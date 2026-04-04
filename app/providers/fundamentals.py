@@ -55,8 +55,11 @@ class FundamentalsProvider(ABC):
         symbol: str,
         from_date: date,
         to_date: date,
+        limit: int = 40,
     ) -> list[FundamentalsSnapshot]:
         """
-        Return all fundamentals snapshots for a symbol within the date range,
-        oldest first.
+        Return fundamentals snapshots for a symbol within the date range,
+        oldest first, up to limit entries.
+
+        limit defaults to 40 (10 years of quarterly data).
         """

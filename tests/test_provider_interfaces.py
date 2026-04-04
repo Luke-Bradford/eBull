@@ -6,8 +6,6 @@ hierarchy and that NotImplementedError is raised (not AttributeError or
 TypeError), which proves the method signatures match the interface.
 """
 
-from datetime import date
-
 import pytest
 
 from app.providers.filings import FilingsProvider
@@ -41,43 +39,32 @@ class TestEtoroProvider:
             pass
 
 
-class TestFmpStub:
-    def setup_method(self) -> None:
-        self.provider = FmpFundamentalsProvider(api_key="test-key")
-
-    def test_get_latest_snapshot_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError):
-            self.provider.get_latest_snapshot("AAPL")
-
-    def test_get_snapshot_history_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError):
-            self.provider.get_snapshot_history("AAPL", date(2023, 1, 1), date(2024, 1, 1))
+class TestFmpProvider:
+    def test_context_manager_closes_cleanly(self) -> None:
+        with FmpFundamentalsProvider(api_key="test-key"):
+            pass
 
 
-class TestSecEdgarStub:
-    def setup_method(self) -> None:
-        self.provider = SecFilingsProvider()
+class TestSecEdgarProvider:
+    def test_context_manager_closes_cleanly(self) -> None:
+        with SecFilingsProvider(user_agent="test-agent test@example.com"):
+            pass
 
-    def test_list_filings_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError):
-            self.provider.list_filings("AAPL", date(2024, 1, 1), date(2024, 12, 31))
-
-    def test_get_filing_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError):
-            self.provider.get_filing("0001234567-24-000001")
+    def test_invalid_identifier_type_raises(self) -> None:
+        with SecFilingsProvider(user_agent="test-agent test@example.com") as provider:
+            with pytest.raises(ValueError, match="identifier_type='cik'"):
+                provider.list_filings_by_identifier("symbol", "AAPL")
 
 
-class TestCompaniesHouseStub:
-    def setup_method(self) -> None:
-        self.provider = CompaniesHouseFilingsProvider(api_key="test-key")
+class TestCompaniesHouseProvider:
+    def test_context_manager_closes_cleanly(self) -> None:
+        with CompaniesHouseFilingsProvider(api_key="test-key"):
+            pass
 
-    def test_list_filings_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError):
-            self.provider.list_filings("BP", date(2024, 1, 1), date(2024, 12, 31))
-
-    def test_get_filing_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError):
-            self.provider.get_filing("MmQ1YzM4ZTliYWM4YzM2")
+    def test_invalid_identifier_type_raises(self) -> None:
+        with CompaniesHouseFilingsProvider(api_key="test-key") as provider:
+            with pytest.raises(ValueError, match="identifier_type='company_number'"):
+                provider.list_filings_by_identifier("cik", "0000320193")
 
 
 class TestNewsProviderIsAbstract:
