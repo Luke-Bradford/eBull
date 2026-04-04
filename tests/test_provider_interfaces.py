@@ -34,21 +34,11 @@ class TestInterfaceHierarchy:
         assert issubclass(CompaniesHouseFilingsProvider, FilingsProvider)
 
 
-class TestEtoroStub:
-    def setup_method(self) -> None:
-        self.provider = EtoroMarketDataProvider(api_key="test-key", env="demo")
-
-    def test_get_tradable_instruments_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError):
-            self.provider.get_tradable_instruments()
-
-    def test_get_daily_candles_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError):
-            self.provider.get_daily_candles("AAPL", date(2024, 1, 1), date(2024, 1, 31))
-
-    def test_get_quote_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError):
-            self.provider.get_quote("AAPL")
+class TestEtoroProvider:
+    def test_context_manager_closes_cleanly(self) -> None:
+        # Confirms __enter__/__exit__ are present and don't raise on close.
+        with EtoroMarketDataProvider(api_key="test-key", env="demo"):
+            pass
 
 
 class TestFmpStub:
