@@ -274,8 +274,13 @@ def daily_thesis_refresh() -> None:
         logger.error("daily_thesis_refresh: ANTHROPIC_API_KEY not set, skipping")
         return
 
-    with psycopg.connect(settings.database_url) as conn:
-        stale = find_stale_instruments(conn, tier=1)
+    logger.info("daily_thesis_refresh: checking for stale Tier 1 instruments")
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            stale = find_stale_instruments(conn, tier=1)
+    except Exception:
+        logger.error("daily_thesis_refresh: failed to query stale instruments", exc_info=True)
+        return
 
     if not stale:
         logger.info("daily_thesis_refresh: no stale Tier 1 instruments found")
