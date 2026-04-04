@@ -103,3 +103,36 @@ uv run pyright
 ```
 
 All three must pass. Fix failures — do not bypass them.
+
+If `uv` is not on PATH in the Claude Code bash shell, ask the user to add the uv
+install directory to `~/.bashrc` (`export PATH="/c/Users/LukeB/.local/bin:$PATH"`
+or wherever `where.exe uv` reports it). Do not skip the checks — push to CI without
+them is wasteful and forces the review agent to do work that should have been caught
+locally.
+
+## Handling review comments
+
+After every push, poll `gh pr view <n> --comments` and `gh pr checks <n>`.
+
+When the review posts:
+- Read every comment before doing anything else.
+- Address ALL severities — BLOCKING, WARNING, and NITPICK.
+- BLOCKING: fix on the same PR before any further push.
+- WARNING: fix on the same PR, or open a `tech-debt` labelled issue and reference it
+  in a reply before merging.
+- NITPICK: fix if trivial (it usually is); if genuinely out of scope, open a
+  `tech-debt` issue and reference it in a reply. Never silently leave it.
+- Reply to each comment with what was done + the commit SHA.
+
+Do not push a follow-up commit to address CI failures without first reading the
+review — the review may already be posted, and pushing again without reading it
+wastes a review round.
+
+## Self-review before pushing
+
+Before committing, re-read the diff as if you are the review agent. Ask:
+- Are all import names alphabetically sorted within each `from X import a, b, c`?
+- Is there a blank line between stdlib and first-party import groups?
+- Does every interface method document its not-found / error contract?
+- Are new fields typed precisely (Literal, not str, where the values are bounded)?
+- Does every new file have the right line endings (LF, not CRLF)?
