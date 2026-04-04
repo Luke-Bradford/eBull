@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     etoro_write_api_key: str | None = None
     etoro_env: str = "demo"
 
+    fmp_api_key: str | None = None
+    companies_house_api_key: str | None = None
+    # SEC EDGAR requires no API key (public API, 10 req/s fair-use limit)
+
     default_portfolio_mode: str = "balanced"
     max_active_positions: int = 20
     max_initial_position_pct: int = 5
