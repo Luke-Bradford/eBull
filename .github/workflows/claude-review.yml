@@ -1,0 +1,209 @@
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+    branches: [main]
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr diff "$PR_NUMBER" > pr.diff
+
+      - name: Get PR description
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr view "$PR_NUMBER" \
+            --json title,body \
+            -q '"# " + .title + "\n\n" + .body' > pr_desc.txt
+
+      - name: Get PR comments
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq '[.[] | "### Comment by " + .user.login + " at " + .created_at + "\n" + .body] | join("\n\n---\n\n")' \
+            > pr_comments.txt
+
+      - name: Get linked issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          ISSUE_NUM=$(gh pr view "$PR_NUMBER" --json body -q '.body' \
+            | grep -oP '(?<=Closes #|closes #|Fixes #|fixes #|Resolves #|resolves #)\d+' | head -1)
+          if [ -n "$ISSUE_NUM" ]; then
+            gh issue view "$ISSUE_NUM" --repo "$REPO" \
+              --json number,title,body -q '"# Issue #" + (.number | tostring) + ": " + .title + "\n\n" + .body' \
+              > linked_issue.txt 2>/dev/null || echo "(issue not found)" > linked_issue.txt
+          else
+            echo "(no linked issue found in PR body)" > linked_issue.txt
+          fi
+
+      - name: Build request body
+        run: |
+          cat > build_prompt.py << 'PYEOF'
+          import json, os
+
+          diff = open('pr.diff', encoding='utf-8', errors='replace').read()
+          desc = open('pr_desc.txt').read()
+          comments_raw = open('pr_comments.txt').read().strip()
+          issue = open('linked_issue.txt').read().strip()
+
+          comments_section = (
+              "## PR Comment History (previous review rounds and author responses)\n\n"
+              + (comments_raw if comments_raw else "(no comments yet)")
+          )
+
+          issue_section = "## Linked Issue / Ticket\n\n" + issue
+
+          prompt = (
+              "You are a strict senior code reviewer for a Python/FastAPI investment engine. "
+              "The product is trader-os: a long-horizon AI-assisted investment system for eToro. "
+              "It has a two-brain design — a research brain (AI-heavy analysis) and an execution brain "
+              "(hard-rule constrained order placement). Your job is to find real problems — not to be encouraging.\n\n"
+
+              "## Stack context\n\n"
+              "- Backend: Python 3.11+, FastAPI, Pydantic v2, psycopg v3 (PostgreSQL)\n"
+              "- Package manager: uv\n"
+              "- Database: PostgreSQL 16 — SQL-first schema, raw parameterised queries, no ORM magic\n"
+              "- Scheduled jobs: APScheduler or equivalent (no Celery in v1)\n"
+              "- External APIs: eToro API (read: market data/universe; write: order placement only)\n"
+              "- No frontend in scope for v1\n\n"
+
+              "## Project non-negotiables\n\n"
+              "These constraints must never be bypassed silently — flag any code that undermines them:\n"
+              "- Every trade path must produce an audit record in `decision_audit` before an order is placed\n"
+              "- Execution guard hard rules (position limits, concentration, stale-data checks, kill switches) "
+              "must be checked and recorded as PASS/FAIL — never skipped\n"
+              "- AI outputs (thesis, scores, recommendations) must never directly trigger order placement "
+              "without passing through the execution guard\n"
+              "- No live trading unless `enable_live_trading=true` is explicitly set\n"
+              "- Raw API payloads must be persisted before any normalisation step\n\n"
+
+              "## Important constraints\n\n"
+              "You only see the diff, not the full codebase. The PR description is written specifically "
+              "to give you context about surrounding code. Trust it. "
+              "If the PR description explains why something outside the diff makes a change safe, "
+              "accept that explanation rather than flagging it as risky.\n\n"
+              "This may not be a first review. Read the PR comment history carefully. "
+              "Do NOT re-raise issues already addressed or explained in the thread. "
+              "Only flag issues that are genuinely unresolved in the current diff.\n\n"
+              "Be careful about changes that REMOVE code: a removal may be the fix, not the problem.\n\n"
+
+              + issue_section + "\n\n"
+              + "## PR Description\n\n" + desc + "\n\n"
+              + comments_section + "\n\n"
+
+              "## What to check\n"
+              "1. **Correctness** — Does the logic do what the description claims? "
+              "Are edge cases (empty results, API errors, partial fills) handled?\n"
+              "2. **Security** — Unvalidated input reaching the DB or eToro API, "
+              "missing parameterisation, secrets in code or logs?\n"
+              "3. **Audit trail** — Does every decision-path write to `decision_audit`? "
+              "Is the rationale recorded before any order is staged?\n"
+              "4. **Execution guard integrity** — Does any path allow an order to be placed "
+              "without all hard checks passing and being recorded?\n"
+              "5. **Data discipline** — Is the raw payload persisted before normalisation? "
+              "Are score model versions and thesis versions stamped on output rows?\n"
+              "6. **API contract** — Do new endpoints follow existing patterns "
+              "(typed request/response models, consistent error shapes)?\n"
+              "7. **Regressions** — Anything removed that other services still depend on?\n\n"
+
+              "## What NOT to flag\n"
+              "- Code in unchanged files\n"
+              "- Concerns already resolved in the PR comment history\n"
+              "- Intentional removals explained in the PR description\n"
+              "- Demo/dry-run paths that explicitly skip eToro API calls when `enable_live_trading=false` — "
+              "that is the intended safe default\n\n"
+
+              "**Format your response as:**\n\n"
+              "Only include a section if it has at least one item. Omit the section header entirely if you have nothing to put under it. "
+              "Do NOT write 'None.' under a section heading — just skip the section.\n\n"
+              "If you start writing an issue and then realise it is already fixed or withdrawn, "
+              "do NOT include it under any section heading. Mention it only in the Verdict.\n\n"
+              "### [BLOCKING] — must fix before merge\n"
+              "Each issue with file:line reference and explanation. Omit if none.\n\n"
+              "### [WARNING] — should fix, not blocking\n"
+              "Each issue with file:line reference. Omit if none.\n\n"
+              "### [NITPICK] — optional / style\n"
+              "Each issue with file:line reference. Omit if none.\n\n"
+              "### Verdict\n"
+              "One of: **APPROVE**, **REQUEST CHANGES**, or **NEEDS DISCUSSION**. "
+              "If approving, briefly note any previously-raised issues now confirmed fixed.\n\n"
+              "Be direct. If the code is fine, say so.\n\n"
+              "## Diff\n```diff\n" + diff + "\n```"
+          )
+
+          payload = {
+              "model": "claude-sonnet-4-6",
+              "max_tokens": 4096,
+              "messages": [{"role": "user", "content": prompt}]
+          }
+
+          with open('request.json', 'w') as f:
+              json.dump(payload, f)
+
+          print(f"Request written: {len(diff)} chars of diff, {len(prompt)} chars total prompt")
+          PYEOF
+          python3 build_prompt.py
+
+      - name: Call Claude API
+        run: |
+          HTTP_STATUS=$(curl -s -w "%{http_code}" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            --data-binary @request.json \
+            -o response.json \
+            https://api.anthropic.com/v1/messages)
+
+          echo "HTTP status: $HTTP_STATUS"
+          cat response.json
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "API returned HTTP $HTTP_STATUS"
+            exit 1
+          fi
+
+          python3 -c "
+          import json, sys
+          data = json.load(open('response.json'))
+          if 'content' in data and data['content']:
+              text = data['content'][0]['text']
+              with open('review.txt', 'w') as f:
+                  f.write(text)
+              print('Review extracted successfully')
+          else:
+              print('Unexpected response shape:', json.dumps(data, indent=2))
+              sys.exit(1)
+          "
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Post review comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          { echo "## Claude Code Review"; echo ""; cat review.txt; } > comment_body.txt
+          gh pr comment "$PR_NUMBER" --body-file comment_body.txt

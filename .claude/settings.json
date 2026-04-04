@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "input=$(cat); echo \"$input\" | grep -q '\"git push' && echo '{\"systemMessage\": \"REMINDER: git push detected. You MUST now poll actively — run `gh pr view <n> --comments` and `gh pr checks <n>`. Do NOT proceed until: (1) the Claude review has posted an APPROVE comment on the most recent commit SHA, and (2) all CI checks are green. An APPROVE on a prior commit does not count — every push resets this requirement.\"}' || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
