@@ -1,0 +1,2 @@
+ALTER TABLE theses
+    ADD COLUMN IF NOT EXISTS critic_json JSONB;
