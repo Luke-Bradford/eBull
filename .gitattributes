@@ -1,0 +1,6 @@
+# Enforce LF line endings for all text files in CI
+* text=auto eol=lf
+
+# Keep Windows batch files with CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
