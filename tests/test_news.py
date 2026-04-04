@@ -86,6 +86,10 @@ def _mock_conn(known_hashes: list[str] | None = None, recent_headlines: list[str
       call 1: load recent headlines (SELECT headline)
       call 2+: upsert INSERT statements — return value unused
 
+    Note: when the provider returns no candidates, _process_instrument returns
+    early and neither DB call is made — the call-order assumption is simply not
+    exercised in that path.
+
     Passing a list to side_effect would exhaust on the upsert calls, so we use
     a closure that returns the right result by position and falls back to a
     plain MagicMock for any additional calls.
@@ -359,7 +363,7 @@ def test_scorer_not_called_for_exact_duplicates() -> None:
     url = "https://example.com/existing"
     conn = _mock_conn(known_hashes=[_url_hash(url)])
 
-    scorer = MagicMock(spec=FakeSentimentScorer)
+    scorer = MagicMock(spec=SentimentScorer)
     refresh_news(
         provider=FakeNewsProvider([_make_item("Some headline", url=url)]),
         scorer=scorer,
