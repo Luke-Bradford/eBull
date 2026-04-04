@@ -1,5 +1,5 @@
 [project]
-name = "trader-os"
+name = "ebull"
 version = "0.1.0"
 description = "Long-horizon AI-assisted investment engine for eToro"
 readme = "README.md"
