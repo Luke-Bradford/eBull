@@ -290,18 +290,11 @@ def daily_thesis_refresh() -> None:
     for item in stale:
         try:
             with psycopg.connect(settings.database_url) as conn:
-                result = generate_thesis(
+                generate_thesis(
                     instrument_id=item.instrument_id,
                     conn=conn,
                     client=claude_client,
                 )
-            logger.info(
-                "Thesis generated: symbol=%s version=%d stance=%s confidence=%.2f",
-                item.symbol,
-                result.thesis_version,
-                result.stance,
-                result.confidence_score,
-            )
             generated += 1
         except Exception:
             logger.warning(

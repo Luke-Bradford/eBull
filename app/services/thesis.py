@@ -17,6 +17,13 @@ Context caps (v1 hard limits):
   - news events:          latest 10 from last 30 days, importance desc → recency desc
 
 Claude model: claude-sonnet-4-6 for both writer and critic calls.
+
+Versioning contract:
+  thesis_version is computed atomically inside the INSERT via a subquery:
+    COALESCE(MAX(thesis_version), 0) + 1
+  This eliminates TOCTOU races when two workers process the same instrument
+  concurrently. The UNIQUE(instrument_id, thesis_version) constraint on the
+  theses table is the final guard.
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
 import anthropic
 import psycopg
@@ -39,9 +46,11 @@ logger = logging.getLogger(__name__)
 
 ThesisType = Literal["compounder", "value", "turnaround", "speculative"]
 Stance = Literal["buy", "hold", "watch", "avoid"]
+StaleReason = Literal["no_thesis", "stale", "missing_frequency"]
 
 _VALID_THESIS_TYPES: frozenset[str] = frozenset({"compounder", "value", "turnaround", "speculative"})
 _VALID_STANCES: frozenset[str] = frozenset({"buy", "hold", "watch", "avoid"})
+_VALID_VERDICTS: frozenset[str] = frozenset({"Strong challenge", "Moderate challenge", "Weak challenge"})
 
 _REVIEW_FREQUENCY_DAYS: dict[str, int] = {
     "daily": 1,
@@ -68,7 +77,7 @@ _MAX_NEWS_EVENTS = 10
 _NEWS_LOOKBACK_DAYS = 30
 
 # ---------------------------------------------------------------------------
-# Public result type
+# Public result types
 # ---------------------------------------------------------------------------
 
 
@@ -89,27 +98,54 @@ class ThesisResult:
     critic_json: dict[str, object] | None
 
 
+@dataclass(frozen=True)
+class StaleInstrument:
+    instrument_id: int
+    symbol: str
+    reason: StaleReason
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _utcnow() -> datetime:
+    """Return the current UTC datetime. Extracted for testability."""
+    return datetime.now(tz=UTC)
+
+
+def _to_float(val: object) -> float | None:
+    """
+    Convert a value to float, returning None on failure.
+
+    Used to safely convert AI-sourced numeric fields from the writer
+    output dict before persisting to the DB and returning in ThesisResult.
+    Both sites must use the same conversion so the DB row and the returned
+    struct are always consistent.
+    """
+    if val is None:
+        return None
+    try:
+        return float(val)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Stale detection
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class StaleInstrument:
-    instrument_id: int
-    symbol: str
-    reason: str  # "no_thesis" | "stale" | "missing_frequency"
-
-
 def find_stale_instruments(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
+    conn: psycopg.Connection[Any],
     tier: int = 1,
 ) -> list[StaleInstrument]:
     """
     Return instruments whose most recent thesis is absent or older than
     their coverage.review_frequency allows.
 
-    Stale rules:
+    Stale rules (evaluated in order):
       1. No thesis row exists → stale (reason: "no_thesis")
       2. review_frequency missing / unrecognised → stale (reason: "missing_frequency")
       3. now >= latest_thesis.created_at + interval(review_frequency) → stale (reason: "stale")
@@ -132,7 +168,7 @@ def find_stale_instruments(
         {"tier": tier},
     ).fetchall()
 
-    now = datetime.now(tz=UTC)
+    now = _utcnow()
     stale: list[StaleInstrument] = []
 
     for row in rows:
@@ -162,7 +198,7 @@ def find_stale_instruments(
 
 
 def _assemble_context(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
+    conn: psycopg.Connection[Any],
     instrument_id: int,
 ) -> dict[str, object]:
     """
@@ -184,20 +220,20 @@ def _assemble_context(
     fundamentals = [
         {
             "as_of_date": str(r[0]),
-            "revenue_ttm": float(r[1]) if r[1] is not None else None,
-            "gross_margin": float(r[2]) if r[2] is not None else None,
-            "operating_margin": float(r[3]) if r[3] is not None else None,
-            "fcf": float(r[4]) if r[4] is not None else None,
-            "cash": float(r[5]) if r[5] is not None else None,
-            "debt": float(r[6]) if r[6] is not None else None,
-            "net_debt": float(r[7]) if r[7] is not None else None,
-            "eps": float(r[8]) if r[8] is not None else None,
-            "book_value": float(r[9]) if r[9] is not None else None,
+            "revenue_ttm": _to_float(r[1]),
+            "gross_margin": _to_float(r[2]),
+            "operating_margin": _to_float(r[3]),
+            "fcf": _to_float(r[4]),
+            "cash": _to_float(r[5]),
+            "debt": _to_float(r[6]),
+            "net_debt": _to_float(r[7]),
+            "eps": _to_float(r[8]),
+            "book_value": _to_float(r[9]),
         }
         for r in fund_rows
     ]
 
-    # Filing events: latest 3 (summary text only — not raw payload)
+    # Filing events: latest N (summary text only — not raw payload)
     filing_rows = conn.execute(
         """
         SELECT filing_date, filing_type, extracted_summary, red_flag_score
@@ -214,13 +250,13 @@ def _assemble_context(
             "filing_date": str(r[0]),
             "filing_type": r[1],
             "summary": r[2],
-            "red_flag_score": float(r[3]) if r[3] is not None else None,
+            "red_flag_score": _to_float(r[3]),
         }
         for r in filing_rows
     ]
 
-    # News events: latest 10 from last 30 days, importance desc then recency desc
-    cutoff = datetime.now(tz=UTC) - timedelta(days=_NEWS_LOOKBACK_DAYS)
+    # News events: latest N from last 30 days, importance desc then recency desc
+    cutoff = _utcnow() - timedelta(days=_NEWS_LOOKBACK_DAYS)
     news_rows = conn.execute(
         """
         SELECT event_time, source, headline, category, sentiment_score, importance_score
@@ -238,8 +274,8 @@ def _assemble_context(
             "source": r[1],
             "headline": r[2],
             "category": r[3],
-            "sentiment_score": float(r[4]) if r[4] is not None else None,
-            "importance_score": float(r[5]) if r[5] is not None else None,
+            "sentiment_score": _to_float(r[4]),
+            "importance_score": _to_float(r[5]),
         }
         for r in news_rows
     ]
@@ -253,9 +289,9 @@ def _assemble_context(
         FROM theses
         WHERE instrument_id = %(id)s
         ORDER BY thesis_version DESC
-        LIMIT 1
+        LIMIT %(limit)s
         """,
-        {"id": instrument_id},
+        {"id": instrument_id, "limit": _MAX_PRIOR_THESES},
     ).fetchone()
     prior_thesis: dict[str, object] | None = None
     if prior_row is not None:
@@ -263,18 +299,18 @@ def _assemble_context(
             "version": prior_row[0],
             "thesis_type": prior_row[1],
             "stance": prior_row[2],
-            "confidence_score": float(prior_row[3]) if prior_row[3] is not None else None,
-            "buy_zone_low": float(prior_row[4]) if prior_row[4] is not None else None,
-            "buy_zone_high": float(prior_row[5]) if prior_row[5] is not None else None,
-            "base_value": float(prior_row[6]) if prior_row[6] is not None else None,
-            "bull_value": float(prior_row[7]) if prior_row[7] is not None else None,
-            "bear_value": float(prior_row[8]) if prior_row[8] is not None else None,
+            "confidence_score": _to_float(prior_row[3]),
+            "buy_zone_low": _to_float(prior_row[4]),
+            "buy_zone_high": _to_float(prior_row[5]),
+            "base_value": _to_float(prior_row[6]),
+            "bull_value": _to_float(prior_row[7]),
+            "bear_value": _to_float(prior_row[8]),
             "break_conditions": prior_row[9],
             "memo_markdown": prior_row[10],
             "created_at": prior_row[11].isoformat() if prior_row[11] else None,
         }
 
-    # Instrument name
+    # Instrument metadata
     inst_row = conn.execute(
         "SELECT symbol, company_name, sector, industry, country, currency"
         " FROM instruments WHERE instrument_id = %(id)s",
@@ -318,7 +354,7 @@ Produce a JSON object with EXACTLY these fields:
 
 {
   "thesis_type": "<compounder|value|turnaround|speculative>",
-  "confidence_score": <float 0.0–1.0>,
+  "confidence_score": <float 0.0-1.0>,
   "stance": "<buy|hold|watch|avoid>",
   "buy_zone_low": <float or null>,
   "buy_zone_high": <float or null>,
@@ -336,8 +372,8 @@ Rules:
 - buy_zone_low/high: only populate when stance is "buy"; null otherwise
 - base/bull/bear_value: per-share price targets in the instrument currency; null if insufficient data
 - break_conditions: list of concrete, specific events that would invalidate the thesis
-- memo_markdown: full structured memo covering: business quality, key financials, recent news impact,
-  valuation, risks, stance rationale. Min 3 paragraphs.
+- memo_markdown: full structured memo covering: business quality, key financials, recent news
+  impact, valuation, risks, stance rationale. Min 3 paragraphs.
 - Separate facts from judgement. Be explicit about what must go right.
 - Respond with ONLY valid JSON. No explanation outside the JSON object.
 """
@@ -360,7 +396,7 @@ You will be given the investment memo and the research context it was built on.
 Produce a JSON object with EXACTLY these fields:
 
 {
-  "summary": "<short counter-thesis in 1–2 sentences>",
+  "summary": "<short counter-thesis in 1-2 sentences>",
   "key_risks": ["<risk 1>", "<risk 2>", ...],
   "hidden_assumptions": ["<assumption 1>", "<assumption 2>", ...],
   "evidence_gaps": ["<gap 1>", "<gap 2>", ...],
@@ -402,12 +438,12 @@ def _call_writer(client: anthropic.Anthropic, context: dict[str, object]) -> dic
         messages=[{"role": "user", "content": _build_writer_prompt(context)}],
     )
     block = message.content[0]
-    if not hasattr(block, "text"):
+    text: str | None = getattr(block, "text", None)
+    if text is None:
         raise ValueError(f"Writer: unexpected content block type {type(block)!r}")
 
-    raw = block.text.strip()  # type: ignore[union-attr]
     try:
-        parsed: dict[str, object] = json.loads(raw)
+        parsed: dict[str, object] = json.loads(text.strip())
     except json.JSONDecodeError as exc:
         raise ValueError(f"Writer: unparseable JSON: {exc}") from exc
 
@@ -458,7 +494,8 @@ def _validate_writer_output(data: dict[str, object]) -> None:
 def _call_critic(client: anthropic.Anthropic, memo_markdown: str, context: dict[str, object]) -> dict[str, object]:
     """
     Call the Claude critic and parse the structured counter-thesis JSON.
-    Returns an empty dict on failure — critic is best-effort.
+    Returns an empty dict on any failure — critic is best-effort and must
+    never block the thesis insert.
     """
     try:
         message = client.messages.create(
@@ -468,16 +505,16 @@ def _call_critic(client: anthropic.Anthropic, memo_markdown: str, context: dict[
             messages=[{"role": "user", "content": _build_critic_prompt(memo_markdown, context)}],
         )
         block = message.content[0]
-        if not hasattr(block, "text"):
-            logger.warning("Critic: unexpected content block type %r", type(block))
+        text: str | None = getattr(block, "text", None)
+        if text is None:
+            logger.warning("Critic: unexpected content block type %r, storing without critic_json", type(block))
             return {}
 
-        raw = block.text.strip()  # type: ignore[union-attr]
-        parsed: dict[str, object] = json.loads(raw)
+        parsed: dict[str, object] = json.loads(text.strip())
         _validate_critic_output(parsed)
         return parsed
-    except Exception as exc:
-        logger.warning("Critic call failed (%s): thesis will be stored without critic_json", exc)
+    except Exception:
+        logger.warning("Critic call failed; thesis will be stored without critic_json", exc_info=True)
         return {}
 
 
@@ -488,8 +525,7 @@ def _validate_critic_output(data: dict[str, object]) -> None:
         raise ValueError(f"Critic output missing fields: {missing}")
 
     verdict = data["verdict"]
-    valid_verdicts = {"Strong challenge", "Moderate challenge", "Weak challenge"}
-    if verdict not in valid_verdicts:
+    if verdict not in _VALID_VERDICTS:
         raise ValueError(f"Critic output invalid verdict: {verdict!r}")
 
 
@@ -498,35 +534,25 @@ def _validate_critic_output(data: dict[str, object]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _next_thesis_version(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
+def _insert_thesis_atomic(
+    conn: psycopg.Connection[Any],
     instrument_id: int,
-) -> int:
-    row = conn.execute(
-        "SELECT COALESCE(MAX(thesis_version), 0) FROM theses WHERE instrument_id = %(id)s",
-        {"id": instrument_id},
-    ).fetchone()
-    return (row[0] if row else 0) + 1
-
-
-def _insert_thesis(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
-    instrument_id: int,
-    version: int,
     writer: dict[str, object],
     critic: dict[str, object] | None,
-) -> None:
+) -> int:
+    """
+    Insert a new thesis row and return the assigned thesis_version.
+
+    thesis_version is computed atomically inside the INSERT via a subquery
+    (COALESCE(MAX(thesis_version), 0) + 1) so two concurrent inserts for the
+    same instrument cannot produce the same version number. The
+    UNIQUE(instrument_id, thesis_version) constraint is the final guard.
+
+    Must be called inside an open transaction.
+    """
     break_conditions = writer.get("break_conditions") or []
 
-    def _to_float(val: object) -> float | None:
-        if val is None:
-            return None
-        try:
-            return float(val)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return None
-
-    conn.execute(
+    row = conn.execute(
         """
         INSERT INTO theses (
             instrument_id, thesis_version,
@@ -535,17 +561,19 @@ def _insert_thesis(
             base_value, bull_value, bear_value,
             break_conditions_json, memo_markdown, critic_json
         )
-        VALUES (
-            %(instrument_id)s, %(thesis_version)s,
+        SELECT
+            %(instrument_id)s,
+            COALESCE(MAX(thesis_version), 0) + 1,
             %(thesis_type)s, %(confidence_score)s, %(stance)s,
             %(buy_zone_low)s, %(buy_zone_high)s,
             %(base_value)s, %(bull_value)s, %(bear_value)s,
             %(break_conditions_json)s, %(memo_markdown)s, %(critic_json)s
-        )
+        FROM theses
+        WHERE instrument_id = %(instrument_id)s
+        RETURNING thesis_version
         """,
         {
             "instrument_id": instrument_id,
-            "thesis_version": version,
             "thesis_type": writer["thesis_type"],
             "confidence_score": float(writer["confidence_score"]),  # type: ignore[arg-type]
             "stance": writer["stance"],
@@ -558,11 +586,15 @@ def _insert_thesis(
             "memo_markdown": writer["memo_markdown"],
             "critic_json": Jsonb(critic) if critic else None,
         },
-    )
+    ).fetchone()
+
+    if row is None:
+        raise RuntimeError(f"INSERT INTO theses did not RETURN a row for instrument_id={instrument_id}")
+    return int(row[0])
 
 
 def _update_last_reviewed(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
+    conn: psycopg.Connection[Any],
     instrument_id: int,
 ) -> None:
     conn.execute(
@@ -578,7 +610,7 @@ def _update_last_reviewed(
 
 def generate_thesis(
     instrument_id: int,
-    conn: psycopg.Connection,  # type: ignore[type-arg]
+    conn: psycopg.Connection[Any],
     client: anthropic.Anthropic,
 ) -> ThesisResult:
     """
@@ -586,25 +618,22 @@ def generate_thesis(
 
     Steps:
       1. Assemble context from DB (capped research inputs).
-      2. Call Claude writer → structured memo.
-      3. Call Claude critic → counter-thesis (best-effort; never blocks the insert).
-      4. Insert new thesis row with incremented thesis_version.
-      5. Update coverage.last_reviewed_at.
+      2. Call Claude writer → structured memo. Raises on failure.
+      3. Call Claude critic → counter-thesis (best-effort; failure is logged only).
+      4. Open a transaction, INSERT a new thesis row with an atomically-computed
+         thesis_version, update coverage.last_reviewed_at, commit.
 
-    Returns ThesisResult. Raises on writer failure (critic failure is logged only).
+    Returns ThesisResult. Claude calls are made outside the transaction to avoid
+    holding a connection open during network I/O.
     """
     context = _assemble_context(conn, instrument_id)
 
-    # Writer call — raises on failure
+    # Claude calls — outside any DB transaction; these can take seconds
     writer_output = _call_writer(client, context)
-
-    # Critic call — best-effort
     critic_output = _call_critic(client, str(writer_output.get("memo_markdown", "")), context)
 
-    version = _next_thesis_version(conn, instrument_id)
-
     with conn.transaction():
-        _insert_thesis(conn, instrument_id, version, writer_output, critic_output or None)
+        version = _insert_thesis_atomic(conn, instrument_id, writer_output, critic_output or None)
         _update_last_reviewed(conn, instrument_id)
 
     logger.info(
@@ -614,14 +643,6 @@ def generate_thesis(
         writer_output["stance"],
         float(writer_output["confidence_score"]),  # type: ignore[arg-type]
     )
-
-    def _to_float(val: object) -> float | None:
-        if val is None:
-            return None
-        try:
-            return float(val)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return None
 
     return ThesisResult(
         instrument_id=instrument_id,

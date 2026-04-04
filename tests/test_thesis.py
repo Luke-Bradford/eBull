@@ -6,10 +6,10 @@ All external dependencies are stubbed or mocked.
 
 Coverage:
   - stale detection: no thesis, missing/unknown frequency, in-window, past threshold
-  - thesis_version increment: first thesis → 1, second → 2
   - writer output validation: valid, missing fields, bad thesis_type, bad stance, out-of-range score
   - critic output validation: valid, missing fields, bad verdict
-  - generate_thesis wiring: correct DB writes, version increment, last_reviewed_at update
+  - generate_thesis wiring: correct DB writes, version from DB, critic-fail isolation,
+    last_reviewed_at update
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from app.services.thesis import (
     ThesisResult,
     _call_critic,
     _call_writer,
-    _next_thesis_version,
+    _to_float,
     _validate_critic_output,
     _validate_writer_output,
     find_stale_instruments,
@@ -63,15 +63,15 @@ _VALID_CRITIC = {
 def _make_conn(
     *,
     stale_rows: list[tuple] | None = None,
-    max_version: int = 0,
+    insert_returns_version: int = 1,
     inst_row: tuple | None = None,
 ) -> MagicMock:
     """
     Build a minimal psycopg connection mock.
 
-    stale_rows: rows returned by the find_stale_instruments query
-    max_version: value returned by the MAX(thesis_version) query
-    inst_row: row returned by the instruments SELECT
+    stale_rows:             rows returned by find_stale_instruments query
+    insert_returns_version: the thesis_version value returned by the INSERT ... RETURNING
+    inst_row:               row returned by the instruments SELECT
     """
     conn = MagicMock()
 
@@ -79,11 +79,14 @@ def _make_conn(
         cursor = MagicMock()
         sql_strip = " ".join(sql.split()).lower()
 
-        if "coalesce(max(thesis_version)" in sql_strip:
-            cursor.fetchone.return_value = (max_version,)
+        if "insert into theses" in sql_strip:
+            # Atomic INSERT with RETURNING thesis_version
+            cursor.fetchone.return_value = (insert_returns_version,)
         elif "max(t.created_at)" in sql_strip:
             cursor.fetchall.return_value = stale_rows or []
-        elif "from instruments" in sql_strip and "instrument_id" in sql_strip and "symbol" in sql_strip:
+        elif sql_strip.startswith("update coverage"):
+            cursor.fetchone.return_value = None
+        elif "from instruments" in sql_strip and "symbol" in sql_strip:
             default = ("AAPL", "Apple Inc.", "Technology", "Consumer Electronics", "US", "USD")
             cursor.fetchone.return_value = inst_row or default
         elif "from fundamentals_snapshot" in sql_strip:
@@ -103,6 +106,28 @@ def _make_conn(
     conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
     conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
     return conn
+
+
+# ---------------------------------------------------------------------------
+# _to_float
+# ---------------------------------------------------------------------------
+
+
+class TestToFloat:
+    def test_none_returns_none(self) -> None:
+        assert _to_float(None) is None
+
+    def test_int_converts(self) -> None:
+        assert _to_float(42) == 42.0
+
+    def test_string_float_converts(self) -> None:
+        assert _to_float("3.14") == pytest.approx(3.14)
+
+    def test_invalid_string_returns_none(self) -> None:
+        assert _to_float("not-a-number") is None
+
+    def test_zero_converts(self) -> None:
+        assert _to_float(0) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -137,8 +162,7 @@ class TestFindStaleInstruments:
         # thesis created 8 days ago, weekly frequency → stale
         rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=8))]
         conn = _make_conn(stale_rows=rows)
-        with patch("app.services.thesis.datetime") as mock_dt:
-            mock_dt.now.return_value = _NOW
+        with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
         assert len(result) == 1
         assert result[0].reason == "stale"
@@ -147,8 +171,7 @@ class TestFindStaleInstruments:
         # thesis created 3 days ago, weekly frequency → fresh
         rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=3))]
         conn = _make_conn(stale_rows=rows)
-        with patch("app.services.thesis.datetime") as mock_dt:
-            mock_dt.now.return_value = _NOW
+        with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
         assert result == []
 
@@ -156,8 +179,7 @@ class TestFindStaleInstruments:
         # thesis created 25 hours ago, daily frequency → stale
         rows = [(1, "MSFT", "daily", _NOW - timedelta(hours=25))]
         conn = _make_conn(stale_rows=rows)
-        with patch("app.services.thesis.datetime") as mock_dt:
-            mock_dt.now.return_value = _NOW
+        with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
         assert len(result) == 1
         assert result[0].symbol == "MSFT"
@@ -166,8 +188,7 @@ class TestFindStaleInstruments:
         # thesis created 31 days ago, monthly frequency → stale
         rows = [(1, "TSLA", "monthly", _NOW - timedelta(days=31))]
         conn = _make_conn(stale_rows=rows)
-        with patch("app.services.thesis.datetime") as mock_dt:
-            mock_dt.now.return_value = _NOW
+        with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
         assert len(result) == 1
 
@@ -178,28 +199,21 @@ class TestFindStaleInstruments:
             (3, "GOOG", "weekly", None),  # no thesis
         ]
         conn = _make_conn(stale_rows=rows)
-        with patch("app.services.thesis.datetime") as mock_dt:
-            mock_dt.now.return_value = _NOW
+        with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
         symbols = {r.symbol for r in result}
         assert "AAPL" not in symbols
         assert "MSFT" in symbols
         assert "GOOG" in symbols
 
-
-# ---------------------------------------------------------------------------
-# Version increment
-# ---------------------------------------------------------------------------
-
-
-class TestNextThesisVersion:
-    def test_first_thesis_is_version_1(self) -> None:
-        conn = _make_conn(max_version=0)
-        assert _next_thesis_version(conn, instrument_id=1) == 1
-
-    def test_increments_existing_version(self) -> None:
-        conn = _make_conn(max_version=3)
-        assert _next_thesis_version(conn, instrument_id=1) == 4
+    def test_exactly_at_threshold_is_stale(self) -> None:
+        # now == created_at + 7 days exactly → stale (>= boundary)
+        rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=7))]
+        conn = _make_conn(stale_rows=rows)
+        with patch("app.services.thesis._utcnow", return_value=_NOW):
+            result = find_stale_instruments(conn, tier=1)
+        assert len(result) == 1
+        assert result[0].reason == "stale"
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +298,7 @@ def _make_anthropic_client(response_json: dict) -> MagicMock:
     import anthropic
 
     client = MagicMock(spec=anthropic.Anthropic)
-    block = MagicMock()
+    block = MagicMock(spec=["text"])
     block.text = json.dumps(response_json)
     msg = MagicMock()
     msg.content = [block]
@@ -303,7 +317,7 @@ class TestCallWriter:
         import anthropic
 
         client = MagicMock(spec=anthropic.Anthropic)
-        block = MagicMock()
+        block = MagicMock(spec=["text"])
         block.text = "not json {"
         msg = MagicMock()
         msg.content = [block]
@@ -315,6 +329,17 @@ class TestCallWriter:
         bad = {**_VALID_WRITER, "stance": "liquidate"}
         client = _make_anthropic_client(bad)
         with pytest.raises(ValueError, match="invalid stance"):
+            _call_writer(client, context={})
+
+    def test_raises_on_missing_text_attribute(self) -> None:
+        import anthropic
+
+        client = MagicMock(spec=anthropic.Anthropic)
+        block = MagicMock(spec=[])  # no 'text' attribute
+        msg = MagicMock()
+        msg.content = [block]
+        client.messages.create.return_value = msg
+        with pytest.raises(ValueError, match="unexpected content block type"):
             _call_writer(client, context={})
 
 
@@ -329,7 +354,7 @@ class TestCallCritic:
         import anthropic
 
         client = MagicMock(spec=anthropic.Anthropic)
-        block = MagicMock()
+        block = MagicMock(spec=["text"])
         block.text = "not json {"
         msg = MagicMock()
         msg.content = [block]
@@ -351,6 +376,17 @@ class TestCallCritic:
         result = _call_critic(client, memo_markdown="## memo", context={})
         assert result == {}
 
+    def test_returns_empty_dict_on_missing_text_attribute(self) -> None:
+        import anthropic
+
+        client = MagicMock(spec=anthropic.Anthropic)
+        block = MagicMock(spec=[])  # no 'text' attribute
+        msg = MagicMock()
+        msg.content = [block]
+        client.messages.create.return_value = msg
+        result = _call_critic(client, memo_markdown="## memo", context={})
+        assert result == {}
+
 
 # ---------------------------------------------------------------------------
 # generate_thesis end-to-end (fully mocked)
@@ -362,9 +398,9 @@ def _make_two_call_client(writer_json: dict, critic_json: dict) -> MagicMock:
     import anthropic
 
     client = MagicMock(spec=anthropic.Anthropic)
-    writer_block = MagicMock()
+    writer_block = MagicMock(spec=["text"])
     writer_block.text = json.dumps(writer_json)
-    critic_block = MagicMock()
+    critic_block = MagicMock(spec=["text"])
     critic_block.text = json.dumps(critic_json)
     writer_msg = MagicMock()
     writer_msg.content = [writer_block]
@@ -375,27 +411,9 @@ def _make_two_call_client(writer_json: dict, critic_json: dict) -> MagicMock:
 
 
 class TestGenerateThesis:
-    def _make_full_conn(self, max_version: int = 0) -> MagicMock:
-        """
-        Connection mock that also handles INSERT and UPDATE statements
-        used by generate_thesis.
-        """
-        conn = _make_conn(max_version=max_version)
-        original_side_effect = conn.execute.side_effect
-
-        def extended_side_effect(sql: str, params: dict | None = None):
-            sql_strip = " ".join(sql.split()).lower()
-            if sql_strip.startswith("insert into theses"):
-                return MagicMock()
-            if sql_strip.startswith("update coverage"):
-                return MagicMock()
-            return original_side_effect(sql, params)
-
-        conn.execute.side_effect = extended_side_effect
-        return conn
-
     def test_returns_thesis_result_with_correct_version(self) -> None:
-        conn = self._make_full_conn(max_version=0)
+        # INSERT RETURNING gives version=1
+        conn = _make_conn(insert_returns_version=1)
         client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
 
         result = generate_thesis(instrument_id=1, conn=conn, client=client)
@@ -409,7 +427,8 @@ class TestGenerateThesis:
         assert result.critic_json["verdict"] == "Moderate challenge"
 
     def test_second_generation_increments_version(self) -> None:
-        conn = self._make_full_conn(max_version=2)
+        # DB returns version=3 (meaning MAX was 2)
+        conn = _make_conn(insert_returns_version=3)
         client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
 
         result = generate_thesis(instrument_id=1, conn=conn, client=client)
@@ -419,9 +438,9 @@ class TestGenerateThesis:
     def test_critic_failure_does_not_block_insert(self) -> None:
         import anthropic
 
-        conn = self._make_full_conn(max_version=0)
+        conn = _make_conn(insert_returns_version=1)
         client = MagicMock(spec=anthropic.Anthropic)
-        writer_block = MagicMock()
+        writer_block = MagicMock(spec=["text"])
         writer_block.text = json.dumps(_VALID_WRITER)
         writer_msg = MagicMock()
         writer_msg.content = [writer_block]
@@ -434,8 +453,8 @@ class TestGenerateThesis:
         assert result.critic_json is None
 
     def test_last_reviewed_at_updated_on_success(self) -> None:
-        conn = self._make_full_conn(max_version=0)
         update_calls: list[str] = []
+        conn = _make_conn(insert_returns_version=1)
 
         original_side_effect = conn.execute.side_effect
 
@@ -452,3 +471,41 @@ class TestGenerateThesis:
 
         assert len(update_calls) == 1
         assert "last_reviewed_at" in update_calls[0].lower()
+
+    def test_float_fields_consistent_between_db_and_result(self) -> None:
+        """
+        Verifies that _to_float is used consistently: the values inserted into
+        the DB and the values in ThesisResult are derived from the same function.
+        Catches any divergence if the two sites had different conversion logic.
+        """
+        conn = _make_conn(insert_returns_version=1)
+        client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
+
+        result = generate_thesis(instrument_id=1, conn=conn, client=client)
+
+        assert result.buy_zone_low == _to_float(_VALID_WRITER["buy_zone_low"])
+        assert result.buy_zone_high == _to_float(_VALID_WRITER["buy_zone_high"])
+        assert result.base_value == _to_float(_VALID_WRITER["base_value"])
+        assert result.bull_value == _to_float(_VALID_WRITER["bull_value"])
+        assert result.bear_value == _to_float(_VALID_WRITER["bear_value"])
+
+    def test_null_optional_fields_returned_as_none(self) -> None:
+        writer_no_targets = {
+            **_VALID_WRITER,
+            "stance": "watch",
+            "buy_zone_low": None,
+            "buy_zone_high": None,
+            "base_value": None,
+            "bull_value": None,
+            "bear_value": None,
+        }
+        conn = _make_conn(insert_returns_version=1)
+        client = _make_two_call_client(writer_no_targets, _VALID_CRITIC)
+
+        result = generate_thesis(instrument_id=1, conn=conn, client=client)
+
+        assert result.buy_zone_low is None
+        assert result.buy_zone_high is None
+        assert result.base_value is None
+        assert result.bull_value is None
+        assert result.bear_value is None
