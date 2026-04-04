@@ -6,7 +6,7 @@ Each function represents one scheduled job. Wire these into APScheduler
 """
 
 import logging
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import psycopg
 
@@ -18,6 +18,7 @@ from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
+from app.services.sentiment import ClaudeSentimentScorer
 from app.services.universe import sync_universe
 
 logger = logging.getLogger(__name__)
@@ -205,6 +206,49 @@ def daily_research_refresh() -> None:
             ch_summary.filings_upserted,
             ch_summary.instruments_skipped,
         )
+
+
+def daily_news_refresh() -> None:
+    """
+    Fetch, deduplicate, and score news events for all active Tier 1/2 instruments.
+
+    Runs daily (or on-demand). Idempotent — safe to re-run.
+    Requires ANTHROPIC_API_KEY to be set; skips sentiment scoring otherwise.
+    """
+    if not settings.anthropic_api_key:
+        logger.error("daily_news_refresh: ANTHROPIC_API_KEY not set, skipping")
+        return
+
+    to_dt = datetime.now(tz=UTC)
+    from_dt = to_dt - timedelta(hours=72)
+
+    with psycopg.connect(settings.database_url) as conn:
+        rows = conn.execute(
+            """
+            SELECT i.symbol, i.instrument_id::text
+            FROM instruments i
+            JOIN coverage c ON c.instrument_id = i.instrument_id
+            WHERE i.is_tradable = TRUE
+              AND c.coverage_tier IN (1, 2)
+            ORDER BY i.symbol
+            """
+        ).fetchall()
+
+    if not rows:
+        logger.info("daily_news_refresh: no covered instruments found, skipping")
+        return
+
+    instrument_symbols = [(row[0], row[1]) for row in rows]
+    scorer = ClaudeSentimentScorer(api_key=settings.anthropic_api_key)
+
+    # NewsProvider: no concrete implementation wired in v1.
+    # Wire a real provider here once one is available (e.g. Benzinga, NewsAPI).
+    # Until then this job is a no-op at the provider level.
+    logger.warning("daily_news_refresh: no NewsProvider implementation wired in v1 — skipping fetch")
+    _ = instrument_symbols
+    _ = scorer
+    _ = from_dt
+    _ = to_dt
 
 
 def morning_candidate_review() -> None:
