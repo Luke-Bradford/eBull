@@ -561,15 +561,15 @@ def _insert_thesis_atomic(
             base_value, bull_value, bear_value,
             break_conditions_json, memo_markdown, critic_json
         )
-        SELECT
+        VALUES (
             %(instrument_id)s,
-            COALESCE(MAX(thesis_version), 0) + 1,
+            (SELECT COALESCE(MAX(thesis_version), 0) + 1
+             FROM theses WHERE instrument_id = %(instrument_id)s),
             %(thesis_type)s, %(confidence_score)s, %(stance)s,
             %(buy_zone_low)s, %(buy_zone_high)s,
             %(base_value)s, %(bull_value)s, %(bear_value)s,
             %(break_conditions_json)s, %(memo_markdown)s, %(critic_json)s
-        FROM theses
-        WHERE instrument_id = %(instrument_id)s
+        )
         RETURNING thesis_version
         """,
         {
@@ -633,7 +633,8 @@ def generate_thesis(
     critic_output = _call_critic(client, str(writer_output.get("memo_markdown", "")), context)
 
     with conn.transaction():
-        version = _insert_thesis_atomic(conn, instrument_id, writer_output, critic_output or None)
+        # critic_output is {} on failure — treat empty dict as no critic data
+        version = _insert_thesis_atomic(conn, instrument_id, writer_output, critic_output if critic_output else None)
         _update_last_reviewed(conn, instrument_id)
 
     logger.info(
