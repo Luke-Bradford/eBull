@@ -84,9 +84,11 @@ def refresh_fundamentals_history(
                 logger.info("Fundamentals history: no data for %s in range, skipping", symbol)
                 skipped += 1
                 continue
-            for snap in snaps:
-                _upsert_snapshot(conn, instrument_id, snap)
-                upserted += 1
+            with conn.transaction():
+                for snap in snaps:
+                    _upsert_snapshot(conn, instrument_id, snap)
+            # Count only after the transaction commits successfully
+            upserted += len(snaps)
         except Exception:
             logger.warning("Fundamentals history: failed to refresh %s, skipping", symbol, exc_info=True)
             skipped += 1

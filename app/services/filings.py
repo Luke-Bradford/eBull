@@ -128,6 +128,7 @@ def upsert_cik_mapping(
                     TRUE, NOW()
                 )
                 ON CONFLICT (provider, identifier_type, identifier_value) DO UPDATE SET
+                    instrument_id    = EXCLUDED.instrument_id,
                     last_verified_at = NOW()
                 """,
                 {"instrument_id": instrument_id, "cik": cik},
