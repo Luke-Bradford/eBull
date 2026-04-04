@@ -4,7 +4,7 @@ Unit tests for filings and fundamentals normalisation.
 No network calls, no database — all tests use in-memory fixtures.
 """
 
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -58,7 +58,7 @@ FIXTURE_FMP_CF_TTM = {
 FIXTURE_SEC_TICKERS = {
     "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
     "1": {"cik_str": 789019, "ticker": "MSFT", "title": "Microsoft Corp"},
-    "2": {"cik_str": 0, "ticker": "", "title": "Bad entry — should be skipped"},
+    "2": {"cik_str": 0, "ticker": "", "title": "Bad entry — skipped because ticker is empty"},
 }
 
 FIXTURE_SEC_SUBMISSIONS = {
@@ -341,7 +341,7 @@ class TestChNormaliseEvent:
         event = ch_normalise_event("04234567/MmQ1YzM4ZTliYWM4YzM2", "04234567", item)
         assert event.provider_filing_id == "04234567/MmQ1YzM4ZTliYWM4YzM2"
         assert event.filing_type == "AA"
-        assert event.filed_at == datetime(2024, 3, 15, tzinfo=None) or event.filed_at.date() == date(2024, 3, 15)
+        assert event.filed_at.date() == date(2024, 3, 15)
 
     def test_extracted_summary_none(self) -> None:
         event = ch_normalise_event("04234567/x", "04234567", FIXTURE_CH_ITEMS[0])
@@ -361,9 +361,3 @@ class TestFilingsProviderIsAbstract:
     def test_cannot_instantiate_directly(self) -> None:
         with pytest.raises(TypeError):
             FilingsProvider()  # type: ignore[abstract]
-
-    def test_list_filings_by_identifier_is_abstract(self) -> None:
-        assert hasattr(FilingsProvider, "list_filings_by_identifier")
-
-    def test_get_filing_is_abstract(self) -> None:
-        assert hasattr(FilingsProvider, "get_filing")

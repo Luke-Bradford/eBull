@@ -79,7 +79,8 @@ def refresh_filings(
             with conn.transaction():
                 for result in results:
                     _upsert_filing(conn, instrument_id, provider_name, result)
-                    upserted += 1
+            # Count only after the transaction commits successfully
+            upserted += len(results)
         except Exception:
             logger.warning(
                 "Filings: failed to refresh instrument_id=%s via %s, skipping",
@@ -110,27 +111,28 @@ def upsert_cik_mapping(
     Returns the number of rows upserted.
     """
     upserted = 0
-    for symbol, instrument_id in instrument_symbols:
-        cik = mapping.get(symbol.upper())
-        if not cik:
-            logger.debug("CIK mapping: no CIK found for symbol %s", symbol)
-            continue
-        conn.execute(
-            """
-            INSERT INTO external_identifiers (
-                instrument_id, provider, identifier_type, identifier_value,
-                is_primary, last_verified_at
+    with conn.transaction():
+        for symbol, instrument_id in instrument_symbols:
+            cik = mapping.get(symbol.upper())
+            if not cik:
+                logger.debug("CIK mapping: no CIK found for symbol %s", symbol)
+                continue
+            conn.execute(
+                """
+                INSERT INTO external_identifiers (
+                    instrument_id, provider, identifier_type, identifier_value,
+                    is_primary, last_verified_at
+                )
+                VALUES (
+                    %(instrument_id)s, 'sec', 'cik', %(cik)s,
+                    TRUE, NOW()
+                )
+                ON CONFLICT (provider, identifier_type, identifier_value) DO UPDATE SET
+                    last_verified_at = NOW()
+                """,
+                {"instrument_id": instrument_id, "cik": cik},
             )
-            VALUES (
-                %(instrument_id)s, 'sec', 'cik', %(cik)s,
-                TRUE, NOW()
-            )
-            ON CONFLICT (provider, identifier_type, identifier_value) DO UPDATE SET
-                last_verified_at = NOW()
-            """,
-            {"instrument_id": instrument_id, "cik": cik},
-        )
-        upserted += 1
+            upserted += 1
     return upserted
 
 
@@ -196,6 +198,18 @@ def _upsert_filing(
             "provider_filing_id": result.provider_filing_id,
             "source_url": result.primary_document_url,
             "primary_document_url": result.primary_document_url,
-            "raw_payload_json": json.dumps({}),  # metadata only in v1; no raw doc text
+            # Serialise the normalised metadata fields as the auditable payload.
+            # Full document text is out of scope for v1; disk persistence of the
+            # raw provider response is handled by _persist_raw in each provider.
+            "raw_payload_json": json.dumps(
+                {
+                    "provider_filing_id": result.provider_filing_id,
+                    "symbol": result.symbol,
+                    "filed_at": result.filed_at.isoformat(),
+                    "filing_type": result.filing_type,
+                    "period_of_report": result.period_of_report.isoformat() if result.period_of_report else None,
+                    "primary_document_url": result.primary_document_url,
+                }
+            ),
         },
     )

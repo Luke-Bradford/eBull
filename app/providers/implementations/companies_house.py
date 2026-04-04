@@ -184,7 +184,7 @@ def _normalise_filings(
         if not raw_date:
             continue
         try:
-            filed_at = datetime.fromisoformat(str(raw_date)[:10])
+            filed_at = datetime.fromisoformat(str(raw_date)[:10]).replace(tzinfo=UTC)
         except ValueError:
             continue
 
@@ -233,7 +233,7 @@ def _normalise_filing_event(
 ) -> FilingEvent:
     raw_date = raw.get("date")
     try:
-        filed_at = datetime.fromisoformat(str(raw_date)[:10]) if raw_date else datetime.now(UTC)
+        filed_at = datetime.fromisoformat(str(raw_date)[:10]).replace(tzinfo=UTC) if raw_date else datetime.now(UTC)
     except ValueError:
         filed_at = datetime.now(UTC)
 

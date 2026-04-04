@@ -251,6 +251,9 @@ def _normalise_filings(
     results: list[FilingSearchResult] = []
     for i, accession in enumerate(accession_numbers):
         form = form_types[i] if i < len(form_types) else ""
+        # Skip entries with no form type rather than storing an empty string
+        if not form:
+            continue
         if filing_types and form not in filing_types:
             continue
 
@@ -258,7 +261,7 @@ def _normalise_filings(
         if not raw_date:
             continue
         try:
-            filed_at = datetime.fromisoformat(raw_date)
+            filed_at = datetime.fromisoformat(raw_date).replace(tzinfo=UTC)
         except ValueError:
             continue
 
@@ -305,7 +308,7 @@ def _normalise_filing_event(provider_filing_id: str, raw: dict[str, object]) -> 
     """
     raw_date = raw.get("filingDate") or raw.get("dateFiled")
     try:
-        filed_at = datetime.fromisoformat(str(raw_date)) if raw_date else datetime.now(UTC)
+        filed_at = datetime.fromisoformat(str(raw_date)[:10]).replace(tzinfo=UTC) if raw_date else datetime.now(UTC)
     except ValueError:
         filed_at = datetime.now(UTC)
 

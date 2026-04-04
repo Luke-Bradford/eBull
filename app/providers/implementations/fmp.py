@@ -295,6 +295,9 @@ def _int_or_none(value: object) -> int | None:
         return None
     try:
         result = int(float(str(value)))
-        return result if result != 0 else None
+        if result == 0:
+            logger.warning("FMP: _int_or_none received zero value (%r) — returning None; verify source data", value)
+            return None
+        return result
     except (ValueError, ArithmeticError):
         return None
