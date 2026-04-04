@@ -8,7 +8,7 @@ Full implementation is built in issue #4 (filings and fundamentals).
 
 from datetime import date
 
-from app.providers.filings import FilingEvent, FilingsProvider, FilingSearchResult
+from app.providers.filings import FilingEvent, FilingSearchResult, FilingsProvider
 
 
 class SecFilingsProvider(FilingsProvider):
