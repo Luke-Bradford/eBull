@@ -256,8 +256,8 @@ def _normalise_quote(symbol: str, raw: object) -> Quote | None:
     raw_bid = data["Bid"] if "Bid" in data else data.get("bid")
     raw_ask = data["Ask"] if "Ask" in data else data.get("ask")
 
-    if not raw_bid or not raw_ask:
-        logger.warning("Quote for %s missing bid or ask: %s", symbol, raw)
+    if raw_bid is None or raw_ask is None or Decimal(str(raw_bid)) <= 0 or Decimal(str(raw_ask)) <= 0:
+        logger.warning("Quote for %s has absent or non-positive bid/ask: %s", symbol, raw)
         return None
 
     raw_ts = data["Time"] if "Time" in data else (data["time"] if "time" in data else data.get("timestamp"))

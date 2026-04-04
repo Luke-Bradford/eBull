@@ -226,9 +226,10 @@ def _compute_rolling_returns(
     for col, days in _RETURN_WINDOWS.items():
         target_date = date.fromordinal(latest_date.toordinal() - days)
         # Find the closest available price on or before target_date.
-        # The break on the first date after target_date is safe because prices
-        # is sorted oldest-first; duplicates are prevented by the DB UNIQUE
-        # constraint on (instrument_id, price_date).
+        # The break on the first date after target_date is correct only because
+        # prices is strictly sorted oldest-first. That ordering is guaranteed by
+        # the DB query (ORDER BY price_date DESC, reversed in Python) and by the
+        # UNIQUE (instrument_id, price_date) constraint preventing duplicate dates.
         anchor: Decimal | None = None
         for price_date, close in prices[:-1]:  # exclude the latest bar itself
             if price_date <= target_date:

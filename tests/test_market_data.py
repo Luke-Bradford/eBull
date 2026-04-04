@@ -186,6 +186,16 @@ class TestNormaliseQuote:
         item = {k: v for k, v in FIXTURE_QUOTE_CAMEL.items() if k != "Ask"}
         assert _normalise_quote("AAPL", item) is None
 
+    def test_zero_bid_returns_none(self) -> None:
+        # Zero bid is dropped (not a tradeable quote) with a warning rather than
+        # silently passing through to spread computation. Pins this as intentional policy.
+        item = {**FIXTURE_QUOTE_CAMEL, "Bid": "0"}
+        assert _normalise_quote("AAPL", item) is None
+
+    def test_zero_ask_returns_none(self) -> None:
+        item = {**FIXTURE_QUOTE_CAMEL, "Ask": "0"}
+        assert _normalise_quote("AAPL", item) is None
+
     def test_non_dict_returns_none(self) -> None:
         assert _normalise_quote("AAPL", ["not", "a", "dict"]) is None
 

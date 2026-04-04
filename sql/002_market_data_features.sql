@@ -7,6 +7,11 @@ ALTER TABLE price_daily
     ADD COLUMN IF NOT EXISTS return_6m  NUMERIC(10,6),  -- 6-month total return
     ADD COLUMN IF NOT EXISTS return_1y  NUMERIC(10,6),  -- 1-year total return
     ADD COLUMN IF NOT EXISTS volatility_30d NUMERIC(10,6); -- 30-day realised volatility (annualised)
+-- NOTE: volume NULL means "not provided or zero" — the ingestion layer (etoro.py _int_or_none)
+-- maps reported zero volume to NULL. See issue #21 to track whether this policy needs revision.
+
+-- TODO: add indexes on price_daily(price_date) and quotes(quoted_at) once query patterns
+-- are established. See issue #22.
 
 -- Current quote snapshot per instrument (overwritten on each refresh)
 CREATE TABLE IF NOT EXISTS quotes (
