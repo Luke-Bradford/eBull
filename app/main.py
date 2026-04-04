@@ -41,7 +41,12 @@ def health() -> dict:
 @app.get("/health/db")
 def health_db() -> dict:
     """Returns migration history and list of public tables in the database."""
-    migrations = migration_status()
+    # migration_status() opens its own connection — catch DB-down here so the
+    # endpoint always returns a structured response rather than a 500.
+    try:
+        migrations = migration_status()
+    except Exception as exc:
+        return {"db_reachable": False, "db_error": str(exc), "tables": [], "migrations": []}
 
     try:
         with psycopg.connect(settings.database_url) as conn:
