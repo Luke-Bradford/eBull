@@ -12,6 +12,7 @@ import logging
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from pathlib import Path
+from types import TracebackType
 
 import httpx
 
@@ -19,11 +20,7 @@ from app.providers.market_data import InstrumentRecord, MarketDataProvider, OHLC
 
 logger = logging.getLogger(__name__)
 
-# Base URLs differ between demo and live environments
-_BASE_URLS = {
-    "demo": "https://api.etoro.com",
-    "live": "https://api.etoro.com",
-}
+_ETORO_BASE_URL = "https://api.etoro.com"
 
 # Directory for raw payload dumps (relative to project root)
 _RAW_PAYLOAD_DIR = Path("data/raw/etoro")
@@ -47,13 +44,17 @@ class EtoroMarketDataProvider(MarketDataProvider):
 
     Requires ETORO_READ_API_KEY. Raw responses are persisted to
     data/raw/etoro/ before normalisation.
+
+    Use as a context manager to ensure the underlying HTTP client is closed:
+
+        with EtoroMarketDataProvider(api_key=..., env=...) as provider:
+            records = provider.get_tradable_instruments()
     """
 
     def __init__(self, api_key: str, env: str = "demo") -> None:
         self._api_key = api_key
-        self._base_url = _BASE_URLS.get(env, _BASE_URLS["demo"])
         self._client = httpx.Client(
-            base_url=self._base_url,
+            base_url=_ETORO_BASE_URL,
             headers={
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
@@ -61,13 +62,25 @@ class EtoroMarketDataProvider(MarketDataProvider):
             timeout=30.0,
         )
 
+    def __enter__(self) -> "EtoroMarketDataProvider":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        self._client.close()
+
     def get_tradable_instruments(self) -> list[InstrumentRecord]:
         """
         Fetch the full list of tradable instruments from eToro.
 
-        Raw response is persisted before normalisation. The eToro
-        instruments endpoint returns a paginated list; this implementation
-        fetches all pages.
+        Raw response is persisted before normalisation.
+        Note: pagination is not yet implemented — single request only.
+        The eToro API pagination shape will be confirmed in live testing
+        and a pagination loop added at that point.
         """
         response = self._client.get("/v1/instruments")
         response.raise_for_status()

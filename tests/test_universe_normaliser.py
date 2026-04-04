@@ -179,5 +179,5 @@ class TestSyncSummary:
         assert summary.updated == 1
         assert summary.deactivated == 0
 
-        with pytest.raises(Exception):
+        with pytest.raises(AttributeError):
             summary.inserted = 99  # type: ignore[misc]

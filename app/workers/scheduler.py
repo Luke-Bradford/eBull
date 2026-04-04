@@ -26,12 +26,10 @@ def nightly_universe_sync() -> None:
         logger.error("nightly_universe_sync: ETORO_READ_API_KEY not set, skipping")
         return
 
-    provider = EtoroMarketDataProvider(
-        api_key=settings.etoro_read_api_key,
-        env=settings.etoro_env,
-    )
-
-    with psycopg.connect(settings.database_url) as conn:
+    with (
+        EtoroMarketDataProvider(api_key=settings.etoro_read_api_key, env=settings.etoro_env) as provider,
+        psycopg.connect(settings.database_url) as conn,
+    ):
         summary = sync_universe(provider, conn)
 
     logger.info(

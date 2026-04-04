@@ -5,11 +5,14 @@ Syncs the eToro tradable instrument list to the local `instruments` table.
 Detects new instruments, removed instruments, and changed metadata.
 """
 
+import logging
 from dataclasses import dataclass
 
 import psycopg
 
 from app.providers.market_data import InstrumentRecord, MarketDataProvider
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -32,20 +35,28 @@ def sync_universe(
     - Instruments no longer returned by the provider are marked
       is_tradable=False; they are never deleted.
 
+    If the provider returns zero instruments, deactivation is skipped to
+    avoid silently wiping the entire universe on a transient API error.
+
     Raw provider response is persisted via the provider implementation
     before this function is called (responsibility of the provider).
     """
     records = provider.get_tradable_instruments()
-    provider_ids = {r.provider_id for r in records}
 
-    inserted = 0
-    updated = 0
+    if not records:
+        logger.warning(
+            "Provider returned zero instruments — skipping sync to avoid wiping universe. "
+            "Check API credentials and endpoint health."
+        )
+        return SyncSummary(inserted=0, updated=0, deactivated=0)
+
+    provider_ids = {r.provider_id for r in records}
     deactivated = 0
 
     with conn.transaction():
         # Upsert each record from the provider
         for rec in records:
-            result = conn.execute(
+            conn.execute(
                 """
                 INSERT INTO instruments (
                     instrument_id, symbol, company_name, exchange, currency,
@@ -89,12 +100,6 @@ def sync_universe(
                     "country": rec.country,
                 },
             )
-            # rowcount == 1 on INSERT, 1 on UPDATE, 0 if row existed and matched
-            if result.rowcount == 1:
-                # Distinguish insert from update by checking if row pre-existed
-                # We check via the ctid trick: if xmax == 0 it's a fresh insert.
-                # Simpler: track which provider_ids already existed before the loop.
-                pass
 
         # Deactivate instruments no longer in the provider feed
         rows = conn.execute(
@@ -109,9 +114,9 @@ def sync_universe(
         )
         deactivated = rows.rowcount
 
-    # Re-query to get accurate inserted/updated counts
-    # (ON CONFLICT DO UPDATE doesn't easily distinguish insert vs update
-    # without a helper column; use a two-pass approach for the summary)
+    # Re-query to get accurate inserted/updated counts.
+    # ON CONFLICT DO UPDATE doesn't distinguish insert vs update via rowcount;
+    # use timestamp comparison as a best-effort summary (not used in decision logic).
     inserted, updated = _count_changes(conn, records)
 
     return SyncSummary(inserted=inserted, updated=updated, deactivated=deactivated)
@@ -126,8 +131,7 @@ def _count_changes(
     and first_seen_at timestamps — inserted rows have them equal (both set to
     NOW() in the same transaction), updated rows have first_seen_at < last_seen_at.
 
-    This is a best-effort count for the summary log; it is not used for any
-    decision logic.
+    Best-effort count for the summary log only; not used in any decision logic.
     """
     if not records:
         return 0, 0
