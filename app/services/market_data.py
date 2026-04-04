@@ -66,21 +66,25 @@ def refresh_market_data(
     spread_flags_set = 0
 
     for symbol, instrument_id in symbols:
-        # Candles
-        bars = provider.get_daily_candles(symbol, from_date, to_date)
-        if bars:
-            upserted = _upsert_candles(conn, instrument_id, bars)
-            candle_rows_upserted += upserted
-            computed = _compute_and_store_features(conn, instrument_id)
-            features_computed += computed
+        try:
+            with conn.transaction():
+                # Candles
+                bars = provider.get_daily_candles(symbol, from_date, to_date)
+                if bars:
+                    upserted = _upsert_candles(conn, instrument_id, bars)
+                    candle_rows_upserted += upserted
+                    computed = _compute_and_store_features(conn, instrument_id)
+                    features_computed += computed
 
-        # Quote
-        quote = provider.get_quote(symbol)
-        if quote is not None:
-            flagged = _upsert_quote(conn, instrument_id, quote, max_spread_pct)
-            quotes_updated += 1
-            if flagged:
-                spread_flags_set += 1
+                # Quote
+                quote = provider.get_quote(symbol)
+                if quote is not None:
+                    flagged = _upsert_quote(conn, instrument_id, quote, max_spread_pct)
+                    quotes_updated += 1
+                    if flagged:
+                        spread_flags_set += 1
+        except Exception:
+            logger.warning("Failed to refresh %s, skipping symbol", symbol, exc_info=True)
 
     return MarketRefreshSummary(
         symbols_refreshed=len(symbols),
@@ -102,42 +106,41 @@ def _upsert_candles(
     Returns the number of rows written (insert or update).
     """
     written = 0
-    with conn.transaction():
-        for bar in bars:
-            result = conn.execute(
-                """
-                INSERT INTO price_daily (
-                    instrument_id, price_date, open, high, low, close, volume
-                )
-                VALUES (
-                    %(instrument_id)s, %(price_date)s,
-                    %(open)s, %(high)s, %(low)s, %(close)s, %(volume)s
-                )
-                ON CONFLICT (instrument_id, price_date) DO UPDATE SET
-                    open   = EXCLUDED.open,
-                    high   = EXCLUDED.high,
-                    low    = EXCLUDED.low,
-                    close  = EXCLUDED.close,
-                    volume = EXCLUDED.volume
-                WHERE (
-                    price_daily.open   IS DISTINCT FROM EXCLUDED.open   OR
-                    price_daily.high   IS DISTINCT FROM EXCLUDED.high   OR
-                    price_daily.low    IS DISTINCT FROM EXCLUDED.low    OR
-                    price_daily.close  IS DISTINCT FROM EXCLUDED.close  OR
-                    price_daily.volume IS DISTINCT FROM EXCLUDED.volume
-                )
-                """,
-                {
-                    "instrument_id": instrument_id,
-                    "price_date": bar.price_date,
-                    "open": bar.open,
-                    "high": bar.high,
-                    "low": bar.low,
-                    "close": bar.close,
-                    "volume": bar.volume,
-                },
+    for bar in bars:
+        result = conn.execute(
+            """
+            INSERT INTO price_daily (
+                instrument_id, price_date, open, high, low, close, volume
             )
-            written += result.rowcount
+            VALUES (
+                %(instrument_id)s, %(price_date)s,
+                %(open)s, %(high)s, %(low)s, %(close)s, %(volume)s
+            )
+            ON CONFLICT (instrument_id, price_date) DO UPDATE SET
+                open   = EXCLUDED.open,
+                high   = EXCLUDED.high,
+                low    = EXCLUDED.low,
+                close  = EXCLUDED.close,
+                volume = EXCLUDED.volume
+            WHERE (
+                price_daily.open   IS DISTINCT FROM EXCLUDED.open   OR
+                price_daily.high   IS DISTINCT FROM EXCLUDED.high   OR
+                price_daily.low    IS DISTINCT FROM EXCLUDED.low    OR
+                price_daily.close  IS DISTINCT FROM EXCLUDED.close  OR
+                price_daily.volume IS DISTINCT FROM EXCLUDED.volume
+            )
+            """,
+            {
+                "instrument_id": instrument_id,
+                "price_date": bar.price_date,
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+            },
+        )
+        written += result.rowcount
     return written
 
 
@@ -172,7 +175,7 @@ def _compute_and_store_features(
 
     # rows are newest-first; reverse to oldest-first for computation
     prices: list[tuple[date, Decimal]] = [(r[0], r[1]) for r in reversed(rows)]
-    latest_date, latest_close = prices[-1]
+    latest_date, _ = prices[-1]
 
     returns = _compute_rolling_returns(prices)
     volatility = _compute_volatility_30d(prices)
@@ -222,7 +225,10 @@ def _compute_rolling_returns(
 
     for col, days in _RETURN_WINDOWS.items():
         target_date = date.fromordinal(latest_date.toordinal() - days)
-        # Find the closest available price on or before target_date
+        # Find the closest available price on or before target_date.
+        # The break on the first date after target_date is safe because prices
+        # is sorted oldest-first; duplicates are prevented by the DB UNIQUE
+        # constraint on (instrument_id, price_date).
         anchor: Decimal | None = None
         for price_date, close in prices[:-1]:  # exclude the latest bar itself
             if price_date <= target_date:
@@ -278,8 +284,7 @@ def _upsert_quote(
     Computes spread_pct and sets spread_flag if spread exceeds the threshold.
     Returns True if spread_flag was set (i.e. spread is wide).
     """
-    mid = (quote.bid + quote.ask) / 2
-    spread_pct = ((quote.ask - quote.bid) / mid * 100) if mid > 0 else None
+    spread_pct = compute_spread_pct(quote.bid, quote.ask)
     spread_flag = spread_pct is not None and spread_pct > max_spread_pct
 
     conn.execute(

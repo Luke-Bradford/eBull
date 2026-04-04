@@ -53,7 +53,13 @@ def hourly_market_refresh() -> None:
         logger.error("hourly_market_refresh: ETORO_READ_API_KEY not set, skipping")
         return
 
-    with psycopg.connect(settings.database_url) as conn:
+    to_date = date.today()
+    from_date = to_date - timedelta(days=400)
+
+    with (
+        EtoroMarketDataProvider(api_key=settings.etoro_read_api_key, env=settings.etoro_env) as provider,
+        psycopg.connect(settings.database_url) as conn,
+    ):
         rows = conn.execute(
             """
             SELECT i.symbol, i.instrument_id::text
@@ -65,18 +71,11 @@ def hourly_market_refresh() -> None:
             """
         ).fetchall()
 
-    if not rows:
-        logger.info("hourly_market_refresh: no covered instruments found, skipping")
-        return
+        if not rows:
+            logger.info("hourly_market_refresh: no covered instruments found, skipping")
+            return
 
-    symbols = [(row[0], row[1]) for row in rows]
-    to_date = date.today()
-    from_date = to_date - timedelta(days=400)
-
-    with (
-        EtoroMarketDataProvider(api_key=settings.etoro_read_api_key, env=settings.etoro_env) as provider,
-        psycopg.connect(settings.database_url) as conn,
-    ):
+        symbols = [(row[0], row[1]) for row in rows]
         summary = refresh_market_data(provider, conn, symbols, from_date, to_date)
 
     logger.info(

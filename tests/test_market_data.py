@@ -207,7 +207,8 @@ def _make_prices(closes: list[float], start: date | None = None) -> list[tuple[d
 
 class TestComputeRollingReturns:
     def test_1w_return_correct(self) -> None:
-        # 8 days of prices: latest close 110, close 7 days ago 100 → return = 0.10
+        # 8 prices spanning 7 intervals: anchor at index 0 (100), latest at index 7 (110)
+        # target_date = latest_date - 7, which falls on index 0 → return = (110/100) - 1 = 0.10
         prices = _make_prices([100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 110.0])
         results = _compute_rolling_returns(prices)
         r1w = results["return_1w"]

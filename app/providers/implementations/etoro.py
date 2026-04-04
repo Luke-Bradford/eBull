@@ -209,11 +209,11 @@ def _normalise_candle(symbol: str, item: Mapping[str, object]) -> OHLCVBar | Non
     Map a single eToro candle dict to an OHLCVBar.
     Returns None if any required OHLC field is missing.
     """
-    raw_date = item.get("Date") or item.get("date")
-    raw_open = item.get("Open") or item.get("open")
-    raw_high = item.get("High") or item.get("high")
-    raw_low = item.get("Low") or item.get("low")
-    raw_close = item.get("Close") or item.get("close")
+    raw_date = item["Date"] if "Date" in item else item.get("date")
+    raw_open = item["Open"] if "Open" in item else item.get("open")
+    raw_high = item["High"] if "High" in item else item.get("high")
+    raw_low = item["Low"] if "Low" in item else item.get("low")
+    raw_close = item["Close"] if "Close" in item else item.get("close")
 
     if not all([raw_date, raw_open, raw_high, raw_low, raw_close]):
         logger.warning("Skipping candle missing required fields for %s: %s", symbol, item)
@@ -253,14 +253,14 @@ def _normalise_quote(symbol: str, raw: object) -> Quote | None:
     if not isinstance(data, dict):
         return None
 
-    raw_bid = data.get("Bid") or data.get("bid")
-    raw_ask = data.get("Ask") or data.get("ask")
+    raw_bid = data["Bid"] if "Bid" in data else data.get("bid")
+    raw_ask = data["Ask"] if "Ask" in data else data.get("ask")
 
     if not raw_bid or not raw_ask:
         logger.warning("Quote for %s missing bid or ask: %s", symbol, raw)
         return None
 
-    raw_ts = data.get("Time") or data.get("time") or data.get("timestamp")
+    raw_ts = data["Time"] if "Time" in data else (data["time"] if "time" in data else data.get("timestamp"))
     if raw_ts:
         try:
             quoted_at = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
@@ -269,7 +269,7 @@ def _normalise_quote(symbol: str, raw: object) -> Quote | None:
     else:
         quoted_at = datetime.now(UTC)
 
-    raw_last = data.get("Last") or data.get("last")
+    raw_last = data["Last"] if "Last" in data else data.get("last")
 
     return Quote(
         symbol=symbol,
