@@ -105,10 +105,10 @@ uv run pyright
 All three must pass. Fix failures — do not bypass them.
 
 If `uv` is not on PATH in the Claude Code bash shell, ask the user to add the uv
-install directory to `~/.bashrc` (`export PATH="/c/Users/LukeB/.local/bin:$PATH"`
-or wherever `where.exe uv` reports it). Do not skip the checks — push to CI without
-them is wasteful and forces the review agent to do work that should have been caught
-locally.
+install directory to `~/.bashrc` (e.g. `export PATH="$HOME/.local/bin:$PATH"` on
+Linux/Mac, or the equivalent Windows Git Bash path). Run `where uv` or `which uv`
+to find the location. Do not skip the checks — pushing to CI without them wastes
+review rounds on issues that should be caught locally.
 
 ## Handling review comments
 
