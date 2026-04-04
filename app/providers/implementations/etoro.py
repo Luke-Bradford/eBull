@@ -145,7 +145,7 @@ def _normalise_instrument(item: Mapping[str, object]) -> InstrumentRecord | None
         sector=_str_or_none(item.get("Sector") or item.get("sector")),
         industry=_str_or_none(item.get("Industry") or item.get("industry")),
         country=_str_or_none(item.get("Country") or item.get("country")),
-        is_tradable=bool(item.get("IsActive", True)),
+        is_tradable=bool(item.get("IsActive") if "IsActive" in item else item.get("is_active", True)),
     )
 
 

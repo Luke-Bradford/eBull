@@ -65,7 +65,7 @@ def sync_universe(
                 )
                 VALUES (
                     %(provider_id)s, %(symbol)s, %(company_name)s, %(exchange)s,
-                    %(currency)s, %(sector)s, %(industry)s, %(country)s, TRUE,
+                    %(currency)s, %(sector)s, %(industry)s, %(country)s, %(is_tradable)s,
                     NOW(), NOW()
                 )
                 ON CONFLICT (instrument_id) DO UPDATE SET
@@ -76,17 +76,17 @@ def sync_universe(
                     sector       = EXCLUDED.sector,
                     industry     = EXCLUDED.industry,
                     country      = EXCLUDED.country,
-                    is_tradable  = TRUE,
+                    is_tradable  = EXCLUDED.is_tradable,
                     last_seen_at = NOW()
                 WHERE (
-                    instruments.symbol        IS DISTINCT FROM EXCLUDED.symbol       OR
-                    instruments.company_name  IS DISTINCT FROM EXCLUDED.company_name OR
-                    instruments.exchange      IS DISTINCT FROM EXCLUDED.exchange     OR
-                    instruments.currency      IS DISTINCT FROM EXCLUDED.currency     OR
-                    instruments.sector        IS DISTINCT FROM EXCLUDED.sector       OR
-                    instruments.industry      IS DISTINCT FROM EXCLUDED.industry     OR
-                    instruments.country       IS DISTINCT FROM EXCLUDED.country      OR
-                    instruments.is_tradable   IS DISTINCT FROM TRUE
+                    instruments.symbol        IS DISTINCT FROM EXCLUDED.symbol        OR
+                    instruments.company_name  IS DISTINCT FROM EXCLUDED.company_name  OR
+                    instruments.exchange      IS DISTINCT FROM EXCLUDED.exchange      OR
+                    instruments.currency      IS DISTINCT FROM EXCLUDED.currency      OR
+                    instruments.sector        IS DISTINCT FROM EXCLUDED.sector        OR
+                    instruments.industry      IS DISTINCT FROM EXCLUDED.industry      OR
+                    instruments.country       IS DISTINCT FROM EXCLUDED.country       OR
+                    instruments.is_tradable   IS DISTINCT FROM EXCLUDED.is_tradable
                 )
                 """,
                 {
@@ -98,6 +98,7 @@ def sync_universe(
                     "sector": rec.sector,
                     "industry": rec.industry,
                     "country": rec.country,
+                    "is_tradable": rec.is_tradable,
                 },
             )
 

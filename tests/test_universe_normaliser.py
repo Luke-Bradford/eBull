@@ -116,11 +116,24 @@ class TestNormaliseInstrument:
         assert record.exchange is None
         assert record.sector is None
 
-    def test_is_active_false(self) -> None:
+    def test_is_active_false_camel_case(self) -> None:
         item = {**FIXTURE_INSTRUMENT_DISPLAY_DATA, "IsActive": False}
         record = _normalise_instrument(item)
         assert record is not None
         assert record.is_tradable is False
+
+    def test_is_active_false_snake_case(self) -> None:
+        item = {**FIXTURE_INSTRUMENT_SNAKE, "is_active": False}
+        record = _normalise_instrument(item)
+        assert record is not None
+        assert record.is_tradable is False
+
+    def test_is_active_absent_defaults_true(self) -> None:
+        # Neither IsActive nor is_active present → defaults to tradable
+        item = {"InstrumentID": 1001, "SymbolFull": "AAPL"}
+        record = _normalise_instrument(item)
+        assert record is not None
+        assert record.is_tradable is True
 
     def test_returns_instrument_record(self) -> None:
         record = _normalise_instrument(FIXTURE_INSTRUMENT_DISPLAY_DATA)
