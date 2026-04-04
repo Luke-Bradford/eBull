@@ -8,6 +8,7 @@ Each function represents one scheduled job. Wire these into APScheduler
 import logging
 from datetime import UTC, date, datetime, timedelta
 
+import anthropic
 import psycopg
 
 from app.config import settings
@@ -19,6 +20,7 @@ from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_
 from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
 from app.services.sentiment import ClaudeSentimentScorer
+from app.services.thesis import find_stale_instruments, generate_thesis
 from app.services.universe import sync_universe
 
 logger = logging.getLogger(__name__)
@@ -254,6 +256,60 @@ def daily_news_refresh() -> None:
         _ = scorer
         _ = from_dt
         _ = to_dt
+
+
+def daily_thesis_refresh() -> None:
+    """
+    Regenerate theses for stale Tier 1 instruments.
+
+    An instrument is stale when:
+      - it has no thesis row, or
+      - its most recent thesis is older than coverage.review_frequency allows.
+
+    Requires ANTHROPIC_API_KEY. Skips silently if not set.
+    Each instrument is processed independently — a failure on one does not
+    abort the rest of the batch.
+    """
+    if not settings.anthropic_api_key:
+        logger.error("daily_thesis_refresh: ANTHROPIC_API_KEY not set, skipping")
+        return
+
+    with psycopg.connect(settings.database_url) as conn:
+        stale = find_stale_instruments(conn, tier=1)
+
+    if not stale:
+        logger.info("daily_thesis_refresh: no stale Tier 1 instruments found")
+        return
+
+    logger.info("daily_thesis_refresh: %d stale instrument(s) to refresh", len(stale))
+
+    claude_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+
+    generated = 0
+    skipped = 0
+    for item in stale:
+        try:
+            with psycopg.connect(settings.database_url) as conn:
+                generate_thesis(
+                    instrument_id=item.instrument_id,
+                    conn=conn,
+                    client=claude_client,
+                )
+            generated += 1
+        except Exception:
+            logger.warning(
+                "daily_thesis_refresh: failed for symbol=%s instrument_id=%d, skipping",
+                item.symbol,
+                item.instrument_id,
+                exc_info=True,
+            )
+            skipped += 1
+
+    logger.info(
+        "daily_thesis_refresh complete: generated=%d skipped=%d",
+        generated,
+        skipped,
+    )
 
 
 def morning_candidate_review() -> None:
