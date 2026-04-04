@@ -222,6 +222,9 @@ def daily_news_refresh() -> None:
     to_dt = datetime.now(tz=UTC)
     from_dt = to_dt - timedelta(hours=72)
 
+    # The DB connection is opened once and kept open for the full pipeline.
+    # refresh_news() performs DB reads (dedup checks) and writes (upserts)
+    # throughout its execution — the connection must not be closed early.
     with psycopg.connect(settings.database_url) as conn:
         rows = conn.execute(
             """
@@ -234,21 +237,23 @@ def daily_news_refresh() -> None:
             """
         ).fetchall()
 
-    if not rows:
-        logger.info("daily_news_refresh: no covered instruments found, skipping")
-        return
+        if not rows:
+            logger.info("daily_news_refresh: no covered instruments found, skipping")
+            return
 
-    instrument_symbols = [(row[0], row[1]) for row in rows]
-    scorer = ClaudeSentimentScorer(api_key=settings.anthropic_api_key)
+        instrument_symbols = [(row[0], row[1]) for row in rows]
+        scorer = ClaudeSentimentScorer(api_key=settings.anthropic_api_key)
 
-    # NewsProvider: no concrete implementation wired in v1.
-    # Wire a real provider here once one is available (e.g. Benzinga, NewsAPI).
-    # Until then this job is a no-op at the provider level.
-    logger.warning("daily_news_refresh: no NewsProvider implementation wired in v1 — skipping fetch")
-    _ = instrument_symbols
-    _ = scorer
-    _ = from_dt
-    _ = to_dt
+        # NewsProvider: no concrete implementation wired in v1.
+        # Wire a real provider here once one is available (e.g. Benzinga, NewsAPI).
+        # When wired, replace the warning + return with:
+        #   summary = refresh_news(provider, scorer, conn, instrument_symbols, from_dt, to_dt)
+        #   logger.info("News refresh: %s", summary)
+        logger.warning("daily_news_refresh: no NewsProvider implementation wired in v1 — skipping fetch")
+        _ = instrument_symbols
+        _ = scorer
+        _ = from_dt
+        _ = to_dt
 
 
 def morning_candidate_review() -> None:

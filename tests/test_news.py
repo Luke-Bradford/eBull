@@ -130,7 +130,7 @@ def test_exact_headline_is_filtered() -> None:
     mock_conn = MagicMock()
     mock_conn.execute.return_value.fetchall.return_value = []
 
-    deduped, skipped = _filter_near_duplicates(items, set(), mock_conn, "42")
+    deduped, skipped = _filter_near_duplicates(items, mock_conn, "42")
 
     assert len(deduped) == 1
     assert skipped == 1
@@ -147,7 +147,7 @@ def test_near_duplicate_above_threshold_is_filtered() -> None:
     mock_conn = MagicMock()
     mock_conn.execute.return_value.fetchall.return_value = []
 
-    deduped, skipped = _filter_near_duplicates(items, set(), mock_conn, "42")
+    deduped, skipped = _filter_near_duplicates(items, mock_conn, "42")
 
     assert len(deduped) == 1
     assert skipped == 1
@@ -163,7 +163,7 @@ def test_distinct_headlines_are_both_kept() -> None:
     mock_conn = MagicMock()
     mock_conn.execute.return_value.fetchall.return_value = []
 
-    deduped, skipped = _filter_near_duplicates(items, set(), mock_conn, "42")
+    deduped, skipped = _filter_near_duplicates(items, mock_conn, "42")
 
     assert len(deduped) == 2
     assert skipped == 0
@@ -179,7 +179,7 @@ def test_near_duplicate_against_db_headline_is_filtered() -> None:
     # Simulate DB returning the existing headline
     mock_conn.execute.return_value.fetchall.return_value = [(db_headline,)]
 
-    deduped, skipped = _filter_near_duplicates(items, set(), mock_conn, "42")
+    deduped, skipped = _filter_near_duplicates(items, mock_conn, "42")
 
     assert len(deduped) == 0
     assert skipped == 1

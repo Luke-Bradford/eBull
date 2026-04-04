@@ -7,7 +7,8 @@ Owns:
   - exact-duplicate filtering via (instrument_id, url_hash) in the DB
   - near-duplicate headline filtering (per-instrument, SequenceMatcher)
   - importance scoring (heuristic, no external calls)
-  - sentiment scoring via a SentimentScorer (called only for new articles)
+  - sentiment scoring via a SentimentScorer (called only for new articles,
+    outside any DB transaction)
   - DB upsert into news_events
 
 Processing order per instrument:
@@ -15,9 +16,9 @@ Processing order per instrument:
   2. compute url_hash for each
   3. remove exact duplicates already in DB
   4. run near-duplicate headline filtering on remaining candidates
-  5. compute importance score
-  6. call sentiment scorer
-  7. persist rows
+  5. compute importance score (pure, no I/O)
+  6. call sentiment scorer (outside DB transaction)
+  7. persist all scored rows in a single transaction
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from difflib import SequenceMatcher
 import psycopg
 
 from app.providers.news import NewsCategory, NewsItem, NewsProvider
-from app.services.sentiment import SentimentScorer
+from app.services.sentiment import SentimentResult, SentimentScorer
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,19 @@ _RECENCY_ZERO_WEIGHT_HOURS = 72  # fully stale after 3 days
 
 
 # ---------------------------------------------------------------------------
+# Internal scored article type
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _ScoredArticle:
+    item: NewsItem
+    url_hash: str
+    importance: float
+    sentiment: SentimentResult
+
+
+# ---------------------------------------------------------------------------
 # Public dataclass
 # ---------------------------------------------------------------------------
 
@@ -109,8 +123,8 @@ def refresh_news(
     Refresh news events for a list of instruments.
 
     instrument_symbols: list of (symbol, instrument_id) pairs — instrument_id
-        is the BIGINT PK from the instruments table, passed as str to stay
-        consistent with the rest of the service layer.
+        is the BIGINT PK from the instruments table, passed as str for
+        consistency with the rest of the service layer.
     """
     total_fetched = 0
     total_exact_skip = 0
@@ -184,18 +198,23 @@ def _process_instrument(
     exact_skipped = len(hashed) - len(new_items)
 
     # Step 4 — near-duplicate headline filtering (per-instrument)
-    deduped, near_skipped = _filter_near_duplicates(new_items, known_hashes, conn, instrument_id)
+    deduped, near_skipped = _filter_near_duplicates(new_items, conn, instrument_id)
 
-    # Steps 5–7 — score and persist
-    upserted = 0
+    # Steps 5–6 — score outside any DB transaction (Claude calls must not hold
+    # a DB connection open; a transient 429/529 from Anthropic would otherwise
+    # abort the entire batch insert and hold the connection for the full round-trip)
+    scored: list[_ScoredArticle] = []
+    for item, url_hash in deduped:
+        importance = _importance_score(item, to_dt)
+        sentiment = scorer.score(item.headline, item.snippet)
+        scored.append(_ScoredArticle(item=item, url_hash=url_hash, importance=importance, sentiment=sentiment))
+
+    # Step 7 — persist all scored rows in a single transaction
     with conn.transaction():
-        for item, url_hash in deduped:
-            importance = _importance_score(item, to_dt)
-            sentiment = scorer.score(item.headline, item.snippet)
-            _upsert_news_event(conn, instrument_id, item, url_hash, sentiment.signed_score, importance, sentiment)
-            upserted += 1
+        for article in scored:
+            _upsert_news_event(conn, instrument_id, article)
 
-    return fetched, exact_skipped, near_skipped, upserted
+    return fetched, exact_skipped, near_skipped, len(scored)
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +233,7 @@ def _load_known_hashes(
 ) -> set[str]:
     """Load all url_hash values already stored for this instrument."""
     rows = conn.execute(
-        "SELECT url_hash FROM news_events WHERE instrument_id = %(id)s AND url_hash IS NOT NULL",
+        "SELECT url_hash FROM news_events WHERE instrument_id = %(id)s",
         {"id": instrument_id},
     ).fetchall()
     return {row[0] for row in rows}
@@ -231,7 +250,6 @@ def _normalise_headline(headline: str) -> str:
 
 def _filter_near_duplicates(
     candidates: list[tuple[NewsItem, str]],
-    known_hashes: set[str],  # noqa: ARG001 — reserved for future hash-based lookups
     conn: psycopg.Connection,  # type: ignore[type-arg]
     instrument_id: str,
 ) -> tuple[list[tuple[NewsItem, str]], int]:
@@ -240,35 +258,39 @@ def _filter_near_duplicates(
 
     Compares candidates against each other (within this batch) using
     SequenceMatcher on normalised headlines. The first article in each
-    near-duplicate cluster is kept.
+    near-duplicate cluster is kept. Also guards against near-dupes of
+    headlines already in the DB from the last 72 hours.
+
+    Normalised forms are pre-computed and cached to avoid O(N²) re-normalisation.
 
     Returns (deduped_list, near_skipped_count).
     """
-    # Load recent headlines already in the DB for this instrument to also
-    # guard against near-dupes that were persisted in a prior run.
-    db_headlines = _load_recent_headlines(conn, instrument_id)
+    # Load recent normalised headlines already in the DB for this instrument
+    db_norms = _load_recent_headlines(conn, instrument_id)
+
+    # Pre-compute normalised forms for all candidates
+    candidate_norms: list[tuple[NewsItem, str, str]] = [
+        (item, url_hash, _normalise_headline(item.headline)) for item, url_hash in candidates
+    ]
 
     kept: list[tuple[NewsItem, str]] = []
+    kept_norms: list[str] = []
     skipped = 0
 
-    for item, url_hash in candidates:
-        norm = _normalise_headline(item.headline)
-
-        # Check against already-kept candidates in this batch
+    for item, url_hash, norm in candidate_norms:
         is_near_dup = any(
-            SequenceMatcher(None, norm, _normalise_headline(kept_item.headline)).ratio() >= SIMILARITY_THRESHOLD
-            for kept_item, _ in kept
+            SequenceMatcher(None, norm, kept_norm).ratio() >= SIMILARITY_THRESHOLD for kept_norm in kept_norms
         )
         if not is_near_dup:
-            # Also check against recently persisted headlines
             is_near_dup = any(
-                SequenceMatcher(None, norm, db_norm).ratio() >= SIMILARITY_THRESHOLD for db_norm in db_headlines
+                SequenceMatcher(None, norm, db_norm).ratio() >= SIMILARITY_THRESHOLD for db_norm in db_norms
             )
 
         if is_near_dup:
             skipped += 1
         else:
             kept.append((item, url_hash))
+            kept_norms.append(norm)
 
     return kept, skipped
 
@@ -342,28 +364,28 @@ def _importance_score(item: NewsItem, as_of: datetime) -> float:
 def _upsert_news_event(
     conn: psycopg.Connection,  # type: ignore[type-arg]
     instrument_id: str,
-    item: NewsItem,
-    url_hash: str,
-    sentiment_score: float,
-    importance_score: float,
-    sentiment_result: object,  # SentimentResult — avoid circular import type hint
+    article: _ScoredArticle,
 ) -> None:
     """
     Upsert a single news event.
     Idempotent — keyed on (instrument_id, url_hash).
-    The raw scorer output is stored inside raw_payload_json for auditability.
+
+    raw_payload_json: pristine provider payload, unmodified.
+    sentiment_raw_json: scorer output (label + magnitude) stored separately
+        so provider data and derived data are never conflated.
     """
-    raw_payload: dict[str, object] = {}
+    item = article.item
+
+    raw_payload: dict[str, object] | None = None
     if item.raw_payload is not None:
         try:
             raw_payload = json.loads(item.raw_payload)
         except (ValueError, TypeError):
             raw_payload = {"raw": item.raw_payload}
 
-    # Embed scorer output for auditability
-    raw_payload["_sentiment"] = {
-        "label": getattr(sentiment_result, "label", None),
-        "magnitude": getattr(sentiment_result, "magnitude", None),
+    sentiment_raw = {
+        "label": article.sentiment.label,
+        "magnitude": article.sentiment.magnitude,
     }
 
     conn.execute(
@@ -371,12 +393,12 @@ def _upsert_news_event(
         INSERT INTO news_events (
             instrument_id, event_time, source, headline, category,
             sentiment_score, importance_score, url_hash, url, snippet,
-            raw_payload_json
+            raw_payload_json, sentiment_raw_json
         )
         VALUES (
             %(instrument_id)s, %(event_time)s, %(source)s, %(headline)s, %(category)s,
             %(sentiment_score)s, %(importance_score)s, %(url_hash)s, %(url)s, %(snippet)s,
-            %(raw_payload_json)s
+            %(raw_payload_json)s, %(sentiment_raw_json)s
         )
         ON CONFLICT (instrument_id, url_hash) DO NOTHING
         """,
@@ -386,11 +408,12 @@ def _upsert_news_event(
             "source": item.source,
             "headline": item.headline,
             "category": item.category,
-            "sentiment_score": sentiment_score,
-            "importance_score": importance_score,
-            "url_hash": url_hash,
+            "sentiment_score": article.sentiment.signed_score,
+            "importance_score": article.importance,
+            "url_hash": article.url_hash,
             "url": item.url,
             "snippet": item.snippet,
-            "raw_payload_json": json.dumps(raw_payload),
+            "raw_payload_json": json.dumps(raw_payload) if raw_payload is not None else None,
+            "sentiment_raw_json": json.dumps(sentiment_raw),
         },
     )

@@ -49,7 +49,14 @@ class SentimentResult:
 
     @property
     def signed_score(self) -> float:
-        """Signed float suitable for persistence in news_events.sentiment_score."""
+        """
+        Signed float suitable for persistence in news_events.sentiment_score.
+
+        positive  =>  +magnitude  (e.g. 0.75)
+        negative  =>  -magnitude  (e.g. -0.40)
+        neutral   =>   0.0  (magnitude is discarded — use sentiment_raw_json
+                             if you need the raw magnitude for neutral articles)
+        """
         if self.label == "positive":
             return self.magnitude
         if self.label == "negative":
