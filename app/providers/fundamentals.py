@@ -29,7 +29,7 @@ class FundamentalsSnapshot:
     cash: Decimal | None
     debt: Decimal | None  # total debt
     net_debt: Decimal | None
-    shares_outstanding: int | None
+    shares_outstanding: int | None  # DB column must be BIGINT — large-caps exceed 2^31 (e.g. AAPL ~15bn)
     book_value: Decimal | None  # per share
     eps: Decimal | None  # diluted EPS, TTM
 

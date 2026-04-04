@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS fundamentals_snapshot (
     cash NUMERIC(20,4),
     debt NUMERIC(20,4),
     net_debt NUMERIC(20,4),
-    shares_outstanding NUMERIC(20,4),
+    shares_outstanding NUMERIC(20,4),  -- NUMERIC not INTEGER: large-caps exceed 2^31; NUMERIC also handles fractional shares
     book_value NUMERIC(20,4),
     eps NUMERIC(20,4),
     custom_json JSONB,

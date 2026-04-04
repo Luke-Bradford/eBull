@@ -91,6 +91,10 @@ class TestCompaniesHouseStub:
 
 
 class TestNewsProviderIsAbstract:
+    # No concrete stub exists for NewsProvider — v1 has no dedicated news provider.
+    # The news service (issue #5) will decide the source (eToro feed, RSS, etc.) and
+    # add an implementations/news.py at that point. This test confirms the ABC is
+    # correctly defined so it cannot be accidentally instantiated directly.
     def test_cannot_instantiate_news_provider_directly(self) -> None:
         with pytest.raises(TypeError):
             NewsProvider()  # type: ignore[abstract]
