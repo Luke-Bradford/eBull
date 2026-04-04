@@ -71,5 +71,8 @@ class MarketDataProvider(ABC):
         """Return OHLCV bars for a symbol over the requested date range."""
 
     @abstractmethod
-    def get_quote(self, symbol: str) -> Quote:
-        """Return the current quote for a symbol."""
+    def get_quote(self, symbol: str) -> Quote | None:
+        """
+        Return the current quote for a symbol.
+        Returns None if the symbol is not recognised or not currently quoted.
+        """

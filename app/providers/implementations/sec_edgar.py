@@ -19,7 +19,7 @@ class SecFilingsProvider(FilingsProvider):
     Covers US-listed companies only.
     """
 
-    BASE_URL = "https://efts.sec.gov/LATEST/search-index"
+    BASE_URL = "https://data.sec.gov"
 
     def list_filings(
         self,

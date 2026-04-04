@@ -10,6 +10,7 @@ in later without touching domain logic.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class NewsItem:
     snippet: str | None  # first paragraph or summary, if available
     url: str
     raw_payload: str | None  # serialised original response, for audit
+    raw_payload_format: Literal["json", "xml", "rss"] | None  # format of raw_payload
 
 
 class NewsProvider(ABC):

@@ -27,5 +27,5 @@ class EtoroMarketDataProvider(MarketDataProvider):
     def get_daily_candles(self, symbol: str, from_date: date, to_date: date) -> list[OHLCVBar]:
         raise NotImplementedError("Implemented in issue #3")
 
-    def get_quote(self, symbol: str) -> Quote:
+    def get_quote(self, symbol: str) -> Quote | None:
         raise NotImplementedError("Implemented in issue #3")

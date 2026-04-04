@@ -6,6 +6,8 @@ hierarchy and that NotImplementedError is raised (not AttributeError or
 TypeError), which proves the method signatures match the interface.
 """
 
+from datetime import date
+
 import pytest
 
 from app.providers.filings import FilingsProvider
@@ -41,8 +43,6 @@ class TestEtoroStub:
             self.provider.get_tradable_instruments()
 
     def test_get_daily_candles_raises_not_implemented(self) -> None:
-        from datetime import date
-
         with pytest.raises(NotImplementedError):
             self.provider.get_daily_candles("AAPL", date(2024, 1, 1), date(2024, 1, 31))
 
@@ -60,8 +60,6 @@ class TestFmpStub:
             self.provider.get_latest_snapshot("AAPL")
 
     def test_get_snapshot_history_raises_not_implemented(self) -> None:
-        from datetime import date
-
         with pytest.raises(NotImplementedError):
             self.provider.get_snapshot_history("AAPL", date(2023, 1, 1), date(2024, 1, 1))
 
@@ -71,8 +69,6 @@ class TestSecEdgarStub:
         self.provider = SecFilingsProvider()
 
     def test_list_filings_raises_not_implemented(self) -> None:
-        from datetime import date
-
         with pytest.raises(NotImplementedError):
             self.provider.list_filings("AAPL", date(2024, 1, 1), date(2024, 12, 31))
 
@@ -86,8 +82,6 @@ class TestCompaniesHouseStub:
         self.provider = CompaniesHouseFilingsProvider(api_key="test-key")
 
     def test_list_filings_raises_not_implemented(self) -> None:
-        from datetime import date
-
         with pytest.raises(NotImplementedError):
             self.provider.list_filings("BP", date(2024, 1, 1), date(2024, 12, 31))
 

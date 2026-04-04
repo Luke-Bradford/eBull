@@ -18,6 +18,10 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 
+class FilingNotFound(Exception):
+    """Raised by FilingsProvider.get_filing when the requested ID does not exist."""
+
+
 @dataclass(frozen=True)
 class FilingEvent:
     """
@@ -73,5 +77,5 @@ class FilingsProvider(ABC):
     def get_filing(self, provider_id: str) -> FilingEvent:
         """
         Fetch a single filing by its provider-native ID, including raw text.
-        Raises KeyError if not found.
+        Raises FilingNotFound if the ID does not exist on the provider.
         """
