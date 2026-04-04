@@ -420,6 +420,21 @@ def _make_two_call_client(writer_json: dict, critic_json: dict) -> MagicMock:
 
 
 class TestGenerateThesis:
+    """
+    All tests in this class patch `_utcnow` to a fixed value so that
+    `_assemble_context`'s news cutoff calculation is deterministic.
+    Without this patch, tests that inject news rows with controlled
+    timestamps would fail non-deterministically when wall-clock time
+    diverges from _NOW.
+    """
+
+    def setup_method(self) -> None:
+        self._utcnow_patcher = patch("app.services.thesis._utcnow", return_value=_NOW)
+        self._utcnow_patcher.start()
+
+    def teardown_method(self) -> None:
+        self._utcnow_patcher.stop()
+
     def test_returns_thesis_result_with_correct_version(self) -> None:
         # INSERT RETURNING gives version=1
         conn = _make_conn(insert_returns_version=1)
