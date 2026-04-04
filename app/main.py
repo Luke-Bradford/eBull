@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Running pending migrations...")
-    applied = run_migrations()
+    applied = await asyncio.to_thread(run_migrations)
     if applied:
         logger.info("Applied %d migration(s): %s", len(applied), applied)
     else:
