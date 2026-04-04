@@ -632,6 +632,9 @@ def generate_thesis(
     writer_output = _call_writer(client, context)
     critic_output = _call_critic(client, str(writer_output.get("memo_markdown", "")), context)
 
+    # Validated by _validate_writer_output; cast once and reuse.
+    confidence = float(writer_output["confidence_score"])  # type: ignore[arg-type]
+
     with conn.transaction():
         # critic_output is {} on failure — treat empty dict as no critic data
         version = _insert_thesis_atomic(conn, instrument_id, writer_output, critic_output if critic_output else None)
@@ -642,14 +645,14 @@ def generate_thesis(
         instrument_id,
         version,
         writer_output["stance"],
-        float(writer_output["confidence_score"]),  # type: ignore[arg-type]
+        confidence,
     )
 
     return ThesisResult(
         instrument_id=instrument_id,
         thesis_version=version,
         thesis_type=writer_output["thesis_type"],  # type: ignore[arg-type]
-        confidence_score=float(writer_output["confidence_score"]),  # type: ignore[arg-type]
+        confidence_score=confidence,
         stance=writer_output["stance"],  # type: ignore[arg-type]
         buy_zone_low=_to_float(writer_output.get("buy_zone_low")),
         buy_zone_high=_to_float(writer_output.get("buy_zone_high")),

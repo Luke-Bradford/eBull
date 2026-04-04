@@ -80,11 +80,16 @@ def _make_conn(
         sql_strip = " ".join(sql.split()).lower()
 
         if "insert into theses" in sql_strip:
+            # Branch priority note: this check must come before any branch that
+            # matches "from theses", because the atomic INSERT contains a scalar
+            # subquery "FROM theses WHERE instrument_id = ..." — that substring
+            # would also match the prior-thesis SELECT branch below if checked
+            # first. Correct today; document the assumption explicitly.
+            #
             # The mock bypasses real SQL entirely: it always returns the
             # configured version regardless of prior thesis state.
-            # The correctness of the scalar subquery (VALUES vs SELECT FROM)
-            # is not exercisable here — integration tests against a real DB
-            # are needed to verify the first-thesis (no-prior-rows) path.
+            # The correctness of the scalar subquery on the first-thesis
+            # (no-prior-rows) path requires integration tests against a real DB.
             cursor.fetchone.return_value = (insert_returns_version,)
         elif "max(t.created_at)" in sql_strip:
             cursor.fetchall.return_value = stale_rows or []
