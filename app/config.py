@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     fmp_api_key: str | None = None
     companies_house_api_key: str | None = None
     # SEC EDGAR requires no API key (public API, 10 req/s fair-use limit)
+    sec_user_agent: str = "eBull dev@example.com"
 
     default_portfolio_mode: str = "balanced"
     max_active_positions: int = 20
