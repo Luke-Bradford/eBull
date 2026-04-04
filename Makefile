@@ -23,7 +23,7 @@ up:
 	@echo "Postgres is ready."
 
 migrate: up
-	uv run python -c "from app.db.migrations import run_migrations; applied = run_migrations(); print(f'Applied: {applied}' if applied else 'No pending migrations.')"
+	uv run python scripts/migrate.py
 
 dev: migrate
 	uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000

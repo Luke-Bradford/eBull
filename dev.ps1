@@ -24,7 +24,7 @@ if ($elapsed -ge $timeout) {
 Write-Host "Postgres is ready." -ForegroundColor Green
 
 Write-Host "Applying pending migrations..." -ForegroundColor Cyan
-uv run python -c "from app.db.migrations import run_migrations; applied = run_migrations(); print(f'Applied {len(applied)} migration(s): {applied}' if applied else 'No pending migrations.')"
+uv run python scripts/migrate.py
 
 Write-Host "Starting uvicorn on http://localhost:8000 ..." -ForegroundColor Cyan
 Write-Host "  /health    — liveness check" -ForegroundColor Gray
