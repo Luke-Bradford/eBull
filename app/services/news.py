@@ -421,6 +421,7 @@ def _upsert_news_event(
             "url_hash": article.url_hash,
             "url": item.url,
             "snippet": item.snippet,
+            # None produces SQL NULL, not Jsonb(null) — do not simplify this guard
             "raw_payload_json": Jsonb(raw_payload) if raw_payload is not None else None,
             "sentiment_raw_json": Jsonb({"label": article.sentiment.label, "magnitude": article.sentiment.magnitude}),
         },
