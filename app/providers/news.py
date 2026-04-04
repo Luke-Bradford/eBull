@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+NewsCategory = Literal["earnings", "analyst_note", "general"]
+
 
 @dataclass(frozen=True)
 class NewsItem:
@@ -24,6 +26,7 @@ class NewsItem:
     headline: str
     snippet: str | None  # first paragraph or summary, if available
     url: str
+    category: NewsCategory  # used for importance score weighting
     raw_payload: str | None  # serialised original response, for audit
     raw_payload_format: Literal["json", "xml", "rss"] | None  # format of raw_payload
 

@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     # SEC EDGAR requires no API key (public API, 10 req/s fair-use limit)
     sec_user_agent: str = "eBull dev@example.com"
 
+    anthropic_api_key: str | None = None
+
     default_portfolio_mode: str = "balanced"
     max_active_positions: int = 20
     max_initial_position_pct: int = 5
