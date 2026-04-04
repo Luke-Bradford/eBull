@@ -17,10 +17,10 @@ from app.providers.news import NewsCategory, NewsItem, NewsProvider
 from app.services.news import (
     NewsRefreshSummary,
     _filter_near_duplicates,
+    _importance_score,
     _normalise_headline,
     _url_hash,
     refresh_news,
-    score_importance,
 )
 from app.services.sentiment import SentimentResult, SentimentScorer
 
@@ -67,13 +67,52 @@ class FakeNewsProvider(NewsProvider):
 
 
 class FakeSentimentScorer(SentimentScorer):
-    """Always returns a fixed positive result. No Claude calls."""
+    """Always returns a fixed result. No Claude calls."""
 
     def __init__(self, label: Literal["positive", "negative", "neutral"] = "positive", magnitude: float = 0.5) -> None:
         self._result = SentimentResult(label=label, magnitude=magnitude)
 
     def score(self, headline: str, snippet: str | None) -> SentimentResult:
         return self._result
+
+
+def _mock_conn(known_hashes: list[str] | None = None, recent_headlines: list[str] | None = None) -> MagicMock:
+    """
+    Build a mock psycopg connection with explicit return values per query type.
+
+    Uses call order rather than query text inspection: the service calls
+    execute() in a fixed order per instrument:
+      call 0: load hashes (SELECT url_hash)
+      call 1: load recent headlines (SELECT headline)
+      call 2+: upsert INSERT statements — return value unused
+
+    Passing a list to side_effect would exhaust on the upsert calls, so we use
+    a closure that returns the right result by position and falls back to a
+    plain MagicMock for any additional calls.
+    """
+    conn = MagicMock()
+
+    hash_result = MagicMock()
+    hash_result.fetchall.return_value = [(h,) for h in (known_hashes or [])]
+
+    headline_result = MagicMock()
+    headline_result.fetchall.return_value = [(h,) for h in (recent_headlines or [])]
+
+    _call_count = [0]
+
+    def _execute(*args: object, **kwargs: object) -> MagicMock:
+        idx = _call_count[0]
+        _call_count[0] += 1
+        if idx == 0:
+            return hash_result
+        if idx == 1:
+            return headline_result
+        return MagicMock()
+
+    conn.execute.side_effect = _execute
+    conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
+    conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
+    return conn
 
 
 # ---------------------------------------------------------------------------
@@ -121,34 +160,34 @@ def test_normalise_headline_collapses_whitespace() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _conn_no_db_data() -> MagicMock:
+    """Mock conn returning empty sets for both DB queries."""
+    conn = MagicMock()
+    result = MagicMock()
+    result.fetchall.return_value = []
+    conn.execute.return_value = result
+    return conn
+
+
 def test_exact_headline_is_filtered() -> None:
     headline = "Apple beats Q1 earnings expectations"
     items = [
         (_make_item(headline, url="https://example.com/1"), "hash1"),
         (_make_item(headline, url="https://example.com/2"), "hash2"),
     ]
-    mock_conn = MagicMock()
-    mock_conn.execute.return_value.fetchall.return_value = []
-
-    deduped, skipped = _filter_near_duplicates(items, mock_conn, "42")
-
+    deduped, skipped = _filter_near_duplicates(items, _conn_no_db_data(), "42")
     assert len(deduped) == 1
     assert skipped == 1
 
 
 def test_near_duplicate_above_threshold_is_filtered() -> None:
-    # Two very similar headlines that should exceed 0.90 ratio
     h1 = "Apple Inc reports record Q1 earnings beating expectations"
     h2 = "Apple Inc reports record Q1 earnings, beating expectations"
     items = [
         (_make_item(h1, url="https://example.com/1"), "hash1"),
         (_make_item(h2, url="https://example.com/2"), "hash2"),
     ]
-    mock_conn = MagicMock()
-    mock_conn.execute.return_value.fetchall.return_value = []
-
-    deduped, skipped = _filter_near_duplicates(items, mock_conn, "42")
-
+    deduped, skipped = _filter_near_duplicates(items, _conn_no_db_data(), "42")
     assert len(deduped) == 1
     assert skipped == 1
 
@@ -160,11 +199,7 @@ def test_distinct_headlines_are_both_kept() -> None:
         (_make_item(h1, url="https://example.com/1"), "hash1"),
         (_make_item(h2, url="https://example.com/2"), "hash2"),
     ]
-    mock_conn = MagicMock()
-    mock_conn.execute.return_value.fetchall.return_value = []
-
-    deduped, skipped = _filter_near_duplicates(items, mock_conn, "42")
-
+    deduped, skipped = _filter_near_duplicates(items, _conn_no_db_data(), "42")
     assert len(deduped) == 2
     assert skipped == 0
 
@@ -174,13 +209,13 @@ def test_near_duplicate_against_db_headline_is_filtered() -> None:
     db_headline = "Apple reports strong Q1 earnings ahead of expectations"
     candidate_headline = "Apple reports strong Q1 earnings, ahead of expectations"
 
+    conn = MagicMock()
+    result = MagicMock()
+    result.fetchall.return_value = [(db_headline,)]
+    conn.execute.return_value = result
+
     items = [(_make_item(candidate_headline, url="https://example.com/new"), "newhash")]
-    mock_conn = MagicMock()
-    # Simulate DB returning the existing headline
-    mock_conn.execute.return_value.fetchall.return_value = [(db_headline,)]
-
-    deduped, skipped = _filter_near_duplicates(items, mock_conn, "42")
-
+    deduped, skipped = _filter_near_duplicates(items, conn, "42")
     assert len(deduped) == 0
     assert skipped == 1
 
@@ -193,52 +228,34 @@ def test_near_duplicate_against_db_headline_is_filtered() -> None:
 def test_earnings_scores_higher_than_general() -> None:
     earnings_item = _make_item("Apple Q1 earnings beat", category="earnings")
     general_item = _make_item("Apple joins sustainability index", category="general")
-
-    score_e = score_importance(earnings_item, _BASE_DT)
-    score_g = score_importance(general_item, _BASE_DT)
-
-    assert score_e > score_g
+    assert _importance_score(earnings_item, _BASE_DT) > _importance_score(general_item, _BASE_DT)
 
 
 def test_reuters_scores_higher_than_unknown_source() -> None:
     reuters_item = _make_item("Apple earnings beat", source="Reuters")
     unknown_item = _make_item("Apple earnings beat", source="Some Blog")
-
-    score_r = score_importance(reuters_item, _BASE_DT)
-    score_u = score_importance(unknown_item, _BASE_DT)
-
-    assert score_r > score_u
+    assert _importance_score(reuters_item, _BASE_DT) > _importance_score(unknown_item, _BASE_DT)
 
 
 def test_fresh_article_scores_higher_than_stale() -> None:
-    fresh_dt = _BASE_DT
     stale_dt = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)  # 3 days old
-
-    fresh_item = _make_item("Apple earnings beat", published_at=fresh_dt)
+    fresh_item = _make_item("Apple earnings beat", published_at=_BASE_DT)
     stale_item = _make_item("Apple earnings beat", published_at=stale_dt)
-
-    score_f = score_importance(fresh_item, _BASE_DT)
-    score_s = score_importance(stale_item, _BASE_DT)
-
-    assert score_f > score_s
+    assert _importance_score(fresh_item, _BASE_DT) > _importance_score(stale_item, _BASE_DT)
 
 
 def test_importance_score_clamped_to_unit_interval() -> None:
     item = _make_item("Apple Q1 earnings record beat", source="Bloomberg", category="earnings")
-    score = score_importance(item, _BASE_DT)
+    score = _importance_score(item, _BASE_DT)
     assert 0.0 <= score <= 1.0
 
 
 def test_fully_stale_article_recency_is_zero() -> None:
-    """Article older than 72h should have recency_w=0, reducing overall score."""
+    """Article older than 72h gets recency_w=0, reducing overall score vs fresh."""
     very_old = datetime(2026, 3, 28, 12, 0, 0, tzinfo=UTC)  # 7 days old
     old_item = _make_item("Apple earnings beat", source="Reuters", category="earnings", published_at=very_old)
     fresh_item = _make_item("Apple earnings beat", source="Reuters", category="earnings", published_at=_BASE_DT)
-
-    score_old = score_importance(old_item, _BASE_DT)
-    score_fresh = score_importance(fresh_item, _BASE_DT)
-
-    assert score_fresh > score_old
+    assert _importance_score(fresh_item, _BASE_DT) > _importance_score(old_item, _BASE_DT)
 
 
 # ---------------------------------------------------------------------------
@@ -247,18 +264,15 @@ def test_fully_stale_article_recency_is_zero() -> None:
 
 
 def test_signed_score_positive() -> None:
-    result = SentimentResult(label="positive", magnitude=0.75)
-    assert result.signed_score == pytest.approx(0.75)
+    assert SentimentResult(label="positive", magnitude=0.75).signed_score == pytest.approx(0.75)
 
 
 def test_signed_score_negative() -> None:
-    result = SentimentResult(label="negative", magnitude=0.40)
-    assert result.signed_score == pytest.approx(-0.40)
+    assert SentimentResult(label="negative", magnitude=0.40).signed_score == pytest.approx(-0.40)
 
 
 def test_signed_score_neutral() -> None:
-    result = SentimentResult(label="neutral", magnitude=0.20)
-    assert result.signed_score == pytest.approx(0.0)
+    assert SentimentResult(label="neutral", magnitude=0.20).signed_score == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -266,33 +280,16 @@ def test_signed_score_neutral() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _mock_conn_with_no_existing_data() -> MagicMock:
-    """Return a mock psycopg connection that reports no existing hashes/headlines."""
-    conn = MagicMock()
-
-    def execute_side_effect(query: str, params: object = None) -> MagicMock:
-        result = MagicMock()
-        result.fetchall.return_value = []
-        return result
-
-    conn.execute.side_effect = execute_side_effect
-    conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
-    conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
-    return conn
-
-
 def test_refresh_news_inserts_new_articles() -> None:
     items = [
         _make_item("Apple beats earnings", url="https://example.com/1"),
         _make_item("Tesla misses revenue", url="https://example.com/2"),
     ]
-    provider = FakeNewsProvider(items)
-    scorer = FakeSentimentScorer()
-    conn = _mock_conn_with_no_existing_data()
+    conn = _mock_conn()
 
     summary = refresh_news(
-        provider=provider,
-        scorer=scorer,
+        provider=FakeNewsProvider(items),
+        scorer=FakeSentimentScorer(),
         conn=conn,
         instrument_symbols=[("AAPL", "1")],
         from_dt=_BASE_DT,
@@ -308,28 +305,13 @@ def test_refresh_news_inserts_new_articles() -> None:
 
 def test_refresh_news_skips_exact_duplicate_urls() -> None:
     url = "https://example.com/same"
-    items = [_make_item("Apple beats earnings", url=url)]
-    provider = FakeNewsProvider(items)
-    scorer = FakeSentimentScorer()
-
-    conn = MagicMock()
-
-    def execute_side_effect(query: str, params: object = None) -> MagicMock:
-        result = MagicMock()
-        # Return the hash as already known for the url_hash query
-        if "url_hash" in query and "headline" not in query:
-            result.fetchall.return_value = [(_url_hash(url),)]
-        else:
-            result.fetchall.return_value = []
-        return result
-
-    conn.execute.side_effect = execute_side_effect
-    conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
-    conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
+    known = _url_hash(url)
+    # known_hashes pre-populated; no recent_headlines needed (exact dup filtered before near-dup check)
+    conn = _mock_conn(known_hashes=[known])
 
     summary = refresh_news(
-        provider=provider,
-        scorer=scorer,
+        provider=FakeNewsProvider([_make_item("Apple beats earnings", url=url)]),
+        scorer=FakeSentimentScorer(),
         conn=conn,
         instrument_symbols=[("AAPL", "1")],
         from_dt=_BASE_DT,
@@ -348,7 +330,7 @@ def test_refresh_news_provider_error_skips_instrument() -> None:
     summary = refresh_news(
         provider=BrokenProvider(),
         scorer=FakeSentimentScorer(),
-        conn=_mock_conn_with_no_existing_data(),
+        conn=_mock_conn(),
         instrument_symbols=[("AAPL", "1"), ("TSLA", "2")],
         from_dt=_BASE_DT,
         to_dt=_BASE_DT,
@@ -362,7 +344,7 @@ def test_refresh_news_empty_provider_returns_zero_upserted() -> None:
     summary = refresh_news(
         provider=FakeNewsProvider([]),
         scorer=FakeSentimentScorer(),
-        conn=_mock_conn_with_no_existing_data(),
+        conn=_mock_conn(),
         instrument_symbols=[("AAPL", "1")],
         from_dt=_BASE_DT,
         to_dt=_BASE_DT,
@@ -370,3 +352,21 @@ def test_refresh_news_empty_provider_returns_zero_upserted() -> None:
 
     assert summary.articles_fetched == 0
     assert summary.articles_upserted == 0
+
+
+def test_scorer_not_called_for_exact_duplicates() -> None:
+    """Scorer must never be called for articles already in DB (wasted API calls)."""
+    url = "https://example.com/existing"
+    conn = _mock_conn(known_hashes=[_url_hash(url)])
+
+    scorer = MagicMock(spec=FakeSentimentScorer)
+    refresh_news(
+        provider=FakeNewsProvider([_make_item("Some headline", url=url)]),
+        scorer=scorer,
+        conn=conn,
+        instrument_symbols=[("AAPL", "1")],
+        from_dt=_BASE_DT,
+        to_dt=_BASE_DT,
+    )
+
+    scorer.score.assert_not_called()
