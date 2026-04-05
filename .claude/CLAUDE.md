@@ -85,12 +85,19 @@ Every piece of work follows this sequence without exception:
 4. **Wait for the Claude review.** The review workflow runs automatically on every push. Poll `gh pr view <n> --comments` and `gh pr checks <n>` — do not proceed until the review has posted and CI is green.
 5. **Address every review comment on the same branch.**
    - BLOCKING: must be fixed before merge.
-   - WARNING: fix on the same PR, or raise a `tech-debt` issue before merging.
-   - NITPICK: fix if trivial, otherwise raise an issue.
+   - WARNING: fix on the same PR, or raise a `tech-debt` issue before merging. Cannot merge with unactioned WARNINGs.
+   - NITPICK: fix if trivial (it usually is); if genuinely out of scope, raise a `tech-debt` issue. Cannot merge with unactioned NITPICKs.
+   - PREVENTION: extract every prevention note to the pre-push checklist or the relevant skill file before merging.
    - Reply to each comment with what was done + the commit SHA. Nothing silently discarded.
 6. **Re-run lint, typecheck, and format check before pushing a follow-up.**
 7. **Every push resets the review requirement.** An APPROVE on a prior commit does not carry forward.
-8. **Merge only after APPROVE on the most recent commit with CI green.** Then delete the branch.
+8. **Merge only after:**
+   - APPROVE on the most recent commit
+   - All BLOCKINGs fixed
+   - All WARNINGs fixed OR have a `tech-debt` issue number in the reply
+   - All NITPICKs fixed OR have a `tech-debt` issue number in the reply
+   - All PREVENTION notes extracted to checklist/skill files
+   - CI green on the most recent commit
 
 ## Pre-push checklist
 
@@ -131,56 +138,11 @@ wastes a review round.
 
 ## Self-review before pushing
 
-Before committing, open `git diff origin/HEAD` and read top to bottom. The review agent reads the same diff fresh, with no knowledge of intent. Match that posture — read what is there, not what you meant.
+Before committing, open `git diff origin/HEAD` and read top to bottom. The review agent reads the same diff fresh with no knowledge of intent — match that posture.
 
-### SQL — every query must pass these before push
+Full checklist with rules and examples: `.claude/skills/engineering/pre-push-checklist.md`
 
-**Determinism**
-- Every `fetchone()` call: does the query have `ORDER BY`? Without it the result row is non-deterministic.
-- Any query fetching "the latest" row: has both `ORDER BY <ts> DESC` and `LIMIT 1`.
-
-**Row access**
-- No `row[0]`, `row[1]` positional indexing on cursor results. Use `row_factory=psycopg.rows.dict_row` and access by name. Positional indexing silently corrupts if a column is ever added before the indexed column.
-
-**Atomic writes**
-- Any `MAX(...) + 1` version or sequence: computed as a scalar subquery inside VALUES, not a separate SELECT then INSERT. Two-step is a TOCTOU race.
-- Any `INSERT ... SELECT WHERE ...`: what happens when the WHERE matches zero rows? Trace it.
-
-**Transactions**
-- No network calls or file I/O inside `with conn.transaction()`. All I/O before the transaction.
-
-**NULL**
-- Any `col != 'value'` on a nullable column: NULLs are excluded silently. Decide and document.
-- Parameterised NULL equality: `col IS NOT DISTINCT FROM %s` (matches NULL). Parameterised NULL inequality: `col IS DISTINCT FROM %s` (excludes NULL). Neither uses bare `IS %s`.
-
-**Parameters**
-- No f-strings or `.format()` in SQL strings. Named params `%(name)s` with dicts.
-- `IN` clauses: `= ANY(%s)` with a list, not `IN %s` with a tuple.
-
-### Python — every file must pass these
-
-- Read-only sequence parameters: `Sequence[T]` not `list[T]`.
-- Bounded string values: `Literal["a", "b"]` not `str`. Defined once at module level.
-- `Optional[X]`: replace with `X | None`.
-- Dicts into jsonb columns: `Jsonb(my_dict)` not `json.dumps()`.
-- Imports: alphabetically sorted within each `from X import ...`; blank line between stdlib / third-party / first-party groups.
-
-### Tests — each test must prove something
-
-- Asserts on a specific value, not just `is not None`.
-- Boundary case exists: first row, zero results, failure path.
-- Any code that calls `_utcnow()` (directly or transitively): patches it.
-- Mocks match the real library's semantics — psycopg `fetchone()` returns `None` not a `MagicMock`.
-- Mock `spec=` set so unexpected attribute access raises, not silently returns another mock.
-
-### Same-class-of-problem scan
-
-After fixing any instance of a problem, grep the whole file (and codebase if it's a pattern) for the same issue before pushing. Never assume the fix was isolated.
-
-| Found | Grep for |
-|---|---|
-| `fetchone()` without ORDER BY | every `fetchone()` call |
-| Positional `row[0]` | `\[[0-9]\]` on cursor results (covers all single-digit indices) |
-| `json.dumps` into jsonb | `json.dumps` in services/ |
-| `Optional[` or `Union[X, None]` | `Optional\[` and `Union\[` — replace all with `X \| None` |
-| `list[` read-only param | function signatures with `list[` |
+Detailed standards by category:
+- SQL correctness: `.claude/skills/engineering/sql-correctness.md`
+- Python hygiene: `.claude/skills/engineering/python-hygiene.md`
+- Test quality: `.claude/skills/engineering/test-quality.md`
