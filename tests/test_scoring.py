@@ -21,7 +21,7 @@ Coverage:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -37,6 +37,7 @@ from app.services.scoring import (
     _sentiment_score,
     _turnaround_score,
     _value_score,
+    compute_rankings,
     compute_score,
 )
 
@@ -668,3 +669,130 @@ class TestComputeScore:
         result = compute_score(1, conn, "v1-balanced")
         assert result.total_score >= 0.0
         assert result.total_score <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# compute_rankings — rank assignment and rank_delta via patched compute_score
+# ---------------------------------------------------------------------------
+
+
+def _make_score_result(instrument_id: int, total_score: float) -> ScoreResult:
+    """Minimal ScoreResult fixture for ranking tests."""
+    return ScoreResult(
+        instrument_id=instrument_id,
+        model_version="v1-balanced",
+        family_scores=FamilyScores(
+            quality=total_score,
+            value=total_score,
+            turnaround=total_score,
+            momentum=total_score,
+            sentiment=total_score,
+            confidence=total_score,
+        ),
+        penalties=[],
+        total_penalty=0.0,
+        raw_total=total_score,
+        total_score=total_score,
+        explanation="fixture",
+    )
+
+
+def _make_rankings_conn(
+    instrument_ids: list[int],
+    prior_rank_rows: list[tuple[int, int]],
+) -> MagicMock:
+    """
+    Fake connection for compute_rankings tests.
+
+    execute() calls arrive in order:
+      1. eligible instruments query → fetchall returns [(id,), ...]
+      2. _fetch_prior_ranks query → fetchall returns [(id, rank), ...]
+      3. N × INSERT INTO scores → execute called, no fetch needed
+    """
+    eligible_rows = [(iid,) for iid in instrument_ids]
+
+    call_count = 0
+
+    conn = MagicMock()
+    conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
+    conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
+
+    def _execute_side(*args: object, **kwargs: object) -> MagicMock:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # eligible instruments
+            return MagicMock(fetchall=MagicMock(return_value=eligible_rows))
+        if call_count == 2:
+            # _fetch_prior_ranks
+            return MagicMock(fetchall=MagicMock(return_value=prior_rank_rows))
+        # INSERT calls — return a dummy
+        return MagicMock()
+
+    conn.execute.side_effect = _execute_side
+    return conn
+
+
+class TestComputeRankings:
+    def test_rank_assigned_descending_by_total_score(self) -> None:
+        # Instrument 2 scores higher → should be rank 1
+        conn = _make_rankings_conn(instrument_ids=[1, 2], prior_rank_rows=[])
+        with patch("app.services.scoring.compute_score") as mock_score:
+            mock_score.side_effect = [
+                _make_score_result(1, 0.60),
+                _make_score_result(2, 0.80),
+            ]
+            result = compute_rankings(conn, "v1-balanced")
+
+        by_id = {r.instrument_id: r for r in result.scored}
+        assert by_id[2].rank == 1
+        assert by_id[1].rank == 2
+
+    def test_rank_delta_positive_when_rank_improved(self) -> None:
+        # Instrument 1 was rank 3 last run; this run it becomes rank 1 → delta = +2
+        conn = _make_rankings_conn(instrument_ids=[1], prior_rank_rows=[(1, 3)])
+        with patch("app.services.scoring.compute_score") as mock_score:
+            mock_score.return_value = _make_score_result(1, 0.75)
+            result = compute_rankings(conn, "v1-balanced")
+
+        assert result.scored[0].rank == 1
+        assert result.scored[0].rank_delta == 2  # prior(3) - current(1)
+
+    def test_rank_delta_negative_when_rank_worsened(self) -> None:
+        # Instrument 1 was rank 1; now rank 2 → delta = -1
+        conn = _make_rankings_conn(instrument_ids=[1, 2], prior_rank_rows=[(1, 1), (2, 2)])
+        with patch("app.services.scoring.compute_score") as mock_score:
+            mock_score.side_effect = [
+                _make_score_result(1, 0.50),  # lower score this run
+                _make_score_result(2, 0.80),  # higher score this run
+            ]
+            result = compute_rankings(conn, "v1-balanced")
+
+        by_id = {r.instrument_id: r for r in result.scored}
+        assert by_id[2].rank == 1
+        assert by_id[1].rank == 2
+        assert by_id[1].rank_delta == -1  # prior(1) - current(2)
+        assert by_id[2].rank_delta == 1  # prior(2) - current(1)
+
+    def test_rank_delta_none_on_first_run(self) -> None:
+        # No prior rows → rank_delta is None for all instruments
+        conn = _make_rankings_conn(instrument_ids=[1, 2], prior_rank_rows=[])
+        with patch("app.services.scoring.compute_score") as mock_score:
+            mock_score.side_effect = [
+                _make_score_result(1, 0.70),
+                _make_score_result(2, 0.60),
+            ]
+            result = compute_rankings(conn, "v1-balanced")
+
+        for r in result.scored:
+            assert r.rank_delta is None
+
+    def test_empty_universe_returns_empty_result(self) -> None:
+        conn = _make_rankings_conn(instrument_ids=[], prior_rank_rows=[])
+        result = compute_rankings(conn, "v1-balanced")
+        assert result.scored == []
+
+    def test_unknown_model_version_raises(self) -> None:
+        conn = MagicMock()
+        with pytest.raises(KeyError, match="bad-version"):
+            compute_rankings(conn, "bad-version")

@@ -940,7 +940,7 @@ def _insert_score(
             instrument_id, scored_at,
             quality_score, value_score, turnaround_score,
             momentum_score, sentiment_score, confidence_score,
-            total_score, model_version,
+            raw_total, total_score, model_version,
             penalties_json, explanation,
             rank, rank_delta
         )
@@ -948,7 +948,7 @@ def _insert_score(
             %(instrument_id)s, %(scored_at)s,
             %(quality_score)s, %(value_score)s, %(turnaround_score)s,
             %(momentum_score)s, %(sentiment_score)s, %(confidence_score)s,
-            %(total_score)s, %(model_version)s,
+            %(raw_total)s, %(total_score)s, %(model_version)s,
             %(penalties_json)s, %(explanation)s,
             %(rank)s, %(rank_delta)s
         )
@@ -962,6 +962,7 @@ def _insert_score(
             "momentum_score": result.family_scores.momentum,
             "sentiment_score": result.family_scores.sentiment,
             "confidence_score": result.family_scores.confidence,
+            "raw_total": result.raw_total,
             "total_score": result.total_score,
             "model_version": result.model_version,
             "penalties_json": Jsonb(penalties_payload),
