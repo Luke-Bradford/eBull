@@ -847,23 +847,25 @@ def compute_rankings(
         raise KeyError(f"Unknown model_version: {model_version!r}")
 
     # Eligible instruments
-    rows = conn.execute(
-        """
-        SELECT DISTINCT i.instrument_id
-        FROM instruments i
-        JOIN coverage c ON c.instrument_id = i.instrument_id
-        WHERE i.is_tradable = TRUE
-          AND c.coverage_tier = 1
-          AND (
-              EXISTS (SELECT 1 FROM theses t WHERE t.instrument_id = i.instrument_id)
-              OR EXISTS (SELECT 1 FROM fundamentals_snapshot f WHERE f.instrument_id = i.instrument_id)
-              OR EXISTS (SELECT 1 FROM price_daily p WHERE p.instrument_id = i.instrument_id)
-          )
-        ORDER BY i.instrument_id
-        """,
-    ).fetchall()
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as elig_cur:
+        elig_cur.execute(
+            """
+            SELECT DISTINCT i.instrument_id
+            FROM instruments i
+            JOIN coverage c ON c.instrument_id = i.instrument_id
+            WHERE i.is_tradable = TRUE
+              AND c.coverage_tier = 1
+              AND (
+                  EXISTS (SELECT 1 FROM theses t WHERE t.instrument_id = i.instrument_id)
+                  OR EXISTS (SELECT 1 FROM fundamentals_snapshot f WHERE f.instrument_id = i.instrument_id)
+                  OR EXISTS (SELECT 1 FROM price_daily p WHERE p.instrument_id = i.instrument_id)
+              )
+            ORDER BY i.instrument_id
+            """,
+        )
+        rows = elig_cur.fetchall()
 
-    instrument_ids = [int(r[0]) for r in rows]
+    instrument_ids = [int(r["instrument_id"]) for r in rows]
     if not instrument_ids:
         logger.info("compute_rankings: no eligible Tier 1 instruments found")
         return RankingResult(scored=[], model_version=model_version)
