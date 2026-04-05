@@ -23,6 +23,7 @@ from app.services.portfolio import (
     _evaluate_add,
     _evaluate_buy,
     _evaluate_exit,
+    _hold_rationale,
     _should_persist_hold,
     run_portfolio_review,
 )
@@ -857,13 +858,13 @@ class TestRunPortfolioReview:
             _make_cursor([]),  # filing_events
             # prev score: same total → no score improvement
             _make_cursor([{"instrument_id": 1, "total_score": 0.60}]),
-            # prior recommendation: HOLD with identical rationale
+            # prior recommendation: HOLD with identical rationale (derived from same format)
             _make_cursor(
                 [
                     {
                         "instrument_id": 1,
                         "action": "HOLD",
-                        "rationale": "No action trigger met; score=0.600 rank=2",
+                        "rationale": _hold_rationale({"total_score": 0.60, "rank": 2}, quote_is_fallback=False),
                     }
                 ]
             ),

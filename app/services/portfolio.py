@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 MAX_ACTIVE_POSITIONS: int = 20
 MAX_INITIAL_POSITION_PCT: float = 0.05  # 5 %
 MAX_FULL_POSITION_PCT: float = 0.10  # 10 %
+# Sector cap uses strict greater-than (> not >=): landing exactly at 25% is
+# permitted; exceeding 25% is not. The ceiling is the maximum post-action exposure.
 MAX_SECTOR_EXPOSURE_PCT: float = 0.25  # 25 %
 
 # Minimum total_score for a BUY recommendation
@@ -312,9 +314,19 @@ def _load_prev_scores(
     for the given model_version, excluding the already-loaded latest row.
 
     Used for the ADD score-delta conviction check.
+
+    Caller must ensure every id in instrument_ids has an entry in latest_score_ids;
+    this function asserts that invariant to catch data-inconsistency bugs early.
     """
     if not instrument_ids:
         return {}
+
+    missing = [iid for iid in instrument_ids if iid not in latest_score_ids]
+    if missing:
+        raise ValueError(
+            f"_load_prev_scores: instrument_ids not found in latest_score_ids: {missing}. "
+            "Caller must pass only ids that have a corresponding latest score row."
+        )
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -589,6 +601,28 @@ def _target_entry(thesis: dict[str, Any] | None, current_price: float | None) ->
 
 
 # ---------------------------------------------------------------------------
+# Rationale builders
+# ---------------------------------------------------------------------------
+
+
+def _hold_rationale(latest_score: dict[str, Any] | None, quote_is_fallback: bool) -> str:
+    """
+    Build the HOLD rationale string.
+
+    Extracted so the test suite can derive the expected string from the same
+    format rather than hardcoding it, preventing brittle string-match failures
+    when the format changes.
+    """
+    if latest_score is not None:
+        reason = f"No action trigger met; score={float(latest_score['total_score']):.3f} rank={latest_score['rank']}"
+    else:
+        reason = "Held position; not in current ranked list (no fresh score)"
+    if quote_is_fallback:
+        reason += "; market value estimated from cost_basis (no live quote)"
+    return reason
+
+
+# ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 
@@ -720,6 +754,14 @@ def run_portfolio_review(
 
     recommendations: list[Recommendation] = []
 
+    # Evaluation order: held instruments (EXIT/ADD/HOLD) BEFORE unowned candidates (BUY).
+    # This ordering is load-bearing: the pending_sector_pct accumulator used in BUY
+    # evaluation only captures in-flight BUYs, not in-flight ADDs. Because ADDs are
+    # evaluated here — before any BUY accumulation begins — the ADD sector check
+    # (_sector_pct against held positions only) is always correct. If this order
+    # is ever changed so BUYs are evaluated before or alongside ADDs, the ADD sector
+    # check must also receive the pending_sector_pct accumulator.
+
     # --- Evaluate held instruments first (EXIT / ADD / HOLD) ---
     for iid, pos in positions.items():
         details = details_map.get(iid, {})
@@ -774,14 +816,7 @@ def run_portfolio_review(
                 continue
 
         # 3. HOLD
-        if latest_score is not None:
-            hold_reason = (
-                f"No action trigger met; score={float(latest_score['total_score']):.3f} rank={latest_score['rank']}"
-            )
-        else:
-            hold_reason = "Held position; not in current ranked list (no fresh score)"
-        if pos.quote_is_fallback:
-            hold_reason += "; market value estimated from cost_basis (no live quote)"
+        hold_reason = _hold_rationale(latest_score, pos.quote_is_fallback)
 
         recommendations.append(
             Recommendation(
