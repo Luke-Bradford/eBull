@@ -19,6 +19,7 @@ from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
+from app.services.scoring import compute_rankings
 from app.services.sentiment import ClaudeSentimentScorer
 from app.services.thesis import find_stale_instruments, generate_thesis
 from app.services.universe import sync_universe
@@ -318,8 +319,33 @@ def daily_thesis_refresh() -> None:
 
 
 def morning_candidate_review() -> None:
-    """Re-score and rank Tier 1 candidates, produce trade recommendations."""
-    raise NotImplementedError("Implemented in issues #7, #8")
+    """
+    Re-score and rank Tier 1 candidates after daily research refresh.
+
+    Scores all eligible Tier 1 instruments under the default model version
+    (v1-balanced), assigns rank and rank_delta, and persists results to the
+    scores table. Trade recommendations are produced in issue #8.
+    """
+    logger.info("morning_candidate_review: starting scoring run")
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            result = compute_rankings(conn)
+    except Exception:
+        logger.error("morning_candidate_review: scoring run failed", exc_info=True)
+        return
+
+    if not result.scored:
+        logger.info("morning_candidate_review: no eligible instruments to score")
+        return
+
+    top5 = result.scored[:5]
+    top5_summary = ", ".join(f"instrument_id={r.instrument_id} score={r.total_score:.3f} rank={r.rank}" for r in top5)
+    logger.info(
+        "morning_candidate_review: scored %d instruments [model=%s] top5=[%s]",
+        len(result.scored),
+        result.model_version,
+        top5_summary,
+    )
 
 
 def weekly_coverage_review() -> None:
