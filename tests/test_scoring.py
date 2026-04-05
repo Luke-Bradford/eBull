@@ -179,10 +179,10 @@ class TestMomentumScore:
         assert notes == []
 
     def test_flat_market(self) -> None:
-        # All returns at the "neutral" midpoint of each formula
-        s1m = _clip((-0.10 + 0.10 + 0.10) / 0.30)  # return_1m = 0.0
-        s3m = _clip((-0.15 + 0.15 + 0.15) / 0.45)
-        s6m = _clip((-0.20 + 0.20 + 0.20) / 0.60)
+        # All returns = 0.0; formula is _clip((return + threshold) / range)
+        s1m = _clip((0.0 + 0.10) / 0.30)
+        s3m = _clip((0.0 + 0.15) / 0.45)
+        s6m = _clip((0.0 + 0.20) / 0.60)
         score, _ = _momentum_score(return_1m=0.0, return_3m=0.0, return_6m=0.0)
         expected = 0.20 * s1m + 0.50 * s3m + 0.30 * s6m
         assert score == _approx(expected)
@@ -451,9 +451,19 @@ class TestWeightedTotal:
 
 
 def _make_prior_ranks_conn(rows: list[tuple[int, int]]) -> MagicMock:
-    """Fake connection whose execute().fetchall() returns [(instrument_id, rank), ...]."""
+    """
+    Fake connection for _fetch_prior_ranks tests.
+
+    _fetch_prior_ranks uses conn.cursor(row_factory=dict_row), so the cursor's
+    fetchall must return dicts with "instrument_id" and "rank" keys.
+    """
+    dict_rows = [{"instrument_id": iid, "rank": rank} for iid, rank in rows]
+    cur = MagicMock()
+    cur.fetchall.return_value = dict_rows
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
     conn = MagicMock()
-    conn.execute.return_value.fetchall.return_value = rows
+    conn.cursor.return_value = cur
     return conn
 
 
@@ -704,32 +714,32 @@ def _make_rankings_conn(
     """
     Fake connection for compute_rankings tests.
 
-    execute() calls arrive in order:
-      1. eligible instruments query → fetchall returns [(id,), ...]
-      2. _fetch_prior_ranks query → fetchall returns [(id, rank), ...]
-      3. N × INSERT INTO scores → execute called, no fetch needed
+    compute_rankings issues calls in this order:
+      1. conn.execute(eligible instruments query) → fetchall: [(id,), ...]
+      2. conn.transaction().__enter__()   ← transaction opens
+      3. conn.cursor(row_factory=dict_row) → cur.execute(_fetch_prior_ranks)
+         → fetchall: [{"instrument_id": id, "rank": rank}, ...]
+      4. N × conn.execute(INSERT INTO scores)
+
+    Prior rank rows are returned as dicts (matching dict_row output).
     """
     eligible_rows = [(iid,) for iid in instrument_ids]
-
-    call_count = 0
+    prior_rank_dicts = [{"instrument_id": iid, "rank": rank} for iid, rank in prior_rank_rows]
 
     conn = MagicMock()
     conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
     conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
 
-    def _execute_side(*args: object, **kwargs: object) -> MagicMock:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            # eligible instruments
-            return MagicMock(fetchall=MagicMock(return_value=eligible_rows))
-        if call_count == 2:
-            # _fetch_prior_ranks
-            return MagicMock(fetchall=MagicMock(return_value=prior_rank_rows))
-        # INSERT calls — return a dummy
-        return MagicMock()
+    # conn.execute: first call is eligible instruments; subsequent calls are INSERTs
+    conn.execute.return_value.fetchall.return_value = eligible_rows
 
-    conn.execute.side_effect = _execute_side
+    # conn.cursor(row_factory=dict_row): used by _fetch_prior_ranks
+    prior_cur = MagicMock()
+    prior_cur.fetchall.return_value = prior_rank_dicts
+    prior_cur.__enter__ = MagicMock(return_value=prior_cur)
+    prior_cur.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = prior_cur
+
     return conn
 
 
@@ -796,3 +806,29 @@ class TestComputeRankings:
         conn = MagicMock()
         with pytest.raises(KeyError, match="bad-version"):
             compute_rankings(conn, "bad-version")
+
+    def test_fetch_prior_ranks_runs_inside_transaction(self) -> None:
+        """
+        Assert that _fetch_prior_ranks (conn.cursor call) executes after
+        conn.transaction().__enter__ — i.e. inside the transaction block.
+        If compute_rankings is ever refactored to move _fetch_prior_ranks
+        outside the transaction, this test will fail.
+        """
+        conn = _make_rankings_conn(instrument_ids=[1], prior_rank_rows=[])
+        with patch("app.services.scoring.compute_score") as mock_score:
+            mock_score.return_value = _make_score_result(1, 0.70)
+            compute_rankings(conn, "v1-balanced")
+
+        # Collect the names of all calls made on `conn` in order
+        call_names = [call[0] for call in conn.mock_calls]
+
+        # transaction().__enter__ must appear before cursor() in the call list
+        assert "transaction().__enter__" in call_names, "transaction was never entered"
+        assert "cursor" in call_names, "_fetch_prior_ranks cursor was never opened"
+
+        tx_enter_idx = call_names.index("transaction().__enter__")
+        cursor_idx = call_names.index("cursor")
+        assert cursor_idx > tx_enter_idx, (
+            f"conn.cursor (prior rank fetch) at position {cursor_idx} "
+            f"must come after transaction().__enter__ at position {tx_enter_idx}"
+        )

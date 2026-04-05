@@ -805,21 +805,23 @@ def _fetch_prior_ranks(
     if not instrument_ids:
         return {}
 
-    rows = conn.execute(
-        """
-        SELECT DISTINCT ON (instrument_id)
-            instrument_id,
-            rank
-        FROM scores
-        WHERE instrument_id = ANY(%(ids)s)
-          AND model_version = %(mv)s
-          AND rank IS NOT NULL
-        ORDER BY instrument_id, scored_at DESC
-        """,
-        {"ids": instrument_ids, "mv": model_version},
-    ).fetchall()
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (instrument_id)
+                instrument_id,
+                rank
+            FROM scores
+            WHERE instrument_id = ANY(%(ids)s)
+              AND model_version = %(mv)s
+              AND rank IS NOT NULL
+            ORDER BY instrument_id, scored_at DESC
+            """,
+            {"ids": instrument_ids, "mv": model_version},
+        )
+        rows: list[dict[str, Any]] = cur.fetchall()
 
-    return {int(r[0]): int(r[1]) for r in rows if r[1] is not None}
+    return {int(r["instrument_id"]): int(r["rank"]) for r in rows if r["rank"] is not None}
 
 
 def compute_rankings(
