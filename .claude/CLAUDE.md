@@ -100,9 +100,10 @@ Run these before every push:
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright
+uv run pytest
 ```
 
-All three must pass. Fix failures — do not bypass them.
+All four must pass. Fix failures — do not bypass them.
 
 If `uv` is not on PATH in the Claude Code bash shell, ask the user to add the uv
 install directory to `~/.bashrc` (e.g. `export PATH="$HOME/.local/bin:$PATH"` on
@@ -130,9 +131,56 @@ wastes a review round.
 
 ## Self-review before pushing
 
-Before committing, re-read the diff as if you are the review agent. Ask:
-- Are all import names alphabetically sorted within each `from X import a, b, c`?
-- Is there a blank line between stdlib and first-party import groups?
-- Does every interface method document its not-found / error contract?
-- Are new fields typed precisely (Literal, not str, where the values are bounded)?
-- Does every new file have the right line endings (LF, not CRLF)?
+Before committing, open `git diff origin/HEAD` and read top to bottom. The review agent reads the same diff fresh, with no knowledge of intent. Match that posture — read what is there, not what you meant.
+
+### SQL — every query must pass these before push
+
+**Determinism**
+- Every `fetchone()` call: does the query have `ORDER BY`? Without it the result row is non-deterministic.
+- Any query fetching "the latest" row: has both `ORDER BY <ts> DESC` and `LIMIT 1`.
+
+**Row access**
+- No `row[0]`, `row[1]` positional indexing on cursor results. Use `row_factory=psycopg.rows.dict_row` and access by name. Positional indexing silently corrupts if a column is ever added before the indexed column.
+
+**Atomic writes**
+- Any `MAX(...) + 1` version or sequence: computed as a scalar subquery inside VALUES, not a separate SELECT then INSERT. Two-step is a TOCTOU race.
+- Any `INSERT ... SELECT WHERE ...`: what happens when the WHERE matches zero rows? Trace it.
+
+**Transactions**
+- No network calls or file I/O inside `with conn.transaction()`. All I/O before the transaction.
+
+**NULL**
+- Any `col != 'value'` on a nullable column: NULLs are excluded silently. Decide and document.
+- Parameterised NULL checks: `IS NOT DISTINCT FROM %s`, not `IS %s`.
+
+**Parameters**
+- No f-strings or `.format()` in SQL strings. Named params `%(name)s` with dicts.
+- `IN` clauses: `= ANY(%s)` with a list, not `IN %s` with a tuple.
+
+### Python — every file must pass these
+
+- Read-only sequence parameters: `Sequence[T]` not `list[T]`.
+- Bounded string values: `Literal["a", "b"]` not `str`. Defined once at module level.
+- `Optional[X]`: replace with `X | None`.
+- Dicts into jsonb columns: `Jsonb(my_dict)` not `json.dumps()`.
+- Imports: alphabetically sorted within each `from X import ...`; blank line between stdlib / third-party / first-party groups.
+
+### Tests — each test must prove something
+
+- Asserts on a specific value, not just `is not None`.
+- Boundary case exists: first row, zero results, failure path.
+- Any code that calls `_utcnow()` (directly or transitively): patches it.
+- Mocks match the real library's semantics — psycopg `fetchone()` returns `None` not a `MagicMock`.
+- Mock `spec=` set so unexpected attribute access raises, not silently returns another mock.
+
+### Same-class-of-problem scan
+
+After fixing any instance of a problem, grep the whole file (and codebase if it's a pattern) for the same issue before pushing. Never assume the fix was isolated.
+
+| Found | Grep for |
+|---|---|
+| `fetchone()` without ORDER BY | every `fetchone()` call |
+| Positional `row[0]` | `\[0\]`, `\[1\]` on cursor results |
+| `json.dumps` into jsonb | `json.dumps` in services/ |
+| `Optional[` | replace all with `X \| None` |
+| `list[` read-only param | function signatures with `list[` |
