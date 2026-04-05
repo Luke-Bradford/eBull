@@ -138,74 +138,11 @@ wastes a review round.
 
 ## Self-review before pushing
 
-Before committing, open `git diff origin/HEAD` and read top to bottom. The review agent reads the same diff fresh, with no knowledge of intent. Match that posture — read what is there, not what you meant.
+Before committing, open `git diff origin/HEAD` and read top to bottom. The review agent reads the same diff fresh with no knowledge of intent — match that posture.
 
-### SQL — every query must pass these before push
+Full checklist with rules and examples: `.claude/skills/engineering/pre-push-checklist.md`
 
-**Determinism**
-- Every `fetchone()` call: does the query have `ORDER BY`? Without it the result row is non-deterministic.
-- Any query fetching "the latest" row: has both `ORDER BY <ts> DESC` and `LIMIT 1`.
-
-**Row access**
-- No `row[0]`, `row[1]` positional indexing on cursor results. Use `row_factory=psycopg.rows.dict_row` and access by name. Positional indexing silently corrupts if a column is ever added before the indexed column.
-
-**Atomic writes**
-- Any `MAX(...) + 1` version or sequence: computed as a scalar subquery inside VALUES, not a separate SELECT then INSERT. Two-step is a TOCTOU race.
-- Any `INSERT ... SELECT WHERE ...`: what happens when the WHERE matches zero rows? Trace it.
-
-**Transactions**
-- No network calls or file I/O inside `with conn.transaction()`. All I/O before the transaction.
-
-**NULL**
-- Any `col != 'value'` on a nullable column: NULLs are excluded silently. Decide and document.
-- Parameterised NULL equality: `col IS NOT DISTINCT FROM %s` (matches NULL). Parameterised NULL inequality: `col IS DISTINCT FROM %s` (excludes NULL). Neither uses bare `IS %s`.
-
-**Parameters**
-- No f-strings or `.format()` in SQL strings. Named params `%(name)s` with dicts.
-- `IN` clauses: `= ANY(%s)` with a list, not `IN %s` with a tuple.
-
-### Python — every file must pass these
-
-- Read-only sequence parameters: `Sequence[T]` not `list[T]`.
-- Bounded string values: `Literal["a", "b"]` not `str`. Defined once at module level.
-- `Optional[X]`: replace with `X | None`.
-- Dicts into jsonb columns: `Jsonb(my_dict)` not `json.dumps()`.
-- Imports: alphabetically sorted within each `from X import ...`; blank line between stdlib / third-party / first-party groups.
-
-### Tests — each test must prove something
-
-- Asserts on a specific value, not just `is not None`.
-- Boundary case exists: first row, zero results, failure path.
-- Any code that calls `_utcnow()` (directly or transitively): patches it.
-- Mocks match the real library's semantics — psycopg `fetchone()` returns `None` not a `MagicMock`.
-- Mock `spec=` set so unexpected attribute access raises, not silently returns another mock.
-
-### Sequential evaluation loops with shared resource limits
-
-In any loop that evaluates candidates against a shared resource constraint (position count, sector cap, cash):
-- Maintain a mutable accumulator updated after each approval, so each candidate is checked against held-state PLUS already-approved-this-pass state.
-- If the loop is split into phases (e.g. held instruments first, then unowned), add a comment at the phase boundary explaining that the ordering is load-bearing and why.
-- Before pushing: grep for all resource-check calls (e.g. `_sector_pct`) in the file and verify each one either receives a pending accumulator OR has an explicit ordering-dependency comment.
-
-### Error escalation from helpers called by orchestrators
-
-When a helper raises an exception and is called from an orchestrator with `except Exception`, a raise in the helper aborts the entire run with zero output. Prefer log-and-return in helpers for data-inconsistency cases, reserving raise for genuine programmer errors (invariant violations that cannot happen in correct code). Before pushing: trace every helper that raises — who catches it, and what is the failure scope?
-
-### Free-text dedup and log counts
-
-- Any dedup logic comparing free-text strings: the expected string must be derived from the same helper as the production code — never a hardcoded literal. A format change must propagate automatically.
-- Any "complete: total=N" log line after a filter step: split into `generated=N` and `written=M`. Compute N before the filter, M after.
-
-### Same-class-of-problem scan
-
-After fixing any instance of a problem, grep the whole file (and codebase if it's a pattern) for the same issue before pushing. Never assume the fix was isolated.
-
-| Found | Grep for |
-|---|---|
-| `fetchone()` without ORDER BY | every `fetchone()` call |
-| Positional `row[0]` | `\[[0-9]\]` on cursor results (covers all single-digit indices) |
-| `json.dumps` into jsonb | `json.dumps` in services/ |
-| `Optional[` or `Union[X, None]` | `Optional\[` and `Union\[` — replace all with `X \| None` |
-| `list[` read-only param | function signatures with `list[` |
-| `dict_row` added to one cursor | grep whole file — every cursor must use `dict_row`, not just the flagged one |
-| `_sector_pct` or similar resource check | all call sites — verify accumulator or ordering comment |
+Detailed standards by category:
+- SQL correctness: `.claude/skills/engineering/sql-correctness.md`
+- Python hygiene: `.claude/skills/engineering/python-hygiene.md`
+- Test quality: `.claude/skills/engineering/test-quality.md`
