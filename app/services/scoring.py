@@ -26,18 +26,13 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any
 
 import psycopg
+import psycopg.rows
 from psycopg.types.json import Jsonb
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Domain literals
-# ---------------------------------------------------------------------------
-
-WeightMode = Literal["balanced", "conservative", "speculative"]
 
 _DEFAULT_MODEL_VERSION = "v1-balanced"
 
@@ -301,6 +296,13 @@ def _sentiment_score(
     Returns (score, notes).
     """
     notes: list[str] = []
+    out_of_range = [s for s, _ in rows if s is not None and not (-1.0 <= s <= 1.0)]
+    if out_of_range:
+        logger.warning(
+            "_sentiment_score: %d sentiment value(s) outside [-1, 1]: %s — clipping will suppress distortion",
+            len(out_of_range),
+            out_of_range[:5],  # cap log length
+        )
     valid = [(s, w) for s, w in rows if s is not None]
 
     if not valid:
@@ -485,83 +487,102 @@ def _load_instrument_data(
     """
     Load all signals required for scoring a single instrument.
 
-    Returns a flat dict of raw values; callers convert to float as needed.
+    Returns a flat dict of typed sub-results. Each query uses dict_row so
+    callers reference columns by name, not position — a schema change that
+    adds or reorders columns will raise a KeyError rather than silently
+    producing wrong scores.
+
     All DB access is read-only — no writes.
     """
-    # Latest fundamentals snapshot (+ up to 4 prior for trend)
-    fund_rows = conn.execute(
-        """
-        SELECT operating_margin, gross_margin, fcf, net_debt, debt,
-               revenue_ttm, shares_outstanding
-        FROM fundamentals_snapshot
-        WHERE instrument_id = %(id)s
-        ORDER BY as_of_date DESC
-        LIMIT 5
-        """,
-        {"id": instrument_id},
-    ).fetchall()
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # Latest fundamentals snapshot (+ up to 4 prior for trend)
+        cur.execute(
+            """
+            SELECT operating_margin, gross_margin, fcf, net_debt, debt,
+                   revenue_ttm, shares_outstanding
+            FROM fundamentals_snapshot
+            WHERE instrument_id = %(id)s
+            ORDER BY as_of_date DESC
+            LIMIT 5
+            """,
+            {"id": instrument_id},
+        )
+        fund_rows: list[dict[str, Any]] = cur.fetchall()
 
-    # Latest price features
-    price_row = conn.execute(
-        """
-        SELECT return_1m, return_3m, return_6m, close
-        FROM price_daily
-        WHERE instrument_id = %(id)s
-          AND close IS NOT NULL
-        ORDER BY price_date DESC
-        LIMIT 1
-        """,
-        {"id": instrument_id},
-    ).fetchone()
+        # Latest price features
+        cur.execute(
+            """
+            SELECT return_1m, return_3m, return_6m, close
+            FROM price_daily
+            WHERE instrument_id = %(id)s
+              AND close IS NOT NULL
+            ORDER BY price_date DESC
+            LIMIT 1
+            """,
+            {"id": instrument_id},
+        )
+        price_row: dict[str, Any] | None = cur.fetchone()
 
-    # Current quote (spread flag + last price)
-    quote_row = conn.execute(
-        """
-        SELECT spread_flag, last, bid, ask
-        FROM quotes
-        WHERE instrument_id = %(id)s
-        """,
-        {"id": instrument_id},
-    ).fetchone()
+        # Current quote (spread flag + last price).
+        # quotes is keyed on instrument_id (PRIMARY KEY), so at most one row
+        # exists per instrument. The ORDER BY is included defensively in case
+        # the schema ever relaxes that constraint.
+        cur.execute(
+            """
+            SELECT spread_flag, last, bid, ask
+            FROM quotes
+            WHERE instrument_id = %(id)s
+            ORDER BY quoted_at DESC
+            LIMIT 1
+            """,
+            {"id": instrument_id},
+        )
+        quote_row: dict[str, Any] | None = cur.fetchone()
 
-    # Latest thesis (confidence + valuation bands + created_at)
-    thesis_row = conn.execute(
-        """
-        SELECT confidence_score, base_value, bear_value, created_at
-        FROM theses
-        WHERE instrument_id = %(id)s
-        ORDER BY thesis_version DESC
-        LIMIT 1
-        """,
-        {"id": instrument_id},
-    ).fetchone()
+        # Latest thesis (confidence + valuation bands + created_at)
+        cur.execute(
+            """
+            SELECT confidence_score, base_value, bear_value, created_at
+            FROM theses
+            WHERE instrument_id = %(id)s
+            ORDER BY thesis_version DESC
+            LIMIT 1
+            """,
+            {"id": instrument_id},
+        )
+        thesis_row: dict[str, Any] | None = cur.fetchone()
 
-    # Recent news sentiment (last 30 days)
-    cutoff = now - timedelta(days=_NEWS_LOOKBACK_DAYS)
-    news_rows = conn.execute(
-        """
-        SELECT sentiment_score, importance_score
-        FROM news_events
-        WHERE instrument_id = %(id)s
-          AND event_time >= %(cutoff)s
-          AND sentiment_score IS NOT NULL
-        ORDER BY event_time DESC
-        """,
-        {"id": instrument_id, "cutoff": cutoff},
-    ).fetchall()
+        # Recent news sentiment (last 30 days).
+        # Cutoff is a full TIMESTAMPTZ to match the event_time column type.
+        cutoff = now - timedelta(days=_NEWS_LOOKBACK_DAYS)
+        cur.execute(
+            """
+            SELECT sentiment_score, importance_score
+            FROM news_events
+            WHERE instrument_id = %(id)s
+              AND event_time >= %(cutoff)s
+              AND sentiment_score IS NOT NULL
+            ORDER BY event_time DESC
+            """,
+            {"id": instrument_id, "cutoff": cutoff},
+        )
+        news_rows: list[dict[str, Any]] = cur.fetchall()
 
-    # Recent red flag scores from filing events (last 90 days)
-    rf_cutoff = now - timedelta(days=90)
-    rf_row = conn.execute(
-        """
-        SELECT AVG(red_flag_score)
-        FROM filing_events
-        WHERE instrument_id = %(id)s
-          AND filing_date >= %(cutoff)s
-          AND red_flag_score IS NOT NULL
-        """,
-        {"id": instrument_id, "cutoff": rf_cutoff.date()},
-    ).fetchone()
+        # Average red flag score from filing events over the last 90 days.
+        # filing_date is a DATE column, so the cutoff is passed as date to
+        # avoid implicit cast ambiguity.
+        rf_cutoff = now - timedelta(days=90)
+        cur.execute(
+            """
+            SELECT AVG(red_flag_score) AS avg_red_flag
+            FROM filing_events
+            WHERE instrument_id = %(id)s
+              AND filing_date >= %(cutoff)s
+              AND red_flag_score IS NOT NULL
+            """,
+            {"id": instrument_id, "cutoff": rf_cutoff.date()},
+        )
+        rf_row: dict[str, Any] | None = cur.fetchone()
 
     return {
         "fund_rows": fund_rows,
@@ -569,7 +590,9 @@ def _load_instrument_data(
         "quote_row": quote_row,
         "thesis_row": thesis_row,
         "news_rows": news_rows,
-        "avg_red_flag_score": _to_float(rf_row[0]) if rf_row else None,
+        # AVG() always returns one row, even when no matching rows exist (returns NULL).
+        # rf_row is therefore never None; avg_red_flag may be None if no filings matched.
+        "avg_red_flag_score": _to_float(rf_row["avg_red_flag"]) if rf_row is not None else None,
     }
 
 
@@ -607,46 +630,48 @@ def compute_score(
     # Extract raw signals
     # ------------------------------------------------------------------
 
-    # Fundamentals — latest row
+    # Fundamentals — latest row (dict_row: access by column name)
     if fund_rows:
         latest_fund = fund_rows[0]
-        operating_margin = _to_float(latest_fund[0])
-        gross_margin = _to_float(latest_fund[1])
-        fcf = _to_float(latest_fund[2])
-        net_debt = _to_float(latest_fund[3])
-        debt = _to_float(latest_fund[4])
-        shares_latest = _to_float(latest_fund[6])
+        operating_margin = _to_float(latest_fund["operating_margin"])
+        gross_margin = _to_float(latest_fund["gross_margin"])
+        fcf = _to_float(latest_fund["fcf"])
+        net_debt = _to_float(latest_fund["net_debt"])
+        debt = _to_float(latest_fund["debt"])
+        shares_latest = _to_float(latest_fund["shares_outstanding"])
     else:
         operating_margin = gross_margin = fcf = net_debt = debt = shares_latest = None
 
     # Shares outstanding prior (use oldest available snapshot for dilution check)
     if len(fund_rows) >= 2:
-        shares_prior = _to_float(fund_rows[-1][6])
+        shares_prior = _to_float(fund_rows[-1]["shares_outstanding"])
     else:
         shares_prior = None
 
     # Fundamentals snapshots for trend (newest-first list of (op_margin, revenue))
-    snapshots: list[tuple[float | None, float | None]] = [(_to_float(r[0]), _to_float(r[5])) for r in fund_rows]
+    snapshots: list[tuple[float | None, float | None]] = [
+        (_to_float(r["operating_margin"]), _to_float(r["revenue_ttm"])) for r in fund_rows
+    ]
 
     # Price features
     if price_row:
-        return_1m = _to_float(price_row[0])
-        return_3m = _to_float(price_row[1])
-        return_6m = _to_float(price_row[2])
-        close_price = _to_float(price_row[3])
+        return_1m = _to_float(price_row["return_1m"])
+        return_3m = _to_float(price_row["return_3m"])
+        return_6m = _to_float(price_row["return_6m"])
+        close_price = _to_float(price_row["close"])
     else:
         return_1m = return_3m = return_6m = close_price = None
 
     # Quote — prefer last price from quote, fall back to close
     if quote_row:
-        spread_flag: bool = bool(quote_row[0])
-        last_price = _to_float(quote_row[1])
+        spread_flag: bool = bool(quote_row["spread_flag"])
+        last_price = _to_float(quote_row["last"])
         # Best available price: quote last > quote mid > daily close
         if last_price and last_price > 0:
             current_price: float | None = last_price
         else:
-            bid = _to_float(quote_row[2])
-            ask = _to_float(quote_row[3])
+            bid = _to_float(quote_row["bid"])
+            ask = _to_float(quote_row["ask"])
             if bid and ask and bid > 0 and ask > 0:
                 current_price = (bid + ask) / 2.0
             else:
@@ -657,16 +682,18 @@ def compute_score(
 
     # Thesis
     if thesis_row:
-        thesis_confidence = _to_float(thesis_row[0])
-        base_value = _to_float(thesis_row[1])
-        bear_value = _to_float(thesis_row[2])
-        thesis_created_at: datetime | None = thesis_row[3]
+        thesis_confidence = _to_float(thesis_row["confidence_score"])
+        base_value = _to_float(thesis_row["base_value"])
+        bear_value = _to_float(thesis_row["bear_value"])
+        thesis_created_at: datetime | None = thesis_row["created_at"]
     else:
         thesis_confidence = base_value = bear_value = None
         thesis_created_at = None
 
     # News sentiment rows: [(sentiment_score, importance_score), ...]
-    sentiment_rows: list[tuple[float | None, float | None]] = [(_to_float(r[0]), _to_float(r[1])) for r in news_rows]
+    sentiment_rows: list[tuple[float | None, float | None]] = [
+        (_to_float(r["sentiment_score"]), _to_float(r["importance_score"])) for r in news_rows
+    ]
 
     # ------------------------------------------------------------------
     # Missing critical data flag
@@ -753,7 +780,7 @@ def compute_score(
         family_scores=family,
         penalties=penalties,
         total_penalty=total_penalty,
-        raw_total=_clip(raw_total),
+        raw_total=raw_total,  # pre-penalty weighted sum; always [0,1] by construction
         total_score=total_score,
         explanation=explanation,
     )
@@ -853,15 +880,21 @@ def compute_rankings(
     # Sort descending by total_score, assign rank (1 = best)
     results.sort(key=lambda r: r.total_score, reverse=True)
 
-    # Prior ranks for delta computation
-    prior_ranks = _fetch_prior_ranks(conn, [r.instrument_id for r in results], model_version)
-
+    # Read prior ranks and write new rows inside a single transaction.
+    # Keeping _fetch_prior_ranks inside the transaction prevents a TOCTOU race
+    # where a concurrent scoring run commits between the prior-rank read and our
+    # own insert, causing rank_delta to be computed against the just-committed run
+    # instead of the true prior run.
+    run_at = _utcnow()
     ranked: list[ScoreResult] = []
-    for position, result in enumerate(results, start=1):
-        prior_rank = prior_ranks.get(result.instrument_id)
-        rank_delta = (prior_rank - position) if prior_rank is not None else None
-        ranked.append(
-            ScoreResult(
+
+    with conn.transaction():
+        prior_ranks = _fetch_prior_ranks(conn, [r.instrument_id for r in results], model_version)
+
+        for position, result in enumerate(results, start=1):
+            prior_rank = prior_ranks.get(result.instrument_id)
+            rank_delta = (prior_rank - position) if prior_rank is not None else None
+            scored = ScoreResult(
                 instrument_id=result.instrument_id,
                 model_version=result.model_version,
                 family_scores=result.family_scores,
@@ -873,13 +906,8 @@ def compute_rankings(
                 rank=position,
                 rank_delta=rank_delta,
             )
-        )
-
-    # Persist all rows in a single transaction
-    run_at = _utcnow()
-    with conn.transaction():
-        for r in ranked:
-            _insert_score(conn, r, run_at)
+            ranked.append(scored)
+            _insert_score(conn, scored, run_at)
 
     logger.info(
         "compute_rankings: persisted %d score rows [model=%s]",

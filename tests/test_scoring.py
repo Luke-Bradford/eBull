@@ -31,6 +31,7 @@ from app.services.scoring import (
     ScoreResult,
     _clip,
     _compute_penalties,
+    _fetch_prior_ranks,
     _momentum_score,
     _quality_score,
     _sentiment_score,
@@ -444,31 +445,54 @@ class TestWeightedTotal:
 
 
 # ---------------------------------------------------------------------------
-# Rank delta
+# Rank delta — tests call through _fetch_prior_ranks
 # ---------------------------------------------------------------------------
 
 
+def _make_prior_ranks_conn(rows: list[tuple[int, int]]) -> MagicMock:
+    """Fake connection whose execute().fetchall() returns [(instrument_id, rank), ...]."""
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = rows
+    return conn
+
+
 class TestRankDelta:
-    def test_rank_improved(self) -> None:
-        prior_rank = 5
-        current_rank = 2
-        delta = prior_rank - current_rank
-        assert delta == 3  # positive = moved up
+    def test_improved_rank_produces_positive_delta(self) -> None:
+        # instrument 1 was rank 5 last run; this run it is rank 2 → delta = +3
+        conn = _make_prior_ranks_conn([(1, 5)])
+        prior = _fetch_prior_ranks(conn, [1], "v1-balanced")
+        assert prior == {1: 5}
+        delta = prior[1] - 2  # prior_rank - current_rank
+        assert delta == 3
 
-    def test_rank_worsened(self) -> None:
-        prior_rank = 2
-        current_rank = 5
-        delta = prior_rank - current_rank
-        assert delta == -3  # negative = moved down
+    def test_worsened_rank_produces_negative_delta(self) -> None:
+        conn = _make_prior_ranks_conn([(1, 2)])
+        prior = _fetch_prior_ranks(conn, [1], "v1-balanced")
+        delta = prior[1] - 5
+        assert delta == -3
 
-    def test_rank_unchanged(self) -> None:
-        delta = 3 - 3
+    def test_unchanged_rank_produces_zero_delta(self) -> None:
+        conn = _make_prior_ranks_conn([(1, 3)])
+        prior = _fetch_prior_ranks(conn, [1], "v1-balanced")
+        delta = prior[1] - 3
         assert delta == 0
 
-    def test_no_prior_rank_is_none(self) -> None:
-        prior_rank = None
-        rank_delta = (prior_rank - 1) if prior_rank is not None else None
+    def test_no_prior_row_returns_empty_dict(self) -> None:
+        # No rows returned by DB → instrument has no prior rank → delta = None
+        conn = _make_prior_ranks_conn([])
+        prior = _fetch_prior_ranks(conn, [1], "v1-balanced")
+        assert prior == {}
+        rank_delta = (prior[1] - 1) if 1 in prior else None
         assert rank_delta is None
+
+    def test_multiple_instruments_delta(self) -> None:
+        conn = _make_prior_ranks_conn([(1, 3), (2, 1), (3, 5)])
+        prior = _fetch_prior_ranks(conn, [1, 2, 3], "v1-balanced")
+        assert prior == {1: 3, 2: 1, 3: 5}
+        # instrument 1: was 3, now 1 → +2
+        assert prior[1] - 1 == 2
+        # instrument 2: was 1, now 2 → -1
+        assert prior[2] - 2 == -1
 
 
 # ---------------------------------------------------------------------------
@@ -476,31 +500,97 @@ class TestRankDelta:
 # ---------------------------------------------------------------------------
 
 
+def _fund_row(
+    operating_margin: float,
+    gross_margin: float,
+    fcf: float,
+    net_debt: float,
+    debt: float,
+    revenue_ttm: float,
+    shares_outstanding: float,
+) -> dict[str, object]:
+    return {
+        "operating_margin": operating_margin,
+        "gross_margin": gross_margin,
+        "fcf": fcf,
+        "net_debt": net_debt,
+        "debt": debt,
+        "revenue_ttm": revenue_ttm,
+        "shares_outstanding": shares_outstanding,
+    }
+
+
+def _price_row(return_1m: float, return_3m: float, return_6m: float, close: float) -> dict[str, object]:
+    return {"return_1m": return_1m, "return_3m": return_3m, "return_6m": return_6m, "close": close}
+
+
+def _quote_row(spread_flag: bool, last: float, bid: float, ask: float) -> dict[str, object]:
+    return {"spread_flag": spread_flag, "last": last, "bid": bid, "ask": ask}
+
+
+def _thesis_row(
+    confidence_score: float,
+    base_value: float,
+    bear_value: float,
+    created_at: datetime,
+) -> dict[str, object]:
+    return {
+        "confidence_score": confidence_score,
+        "base_value": base_value,
+        "bear_value": bear_value,
+        "created_at": created_at,
+    }
+
+
+def _news_row(sentiment_score: float, importance_score: float) -> dict[str, object]:
+    return {"sentiment_score": sentiment_score, "importance_score": importance_score}
+
+
 def _make_fake_conn(
-    fund_rows: list[tuple[object, ...]],
-    price_row: tuple[object, ...] | None,
-    quote_row: tuple[object, ...] | None,
-    thesis_row: tuple[object, ...] | None,
-    news_rows: list[tuple[object, ...]],
+    fund_rows: list[dict[str, object]],
+    price_row: dict[str, object] | None,
+    quote_row: dict[str, object] | None,
+    thesis_row: dict[str, object] | None,
+    news_rows: list[dict[str, object]],
     avg_red_flag: float | None,
 ) -> MagicMock:
     """
-    Return a MagicMock psycopg connection whose execute().fetchall() /
-    fetchone() returns fixture data in the same order as _load_instrument_data.
+    Return a MagicMock psycopg connection that supports the cursor(row_factory=...)
+    context manager pattern used by _load_instrument_data.
+
+    psycopg cursor semantics: cur.execute(sql) is called, then cur.fetchone() /
+    cur.fetchall() is called on the *same* cursor object. We model this by having
+    execute() mutate cur.fetchone / cur.fetchall as a side effect, dispatching
+    results in order: fundamentals, price, quote, thesis, news, red_flag.
     """
-    conn = MagicMock()
+    rf_row: dict[str, object] = {"avg_red_flag": avg_red_flag}
 
-    # execute is called 6 times (fundamentals, price, quote, thesis, news, red_flag)
-    execute_returns = [
-        MagicMock(fetchall=MagicMock(return_value=fund_rows)),  # fundamentals
-        MagicMock(fetchone=MagicMock(return_value=price_row)),  # price
-        MagicMock(fetchone=MagicMock(return_value=quote_row)),  # quote
-        MagicMock(fetchone=MagicMock(return_value=thesis_row)),  # thesis
-        MagicMock(fetchall=MagicMock(return_value=news_rows)),  # news
-        MagicMock(fetchone=MagicMock(return_value=(avg_red_flag,))),  # red flag avg
+    # Ordered list of (fetch_method, return_value) per execute() call.
+    responses: list[tuple[str, object]] = [
+        ("fetchall", fund_rows),
+        ("fetchone", price_row),
+        ("fetchone", quote_row),
+        ("fetchone", thesis_row),
+        ("fetchall", news_rows),
+        ("fetchone", rf_row),
     ]
+    response_iter = iter(responses)
 
-    conn.execute.side_effect = execute_returns
+    cur = MagicMock()
+
+    def _execute_side_effect(*args: object, **kwargs: object) -> None:
+        method, value = next(response_iter)
+        if method == "fetchall":
+            cur.fetchall.return_value = value
+        else:
+            cur.fetchone.return_value = value
+
+    cur.execute.side_effect = _execute_side_effect
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+
+    conn = MagicMock()
+    conn.cursor.return_value = cur
     return conn
 
 
@@ -508,13 +598,13 @@ class TestComputeScore:
     def test_full_fixture_produces_valid_result(self) -> None:
         conn = _make_fake_conn(
             fund_rows=[
-                (0.18, 0.55, 200_000.0, -50_000.0, 100_000.0, 1_100_000.0, 10_000_000.0),  # latest
-                (0.12, 0.50, 150_000.0, -30_000.0, 80_000.0, 1_000_000.0, 10_000_000.0),  # prior
+                _fund_row(0.18, 0.55, 200_000.0, -50_000.0, 100_000.0, 1_100_000.0, 10_000_000.0),
+                _fund_row(0.12, 0.50, 150_000.0, -30_000.0, 80_000.0, 1_000_000.0, 10_000_000.0),
             ],
-            price_row=(0.05, 0.20, 0.35, 120.0),  # return_1m, 3m, 6m, close
-            quote_row=(False, 120.0, 119.5, 120.5),  # spread_flag, last, bid, ask
-            thesis_row=(0.75, 180.0, 90.0, _RECENT),  # confidence, base, bear, created_at
-            news_rows=[(0.6, 0.8), (0.5, 1.0)],
+            price_row=_price_row(0.05, 0.20, 0.35, 120.0),
+            quote_row=_quote_row(False, 120.0, 119.5, 120.5),
+            thesis_row=_thesis_row(0.75, 180.0, 90.0, _RECENT),
+            news_rows=[_news_row(0.6, 0.8), _news_row(0.5, 1.0)],
             avg_red_flag=0.15,
         )
         result = compute_score(1, conn, "v1-balanced")
@@ -535,10 +625,10 @@ class TestComputeScore:
 
     def test_wide_spread_triggers_penalty(self) -> None:
         conn = _make_fake_conn(
-            fund_rows=[(0.18, 0.55, 200_000.0, -50_000.0, 100_000.0, 1_100_000.0, 10_000_000.0)],
-            price_row=(0.05, 0.20, 0.35, 120.0),
-            quote_row=(True, 120.0, 119.5, 120.5),  # spread_flag=True
-            thesis_row=(0.75, 180.0, 90.0, _RECENT),
+            fund_rows=[_fund_row(0.18, 0.55, 200_000.0, -50_000.0, 100_000.0, 1_100_000.0, 10_000_000.0)],
+            price_row=_price_row(0.05, 0.20, 0.35, 120.0),
+            quote_row=_quote_row(True, 120.0, 119.5, 120.5),  # spread_flag=True
+            thesis_row=_thesis_row(0.75, 180.0, 90.0, _RECENT),
             news_rows=[],
             avg_red_flag=0.0,
         )
@@ -549,9 +639,9 @@ class TestComputeScore:
 
     def test_missing_thesis_triggers_stale_penalty(self) -> None:
         conn = _make_fake_conn(
-            fund_rows=[(0.18, 0.55, 200_000.0, -50_000.0, 100_000.0, 1_100_000.0, 10_000_000.0)],
-            price_row=(0.05, 0.20, 0.35, 120.0),
-            quote_row=(False, 120.0, 119.5, 120.5),
+            fund_rows=[_fund_row(0.18, 0.55, 200_000.0, -50_000.0, 100_000.0, 1_100_000.0, 10_000_000.0)],
+            price_row=_price_row(0.05, 0.20, 0.35, 120.0),
+            quote_row=_quote_row(False, 120.0, 119.5, 120.5),
             thesis_row=None,  # no thesis
             news_rows=[],
             avg_red_flag=0.0,
@@ -568,11 +658,11 @@ class TestComputeScore:
     def test_total_score_clipped_when_heavy_penalties(self) -> None:
         # Stale thesis + low confidence + high red flag + spread → heavy deductions
         conn = _make_fake_conn(
-            fund_rows=[(0.00, 0.10, -1.0, 500_000.0, 600_000.0, 500_000.0, 10_000_000.0)],
-            price_row=(0.0, 0.0, 0.0, 100.0),
-            quote_row=(True, 100.0, 99.0, 101.0),  # spread flag
-            thesis_row=(0.20, None, None, _STALE),  # stale + low confidence + no valuation
-            news_rows=[(-0.9, 1.0), (-0.8, 1.0)],
+            fund_rows=[_fund_row(0.00, 0.10, -1.0, 500_000.0, 600_000.0, 500_000.0, 10_000_000.0)],
+            price_row=_price_row(0.0, 0.0, 0.0, 100.0),
+            quote_row=_quote_row(True, 100.0, 99.0, 101.0),  # spread flag
+            thesis_row=_thesis_row(0.20, 100.0, 100.0, _STALE),  # stale + low confidence
+            news_rows=[_news_row(-0.9, 1.0), _news_row(-0.8, 1.0)],
             avg_red_flag=0.80,
         )
         result = compute_score(1, conn, "v1-balanced")
