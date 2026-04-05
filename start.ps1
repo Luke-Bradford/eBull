@@ -28,4 +28,6 @@ uv run python scripts/migrate.py
 if ($LASTEXITCODE -ne 0) { Write-Error "Migrations failed"; exit 1 }
 
 Write-Host "Starting server on http://localhost:8000" -ForegroundColor Green
-uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# Binds to localhost only. To expose on the network, override: --host 0.0.0.0
+uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+exit 0

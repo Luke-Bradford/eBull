@@ -151,7 +151,7 @@ Before committing, open `git diff origin/HEAD` and read top to bottom. The revie
 
 **NULL**
 - Any `col != 'value'` on a nullable column: NULLs are excluded silently. Decide and document.
-- Parameterised NULL checks: `IS NOT DISTINCT FROM %s`, not `IS %s`.
+- Parameterised NULL equality: `col IS NOT DISTINCT FROM %s` (matches NULL). Parameterised NULL inequality: `col IS DISTINCT FROM %s` (excludes NULL). Neither uses bare `IS %s`.
 
 **Parameters**
 - No f-strings or `.format()` in SQL strings. Named params `%(name)s` with dicts.
@@ -180,7 +180,7 @@ After fixing any instance of a problem, grep the whole file (and codebase if it'
 | Found | Grep for |
 |---|---|
 | `fetchone()` without ORDER BY | every `fetchone()` call |
-| Positional `row[0]` | `\[0\]`, `\[1\]` on cursor results |
+| Positional `row[0]` | `\[[0-9]\]` on cursor results (covers all single-digit indices) |
 | `json.dumps` into jsonb | `json.dumps` in services/ |
-| `Optional[` | replace all with `X \| None` |
+| `Optional[` or `Union[X, None]` | `Optional\[` and `Union\[` — replace all with `X \| None` |
 | `list[` read-only param | function signatures with `list[` |
