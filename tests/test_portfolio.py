@@ -318,6 +318,8 @@ class TestEvaluateBuy:
             self._no_positions(),
             total_aum=100_000.0,
             cash=10_000.0,
+            pending_buy_count=0,
+            pending_sector_pct={},
         )
         assert should_buy is True
         assert "Entry candidate" in reason
@@ -334,6 +336,8 @@ class TestEvaluateBuy:
             self._no_positions(),
             total_aum=100_000.0,
             cash=10_000.0,
+            pending_buy_count=0,
+            pending_sector_pct={},
         )
         assert should_buy is False
         assert "min_buy_score" in reason
@@ -350,6 +354,8 @@ class TestEvaluateBuy:
             self._no_positions(),
             total_aum=100_000.0,
             cash=10_000.0,
+            pending_buy_count=0,
+            pending_sector_pct={},
         )
         assert should_buy is False
         assert "stance" in reason
@@ -367,12 +373,14 @@ class TestEvaluateBuy:
             positions,
             total_aum=100_000.0,
             cash=10_000.0,
+            pending_buy_count=0,
+            pending_sector_pct={},
         )
         assert should_buy is False
         assert "max_active_positions" in reason
 
-    def test_sector_cap_blocks_buy(self) -> None:
-        # 25% already in Technology — adding another would breach cap
+    def test_sector_cap_blocks_buy_from_held_exposure(self) -> None:
+        # 25% already held in Technology — adding another would breach cap
         pos = _pos(sector="Technology", market_value=25_000.0)
         details: dict[str, Any] = {"thesis": _thesis(stance="buy")}
         latest_score = _score(total_score=0.80)
@@ -385,8 +393,49 @@ class TestEvaluateBuy:
             {1: pos},
             total_aum=100_000.0,
             cash=10_000.0,
+            pending_buy_count=0,
+            pending_sector_pct={},
         )
         assert should_buy is False
+        assert "sector" in reason
+
+    def test_sector_cap_blocks_second_buy_via_accumulator(self) -> None:
+        # No held positions; first BUY approved (5% Tech pending).
+        # Second candidate in same sector: 0% held + 5% pending + 5% new = 10% — passes.
+        # Third candidate: 0% + 5% + 5% = 10% after second — still fine.
+        # Use 21% already pending to test the cap fires correctly.
+        details: dict[str, Any] = {"thesis": _thesis(stance="buy")}
+        latest_score = _score(total_score=0.80)
+        # Simulate 4 prior BUYs in Technology already pending (4 × 5% = 20%)
+        # → 5th BUY would push to 25% exactly (passes >, not >=)
+        # → 6th would push to 30% and be blocked
+        should_buy_fifth, _ = _evaluate_buy(
+            5,
+            "E",
+            "Technology",
+            details,
+            latest_score,
+            {},
+            total_aum=100_000.0,
+            cash=50_000.0,
+            pending_buy_count=4,
+            pending_sector_pct={"Technology": 0.20},
+        )
+        assert should_buy_fifth is True  # 20% + 5% = 25%, exactly at cap (not >, so passes)
+
+        should_buy_sixth, reason = _evaluate_buy(
+            6,
+            "F",
+            "Technology",
+            details,
+            latest_score,
+            {},
+            total_aum=100_000.0,
+            cash=50_000.0,
+            pending_buy_count=5,
+            pending_sector_pct={"Technology": 0.25},
+        )
+        assert should_buy_sixth is False  # 25% + 5% = 30% > 25%
         assert "sector" in reason
 
     def test_insufficient_cash_blocks_buy(self) -> None:
@@ -402,6 +451,8 @@ class TestEvaluateBuy:
             self._no_positions(),
             total_aum=100_000.0,
             cash=1_000.0,
+            pending_buy_count=0,
+            pending_sector_pct={},
         )
         assert should_buy is False
         assert "cash" in reason.lower()
@@ -418,6 +469,8 @@ class TestEvaluateBuy:
             self._no_positions(),
             total_aum=100_000.0,
             cash=None,
+            pending_buy_count=0,
+            pending_sector_pct={},
         )
         assert should_buy is True
         assert "cash_check_deferred" in reason
@@ -437,6 +490,8 @@ class TestEvaluateBuy:
             self._no_positions(),
             total_aum=100_000.0,
             cash=10_000.0,
+            pending_buy_count=0,
+            pending_sector_pct={},
         )
         assert should_buy is False
         assert "red flag" in reason.lower()
@@ -453,6 +508,8 @@ class TestEvaluateBuy:
             self._no_positions(),
             total_aum=100_000.0,
             cash=10_000.0,
+            pending_buy_count=0,
+            pending_sector_pct={},
         )
         assert should_buy is False
         assert "thesis" in reason.lower()
@@ -819,15 +876,31 @@ class TestRunPortfolioReview:
 
     def test_sector_concentration_enforced_across_buys(self) -> None:
         """
-        Two ranked candidates in the same sector; first passes, second would breach cap.
-        Only the first should get BUY.
+        Held position at 21% Tech + two unowned Tech candidates ranked 1 and 2.
+        First candidate: 21% + 5% = 26% > 25% — blocked.
+        Both candidates should be blocked by the sector cap.
+
+        This tests that _evaluate_buy uses held exposure correctly and that
+        no BUY is approved when held exposure already fills the sector headroom.
         """
+        # AUM = 100k; held Tech position = 21k (21%)
         cursors = [
-            # no positions
-            _make_cursor([]),
-            # cash
-            _make_cursor([{"balance": 200_000.0}]),
-            # ranked scores — two Tech candidates, rank 1 and 2
+            _make_cursor(
+                [
+                    {
+                        "instrument_id": 10,
+                        "symbol": "HELD",
+                        "sector": "Technology",
+                        "current_units": 210.0,
+                        "cost_basis": 20_000.0,
+                        "quote_price": 100.0,
+                        "quote_is_fallback": False,
+                    }
+                ]
+            ),
+            # cash: 79k → AUM = 21k + 79k = 100k
+            _make_cursor([{"balance": 79_000.0}]),
+            # ranked scores — two new Tech candidates
             _make_cursor(
                 [
                     {
@@ -850,11 +923,12 @@ class TestRunPortfolioReview:
                     },
                 ]
             ),
-            # instruments
+            # instruments — includes held instrument 10 and candidates 1, 2
             _make_cursor(
                 [
                     {"instrument_id": 1, "symbol": "AAPL", "sector": "Technology"},
                     {"instrument_id": 2, "symbol": "MSFT", "sector": "Technology"},
+                    {"instrument_id": 10, "symbol": "HELD", "sector": "Technology"},
                 ]
             ),
             # theses
@@ -880,23 +954,32 @@ class TestRunPortfolioReview:
                         "base_value": 400.0,
                         "break_conditions_json": None,
                     },
+                    {
+                        "instrument_id": 10,
+                        "thesis_version": 1,
+                        "stance": "buy",
+                        "confidence_score": 0.70,
+                        "buy_zone_low": None,
+                        "buy_zone_high": None,
+                        "base_value": 150.0,
+                        "break_conditions_json": None,
+                    },
                 ]
             ),
             _make_cursor([]),  # prev thesis
             _make_cursor([]),  # filing_events
-            # prev scores (no held positions → skipped)
+            # _load_prev_scores for held instrument 10 (it IS ranked)
+            _make_cursor([]),
             # prior recs
             _make_cursor([]),
         ]
         conn = _make_conn(cursors)
 
-        # AUM = 200k cash only; 5% initial = 10k per buy
-        # After instrument 1 BUY: Technology = 5%; instrument 2 would push to 10%
-        # Both fit within 25% cap — both should get BUY
+        # Held Tech = 21k/100k = 21%; first BUY would push to 26% > 25% — blocked
         result = run_portfolio_review(conn, "v1-balanced")
 
         buy_recs = [r for r in result.recommendations if r.action == "BUY"]
-        assert len(buy_recs) == 2
+        assert len(buy_recs) == 0  # both blocked by sector cap from held exposure
 
     def test_empty_universe_returns_empty_result(self) -> None:
         cursors = [

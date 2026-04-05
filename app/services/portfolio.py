@@ -507,19 +507,25 @@ def _evaluate_buy(
     positions: dict[int, PositionState],
     total_aum: float,
     cash: float | None,
+    pending_buy_count: int,
+    pending_sector_pct: dict[str, float],
 ) -> tuple[bool, str]:
     """
     Return (should_buy, reason).
 
     BUY requires:
-      - portfolio below max_active_positions
+      - portfolio (held + already-approved BUYs this run) below max_active_positions
       - total_score >= MIN_BUY_SCORE
       - thesis exists with stance == "buy"
       - no severe red flags
-      - sector concentration passes
+      - sector concentration passes, accounting for BUYs already approved this run
       - cash sufficient if known; if unknown, note cash_check_deferred
+
+    pending_buy_count: number of BUYs approved so far in this evaluation pass.
+    pending_sector_pct: accumulated sector exposure from BUYs approved so far,
+        keyed by sector name. Callers must update this after each approval.
     """
-    if len(positions) >= MAX_ACTIVE_POSITIONS:
+    if len(positions) + pending_buy_count >= MAX_ACTIVE_POSITIONS:
         return (
             False,
             f"BUY blocked: portfolio at max_active_positions={MAX_ACTIVE_POSITIONS}",
@@ -540,7 +546,10 @@ def _evaluate_buy(
         return False, f"Severe red flag: red_flag_score={max_red_flag:.2f}"
 
     if sector is not None and total_aum > 0:
-        sector_after = _sector_pct(positions, sector, total_aum) + MAX_INITIAL_POSITION_PCT
+        # Combine held exposure with exposure from BUYs already approved this run
+        held_pct = _sector_pct(positions, sector, total_aum)
+        pending_pct = pending_sector_pct.get(sector, 0.0)
+        sector_after = held_pct + pending_pct + MAX_INITIAL_POSITION_PCT
         if sector_after > MAX_SECTOR_EXPOSURE_PCT:
             return (
                 False,
@@ -771,8 +780,6 @@ def run_portfolio_review(
             )
         else:
             hold_reason = "Held position; not in current ranked list (no fresh score)"
-            if details.get("symbol"):
-                pass  # symbol already on pos
         if pos.quote_is_fallback:
             hold_reason += "; market value estimated from cost_basis (no live quote)"
 
@@ -791,6 +798,12 @@ def run_portfolio_review(
         )
 
     # --- Evaluate unowned ranked candidates (BUY) ---
+    # Accumulators track resource consumption from BUYs approved earlier in
+    # this same pass so each candidate is checked against the true post-approval
+    # state, not just the held-positions baseline.
+    pending_buy_count: int = 0
+    pending_sector_pct: dict[str, float] = {}
+
     for iid in ranked_ids:
         if iid in positions:
             continue  # already evaluated above
@@ -801,7 +814,18 @@ def run_portfolio_review(
         symbol = details.get("symbol", str(iid))
         sector = details.get("sector")
 
-        should_buy, buy_reason = _evaluate_buy(iid, symbol, sector, details, latest_score, positions, total_aum, cash)
+        should_buy, buy_reason = _evaluate_buy(
+            iid,
+            symbol,
+            sector,
+            details,
+            latest_score,
+            positions,
+            total_aum,
+            cash,
+            pending_buy_count,
+            pending_sector_pct,
+        )
         if should_buy:
             thesis = details.get("thesis")
             recommendations.append(
@@ -817,18 +841,26 @@ def run_portfolio_review(
                     cash_balance_known=cash_known,
                 )
             )
+            # Update accumulators so the next candidate sees the correct state
+            pending_buy_count += 1
+            if sector is not None and total_aum > 0:
+                pending_sector_pct[sector] = pending_sector_pct.get(sector, 0.0) + MAX_INITIAL_POSITION_PCT
 
     # --- Persist atomically ---
+    written = 0
     with conn.transaction():
         for rec in recommendations:
             if rec.action == "HOLD" and not _should_persist_hold(rec.instrument_id, rec.rationale, prior_recs):
                 continue
             _insert_recommendation(conn, rec, run_at)
+            written += 1
 
+    # Log counts of generated recommendations; written may be less due to HOLD dedup
     counts = {a: sum(1 for r in recommendations if r.action == a) for a in ("BUY", "ADD", "HOLD", "EXIT")}
     logger.info(
-        "run_portfolio_review complete: total=%d BUY=%d ADD=%d HOLD=%d EXIT=%d",
+        "run_portfolio_review complete: generated=%d written=%d BUY=%d ADD=%d HOLD=%d EXIT=%d",
         len(recommendations),
+        written,
         counts["BUY"],
         counts["ADD"],
         counts["HOLD"],
