@@ -85,12 +85,19 @@ Every piece of work follows this sequence without exception:
 4. **Wait for the Claude review.** The review workflow runs automatically on every push. Poll `gh pr view <n> --comments` and `gh pr checks <n>` — do not proceed until the review has posted and CI is green.
 5. **Address every review comment on the same branch.**
    - BLOCKING: must be fixed before merge.
-   - WARNING: fix on the same PR, or raise a `tech-debt` issue before merging.
-   - NITPICK: fix if trivial, otherwise raise an issue.
+   - WARNING: fix on the same PR, or raise a `tech-debt` issue before merging. Cannot merge with unactioned WARNINGs.
+   - NITPICK: fix if trivial (it usually is); if genuinely out of scope, raise a `tech-debt` issue. Cannot merge with unactioned NITPICKs.
+   - PREVENTION: extract every prevention note to the pre-push checklist or the relevant skill file before merging.
    - Reply to each comment with what was done + the commit SHA. Nothing silently discarded.
 6. **Re-run lint, typecheck, and format check before pushing a follow-up.**
 7. **Every push resets the review requirement.** An APPROVE on a prior commit does not carry forward.
-8. **Merge only after APPROVE on the most recent commit with CI green.** Then delete the branch.
+8. **Merge only after:**
+   - APPROVE on the most recent commit
+   - All BLOCKINGs fixed
+   - All WARNINGs fixed OR have a `tech-debt` issue number in the reply
+   - All NITPICKs fixed OR have a `tech-debt` issue number in the reply
+   - All PREVENTION notes extracted to checklist/skill files
+   - CI green on the most recent commit
 
 ## Pre-push checklist
 
@@ -173,6 +180,22 @@ Before committing, open `git diff origin/HEAD` and read top to bottom. The revie
 - Mocks match the real library's semantics — psycopg `fetchone()` returns `None` not a `MagicMock`.
 - Mock `spec=` set so unexpected attribute access raises, not silently returns another mock.
 
+### Sequential evaluation loops with shared resource limits
+
+In any loop that evaluates candidates against a shared resource constraint (position count, sector cap, cash):
+- Maintain a mutable accumulator updated after each approval, so each candidate is checked against held-state PLUS already-approved-this-pass state.
+- If the loop is split into phases (e.g. held instruments first, then unowned), add a comment at the phase boundary explaining that the ordering is load-bearing and why.
+- Before pushing: grep for all resource-check calls (e.g. `_sector_pct`) in the file and verify each one either receives a pending accumulator OR has an explicit ordering-dependency comment.
+
+### Error escalation from helpers called by orchestrators
+
+When a helper raises an exception and is called from an orchestrator with `except Exception`, a raise in the helper aborts the entire run with zero output. Prefer log-and-return in helpers for data-inconsistency cases, reserving raise for genuine programmer errors (invariant violations that cannot happen in correct code). Before pushing: trace every helper that raises — who catches it, and what is the failure scope?
+
+### Free-text dedup and log counts
+
+- Any dedup logic comparing free-text strings: the expected string must be derived from the same helper as the production code — never a hardcoded literal. A format change must propagate automatically.
+- Any "complete: total=N" log line after a filter step: split into `generated=N` and `written=M`. Compute N before the filter, M after.
+
 ### Same-class-of-problem scan
 
 After fixing any instance of a problem, grep the whole file (and codebase if it's a pattern) for the same issue before pushing. Never assume the fix was isolated.
@@ -184,3 +207,5 @@ After fixing any instance of a problem, grep the whole file (and codebase if it'
 | `json.dumps` into jsonb | `json.dumps` in services/ |
 | `Optional[` or `Union[X, None]` | `Optional\[` and `Union\[` — replace all with `X \| None` |
 | `list[` read-only param | function signatures with `list[` |
+| `dict_row` added to one cursor | grep whole file — every cursor must use `dict_row`, not just the flagged one |
+| `_sector_pct` or similar resource check | all call sites — verify accumulator or ordering comment |
