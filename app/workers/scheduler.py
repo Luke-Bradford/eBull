@@ -19,6 +19,7 @@ from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
+from app.services.portfolio import run_portfolio_review
 from app.services.scoring import compute_rankings
 from app.services.sentiment import ClaudeSentimentScorer
 from app.services.thesis import find_stale_instruments, generate_thesis
@@ -320,31 +321,52 @@ def daily_thesis_refresh() -> None:
 
 def morning_candidate_review() -> None:
     """
-    Re-score and rank Tier 1 candidates after daily research refresh.
+    Re-score, rank, and generate trade recommendations for Tier 1 candidates.
 
-    Scores all eligible Tier 1 instruments under the default model version
-    (v1-balanced), assigns rank and rank_delta, and persists results to the
-    scores table. Trade recommendations are produced in issue #8.
+    Steps (run sequentially on the same connection for each phase):
+      1. Score all eligible Tier 1 instruments (v1-balanced).
+      2. Run portfolio review to produce BUY/ADD/HOLD/EXIT recommendations.
+
+    Each phase opens its own connection so a failure in recommendations
+    does not roll back the completed scoring run.
     """
     logger.info("morning_candidate_review: starting scoring run")
     try:
         with psycopg.connect(settings.database_url) as conn:
-            result = compute_rankings(conn)
+            score_result = compute_rankings(conn)
     except Exception:
         logger.error("morning_candidate_review: scoring run failed", exc_info=True)
         return
 
-    if not result.scored:
+    if not score_result.scored:
         logger.info("morning_candidate_review: no eligible instruments to score")
         return
 
-    top5 = result.scored[:5]
+    top5 = score_result.scored[:5]
     top5_summary = ", ".join(f"instrument_id={r.instrument_id} score={r.total_score:.3f} rank={r.rank}" for r in top5)
     logger.info(
         "morning_candidate_review: scored %d instruments [model=%s] top5=[%s]",
-        len(result.scored),
-        result.model_version,
+        len(score_result.scored),
+        score_result.model_version,
         top5_summary,
+    )
+
+    logger.info("morning_candidate_review: starting portfolio review")
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            rec_result = run_portfolio_review(conn, model_version=score_result.model_version)
+    except Exception:
+        logger.error("morning_candidate_review: portfolio review failed", exc_info=True)
+        return
+
+    logger.info(
+        "morning_candidate_review: recommendations=%d (BUY=%d ADD=%d HOLD=%d EXIT=%d) aum=%.2f",
+        len(rec_result.recommendations),
+        sum(1 for r in rec_result.recommendations if r.action == "BUY"),
+        sum(1 for r in rec_result.recommendations if r.action == "ADD"),
+        sum(1 for r in rec_result.recommendations if r.action == "HOLD"),
+        sum(1 for r in rec_result.recommendations if r.action == "EXIT"),
+        rec_result.total_aum,
     )
 
 
