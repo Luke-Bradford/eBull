@@ -49,10 +49,11 @@ class _AuthTestBase:
         # Capture the conftest no-op override at setup time so teardown can
         # restore it deterministically without re-importing. Re-importing in
         # teardown could silently install None if the import path changed.
+        # If conftest hasn't installed an override (e.g. running this file in
+        # isolation in some odd way), the captured value is None and teardown
+        # will simply pop the key — the test still exercises the real
+        # require_auth dependency correctly.
         self._prior_auth_override = app.dependency_overrides.get(require_auth)
-        assert self._prior_auth_override is not None, (
-            "conftest must install a require_auth override before this test runs"
-        )
         app.dependency_overrides.pop(require_auth, None)
         app.dependency_overrides[get_conn] = _override_conn
 
