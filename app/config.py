@@ -1,4 +1,10 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Minimum operator API key length. 32 chars of base64/hex is ~192 bits of
+# entropy, well above brute-force range. We refuse to start with anything
+# shorter rather than silently accepting a weak credential.
+_MIN_API_KEY_LEN = 32
 
 
 class Settings(BaseSettings):
@@ -26,6 +32,23 @@ class Settings(BaseSettings):
 
     enable_auto_trading: bool = False
     enable_live_trading: bool = False
+
+    # Operator API key for authenticating requests to protected endpoints.
+    # Sourced from EBULL_API_KEY (or API_KEY via env_file). When unset, all
+    # protected endpoints fail closed — we never silently allow access.
+    api_key: str | None = None
+
+    @field_validator("api_key")
+    @classmethod
+    def _api_key_min_length(cls, v: str | None) -> str | None:
+        # An empty string is treated as "unset" by require_auth (fail-closed),
+        # so we allow it through validation. Any non-empty value must meet
+        # the minimum length so a single-character key cannot be accepted.
+        if v is None or v == "":
+            return v
+        if len(v) < _MIN_API_KEY_LEN:
+            raise ValueError(f"api_key must be at least {_MIN_API_KEY_LEN} characters")
+        return v
 
 
 settings = Settings()

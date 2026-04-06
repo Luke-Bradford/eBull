@@ -30,9 +30,14 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.api._helpers import parse_optional_float
+from app.api.auth import require_auth
 from app.db import get_conn
 
-router = APIRouter(prefix="/portfolio", tags=["portfolio"])
+router = APIRouter(
+    prefix="/portfolio",
+    tags=["portfolio"],
+    dependencies=[Depends(require_auth)],
+)
 
 
 # ---------------------------------------------------------------------------
