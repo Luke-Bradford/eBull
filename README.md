@@ -1,41 +1,43 @@
-# trader-os
+# eBull
 
 Long-horizon AI-assisted investment engine for eToro.
 
-This starter repo is intentionally opinionated:
-- Python backend
+- Python backend with FastAPI
 - PostgreSQL as the system of record
 - Claude Code skills / agents / hooks for research and execution discipline
 - SQL-first schema for auditability
 - Demo-first, live-small-capital later
 
-## What this skeleton contains
+## Repo structure
 
-- `docs/` design and policy docs
-- `.claude/` project guidance, skills, agents, and hook notes
-- `sql/001_init.sql` initial Postgres schema
-- `app/` minimal Python service skeleton
-- `docker-compose.yml` for local Postgres
+- `app/` — services, providers, workers, and API
+- `sql/` — Postgres migrations (001–010)
+- `docs/` — architecture, scoring model, trading policy, tax engine
+- `.claude/` — project guidance, skills, agents, and hooks
+- `tests/` — pytest suite
+- `docker-compose.yml` — local Postgres
 
-## Suggested build order
+## Current state
 
-1. Create the database with `sql/001_init.sql`
-2. Read:
-   - `docs/architecture.md`
-   - `docs/scoring-model.md`
-   - `docs/trading-policy.md`
-   - `docs/tax-engine.md`
-3. Open `.claude/CLAUDE.md` in Claude Code
-4. Implement services in this order:
-   - universe sync
-   - market data
-   - filings
-   - thesis engine
-   - ranking engine
-   - portfolio manager
-   - execution guard
-   - tax ledger
-5. Use Demo keys before anything live
+Backend services implemented:
+- Universe sync
+- Market data (OHLCV, quotes, features)
+- Filings and fundamentals (SEC EDGAR, Companies House, FMP)
+- News and sentiment
+- Scoring and ranking engine
+- Portfolio manager
+- Execution guard
+
+Remaining backend:
+- Thesis engine (#6)
+- eToro order client (#10)
+- Tax ledger (#11)
+- Coverage tier management (#12)
+
+Not yet started:
+- API layer (REST endpoints for frontend)
+- Frontend / dashboard
+- Ops monitoring and admin controls
 
 ## Local setup
 
@@ -44,11 +46,6 @@ cp .env.example .env
 docker compose up -d
 ```
 
-This repo is a scaffold, not a production-ready trading system.
-You still need to implement:
-- eToro API client
-- filings/news/macro providers
-- job scheduling
-- actual order placement
-- reconciliation
-- proper tests
+## Build order
+
+See `.claude/CLAUDE.md` and `docs/architecture.md` for detailed guidance.
