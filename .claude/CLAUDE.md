@@ -44,20 +44,14 @@ Work is not done until all of the following are true:
 3. Lint, format, typecheck, and tests all pass locally.
 4. The PR description is complete and self-contained.
 5. Review comments are all resolved as:
-   - `FIXED <commit_sha>`
-   - `DEFERRED <issue_number>`
-   - `REBUTTED <reason>`
+   - `FIXED {commit_sha}`
+   - `DEFERRED #{issue_number}`
+   - `REBUTTED {reason}`
 6. No warning or nitpick is left hanging silently.
 7. Any recurring review finding is extracted into the prevention log or a relevant skill before merge.
 
 ## Working order for every task
 
-Before designing or coding:
-1. Read `docs/settled-decisions.md` and state which decisions apply to this issue and how the plan preserves them.
-2. Read `docs/review-prevention-log.md` and state which entries are relevant to this issue and how the plan avoids repeating them.
-
-If a settled decision or prevention entry constrains the design, say so before coding.
-Do not silently reinterpret or override either.
 Follow this order unless the user explicitly says otherwise:
 
 1. Read the issue.
@@ -76,13 +70,13 @@ Follow this order unless the user explicitly says otherwise:
 ## Branch and PR workflow
 
 1. Create a branch before touching code.
-   - `feature/<issue-number>-short-description`
-   - `fix/<issue-number>-short-description`
+   - `feature/{issue-number}-short-description`
+   - `fix/{issue-number}-short-description`
 2. Commit only on that branch.
 3. Push and open a PR.
 After every push, poll:
-- `gh pr view <n> --comments`
-- `gh pr checks <n>`
+- `gh pr view {pr_number} --comments`
+- `gh pr checks {pr_number}`
 
 Do not push again until:
 - the Claude review has posted
@@ -96,15 +90,13 @@ If the review has not posted yet, wait and poll again rather than continuing bli
 6. Re-run local checks before every follow-up push.
 7. Merge only after review is satisfied on the most recent commit and CI is green.
 
-
-
 ## Review comment resolution contract
 
 Every review comment must end in exactly one of these states:
 
-- `FIXED <commit_sha>`
-- `DEFERRED <issue_number>`
-- `REBUTTED <reason>`
+- `FIXED {commit_sha}`
+- `DEFERRED #{issue_number}`
+- `REBUTTED {reason}`
 
 There is no fourth state.
 Do not ignore comments because they feel minor or annoying.
@@ -113,9 +105,9 @@ If a comment is wrong, push back clearly and specifically.
 
 Every PREVENTION comment must end in exactly one of these states:
 
-- `EXTRACTED <file>` — lesson added to a skill, workflow doc, checklist, or `docs/review-prevention-log.md`
-- `ALREADY_COVERED <file>` — rule already exists; cite the exact file
-- `REBUTTED <reason>` — lesson does not apply; explain specifically
+- `EXTRACTED {file}` — lesson added to a skill, workflow doc, checklist, or `docs/review-prevention-log.md`
+- `ALREADY_COVERED {file}` — rule already exists; cite the exact file
+- `REBUTTED {reason}` — lesson does not apply; explain specifically
 
 PREVENTION comments cannot be silently acknowledged.
 Reusable engineering lessons go into skill files.
@@ -148,15 +140,7 @@ Read and apply these before pushing:
 
 ## Settled decisions
 
-Before designing or coding, read `docs/settled-decisions.md`.
-
-For every issue, identify:
-- which settled decisions apply
-- how the planned implementation preserves them
-- whether any deviation is being proposed
-
-Do not silently contradict settled repo decisions.
-If a change is needed, surface it before coding.
+→ Covered in the Working order above (steps 2 and 4).
 
 ## Repo discipline
 
