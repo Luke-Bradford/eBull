@@ -10,6 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field, model_validator
 
+from app.api.audit import router as audit_router
 from app.api.instruments import router as instruments_router
 from app.api.portfolio import router as portfolio_router
 from app.api.recommendations import router as recommendations_router
@@ -51,6 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="eBull", version="0.1.0", lifespan=lifespan)
+app.include_router(audit_router)
 app.include_router(instruments_router)
 app.include_router(portfolio_router)
 app.include_router(recommendations_router)
