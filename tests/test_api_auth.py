@@ -19,7 +19,7 @@ from app.main import app
 
 client = TestClient(app)
 
-_VALID_KEY = "test-operator-key"
+_VALID_KEY = "test-operator-key-with-32-chars!"  # 32 chars, meets min length
 
 
 def _mock_conn() -> MagicMock:
@@ -46,15 +46,23 @@ class _AuthTestBase:
     def setup_method(self) -> None:
         self._real_key = settings.api_key
         settings.api_key = _VALID_KEY
+        # Capture the conftest no-op override at setup time so teardown can
+        # restore it deterministically without re-importing. Re-importing in
+        # teardown could silently install None if the import path changed.
+        self._prior_auth_override = app.dependency_overrides.get(require_auth)
+        assert self._prior_auth_override is not None, (
+            "conftest must install a require_auth override before this test runs"
+        )
         app.dependency_overrides.pop(require_auth, None)
         app.dependency_overrides[get_conn] = _override_conn
 
     def teardown_method(self) -> None:
         settings.api_key = self._real_key
-        # Restore the conftest no-op so subsequent tests are unaffected.
-        from tests.conftest import _noop_auth
-
-        app.dependency_overrides[require_auth] = _noop_auth
+        prior = self._prior_auth_override
+        if prior is not None:
+            app.dependency_overrides[require_auth] = prior
+        else:
+            app.dependency_overrides.pop(require_auth, None)
         app.dependency_overrides.pop(get_conn, None)
 
 
@@ -80,7 +88,7 @@ class TestRequireAuth(_AuthTestBase):
         resp = client.post(
             "/kill-switch",
             json={"active": False},
-            headers={"Authorization": "Basic test-operator-key"},
+            headers={"Authorization": f"Basic {_VALID_KEY}"},
         )
         assert resp.status_code == 401
 

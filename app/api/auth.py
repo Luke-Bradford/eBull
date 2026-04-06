@@ -32,11 +32,20 @@ from app.config import settings
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
-_UNAUTHORIZED = HTTPException(
-    status_code=status.HTTP_401_UNAUTHORIZED,
-    detail="Unauthorized",
-    headers={"WWW-Authenticate": "Bearer"},
-)
+
+def _unauthorized() -> HTTPException:
+    """Build a fresh 401 response.
+
+    A fresh ``HTTPException`` is constructed per raise rather than reused
+    from a module-level singleton. FastAPI / Starlette do not generally
+    mutate exception instances, but constructing fresh per raise removes
+    any risk of shared-state bugs and matches the conventional pattern.
+    """
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Unauthorized",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 def require_auth(
@@ -52,10 +61,10 @@ def require_auth(
     expected = settings.api_key
     if not expected:
         # Fail closed: misconfigured server must not leak protected data.
-        raise _UNAUTHORIZED
+        raise _unauthorized()
 
     if credentials is None or credentials.scheme.lower() != "bearer":
-        raise _UNAUTHORIZED
+        raise _unauthorized()
 
     if not secrets.compare_digest(credentials.credentials, expected):
-        raise _UNAUTHORIZED
+        raise _unauthorized()

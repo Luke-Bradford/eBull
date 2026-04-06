@@ -219,6 +219,22 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### Weak operator credential silently accepted
+- First seen in: #81
+- Symptom: `api_key: str | None = None` accepted any non-empty value, including `"a"`. A misconfigured deploy with a single-character key would auth-pass without warning.
+- Prevention: For any operator credential / token / key field on `Settings`, attach a `@field_validator` that rejects values shorter than a minimum-entropy threshold (32 chars baseline). Empty string is allowed only because it is treated as "unset" by the fail-closed branch.
+- Enforced in: `app/config.py` (`_api_key_min_length`)
+
+---
+
+### Test teardown re-imports module-level fixture instead of capturing it
+- First seen in: #81
+- Symptom: `teardown_method` re-imported the conftest no-op override at teardown time. If the import path or symbol name ever changed, teardown would silently install `None` instead of raising — breaking auth bypass for the rest of the suite without a clear failure signal.
+- Prevention: When a test temporarily mutates a module-level singleton (`app.dependency_overrides`, settings fields, env vars), capture the prior value in `setup_method` (`self._prior = container.get(key)`) and restore from `self._prior` in `teardown_method`. Never re-fetch from the source in teardown.
+- Enforced in: `tests/test_api_auth.py` (`_AuthTestBase`)
+
+---
+
 ### Naive datetime in TIMESTAMPTZ query params
 - First seen in: #80
 - Symptom: A `datetime | None` query parameter without timezone info is sent to PostgreSQL as naive; comparing against a `TIMESTAMPTZ` column may cause mixed-offset rejection or silent misinterpretation.
