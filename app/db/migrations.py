@@ -86,22 +86,31 @@ def run_migrations() -> list[str]:
     return applied
 
 
-def migration_status() -> list[dict[str, str]]:
+def migration_status(conn: psycopg.Connection[object] | None = None) -> list[dict[str, str]]:
     """Return status of every migration file: applied or pending.
+
+    If *conn* is provided, uses that connection.  Otherwise opens a raw
+    connection (for CLI/startup contexts where no pool exists yet).
 
     Raises psycopg.OperationalError if the database is unreachable.
     Callers are responsible for handling connection failures.
     """
     files = _migration_files()
 
-    try:
-        with psycopg.connect(settings.database_url) as conn:
-            applied: dict[str, str] = {
-                row[0]: row[1].isoformat() if row[1] else ""
-                for row in conn.execute("SELECT filename, applied_at FROM schema_migrations ORDER BY filename")
+    def _query_applied(c: psycopg.Connection[object]) -> dict[str, str]:
+        try:
+            return {
+                row[0]: row[1].isoformat() if row[1] else ""  # type: ignore[index]  # TupleRow
+                for row in c.execute("SELECT filename, applied_at FROM schema_migrations ORDER BY filename")
             }
-    except psycopg.errors.UndefinedTable:
-        applied = {}
+        except psycopg.errors.UndefinedTable:
+            return {}
+
+    if conn is not None:
+        applied = _query_applied(conn)
+    else:
+        with psycopg.connect(settings.database_url) as fallback_conn:
+            applied = _query_applied(fallback_conn)
 
     return [
         {

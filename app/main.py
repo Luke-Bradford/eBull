@@ -1,13 +1,18 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import psycopg
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field, model_validator
 
+from app.api.instruments import router as instruments_router
 from app.config import settings
+from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
 from app.services.coverage import override_tier
 from app.services.ops_monitor import (
@@ -28,10 +33,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("Applied %d migration(s): %s", len(applied), applied)
     else:
         logger.info("No pending migrations.")
+
+    # Open the connection pool after migrations so the schema is up to date.
+    pool = ConnectionPool(settings.database_url, min_size=1, max_size=10)
+    pool.wait()
+    logger.info("Connection pool opened (min=1, max=10).")
+    app.state.db_pool = pool
+
     yield
+
+    pool.close()
+    logger.info("Connection pool closed.")
 
 
 app = FastAPI(title="eBull", version="0.1.0", lifespan=lifespan)
+app.include_router(instruments_router)
 
 
 @app.get("/health")
@@ -46,30 +62,27 @@ def health() -> dict:
 
 
 @app.get("/health/db")
-def health_db() -> dict:
+def health_db(conn: psycopg.Connection[object] = Depends(get_conn)) -> dict:
     """Returns migration history and list of public tables in the database."""
-    # migration_status() opens its own connection — catch DB-down here so the
-    # endpoint always returns a structured response rather than a 500.
     try:
-        migrations = migration_status()
+        migrations = migration_status(conn)
     except Exception as exc:
         return {"db_reachable": False, "db_error": str(exc), "tables": [], "migrations": []}
 
     try:
-        with psycopg.connect(settings.database_url) as conn:
-            tables = [
-                row[0]
-                for row in conn.execute(
-                    """
-                    SELECT tablename
-                    FROM pg_tables
-                    WHERE schemaname = 'public'
-                    ORDER BY tablename
-                    """
-                )
-            ]
-            db_ok = True
-            db_error = None
+        tables = [
+            row[0]  # type: ignore[index]  # TupleRow from default row factory
+            for row in conn.execute(
+                """
+                SELECT tablename
+                FROM pg_tables
+                WHERE schemaname = 'public'
+                ORDER BY tablename
+                """
+            )
+        ]
+        db_ok = True
+        db_error = None
     except Exception as exc:
         tables = []
         db_ok = False
@@ -95,16 +108,18 @@ class TierOverrideRequest(BaseModel):
 
 
 @app.post("/coverage/override")
-def coverage_override(body: TierOverrideRequest) -> dict:
+def coverage_override(
+    body: TierOverrideRequest,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> dict:
     """Manually override an instrument's coverage tier."""
     try:
-        with psycopg.connect(settings.database_url) as conn:
-            change = override_tier(
-                conn=conn,
-                instrument_id=body.instrument_id,
-                new_tier=body.new_tier,
-                rationale=body.rationale,
-            )
+        change = override_tier(
+            conn=conn,
+            instrument_id=body.instrument_id,
+            new_tier=body.new_tier,
+            rationale=body.rationale,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -138,11 +153,10 @@ _KNOWN_JOBS: list[str] = [
 
 
 @app.get("/health/data")
-def health_data() -> dict:
+def health_data(conn: psycopg.Connection[object] = Depends(get_conn)) -> dict:
     """Per-layer staleness status, job health, and kill switch state."""
     try:
-        with psycopg.connect(settings.database_url) as conn:
-            report = get_system_health(conn, job_names=_KNOWN_JOBS)
+        report = get_system_health(conn, job_names=_KNOWN_JOBS)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -187,21 +201,23 @@ class KillSwitchRequest(BaseModel):
     activated_by: str = ""
 
     @model_validator(mode="after")
-    def reason_required_when_active(self) -> "KillSwitchRequest":
+    def reason_required_when_active(self) -> KillSwitchRequest:
         if self.active and not self.reason.strip():
             raise ValueError("reason is required when activating the kill switch")
         return self
 
 
 @app.post("/kill-switch")
-def set_kill_switch(body: KillSwitchRequest) -> dict:
+def set_kill_switch(
+    body: KillSwitchRequest,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> dict:
     """Activate or deactivate the system-wide kill switch."""
     try:
-        with psycopg.connect(settings.database_url) as conn:
-            if body.active:
-                activate_kill_switch(conn, reason=body.reason, activated_by=body.activated_by)
-            else:
-                deactivate_kill_switch(conn)
+        if body.active:
+            activate_kill_switch(conn, reason=body.reason, activated_by=body.activated_by)
+        else:
+            deactivate_kill_switch(conn)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
