@@ -139,7 +139,12 @@ class TestHealthDb:
 
 
 class TestKillSwitch:
-    """POST /kill-switch — kill switch via pooled connection."""
+    """POST /kill-switch (deprecated alias) — delegates to config router.
+
+    The canonical path is POST /config/kill-switch (tested in
+    test_api_config.py).  This test only proves that the deprecated alias
+    is still wired and that the pooled connection reaches the service layer.
+    """
 
     def teardown_method(self) -> None:
         _cleanup()
@@ -148,7 +153,7 @@ class TestKillSwitch:
         conn = _mock_conn()
         _setup(conn)
 
-        with patch("app.main.activate_kill_switch") as mock_activate:
+        with patch("app.api.config.activate_kill_switch") as mock_activate:
             resp = client.post(
                 "/kill-switch",
                 json={"active": True, "reason": "test", "activated_by": "ci"},

@@ -32,8 +32,8 @@ import psycopg
 import psycopg.rows
 from psycopg.types.json import Jsonb
 
-from app.config import Settings
 from app.providers.broker import BrokerOrderResult, BrokerProvider
+from app.services.runtime_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -435,7 +435,6 @@ def execute_order(
     conn: psycopg.Connection[Any],
     recommendation_id: int,
     decision_id: int,
-    settings: Settings,
     broker: BrokerProvider | None = None,
 ) -> ExecuteResult:
     """
@@ -478,7 +477,13 @@ def execute_order(
             requested_amount = cash * Decimal(str(rec["suggested_size_pct"]))
 
     # --- Step 3: call broker or demo mode ---
-    is_live = settings.enable_live_trading
+    # Read live-mode flag from runtime_config (DB-backed source of truth).
+    # Any RuntimeConfigCorrupt propagates: we will NOT default to demo mode
+    # silently when live mode could have been intended (or the reverse).
+    # Callers must have already passed execution_guard, which fails closed
+    # on the same condition.
+    runtime = get_runtime_config(conn)
+    is_live = runtime.enable_live_trading
 
     if is_live:
         if broker is None:

@@ -8,10 +8,12 @@ from contextlib import asynccontextmanager
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from app.api.audit import router as audit_router
 from app.api.auth import require_auth
+from app.api.config import KillSwitchRequest, post_kill_switch
+from app.api.config import router as config_router
 from app.api.filings import router as filings_router
 from app.api.instruments import router as instruments_router
 from app.api.news import router as news_router
@@ -23,11 +25,7 @@ from app.config import settings
 from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
 from app.services.coverage import override_tier
-from app.services.ops_monitor import (
-    activate_kill_switch,
-    deactivate_kill_switch,
-    get_system_health,
-)
+from app.services.ops_monitor import get_system_health
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -56,6 +54,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="eBull", version="0.1.0", lifespan=lifespan)
 app.include_router(audit_router)
+app.include_router(config_router)
 app.include_router(filings_router)
 app.include_router(instruments_router)
 app.include_router(news_router)
@@ -67,12 +66,13 @@ app.include_router(theses_router)
 
 @app.get("/health")
 def health() -> dict:
+    # Trading-mode flags intentionally NOT returned here.  They live in
+    # runtime_config (DB-backed) and are exposed via /config — surfacing the
+    # env-backed values would be misleading and stale (issue #56).
     return {
         "status": "ok",
         "env": settings.app_env,
         "etoro_env": settings.etoro_env,
-        "auto_trading_enabled": settings.enable_auto_trading,
-        "live_trading_enabled": settings.enable_live_trading,
     }
 
 
@@ -206,34 +206,24 @@ def health_data(conn: psycopg.Connection[object] = Depends(get_conn)) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Kill switch
+# Kill switch — deprecated alias
 # ---------------------------------------------------------------------------
+#
+# The canonical route is POST /config/kill-switch (issue #56).  This alias is
+# kept temporarily so any existing operator scripts do not break in this
+# release.  It delegates to the same handler, so behaviour and audit writes
+# are identical.  Remove once the settings UI (#65) lands.
 
 
-class KillSwitchRequest(BaseModel):
-    active: bool
-    reason: str = ""
-    activated_by: str = ""
-
-    @model_validator(mode="after")
-    def reason_required_when_active(self) -> KillSwitchRequest:
-        if self.active and not self.reason.strip():
-            raise ValueError("reason is required when activating the kill switch")
-        return self
-
-
-@app.post("/kill-switch", dependencies=[Depends(require_auth)])
-def set_kill_switch(
+@app.post(
+    "/kill-switch",
+    dependencies=[Depends(require_auth)],
+    deprecated=True,
+    tags=["config"],
+)
+def set_kill_switch_deprecated(
     body: KillSwitchRequest,
     conn: psycopg.Connection[object] = Depends(get_conn),
-) -> dict:
-    """Activate or deactivate the system-wide kill switch."""
-    try:
-        if body.active:
-            activate_kill_switch(conn, reason=body.reason, activated_by=body.activated_by)
-        else:
-            deactivate_kill_switch(conn)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    return {"active": body.active, "reason": body.reason}
+) -> dict[str, object]:
+    """Deprecated alias for POST /config/kill-switch."""
+    return post_kill_switch(body, conn)

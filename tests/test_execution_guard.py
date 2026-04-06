@@ -22,15 +22,16 @@ Mock DB approach mirrors test_portfolio.py:
 Cursor call order inside evaluate_recommendation:
   1. _load_recommendation          — fetchone
   2. _load_kill_switch             — fetchone
-  3. _load_coverage                — fetchone
-  4. _load_latest_thesis           — fetchone
-  5. _load_quote                   — fetchone
-  6. _load_cash                    — fetchone
-  7. _load_sector_exposure         — 3 cursors: instruments, positions, cash_ledger
-  8. _write_audit                  — 1 cursor (INSERT RETURNING decision_id)
+  3. get_runtime_config            — fetchone (runtime_config singleton)
+  4. _load_coverage                — fetchone
+  5. _load_latest_thesis           — fetchone
+  6. _load_quote                   — fetchone
+  7. _load_cash                    — fetchone
+  8. _load_sector_exposure         — 3 cursors: instruments, positions, cash_ledger
+  9. _write_audit                  — 1 cursor (INSERT RETURNING decision_id)
      + conn.execute (UPDATE status)
 
-Note: for EXIT actions, cursors 3–7 (coverage through sector_exposure) are
+Note: for EXIT actions, cursors 4-8 (coverage through sector_exposure) are
 skipped, so the sequence is shorter.
 """
 
@@ -42,7 +43,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.config import Settings
 from app.services.execution_guard import (
     GuardResult,
     RuleResult,
@@ -63,27 +63,6 @@ from app.services.execution_guard import (
 # ---------------------------------------------------------------------------
 
 _NOW = datetime(2026, 4, 6, 9, 0, 0, tzinfo=UTC)
-
-_SETTINGS_LIVE = Settings(
-    database_url="postgresql://x",
-    enable_auto_trading=True,
-    enable_live_trading=True,
-)
-_SETTINGS_NO_AUTO = Settings(
-    database_url="postgresql://x",
-    enable_auto_trading=False,
-    enable_live_trading=True,
-)
-_SETTINGS_NO_LIVE = Settings(
-    database_url="postgresql://x",
-    enable_auto_trading=True,
-    enable_live_trading=False,
-)
-_SETTINGS_ALL_OFF = Settings(
-    database_url="postgresql://x",
-    enable_auto_trading=False,
-    enable_live_trading=False,
-)
 
 
 def _make_cursor(rows: list[dict[str, Any]]) -> MagicMock:
@@ -123,6 +102,28 @@ def _rec_cursor(
                 "instrument_id": instrument_id,
                 "action": action,
                 "model_version": model_version,
+            }
+        ]
+    )
+
+
+def _runtime_cursor(
+    enable_auto_trading: bool = True,
+    enable_live_trading: bool = True,
+) -> MagicMock:
+    """Cursor returning a runtime_config row.
+
+    Pass an empty list to _make_cursor to simulate a missing singleton row
+    (configuration corruption).
+    """
+    return _make_cursor(
+        [
+            {
+                "enable_auto_trading": enable_auto_trading,
+                "enable_live_trading": enable_live_trading,
+                "updated_at": _NOW,
+                "updated_by": "test",
+                "reason": "test",
             }
         ]
     )
@@ -188,6 +189,9 @@ def _audit_cursor(decision_id: int = 99) -> MagicMock:
 def _buy_cursors(
     *,
     ks_active: bool = False,
+    runtime_auto: bool = True,
+    runtime_live: bool = True,
+    runtime_corrupt: bool = False,
     coverage_tier: int = 1,
     coverage_frequency: str = "weekly",
     thesis_age_days: int = 3,
@@ -201,9 +205,15 @@ def _buy_cursors(
     decision_id: int = 99,
 ) -> list[MagicMock]:
     """Convenience: build the full cursor sequence for a BUY evaluation."""
+    runtime = (
+        _make_cursor([])
+        if runtime_corrupt
+        else _runtime_cursor(enable_auto_trading=runtime_auto, enable_live_trading=runtime_live)
+    )
     return [
         _rec_cursor(action="BUY"),
         _ks_cursor(is_active=ks_active),
+        runtime,
         _coverage_cursor(tier=coverage_tier, frequency=coverage_frequency),
         _thesis_cursor(age_days=thesis_age_days),
         _quote_cursor(spread_flag=spread_flag),
@@ -222,12 +232,21 @@ def _buy_cursors(
 def _exit_cursors(
     *,
     ks_active: bool = False,
+    runtime_auto: bool = True,
+    runtime_live: bool = True,
+    runtime_corrupt: bool = False,
     decision_id: int = 99,
 ) -> list[MagicMock]:
     """Convenience: build the full cursor sequence for an EXIT evaluation."""
+    runtime = (
+        _make_cursor([])
+        if runtime_corrupt
+        else _runtime_cursor(enable_auto_trading=runtime_auto, enable_live_trading=runtime_live)
+    )
     return [
         _rec_cursor(action="EXIT"),
         _ks_cursor(is_active=ks_active),
+        runtime,
         _audit_cursor(decision_id=decision_id),
     ]
 
@@ -498,12 +517,11 @@ class TestEvaluateRecommendation:
     def _eval(
         self,
         cursors: list[MagicMock],
-        settings: Settings = _SETTINGS_LIVE,
         recommendation_id: int = 42,
     ) -> GuardResult:
         conn = _make_conn(cursors)
         with patch("app.services.execution_guard._utcnow", return_value=_NOW):
-            return evaluate_recommendation(conn, recommendation_id, settings)
+            return evaluate_recommendation(conn, recommendation_id)
 
     # --- Happy path ---
 
@@ -540,23 +558,38 @@ class TestEvaluateRecommendation:
         assert result.verdict == "FAIL"
         assert "kill_switch_config_corrupt" in result.failed_rules
 
-    # --- Config flags ---
+    # --- Runtime config flags ---
 
     def test_auto_trading_disabled_fails_buy(self) -> None:
-        result = self._eval(_buy_cursors(), settings=_SETTINGS_NO_AUTO)
+        result = self._eval(_buy_cursors(runtime_auto=False))
         assert result.verdict == "FAIL"
         assert "auto_trading" in result.failed_rules
 
     def test_live_trading_disabled_fails_buy(self) -> None:
-        result = self._eval(_buy_cursors(), settings=_SETTINGS_NO_LIVE)
+        result = self._eval(_buy_cursors(runtime_live=False))
         assert result.verdict == "FAIL"
         assert "live_trading" in result.failed_rules
 
-    def test_both_config_flags_off_both_appear_in_failed_rules(self) -> None:
-        result = self._eval(_buy_cursors(), settings=_SETTINGS_ALL_OFF)
+    def test_both_runtime_flags_off_both_appear_in_failed_rules(self) -> None:
+        result = self._eval(_buy_cursors(runtime_auto=False, runtime_live=False))
         assert result.verdict == "FAIL"
         assert "auto_trading" in result.failed_rules
         assert "live_trading" in result.failed_rules
+
+    def test_runtime_config_row_missing_fails_closed_buy(self) -> None:
+        # Missing runtime_config singleton -> fail closed; auto/live rules
+        # are NOT emitted because the corrupt-config rule supersedes them.
+        result = self._eval(_buy_cursors(runtime_corrupt=True))
+        assert result.verdict == "FAIL"
+        assert "runtime_config_corrupt" in result.failed_rules
+        assert "auto_trading" not in result.failed_rules
+        assert "live_trading" not in result.failed_rules
+
+    def test_runtime_config_row_missing_fails_closed_exit(self) -> None:
+        # Even an EXIT, which skips most checks, must fail when config is corrupt
+        result = self._eval(_exit_cursors(runtime_corrupt=True))
+        assert result.verdict == "FAIL"
+        assert "runtime_config_corrupt" in result.failed_rules
 
     # --- Coverage ---
 
@@ -568,7 +601,7 @@ class TestEvaluateRecommendation:
 
     def test_no_coverage_row_fails_buy(self) -> None:
         cursors = _buy_cursors()
-        cursors[2] = _make_cursor([])  # no coverage row
+        cursors[3] = _make_cursor([])  # no coverage row
         result = self._eval(cursors)
         assert result.verdict == "FAIL"
         assert "no_coverage_row" in result.failed_rules
@@ -591,7 +624,7 @@ class TestEvaluateRecommendation:
 
     def test_no_thesis_row_fails_buy(self) -> None:
         cursors = _buy_cursors()
-        cursors[3] = _make_cursor([])  # no thesis row
+        cursors[4] = _make_cursor([])  # no thesis row
         result = self._eval(cursors)
         assert result.verdict == "FAIL"
         assert "no_thesis" in result.failed_rules
@@ -610,7 +643,7 @@ class TestEvaluateRecommendation:
 
     def test_spread_unavailable_fails_buy(self) -> None:
         cursors = _buy_cursors()
-        cursors[4] = _make_cursor([])  # no quotes row
+        cursors[5] = _make_cursor([])  # no quotes row
         result = self._eval(cursors)
         assert result.verdict == "FAIL"
         assert "spread_unavailable" in result.failed_rules
@@ -693,7 +726,7 @@ class TestEvaluateRecommendation:
         """conn.execute() must fire the UPDATE — ensures the status write cannot be silently dropped."""
         conn = _make_conn(_buy_cursors(decision_id=99))
         with patch("app.services.execution_guard._utcnow", return_value=_NOW):
-            evaluate_recommendation(conn, 42, _SETTINGS_LIVE)
+            evaluate_recommendation(conn, 42)
         conn.execute.assert_called_once()
         call_sql: str = conn.execute.call_args[0][0]
         assert "UPDATE trade_recommendations" in call_sql
@@ -713,8 +746,8 @@ class TestEvaluateRecommendation:
 
     def test_multiple_failed_rules_all_listed(self) -> None:
         # Kill switch active + both config flags off
-        cursors = _buy_cursors(ks_active=True)
-        result = self._eval(cursors, settings=_SETTINGS_ALL_OFF)
+        cursors = _buy_cursors(ks_active=True, runtime_auto=False, runtime_live=False)
+        result = self._eval(cursors)
         assert result.verdict == "FAIL"
         assert "kill_switch" in result.failed_rules
         assert "auto_trading" in result.failed_rules
@@ -730,12 +763,12 @@ class TestEvaluateRecommendation:
         conn = _make_conn([_make_cursor([])])  # fetchone returns None
         with pytest.raises(ValueError, match="recommendation_id=42 not found"):
             with patch("app.services.execution_guard._utcnow", return_value=_NOW):
-                evaluate_recommendation(conn, 42, _SETTINGS_LIVE)
+                evaluate_recommendation(conn, 42)
 
     def test_recommendation_not_found_does_not_write_audit(self) -> None:
         conn = _make_conn([_make_cursor([])])
         with pytest.raises(ValueError):
             with patch("app.services.execution_guard._utcnow", return_value=_NOW):
-                evaluate_recommendation(conn, 42, _SETTINGS_LIVE)
+                evaluate_recommendation(conn, 42)
         # transaction() should never have been entered
         conn.transaction.assert_not_called()

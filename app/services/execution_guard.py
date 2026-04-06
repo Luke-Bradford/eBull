@@ -13,9 +13,10 @@ Responsibilities:
 Rule application by action:
 
   All actions (BUY, ADD, EXIT, HOLD):
-    - kill_switch           — DB-backed runtime flag; missing row = config corrupt
-    - auto_trading_disabled — settings.enable_auto_trading must be True
-    - live_trading_disabled — settings.enable_live_trading must be True
+    - kill_switch              — DB-backed runtime flag; missing row = config corrupt
+    - runtime_config_corrupt   — runtime_config singleton row missing (fail closed)
+    - auto_trading             — runtime_config.enable_auto_trading must be True
+    - live_trading             — runtime_config.enable_live_trading must be True
 
   BUY / ADD only:
     - coverage_not_tier1    — instrument must have coverage_tier = 1
@@ -47,7 +48,7 @@ import psycopg
 import psycopg.rows
 from psycopg.types.json import Jsonb
 
-from app.config import Settings
+from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ Verdict = Literal["PASS", "FAIL"]
 RuleName = Literal[
     "kill_switch",
     "kill_switch_config_corrupt",
+    "runtime_config_corrupt",
     "auto_trading",
     "live_trading",
     "coverage_not_tier1",
@@ -316,7 +318,7 @@ def _check_auto_trading(enabled: bool) -> RuleResult:
         return RuleResult(
             rule="auto_trading",
             passed=False,
-            detail="settings.enable_auto_trading is False",
+            detail="runtime_config.enable_auto_trading is False",
         )
     return RuleResult(rule="auto_trading", passed=True)
 
@@ -326,7 +328,7 @@ def _check_live_trading(enabled: bool) -> RuleResult:
         return RuleResult(
             rule="live_trading",
             passed=False,
-            detail="settings.enable_live_trading is False",
+            detail="runtime_config.enable_live_trading is False",
         )
     return RuleResult(rule="live_trading", passed=True)
 
@@ -536,7 +538,6 @@ def _utcnow() -> datetime:
 def evaluate_recommendation(
     conn: psycopg.Connection[Any],
     recommendation_id: int,
-    settings: Settings,
 ) -> GuardResult:
     """
     Evaluate a trade recommendation against all hard rules and write one
@@ -564,8 +565,14 @@ def evaluate_recommendation(
     model_version: str | None = rec.get("model_version")
 
     # --- Step 2: load all state (no transaction open yet) ---
-    # Always load kill switch (applies to every action).
+    # Always load kill switch and runtime config (apply to every action).
     ks_row = _load_kill_switch(conn)
+    try:
+        runtime = get_runtime_config(conn)
+        runtime_corrupt = False
+    except RuntimeConfigCorrupt:
+        runtime = None
+        runtime_corrupt = True
 
     # BUY / ADD require additional state; EXIT intentionally skips these checks
     # (do not block a protective exit on stale thesis, off-tier coverage, etc.).
@@ -590,8 +597,20 @@ def evaluate_recommendation(
 
     # Rules that apply to every action
     rule_results.append(_check_kill_switch(ks_row))
-    rule_results.append(_check_auto_trading(settings.enable_auto_trading))
-    rule_results.append(_check_live_trading(settings.enable_live_trading))
+    if runtime_corrupt or runtime is None:
+        # Fail closed: missing runtime_config singleton row.  We do NOT fall
+        # through to the auto/live checks with default values — that would
+        # silently bypass operator intent.  Prevention-log #46.
+        rule_results.append(
+            RuleResult(
+                rule="runtime_config_corrupt",
+                passed=False,
+                detail="runtime_config singleton row missing — configuration corrupt",
+            )
+        )
+    else:
+        rule_results.append(_check_auto_trading(runtime.enable_auto_trading))
+        rule_results.append(_check_live_trading(runtime.enable_live_trading))
 
     # Rules that apply to BUY / ADD only
     if action in ("BUY", "ADD"):

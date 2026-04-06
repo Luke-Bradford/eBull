@@ -30,8 +30,10 @@ class Settings(BaseSettings):
     max_full_position_pct: int = 10
     max_sector_exposure_pct: int = 25
 
-    enable_auto_trading: bool = False
-    enable_live_trading: bool = False
+    # NOTE: enable_auto_trading and enable_live_trading used to live here.
+    # As of issue #56 they are DB-backed (runtime_config singleton) and
+    # toggled at runtime via PATCH /config — env values are no longer the
+    # source of truth.
 
     # Operator API key for authenticating requests to protected endpoints.
     # Sourced from EBULL_API_KEY (or API_KEY via env_file). When unset, all

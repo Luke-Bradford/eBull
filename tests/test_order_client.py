@@ -39,7 +39,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.config import Settings
 from app.providers.broker import BrokerOrderResult
 from app.services.order_client import (
     _load_approved_recommendation,
@@ -48,6 +47,7 @@ from app.services.order_client import (
     _synthetic_fill,
     execute_order,
 )
+from app.services.runtime_config import RuntimeConfig, RuntimeConfigCorrupt
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -55,17 +55,34 @@ from app.services.order_client import (
 
 _NOW = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
 
-_SETTINGS_DEMO = Settings(
-    database_url="postgresql://x",
+_RUNTIME_DEMO = RuntimeConfig(
     enable_auto_trading=True,
     enable_live_trading=False,
+    updated_at=_NOW,
+    updated_by="test",
+    reason="test",
 )
 
-_SETTINGS_LIVE = Settings(
-    database_url="postgresql://x",
+_RUNTIME_LIVE = RuntimeConfig(
     enable_auto_trading=True,
     enable_live_trading=True,
+    updated_at=_NOW,
+    updated_by="test",
+    reason="test",
 )
+
+
+@pytest.fixture(autouse=True)
+def _patch_runtime_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default every test in this file to demo mode.
+
+    Tests that need live mode override via monkeypatch within the test body.
+    Tests that need a corrupt-config failure raise RuntimeConfigCorrupt.
+    """
+    monkeypatch.setattr(
+        "app.services.order_client.get_runtime_config",
+        lambda _conn: _RUNTIME_DEMO,
+    )
 
 
 def _make_cursor(rows: list[dict[str, Any]]) -> MagicMock:
@@ -282,7 +299,6 @@ class TestExecuteOrderDemoMode:
             conn,
             recommendation_id=42,
             decision_id=10,
-            settings=_SETTINGS_DEMO,
         )
         assert result.outcome == "filled"
         assert result.order_id == 7
@@ -309,7 +325,6 @@ class TestExecuteOrderDemoMode:
             conn,
             recommendation_id=42,
             decision_id=10,
-            settings=_SETTINGS_DEMO,
         )
         assert result.outcome == "filled"
         assert result.order_id == 8
@@ -333,7 +348,6 @@ class TestExecuteOrderDemoMode:
             conn,
             recommendation_id=42,
             decision_id=10,
-            settings=_SETTINGS_DEMO,
         )
         assert result.outcome == "failed"
         assert result.fill_id is None
@@ -359,7 +373,6 @@ class TestExecuteOrderDemoMode:
             conn,
             recommendation_id=42,
             decision_id=10,
-            settings=_SETTINGS_DEMO,
             broker=broker,
         )
         broker.place_order.assert_not_called()
@@ -381,7 +394,6 @@ class TestExecuteOrderDemoMode:
             conn,
             recommendation_id=42,
             decision_id=10,
-            settings=_SETTINGS_DEMO,
         )
         # Find the decision_audit INSERT among conn.execute calls
         audit_calls = [c for c in conn.execute.call_args_list if "decision_audit" in str(c)]
@@ -394,6 +406,14 @@ class TestExecuteOrderDemoMode:
 
 
 class TestExecuteOrderLiveMode:
+    @pytest.fixture(autouse=True)
+    def _force_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Override the file-level demo default for every test in this class.
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_live_buy_calls_broker_place_order(self, _mock_now: MagicMock) -> None:
         broker = MagicMock()
@@ -417,7 +437,6 @@ class TestExecuteOrderLiveMode:
             conn,
             recommendation_id=42,
             decision_id=10,
-            settings=_SETTINGS_LIVE,
             broker=broker,
         )
         assert result.outcome == "filled"
@@ -447,7 +466,6 @@ class TestExecuteOrderLiveMode:
             conn,
             recommendation_id=42,
             decision_id=10,
-            settings=_SETTINGS_LIVE,
             broker=broker,
         )
         assert result.outcome == "filled"
@@ -465,7 +483,6 @@ class TestExecuteOrderLiveMode:
                 conn,
                 recommendation_id=42,
                 decision_id=10,
-                settings=_SETTINGS_LIVE,
                 broker=None,
             )
 
@@ -476,6 +493,17 @@ class TestExecuteOrderLiveMode:
 
 
 class TestExecuteOrderFailures:
+    @pytest.fixture(autouse=True)
+    def _force_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # All tests in this class exercise broker error paths, which are
+        # only reachable in live mode.  The two not-found / not-approved
+        # tests fail before the runtime read, so this override is harmless
+        # for them.
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_broker_failed_persists_order_with_failed_status(self, _mock_now: MagicMock) -> None:
         """Failed broker call still persists an order row and audit row."""
@@ -498,7 +526,6 @@ class TestExecuteOrderFailures:
             conn,
             recommendation_id=42,
             decision_id=10,
-            settings=_SETTINGS_LIVE,
             broker=broker,
         )
         assert result.outcome == "failed"
@@ -531,7 +558,6 @@ class TestExecuteOrderFailures:
             conn,
             recommendation_id=42,
             decision_id=10,
-            settings=_SETTINGS_LIVE,
             broker=broker,
         )
         assert result.outcome == "pending"
@@ -546,7 +572,6 @@ class TestExecuteOrderFailures:
                 conn,
                 recommendation_id=999,
                 decision_id=10,
-                settings=_SETTINGS_DEMO,
             )
 
     def test_recommendation_not_approved_raises(self) -> None:
@@ -556,7 +581,6 @@ class TestExecuteOrderFailures:
                 conn,
                 recommendation_id=42,
                 decision_id=10,
-                settings=_SETTINGS_DEMO,
             )
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
@@ -581,7 +605,6 @@ class TestExecuteOrderFailures:
             conn,
             recommendation_id=42,
             decision_id=10,
-            settings=_SETTINGS_LIVE,
             broker=broker,
         )
         assert result.outcome == "failed"
@@ -610,8 +633,36 @@ class TestExecuteOrderFailures:
             conn,
             recommendation_id=42,
             decision_id=10,
-            settings=_SETTINGS_LIVE,
             broker=broker,
         )
         audit_calls = [c for c in conn.execute.call_args_list if "decision_audit" in str(c)]
         assert len(audit_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestExecuteOrderRuntimeConfigCorrupt
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteOrderRuntimeConfigCorrupt:
+    """RuntimeConfigCorrupt must propagate from execute_order — never silently
+    fall through to demo or live mode.  The execution_guard fails closed on
+    the same condition; the order client is the second line of defence.
+    """
+
+    def test_corrupt_runtime_config_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(_conn: object) -> RuntimeConfig:
+            raise RuntimeConfigCorrupt("singleton missing")
+
+        monkeypatch.setattr("app.services.order_client.get_runtime_config", _raise)
+
+        cursors = [
+            _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
+        ]
+        conn = _make_conn(cursors)
+        with pytest.raises(RuntimeConfigCorrupt):
+            execute_order(conn, recommendation_id=42, decision_id=10)
+
+        # No order should have been persisted, no audit row written.
+        conn.transaction.assert_not_called()

@@ -99,10 +99,10 @@ class TestRequireAuth(_AuthTestBase):
         # let the request through. Patch the service to a no-op.
         from unittest.mock import patch
 
-        with patch("app.main.deactivate_kill_switch"):
+        with patch("app.api.config.deactivate_kill_switch"):
             resp = client.post(
                 "/kill-switch",
-                json={"active": False},
+                json={"active": False, "reason": "test", "activated_by": "ci"},
                 headers={"Authorization": f"Bearer {_VALID_KEY}"},
             )
         assert resp.status_code == 200
