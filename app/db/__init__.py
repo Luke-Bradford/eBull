@@ -15,13 +15,13 @@ Usage in route handlers::
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 
 import psycopg
 from fastapi import Request
 
 
-def get_conn(request: Request) -> Iterator[psycopg.Connection[object]]:
+def get_conn(request: Request) -> Generator[psycopg.Connection[object], None, None]:
     """FastAPI dependency that checks out a connection from the pool.
 
     The connection is returned to the pool when the request completes.
