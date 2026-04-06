@@ -557,6 +557,52 @@ class TestS104Pool:
         assert matches[0].gain_or_loss_gbp == _D("300")
         assert pool.units == _D("100")
 
+    def test_3_unit_lot_no_decimal_drift(self) -> None:
+        """Regression: pool with 3 units and 1000 GBP cost produces a
+        repeating decimal avg (333.333...). Two partial disposals must
+        not cause pool cost to drift negative."""
+        buy = _lot(
+            tax_lot_id=1,
+            event_time=datetime(2025, 7, 1, 10, 0, 0, tzinfo=UTC),
+            quantity=_D("3"),
+            amount_gbp=_D("1000"),
+        )
+        sell1 = _lot(
+            tax_lot_id=2,
+            event_time=datetime(2025, 7, 2, 10, 0, 0, tzinfo=UTC),
+            direction="disposal",
+            event_type="EXIT",
+            quantity=_D("1"),
+            amount_gbp=_D("500"),
+            reference_fill_id=2,
+        )
+        sell2 = _lot(
+            tax_lot_id=3,
+            event_time=datetime(2025, 7, 3, 10, 0, 0, tzinfo=UTC),
+            direction="disposal",
+            event_type="EXIT",
+            quantity=_D("1"),
+            amount_gbp=_D("500"),
+            reference_fill_id=3,
+        )
+        sell3 = _lot(
+            tax_lot_id=4,
+            event_time=datetime(2025, 7, 4, 10, 0, 0, tzinfo=UTC),
+            direction="disposal",
+            event_type="EXIT",
+            quantity=_D("1"),
+            amount_gbp=_D("500"),
+            reference_fill_id=4,
+        )
+        # Must not raise RuntimeError from negative pool cost
+        matches, pool = _match_disposals_for_instrument([buy], [sell1, sell2, sell3])
+        assert len(matches) == 3
+        assert pool.units == _D("0")
+        assert pool.cost_gbp >= _D("0")
+        # Total acquisition cost should equal 1000 (no cost lost or gained)
+        total_acq = sum(m.acquisition_cost_gbp for m in matches)
+        assert total_acq == _D("1000")
+
     def test_pool_depleted_to_zero(self) -> None:
         buy = _lot(
             tax_lot_id=1,
@@ -861,10 +907,12 @@ class TestIngestion:
         # Cursor 2: FX rate lookup
         fx_cursor = _make_cursor([{"rate": _D("0.80")}])
 
-        # Cursor 3: count of total fill tax_lots (after write)
-        count_cursor = _make_cursor([{"cnt": 1}])
+        conn = _make_conn([fills_cursor, fx_cursor])
 
-        conn = _make_conn([fills_cursor, fx_cursor, count_cursor])
+        # conn.execute returns a result with rowcount=1 (row inserted)
+        exec_result = MagicMock()
+        exec_result.rowcount = 1
+        conn.execute.return_value = exec_result
 
         result = ingest_tax_events(conn)
 

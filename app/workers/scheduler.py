@@ -403,6 +403,12 @@ def daily_tax_reconciliation() -> None:
 
     Runs daily. Idempotent — safe to re-run. Requires fx_rates to be
     populated for any non-GBP instruments before ingestion.
+
+    Two separate connections are used intentionally so that a matching
+    failure does not roll back committed tax_lot ingestion. If the
+    process crashes between ingestion and matching, disposal_matches
+    will be stale until the next run — acceptable because matching is
+    a full delete-and-recompute and will self-correct on re-run.
     """
     logger.info("daily_tax_reconciliation: starting")
 

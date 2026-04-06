@@ -37,6 +37,9 @@ _D = Decimal
 # ---------------------------------------------------------------------------
 
 # (from_date_inclusive, to_date_inclusive, basic_rate, higher_rate)
+# Earliest supported disposal date: 2024-04-06 (start of 2024/25 tax year).
+# Disposals before this date will raise RuntimeError. To support earlier
+# years, add the applicable rate period to this list.
 _CGT_RATE_PERIODS: list[tuple[date, date, Decimal, Decimal]] = [
     # Pre-Autumn-Budget 2024/25
     (date(2024, 4, 6), date(2024, 10, 29), _D("0.10"), _D("0.20")),
@@ -90,6 +93,12 @@ class MutablePoolState:
 
     @property
     def avg_cost_gbp(self) -> Decimal:
+        """Average cost per unit. Returns 0 when pool is empty.
+
+        Only valid for gain/loss computation when units > 0.
+        Callers in _match_disposals_for_instrument always guard with
+        ``if pool.units > 0`` before using the average.
+        """
         if self.units <= 0:
             return _D("0")
         return self.cost_gbp / self.units
@@ -231,36 +240,30 @@ def _load_fx_rate(
 
 def ingest_tax_events(conn: psycopg.Connection[Any]) -> IngestionResult:
     """Ingest fills and cash events into tax_lots. Idempotent."""
-    fills = _ingest_fills(conn)
+    inserted, attempted = _ingest_fills(conn)
     cash = _ingest_cash_events(conn)
 
-    # Count how many fills were already present (skipped by ON CONFLICT)
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute("SELECT COUNT(*) AS cnt FROM tax_lots WHERE reference_fill_id IS NOT NULL")
-        row = cur.fetchone()
-        if row is None:
-            raise RuntimeError("COUNT query returned no rows")
-        total_fill_lots = int(row["cnt"])
-
-    already = total_fill_lots - fills
+    already = attempted - inserted
 
     logger.info(
         "ingest_tax_events: fills_ingested=%d cash_events=%d already_present=%d",
-        fills,
+        inserted,
         cash,
         already,
     )
     return IngestionResult(
-        fills_ingested=fills,
+        fills_ingested=inserted,
         cash_events_ingested=cash,
         already_present=already,
     )
 
 
-def _ingest_fills(conn: psycopg.Connection[Any]) -> int:
+def _ingest_fills(conn: psycopg.Connection[Any]) -> tuple[int, int]:
     """Read fills not yet in tax_lots, convert to GBP, write tax_lots rows.
 
-    Returns the number of new rows written.
+    Returns (inserted, attempted) — inserted counts rows actually written
+    (via RETURNING), attempted counts fills processed. The difference is
+    duplicates silently absorbed by ON CONFLICT DO NOTHING.
     """
     # Load un-ingested fills (read phase — before transaction)
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -285,7 +288,7 @@ def _ingest_fills(conn: psycopg.Connection[Any]) -> int:
         rows = cur.fetchall()
 
     if not rows:
-        return 0
+        return 0, 0
 
     # Resolve FX rates (read phase — before transaction)
     # Collect unique (uk_date, currency) pairs
@@ -298,7 +301,13 @@ def _ingest_fills(conn: psycopg.Connection[Any]) -> int:
             rate_cache[key] = _load_fx_rate(conn, uk_dt, currency)
 
     # Write phase — single atomic transaction
-    written = 0
+    # NOTE: The fill rows were loaded before this transaction opens.
+    # A concurrent fill committed between the NOT IN snapshot and this
+    # transaction would be re-attempted here; ON CONFLICT DO NOTHING
+    # absorbs the duplicate safely. The RETURNING clause ensures we
+    # count only actually-inserted rows, not conflict-skipped ones.
+    inserted = 0
+    attempted = 0
     with conn.transaction():
         for row in rows:
             action: str = row["action"]
@@ -332,7 +341,8 @@ def _ingest_fills(conn: psycopg.Connection[Any]) -> int:
             amount_gbp = cost_or_proceeds * fx_rate
             tax_year = _compute_tax_year(uk_dt)
 
-            conn.execute(
+            attempted += 1
+            result = conn.execute(
                 """
                 INSERT INTO tax_lots (
                     instrument_id, event_time, event_type, direction,
@@ -364,9 +374,11 @@ def _ingest_fills(conn: psycopg.Connection[Any]) -> int:
                     "fill_id": row["fill_id"],
                 },
             )
-            written += 1
+            # rowcount is 0 when ON CONFLICT DO NOTHING skips the row
+            if result.rowcount > 0:
+                inserted += 1
 
-    return written
+    return inserted, attempted
 
 
 def _ingest_cash_events(conn: psycopg.Connection[Any]) -> int:
@@ -380,7 +392,7 @@ def _ingest_cash_events(conn: psycopg.Connection[Any]) -> int:
     # their own dedup key — likely (event_type, event_time, instrument_id,
     # amount) natural key or a dedicated reference_event_id column.
     """
-    _ = conn
+    del conn  # unused until dividend/fee event_types exist
     return 0
 
 
@@ -402,11 +414,8 @@ def _match_disposals_for_instrument(
         # No disposals — just compute the pool from all acquisitions
         pool = MutablePoolState(units=_D("0"), cost_gbp=_D("0"))
         for acq in acquisitions:
-            # per_unit_cost (GBP/unit) = amount_gbp (GBP) / quantity (units)
-            per_unit = acq.amount_gbp / acq.quantity
             pool.units += acq.quantity
-            # quantity (units) * per_unit (GBP/unit) = cost (GBP)
-            pool.cost_gbp += acq.quantity * per_unit
+            pool.cost_gbp += acq.amount_gbp  # full lot — exact cost
         instrument_id = acquisitions[0].instrument_id if acquisitions else 0
         return [], PoolState(
             instrument_id=instrument_id,
@@ -440,11 +449,10 @@ def _match_disposals_for_instrument(
             if remaining <= 0:
                 in_pool.add(acq.tax_lot_id)
                 continue
-            # per_unit_cost (GBP/unit) = amount_gbp (GBP) / quantity (units)
-            per_unit = acq.amount_gbp / acq.quantity
-            # remaining (units) * per_unit (GBP/unit) = cost (GBP)
             pool.units += remaining
-            pool.cost_gbp += remaining * per_unit
+            # (remaining / quantity) * amount avoids repeating-decimal loss
+            # when remaining == quantity: (q/q)*a = 1*a = a exactly
+            pool.cost_gbp += (remaining / acq.quantity) * acq.amount_gbp
             in_pool.add(acq.tax_lot_id)
 
         # Step 2: same-day rule
@@ -482,9 +490,8 @@ def _match_disposals_for_instrument(
                 continue
             remaining = remaining_acq[acq.tax_lot_id]
             if remaining > 0:
-                per_unit = acq.amount_gbp / acq.quantity
                 pool.units += remaining
-                pool.cost_gbp += remaining * per_unit
+                pool.cost_gbp += (remaining / acq.quantity) * acq.amount_gbp
             in_pool.add(acq.tax_lot_id)
 
         # Step 3: 30-day rule (bed and breakfast)
@@ -527,10 +534,18 @@ def _match_disposals_for_instrument(
         # Step 4: Section 104 pool
         if disposal_remaining > 0 and pool.units > 0:
             match_units = min(disposal_remaining, pool.units)
-            # avg_cost (GBP/unit) = pool_cost (GBP) / pool_units (units)
-            avg_cost = pool.avg_cost_gbp
-            # match_units (units) * avg_cost (GBP/unit) = acq_cost (GBP)
-            acq_cost = match_units * avg_cost
+            # Use proportional fraction to avoid non-terminating decimal
+            # expansion when pool_cost / pool_units is repeating.
+            # fraction (dimensionless) = match_units (units) / pool_units (units)
+            # acq_cost (GBP) = fraction * pool_cost (GBP)
+            if match_units == pool.units:
+                # Full pool depletion — take exact remaining cost, no rounding
+                acq_cost = pool.cost_gbp
+            else:
+                # Quantize to 6 dp (matching DB NUMERIC(18,6)) so that
+                # cumulative subtractions leave an exact remainder for the
+                # final full-depletion withdrawal — guarantees cost conservation.
+                acq_cost = ((match_units / pool.units) * pool.cost_gbp).quantize(_D("0.000001"))
             per_unit_proceeds = disposal.amount_gbp / disposal.quantity
             disp_proceeds = match_units * per_unit_proceeds
 
@@ -563,9 +578,8 @@ def _match_disposals_for_instrument(
             continue
         remaining = remaining_acq[acq.tax_lot_id]
         if remaining > 0:
-            per_unit = acq.amount_gbp / acq.quantity
             pool.units += remaining
-            pool.cost_gbp += remaining * per_unit
+            pool.cost_gbp += (remaining / acq.quantity) * acq.amount_gbp
         in_pool.add(acq.tax_lot_id)
 
     # Invariant checks
@@ -840,7 +854,12 @@ def tax_year_summary(
     net_gain = Decimal(str(agg["net_gain"]))
     dividend_total = Decimal(str(div_row["dividend_total"]))
 
-    # Per-match weighted CGT estimates
+    # Per-match weighted CGT estimates.
+    # Invariant: gain_rows contains only rows where gain_or_loss_gbp > 0
+    # (filtered in the SQL query). total_gains is the sum of the same
+    # positive values. The scale factor below (taxable_net / total_gains)
+    # is therefore a valid ratio. If the query is ever changed to include
+    # losses, the denominator must also change.
     weighted_basic = _D("0")
     weighted_higher = _D("0")
     for gr in gain_rows:
