@@ -54,7 +54,7 @@ DEMOTE_T2_TO_T3_SCORE: float = 0.45
 # Tier 1 hard cap
 TIER_1_CAP: int = 50
 
-# Review frequency mapping (duplicated from thesis engine)
+# Review frequency mapping — duplicated from thesis.py; extract when touched next
 _REVIEW_FREQUENCY_DAYS: dict[str, int] = {
     "daily": 1,
     "weekly": 7,
@@ -601,6 +601,10 @@ def override_tier(
 ) -> TierChange:
     """
     Manually override an instrument's coverage tier.
+
+    Opens its own ``conn.transaction()`` block — do not call inside an
+    existing transaction. A ``ValueError`` raised during validation will
+    roll back the inner transaction (or savepoint) and propagate to the caller.
 
     Validates:
       - instrument exists and has a coverage row
