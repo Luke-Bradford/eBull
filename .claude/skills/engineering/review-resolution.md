@@ -13,9 +13,9 @@ No "I'll leave that for later" without a ticket.
 
 Every review comment must end in exactly one of these forms:
 
-- `FIXED <commit_sha>`
-- `DEFERRED <issue_number>`
-- `REBUTTED <reason>`
+- `FIXED {commit_sha}`
+- `DEFERRED #{issue_number}`
+- `REBUTTED {reason}`
 
 There is no fourth state.
 
@@ -26,7 +26,7 @@ Use when the issue was addressed in code on the same PR.
 
 Reply format:
 ```text
-FIXED <commit_sha> — <short explanation of what changed>
+FIXED {commit_sha} — {what_changed}
 ```
 
 ### DEFERRED
@@ -39,7 +39,7 @@ Requirements:
 
 Reply format:
 ```text
-DEFERRED #123 — <why it is safe to defer for now>
+DEFERRED #123 — {why_safe_to_defer}
 ```
 
 ### REBUTTED
@@ -52,7 +52,7 @@ Requirements:
 
 Reply format:
 ```text
-REBUTTED — <specific reason the concern does not apply>
+REBUTTED — {reason}
 ```
 
 ## Severity handling
@@ -85,7 +85,7 @@ REBUTTED — <specific reason the concern does not apply>
 4. Re-run local checks.
 5. Push the fix commit.
 6. Reply to every comment with one terminal state.
-7. **Wait for the re-review to post on the new commit** — poll `gh pr view <n> --comments` and `gh pr checks <n>` until both the review workflow and CI complete. Do not proceed until the re-review result is visible.
+7. **Wait for the re-review to post on the new commit** — poll `gh pr view {pr_number} --comments` and `gh pr checks {pr_number}` until both the review workflow and CI complete. Do not proceed until the re-review result is visible.
 8. If the re-review requests further changes, repeat from step 1.
 9. If a prevention lesson emerged, update the prevention log or a skill before merge.
 
@@ -103,9 +103,9 @@ Do not:
 
 Every PREVENTION comment must end in exactly one of these states:
 
-- `EXTRACTED <file>` — lesson added to a skill, workflow doc, checklist, or `docs/review-prevention-log.md`
-- `ALREADY_COVERED <file>` — rule already exists in that file; cite the exact file path
-- `REBUTTED <reason>` — prevention note does not apply; explain specifically why
+- `EXTRACTED {file}` — lesson added to a skill, workflow doc, checklist, or `docs/review-prevention-log.md`
+- `ALREADY_COVERED {file}` — rule already exists in that file; cite the exact file path
+- `REBUTTED {reason}` — prevention note does not apply; explain specifically why
 
 ### Rules
 
