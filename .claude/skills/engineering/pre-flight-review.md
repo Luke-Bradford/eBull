@@ -133,7 +133,6 @@ The prevention log captures recurring mistakes — the bugs that look "obviously
 ## Required same-class scan
 
 After finding one query/rule/test hazard in a file, grep the entire file for the same hazard and confirm each occurrence is either correct or fixed before pushing.
-A partial fix is not enough.
 
 Examples:
 - if one `fetchone()` needed `ORDER BY`, inspect every `fetchone()` in the file
@@ -141,7 +140,7 @@ Examples:
 - if one helper needed graceful failure, inspect similar helpers nearby
 - if one test used the wrong mock shape, inspect similar tests in the file
 
-A partial fix is not enough.
+A partial fix is not enough — push only when every occurrence is accounted for.
 
 ## Pre-push output
 

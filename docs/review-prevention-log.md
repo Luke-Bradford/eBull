@@ -48,7 +48,7 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - **Prevention rule:** Before pushing any `fetchone()` with `ORDER BY <col> LIMIT 1`, verify the sort column is not the same column already pinned by the `WHERE` predicate. The correct column is the one that distinguishes rows — typically a timestamp (`quoted_at`, `created_at`) or an auto-increment PK.
 - **Enforced in:** `.claude/skills/engineering/pre-flight-review.md` section B (SQL correctness)
 - **Promoted to skill?** yes — `.claude/skills/engineering/pre-flight-review.md`
-- **Notes:** Tables with a single-column PK that is also the `WHERE` filter (e.g. `coverage`, `quotes` in v1) are singleton-per-key today; adding `ORDER BY <pk>` is harmless but misleading. Add a comment explaining the PK guarantee, or use a freshness timestamp.
+- **Notes:** For tables where singleton-per-key is guaranteed by a schema constraint (e.g. `coverage.instrument_id PRIMARY KEY`): drop the `ORDER BY` entirely and add a comment stating the PK guarantee — a no-op sort is more misleading than no sort. For tables where uniqueness is enforced only by application logic (e.g. `quotes` upserted but no schema constraint): use the freshness timestamp (`ORDER BY quoted_at DESC LIMIT 1`).
 
 ---
 

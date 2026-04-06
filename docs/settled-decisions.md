@@ -2,6 +2,11 @@
 
 This file records **live, repo-level decisions that are already settled**.
 
+## Product name
+
+The project is called **eBull**. Use `eBull` in all documentation, code comments, and PR descriptions.
+The previous working name `trader-os` is retired.
+
 Its purpose is simple:
 
 - stop re-deciding things that are already decided
@@ -196,7 +201,7 @@ Use capped context in v1:
 ### Unknown cash rule
 - in the portfolio manager, empty / unknown cash does not hard-block recommendations
 - unknown cash should be recorded in the explanation
-- hard cash enforcement belongs to the execution guard
+- hard cash enforcement belongs to the execution guard (see "Cash enforcement" under Execution guard semantics below)
 
 ### AUM basis
 - AUM and concentration should use mark-to-market first
