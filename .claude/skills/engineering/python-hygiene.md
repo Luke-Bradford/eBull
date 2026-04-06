@@ -66,6 +66,17 @@ When a helper raises and is called from an orchestrator with `except Exception`,
 
 Before pushing any helper that raises: trace who catches it and what the failure scope is. If a single bad instrument would kill the whole batch run, that's the wrong failure mode.
 
+## Production invariants
+
+Never use `assert` for a condition that must hold in production.
+Use an explicit runtime check and raise a concrete exception, for example:
+
+```python
+if some_required_value is None:
+    raise RuntimeError("some_required_value must be present here")
+```
+`assert` is for developer assumptions and can be optimized away; production invariants must remain enforced.
+
 ## Sequential evaluation loops with shared resource limits
 
 Any loop evaluating candidates against a shared constraint (position count, sector cap, cash) must maintain a mutable accumulator updated after each approval:
