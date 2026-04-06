@@ -2,11 +2,10 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
 
 import psycopg
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, model_validator
 
 from app.config import settings
 from app.db.migrations import migration_status, run_migrations
@@ -124,6 +123,7 @@ def coverage_override(body: TierOverrideRequest) -> dict:
 
 # Job names that the scheduler uses — listed here so the health endpoint
 # can report on each without coupling to the scheduler module.
+# Keep in sync with app/workers/scheduler.py job function names.
 _KNOWN_JOBS: list[str] = [
     "nightly_universe_sync",
     "hourly_market_refresh",
@@ -144,7 +144,7 @@ def health_data() -> dict:
         with psycopg.connect(settings.database_url) as conn:
             report = get_system_health(conn, job_names=_KNOWN_JOBS)
     except Exception as exc:
-        return {"error": str(exc)}
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return {
         "checked_at": report.checked_at.isoformat(),
@@ -186,12 +186,11 @@ class KillSwitchRequest(BaseModel):
     reason: str = ""
     activated_by: str = ""
 
-    @field_validator("reason")
-    @classmethod
-    def reason_required_when_active(cls, v: str, info: Any) -> str:  # noqa: N805
-        if info.data.get("active") and not v.strip():
+    @model_validator(mode="after")
+    def reason_required_when_active(self) -> "KillSwitchRequest":
+        if self.active and not self.reason.strip():
             raise ValueError("reason is required when activating the kill switch")
-        return v
+        return self
 
 
 @app.post("/kill-switch")

@@ -54,7 +54,13 @@ def _make_cursor(rows: list[dict[str, Any]]) -> MagicMock:
 
 
 def _make_conn(cursors: list[MagicMock]) -> MagicMock:
-    """Build a mock connection whose cursor() calls consume cursors in order."""
+    """Build a mock connection whose cursor() calls consume cursors in order.
+
+    conn.cursor() is consumed from the cursors list (for functions using
+    `with conn.cursor() as cur: cur.execute(...)`).
+    conn.execute() is a separate MagicMock (for functions calling
+    `conn.execute(...)` directly, e.g. record_job_finish).
+    """
     conn = MagicMock()
     cursor_iter = iter(cursors)
     conn.cursor.side_effect = lambda **kwargs: next(cursor_iter)
@@ -277,7 +283,8 @@ class TestCheckJobHealth:
         assert "last run failed" in result.detail
         assert "connection refused" in result.detail
 
-    def test_running_job_shows_in_progress(self) -> None:
+    @patch("app.services.ops_monitor._utcnow", return_value=_NOW)
+    def test_running_job_shows_in_progress(self, mock_now: MagicMock) -> None:
         conn = _make_conn(
             [
                 _make_cursor(
@@ -295,6 +302,27 @@ class TestCheckJobHealth:
         result = check_job_health(conn, "test_job")
         assert result.last_status == "running"
         assert "still in progress" in result.detail
+
+    @patch("app.services.ops_monitor._utcnow", return_value=_NOW)
+    def test_stuck_running_treated_as_failure(self, mock_now: MagicMock) -> None:
+        # Started > 2 hours ago and still 'running' → treated as stuck/failed.
+        conn = _make_conn(
+            [
+                _make_cursor(
+                    [
+                        {
+                            "status": "running",
+                            "started_at": _NOW - timedelta(hours=3),
+                            "finished_at": None,
+                            "error_msg": None,
+                        }
+                    ]
+                )
+            ]
+        )
+        result = check_job_health(conn, "test_job")
+        assert result.last_status == "failure"
+        assert "stuck" in result.detail
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +388,7 @@ class TestKillSwitch:
 
     def test_activate_sets_fields(self) -> None:
         conn = MagicMock()
+        conn.execute.return_value = MagicMock(rowcount=1)
         activate_kill_switch(conn, reason="data corruption", activated_by="ops", now=_NOW)
         conn.execute.assert_called_once()
         params = conn.execute.call_args[0][1]
@@ -368,11 +397,24 @@ class TestKillSwitch:
         assert params["at"] == _NOW
         conn.commit.assert_called_once()
 
+    def test_activate_raises_on_missing_row(self) -> None:
+        conn = MagicMock()
+        conn.execute.return_value = MagicMock(rowcount=0)
+        with pytest.raises(RuntimeError, match="kill_switch row missing"):
+            activate_kill_switch(conn, reason="test", activated_by="ops", now=_NOW)
+
     def test_deactivate_clears_fields(self) -> None:
         conn = MagicMock()
+        conn.execute.return_value = MagicMock(rowcount=1)
         deactivate_kill_switch(conn)
         conn.execute.assert_called_once()
         conn.commit.assert_called_once()
+
+    def test_deactivate_raises_on_missing_row(self) -> None:
+        conn = MagicMock()
+        conn.execute.return_value = MagicMock(rowcount=0)
+        with pytest.raises(RuntimeError, match="kill_switch row missing"):
+            deactivate_kill_switch(conn)
 
     def test_status_returns_active_state(self) -> None:
         conn = _make_conn(

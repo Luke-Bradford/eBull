@@ -304,17 +304,29 @@ def check_job_health(
             detail=f"{job_name}: no runs recorded",
         )
 
+    status: JobStatus = row["status"]
     detail = ""
-    if row["status"] == "failure":
+
+    if status == "failure":
         detail = f"{job_name}: last run failed"
         if row["error_msg"]:
             detail += f" — {row['error_msg']}"
-    elif row["status"] == "running":
-        detail = f"{job_name}: run still in progress since {row['started_at']}"
+    elif status == "running":
+        # Self-healing guard: if a run has been 'running' for > 2 hours,
+        # treat it as stuck (process likely crashed without recording finish).
+        started_at: datetime = row["started_at"]
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+        age = _utcnow() - started_at
+        if age > timedelta(hours=2):
+            status = "failure"
+            detail = f"{job_name}: stuck in 'running' since {row['started_at']} (>{age}); likely crashed"
+        else:
+            detail = f"{job_name}: run still in progress since {row['started_at']}"
 
     return JobHealth(
         job_name=job_name,
-        last_status=row["status"],
+        last_status=status,
         last_started_at=row["started_at"],
         last_finished_at=row["finished_at"],
         detail=detail,
@@ -330,6 +342,8 @@ def check_row_count_spike(
     conn: psycopg.Connection[Any],
     job_name: str,
     current_count: int,
+    *,
+    exclude_run_id: int | None = None,
 ) -> SpikeResult:
     """
     Compare current_count against the previous successful run's row_count.
@@ -337,6 +351,9 @@ def check_row_count_spike(
     Flags when current_count < previous_count * _SPIKE_RATIO_THRESHOLD.
     This detects broken data sources that silently return fewer rows than
     expected.
+
+    exclude_run_id: if provided, excludes this run from the comparison query
+    so the current run does not compare against itself.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -346,10 +363,11 @@ def check_row_count_spike(
             WHERE job_name = %(name)s
               AND status = 'success'
               AND row_count IS NOT NULL
+              AND (%(exclude_id)s IS NULL OR run_id != %(exclude_id)s)
             ORDER BY started_at DESC
             LIMIT 1
             """,
-            {"name": job_name},
+            {"name": job_name, "exclude_id": exclude_run_id},
         )
         row = cur.fetchone()
 
@@ -406,9 +424,13 @@ def activate_kill_switch(
     *,
     now: datetime | None = None,
 ) -> None:
-    """Activate the system-wide kill switch."""
+    """Activate the system-wide kill switch.
+
+    Raises RuntimeError if the kill_switch row is missing (configuration
+    corruption) — the caller must not silently believe activation succeeded.
+    """
     now = now or _utcnow()
-    conn.execute(
+    result = conn.execute(
         """
         UPDATE kill_switch
         SET is_active = TRUE,
@@ -419,13 +441,18 @@ def activate_kill_switch(
         """,
         {"at": now, "by": activated_by, "reason": reason},
     )
+    if result.rowcount == 0:
+        raise RuntimeError("kill_switch row missing — cannot activate; configuration corrupt")
     conn.commit()
     logger.warning("Kill switch ACTIVATED by=%s reason=%s", activated_by, reason)
 
 
 def deactivate_kill_switch(conn: psycopg.Connection[Any]) -> None:
-    """Deactivate the system-wide kill switch."""
-    conn.execute(
+    """Deactivate the system-wide kill switch.
+
+    Raises RuntimeError if the kill_switch row is missing.
+    """
+    result = conn.execute(
         """
         UPDATE kill_switch
         SET is_active = FALSE,
@@ -435,6 +462,8 @@ def deactivate_kill_switch(conn: psycopg.Connection[Any]) -> None:
         WHERE id = TRUE
         """,
     )
+    if result.rowcount == 0:
+        raise RuntimeError("kill_switch row missing — cannot deactivate; configuration corrupt")
     conn.commit()
     logger.info("Kill switch DEACTIVATED")
 

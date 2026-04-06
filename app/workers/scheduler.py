@@ -83,8 +83,10 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker, None, None]:
                     row_count=tracker.row_count,
                 )
                 # Check for row-count spikes after recording the successful run.
+                # Exclude the current run_id so we compare against the *previous*
+                # successful run, not the one we just wrote.
                 if tracker.row_count is not None:
-                    spike = check_row_count_spike(conn, job_name, tracker.row_count)
+                    spike = check_row_count_spike(conn, job_name, tracker.row_count, exclude_run_id=tracker.run_id)
                     if spike.flagged:
                         logger.warning("Row-count spike detected: %s", spike.detail)
         except Exception:
@@ -158,6 +160,7 @@ def hourly_market_refresh() -> None:
 
             if not rows:
                 logger.info("hourly_market_refresh: no covered instruments found, skipping")
+                tracker.row_count = 0
                 return
 
             symbols = [(row[0], row[1]) for row in rows]
@@ -227,6 +230,7 @@ def daily_research_refresh() -> None:
 
         if not rows:
             logger.info("daily_research_refresh: no covered instruments found, skipping")
+            tracker.row_count = 0
             return
 
         symbols = [(row[0], row[1]) for row in rows]
