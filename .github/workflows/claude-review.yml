@@ -124,6 +124,23 @@ jobs:
               "- Do not explain how the code works — the author wrote it\n"
               "- Do not re-raise issues resolved in the comment history\n"
               "- Do not flag: unchanged code, intentional removals explained in PR, demo/dry-run safe defaults\n\n"
+
+              "## Verify before posting — no retractions\n"
+              "For every finding you draft, verify it against the diff, the PR description, "
+              "and your knowledge of the stack BEFORE assigning a severity. If verification "
+              "shows the finding is wrong or the author has already explained it, **delete the "
+              "finding entirely**. Do not post it with a retraction.\n\n"
+              "Severity is a commitment, not a draft. BLOCKING means: 'I have verified this is "
+              "wrong and it must be fixed before merge.' If you are not sure, it is not BLOCKING.\n\n"
+              "**Banned phrases** — if you would write any of these, delete the finding instead:\n"
+              "- 'Actually, ...' / 'On second thought ...' / 'Wait, ...'\n"
+              "- 'Withdrawing' / 'Retracting' / 'Never mind'\n"
+              "- 'Not a real issue' / 'Not actually a problem'\n"
+              "- 'After inspecting ... this is fine'\n"
+              "- Any sentence that contradicts an earlier sentence in the same finding\n"
+              "Each finding must be a single, committed claim. No narration of your own "
+              "verification process. The author should never see a BLOCKING that ends in "
+              "'withdrawing'.\n\n"
           )
 
           if has_incremental:
@@ -145,7 +162,8 @@ jobs:
               "## Output format\n\n"
               "**Be terse.** Do all reasoning internally. Only output findings and verdict. "
               "One sentence per item. No preamble, no analysis narrative, no restating what the code does.\n\n"
-              "If an issue is not real after analysis, do not include it at all.\n"
+              "**If an issue is not real after analysis, do not include it at all.** This is "
+              "non-negotiable. Do not post a finding and then retract it in the same comment.\n"
               "Only include a section if it has items. No empty sections.\n\n"
               "### [BLOCKING] — must fix before merge\n"
               "`file:line` — what is wrong (one sentence). Omit section if none.\n\n"
