@@ -52,9 +52,9 @@ class AuditListItem(BaseModel):
     symbol: str | None
     company_name: str | None
     recommendation_id: int | None
-    stage: str
+    stage: Stage
     model_version: str | None
-    pass_fail: str
+    pass_fail: PassFail
     explanation: str
 
 
@@ -72,9 +72,9 @@ class AuditDetail(BaseModel):
     symbol: str | None
     company_name: str | None
     recommendation_id: int | None
-    stage: str
+    stage: Stage
     model_version: str | None
-    pass_fail: str
+    pass_fail: PassFail
     explanation: str
     evidence_json: object | None
 

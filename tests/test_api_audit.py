@@ -77,6 +77,9 @@ def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
 
 
 def _with_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
+    # Results must match query execution order: for list_audit, position 0 is
+    # the COUNT query result and position 1 is the items query result.
+    # For get_audit, position 0 is the single-row query result.
     conn = _mock_conn(cursor_results)
 
     def _override() -> Iterator[MagicMock]:
