@@ -244,3 +244,55 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - **Enforced in:** this prevention log
 - **Promoted to skill?** no — specific to S104 pool and similar accumulator patterns
 - **Notes:** The key insight is operation ordering: `(remaining / quantity) * amount` is exact when `remaining == quantity` because `(q/q) = 1` exactly. Combined with quantize + full-depletion, this guarantees `sum(all_withdrawals) == original_cost`.
+
+---
+
+### Single-row UPDATE must check rowcount before declaring success
+
+- **Bug class:** silent no-op on UPDATE WHERE with missing row
+- **First seen in:** `#70`
+- **Example symptom:** `activate_kill_switch` ran `UPDATE kill_switch SET is_active = TRUE WHERE id = TRUE`, called `conn.commit()`, and logged "ACTIVATED" — but the kill_switch row was absent, so zero rows were updated and the system remained unprotected.
+- **Root cause:** `UPDATE ... WHERE` silently affects zero rows when the predicate matches nothing. The function assumed the row existed and did not verify `rowcount`.
+- **Prevention rule:** After writing any `UPDATE ... WHERE` that must affect exactly one row (singleton tables, primary-key lookups), check `result.rowcount` and raise `RuntimeError` if zero. Grep the file for `conn.execute("UPDATE` and confirm each has a rowcount guard or a comment explaining why zero rows is acceptable.
+- **Enforced in:** this prevention log
+- **Promoted to skill?** no — specific to singleton-table mutation patterns
+- **Notes:** Applies to `kill_switch`, `coverage` (PK update), `positions` (PK upsert). For `UPDATE ... SET` with non-PK WHERE, zero rows may be acceptable — the key distinction is whether the caller assumes success.
+
+---
+
+### Health endpoints must not return HTTP 200 on infrastructure failure
+
+- **Bug class:** error body with success status code
+- **First seen in:** `#70`
+- **Example symptom:** `GET /health/data` caught `Exception` and returned `{"error": "..."}` with HTTP 200. Monitoring tools polling the endpoint saw 200 OK and interpreted the system as healthy.
+- **Root cause:** `except Exception: return {"error": ...}` produces a FastAPI JSONResponse with status 200. The intent was graceful degradation, but the effect was masking failures from automated health checks.
+- **Prevention rule:** Before pushing any `except Exception` inside a route handler, verify it raises `HTTPException` with an appropriate status code (503 for infrastructure, 500 for unexpected errors) — never `return` a dict on exception. Grep for `except Exception` in route handlers and confirm each either raises or has a comment explaining why 200 is correct.
+- **Enforced in:** this prevention log
+- **Promoted to skill?** no — specific to FastAPI endpoint patterns
+- **Notes:** `/health/db` follows the same pattern (returns 200 with `db_reachable: False`) — this is intentional there because it explicitly signals DB status in the response body and the endpoint itself is always reachable. The distinction is: health endpoints that are the primary liveness signal must use status codes; diagnostic endpoints that always succeed can use response body signaling.
+
+---
+
+### Spike/comparison queries must exclude the just-written row
+
+- **Bug class:** self-referencing comparison query
+- **First seen in:** `#70`
+- **Example symptom:** `check_row_count_spike` queried the most recent successful job run to compare against the current count. Because `record_job_finish` committed the current run first, the query returned the just-written row — comparing the run against itself. Spikes were never detected.
+- **Root cause:** `ORDER BY started_at DESC LIMIT 1` with no exclusion of the current `run_id` after an in-session commit.
+- **Prevention rule:** After writing any query that records a row then immediately queries the same table for a "previous" value, verify the query explicitly excludes the just-written row by primary key. Grep for sequences of INSERT/UPDATE + SELECT on the same table and confirm each SELECT excludes the current PK.
+- **Enforced in:** this prevention log
+- **Promoted to skill?** no — specific to job-tracking and comparison patterns
+- **Notes:** The pattern is: write row → commit → query for "previous" value. The exclusion can be `AND run_id != %(exclude_id)s` or a subquery. Either way, the caller must thread the PK through.
+
+---
+
+### Early return inside context-managed tracking must set row_count
+
+- **Bug class:** tracked job with unset row_count on early exit
+- **First seen in:** `#70`
+- **Example symptom:** `hourly_market_refresh` returned early when no covered instruments were found. The `_tracked_job` context manager recorded the job as `success` with `row_count=None` — indistinguishable from a tracking failure and suppressing spike detection.
+- **Root cause:** the `return` bypassed `tracker.row_count = ...` which was after the main work block.
+- **Prevention rule:** Before pushing any scheduler job wrapped in `_tracked_job`, grep the function body for `return` statements and verify each one sets `tracker.row_count` first (usually `= 0` for "nothing to do" paths). A bare `return` inside `_tracked_job` without setting `row_count` is always a suspect pattern.
+- **Enforced in:** this prevention log
+- **Promoted to skill?** no — specific to scheduler job tracking
+- **Notes:** The canonical early-exit pattern is: `tracker.row_count = 0; return`. This distinguishes "ran successfully with no work" from "tracking infrastructure failed".
