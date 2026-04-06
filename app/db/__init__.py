@@ -1,22 +1,30 @@
-"""Database connection pool.
+"""Database connection pool and FastAPI dependency.
 
-Usage (async context):
-    async with get_conn() as conn:
-        rows = await conn.execute("SELECT ...")
+Pool lifecycle:
+  - Created in the FastAPI lifespan and stored on ``app.state.db_pool``.
+  - Closed when the app shuts down.
+
+Usage in route handlers::
+
+    from app.db import get_conn
+
+    @router.get("/example")
+    def example(conn: psycopg.Connection = Depends(get_conn)):
+        rows = conn.execute("SELECT ...").fetchall()
 """
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from __future__ import annotations
+
+from collections.abc import Iterator
 
 import psycopg
-from psycopg import AsyncConnection
-
-from app.config import settings
+from fastapi import Request
 
 
-@asynccontextmanager
-async def get_conn() -> AsyncIterator[AsyncConnection]:  # type: ignore[type-arg]
-    # TODO: replace with a connection pool (e.g. psycopg_pool.AsyncConnectionPool)
-    # before any production use — this opens a new connection on every call.
-    async with await psycopg.AsyncConnection.connect(settings.database_url) as conn:
+def get_conn(request: Request) -> Iterator[psycopg.Connection[object]]:
+    """FastAPI dependency that checks out a connection from the pool.
+
+    The connection is returned to the pool when the request completes.
+    """
+    with request.app.state.db_pool.connection() as conn:
         yield conn

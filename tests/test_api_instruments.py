@@ -2,9 +2,12 @@
 Tests for app.api.instruments — instrument list and detail endpoints.
 
 Test strategy:
-  Mock DB only. ``psycopg.connect`` is patched so no real database is needed.
-  The mock connection returns ``dict_row``-style dicts from cursors, matching
-  the ``row_factory=psycopg.rows.dict_row`` used in production code.
+  Mock DB via FastAPI dependency override. The ``get_conn`` dependency is
+  replaced with a mock connection that returns ``dict_row``-style dicts,
+  matching ``row_factory=psycopg.rows.dict_row`` used in production.
+
+  No ``psycopg.connect`` patching — the override injects the mock connection
+  directly, proving that endpoints consume connections from the pool dependency.
 
   FastAPI ``TestClient`` drives requests through the real router, exercising
   Pydantic validation, query-parameter parsing, and response serialisation.
@@ -16,15 +19,15 @@ Structure:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
+from app.db import get_conn
 from app.main import app
-
-client = TestClient(app)
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -86,8 +89,8 @@ def _make_ext_id_row(
     }
 
 
-def _mock_connect(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
-    """Build a mock psycopg.connect context manager.
+def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
+    """Build a mock psycopg.Connection.
 
     ``cursor_results`` is a list of result sets, one per ``cur.execute()`` call.
     Each ``fetchone()`` returns the first row (or None), and ``fetchall()``
@@ -107,10 +110,37 @@ def _mock_connect(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
 
     conn = MagicMock()
     conn.cursor.return_value = cur
-    conn.__enter__ = MagicMock(return_value=conn)
-    conn.__exit__ = MagicMock(return_value=False)
-
     return conn
+
+
+def _with_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
+    """Set up a mock connection as the get_conn dependency override.
+
+    Returns the mock connection so tests can inspect ``cur.execute`` calls.
+    """
+    conn = _mock_conn(cursor_results)
+
+    def _override() -> Iterator[MagicMock]:
+        yield conn
+
+    app.dependency_overrides[get_conn] = _override
+    return conn
+
+
+def _cleanup() -> None:
+    """Restore the fallback dependency override after each test."""
+    app.dependency_overrides[get_conn] = _fallback_conn
+
+
+# Default override so validation-rejection tests (422 before DB access) don't
+# crash on app.state.db_pool missing — the pool isn't created without lifespan.
+def _fallback_conn() -> Iterator[MagicMock]:
+    yield _mock_conn([])
+
+
+app.dependency_overrides.setdefault(get_conn, _fallback_conn)
+
+client = TestClient(app)
 
 
 # ---------------------------------------------------------------------------
@@ -121,16 +151,13 @@ def _mock_connect(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
 class TestListInstruments:
     """GET /instruments — paginated list with optional filters."""
 
+    def teardown_method(self) -> None:
+        _cleanup()
+
     def test_happy_path_returns_items(self) -> None:
         row = _make_instrument_row()
-        conn = _mock_connect(
-            [
-                [{"cnt": 1}],  # COUNT query
-                [row],  # items query
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments")
+        _with_conn([[{"cnt": 1}], [row]])
+        resp = client.get("/instruments")
 
         assert resp.status_code == 200
         body = resp.json()
@@ -147,14 +174,8 @@ class TestListInstruments:
         assert item["latest_quote"]["ask"] == 185.60
 
     def test_empty_table_returns_empty_list(self) -> None:
-        conn = _mock_connect(
-            [
-                [{"cnt": 0}],
-                [],
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments")
+        _with_conn([[{"cnt": 0}], []])
+        resp = client.get("/instruments")
 
         assert resp.status_code == 200
         body = resp.json()
@@ -163,28 +184,16 @@ class TestListInstruments:
 
     def test_missing_quote_returns_null(self) -> None:
         row = _make_instrument_row(bid=None, ask=None, last=None, spread_pct=None, quoted_at=None)
-        conn = _mock_connect(
-            [
-                [{"cnt": 1}],
-                [row],
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments")
+        _with_conn([[{"cnt": 1}], [row]])
+        resp = client.get("/instruments")
 
         assert resp.status_code == 200
         assert resp.json()["items"][0]["latest_quote"] is None
 
     def test_missing_coverage_returns_null(self) -> None:
         row = _make_instrument_row(coverage_tier=None)
-        conn = _mock_connect(
-            [
-                [{"cnt": 1}],
-                [row],
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments")
+        _with_conn([[{"cnt": 1}], [row]])
+        resp = client.get("/instruments")
 
         assert resp.status_code == 200
         assert resp.json()["items"][0]["coverage_tier"] is None
@@ -192,45 +201,26 @@ class TestListInstruments:
     def test_partial_quote_row_returns_null(self) -> None:
         """quoted_at present but bid None → latest_quote should be null, not crash."""
         row = _make_instrument_row(bid=None, ask=None, last=None, spread_pct=None, quoted_at=_NOW)
-        conn = _mock_connect(
-            [
-                [{"cnt": 1}],
-                [row],
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments")
+        _with_conn([[{"cnt": 1}], [row]])
+        resp = client.get("/instruments")
 
         assert resp.status_code == 200
         assert resp.json()["items"][0]["latest_quote"] is None
 
     def test_filter_by_sector(self) -> None:
         row = _make_instrument_row(sector="Technology")
-        conn = _mock_connect(
-            [
-                [{"cnt": 1}],
-                [row],
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments", params={"sector": "Technology"})
+        conn = _with_conn([[{"cnt": 1}], [row]])
+        resp = client.get("/instruments", params={"sector": "Technology"})
 
         assert resp.status_code == 200
-        # Verify the SQL received the sector parameter
         cur = conn.cursor.return_value
         first_execute_params = cur.execute.call_args_list[0][0][1]
         assert first_execute_params["sector"] == "Technology"
 
     def test_filter_by_coverage_tier(self) -> None:
         row = _make_instrument_row(coverage_tier=1)
-        conn = _mock_connect(
-            [
-                [{"cnt": 1}],
-                [row],
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments", params={"coverage_tier": 1})
+        conn = _with_conn([[{"cnt": 1}], [row]])
+        resp = client.get("/instruments", params={"coverage_tier": 1})
 
         assert resp.status_code == 200
         cur = conn.cursor.return_value
@@ -239,14 +229,8 @@ class TestListInstruments:
 
     def test_filter_by_exchange(self) -> None:
         row = _make_instrument_row(exchange="NASDAQ")
-        conn = _mock_connect(
-            [
-                [{"cnt": 1}],
-                [row],
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments", params={"exchange": "NASDAQ"})
+        conn = _with_conn([[{"cnt": 1}], [row]])
+        resp = client.get("/instruments", params={"exchange": "NASDAQ"})
 
         assert resp.status_code == 200
         cur = conn.cursor.return_value
@@ -255,14 +239,8 @@ class TestListInstruments:
 
     def test_pagination_offset_and_limit(self) -> None:
         row = _make_instrument_row()
-        conn = _mock_connect(
-            [
-                [{"cnt": 100}],
-                [row],
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments", params={"offset": 10, "limit": 25})
+        conn = _with_conn([[{"cnt": 100}], [row]])
+        resp = client.get("/instruments", params={"offset": 10, "limit": 25})
 
         assert resp.status_code == 200
         body = resp.json()
@@ -298,14 +276,8 @@ class TestListInstruments:
 
     def test_count_query_receives_only_filter_params(self) -> None:
         """COUNT query must not receive limit/offset — only filter keys."""
-        conn = _mock_connect(
-            [
-                [{"cnt": 5}],
-                [],
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            client.get("/instruments", params={"sector": "Tech", "offset": 10, "limit": 25})
+        conn = _with_conn([[{"cnt": 5}], []])
+        client.get("/instruments", params={"sector": "Tech", "offset": 10, "limit": 25})
 
         cur = conn.cursor.return_value
         count_params = cur.execute.call_args_list[0][0][1]
@@ -315,14 +287,8 @@ class TestListInstruments:
 
     def test_count_query_omits_coverage_join_when_no_tier_filter(self) -> None:
         """When coverage_tier filter is not active, COUNT query should not join coverage."""
-        conn = _mock_connect(
-            [
-                [{"cnt": 0}],
-                [],
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            client.get("/instruments")
+        conn = _with_conn([[{"cnt": 0}], []])
+        client.get("/instruments")
 
         cur = conn.cursor.return_value
         count_sql: str = cur.execute.call_args_list[0][0][0]
@@ -330,14 +296,8 @@ class TestListInstruments:
 
     def test_count_query_joins_coverage_when_tier_filter_active(self) -> None:
         """When coverage_tier filter is active, COUNT query must join coverage."""
-        conn = _mock_connect(
-            [
-                [{"cnt": 0}],
-                [],
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            client.get("/instruments", params={"coverage_tier": 1})
+        conn = _with_conn([[{"cnt": 0}], []])
+        client.get("/instruments", params={"coverage_tier": 1})
 
         cur = conn.cursor.return_value
         count_sql: str = cur.execute.call_args_list[0][0][0]
@@ -352,20 +312,17 @@ class TestListInstruments:
 class TestGetInstrumentDetail:
     """GET /instruments/{instrument_id} — single instrument detail."""
 
+    def teardown_method(self) -> None:
+        _cleanup()
+
     def test_happy_path_full_detail(self) -> None:
         row = _make_instrument_row()
         ext_ids = [
             _make_ext_id_row("fmp", "symbol", "AAPL"),
             _make_ext_id_row("sec", "cik", "0000320193"),
         ]
-        conn = _mock_connect(
-            [
-                [row],  # instrument query
-                ext_ids,  # external_identifiers query
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments/1")
+        _with_conn([[row], ext_ids])
+        resp = client.get("/instruments/1")
 
         assert resp.status_code == 200
         body = resp.json()
@@ -381,41 +338,24 @@ class TestGetInstrumentDetail:
 
     def test_not_found_returns_404(self) -> None:
         # Only one result set needed — 404 is raised before the identifiers query.
-        conn = _mock_connect(
-            [
-                [],  # instrument query returns nothing
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments/999")
+        _with_conn([[]])
+        resp = client.get("/instruments/999")
 
         assert resp.status_code == 404
         assert "999" in resp.json()["detail"]
 
     def test_no_external_identifiers(self) -> None:
         row = _make_instrument_row()
-        conn = _mock_connect(
-            [
-                [row],
-                [],  # no external identifiers
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments/1")
+        _with_conn([[row], []])
+        resp = client.get("/instruments/1")
 
         assert resp.status_code == 200
         assert resp.json()["external_identifiers"] == []
 
     def test_no_quote_returns_null(self) -> None:
         row = _make_instrument_row(bid=None, ask=None, last=None, spread_pct=None, quoted_at=None)
-        conn = _mock_connect(
-            [
-                [row],
-                [],
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments/1")
+        _with_conn([[row], []])
+        resp = client.get("/instruments/1")
 
         assert resp.status_code == 200
         assert resp.json()["latest_quote"] is None
@@ -423,28 +363,16 @@ class TestGetInstrumentDetail:
     def test_partial_quote_row_returns_null(self) -> None:
         """quoted_at present but bid/ask None → latest_quote should be null, not crash."""
         row = _make_instrument_row(bid=None, ask=None, last=None, spread_pct=None, quoted_at=_NOW)
-        conn = _mock_connect(
-            [
-                [row],
-                [],
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments/1")
+        _with_conn([[row], []])
+        resp = client.get("/instruments/1")
 
         assert resp.status_code == 200
         assert resp.json()["latest_quote"] is None
 
     def test_no_coverage_returns_null(self) -> None:
         row = _make_instrument_row(coverage_tier=None)
-        conn = _mock_connect(
-            [
-                [row],
-                [],
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            resp = client.get("/instruments/1")
+        _with_conn([[row], []])
+        resp = client.get("/instruments/1")
 
         assert resp.status_code == 200
         assert resp.json()["coverage_tier"] is None
@@ -457,16 +385,9 @@ class TestGetInstrumentDetail:
             _make_ext_id_row("sec", "cik", "0000320193"),
             _make_ext_id_row("sec", "ticker", "AAPL"),
         ]
-        conn = _mock_connect(
-            [
-                [row],
-                ext_ids,
-            ]
-        )
-        with patch("app.api.instruments.psycopg.connect", return_value=conn):
-            client.get("/instruments/1")
+        conn = _with_conn([[row], ext_ids])
+        client.get("/instruments/1")
 
-        # Verify the SQL has ORDER BY
         cur = conn.cursor.return_value
         identifiers_sql: str = cur.execute.call_args_list[1][0][0]
         assert "ORDER BY provider, identifier_type, identifier_value" in identifiers_sql

@@ -15,10 +15,10 @@ from datetime import datetime
 
 import psycopg
 import psycopg.rows
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from app.config import settings
+from app.db import get_conn
 
 router = APIRouter(prefix="/instruments", tags=["instruments"])
 
@@ -117,6 +117,7 @@ def _parse_quote(row: dict[str, object]) -> QuoteSnapshot | None:
 
 @router.get("", response_model=InstrumentListResponse)
 def list_instruments(
+    conn: psycopg.Connection[object] = Depends(get_conn),
     sector: str | None = Query(default=None),
     coverage_tier: int | None = Query(default=None, ge=1, le=3),
     exchange: str | None = Query(default=None),
@@ -168,14 +169,13 @@ def list_instruments(
         ORDER BY i.symbol, i.instrument_id
         LIMIT %(limit)s OFFSET %(offset)s"""  # noqa: S608  — hardcoded fragments only
 
-    with psycopg.connect(settings.database_url) as conn:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(count_sql, filter_params)  # type: ignore[arg-type]  # SQL built from hardcoded fragments
-            count_row = cur.fetchone()
-            total: int = count_row["cnt"] if count_row else 0  # type: ignore[index]
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(count_sql, filter_params)  # type: ignore[arg-type]  # SQL built from hardcoded fragments
+        count_row = cur.fetchone()
+        total: int = count_row["cnt"] if count_row else 0  # type: ignore[index]
 
-            cur.execute(items_sql, items_params)  # type: ignore[arg-type]  # SQL built from hardcoded fragments
-            rows = cur.fetchall()
+        cur.execute(items_sql, items_params)  # type: ignore[arg-type]  # SQL built from hardcoded fragments
+        rows = cur.fetchall()
 
     items = [
         InstrumentListItem(
@@ -196,7 +196,10 @@ def list_instruments(
 
 
 @router.get("/{instrument_id}", response_model=InstrumentDetail)
-def get_instrument(instrument_id: int) -> InstrumentDetail:
+def get_instrument(
+    instrument_id: int,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InstrumentDetail:
     """Single instrument with latest quote, coverage tier, and external identifiers."""
     instrument_sql = """
         SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
@@ -219,16 +222,15 @@ def get_instrument(instrument_id: int) -> InstrumentDetail:
 
     params = {"instrument_id": instrument_id}
 
-    with psycopg.connect(settings.database_url) as conn:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(instrument_sql, params)
-            row = cur.fetchone()
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(instrument_sql, params)
+        row = cur.fetchone()
 
-            if row is None:
-                raise HTTPException(status_code=404, detail=f"Instrument {instrument_id} not found")
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Instrument {instrument_id} not found")
 
-            cur.execute(identifiers_sql, params)
-            id_rows = cur.fetchall()
+        cur.execute(identifiers_sql, params)
+        id_rows = cur.fetchall()
 
     ext_ids = [
         ExternalIdentifier(
