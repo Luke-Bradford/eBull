@@ -267,7 +267,7 @@ class TestCheckConfigFlags:
     def test_auto_trading_disabled_fails(self) -> None:
         result = _check_auto_trading(False)
         assert result.passed is False
-        assert result.rule == "auto_trading_disabled"
+        assert result.rule == "auto_trading"
 
     def test_auto_trading_enabled_passes(self) -> None:
         result = _check_auto_trading(True)
@@ -276,7 +276,7 @@ class TestCheckConfigFlags:
     def test_live_trading_disabled_fails(self) -> None:
         result = _check_live_trading(False)
         assert result.passed is False
-        assert result.rule == "live_trading_disabled"
+        assert result.rule == "live_trading"
 
     def test_live_trading_enabled_passes(self) -> None:
         result = _check_live_trading(True)
@@ -464,7 +464,7 @@ class TestBuildExplanation:
     def test_all_passed_returns_all_pass(self) -> None:
         results = [
             RuleResult(rule="kill_switch", passed=True),
-            RuleResult(rule="live_trading_disabled", passed=True),
+            RuleResult(rule="live_trading", passed=True),
         ]
         assert _build_explanation(results) == "All rules passed"
 
@@ -481,11 +481,11 @@ class TestBuildExplanation:
     def test_multiple_failures_all_listed(self) -> None:
         results = [
             RuleResult(rule="kill_switch", passed=False, detail="active"),
-            RuleResult(rule="live_trading_disabled", passed=False, detail="flag=False"),
+            RuleResult(rule="live_trading", passed=False, detail="flag=False"),
         ]
         explanation = _build_explanation(results)
         assert "kill_switch" in explanation
-        assert "live_trading_disabled" in explanation
+        assert "live_trading" in explanation
 
 
 # ---------------------------------------------------------------------------
@@ -544,18 +544,18 @@ class TestEvaluateRecommendation:
     def test_auto_trading_disabled_fails_buy(self) -> None:
         result = self._eval(_buy_cursors(), settings=_SETTINGS_NO_AUTO)
         assert result.verdict == "FAIL"
-        assert "auto_trading_disabled" in result.failed_rules
+        assert "auto_trading" in result.failed_rules
 
     def test_live_trading_disabled_fails_buy(self) -> None:
         result = self._eval(_buy_cursors(), settings=_SETTINGS_NO_LIVE)
         assert result.verdict == "FAIL"
-        assert "live_trading_disabled" in result.failed_rules
+        assert "live_trading" in result.failed_rules
 
     def test_both_config_flags_off_both_appear_in_failed_rules(self) -> None:
         result = self._eval(_buy_cursors(), settings=_SETTINGS_ALL_OFF)
         assert result.verdict == "FAIL"
-        assert "auto_trading_disabled" in result.failed_rules
-        assert "live_trading_disabled" in result.failed_rules
+        assert "auto_trading" in result.failed_rules
+        assert "live_trading" in result.failed_rules
 
     # --- Coverage ---
 
@@ -716,12 +716,12 @@ class TestEvaluateRecommendation:
         result = self._eval(cursors, settings=_SETTINGS_ALL_OFF)
         assert result.verdict == "FAIL"
         assert "kill_switch" in result.failed_rules
-        assert "auto_trading_disabled" in result.failed_rules
-        assert "live_trading_disabled" in result.failed_rules
+        assert "auto_trading" in result.failed_rules
+        assert "live_trading" in result.failed_rules
         # All three must appear in the explanation string too
         assert "kill_switch" in result.explanation
-        assert "auto_trading_disabled" in result.explanation
-        assert "live_trading_disabled" in result.explanation
+        assert "auto_trading" in result.explanation
+        assert "live_trading" in result.explanation
 
     # --- Error paths ---
 

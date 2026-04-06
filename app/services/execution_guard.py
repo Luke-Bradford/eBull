@@ -77,8 +77,8 @@ Verdict = Literal["PASS", "FAIL"]
 RuleName = Literal[
     "kill_switch",
     "kill_switch_config_corrupt",
-    "auto_trading_disabled",
-    "live_trading_disabled",
+    "auto_trading",
+    "live_trading",
     "coverage_not_tier1",
     "no_coverage_row",
     "thesis_stale",
@@ -254,7 +254,12 @@ def _load_sector_exposure(
                 ) AS market_value
             FROM positions p
             JOIN instruments i ON i.instrument_id = p.instrument_id
-            LEFT JOIN quotes q ON q.instrument_id = p.instrument_id
+            LEFT JOIN LATERAL (
+                SELECT last FROM quotes
+                WHERE instrument_id = p.instrument_id
+                ORDER BY quoted_at DESC
+                LIMIT 1
+            ) q ON TRUE
             WHERE p.current_units > 0
             GROUP BY i.sector
             """,
@@ -307,21 +312,21 @@ def _check_kill_switch(ks_row: dict[str, Any] | None) -> RuleResult:
 def _check_auto_trading(enabled: bool) -> RuleResult:
     if not enabled:
         return RuleResult(
-            rule="auto_trading_disabled",
+            rule="auto_trading",
             passed=False,
             detail="settings.enable_auto_trading is False",
         )
-    return RuleResult(rule="auto_trading_disabled", passed=True)
+    return RuleResult(rule="auto_trading", passed=True)
 
 
 def _check_live_trading(enabled: bool) -> RuleResult:
     if not enabled:
         return RuleResult(
-            rule="live_trading_disabled",
+            rule="live_trading",
             passed=False,
             detail="settings.enable_live_trading is False",
         )
-    return RuleResult(rule="live_trading_disabled", passed=True)
+    return RuleResult(rule="live_trading", passed=True)
 
 
 def _check_coverage(coverage: dict[str, Any] | None) -> RuleResult:
