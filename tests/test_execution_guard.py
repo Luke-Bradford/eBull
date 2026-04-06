@@ -571,6 +571,9 @@ class TestEvaluateRecommendation:
         result = self._eval(cursors)
         assert result.verdict == "FAIL"
         assert "no_coverage_row" in result.failed_rules
+        # thesis_stale must not appear — review_frequency is unknowable without
+        # a coverage row; emitting it alongside no_coverage_row is audit noise
+        assert "thesis_stale" not in result.failed_rules
 
     def test_coverage_not_tier1_does_not_fail_exit(self) -> None:
         # EXIT skips coverage check entirely

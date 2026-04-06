@@ -591,7 +591,12 @@ def evaluate_recommendation(
         coverage_result = _check_coverage(coverage)
         rule_results.append(coverage_result)
 
-        rule_results.append(_check_thesis_freshness(thesis, coverage, now))
+        # Skip thesis freshness when coverage is absent — review_frequency is
+        # unknowable without a coverage row, and no_coverage_row is already a
+        # FAIL.  Emitting thesis_stale alongside it would be misleading noise
+        # in the audit trail.
+        if coverage is not None:
+            rule_results.append(_check_thesis_freshness(thesis, coverage, now))
         rule_results.append(_check_spread(quote))
         rule_results.append(_check_cash(cash))
         rule_results.append(_check_concentration(instrument_found, sector, current_sector_pct, total_aum))
