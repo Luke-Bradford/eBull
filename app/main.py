@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.api.instruments import router as instruments_router
 from app.api.scores import router as scores_router
+from app.api.theses import router as theses_router
 from app.config import settings
 from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="eBull", version="0.1.0", lifespan=lifespan)
 app.include_router(instruments_router)
 app.include_router(scores_router)
+app.include_router(theses_router)
 
 
 @app.get("/health")
