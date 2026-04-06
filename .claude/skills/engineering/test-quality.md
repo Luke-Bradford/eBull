@@ -28,6 +28,17 @@ For every function, identify and test:
 
 These aren't edge cases. They're the first things a reviewer checks.
 
+## Semantic boundary checks
+
+For any rule about affordability, capacity, or limits, include tests for the actual business boundary:
+- zero
+- exact cap
+- just below cap
+- just above cap
+
+Do not stop at proving branch execution.
+Prove the rule matches its intended meaning.
+
 ## Mock discipline
 
 **Match what the real library returns.** psycopg `fetchone()` returns `None` on exhaustion — not a `MagicMock`. A mock that returns `MagicMock` instead of `None` will never trigger the None-check branch.

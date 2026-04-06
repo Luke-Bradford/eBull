@@ -99,10 +99,38 @@ Do not:
 - rebut a comment without concrete reasoning
 - push another commit before reading the review
 
+## PREVENTION comment resolution
+
+Every PREVENTION comment must end in exactly one of these states:
+
+- `EXTRACTED <file>` — lesson added to a skill, workflow doc, checklist, or `docs/review-prevention-log.md`
+- `ALREADY_COVERED <file>` — rule already exists in that file; cite the exact file path
+- `REBUTTED <reason>` — prevention note does not apply; explain specifically why
+
+### Rules
+
+PREVENTION comments cannot be silently acknowledged.
+"Noted" or "good point" is not a terminal state.
+
+Reusable engineering lessons (language, SQL, test patterns that recur across repos) go into skill files under `.claude/skills/engineering/`.
+
+Recurring repo-specific mistakes (bug classes that keep appearing in eBull PRs specifically) go into `docs/review-prevention-log.md`.
+
+The exact file must be named in the resolution reply.
+
+### Reply format
+
+```text
+EXTRACTED docs/review-prevention-log.md — added entry "join fan-out corrupts aggregates"
+ALREADY_COVERED .claude/skills/engineering/python-hygiene.md — "production invariants" section
+REBUTTED — this applies to ML pipelines; eBull uses heuristic scoring with no batch normalisation
+```
+
 ## Definition of review complete
 
 A review is only complete when:
-- every comment has a terminal state
+- every comment has a terminal state (FIXED / DEFERRED / REBUTTED)
+- every PREVENTION comment has a terminal state (EXTRACTED / ALREADY_COVERED / REBUTTED)
 - all fixes are on the latest commit
 - all deferrals have issue numbers
 - all rebuttals are specific
