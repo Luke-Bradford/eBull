@@ -24,6 +24,25 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: gh pr diff "$PR_NUMBER" > pr.diff
 
+      - name: Get incremental diff (changes since last push)
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_ACTION: ${{ github.event.action }}
+        run: |
+          if [ "$EVENT_ACTION" = "synchronize" ] && [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            if git diff "$BEFORE_SHA"..HEAD > incremental.diff 2>&1; then
+              echo "has_incremental=true" > incremental_flag.txt
+              echo "Incremental diff: $(wc -l < incremental.diff) lines"
+            else
+              echo "::warning::git diff $BEFORE_SHA..HEAD failed — falling back to full diff only"
+              echo "has_incremental=false" > incremental_flag.txt
+              : > incremental.diff
+            fi
+          else
+            echo "has_incremental=false" > incremental_flag.txt
+            : > incremental.diff
+          fi
+
       - name: Get PR description
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -65,6 +84,8 @@ jobs:
           import json, os
 
           diff = open('pr.diff', encoding='utf-8', errors='replace').read()
+          incremental = open('incremental.diff', encoding='utf-8', errors='replace').read()
+          flag = open('incremental_flag.txt').read().strip()
           desc = open('pr_desc.txt').read()
           comments_raw = open('pr_comments.txt').read().strip()
           issue = open('linked_issue.txt').read().strip()
@@ -76,9 +97,20 @@ jobs:
 
           issue_section = "## Linked Issue / Ticket\n\n" + issue
 
+          # Flag file written by shell step — no string-matching heuristic
+          has_incremental = flag == "has_incremental=true"
+          incremental_section = ""
+          if has_incremental:
+              incremental_section = (
+                  "## Incremental diff (changes since last push)\n"
+                  "This shows ONLY the code changed in the most recent push. "
+                  "Focus your review here. Use the full diff below for context.\n"
+                  "```diff\n" + incremental + "\n```\n\n"
+              )
+
           prompt = (
               "You are a strict senior code reviewer for a Python/FastAPI investment engine. "
-              "The product is trader-os: a long-horizon AI-assisted investment system for eToro. "
+              "The product is eBull: a long-horizon AI-assisted investment system for eToro. "
               "It has a two-brain design — a research brain (AI-heavy analysis) and an execution brain "
               "(hard-rule constrained order placement). Your job is to find real problems — not to be encouraging.\n\n"
 
@@ -100,14 +132,31 @@ jobs:
               "- No live trading unless `enable_live_trading=true` is explicitly set\n"
               "- Raw API payloads must be persisted before any normalisation step\n\n"
 
-              "## Important constraints\n\n"
+              "## Review focus\n\n"
               "You only see the diff, not the full codebase. The PR description is written specifically "
               "to give you context about surrounding code. Trust it. "
               "If the PR description explains why something outside the diff makes a change safe, "
               "accept that explanation rather than flagging it as risky.\n\n"
-              "This may not be a first review. Read the PR comment history carefully. "
-              "Do NOT re-raise issues already addressed or explained in the thread. "
-              "Only flag issues that are genuinely unresolved in the current diff.\n\n"
+          )
+
+          if has_incremental:
+              prompt += (
+                  "### Incremental diff available\n"
+                  "An incremental diff is included showing only changes since the last push. "
+                  "**Focus your review on these new changes.** The full diff is provided for context — "
+                  "use it to understand surrounding code, but do not re-evaluate unchanged code. "
+                  "If a previous round flagged an issue in code that the incremental diff does not touch, "
+                  "treat it as resolved.\n\n"
+              )
+
+          prompt += (
+              "### Comment history\n"
+              "Read the PR comment history to understand what has already been reviewed and resolved. "
+              "The most recent review and author response represent the current state. "
+              "Do NOT re-raise issues that have been fixed or explicitly addressed in the comment thread — "
+              "even if the fix approach differs from what you would have chosen. "
+              "If the author implemented a fix that was explicitly requested by a previous review round, "
+              "that is not a regression or a 'silent revert'.\n\n"
               "Be careful about changes that REMOVE code: a removal may be the fix, not the problem.\n\n"
 
               + issue_section + "\n\n"
@@ -136,11 +185,16 @@ jobs:
               "- Demo/dry-run paths that explicitly skip eToro API calls when `enable_live_trading=false` — "
               "that is the intended safe default\n\n"
 
+              "## Output rules\n\n"
+              "**Think before you write.** Evaluate each potential issue internally before including it. "
+              "If you determine during analysis that an issue is not real, is already fixed, or should be "
+              "withdrawn — do NOT include it in the output at all. Not as withdrawn text, not under a "
+              "heading, not as a side note. Every item under a severity heading must be a genuine, "
+              "unresolved problem in the current diff.\n\n"
+              "Only include a section if it has at least one item. Omit the section header entirely "
+              "if you have nothing to put under it. Do NOT write 'None.' under a section heading.\n\n"
+
               "**Format your response as:**\n\n"
-              "Only include a section if it has at least one item. Omit the section header entirely if you have nothing to put under it. "
-              "Do NOT write 'None.' under a section heading — just skip the section.\n\n"
-              "If you start writing an issue and then realise it is already fixed or withdrawn, "
-              "do NOT include it under any section heading. Mention it only in the Verdict.\n\n"
               "### [BLOCKING] — must fix before merge\n"
               "Each issue with file:line reference and explanation. Omit if none.\n\n"
               "### [WARNING] — should fix, not blocking\n"
@@ -162,8 +216,13 @@ jobs:
               "One of: **APPROVE**, **REQUEST CHANGES**, or **NEEDS DISCUSSION**. "
               "If approving, briefly note any previously-raised issues now confirmed fixed.\n\n"
               "Be direct. If the code is fine, say so.\n\n"
-              "## Diff\n```diff\n" + diff + "\n```"
           )
+
+          # Add incremental diff before the full diff when available
+          if has_incremental:
+              prompt += incremental_section
+
+          prompt += "## Full diff\n```diff\n" + diff + "\n```"
 
           payload = {
               "model": "claude-sonnet-4-6",
