@@ -91,6 +91,19 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### Product name inconsistency introduced by documentation PRs
+
+- **Bug class:** product name drift across docs
+- **First seen in:** `#47`
+- **Example symptom:** `CLAUDE.md` renamed the project to `eBull` but `docs/settled-decisions.md` never recorded the canonical name, and the previous name `trader-os` persisted in other contexts.
+- **Root cause:** the rename was intentional but not propagated to settled-decisions.md; doc-only PRs that touch names can introduce inconsistency without a grep check.
+- **Prevention rule:** Before pushing any documentation PR that touches product names, grep the entire diff for all name variants (`grep -i "trader-os\|ebull\|eBull"`). Confirm the name is consistent across every changed file and the PR description.
+- **Enforced in:** this prevention log
+- **Promoted to skill?** no — too project-specific
+- **Notes:** Canonical name is `eBull`. Retired name is `trader-os`. The settled-decisions.md Product name section is the authoritative record.
+
+---
+
 ### JOIN fan-out can corrupt derived totals in aggregate queries
 
 - **Bug class:** fan-out join inflating aggregate
