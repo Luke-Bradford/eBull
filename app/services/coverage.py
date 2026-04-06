@@ -54,7 +54,8 @@ DEMOTE_T2_TO_T3_SCORE: float = 0.45
 # Tier 1 hard cap
 TIER_1_CAP: int = 50
 
-# Review frequency mapping (shared with thesis engine)
+# Review frequency mapping (duplicated from thesis engine;
+# extract to shared module when a third consumer appears)
 _REVIEW_FREQUENCY_DAYS: dict[str, int] = {
     "daily": 1,
     "weekly": 7,
@@ -559,7 +560,10 @@ def review_coverage(
         for change in blocked:
             _apply_tier_change(conn, change)
 
-    unchanged = len(snapshots) - len(demotions) - len(all_promotions) - len(blocked)
+    # Blocked instruments did not change tier — they are not counted as "unchanged"
+    # (they are a distinct bucket in ReviewResult) but they are also not tier-modified.
+    # unchanged = total - tier-modified (demotions + promotions).
+    unchanged = len(snapshots) - len(demotions) - len(all_promotions)
 
     logger.info(
         "review_coverage: promotions=%d demotions=%d blocked=%d unchanged=%d",
@@ -622,17 +626,6 @@ def override_tier(
     if old_tier == new_tier:
         raise ValueError(f"instrument_id={instrument_id} ({symbol}) is already at Tier {new_tier}")
 
-    # Enforce Tier 1 cap for promotions to T1
-    if new_tier == 1:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute("SELECT COUNT(*) AS cnt FROM coverage WHERE coverage_tier = 1")
-            count_row = cur.fetchone()
-        current_t1 = int(count_row["cnt"]) if count_row else 0  # type: ignore[index]
-        if current_t1 >= TIER_1_CAP:
-            raise ValueError(
-                f"Tier 1 cap ({TIER_1_CAP}) reached; current count={current_t1}. Demote another instrument first."
-            )
-
     change_type: ChangeType = "override"
     change = TierChange(
         instrument_id=instrument_id,
@@ -648,7 +641,19 @@ def override_tier(
         },
     )
 
+    # Cap check and write are inside the same transaction to prevent TOCTOU:
+    # a concurrent override/review cannot promote past the cap between the
+    # count read and the tier update.
     with conn.transaction():
+        if new_tier == 1:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("SELECT COUNT(*) AS cnt FROM coverage WHERE coverage_tier = 1")
+                count_row = cur.fetchone()
+            current_t1 = int(count_row["cnt"]) if count_row else 0  # type: ignore[index]
+            if current_t1 >= TIER_1_CAP:
+                raise ValueError(
+                    f"Tier 1 cap ({TIER_1_CAP}) reached; current count={current_t1}. Demote another instrument first."
+                )
         _apply_tier_change(conn, change)
 
     logger.info(

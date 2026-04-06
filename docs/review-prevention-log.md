@@ -114,3 +114,29 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - **Enforced in:** `.claude/skills/engineering/pre-flight-review.md` section B (SQL correctness)
 - **Promoted to skill?** no — the general rule is in pre-flight section B; this entry records the repo-specific tables to watch
 - **Notes:** Tables to watch in eBull (v1 state — update when schema constraints change): `quotes` (one row per instrument by upsert, but no unique constraint); `theses` (multiple rows per instrument by design); `news_events` (multiple rows per instrument). Any of these joined naively inside an aggregate is a fan-out hazard.
+
+---
+
+### Read-then-write cap/limit checks must be inside the same transaction
+
+- **Bug class:** TOCTOU race on count-based limit enforcement
+- **First seen in:** `#66`
+- **Example symptom:** `override_tier` read `SELECT COUNT(*) FROM coverage WHERE coverage_tier = 1` in one cursor, then later opened a separate `conn.transaction()` for the write. A concurrent request could promote past the Tier 1 cap between the count read and the tier update.
+- **Root cause:** the count query and the tier mutation were not in the same transaction, creating a window where the cap could be violated by concurrent callers.
+- **Prevention rule:** Before pushing any read-then-write pattern involving a count/limit enforcement, verify the read and the write are inside the same `conn.transaction()` block. Grep for `SELECT COUNT` and confirm the next write is not separated by a cursor close, function boundary, or transaction boundary.
+- **Enforced in:** `.claude/skills/engineering/pre-flight-review.md` section F (Concurrency / idempotency)
+- **Promoted to skill?** no — the general concurrency check is already in pre-flight section F; this entry records the repo-specific pattern
+- **Notes:** Applies to any cap or quota enforcement in eBull: Tier 1 cap, max active positions, sector exposure limits. The pattern is: read the current count, check against the limit, then write — all three must be atomic.
+
+---
+
+### Bucket-arithmetic formulas must account for all categories
+
+- **Bug class:** off-by-N count from overlooked bucket
+- **First seen in:** `#66`
+- **Example symptom:** `unchanged = len(snapshots) - len(demotions) - len(all_promotions) - len(blocked)` subtracted `blocked` from the total, but blocked instruments did not change tier — they were double-counted as both "not unchanged" and "not tier-modified".
+- **Root cause:** the formula assumed every bucket was mutually exclusive with "unchanged", but `blocked` instruments are tier-unmodified (their old_tier == new_tier).
+- **Prevention rule:** After writing any formula of the form `total - bucket_a - bucket_b - ...`, verify each bucket is mutually exclusive. Add an `assert result >= 0` immediately after. Trace the formula with pen-and-paper values (e.g. 51 instruments, 1 blocked, 0 demoted) before pushing.
+- **Enforced in:** this prevention log
+- **Promoted to skill?** no — too specific to summary-count patterns
+- **Notes:** The correct formula is: only subtract categories that actually changed state. Categories that are "processed but unchanged" (like blocked promotions) should not reduce the unchanged count.

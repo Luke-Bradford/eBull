@@ -432,6 +432,15 @@ class TestDemotionT1ToT2:
         assert "stance=avoid" in result.rationale
         assert "liquidity fails" in result.rationale
 
+    def test_none_score_demotes_via_missing_data(self) -> None:
+        """A T1 instrument with total_score=None is demoted because score is required data."""
+        snap = _snap(current_tier=1, total_score=None)
+        result = _evaluate_demotion(snap, _NOW)
+        assert result is not None
+        assert result.new_tier == 2
+        assert "critical data missing" in result.rationale
+        assert "score" in result.rationale
+
 
 # ---------------------------------------------------------------------------
 # Demotion: T2 → T3
@@ -596,6 +605,56 @@ class TestEnforceTier1Cap:
         assert "cap" in blocked[0].rationale.lower()
         assert "0.75" in blocked[0].rationale
 
+    def test_tiebreak_by_freshness(self) -> None:
+        """When score and confidence tie, more recent thesis wins."""
+        old_ts = (_NOW - timedelta(days=5)).isoformat()
+        new_ts = (_NOW - timedelta(days=1)).isoformat()
+
+        c1 = TierChange(
+            instrument_id=1,
+            old_tier=2,
+            new_tier=1,
+            change_type="promotion",
+            rationale="test",
+            evidence={"total_score": 0.80, "thesis_confidence": 0.70, "thesis_created_at": old_ts},
+        )
+        c2 = TierChange(
+            instrument_id=2,
+            old_tier=2,
+            new_tier=1,
+            change_type="promotion",
+            rationale="test",
+            evidence={"total_score": 0.80, "thesis_confidence": 0.70, "thesis_created_at": new_ts},
+        )
+        approved, blocked = _enforce_tier1_cap(TIER_1_CAP - 1, [c1, c2])
+        assert len(approved) == 1
+        assert approved[0].instrument_id == 2  # more recent thesis wins
+
+    def test_tiebreak_none_freshness_ranked_last(self) -> None:
+        """Instruments with no thesis_created_at are ranked below those with one."""
+        c1 = TierChange(
+            instrument_id=1,
+            old_tier=2,
+            new_tier=1,
+            change_type="promotion",
+            rationale="test",
+            evidence={"total_score": 0.80, "thesis_confidence": 0.70, "thesis_created_at": None},
+        )
+        c2 = TierChange(
+            instrument_id=2,
+            old_tier=2,
+            new_tier=1,
+            change_type="promotion",
+            rationale="test",
+            evidence={
+                "total_score": 0.80,
+                "thesis_confidence": 0.70,
+                "thesis_created_at": (_NOW - timedelta(days=1)).isoformat(),
+            },
+        )
+        approved, _ = _enforce_tier1_cap(TIER_1_CAP - 1, [c1, c2])
+        assert approved[0].instrument_id == 2
+
 
 # ---------------------------------------------------------------------------
 # review_coverage end-to-end (mocked DB)
@@ -707,6 +766,20 @@ class TestReviewCoverage:
         conn = self._mock_conn_for_snapshots([stable])
         result = review_coverage(conn)
         assert result.unchanged == 1
+        assert result.promotions == []
+        assert result.demotions == []
+
+    @patch("app.services.coverage._utcnow", return_value=_NOW)
+    def test_blocked_does_not_reduce_unchanged(self, _mock_now: MagicMock) -> None:
+        """Blocked promotions are a distinct bucket; unchanged counts tier-unmodified instruments."""
+        t1_fillers = [_snap(instrument_id=100 + i, current_tier=1, total_score=0.75) for i in range(TIER_1_CAP)]
+        promotable = _snap(instrument_id=1, current_tier=2, total_score=0.80)
+        all_snaps = t1_fillers + [promotable]
+        conn = self._mock_conn_for_snapshots(all_snaps)
+        result = review_coverage(conn)
+        # 51 total: 50 stable T1 + 1 blocked T2→T1
+        assert result.blocked == [result.blocked[0]]  # 1 blocked
+        assert result.unchanged == 51  # all 51 are tier-unmodified
         assert result.promotions == []
         assert result.demotions == []
 
