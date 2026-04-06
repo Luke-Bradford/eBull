@@ -23,6 +23,7 @@ from app.services.market_data import refresh_market_data
 from app.services.portfolio import run_portfolio_review
 from app.services.scoring import compute_rankings
 from app.services.sentiment import ClaudeSentimentScorer
+from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
 from app.services.thesis import find_stale_instruments, generate_thesis
 from app.services.universe import sync_universe
 
@@ -393,4 +394,43 @@ def weekly_coverage_review() -> None:
         len(result.demotions),
         len(result.blocked),
         result.unchanged,
+    )
+
+
+def daily_tax_reconciliation() -> None:
+    """
+    Ingest new fills into tax_lots and re-run disposal matching.
+
+    Runs daily. Idempotent — safe to re-run. Requires fx_rates to be
+    populated for any non-GBP instruments before ingestion.
+    """
+    logger.info("daily_tax_reconciliation: starting")
+
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            ingestion = ingest_tax_events(conn)
+    except Exception:
+        logger.error("daily_tax_reconciliation: ingestion failed", exc_info=True)
+        return
+
+    logger.info(
+        "daily_tax_reconciliation: ingested fills=%d cash_events=%d already_present=%d",
+        ingestion.fills_ingested,
+        ingestion.cash_events_ingested,
+        ingestion.already_present,
+    )
+
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            matching = run_disposal_matching(conn)
+    except Exception:
+        logger.error("daily_tax_reconciliation: matching failed", exc_info=True)
+        return
+
+    logger.info(
+        "daily_tax_reconciliation complete: instruments=%d matches=%d gain=%.2f loss=%.2f",
+        matching.instruments_processed,
+        matching.matches_created,
+        matching.total_gain_gbp,
+        matching.total_loss_gbp,
     )
