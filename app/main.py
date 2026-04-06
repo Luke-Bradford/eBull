@@ -11,6 +11,7 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field, model_validator
 
 from app.api.audit import router as audit_router
+from app.api.auth import require_auth
 from app.api.filings import router as filings_router
 from app.api.instruments import router as instruments_router
 from app.api.news import router as news_router
@@ -121,7 +122,7 @@ class TierOverrideRequest(BaseModel):
     rationale: str = Field(min_length=1)
 
 
-@app.post("/coverage/override")
+@app.post("/coverage/override", dependencies=[Depends(require_auth)])
 def coverage_override(
     body: TierOverrideRequest,
     conn: psycopg.Connection[object] = Depends(get_conn),
@@ -166,7 +167,7 @@ _KNOWN_JOBS: list[str] = [
 ]
 
 
-@app.get("/health/data")
+@app.get("/health/data", dependencies=[Depends(require_auth)])
 def health_data(conn: psycopg.Connection[object] = Depends(get_conn)) -> dict:
     """Per-layer staleness status, job health, and kill switch state."""
     try:
@@ -221,7 +222,7 @@ class KillSwitchRequest(BaseModel):
         return self
 
 
-@app.post("/kill-switch")
+@app.post("/kill-switch", dependencies=[Depends(require_auth)])
 def set_kill_switch(
     body: KillSwitchRequest,
     conn: psycopg.Connection[object] = Depends(get_conn),

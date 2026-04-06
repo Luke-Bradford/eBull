@@ -29,9 +29,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.api._helpers import parse_optional_float, parse_optional_int
+from app.api.auth import require_auth
 from app.db import get_conn
 
-router = APIRouter(prefix="/recommendations", tags=["recommendations"])
+router = APIRouter(
+    prefix="/recommendations",
+    tags=["recommendations"],
+    dependencies=[Depends(require_auth)],
+)
 
 MAX_PAGE_LIMIT = 200
 

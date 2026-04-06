@@ -27,5 +27,10 @@ class Settings(BaseSettings):
     enable_auto_trading: bool = False
     enable_live_trading: bool = False
 
+    # Operator API key for authenticating requests to protected endpoints.
+    # Sourced from EBULL_API_KEY (or API_KEY via env_file). When unset, all
+    # protected endpoints fail closed — we never silently allow access.
+    api_key: str | None = None
+
 
 settings = Settings()
