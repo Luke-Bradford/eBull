@@ -13,7 +13,6 @@ has ``confidence_score``.  This module uses the actual schema column name.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
 
 import psycopg
 import psycopg.rows
@@ -25,9 +24,6 @@ from app.db import get_conn
 router = APIRouter(prefix="/theses", tags=["theses"])
 
 MAX_PAGE_LIMIT = 200
-
-ThesisType = Literal["compounder", "value", "turnaround", "speculative"]
-Stance = Literal["buy", "hold", "watch", "avoid"]
 
 # ---------------------------------------------------------------------------
 # Response models
@@ -122,7 +118,7 @@ def get_latest_thesis(
         WHERE t.instrument_id = %(instrument_id)s
         ORDER BY t.created_at DESC, t.thesis_version DESC
         LIMIT 1
-    """
+    """  # safe: _THESIS_COLUMNS is a module-level constant, not user input
     params = {"instrument_id": instrument_id}
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -164,7 +160,9 @@ def get_thesis_history(
                 detail=f"Instrument {instrument_id} not found",
             )
 
-        # COUNT query — separate params dict (prevention log: shared params).
+        # COUNT then SELECT is a TOCTOU window, but theses is append-only
+        # so total can only grow between queries — never shrink.
+        # Separate params dict (prevention log: shared params).
         count_sql = """
             SELECT COUNT(*) AS cnt
             FROM theses t
@@ -192,7 +190,7 @@ def get_thesis_history(
             WHERE t.instrument_id = %(instrument_id)s
             ORDER BY t.created_at DESC, t.thesis_version DESC
             LIMIT %(limit)s OFFSET %(offset)s
-        """
+        """  # safe: _THESIS_COLUMNS is a module-level constant, not user input
         data_params = {"instrument_id": instrument_id, "limit": limit, "offset": offset}
         cur.execute(data_sql, data_params)
         rows = cur.fetchall()
