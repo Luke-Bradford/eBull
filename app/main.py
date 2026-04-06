@@ -2,14 +2,20 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import psycopg
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.config import settings
 from app.db.migrations import migration_status, run_migrations
 from app.services.coverage import override_tier
+from app.services.ops_monitor import (
+    activate_kill_switch,
+    deactivate_kill_switch,
+    get_system_health,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -110,3 +116,94 @@ def coverage_override(body: TierOverrideRequest) -> dict:
         "change_type": change.change_type,
         "rationale": change.rationale,
     }
+
+
+# ---------------------------------------------------------------------------
+# Data health
+# ---------------------------------------------------------------------------
+
+# Job names that the scheduler uses — listed here so the health endpoint
+# can report on each without coupling to the scheduler module.
+_KNOWN_JOBS: list[str] = [
+    "nightly_universe_sync",
+    "hourly_market_refresh",
+    "daily_cik_refresh",
+    "daily_research_refresh",
+    "daily_news_refresh",
+    "daily_thesis_refresh",
+    "morning_candidate_review",
+    "weekly_coverage_review",
+    "daily_tax_reconciliation",
+]
+
+
+@app.get("/health/data")
+def health_data() -> dict:
+    """Per-layer staleness status, job health, and kill switch state."""
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            report = get_system_health(conn, job_names=_KNOWN_JOBS)
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    return {
+        "checked_at": report.checked_at.isoformat(),
+        "kill_switch": {
+            "active": report.kill_switch_active,
+            "detail": report.kill_switch_detail,
+        },
+        "layers": [
+            {
+                "layer": lh.layer,
+                "status": lh.status,
+                "latest": lh.latest.isoformat() if lh.latest else None,
+                "max_age_seconds": lh.max_age.total_seconds() if lh.max_age else None,
+                "age_seconds": lh.age.total_seconds() if lh.age else None,
+                "detail": lh.detail,
+            }
+            for lh in report.layers
+        ],
+        "jobs": [
+            {
+                "job_name": jh.job_name,
+                "last_status": jh.last_status,
+                "last_started_at": jh.last_started_at.isoformat() if jh.last_started_at else None,
+                "last_finished_at": jh.last_finished_at.isoformat() if jh.last_finished_at else None,
+                "detail": jh.detail,
+            }
+            for jh in report.jobs
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Kill switch
+# ---------------------------------------------------------------------------
+
+
+class KillSwitchRequest(BaseModel):
+    active: bool
+    reason: str = ""
+    activated_by: str = ""
+
+    @field_validator("reason")
+    @classmethod
+    def reason_required_when_active(cls, v: str, info: Any) -> str:  # noqa: N805
+        if info.data.get("active") and not v.strip():
+            raise ValueError("reason is required when activating the kill switch")
+        return v
+
+
+@app.post("/kill-switch")
+def set_kill_switch(body: KillSwitchRequest) -> dict:
+    """Activate or deactivate the system-wide kill switch."""
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            if body.active:
+                activate_kill_switch(conn, reason=body.reason, activated_by=body.activated_by)
+            else:
+                deactivate_kill_switch(conn)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"active": body.active, "reason": body.reason}
