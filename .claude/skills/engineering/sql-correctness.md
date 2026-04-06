@@ -61,6 +61,19 @@ Pattern: do all I/O first, then open the transaction for the writes only.
 - `IN` clauses: `= ANY(%s)` with a list, not `IN %s` with a tuple
 - Literal `%` in LIKE patterns: `%%`
 
+## Single-row UPDATE must verify rowcount
+
+`UPDATE ... WHERE` silently affects zero rows when the predicate matches nothing. For any UPDATE that must affect exactly one row (singleton tables, primary-key lookups), check `result.rowcount`:
+
+```python
+result = conn.execute("UPDATE kill_switch SET ... WHERE id = TRUE", params)
+if result.rowcount == 0:
+    raise RuntimeError("expected row missing — cannot update")
+conn.commit()
+```
+
+Without this, the caller believes the mutation succeeded while the row is unchanged.
+
 ## Same-class scan after any fix
 
 | Found | Grep for |
@@ -70,3 +83,4 @@ Pattern: do all I/O first, then open the transaction for the writes only.
 | `MAX(` in a two-step sequence | `MAX(` in service files |
 | `json.dumps` into jsonb | `json.dumps` in services/ |
 | `dict_row` added to one cursor | all cursor calls in the file |
+| Missing `rowcount` after UPDATE | every `conn.execute("UPDATE` in the file |
