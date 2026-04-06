@@ -49,6 +49,7 @@ from app.services.ops_monitor import (
 )
 from app.services.runtime_config import (
     RuntimeConfigCorrupt,
+    RuntimeConfigNoOp,
     get_runtime_config,
     update_runtime_config,
 )
@@ -195,6 +196,9 @@ def patch_config(
         )
     except RuntimeConfigCorrupt as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RuntimeConfigNoOp as exc:
+        # No-op patch — reject so audit table never diverges from singleton.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
         # update_runtime_config raises ValueError only on empty-patch which
         # the pydantic validator already blocks.  Defensive 400 in case the
@@ -210,11 +214,11 @@ def patch_config(
     )
 
 
-@router.post("/kill-switch")
+@router.post("/kill-switch", response_model=KillSwitchResponse)
 def post_kill_switch(
     body: KillSwitchRequest,
     conn: psycopg.Connection[object] = Depends(get_conn),
-) -> dict[str, object]:
+) -> KillSwitchResponse:
     """Activate or deactivate the system-wide kill switch.
 
     The underlying service writes a runtime_config_audit row in the same
@@ -239,4 +243,6 @@ def post_kill_switch(
         # is an environmental fault, not a programmer error.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    return {"active": body.active, "reason": body.reason}
+    # Read post-write state so the response reflects the authoritative DB row
+    # (activated_at, activated_by, reason) rather than echoing the request body.
+    return _build_kill_switch_response(conn)

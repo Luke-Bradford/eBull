@@ -21,6 +21,7 @@ import pytest
 from app.services.runtime_config import (
     RuntimeConfig,
     RuntimeConfigCorrupt,
+    RuntimeConfigNoOp,
     get_runtime_config,
     update_runtime_config,
     write_kill_switch_audit,
@@ -142,21 +143,21 @@ class TestUpdateRuntimeConfig:
         assert audit_calls[0][0][1]["old"] == "false"
         assert audit_calls[0][0][1]["new"] == "true"
 
-    def test_no_op_update_writes_no_audit_row(self) -> None:
+    def test_no_op_update_raises(self) -> None:
         # Patch sets enable_auto_trading=True but the row already has True.
-        # The UPDATE still runs (stamps updated_at/updated_by/reason) but no
-        # audit row is written because the value did not change.
+        # The patch is rejected so updated_at/updated_by/reason on the
+        # singleton can never drift from the audit table.
         conn = _make_conn([_make_cursor([_row(auto=True, live=False)])])
-        update_runtime_config(
-            conn,
-            updated_by="op",
-            reason="noop",
-            enable_auto_trading=True,
-            now=_NOW,
-        )
-        # 1 UPDATE only — no audit insert
-        assert conn.execute.call_count == 1
-        assert "UPDATE runtime_config" in conn.execute.call_args_list[0][0][0]
+        with pytest.raises(RuntimeConfigNoOp, match="not change"):
+            update_runtime_config(
+                conn,
+                updated_by="op",
+                reason="noop",
+                enable_auto_trading=True,
+                now=_NOW,
+            )
+        # No UPDATE issued
+        assert conn.execute.call_count == 0
 
     def test_atomic_via_transaction(self) -> None:
         conn = _make_conn([_make_cursor([_row(auto=False, live=False)])])

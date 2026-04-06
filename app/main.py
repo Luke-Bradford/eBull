@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.api.audit import router as audit_router
 from app.api.auth import require_auth
-from app.api.config import KillSwitchRequest, post_kill_switch
+from app.api.config import KillSwitchRequest, KillSwitchResponse, post_kill_switch
 from app.api.config import router as config_router
 from app.api.filings import router as filings_router
 from app.api.instruments import router as instruments_router
@@ -224,6 +224,6 @@ def health_data(conn: psycopg.Connection[object] = Depends(get_conn)) -> dict:
 def set_kill_switch_deprecated(
     body: KillSwitchRequest,
     conn: psycopg.Connection[object] = Depends(get_conn),
-) -> dict[str, object]:
+) -> KillSwitchResponse:
     """Deprecated alias for POST /config/kill-switch."""
     return post_kill_switch(body, conn)

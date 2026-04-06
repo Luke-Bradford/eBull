@@ -46,6 +46,15 @@ class RuntimeConfigCorrupt(RuntimeError):
     """
 
 
+class RuntimeConfigNoOp(ValueError):
+    """Raised when a PATCH would not change any flag value.
+
+    Rejected so updated_at/updated_by/reason on the singleton can never drift
+    from the audit table — every recorded provenance update has a matching
+    audit row.
+    """
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     enable_auto_trading: bool
@@ -139,6 +148,16 @@ def update_runtime_config(
 
         new_auto = enable_auto_trading if enable_auto_trading is not None else bool(current["enable_auto_trading"])
         new_live = enable_live_trading if enable_live_trading is not None else bool(current["enable_live_trading"])
+
+        # No-op patch detection: if every provided flag already matches the
+        # current row, refuse the patch.  Otherwise the UPDATE would silently
+        # rewrite updated_at/updated_by/reason on the singleton with no audit
+        # row to record the attribution change, leaving config provenance
+        # diverged from the audit table.
+        auto_changed = enable_auto_trading is not None and bool(current["enable_auto_trading"]) != new_auto
+        live_changed = enable_live_trading is not None and bool(current["enable_live_trading"]) != new_live
+        if not auto_changed and not live_changed:
+            raise RuntimeConfigNoOp("patch would not change any flag value")
 
         update_result = conn.execute(
             """

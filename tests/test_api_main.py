@@ -153,7 +153,18 @@ class TestKillSwitch:
         conn = _mock_conn()
         _setup(conn)
 
-        with patch("app.api.config.activate_kill_switch") as mock_activate:
+        with (
+            patch("app.api.config.activate_kill_switch") as mock_activate,
+            patch(
+                "app.api.config.get_kill_switch_status",
+                return_value={
+                    "is_active": True,
+                    "activated_at": _NOW,
+                    "activated_by": "ci",
+                    "reason": "test",
+                },
+            ),
+        ):
             resp = client.post(
                 "/kill-switch",
                 json={"active": True, "reason": "test", "activated_by": "ci"},
