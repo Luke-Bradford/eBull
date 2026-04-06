@@ -86,8 +86,8 @@ RuleName = Literal[
     "spread_wide",
     "spread_unavailable",
     "cash_unknown",
+    "instrument_missing",
     "concentration_breach",
-    "score_missing",
 ]
 
 
@@ -103,7 +103,7 @@ class GuardResult:
     recommendation_id: int
     instrument_id: int
     verdict: Verdict
-    failed_rules: list[str]
+    failed_rules: list[RuleName]
     explanation: str
     decision_id: int  # PK of the written decision_audit row
 
@@ -124,8 +124,7 @@ def _load_recommendation(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT recommendation_id, instrument_id, action, model_version,
-                   cash_balance_known
+            SELECT recommendation_id, instrument_id, action, model_version
             FROM trade_recommendations
             WHERE recommendation_id = %(rid)s
             """,
@@ -158,6 +157,8 @@ def _load_coverage(
             SELECT coverage_tier, review_frequency
             FROM coverage
             WHERE instrument_id = %(iid)s
+            ORDER BY instrument_id
+            LIMIT 1
             """,
             {"iid": instrument_id},
         )
@@ -195,6 +196,8 @@ def _load_quote(
             SELECT spread_flag
             FROM quotes
             WHERE instrument_id = %(iid)s
+            ORDER BY instrument_id
+            LIMIT 1
             """,
             {"iid": instrument_id},
         )
@@ -215,10 +218,12 @@ def _load_cash(conn: psycopg.Connection[Any]) -> float | None:
 def _load_sector_exposure(
     conn: psycopg.Connection[Any],
     instrument_id: int,
-) -> tuple[str | None, float, float]:
+) -> tuple[bool, str | None, float, float]:
     """
-    Return (sector, current_sector_pct, total_aum).
+    Return (instrument_found, sector, current_sector_pct, total_aum).
 
+    instrument_found is False when the instrument has no row in instruments —
+    the caller must treat this as a hard failure, not a pass.
     current_sector_pct is the fraction of AUM currently in the same sector as
     instrument_id (excluding the instrument itself, since it is unowned for BUY).
     total_aum = SUM(position mark-to-market) + cash.  Returns 0.0 when unknown.
@@ -230,7 +235,9 @@ def _load_sector_exposure(
             {"iid": instrument_id},
         )
         row = cur.fetchone()
-    sector: str | None = row["sector"] if row is not None else None
+    if row is None:
+        return False, None, 0.0, 0.0
+    sector: str | None = row["sector"]
 
     # Portfolio mark-to-market
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -266,7 +273,7 @@ def _load_sector_exposure(
     total_aum = total_positions + cash
     current_sector_pct = (sector_values.get(sector, 0.0) / total_aum) if total_aum > 0 else 0.0
 
-    return sector, current_sector_pct, total_aum
+    return True, sector, current_sector_pct, total_aum
 
 
 # ---------------------------------------------------------------------------
@@ -388,15 +395,28 @@ def _check_cash(cash: float | None) -> RuleResult:
             passed=False,
             detail="cash_ledger is empty; cannot verify affordability",
         )
+    if cash <= 0:
+        return RuleResult(
+            rule="cash_unknown",
+            passed=False,
+            detail=f"cash_balance={cash}; no buying power",
+        )
     return RuleResult(rule="cash_unknown", passed=True)
 
 
 def _check_concentration(
+    instrument_found: bool,
     sector: str | None,
     current_sector_pct: float,
     total_aum: float,
 ) -> RuleResult:
-    if sector is None or total_aum <= 0:
+    if not instrument_found:
+        return RuleResult(
+            rule="instrument_missing",
+            passed=False,
+            detail="instrument_id not found in instruments table",
+        )
+    if total_aum <= 0:
         return RuleResult(rule="concentration_breach", passed=True)
     post_action_pct = current_sector_pct + _MAX_INITIAL_POSITION_PCT
     if post_action_pct > _MAX_SECTOR_EXPOSURE_PCT:
@@ -482,7 +502,8 @@ def _write_audit(
             {"status": status, "rid": recommendation_id},
         )
 
-    assert audit_row is not None  # INSERT ... RETURNING always returns a row
+    if audit_row is None:  # pragma: no cover — INSERT … RETURNING always returns a row
+        raise RuntimeError("decision_audit INSERT returned no row — this should never happen")
     return int(audit_row["decision_id"])
 
 
@@ -535,6 +556,7 @@ def evaluate_recommendation(
     thesis: dict[str, Any] | None = None
     quote: dict[str, Any] | None = None
     cash: float | None = None
+    instrument_found: bool = True
     sector: str | None = None
     current_sector_pct: float = 0.0
     total_aum: float = 0.0
@@ -544,7 +566,7 @@ def evaluate_recommendation(
         thesis = _load_latest_thesis(conn, instrument_id)
         quote = _load_quote(conn, instrument_id)
         cash = _load_cash(conn)
-        sector, current_sector_pct, total_aum = _load_sector_exposure(conn, instrument_id)
+        instrument_found, sector, current_sector_pct, total_aum = _load_sector_exposure(conn, instrument_id)
 
     # --- Step 3: evaluate rules ---
     rule_results: list[RuleResult] = []
@@ -562,12 +584,12 @@ def evaluate_recommendation(
         rule_results.append(_check_thesis_freshness(thesis, coverage, now))
         rule_results.append(_check_spread(quote))
         rule_results.append(_check_cash(cash))
-        rule_results.append(_check_concentration(sector, current_sector_pct, total_aum))
+        rule_results.append(_check_concentration(instrument_found, sector, current_sector_pct, total_aum))
 
     # --- Step 4: derive verdict ---
     failed = [r for r in rule_results if not r.passed]
     verdict: Verdict = "FAIL" if failed else "PASS"
-    failed_rule_names = [r.rule for r in failed]
+    failed_rule_names: list[RuleName] = [r.rule for r in failed]
     explanation = _build_explanation(rule_results)
 
     logger.info(

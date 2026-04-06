@@ -115,7 +115,6 @@ def _rec_cursor(
     instrument_id: int = 1,
     recommendation_id: int = 42,
     model_version: str | None = "v1-balanced",
-    cash_balance_known: bool | None = True,
 ) -> MagicMock:
     return _make_cursor(
         [
@@ -124,7 +123,6 @@ def _rec_cursor(
                 "instrument_id": instrument_id,
                 "action": action,
                 "model_version": model_version,
-                "cash_balance_known": cash_balance_known,
             }
         ]
     )
@@ -164,8 +162,16 @@ def _sector_cursors(
     sector_market_value: float = 0.0,
     total_positions: float = 0.0,
     cash: float = 50_000.0,
+    instrument_missing: bool = False,
 ) -> list[MagicMock]:
-    """Return the 3 cursors consumed by _load_sector_exposure."""
+    """Return the cursors consumed by _load_sector_exposure.
+
+    When instrument_missing=True the instruments cursor returns no rows and
+    _load_sector_exposure returns early — only 1 cursor is consumed.
+    Otherwise 3 cursors are returned (instruments, positions, cash_ledger).
+    """
+    if instrument_missing:
+        return [_make_cursor([])]
     instrument_cur = _make_cursor([{"sector": sector}])
     if sector is not None and sector_market_value > 0:
         positions_cur = _make_cursor([{"sector": sector, "market_value": sector_market_value}])
@@ -191,6 +197,7 @@ def _buy_cursors(
     sector_mv: float = 0.0,
     total_positions: float = 0.0,
     cash_for_sector: float = 50_000.0,
+    instrument_missing: bool = False,
     decision_id: int = 99,
 ) -> list[MagicMock]:
     """Convenience: build the full cursor sequence for a BUY evaluation."""
@@ -206,6 +213,7 @@ def _buy_cursors(
             sector_market_value=sector_mv,
             total_positions=total_positions,
             cash=cash_for_sector,
+            instrument_missing=instrument_missing,
         ),
         _audit_cursor(decision_id=decision_id),
     ]
@@ -396,10 +404,16 @@ class TestCheckCash:
         assert result.passed is False
         assert result.rule == "cash_unknown"
 
-    def test_zero_cash_passes(self) -> None:
-        # Zero is a known balance (portfolio might be fully invested)
+    def test_zero_cash_fails(self) -> None:
+        # Zero means no buying power — block BUY/ADD
         result = _check_cash(0.0)
-        assert result.passed is True
+        assert result.passed is False
+        assert result.rule == "cash_unknown"
+
+    def test_negative_cash_fails(self) -> None:
+        result = _check_cash(-1.0)
+        assert result.passed is False
+        assert result.rule == "cash_unknown"
 
     def test_positive_cash_passes(self) -> None:
         result = _check_cash(5_000.0)
@@ -412,22 +426,29 @@ class TestCheckCash:
 
 
 class TestCheckConcentration:
+    def test_instrument_missing_fails(self) -> None:
+        # Missing instrument row is a data-integrity failure — must not silently pass
+        result = _check_concentration(False, None, 0.0, 100_000.0)
+        assert result.passed is False
+        assert result.rule == "instrument_missing"
+
     def test_no_sector_passes(self) -> None:
-        result = _check_concentration(None, 0.0, 100_000.0)
+        # Instrument exists but has NULL sector — concentration check skipped
+        result = _check_concentration(True, None, 0.0, 100_000.0)
         assert result.passed is True
 
     def test_zero_aum_passes(self) -> None:
-        result = _check_concentration("Technology", 0.0, 0.0)
+        result = _check_concentration(True, "Technology", 0.0, 0.0)
         assert result.passed is True
 
     def test_within_cap_passes(self) -> None:
         # 20% current + 5% alloc = 25% — exactly at cap, not over (> not >=)
-        result = _check_concentration("Technology", 0.20, 100_000.0)
+        result = _check_concentration(True, "Technology", 0.20, 100_000.0)
         assert result.passed is True
 
     def test_breach_fails(self) -> None:
         # 21% current + 5% alloc = 26% > 25%
-        result = _check_concentration("Technology", 0.21, 100_000.0)
+        result = _check_concentration(True, "Technology", 0.21, 100_000.0)
         assert result.passed is False
         assert result.rule == "concentration_breach"
         assert "Technology" in result.detail
@@ -601,6 +622,12 @@ class TestEvaluateRecommendation:
         assert result.verdict == "FAIL"
         assert "cash_unknown" in result.failed_rules
 
+    def test_zero_cash_fails_buy(self) -> None:
+        cursors = _buy_cursors(cash_balance=0.0)
+        result = self._eval(cursors)
+        assert result.verdict == "FAIL"
+        assert "cash_unknown" in result.failed_rules
+
     def test_cash_unknown_does_not_fail_exit(self) -> None:
         result = self._eval(_exit_cursors())
         assert result.verdict == "PASS"
@@ -630,6 +657,13 @@ class TestEvaluateRecommendation:
         )
         result = self._eval(cursors)
         assert result.verdict == "PASS"
+
+    def test_instrument_missing_fails_buy(self) -> None:
+        # Instrument not in instruments table → hard FAIL, not silent pass
+        cursors = _buy_cursors(instrument_missing=True)
+        result = self._eval(cursors)
+        assert result.verdict == "FAIL"
+        assert "instrument_missing" in result.failed_rules
 
     # --- Audit writing ---
 
