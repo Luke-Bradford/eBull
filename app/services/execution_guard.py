@@ -87,6 +87,7 @@ RuleName = Literal[
     "spread_unavailable",
     "cash_unknown",
     "instrument_missing",
+    "sector_missing",
     "concentration_breach",
 ]
 
@@ -151,6 +152,9 @@ def _load_coverage(
     conn: psycopg.Connection[Any],
     instrument_id: int,
 ) -> dict[str, Any] | None:
+    # coverage.instrument_id is PRIMARY KEY — at most one row per instrument.
+    # ORDER BY instrument_id LIMIT 1 is stated for consistency with the
+    # fetchone invariant; the PK guarantees determinism regardless.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -196,7 +200,7 @@ def _load_quote(
             SELECT spread_flag
             FROM quotes
             WHERE instrument_id = %(iid)s
-            ORDER BY instrument_id
+            ORDER BY quoted_at DESC
             LIMIT 1
             """,
             {"iid": instrument_id},
@@ -415,6 +419,12 @@ def _check_concentration(
             rule="instrument_missing",
             passed=False,
             detail="instrument_id not found in instruments table",
+        )
+    if sector is None:
+        return RuleResult(
+            rule="sector_missing",
+            passed=False,
+            detail="instruments.sector is NULL; cannot verify concentration",
         )
     if total_aum <= 0:
         return RuleResult(rule="concentration_breach", passed=True)

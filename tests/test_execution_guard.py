@@ -432,10 +432,11 @@ class TestCheckConcentration:
         assert result.passed is False
         assert result.rule == "instrument_missing"
 
-    def test_no_sector_passes(self) -> None:
-        # Instrument exists but has NULL sector — concentration check skipped
+    def test_null_sector_fails(self) -> None:
+        # Instrument exists but has NULL sector — cannot verify concentration
         result = _check_concentration(True, None, 0.0, 100_000.0)
-        assert result.passed is True
+        assert result.passed is False
+        assert result.rule == "sector_missing"
 
     def test_zero_aum_passes(self) -> None:
         result = _check_concentration(True, "Technology", 0.0, 0.0)
@@ -664,6 +665,13 @@ class TestEvaluateRecommendation:
         result = self._eval(cursors)
         assert result.verdict == "FAIL"
         assert "instrument_missing" in result.failed_rules
+
+    def test_null_sector_fails_buy(self) -> None:
+        # Instrument exists but sector is NULL → sector_missing FAIL
+        cursors = _buy_cursors(sector=None)
+        result = self._eval(cursors)
+        assert result.verdict == "FAIL"
+        assert "sector_missing" in result.failed_rules
 
     # --- Audit writing ---
 
