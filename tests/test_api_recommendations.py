@@ -209,6 +209,16 @@ class TestListRecommendations:
         resp = client.get("/recommendations", params={"limit": 0})
         assert resp.status_code == 422
 
+    def test_invalid_action_rejected(self) -> None:
+        """Invalid action value rejected by Literal validation."""
+        resp = client.get("/recommendations", params={"action": "NUKE"})
+        assert resp.status_code == 422
+
+    def test_invalid_status_rejected(self) -> None:
+        """Invalid status value rejected by Literal validation."""
+        resp = client.get("/recommendations", params={"status": "banana"})
+        assert resp.status_code == 422
+
     def test_count_query_receives_only_filter_params(self) -> None:
         """COUNT query must not receive limit/offset keys."""
         conn = _with_conn([[{"cnt": 5}], []])

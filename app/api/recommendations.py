@@ -21,17 +21,22 @@ Ordering: created_at DESC, recommendation_id DESC (newest first, deterministic).
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 import psycopg
 import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from app.api._helpers import parse_optional_float, parse_optional_int
 from app.db import get_conn
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
 
 MAX_PAGE_LIMIT = 200
+
+Action = Literal["BUY", "ADD", "HOLD", "EXIT"]
+Status = Literal["proposed", "approved", "rejected", "executed"]
 
 
 # ---------------------------------------------------------------------------
@@ -84,20 +89,6 @@ class RecommendationDetail(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _parse_optional_float(row: dict[str, object], key: str) -> float | None:
-    val = row.get(key)
-    if val is None:
-        return None
-    return float(val)  # type: ignore[arg-type]
-
-
-def _parse_optional_int(row: dict[str, object], key: str) -> int | None:
-    val = row.get(key)
-    if val is None:
-        return None
-    return int(val)  # type: ignore[arg-type]
-
-
 def _parse_list_item(row: dict[str, object]) -> RecommendationListItem:
     return RecommendationListItem(
         recommendation_id=row["recommendation_id"],  # type: ignore[arg-type]
@@ -107,10 +98,10 @@ def _parse_list_item(row: dict[str, object]) -> RecommendationListItem:
         action=row["action"],  # type: ignore[arg-type]
         status=row["status"],  # type: ignore[arg-type]
         rationale=row["rationale"],  # type: ignore[arg-type]
-        score_id=_parse_optional_int(row, "score_id"),
+        score_id=parse_optional_int(row, "score_id"),
         model_version=row["model_version"],  # type: ignore[arg-type]
-        suggested_size_pct=_parse_optional_float(row, "suggested_size_pct"),
-        target_entry=_parse_optional_float(row, "target_entry"),
+        suggested_size_pct=parse_optional_float(row, "suggested_size_pct"),
+        target_entry=parse_optional_float(row, "target_entry"),
         cash_balance_known=row["cash_balance_known"],  # type: ignore[arg-type]
         created_at=row["created_at"],  # type: ignore[arg-type]
     )
@@ -143,8 +134,8 @@ WITH deduped AS (
 @router.get("", response_model=RecommendationsListResponse)
 def list_recommendations(
     conn: psycopg.Connection[object] = Depends(get_conn),
-    action: str | None = Query(default=None),
-    status: str | None = Query(default=None),
+    action: Action | None = Query(default=None),
+    status: Status | None = Query(default=None),
     instrument_id: int | None = Query(default=None),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=MAX_PAGE_LIMIT),
@@ -153,7 +144,7 @@ def list_recommendations(
 
     Filters:
       - action: exact match (BUY, ADD, HOLD, EXIT)
-      - status: exact match (proposed, accepted, rejected, executed)
+      - status: exact match (proposed, approved, rejected, executed)
       - instrument_id: exact match
 
     Ordering: created_at DESC, recommendation_id DESC (newest first).
@@ -177,11 +168,12 @@ def list_recommendations(
     where_sql = " WHERE " + " AND ".join(where_clauses)
 
     # -- COUNT query (separate params — no limit/offset) -------------------
+    # S608 safe: all SQL fragments are hardcoded; user input is parameterised via %(...)s.
     count_sql = f"""{_DEDUPED_CTE}
         SELECT COUNT(*) AS cnt
         FROM deduped d
         JOIN instruments i USING (instrument_id)
-        {where_sql}"""  # noqa: S608  — hardcoded fragments only
+        {where_sql}"""  # noqa: S608
 
     # -- Items query -------------------------------------------------------
     items_params: dict[str, object] = {
@@ -189,6 +181,7 @@ def list_recommendations(
         "limit": limit,
         "offset": offset,
     }
+    # S608 safe: all SQL fragments are hardcoded; user input is parameterised via %(...)s.
     items_sql = f"""{_DEDUPED_CTE}
         SELECT d.recommendation_id, d.instrument_id,
                i.symbol, i.company_name,
@@ -200,7 +193,7 @@ def list_recommendations(
         JOIN instruments i USING (instrument_id)
         {where_sql}
         ORDER BY d.created_at DESC, d.recommendation_id DESC
-        LIMIT %(limit)s OFFSET %(offset)s"""  # noqa: S608  — hardcoded fragments only
+        LIMIT %(limit)s OFFSET %(offset)s"""  # noqa: S608
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(count_sql, filter_params)  # type: ignore[arg-type]
@@ -208,6 +201,7 @@ def list_recommendations(
         # COUNT() always returns exactly one row.
         total: int = count_row["cnt"] if count_row else 0  # type: ignore[index]
 
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(items_sql, items_params)  # type: ignore[arg-type]
         rows = cur.fetchall()
 
@@ -260,11 +254,11 @@ def get_recommendation(
         action=row["action"],  # type: ignore[arg-type]
         status=row["status"],  # type: ignore[arg-type]
         rationale=row["rationale"],  # type: ignore[arg-type]
-        score_id=_parse_optional_int(row, "score_id"),
+        score_id=parse_optional_int(row, "score_id"),
         model_version=row["model_version"],  # type: ignore[arg-type]
-        suggested_size_pct=_parse_optional_float(row, "suggested_size_pct"),
-        target_entry=_parse_optional_float(row, "target_entry"),
+        suggested_size_pct=parse_optional_float(row, "suggested_size_pct"),
+        target_entry=parse_optional_float(row, "target_entry"),
         cash_balance_known=row["cash_balance_known"],  # type: ignore[arg-type]
-        total_score=_parse_optional_float(row, "total_score"),
+        total_score=parse_optional_float(row, "total_score"),
         created_at=row["created_at"],  # type: ignore[arg-type]
     )

@@ -14,7 +14,7 @@ Structure:
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -34,7 +34,7 @@ def _make_position_row(
     instrument_id: int = 1,
     symbol: str = "AAPL",
     company_name: str = "Apple Inc",
-    open_date: str | None = "2026-01-15",
+    open_date: date | None = date(2026, 1, 15),
     avg_cost: float | None = 180.00,
     current_units: float = 10.0,
     cost_basis: float = 1800.00,
@@ -264,3 +264,25 @@ class TestGetPortfolio:
         item = resp.json()["positions"][0]
         assert item["market_value"] == 1500.0  # 10 * 150
         assert item["unrealized_pnl"] == -500.0  # 1500 - 2000
+
+    def test_open_date_serialised_as_iso_date(self) -> None:
+        """open_date (DB DATE column) serialises as ISO-8601 string."""
+        pos = _make_position_row(open_date=date(2026, 1, 15))
+        _with_conn([[pos], [_make_cash_row(0.0)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        assert resp.json()["positions"][0]["open_date"] == "2026-01-15"
+
+    def test_zero_unit_positions_excluded_by_sql_filter(self) -> None:
+        """Zero-unit positions are excluded via WHERE filter in the SQL query.
+
+        The SQL has WHERE p.current_units > 0, so zero-unit rows never reach
+        the endpoint. This test verifies the WHERE clause is present.
+        """
+        conn = _with_conn([[], [_make_cash_row(0.0)]])
+        client.get("/portfolio")
+
+        cur = conn.cursor.return_value
+        positions_sql: str = cur.execute.call_args_list[0][0][0]
+        assert "current_units > 0" in positions_sql
