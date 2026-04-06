@@ -54,8 +54,7 @@ DEMOTE_T2_TO_T3_SCORE: float = 0.45
 # Tier 1 hard cap
 TIER_1_CAP: int = 50
 
-# Review frequency mapping (duplicated from thesis engine;
-# extract to shared module when a third consumer appears)
+# Review frequency mapping (duplicated from thesis engine)
 _REVIEW_FREQUENCY_DAYS: dict[str, int] = {
     "daily": 1,
     "weekly": 7,
@@ -338,11 +337,13 @@ def _evaluate_demotion(snap: InstrumentSnapshot, now: datetime) -> TierChange | 
         if snap.total_score is not None and snap.total_score < DEMOTE_T1_TO_T2_SCORE:
             triggers.append(f"score={snap.total_score:.3f} < {DEMOTE_T1_TO_T2_SCORE}")
 
-        if snap.thesis_created_at is not None and not _is_thesis_fresh(
-            snap.thesis_created_at, snap.review_frequency, now
-        ):
-            triggers.append("thesis stale")
-        elif snap.thesis_created_at is None:
+        if snap.thesis_created_at is not None:
+            if not _is_thesis_fresh(snap.thesis_created_at, snap.review_frequency, now):
+                if snap.review_frequency not in _REVIEW_FREQUENCY_DAYS:
+                    triggers.append(f"thesis freshness unknown (review_frequency={snap.review_frequency!r})")
+                else:
+                    triggers.append("thesis stale")
+        else:
             triggers.append("no thesis")
 
         if snap.thesis_stance == "avoid":
@@ -605,46 +606,31 @@ def override_tier(
     if not rationale or not rationale.strip():
         raise ValueError("rationale must be non-empty")
 
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT c.coverage_tier, i.symbol
-            FROM coverage c
-            JOIN instruments i ON i.instrument_id = c.instrument_id
-            WHERE c.instrument_id = %(id)s
-            """,
-            {"id": instrument_id},
-        )
-        row = cur.fetchone()
-
-    if row is None:
-        raise ValueError(f"No coverage row for instrument_id={instrument_id}")
-
-    old_tier = int(row["coverage_tier"])
-    symbol = row["symbol"]
-
-    if old_tier == new_tier:
-        raise ValueError(f"instrument_id={instrument_id} ({symbol}) is already at Tier {new_tier}")
-
-    change_type: ChangeType = "override"
-    change = TierChange(
-        instrument_id=instrument_id,
-        old_tier=old_tier,
-        new_tier=new_tier,
-        change_type=change_type,
-        rationale=f"Manual override ({symbol}): {rationale.strip()}",
-        evidence={
-            "symbol": symbol,
-            "old_tier": old_tier,
-            "new_tier": new_tier,
-            "operator_rationale": rationale.strip(),
-        },
-    )
-
-    # Cap check and write are inside the same transaction to prevent TOCTOU:
-    # a concurrent override/review cannot promote past the cap between the
-    # count read and the tier update.
+    # All reads (old_tier lookup, T1 cap count) and the write are inside
+    # a single transaction so the audit record cannot record a stale old_tier
+    # and the cap check cannot race with a concurrent override or weekly review.
     with conn.transaction():
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT c.coverage_tier, i.symbol
+                FROM coverage c
+                JOIN instruments i ON i.instrument_id = c.instrument_id
+                WHERE c.instrument_id = %(id)s
+                """,
+                {"id": instrument_id},
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            raise ValueError(f"No coverage row for instrument_id={instrument_id}")
+
+        old_tier = int(row["coverage_tier"])
+        symbol = row["symbol"]
+
+        if old_tier == new_tier:
+            raise ValueError(f"instrument_id={instrument_id} ({symbol}) is already at Tier {new_tier}")
+
         if new_tier == 1:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute("SELECT COUNT(*) AS cnt FROM coverage WHERE coverage_tier = 1")
@@ -654,6 +640,20 @@ def override_tier(
                 raise ValueError(
                     f"Tier 1 cap ({TIER_1_CAP}) reached; current count={current_t1}. Demote another instrument first."
                 )
+
+        change = TierChange(
+            instrument_id=instrument_id,
+            old_tier=old_tier,
+            new_tier=new_tier,
+            change_type="override",
+            rationale=f"Manual override ({symbol}): {rationale.strip()}",
+            evidence={
+                "symbol": symbol,
+                "old_tier": old_tier,
+                "new_tier": new_tier,
+                "operator_rationale": rationale.strip(),
+            },
+        )
         _apply_tier_change(conn, change)
 
     logger.info(

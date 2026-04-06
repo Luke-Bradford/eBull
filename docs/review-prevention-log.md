@@ -140,3 +140,16 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - **Enforced in:** this prevention log
 - **Promoted to skill?** no — too specific to summary-count patterns
 - **Notes:** The correct formula is: only subtract categories that actually changed state. Categories that are "processed but unchanged" (like blocked promotions) should not reduce the unchanged count.
+
+---
+
+### Audit-record reads must be inside the write transaction
+
+- **Bug class:** stale state recorded in audit table
+- **First seen in:** `#66`
+- **Example symptom:** `override_tier` read `coverage_tier` (for `old_tier`) in a cursor outside the transaction, then wrote the audit record inside a later `conn.transaction()`. A concurrent tier change between the read and write would record the wrong `old_tier` in `coverage_audit`.
+- **Root cause:** the `SELECT` that populated the audit evidence was separated from the `INSERT INTO coverage_audit` by a transaction boundary.
+- **Prevention rule:** Before pushing any `override_*` or `audit_*` function, grep for `SELECT` calls that read state used in audit records and confirm they are inside the same `conn.transaction()` block as the `INSERT INTO *_audit`. If the `SELECT` is outside the transaction, the audit row can record stale state.
+- **Enforced in:** `.claude/skills/engineering/pre-flight-review.md` section E (Auditability) and section F (Concurrency)
+- **Promoted to skill?** no — already covered by pre-flight sections E+F; this entry records the repo-specific pattern
+- **Notes:** General rule: any data that appears in an audit record must be read within the same transaction that writes the audit row.

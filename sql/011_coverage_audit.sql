@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS coverage_audit (
     new_tier       SMALLINT NOT NULL CHECK (new_tier BETWEEN 1 AND 3),
     change_type    TEXT NOT NULL CHECK (change_type IN ('promotion', 'demotion', 'override', 'blocked_promotion')),
     rationale      TEXT NOT NULL,
-    evidence_json  JSONB
+    evidence_json  JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
 CREATE INDEX IF NOT EXISTS idx_coverage_audit_instrument
