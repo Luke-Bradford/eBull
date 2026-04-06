@@ -13,12 +13,13 @@ Mock DB approach mirrors test_execution_guard.py:
   - _make_conn(cursors) builds a connection mock
   - conn.transaction() is a no-op context manager
 
-Cursor call order inside execute_order (demo BUY):
+Cursor call order inside execute_order (demo BUY with suggested_size_pct):
   1. _load_approved_recommendation  — fetchone
-  2. _load_latest_quote_price       — fetchone
-  3. _persist_order                 — fetchone (INSERT RETURNING)
-  4. _persist_fill                  — fetchone (INSERT RETURNING)
-  5. conn.execute x3                — position upsert, cash_ledger, recommendation status
+  2. _load_cash                     — fetchone
+  3. _load_latest_quote_price       — fetchone
+  4. _persist_order                 — fetchone (INSERT RETURNING)
+  5. _persist_fill                  — fetchone (INSERT RETURNING)
+  6. conn.execute x4                — position upsert, cash_ledger, rec status, audit
 
 Cursor call order inside execute_order (demo EXIT):
   1. _load_approved_recommendation  — fetchone
@@ -26,7 +27,7 @@ Cursor call order inside execute_order (demo EXIT):
   3. _load_latest_quote_price       — fetchone
   4. _persist_order                 — fetchone (INSERT RETURNING)
   5. _persist_fill                  — fetchone (INSERT RETURNING)
-  6. conn.execute x3                — position update, cash_ledger, recommendation status
+  6. conn.execute x4                — position update, cash_ledger, rec status, audit
 """
 
 from __future__ import annotations
@@ -113,6 +114,10 @@ def _rec_cursor(
             }
         ]
     )
+
+
+def _cash_cursor(balance: float | None = 10_000.0) -> MagicMock:
+    return _make_cursor([{"balance": balance}])
 
 
 def _quote_cursor(last: float | None = 150.0) -> MagicMock:
@@ -263,9 +268,10 @@ class TestLoadHelpers:
 class TestExecuteOrderDemoMode:
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_demo_buy_produces_fill_and_order(self, _mock_now: MagicMock) -> None:
-        """Demo BUY: synthetic fill, order row, fill row, position upsert, cash entry."""
+        """Demo BUY: synthetic fill, order row, fill row, position upsert, cash, audit."""
         cursors = [
             _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
             _quote_cursor(last=100.0),
             # Inside transaction:
             _order_returning_cursor(order_id=7),
@@ -284,9 +290,8 @@ class TestExecuteOrderDemoMode:
         assert result.broker_order_ref == "DEMO-1-BUY"
         assert "order filled" in result.explanation
 
-        # conn.execute should have been called for:
-        # position upsert, cash_ledger insert, recommendation status update
-        assert conn.execute.call_count == 3
+        # conn.execute: position upsert, cash_ledger, rec status, audit = 4
+        assert conn.execute.call_count == 4
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_demo_exit_produces_fill(self, _mock_now: MagicMock) -> None:
@@ -310,18 +315,18 @@ class TestExecuteOrderDemoMode:
         assert result.order_id == 8
         assert result.fill_id == 4
 
-        # conn.execute: position update, cash_ledger, recommendation status
-        assert conn.execute.call_count == 3
+        # conn.execute: position update, cash_ledger, rec status, audit = 4
+        assert conn.execute.call_count == 4
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
-    def test_demo_buy_no_quote_still_produces_order(self, _mock_now: MagicMock) -> None:
-        """Demo BUY with no quote: synthetic fill at price=0, units=0."""
+    def test_demo_buy_no_quote_produces_failed_no_fill(self, _mock_now: MagicMock) -> None:
+        """Demo BUY with no quote: zero-unit fill is not persisted."""
         cursors = [
             _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
             _make_cursor([]),  # no quote
-            # Inside transaction: order persisted, but no fill (units=0)
+            # Inside transaction: order persisted, no fill (zero units)
             _order_returning_cursor(order_id=9),
-            _fill_returning_cursor(fill_id=5),
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -330,8 +335,13 @@ class TestExecuteOrderDemoMode:
             decision_id=10,
             settings=_SETTINGS_DEMO,
         )
-        assert result.outcome == "filled"
+        assert result.outcome == "failed"
+        assert result.fill_id is None
         assert result.order_id == 9
+        assert "zero units" in result.explanation
+
+        # conn.execute: rec status update, audit = 2 (no fill/position/cash)
+        assert conn.execute.call_count == 2
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_demo_mode_never_calls_broker(self, _mock_now: MagicMock) -> None:
@@ -339,6 +349,7 @@ class TestExecuteOrderDemoMode:
         broker = MagicMock()
         cursors = [
             _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
             _quote_cursor(last=100.0),
             _order_returning_cursor(order_id=1),
             _fill_returning_cursor(fill_id=1),
@@ -354,6 +365,27 @@ class TestExecuteOrderDemoMode:
         broker.place_order.assert_not_called()
         broker.close_position.assert_not_called()
         broker.get_order_status.assert_not_called()
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_buy_writes_execution_audit(self, _mock_now: MagicMock) -> None:
+        """Every code path must write a decision_audit row for execution outcome."""
+        cursors = [
+            _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
+            _quote_cursor(last=100.0),
+            _order_returning_cursor(order_id=1),
+            _fill_returning_cursor(fill_id=1),
+        ]
+        conn = _make_conn(cursors)
+        execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+            settings=_SETTINGS_DEMO,
+        )
+        # Find the decision_audit INSERT among conn.execute calls
+        audit_calls = [c for c in conn.execute.call_args_list if "decision_audit" in str(c)]
+        assert len(audit_calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +407,8 @@ class TestExecuteOrderLiveMode:
         )
         cursors = [
             _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            # broker called (no cursor)
             _order_returning_cursor(order_id=10),
             _fill_returning_cursor(fill_id=6),
         ]
@@ -404,6 +438,7 @@ class TestExecuteOrderLiveMode:
         cursors = [
             _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
             _position_cursor(current_units=5.0),
+            # broker called (no cursor)
             _order_returning_cursor(order_id=11),
             _fill_returning_cursor(fill_id=7),
         ]
@@ -422,6 +457,7 @@ class TestExecuteOrderLiveMode:
     def test_live_mode_no_broker_raises(self, _mock_now: MagicMock) -> None:
         cursors = [
             _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
         ]
         conn = _make_conn(cursors)
         with pytest.raises(ValueError, match="no broker provider supplied"):
@@ -442,7 +478,7 @@ class TestExecuteOrderLiveMode:
 class TestExecuteOrderFailures:
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_broker_failed_persists_order_with_failed_status(self, _mock_now: MagicMock) -> None:
-        """Failed broker call still persists an order row."""
+        """Failed broker call still persists an order row and audit row."""
         broker = MagicMock()
         broker.place_order.return_value = BrokerOrderResult(
             broker_order_ref=None,
@@ -454,6 +490,7 @@ class TestExecuteOrderFailures:
         )
         cursors = [
             _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=12),
         ]
         conn = _make_conn(cursors)
@@ -469,13 +506,12 @@ class TestExecuteOrderFailures:
         assert result.order_id == 12
         assert "failed" in result.explanation
 
-        # Only order insert + recommendation status update; no fill/position/cash
-        # conn.cursor called once (order insert), conn.execute once (rec status)
-        assert conn.execute.call_count == 1
+        # conn.execute: rec status update + audit = 2 (no fill/position/cash)
+        assert conn.execute.call_count == 2
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_broker_pending_persists_order_with_pending_status(self, _mock_now: MagicMock) -> None:
-        """Pending broker response still persists an order row."""
+        """Pending broker response still persists an order row and audit row."""
         broker = MagicMock()
         broker.place_order.return_value = BrokerOrderResult(
             broker_order_ref="ORD-789",
@@ -487,6 +523,7 @@ class TestExecuteOrderFailures:
         )
         cursors = [
             _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=13),
         ]
         conn = _make_conn(cursors)
@@ -536,6 +573,7 @@ class TestExecuteOrderFailures:
         )
         cursors = [
             _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=14),
         ]
         conn = _make_conn(cursors)
@@ -549,3 +587,31 @@ class TestExecuteOrderFailures:
         assert result.outcome == "failed"
         assert result.fill_id is None
         assert result.order_id == 14
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_failed_order_still_writes_audit(self, _mock_now: MagicMock) -> None:
+        """Even a failed order must produce a decision_audit row."""
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref=None,
+            status="failed",
+            filled_price=None,
+            filled_units=None,
+            fees=Decimal("0"),
+            raw_payload={"error": "timeout"},
+        )
+        cursors = [
+            _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=15),
+        ]
+        conn = _make_conn(cursors)
+        execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+            settings=_SETTINGS_LIVE,
+            broker=broker,
+        )
+        audit_calls = [c for c in conn.execute.call_args_list if "decision_audit" in str(c)]
+        assert len(audit_calls) == 1

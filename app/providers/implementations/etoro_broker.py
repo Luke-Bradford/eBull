@@ -50,6 +50,10 @@ class EtoroBrokerProvider(BrokerProvider):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the underlying HTTP client. Prefer using as a context manager."""
         self._client.close()
 
     # ------------------------------------------------------------------
@@ -191,19 +195,28 @@ _STATUS_MAP: dict[str, OrderStatus] = {
 }
 
 
+def _first_present(*keys: str, source: dict[str, Any]) -> Any:
+    """Return the value of the first key present (not None) in source."""
+    for k in keys:
+        val = source.get(k)
+        if val is not None:
+            return val
+    return None
+
+
 def _normalise_order_response(raw: dict[str, Any]) -> BrokerOrderResult:
     """Map eToro order response to BrokerOrderResult."""
-    ref = raw.get("OrderId") or raw.get("orderId") or raw.get("order_id")
-    raw_status = raw.get("Status") or raw.get("status") or "pending"
+    ref = _first_present("OrderId", "orderId", "order_id", source=raw)
+    raw_status = _first_present("Status", "status", source=raw) or "pending"
     status: OrderStatus = _STATUS_MAP.get(str(raw_status), "pending")
 
     filled_price: Decimal | None = None
     filled_units: Decimal | None = None
     fees = Decimal("0")
 
-    raw_price = raw.get("ExecutionPrice") or raw.get("execution_price") or raw.get("price")
-    raw_units = raw.get("ExecutedUnits") or raw.get("executed_units") or raw.get("units")
-    raw_fees = raw.get("Fees") or raw.get("fees")
+    raw_price = _first_present("ExecutionPrice", "execution_price", "price", source=raw)
+    raw_units = _first_present("ExecutedUnits", "executed_units", "units", source=raw)
+    raw_fees = _first_present("Fees", "fees", source=raw)
 
     if raw_price is not None:
         filled_price = Decimal(str(raw_price))

@@ -43,11 +43,9 @@ logger = logging.getLogger(__name__)
 
 OrderOutcome = Literal["filled", "pending", "failed"]
 
-# Default position size used for BUY when the recommendation has no units.
-# The portfolio manager provides suggested_size_pct as a fraction of AUM;
-# the guard already validated cash.  When both amount and units are absent,
-# this default prevents a zero-size order.
 _DEFAULT_ORDER_TYPE = "market"
+
+STAGE: str = "order_execution"
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -140,6 +138,16 @@ def _load_position_units(
     if row is None or row["current_units"] is None:
         return Decimal("0")
     return Decimal(str(row["current_units"]))
+
+
+def _load_cash(conn: psycopg.Connection[Any]) -> Decimal | None:
+    """Return current cash balance, or None if the ledger is empty."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("SELECT SUM(amount) AS balance FROM cash_ledger")
+        row = cur.fetchone()
+    if row is None or row["balance"] is None:
+        return None
+    return Decimal(str(row["balance"]))
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +384,43 @@ def _record_cash_ledger(
     )
 
 
+def _write_execution_audit(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+    recommendation_id: int,
+    order_id: int,
+    outcome: str,
+    explanation: str,
+    raw_payload: dict[str, Any],
+    now: datetime,
+) -> None:
+    """
+    Write a decision_audit row recording the execution outcome.
+
+    This is separate from the execution guard's audit row (stage='execution_guard').
+    The order_execution stage records what happened when the order was placed.
+    """
+    conn.execute(
+        """
+        INSERT INTO decision_audit
+            (decision_time, instrument_id, recommendation_id, stage,
+             pass_fail, explanation, evidence_json)
+        VALUES
+            (%(dt)s, %(iid)s, %(rid)s, %(stage)s,
+             %(pf)s, %(expl)s, %(ev)s)
+        """,
+        {
+            "dt": now,
+            "iid": instrument_id,
+            "rid": recommendation_id,
+            "stage": STAGE,
+            "pf": outcome,
+            "expl": explanation,
+            "ev": Jsonb({"order_id": order_id, "raw_payload": raw_payload}),
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -419,13 +464,17 @@ def execute_order(
     action: str = str(rec["action"])
 
     # --- Step 2: determine order parameters ---
+    # requested_amount is the dollar amount to invest.
+    # Units: cash (USD) * suggested_size_pct (fraction) = dollar amount (USD).
     requested_amount: Decimal | None = None
     requested_units: Decimal | None = None
 
-    if rec["target_entry"] is not None and rec["suggested_size_pct"] is not None:
-        requested_amount = Decimal(str(rec["target_entry"])) * Decimal(str(rec["suggested_size_pct"]))
     if action == "EXIT":
         requested_units = _load_position_units(conn, instrument_id)
+    elif rec["suggested_size_pct"] is not None:
+        cash = _load_cash(conn)
+        if cash is not None and cash > 0:
+            requested_amount = cash * Decimal(str(rec["suggested_size_pct"]))
 
     # --- Step 3: call broker or demo mode ---
     is_live = settings.enable_live_trading
@@ -479,15 +528,17 @@ def execute_order(
             now=now,
         )
 
-        filled_price = broker_result.filled_price
-        filled_units = broker_result.filled_units
+        fp = broker_result.filled_price
+        fu = broker_result.filled_units
 
-        if order_status == "filled" and filled_price is not None and filled_units is not None:
+        # Guard: a fill must have positive units to be persisted.
+        # A zero-unit fill (e.g. demo mode with no quote) is not a real fill.
+        if order_status == "filled" and fp is not None and fu is not None and fu > 0:
             fill_id = _persist_fill(
                 conn,
                 order_id=order_id,
-                price=filled_price,
-                units=filled_units,
+                price=fp,
+                units=fu,
                 fees=broker_result.fees,
                 now=now,
             )
@@ -496,24 +547,24 @@ def execute_order(
                 _update_position_buy(
                     conn,
                     instrument_id=instrument_id,
-                    filled_price=filled_price,
-                    filled_units=filled_units,
+                    filled_price=fp,
+                    filled_units=fu,
                     now=now,
                 )
             elif action == "EXIT":
                 _update_position_exit(
                     conn,
                     instrument_id=instrument_id,
-                    filled_price=filled_price,
-                    filled_units=filled_units,
+                    filled_price=fp,
+                    filled_units=fu,
                     now=now,
                 )
 
-            gross_amount = filled_price * filled_units
+            gross_amount = fp * fu
             _record_cash_ledger(conn, action, gross_amount, broker_result.fees, now)
 
         # Update recommendation status to reflect execution outcome
-        if order_status == "filled":
+        if fill_id is not None:
             exec_status = "executed"
         elif order_status == "pending":
             exec_status = "execution_pending"
@@ -528,20 +579,34 @@ def execute_order(
             {"status": exec_status, "rid": recommendation_id},
         )
 
+        # Write execution outcome to decision_audit (every path, success or failure)
+        _write_execution_audit(
+            conn,
+            instrument_id=instrument_id,
+            recommendation_id=recommendation_id,
+            order_id=order_id,
+            outcome=exec_status,
+            explanation=f"order_status={order_status} broker_ref={broker_result.broker_order_ref}",
+            raw_payload=broker_result.raw_payload,
+            now=now,
+        )
+
     # --- Build explanation ---
-    if order_status == "filled":
+    if order_status == "filled" and fill_id is not None:
         explanation = (
             f"order filled: price={broker_result.filled_price} "
             f"units={broker_result.filled_units} "
             f"ref={broker_result.broker_order_ref}"
         )
+    elif order_status == "filled" and fill_id is None:
+        explanation = "order reported filled but zero units — no fill persisted"
     elif order_status == "pending":
         explanation = f"order pending: ref={broker_result.broker_order_ref}"
     else:
         explanation = f"order {order_status}: {broker_result.raw_payload}"
 
     outcome: OrderOutcome
-    if order_status == "filled":
+    if fill_id is not None:
         outcome = "filled"
     elif order_status == "pending":
         outcome = "pending"
