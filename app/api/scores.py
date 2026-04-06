@@ -196,8 +196,9 @@ def list_rankings(
             "SELECT MAX(scored_at) AS latest FROM scores WHERE model_version = %(mv)s",
             {"mv": model_version},
         )
+        # MAX() always returns exactly one row; the value is None when no rows match.
         ts_row = cur.fetchone()
-        latest_scored_at = ts_row["latest"] if ts_row else None  # type: ignore[index]
+        latest_scored_at = ts_row["latest"]  # type: ignore[index]
 
         if latest_scored_at is None:
             return RankingsListResponse(

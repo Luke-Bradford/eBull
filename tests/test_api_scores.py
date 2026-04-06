@@ -310,7 +310,8 @@ class TestListRankings:
                 [],
             ]
         )
-        client.get("/rankings", params={"sector": "Tech", "offset": 10, "limit": 25})
+        resp = client.get("/rankings", params={"sector": "Tech", "offset": 10, "limit": 25})
+        assert resp.status_code == 200
 
         cur = conn.cursor.return_value
         count_params = cur.execute.call_args_list[1][0][1]
