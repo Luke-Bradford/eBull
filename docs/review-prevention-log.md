@@ -218,3 +218,29 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - **Enforced in:** this prevention log
 - **Promoted to skill?** no — specific to multi-stage audit patterns
 - **Notes:** `decision_audit.pass_fail` is unconstrained `TEXT NOT NULL`, but the convention is `PASS`/`FAIL` across all stages.
+
+---
+
+### ON CONFLICT DO NOTHING counters must use rowcount, not unconditional increment
+
+- **Bug class:** overcount on idempotent upsert
+- **First seen in:** `#69`
+- **Example symptom:** `_ingest_fills` incremented `written += 1` after every `INSERT ... ON CONFLICT DO NOTHING`, regardless of whether the row was actually inserted or silently skipped. `fills_ingested` was inflated and `already_present` went negative.
+- **Root cause:** `ON CONFLICT DO NOTHING` succeeds silently — `conn.execute` does not raise — so a post-execute counter always increments.
+- **Prevention rule:** Before pushing any `INSERT ... ON CONFLICT DO NOTHING` with a Python counter, verify the counter is gated on `result.rowcount > 0` (or count rows from a `RETURNING` clause). Grep for `+= 1` near any `ON CONFLICT` and confirm each is conditional.
+- **Enforced in:** this prevention log
+- **Promoted to skill?** no — specific to ingestion patterns
+- **Notes:** `result.rowcount` is 0 when the conflict clause absorbs the duplicate. For `ON CONFLICT DO UPDATE`, rowcount is 1 even on conflict (because the row is updated), so this issue is specific to `DO NOTHING`.
+
+---
+
+### Decimal pool accumulators must avoid repeating-decimal drift
+
+- **Bug class:** non-terminating decimal expansion corrupts pool cost
+- **First seen in:** `#69`
+- **Example symptom:** S104 pool with 3 units at 1000 GBP. `remaining * (amount_gbp / quantity)` = `3 * (1000/3)` = `3 * 333.333...` = `999.999...` instead of `1000`. After multiple partial disposals, pool cost drifted negative, tripping the invariant check.
+- **Root cause:** `a * (b / c)` and `(a / c) * b` are mathematically equivalent but not equivalent in Decimal arithmetic when `b / c` is non-terminating. The former expands the repeating decimal first; the latter computes the ratio first (which is exact when `a == c`).
+- **Prevention rule:** Before pushing any pool accumulator that computes `cost = units * (total_cost / total_units)`, rewrite as `cost = (units / total_units) * total_cost`. For pool withdrawals, quantize partial withdrawals to match the DB column precision (e.g. `NUMERIC(18,6)` → `.quantize(Decimal("0.000001"))`), and use exact remaining cost for full-depletion. Add a regression test with an indivisible lot (e.g. 3 units at 1000 GBP) asserting exact cost conservation.
+- **Enforced in:** this prevention log
+- **Promoted to skill?** no — specific to S104 pool and similar accumulator patterns
+- **Notes:** The key insight is operation ordering: `(remaining / quantity) * amount` is exact when `remaining == quantity` because `(q/q) = 1` exactly. Combined with quantize + full-depletion, this guarantees `sum(all_withdrawals) == original_cost`.
