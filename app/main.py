@@ -24,7 +24,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-app = FastAPI(title="trader-os", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="eBull", version="0.1.0", lifespan=lifespan)
 
 
 @app.get("/health")
