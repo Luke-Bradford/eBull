@@ -153,3 +153,68 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - **Enforced in:** `.claude/skills/engineering/pre-flight-review.md` section E (Auditability) and section F (Concurrency)
 - **Promoted to skill?** no — already covered by pre-flight sections E+F; this entry records the repo-specific pattern
 - **Notes:** General rule: any data that appears in an audit record must be read within the same transaction that writes the audit row.
+
+---
+
+### Services receiving a decision_id must write back to decision_audit
+
+- **Bug class:** missing audit close-out on execution path
+- **First seen in:** `#68`
+- **Example symptom:** `execute_order` accepted `decision_id`, linked it to the orders FK, but never wrote the execution outcome back to `decision_audit`. Success and failure paths were both unaudited.
+- **Root cause:** the audit row from the execution guard was treated as the complete record; the subsequent execution stage did not write its own.
+- **Prevention rule:** Before pushing any service that receives a `decision_id` parameter, grep the file for `decision_audit`. If the string does not appear, the audit close-out is missing. Every stage in the execution pipeline must write its own `decision_audit` row.
+- **Enforced in:** this prevention log
+- **Promoted to skill?** no — too specific to the execution pipeline
+- **Notes:** The execution guard writes stage='execution_guard'. The order client writes stage='order_execution'. Each stage is responsible for its own audit row.
+
+---
+
+### Zero-value fills must not be persisted as real fills
+
+- **Bug class:** zero-unit fill written to fills/positions/cash_ledger
+- **First seen in:** `#68`
+- **Example symptom:** demo mode with no quote produced `filled_price=0, filled_units=0`. The condition `filled_price is not None and filled_units is not None` was True (Decimal("0") is not None), so garbage rows were written to `fills`, `positions`, and `cash_ledger`.
+- **Root cause:** the fill guard only checked for None, not for zero values.
+- **Prevention rule:** After writing any `if status == "filled"` persistence branch, verify the guard also checks `filled_units > 0`. A zero-unit fill from a demo or error path must not produce fill/position/cash rows.
+- **Enforced in:** this prevention log
+- **Promoted to skill?** no — specific to order execution
+- **Notes:** Applies to any future fill processing (e.g. pending order polling). The guard pattern is: `status == "filled" and price is not None and units is not None and units > 0`.
+
+---
+
+### `or`-chaining on external API numeric fields silently discards zero values
+
+- **Bug class:** falsy-zero fallthrough in `or` chains
+- **First seen in:** `#68`
+- **Example symptom:** `raw.get("Fees") or raw.get("fees")` — if the API returns `"Fees": 0`, `or` treats it as falsy and falls through to the next key.
+- **Root cause:** Python `or` evaluates truthiness, not nullness. `0`, `0.0`, `Decimal("0")`, and `""` are all falsy.
+- **Prevention rule:** After writing any `a or b` expression where `a` comes from an external API payload, grep the file for ` or raw.get(` — every hit should be reviewed for zero-value correctness. Use `a if a is not None else b` instead of `a or b` for numeric fields.
+- **Enforced in:** this prevention log
+- **Promoted to skill?** no — already implicitly covered by python-hygiene; this entry records the repo-specific API pattern
+- **Notes:** For string fields (order ref, status label), `or`-chaining is fine because empty strings are invalid. For numeric fields (price, units, fees), use explicit `is not None` checks.
+
+---
+
+### Multiplying two DB fields requires dimensional comment
+
+- **Bug class:** dimensionally incorrect arithmetic
+- **First seen in:** `#68`
+- **Example symptom:** `target_entry * suggested_size_pct` — price × fraction = nonsensical number. The correct amount is `cash * suggested_size_pct`.
+- **Root cause:** two fields from the same row were multiplied without checking units.
+- **Prevention rule:** Before multiplying two fields from a DB row, add a one-line comment stating the units of each operand and the expected units of the result. If the comment cannot be written confidently, the expression is wrong.
+- **Enforced in:** this prevention log
+- **Promoted to skill?** no — general enough but too edge-case for a skill; this entry is a repo-specific reminder
+- **Notes:** Common correct patterns: `cash (USD) * size_pct (fraction) = dollar_amount (USD)`. Common wrong patterns: `price (USD/unit) * size_pct (fraction) = ??? (USD/unit × fraction = nonsense)`.
+
+---
+
+### Columns shared across stages must use a consistent vocabulary
+
+- **Bug class:** vocabulary mismatch in shared column
+- **First seen in:** `#68`
+- **Example symptom:** execution guard writes `PASS`/`FAIL` to `decision_audit.pass_fail`; order client wrote `executed`/`execution_failed`/`execution_pending` to the same column. Downstream queries filtering on `pass_fail = 'PASS'` would miss all order execution rows.
+- **Root cause:** the new stage used its own status enum instead of the established column vocabulary.
+- **Prevention rule:** Before inserting into any column that another stage already writes to, grep the codebase for all `INSERT INTO <table>` statements targeting that column and verify the values match. If the column uses a fixed vocabulary (`PASS`/`FAIL`), new stages must map to that vocabulary. Detailed status goes in `explanation` or `evidence_json`.
+- **Enforced in:** this prevention log
+- **Promoted to skill?** no — specific to multi-stage audit patterns
+- **Notes:** `decision_audit.pass_fail` is unconstrained `TEXT NOT NULL`, but the convention is `PASS`/`FAIL` across all stages.
