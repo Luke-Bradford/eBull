@@ -685,6 +685,16 @@ class TestEvaluateRecommendation:
         assert result.verdict == "FAIL"
         assert result.decision_id == 55
 
+    def test_status_update_execute_called(self) -> None:
+        """conn.execute() must fire the UPDATE — ensures the status write cannot be silently dropped."""
+        conn = _make_conn(_buy_cursors(decision_id=99))
+        with patch("app.services.execution_guard._utcnow", return_value=_NOW):
+            evaluate_recommendation(conn, 42, _SETTINGS_LIVE)
+        conn.execute.assert_called_once()
+        call_sql: str = conn.execute.call_args[0][0]
+        assert "UPDATE trade_recommendations" in call_sql
+        assert "status" in call_sql
+
     def test_db_write_and_return_decision_id_match(self) -> None:
         """GuardResult.decision_id reflects the value returned from the INSERT."""
         result = self._eval(_buy_cursors(decision_id=123))
