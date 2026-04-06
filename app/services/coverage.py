@@ -114,6 +114,28 @@ def _utcnow() -> datetime:
     return datetime.now(tz=UTC)
 
 
+def _thesis_staleness_label(
+    thesis_created_at: datetime | None,
+    review_frequency: str | None,
+    now: datetime,
+) -> str | None:
+    """
+    Return a human-readable staleness label if the thesis is not fresh,
+    or None if the thesis is fresh.
+
+    Single source of truth for the ``_REVIEW_FREQUENCY_DAYS`` lookup —
+    ``_is_thesis_fresh`` delegates here.
+    """
+    if thesis_created_at is None:
+        return "no thesis"
+    days = _REVIEW_FREQUENCY_DAYS.get(review_frequency) if review_frequency is not None else None
+    if days is None:
+        return f"thesis freshness unknown (review_frequency={review_frequency!r})"
+    if now >= thesis_created_at + timedelta(days=days):
+        return "thesis stale"
+    return None
+
+
 def _is_thesis_fresh(
     thesis_created_at: datetime | None,
     review_frequency: str | None,
@@ -123,12 +145,7 @@ def _is_thesis_fresh(
     A thesis is fresh if now < thesis.created_at + interval(review_frequency).
     Returns False if thesis is absent, created_at is None, or frequency is unrecognised.
     """
-    if thesis_created_at is None or review_frequency is None:
-        return False
-    days = _REVIEW_FREQUENCY_DAYS.get(review_frequency)
-    if days is None:
-        return False
-    return now < thesis_created_at + timedelta(days=days)
+    return _thesis_staleness_label(thesis_created_at, review_frequency, now) is None
 
 
 def _has_tier1_required_data(snap: InstrumentSnapshot) -> tuple[bool, list[str]]:
@@ -337,14 +354,9 @@ def _evaluate_demotion(snap: InstrumentSnapshot, now: datetime) -> TierChange | 
         if snap.total_score is not None and snap.total_score < DEMOTE_T1_TO_T2_SCORE:
             triggers.append(f"score={snap.total_score:.3f} < {DEMOTE_T1_TO_T2_SCORE}")
 
-        if snap.thesis_created_at is not None:
-            if not _is_thesis_fresh(snap.thesis_created_at, snap.review_frequency, now):
-                if snap.review_frequency not in _REVIEW_FREQUENCY_DAYS:
-                    triggers.append(f"thesis freshness unknown (review_frequency={snap.review_frequency!r})")
-                else:
-                    triggers.append("thesis stale")
-        else:
-            triggers.append("no thesis")
+        label = _thesis_staleness_label(snap.thesis_created_at, snap.review_frequency, now)
+        if label is not None:
+            triggers.append(label)
 
         if snap.thesis_stance == "avoid":
             triggers.append("stance=avoid")
@@ -561,10 +573,9 @@ def review_coverage(
         for change in blocked:
             _apply_tier_change(conn, change)
 
-    # Blocked instruments did not change tier — they are not counted as "unchanged"
-    # (they are a distinct bucket in ReviewResult) but they are also not tier-modified.
-    # unchanged = total - tier-modified (demotions + promotions).
-    unchanged = len(snapshots) - len(demotions) - len(all_promotions)
+    # Each instrument falls into exactly one bucket:
+    #   promotions + demotions + blocked + unchanged == len(snapshots)
+    unchanged = len(snapshots) - len(demotions) - len(all_promotions) - len(blocked)
 
     logger.info(
         "review_coverage: promotions=%d demotions=%d blocked=%d unchanged=%d",

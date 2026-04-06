@@ -770,18 +770,19 @@ class TestReviewCoverage:
         assert result.demotions == []
 
     @patch("app.services.coverage._utcnow", return_value=_NOW)
-    def test_blocked_does_not_reduce_unchanged(self, _mock_now: MagicMock) -> None:
-        """Blocked promotions are a distinct bucket; unchanged counts tier-unmodified instruments."""
+    def test_blocked_is_own_bucket(self, _mock_now: MagicMock) -> None:
+        """promotions + demotions + blocked + unchanged == len(snapshots)."""
         t1_fillers = [_snap(instrument_id=100 + i, current_tier=1, total_score=0.75) for i in range(TIER_1_CAP)]
         promotable = _snap(instrument_id=1, current_tier=2, total_score=0.80)
         all_snaps = t1_fillers + [promotable]
         conn = self._mock_conn_for_snapshots(all_snaps)
         result = review_coverage(conn)
         # 51 total: 50 stable T1 + 1 blocked T2→T1
-        assert result.blocked == [result.blocked[0]]  # 1 blocked
-        assert result.unchanged == 51  # all 51 are tier-unmodified
+        assert len(result.blocked) == 1
+        assert result.unchanged == 50  # 50 stable T1; blocked is separate bucket
         assert result.promotions == []
         assert result.demotions == []
+        assert len(result.promotions) + len(result.demotions) + len(result.blocked) + result.unchanged == len(all_snaps)
 
     @patch("app.services.coverage._utcnow", return_value=_NOW)
     def test_demoted_instrument_not_also_promoted(self, _mock_now: MagicMock) -> None:
