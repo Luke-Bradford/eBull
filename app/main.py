@@ -7,6 +7,7 @@ import psycopg
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
+from app.api.instruments import router as instruments_router
 from app.config import settings
 from app.db.migrations import migration_status, run_migrations
 from app.services.coverage import override_tier
@@ -32,6 +33,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="eBull", version="0.1.0", lifespan=lifespan)
+app.include_router(instruments_router)
 
 
 @app.get("/health")
