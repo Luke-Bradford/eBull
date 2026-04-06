@@ -93,8 +93,13 @@ class InstrumentDetail(BaseModel):
 
 
 def _parse_quote(row: dict[str, object]) -> QuoteSnapshot | None:
-    """Extract a QuoteSnapshot from a joined row, or None if no quote exists."""
-    if row.get("quoted_at") is None:
+    """Extract a QuoteSnapshot from a joined row, or None if no quote exists.
+
+    Guards on ``quoted_at``, ``bid``, and ``ask`` — all three must be non-None
+    to produce a valid snapshot.  A partially-written quote row (e.g. quoted_at
+    set but bid/ask NULL) returns None rather than crashing on ``float(None)``.
+    """
+    if row.get("quoted_at") is None or row.get("bid") is None or row.get("ask") is None:
         return None
     return QuoteSnapshot(
         bid=float(row["bid"]),  # type: ignore[arg-type]
@@ -129,29 +134,30 @@ def list_instruments(
     """
     # -- WHERE clause fragments (parameterised) ----------------------------
     where_clauses: list[str] = []
-    params: dict[str, object] = {}
+    filter_params: dict[str, object] = {}
 
     if sector is not None:
         where_clauses.append("i.sector = %(sector)s")
-        params["sector"] = sector
+        filter_params["sector"] = sector
     if coverage_tier is not None:
         where_clauses.append("c.coverage_tier = %(coverage_tier)s")
-        params["coverage_tier"] = coverage_tier
+        filter_params["coverage_tier"] = coverage_tier
     if exchange is not None:
         where_clauses.append("i.exchange = %(exchange)s")
-        params["exchange"] = exchange
+        filter_params["exchange"] = exchange
 
     where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
     # -- COUNT query -------------------------------------------------------
     # Only join tables that the active filters require.
+    # Uses filter_params only — no limit/offset keys that the COUNT has no placeholders for.
     count_needs_coverage = coverage_tier is not None
     count_join = "LEFT JOIN coverage c USING (instrument_id)" if count_needs_coverage else ""
-    count_sql = f"SELECT COUNT(*) AS cnt FROM instruments i {count_join}{where_sql}"  # noqa: S608
+    count_sql = f"SELECT COUNT(*) AS cnt FROM instruments i {count_join}{where_sql}"  # noqa: S608  — hardcoded fragments only
 
     # -- Items query -------------------------------------------------------
-    items_sql = f"""
-        SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
+    items_params: dict[str, object] = {**filter_params, "limit": limit, "offset": offset}
+    items_sql = f"""SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
                i.currency, i.sector, i.is_tradable,
                c.coverage_tier,
                q.bid, q.ask, q.last, q.spread_pct, q.quoted_at
@@ -160,19 +166,15 @@ def list_instruments(
         LEFT JOIN coverage c USING (instrument_id)
         {where_sql}
         ORDER BY i.symbol, i.instrument_id
-        LIMIT %(limit)s OFFSET %(offset)s
-    """  # noqa: S608
-
-    params["limit"] = limit
-    params["offset"] = offset
+        LIMIT %(limit)s OFFSET %(offset)s"""  # noqa: S608  — hardcoded fragments only
 
     with psycopg.connect(settings.database_url) as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(count_sql, params)  # type: ignore[arg-type]  # SQL built from hardcoded fragments
+            cur.execute(count_sql, filter_params)  # type: ignore[arg-type]  # SQL built from hardcoded fragments
             count_row = cur.fetchone()
             total: int = count_row["cnt"] if count_row else 0  # type: ignore[index]
 
-            cur.execute(items_sql, params)  # type: ignore[arg-type]  # SQL built from hardcoded fragments
+            cur.execute(items_sql, items_params)  # type: ignore[arg-type]  # SQL built from hardcoded fragments
             rows = cur.fetchall()
 
     items = [

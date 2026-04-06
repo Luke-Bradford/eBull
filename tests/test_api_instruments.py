@@ -189,6 +189,21 @@ class TestListInstruments:
         assert resp.status_code == 200
         assert resp.json()["items"][0]["coverage_tier"] is None
 
+    def test_partial_quote_row_returns_null(self) -> None:
+        """quoted_at present but bid None → latest_quote should be null, not crash."""
+        row = _make_instrument_row(bid=None, ask=None, last=None, spread_pct=None, quoted_at=_NOW)
+        conn = _mock_connect(
+            [
+                [{"cnt": 1}],
+                [row],
+            ]
+        )
+        with patch("app.api.instruments.psycopg.connect", return_value=conn):
+            resp = client.get("/instruments")
+
+        assert resp.status_code == 200
+        assert resp.json()["items"][0]["latest_quote"] is None
+
     def test_filter_by_sector(self) -> None:
         row = _make_instrument_row(sector="Technology")
         conn = _mock_connect(
@@ -281,6 +296,23 @@ class TestListInstruments:
         resp = client.get("/instruments", params={"coverage_tier": 0})
         assert resp.status_code == 422
 
+    def test_count_query_receives_only_filter_params(self) -> None:
+        """COUNT query must not receive limit/offset — only filter keys."""
+        conn = _mock_connect(
+            [
+                [{"cnt": 5}],
+                [],
+            ]
+        )
+        with patch("app.api.instruments.psycopg.connect", return_value=conn):
+            client.get("/instruments", params={"sector": "Tech", "offset": 10, "limit": 25})
+
+        cur = conn.cursor.return_value
+        count_params = cur.execute.call_args_list[0][0][1]
+        assert "limit" not in count_params
+        assert "offset" not in count_params
+        assert count_params["sector"] == "Tech"
+
     def test_count_query_omits_coverage_join_when_no_tier_filter(self) -> None:
         """When coverage_tier filter is not active, COUNT query should not join coverage."""
         conn = _mock_connect(
@@ -348,10 +380,10 @@ class TestGetInstrumentDetail:
         assert body["external_identifiers"][1]["provider"] == "sec"
 
     def test_not_found_returns_404(self) -> None:
+        # Only one result set needed — 404 is raised before the identifiers query.
         conn = _mock_connect(
             [
                 [],  # instrument query returns nothing
-                [],  # identifiers query (not reached, but present for mock)
             ]
         )
         with patch("app.api.instruments.psycopg.connect", return_value=conn):
@@ -376,6 +408,21 @@ class TestGetInstrumentDetail:
 
     def test_no_quote_returns_null(self) -> None:
         row = _make_instrument_row(bid=None, ask=None, last=None, spread_pct=None, quoted_at=None)
+        conn = _mock_connect(
+            [
+                [row],
+                [],
+            ]
+        )
+        with patch("app.api.instruments.psycopg.connect", return_value=conn):
+            resp = client.get("/instruments/1")
+
+        assert resp.status_code == 200
+        assert resp.json()["latest_quote"] is None
+
+    def test_partial_quote_row_returns_null(self) -> None:
+        """quoted_at present but bid/ask None → latest_quote should be null, not crash."""
+        row = _make_instrument_row(bid=None, ask=None, last=None, spread_pct=None, quoted_at=_NOW)
         conn = _mock_connect(
             [
                 [row],
