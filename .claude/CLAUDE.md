@@ -71,9 +71,7 @@ Follow this order unless the user explicitly says otherwise:
 9. Self-review the diff using the pre-flight review skill.
 10. Run local checks.
 11. Write a complete PR description.
-12. Push, then **wait** — poll `gh pr view <n> --comments` and `gh pr checks <n>` until the review has posted and CI is complete on that exact commit. Do not proceed until both are visible.
-13. Resolve every review comment explicitly. After each push, wait again.
-14. Merge only after APPROVE on the most recent commit with CI green.
+12. Follow the branch and PR workflow below — push, poll, wait, resolve, repeat until APPROVE on the most recent commit with CI green.
 
 ## Branch and PR workflow
 

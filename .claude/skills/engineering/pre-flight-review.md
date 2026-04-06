@@ -157,5 +157,3 @@ Before pushing, be able to state:
 - prevention log checked; relevant entries identified or confirmed none apply
 
 If you cannot honestly say that, do not push yet.
-
-
