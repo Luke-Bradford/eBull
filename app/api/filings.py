@@ -120,6 +120,7 @@ def list_filings(
     where_sql = " AND ".join(where_clauses)
 
     # COUNT query — separate cursor, separate params dict.
+    # where_sql is built from hardcoded clause strings only — not user input.
     count_sql = f"SELECT COUNT(*) AS cnt FROM filing_events WHERE {where_sql}"  # noqa: S608
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(count_sql, filter_params)  # type: ignore[arg-type]
@@ -141,7 +142,7 @@ def list_filings(
                 FROM filing_events
                 WHERE {where_sql}
                 ORDER BY filing_date DESC, filing_event_id DESC
-                LIMIT %(limit)s OFFSET %(offset)s"""  # noqa: S608
+                LIMIT %(limit)s OFFSET %(offset)s"""  # noqa: S608  — where_sql is hardcoded clauses only
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(items_sql, items_params)  # type: ignore[arg-type]
         rows = cur.fetchall()

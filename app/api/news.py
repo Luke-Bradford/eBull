@@ -114,7 +114,11 @@ def list_news(
 
     symbol: str = inst_row["symbol"]  # type: ignore[assignment]
 
-    since_ts = since if since is not None else datetime.now(UTC) - timedelta(days=_DEFAULT_DAYS)
+    # Coerce naive datetime to UTC; PostgreSQL rejects mixed-offset comparisons on TIMESTAMPTZ.
+    if since is not None:
+        since_ts = since if since.tzinfo is not None else since.replace(tzinfo=UTC)
+    else:
+        since_ts = datetime.now(UTC) - timedelta(days=_DEFAULT_DAYS)
 
     # COUNT query — separate cursor, separate params dict.
     count_params: dict[str, object] = {
