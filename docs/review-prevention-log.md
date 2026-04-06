@@ -205,3 +205,16 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - **Enforced in:** this prevention log
 - **Promoted to skill?** no — general enough but too edge-case for a skill; this entry is a repo-specific reminder
 - **Notes:** Common correct patterns: `cash (USD) * size_pct (fraction) = dollar_amount (USD)`. Common wrong patterns: `price (USD/unit) * size_pct (fraction) = ??? (USD/unit × fraction = nonsense)`.
+
+---
+
+### Columns shared across stages must use a consistent vocabulary
+
+- **Bug class:** vocabulary mismatch in shared column
+- **First seen in:** `#68`
+- **Example symptom:** execution guard writes `PASS`/`FAIL` to `decision_audit.pass_fail`; order client wrote `executed`/`execution_failed`/`execution_pending` to the same column. Downstream queries filtering on `pass_fail = 'PASS'` would miss all order execution rows.
+- **Root cause:** the new stage used its own status enum instead of the established column vocabulary.
+- **Prevention rule:** Before inserting into any column that another stage already writes to, grep the codebase for all `INSERT INTO <table>` statements targeting that column and verify the values match. If the column uses a fixed vocabulary (`PASS`/`FAIL`), new stages must map to that vocabulary. Detailed status goes in `explanation` or `evidence_json`.
+- **Enforced in:** this prevention log
+- **Promoted to skill?** no — specific to multi-stage audit patterns
+- **Notes:** `decision_audit.pass_fail` is unconstrained `TEXT NOT NULL`, but the convention is `PASS`/`FAIL` across all stages.

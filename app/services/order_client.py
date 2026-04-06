@@ -389,7 +389,7 @@ def _write_execution_audit(
     instrument_id: int,
     recommendation_id: int,
     order_id: int,
-    outcome: str,
+    passed: bool,
     explanation: str,
     raw_payload: dict[str, Any],
     now: datetime,
@@ -397,8 +397,9 @@ def _write_execution_audit(
     """
     Write a decision_audit row recording the execution outcome.
 
-    This is separate from the execution guard's audit row (stage='execution_guard').
-    The order_execution stage records what happened when the order was placed.
+    Uses the same PASS/FAIL vocabulary as the execution guard so the
+    pass_fail column is semantically consistent across stages.  The
+    detailed execution status goes into explanation.
     """
     conn.execute(
         """
@@ -414,7 +415,7 @@ def _write_execution_audit(
             "iid": instrument_id,
             "rid": recommendation_id,
             "stage": STAGE,
-            "pf": outcome,
+            "pf": "PASS" if passed else "FAIL",
             "expl": explanation,
             "ev": Jsonb({"order_id": order_id, "raw_payload": raw_payload}),
         },
@@ -579,14 +580,16 @@ def execute_order(
             {"status": exec_status, "rid": recommendation_id},
         )
 
-        # Write execution outcome to decision_audit (every path, success or failure)
+        # Write execution outcome to decision_audit (every path, success or failure).
+        # pass_fail uses PASS/FAIL vocabulary consistent with the execution guard.
+        # Detailed status goes in explanation.
         _write_execution_audit(
             conn,
             instrument_id=instrument_id,
             recommendation_id=recommendation_id,
             order_id=order_id,
-            outcome=exec_status,
-            explanation=f"order_status={order_status} broker_ref={broker_result.broker_order_ref}",
+            passed=exec_status == "executed",
+            explanation=f"status={exec_status} order_status={order_status} broker_ref={broker_result.broker_order_ref}",
             raw_payload=broker_result.raw_payload,
             now=now,
         )
