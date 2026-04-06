@@ -126,3 +126,18 @@ logger.info("complete: total=%d", len(recommendations))
 logger.info("complete: generated=%d written=%d", len(recommendations), written)
 ```
 Compute `generated` before the filter, `written` after.
+
+## `or`-chaining on numeric fields from external data
+
+Python `or` evaluates truthiness, not nullness. `0`, `0.0`, and `Decimal("0")` are all falsy.
+
+```python
+# Wrong — if the API returns {"Fees": 0}, `or` treats it as falsy
+fees = raw.get("Fees") or raw.get("fees")
+
+# Correct — explicit None check preserves zero
+fees = raw.get("Fees") if raw.get("Fees") is not None else raw.get("fees")
+```
+
+For string fields (order ref, status label), `or`-chaining is fine because empty strings are invalid.
+For numeric fields (price, units, fees), use explicit `is not None` checks.
