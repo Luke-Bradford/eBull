@@ -261,8 +261,10 @@ def _load_sector_exposure(
                 LIMIT 1
             ) q ON TRUE
             WHERE p.current_units > 0
+              AND p.instrument_id != %(iid)s
             GROUP BY i.sector
             """,
+            {"iid": instrument_id},
         )
         rows = cur.fetchall()
 
@@ -432,7 +434,7 @@ def _check_concentration(
             detail="instruments.sector is NULL; cannot verify concentration",
         )
     if total_aum <= 0:
-        return RuleResult(rule="concentration_breach", passed=True)
+        return RuleResult(rule="concentration_breach", passed=True, detail="total_aum=0; concentration check skipped")
     post_action_pct = current_sector_pct + _MAX_INITIAL_POSITION_PCT
     if post_action_pct > _MAX_SECTOR_EXPOSURE_PCT:
         return RuleResult(

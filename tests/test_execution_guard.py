@@ -441,6 +441,7 @@ class TestCheckConcentration:
     def test_zero_aum_passes(self) -> None:
         result = _check_concentration(True, "Technology", 0.0, 0.0)
         assert result.passed is True
+        assert "total_aum=0" in result.detail
 
     def test_within_cap_passes(self) -> None:
         # 20% current + 5% alloc = 25% — exactly at cap, not over (> not >=)
