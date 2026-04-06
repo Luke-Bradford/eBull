@@ -16,6 +16,7 @@ from app.providers.implementations.companies_house import CompaniesHouseFilingsP
 from app.providers.implementations.etoro import EtoroMarketDataProvider
 from app.providers.implementations.fmp import FmpFundamentalsProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
+from app.services.coverage import review_coverage
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
@@ -371,5 +372,25 @@ def morning_candidate_review() -> None:
 
 
 def weekly_coverage_review() -> None:
-    """Review coverage tier assignments; promote/demote instruments."""
-    raise NotImplementedError("Implemented in issue #12")
+    """
+    Review coverage tier assignments; promote/demote instruments.
+
+    Runs weekly. Evaluates all instruments with coverage rows against
+    deterministic promotion/demotion rules. Enforces Tier 1 cap.
+    All changes are recorded in coverage_audit.
+    """
+    logger.info("weekly_coverage_review: starting coverage tier review")
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            result = review_coverage(conn)
+    except Exception:
+        logger.error("weekly_coverage_review: failed", exc_info=True)
+        return
+
+    logger.info(
+        "weekly_coverage_review complete: promotions=%d demotions=%d blocked=%d unchanged=%d",
+        len(result.promotions),
+        len(result.demotions),
+        len(result.blocked),
+        result.unchanged,
+    )

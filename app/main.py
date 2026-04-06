@@ -4,10 +4,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import psycopg
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.db.migrations import migration_status, run_migrations
+from app.services.coverage import override_tier
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -73,4 +75,38 @@ def health_db() -> dict:
         "db_error": db_error,
         "tables": tables,
         "migrations": migrations,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Coverage tier override
+# ---------------------------------------------------------------------------
+
+
+class TierOverrideRequest(BaseModel):
+    instrument_id: int
+    new_tier: int = Field(ge=1, le=3)
+    rationale: str = Field(min_length=1)
+
+
+@app.post("/coverage/override")
+def coverage_override(body: TierOverrideRequest) -> dict:
+    """Manually override an instrument's coverage tier."""
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            change = override_tier(
+                conn=conn,
+                instrument_id=body.instrument_id,
+                new_tier=body.new_tier,
+                rationale=body.rationale,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "instrument_id": change.instrument_id,
+        "old_tier": change.old_tier,
+        "new_tier": change.new_tier,
+        "change_type": change.change_type,
+        "rationale": change.rationale,
     }
