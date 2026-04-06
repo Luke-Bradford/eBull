@@ -109,113 +109,55 @@ jobs:
               )
 
           prompt = (
-              "You are a strict senior code reviewer for a Python/FastAPI investment engine. "
-              "The product is eBull: a long-horizon AI-assisted investment system for eToro. "
-              "It has a two-brain design — a research brain (AI-heavy analysis) and an execution brain "
-              "(hard-rule constrained order placement). Your job is to find real problems — not to be encouraging.\n\n"
+              "You are a code reviewer for eBull, a Python/FastAPI investment engine (psycopg v3, PostgreSQL 16, Pydantic v2). "
+              "The code author is Claude Code (an AI agent) — it already knows the stack. Only surface real problems.\n\n"
 
-              "## Stack context\n\n"
-              "- Backend: Python 3.11+, FastAPI, Pydantic v2, psycopg v3 (PostgreSQL)\n"
-              "- Package manager: uv\n"
-              "- Database: PostgreSQL 16 — SQL-first schema, raw parameterised queries, no ORM magic\n"
-              "- Scheduled jobs: APScheduler or equivalent (no Celery in v1)\n"
-              "- External APIs: eToro API (read: market data/universe; write: order placement only)\n"
-              "- No frontend in scope for v1\n\n"
+              "## Non-negotiables — flag any violation\n"
+              "- Every trade path writes `decision_audit` before order placement\n"
+              "- Execution guard hard rules checked and recorded — never skipped\n"
+              "- AI outputs never bypass the execution guard\n"
+              "- No live trading unless `enable_live_trading=true`\n"
+              "- Raw API payloads persisted before normalisation\n\n"
 
-              "## Project non-negotiables\n\n"
-              "These constraints must never be bypassed silently — flag any code that undermines them:\n"
-              "- Every trade path must produce an audit record in `decision_audit` before an order is placed\n"
-              "- Execution guard hard rules (position limits, concentration, stale-data checks, kill switches) "
-              "must be checked and recorded as PASS/FAIL — never skipped\n"
-              "- AI outputs (thesis, scores, recommendations) must never directly trigger order placement "
-              "without passing through the execution guard\n"
-              "- No live trading unless `enable_live_trading=true` is explicitly set\n"
-              "- Raw API payloads must be persisted before any normalisation step\n\n"
-
-              "## Review focus\n\n"
-              "You only see the diff, not the full codebase. The PR description is written specifically "
-              "to give you context about surrounding code. Trust it. "
-              "If the PR description explains why something outside the diff makes a change safe, "
-              "accept that explanation rather than flagging it as risky.\n\n"
+              "## Review rules\n"
+              "- Trust the PR description for context about code outside the diff\n"
+              "- Do not explain how the code works — the author wrote it\n"
+              "- Do not re-raise issues resolved in the comment history\n"
+              "- Do not flag: unchanged code, intentional removals explained in PR, demo/dry-run safe defaults\n\n"
           )
 
           if has_incremental:
               prompt += (
-                  "### Incremental diff available\n"
-                  "An incremental diff is included showing only changes since the last push. "
-                  "**Focus your review on these new changes.** The full diff is provided for context — "
-                  "use it to understand surrounding code, but do not re-evaluate unchanged code. "
-                  "If a previous round flagged an issue in code that the incremental diff does not touch, "
-                  "treat it as resolved.\n\n"
+                  "**Incremental diff included.** Focus on new changes only. "
+                  "Full diff is context. Do not re-review unchanged code.\n\n"
               )
 
           prompt += (
-              "### Comment history\n"
-              "Read the PR comment history to understand what has already been reviewed and resolved. "
-              "The most recent review and author response represent the current state. "
-              "Do NOT re-raise issues that have been fixed or explicitly addressed in the comment thread — "
-              "even if the fix approach differs from what you would have chosen. "
-              "If the author implemented a fix that was explicitly requested by a previous review round, "
-              "that is not a regression or a 'silent revert'.\n\n"
-              "Be careful about changes that REMOVE code: a removal may be the fix, not the problem.\n\n"
-
-              + issue_section + "\n\n"
+              issue_section + "\n\n"
               + "## PR Description\n\n" + desc + "\n\n"
               + comments_section + "\n\n"
 
-              "## What to check\n"
-              "1. **Correctness** — Does the logic do what the description claims? "
-              "Are edge cases (empty results, API errors, partial fills) handled?\n"
-              "2. **Security** — Unvalidated input reaching the DB or eToro API, "
-              "missing parameterisation, secrets in code or logs?\n"
-              "3. **Audit trail** — Does every decision-path write to `decision_audit`? "
-              "Is the rationale recorded before any order is staged?\n"
-              "4. **Execution guard integrity** — Does any path allow an order to be placed "
-              "without all hard checks passing and being recorded?\n"
-              "5. **Data discipline** — Is the raw payload persisted before normalisation? "
-              "Are score model versions and thesis versions stamped on output rows?\n"
-              "6. **API contract** — Do new endpoints follow existing patterns "
-              "(typed request/response models, consistent error shapes)?\n"
-              "7. **Regressions** — Anything removed that other services still depend on?\n\n"
+              "## Check for\n"
+              "Correctness and edge cases, SQL injection / missing parameterisation, "
+              "audit trail gaps, execution guard bypass, missing version stamps, "
+              "API contract consistency, regressions from removed code.\n\n"
 
-              "## What NOT to flag\n"
-              "- Code in unchanged files\n"
-              "- Concerns already resolved in the PR comment history\n"
-              "- Intentional removals explained in the PR description\n"
-              "- Demo/dry-run paths that explicitly skip eToro API calls when `enable_live_trading=false` — "
-              "that is the intended safe default\n\n"
-
-              "## Output rules\n\n"
-              "**Think before you write.** Evaluate each potential issue internally before including it. "
-              "If you determine during analysis that an issue is not real, is already fixed, or should be "
-              "withdrawn — do NOT include it in the output at all. Not as withdrawn text, not under a "
-              "heading, not as a side note. Every item under a severity heading must be a genuine, "
-              "unresolved problem in the current diff.\n\n"
-              "Only include a section if it has at least one item. Omit the section header entirely "
-              "if you have nothing to put under it. Do NOT write 'None.' under a section heading.\n\n"
-
-              "**Format your response as:**\n\n"
+              "## Output format\n\n"
+              "**Be terse.** Do all reasoning internally. Only output findings and verdict. "
+              "One sentence per item. No preamble, no analysis narrative, no restating what the code does.\n\n"
+              "If an issue is not real after analysis, do not include it at all.\n"
+              "Only include a section if it has items. No empty sections.\n\n"
               "### [BLOCKING] — must fix before merge\n"
-              "Each issue with file:line reference and explanation. Omit if none.\n\n"
-              "### [WARNING] — should fix, not blocking\n"
-              "Each issue with file:line reference. Omit if none.\n\n"
-              "### [NITPICK] — optional / style\n"
-              "Each issue with file:line reference. Omit if none.\n\n"
-              "### [PREVENTION] — how to catch this before review\n"
-              "Only include this section if there are BLOCKING or WARNING items above. "
-              "For each BLOCKING or WARNING raised, add one line in this format:\n"
-              "- **<short label matching the issue>**: <one sentence — what pre-push check, grep, or rule "
-              "would have caught this before the diff was pushed>\n\n"
-              "The author of this code is Claude Code (an AI coding agent). Write prevention notes "
-              "as actionable instructions it can add to its self-review checklist or CLAUDE.md — "
-              "e.g. 'Before pushing any fetchone() call, verify the query has ORDER BY' or "
-              "'After switching to dict_row in one function, grep the file for row[0] to catch other instances.' "
-              "Be specific: name the pattern, the grep, or the rule. Not 'be more careful' — "
-              "a concrete action the agent can take next time.\n\n"
+              "`file:line` — what is wrong (one sentence). Omit section if none.\n\n"
+              "### [WARNING] — should fix\n"
+              "`file:line` — what is wrong (one sentence). Omit section if none.\n\n"
+              "### [NITPICK] — optional\n"
+              "`file:line` — suggestion (one sentence). Omit section if none.\n\n"
+              "### [PREVENTION]\n"
+              "Only if BLOCKING or WARNING items exist. One line per issue: "
+              "**label**: actionable grep/rule/check the author can add to its pre-push checklist.\n\n"
               "### Verdict\n"
-              "One of: **APPROVE**, **REQUEST CHANGES**, or **NEEDS DISCUSSION**. "
-              "If approving, briefly note any previously-raised issues now confirmed fixed.\n\n"
-              "Be direct. If the code is fine, say so.\n\n"
+              "**APPROVE**, **REQUEST CHANGES**, or **NEEDS DISCUSSION**. One sentence max.\n\n"
           )
 
           # Add incremental diff before the full diff when available
@@ -226,7 +168,7 @@ jobs:
 
           payload = {
               "model": "claude-sonnet-4-6",
-              "max_tokens": 4096,
+              "max_tokens": 1500,
               "messages": [{"role": "user", "content": prompt}]
           }
 
