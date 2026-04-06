@@ -30,10 +30,17 @@ jobs:
           EVENT_ACTION: ${{ github.event.action }}
         run: |
           if [ "$EVENT_ACTION" = "synchronize" ] && [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
-            git diff "$BEFORE_SHA"..HEAD > incremental.diff 2>/dev/null || echo "(incremental diff unavailable)" > incremental.diff
-            echo "Incremental diff: $(wc -l < incremental.diff) lines"
+            if git diff "$BEFORE_SHA"..HEAD > incremental.diff 2>&1; then
+              echo "has_incremental=true" > incremental_flag.txt
+              echo "Incremental diff: $(wc -l < incremental.diff) lines"
+            else
+              echo "::warning::git diff $BEFORE_SHA..HEAD failed — falling back to full diff only"
+              echo "has_incremental=false" > incremental_flag.txt
+              : > incremental.diff
+            fi
           else
-            echo "(first review — no incremental diff available)" > incremental.diff
+            echo "has_incremental=false" > incremental_flag.txt
+            : > incremental.diff
           fi
 
       - name: Get PR description
@@ -78,6 +85,7 @@ jobs:
 
           diff = open('pr.diff', encoding='utf-8', errors='replace').read()
           incremental = open('incremental.diff', encoding='utf-8', errors='replace').read()
+          flag = open('incremental_flag.txt').read().strip()
           desc = open('pr_desc.txt').read()
           comments_raw = open('pr_comments.txt').read().strip()
           issue = open('linked_issue.txt').read().strip()
@@ -89,8 +97,8 @@ jobs:
 
           issue_section = "## Linked Issue / Ticket\n\n" + issue
 
-          # Build the incremental diff section
-          has_incremental = not incremental.startswith("(")
+          # Flag file written by shell step — no string-matching heuristic
+          has_incremental = flag == "has_incremental=true"
           incremental_section = ""
           if has_incremental:
               incremental_section = (
