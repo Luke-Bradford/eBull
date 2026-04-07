@@ -253,11 +253,13 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
-### Duplicate error widgets for a shared async fetch
+### Shared async state must drive at most one render surface (errors and loading)
 - First seen in: #89
-- Symptom: A single `/portfolio` failure rendered two `SectionError` widgets — one inside the summary cards slot and one inside the positions section — because two presentational sections both consumed the same `useAsync` state and each rendered their own error path. The user saw two error banners and two retry buttons for one underlying failure, with no way to tell them apart.
-- Prevention: Each async state on a frontend page should drive **at most one error surface**. When two sections share the same fetch, either (a) collapse them under a single error guard (preferred), or (b) make one of the sections render nothing on the failure path and let the other own the error UI. Before pushing any new page, grep the page file for `\.error !== null` and confirm each async state appears in the error branch exactly once. The same rule applies to retry buttons: one async state, one retry control.
-- Enforced in: `frontend/src/pages/DashboardPage.tsx`
+- Symptom: Two distinct presentation bugs with the same root cause across rounds 2 and 3 of PR #89:
+  1. A single `/portfolio` failure rendered two `SectionError` widgets (summary cards + positions section) because two presentational sections both consumed the same `useAsync` state and each rendered their own error path. One failure → two banners, two retry buttons, no way to tell them apart.
+  2. The System Status section gated rendering on `system.loading || config.loading`, so a slow or retrying endpoint hid the already-resolved sibling behind a skeleton. After a successful fetch, hitting Retry on a failed sibling re-entered `loading=true` and the resolved side disappeared until the retry resolved.
+- Prevention: Each async state on a frontend page must drive **at most one error surface and at most one loading surface**. When two sections share the same fetch, collapse them under a single guard. When two sections consume *independent* fetches, never combine their `loading` / `error` flags with `||` — each side renders its own `{loading, errored, resolved}` branch independently so a slow or retrying sibling cannot hide resolved data. Before pushing any new page, grep the page file for `\.error !== null` and `\.loading || .*\.loading` and confirm each async state appears in each branch exactly once, never combined with another state's flag. The same rule applies to retry buttons: one async state, one retry control.
+- Enforced in: `frontend/src/pages/DashboardPage.tsx`, `frontend/src/components/dashboard/SystemStatusPanel.tsx`
 
 ---
 
