@@ -219,32 +219,37 @@ def login(
     if _rate_limiter.is_blocked(ip_key, username_key):
         raise _too_many()
 
-    # Look up the operator. We always run verify_password against *some*
-    # hash so the timing of "no such user" matches the timing of "wrong
-    # password" -- otherwise an attacker can enumerate usernames.
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            "SELECT operator_id, username, password_hash FROM operators WHERE username = %s",
-            (normalised_username,),
-        )
-        row = cur.fetchone()
-
-    stored_hash = row["password_hash"] if row is not None else _DUMMY_HASH
-
-    if not verify_password(body.password, stored_hash) or row is None:
-        _rate_limiter.record_failure(ip_key, username_key)
-        raise _unauthorized()
-
-    operator_id: UUID = row["operator_id"]
-    username: str = row["username"]
-
-    # Create the session row + bump last_login_at in a single transaction
-    # so a partial write cannot leave a session without an updated stamp.
+    # Look up the operator and (on success) create the session inside a
+    # single transaction. Keeping the SELECT, the create_session INSERT,
+    # and the touch_last_login UPDATE in one tx prevents a concurrent
+    # request on the same pooled connection from interleaving between the
+    # read and the writes, and guarantees a partial write cannot leave a
+    # session without an updated last_login_at.
+    #
+    # We always run verify_password against *some* hash so the timing of
+    # "no such user" matches the timing of "wrong password" -- otherwise
+    # an attacker can enumerate usernames.
     user_agent = request.headers.get("user-agent")
     client = request.client
     ip = client.host if client else None
     absolute = timedelta(hours=settings.session_absolute_timeout_hours)
     with conn.transaction():
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT operator_id, username, password_hash FROM operators WHERE username = %s",
+                (normalised_username,),
+            )
+            row = cur.fetchone()
+
+        stored_hash = row["password_hash"] if row is not None else _DUMMY_HASH
+
+        if not verify_password(body.password, stored_hash) or row is None:
+            _rate_limiter.record_failure(ip_key, username_key)
+            raise _unauthorized()
+
+        operator_id: UUID = row["operator_id"]
+        username: str = row["username"]
+
         session_id, expires_at = create_session(
             conn,
             operator_id=operator_id,

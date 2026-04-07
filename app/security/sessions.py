@@ -93,45 +93,65 @@ def get_active_session(
     window is rolling.
     """
     now = _utcnow()
-    # Wrap the read + conditional update in an explicit transaction so
-    # every early-return path has a clear commit/rollback boundary. Without
-    # this the SELECT would leave an implicit transaction open on the
-    # pooled connection -- the pool eventually rolls it back on putback,
-    # but downstream code in the same request would inherit dirty txn
-    # state. ``conn.transaction()`` here is a real transaction at the
-    # outermost level and a savepoint when nested inside a caller txn.
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT s.session_id, s.operator_id, o.username,
-                   s.expires_at, s.last_seen_at
-            FROM sessions s
-            JOIN operators o USING (operator_id)
-            WHERE s.session_id = %s
-            """,
-            (session_id,),
-        )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        # Default cursor returns a TupleRow; pyright sees it as `object`
-        # without an explicit row factory, so we destructure via index.
-        sid: str = row[0]  # type: ignore[index]
-        operator_id: UUID = row[1]  # type: ignore[index]
-        username: str = row[2]  # type: ignore[index]
-        expires_at: datetime = row[3]  # type: ignore[index]
-        last_seen_at: datetime = row[4]  # type: ignore[index]
+    # Explicit commit / rollback per path. We deliberately do NOT wrap
+    # the body in ``conn.transaction()`` because in psycopg v3 a normal
+    # ``return`` from inside that context manager **commits** the
+    # transaction; for the early-return paths (missing row, expired,
+    # idle-timeout exceeded) we want a rollback, not a commit. If a
+    # future caller wraps this in their own ``conn.transaction()``, an
+    # implicit commit on the savepoint would prematurely promote the
+    # caller's intermediate state -- a latent correctness bug.
+    #
+    # Pattern: do the SELECT, decide, then either rollback-and-return or
+    # write-then-commit. The outer ``try / except`` converts any
+    # unexpected error into a rollback so the connection is never
+    # returned to the pool with dirty state.
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT s.session_id, s.operator_id, o.username,
+                       s.expires_at, s.last_seen_at
+                FROM sessions s
+                JOIN operators o USING (operator_id)
+                WHERE s.session_id = %s
+                """,
+                (session_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                conn.rollback()
+                return None
+            # Default cursor returns a TupleRow; pyright sees it as
+            # ``object`` without an explicit row factory, so we
+            # destructure via index.
+            sid: str = row[0]  # type: ignore[index]
+            operator_id: UUID = row[1]  # type: ignore[index]
+            username: str = row[2]  # type: ignore[index]
+            expires_at: datetime = row[3]  # type: ignore[index]
+            last_seen_at: datetime = row[4]  # type: ignore[index]
 
-        if expires_at <= now:
-            return None
-        if (now - last_seen_at) > idle_timeout:
-            return None
+            if expires_at <= now or (now - last_seen_at) > idle_timeout:
+                # Reap the dead row inline so expired sessions do not
+                # accumulate forever -- there is no separate reaper job.
+                # We still return None to the caller because the session
+                # is no longer valid for auth.
+                cur.execute(
+                    "DELETE FROM sessions WHERE session_id = %s",
+                    (sid,),
+                )
+                conn.commit()
+                return None
 
-        # Roll the idle window.
-        cur.execute(
-            "UPDATE sessions SET last_seen_at = %s WHERE session_id = %s",
-            (now, sid),
-        )
+            # Roll the idle window.
+            cur.execute(
+                "UPDATE sessions SET last_seen_at = %s WHERE session_id = %s",
+                (now, sid),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
     return SessionRow(
         session_id=sid,
