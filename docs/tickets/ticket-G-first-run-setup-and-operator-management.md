@@ -45,12 +45,19 @@ this ticket is execution only.
   start of the setup transaction:
   ```sql
   BEGIN;
-  SELECT pg_advisory_xact_lock(7263011);  -- pinned constant, see below
-  SELECT 1 FROM operators LIMIT 1;            -- empty check
-  -- if non-empty: rollback, return 404
+  SELECT pg_advisory_xact_lock(7263011);   -- pinned constant, see below
+  SELECT 1 FROM operators LIMIT 1;          -- empty check
+  -- if non-empty: ROLLBACK, return 404
   INSERT INTO operators (...) VALUES (...);
+  INSERT INTO sessions  (...) VALUES (...); -- session for the new operator
+  INSERT INTO operator_audit (...) VALUES (...); -- 'setup' event
   COMMIT;
   ```
+  All three writes (operator row, session row, audit row) happen
+  inside the same locked transaction. The session cookie is set on
+  the response *after* commit. A concurrent setup request blocks on
+  `pg_advisory_xact_lock`, then sees a non-empty operators table and
+  returns 404 — it never observes a half-built state.
   The lock is released automatically on transaction end. The
   empty-check, the insert, and the session creation all happen inside
   the locked transaction. A concurrent setup request blocks on the
