@@ -394,25 +394,35 @@ class TestKillSwitch:
     """
 
     def test_activate_sets_fields_and_writes_audit(self) -> None:
-        conn = _make_conn([_make_cursor([{"is_active": False}])])
-        conn.execute.return_value = MagicMock(rowcount=1)
+        # Two cursors are opened: SELECT FOR UPDATE, then UPDATE ... RETURNING.
+        select_cur = _make_cursor([{"is_active": False}])
+        update_cur = _make_cursor([{"activated_at": _NOW}])
+        conn = _make_conn([select_cur, update_cur])
 
-        activate_kill_switch(conn, reason="data corruption", activated_by="ops", now=_NOW)
+        result = activate_kill_switch(conn, reason="data corruption", activated_by="ops", now=_NOW)
 
-        # Two conn.execute() calls inside the transaction: UPDATE then INSERT audit.
-        assert conn.execute.call_count == 2
-        update_call, audit_call = conn.execute.call_args_list
-
-        assert "UPDATE kill_switch" in update_call[0][0]
-        assert update_call[0][1]["reason"] == "data corruption"
-        assert update_call[0][1]["by"] == "ops"
-        assert update_call[0][1]["at"] == _NOW
-
+        # The UPDATE happens through the second cursor; the audit INSERT is the
+        # only conn.execute() call.
+        assert conn.execute.call_count == 1
+        audit_call = conn.execute.call_args_list[0]
         assert "INSERT INTO runtime_config_audit" in audit_call[0][0]
         assert audit_call[0][1]["field"] == "kill_switch"
         assert audit_call[0][1]["new"] == "true"
         assert audit_call[0][1]["old"] == "false"
         assert audit_call[0][1]["by"] == "ops"
+
+        # The UPDATE was issued on the second cursor with RETURNING.
+        update_sql, update_params = update_cur.execute.call_args[0]
+        assert "UPDATE kill_switch" in update_sql
+        assert "RETURNING activated_at" in update_sql
+        assert update_params["reason"] == "data corruption"
+        assert update_params["by"] == "ops"
+        assert update_params["at"] == _NOW
+
+        # Returned dict carries DB-committed activated_at, not the app `now`.
+        assert result["activated_at"] == _NOW
+        assert result["activated_by"] == "ops"
+        assert result["is_active"] is True
 
         conn.transaction.assert_called_once()
 

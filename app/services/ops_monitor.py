@@ -444,19 +444,26 @@ def activate_kill_switch(
         if prior is None:
             raise RuntimeError("kill_switch row missing — cannot activate; configuration corrupt")
 
-        result = conn.execute(
-            """
-            UPDATE kill_switch
-            SET is_active = TRUE,
-                activated_at = %(at)s,
-                activated_by = %(by)s,
-                reason = %(reason)s
-            WHERE id = TRUE
-            """,
-            {"at": now, "by": activated_by, "reason": reason},
-        )
-        if result.rowcount == 0:  # pragma: no cover — SELECT FOR UPDATE proved row exists
+        # RETURNING activated_at so the caller carries the DB-committed value
+        # rather than the application-side `now`, eliminating any app/DB clock
+        # skew in the response.
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                UPDATE kill_switch
+                SET is_active = TRUE,
+                    activated_at = %(at)s,
+                    activated_by = %(by)s,
+                    reason = %(reason)s
+                WHERE id = TRUE
+                RETURNING activated_at
+                """,
+                {"at": now, "by": activated_by, "reason": reason},
+            )
+            updated = cur.fetchone()
+        if updated is None:  # pragma: no cover — SELECT FOR UPDATE proved row exists
             raise RuntimeError("kill_switch row missing — cannot activate; configuration corrupt")
+        committed_at = updated["activated_at"]
 
         write_kill_switch_audit(
             conn,
@@ -471,7 +478,7 @@ def activate_kill_switch(
     # cannot race a concurrent toggle by re-reading after commit.
     return {
         "is_active": True,
-        "activated_at": now,
+        "activated_at": committed_at,
         "activated_by": activated_by,
         "reason": reason,
     }
