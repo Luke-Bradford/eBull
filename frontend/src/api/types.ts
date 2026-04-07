@@ -182,6 +182,39 @@ export interface PortfolioResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /recommendations (app/api/recommendations.py)
+// ---------------------------------------------------------------------------
+
+export type RecommendationAction = "BUY" | "ADD" | "HOLD" | "EXIT";
+export type RecommendationStatus = "proposed" | "approved" | "rejected" | "executed";
+
+export interface RecommendationListItem {
+  recommendation_id: number;
+  instrument_id: number;
+  symbol: string;
+  company_name: string;
+  // action/status are typed as `str` on the backend (not Literal), so mirror
+  // that here. RecommendationAction / RecommendationStatus above are the
+  // closed sets the backend currently emits — use them when narrowing.
+  action: string;
+  status: string;
+  rationale: string;
+  score_id: number | null;
+  model_version: string | null;
+  suggested_size_pct: number | null;
+  target_entry: number | null;
+  cash_balance_known: boolean | null;
+  created_at: string;
+}
+
+export interface RecommendationsListResponse {
+  items: RecommendationListItem[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+// ---------------------------------------------------------------------------
 // /rankings (app/api/scores.py)
 // ---------------------------------------------------------------------------
 
