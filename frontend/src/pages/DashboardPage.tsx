@@ -24,6 +24,9 @@ import { SystemStatusPanel } from "@/components/dashboard/SystemStatusPanel";
  */
 export function DashboardPage() {
   const portfolio = useAsync(fetchPortfolio, []);
+  // The arrow function below is intentionally not memoised: useAsync
+  // captures the latest `fn` via a ref (see frontend/src/lib/useAsync.ts),
+  // so a new identity per render is harmless and does not trigger refetch.
   const recs = useAsync(() => fetchRecommendations(10), []);
   const system = useAsync(fetchSystemStatus, []);
   const config = useAsync(fetchConfig, []);
