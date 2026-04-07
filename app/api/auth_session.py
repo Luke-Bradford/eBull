@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import timedelta
+from datetime import datetime, timedelta
 from threading import Lock
 from time import monotonic
 from uuid import UUID
@@ -233,6 +233,15 @@ def login(
     client = request.client
     ip = client.host if client else None
     absolute = timedelta(hours=settings.session_absolute_timeout_hours)
+    # Single transaction wraps SELECT + writes so a concurrent request on
+    # the same pooled connection cannot interleave. The auth decision is
+    # captured into ``valid`` so we can exit the transaction cleanly on
+    # failure (no writes happened, the empty tx commits a no-op) and then
+    # bump the rate-limiter + raise outside the tx -- this keeps the
+    # counter mutation off the tx's exception path so a hypothetical
+    # rollback error cannot leave the counter incremented for a request
+    # that never returned a 401.
+    issued: tuple[UUID, str, str, datetime] | None = None
     with conn.transaction():
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
@@ -242,22 +251,23 @@ def login(
             row = cur.fetchone()
 
         stored_hash = row["password_hash"] if row is not None else _DUMMY_HASH
+        if verify_password(body.password, stored_hash) and row is not None:
+            operator_id_ok: UUID = row["operator_id"]
+            username_ok: str = row["username"]
+            new_session_id, new_expires_at = create_session(
+                conn,
+                operator_id=operator_id_ok,
+                user_agent=user_agent,
+                ip=ip,
+                absolute_timeout=absolute,
+            )
+            touch_last_login(conn, operator_id=operator_id_ok)
+            issued = (operator_id_ok, username_ok, new_session_id, new_expires_at)
 
-        if not verify_password(body.password, stored_hash) or row is None:
-            _rate_limiter.record_failure(ip_key, username_key)
-            raise _unauthorized()
-
-        operator_id: UUID = row["operator_id"]
-        username: str = row["username"]
-
-        session_id, expires_at = create_session(
-            conn,
-            operator_id=operator_id,
-            user_agent=user_agent,
-            ip=ip,
-            absolute_timeout=absolute,
-        )
-        touch_last_login(conn, operator_id=operator_id)
+    if issued is None:
+        _rate_limiter.record_failure(ip_key, username_key)
+        raise _unauthorized()
+    operator_id, username, session_id, _expires_at = issued
 
     _set_session_cookie(
         response,

@@ -168,13 +168,19 @@ def delete_session(conn: psycopg.Connection[object], *, session_id: str) -> None
     Used by /auth/logout. We do not raise on missing rows -- a logout for
     an already-expired session should still succeed from the caller's POV.
     """
-    with conn.cursor() as cur:
+    with conn.transaction(), conn.cursor() as cur:
         cur.execute("DELETE FROM sessions WHERE session_id = %s", (session_id,))
 
 
 def touch_last_login(conn: psycopg.Connection[object], *, operator_id: UUID) -> None:
-    """Stamp ``operators.last_login_at`` on a successful login."""
-    with conn.cursor() as cur:
+    """Stamp ``operators.last_login_at`` on a successful login.
+
+    Self-contained transaction so the write is durable when called outside
+    a caller-managed ``conn.transaction()``. When the caller already has an
+    open transaction (as ``login`` does), psycopg promotes this to a
+    savepoint, which is the desired nesting behaviour.
+    """
+    with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "UPDATE operators SET last_login_at = %s WHERE operator_id = %s",
             (_utcnow(), operator_id),
