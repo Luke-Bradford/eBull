@@ -94,6 +94,11 @@ export function RankingsPage() {
     }
   }, [rankings.data]);
 
+  const onClearAll = () => {
+    setQuery({ coverage_tier: null, sector: null, stance: null });
+    setScoreThreshold(null);
+  };
+
   const view: RankingsView = computeView({
     loading: rankings.loading,
     error: rankings.error,
@@ -101,12 +106,8 @@ export function RankingsPage() {
     filteredItems,
     filtersDirty,
     onRetry: rankings.refetch,
+    onClearFilters: onClearAll,
   });
-
-  const onClearAll = () => {
-    setQuery({ coverage_tier: null, sector: null, stance: null });
-    setScoreThreshold(null);
-  };
 
   return (
     <div className="space-y-6">
@@ -143,6 +144,7 @@ interface ComputeViewArgs {
   filteredItems: ReadonlyArray<RankingItem>;
   filtersDirty: boolean;
   onRetry: () => void;
+  onClearFilters: () => void;
 }
 
 /**
@@ -161,7 +163,7 @@ interface ComputeViewArgs {
  *   6. data           — render rows
  */
 function computeView(args: ComputeViewArgs): RankingsView {
-  const { loading, error, data, filteredItems, filtersDirty, onRetry } = args;
+  const { loading, error, data, filteredItems, filtersDirty, onRetry, onClearFilters } = args;
 
   if (loading) return { kind: "loading" };
 
@@ -182,9 +184,13 @@ function computeView(args: ComputeViewArgs): RankingsView {
   // nothing for this filter set". The backend sets scored_at=None only
   // when MAX(scored_at) is NULL — i.e. there are zero rows in the
   // `scores` table for this model_version (see app/api/scores.py
-  // list_rankings step 1). A run that produced empty results would
-  // still have a scored_at timestamp.
-  if (data.scored_at === null) {
+  // list_rankings step 1). The `&& items.length === 0` belt-and-braces
+  // guard defends against a hypothetical malformed payload where the
+  // backend serves rows with a null scored_at — without it, real rows
+  // would be hidden behind the "no runs yet" message. fetchRankings
+  // also console.warns on the same invariant violation so contract
+  // drift surfaces immediately.
+  if (data.scored_at === null && data.items.length === 0) {
     return {
       kind: "empty",
       title: "No scoring runs yet",
@@ -194,14 +200,32 @@ function computeView(args: ComputeViewArgs): RankingsView {
   }
 
   if (filteredItems.length === 0) {
+    // The clear-filters button is the operator's escape hatch when a
+    // filter combination produces zero rows. The filter bar above
+    // already exposes the same control, but the issue spec requires
+    // the affordance inside the empty state itself when filters are
+    // dirty so the operator never has to hunt for the next action.
     return {
       kind: "empty",
       title: "No instruments match the current filters",
       description: filtersDirty
         ? "Loosen the filters or clear them to see the full ranked list."
         : "The latest scoring run produced no ranked instruments.",
+      action: filtersDirty ? <ClearFiltersButton onClick={onClearFilters} /> : undefined,
     };
   }
 
   return { kind: "data", items: filteredItems.slice() };
+}
+
+function ClearFiltersButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100"
+    >
+      Clear filters
+    </button>
+  );
 }
