@@ -201,25 +201,19 @@ def delete_operator(
 
     with conn.transaction():
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            # Self-delete needs the "is the caller the only operator?"
-            # invariant to be race-safe. We take a per-self-delete
-            # advisory lock (distinct from the setup key) so two
-            # concurrent self-delete attempts serialise without locking
-            # any operator rows -- non-self deletes, set-password, and
-            # last_login_at updates against the operators table run
-            # without contention.
-            #
-            # Non-self delete does NOT take the advisory lock: the
-            # invariant ("at least one other operator remains") is
-            # trivially preserved because the caller's own row is the
-            # +1, and concurrent self-delete by the *target* would
-            # serialise on the FK / row lock acquired by the DELETE
-            # statement itself.
-            if is_self:
-                cur.execute(
-                    "SELECT pg_advisory_xact_lock(%s)",
-                    (_SELF_DELETE_LOCK_KEY,),
-                )
+            # Take the population-invariant advisory lock for EVERY
+            # delete (self and non-self alike) so the self-delete count
+            # check cannot race a concurrent non-self delete that would
+            # otherwise commit between this transaction's SELECT
+            # COUNT(*) and DELETE. ``create_operator`` also takes the
+            # same key, so create / non-self-delete / self-delete all
+            # serialise on the population invariant. set-password and
+            # last_login_at do not take the lock -- they don't change
+            # the row count.
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_SELF_DELETE_LOCK_KEY,),
+            )
 
             cur.execute(
                 "SELECT username FROM operators WHERE operator_id = %s",
