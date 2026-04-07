@@ -20,12 +20,14 @@ from app.api.news import router as news_router
 from app.api.portfolio import router as portfolio_router
 from app.api.recommendations import router as recommendations_router
 from app.api.scores import router as scores_router
+from app.api.system import router as system_router
 from app.api.theses import router as theses_router
 from app.config import settings
 from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
 from app.services.coverage import override_tier
 from app.services.ops_monitor import get_system_health
+from app.workers.scheduler import SCHEDULED_JOBS
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -61,6 +63,7 @@ app.include_router(news_router)
 app.include_router(portfolio_router)
 app.include_router(recommendations_router)
 app.include_router(scores_router)
+app.include_router(system_router)
 app.include_router(theses_router)
 
 
@@ -151,29 +154,27 @@ def coverage_override(
 # Data health
 # ---------------------------------------------------------------------------
 
-# Job names that the scheduler uses — listed here so the health endpoint
-# can report on each without coupling to the scheduler module.
-# Keep in sync with app/workers/scheduler.py job function names.
-_KNOWN_JOBS: list[str] = [
-    "nightly_universe_sync",
-    "hourly_market_refresh",
-    "daily_cik_refresh",
-    "daily_research_refresh",
-    "daily_news_refresh",
-    "daily_thesis_refresh",
-    "morning_candidate_review",
-    "weekly_coverage_review",
-    "daily_tax_reconciliation",
-]
+# Deprecated: superseded by GET /system/status (issue #57). The new router
+# carries the canonical operator visibility surface (per-layer freshness, job
+# health, kill switch). This route is kept temporarily so any existing
+# operator scripts continue to work; remove once the admin page (#64) ships.
 
 
-@app.get("/health/data", dependencies=[Depends(require_auth)])
+@app.get("/health/data", dependencies=[Depends(require_auth)], deprecated=True, tags=["system"])
 def health_data(conn: psycopg.Connection[object] = Depends(get_conn)) -> dict:
-    """Per-layer staleness status, job health, and kill switch state."""
+    """Deprecated alias for ``GET /system/status``.
+
+    Job names are sourced from ``SCHEDULED_JOBS`` so this endpoint cannot
+    drift from the registry — both /health/data and /system/status report on
+    the same job set.
+    """
     try:
-        report = get_system_health(conn, job_names=_KNOWN_JOBS)
+        report = get_system_health(conn, job_names=[job.name for job in SCHEDULED_JOBS])
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # Fixed-string detail; full exception text goes to logger only.
+        # See review-prevention-log entry on 5xx HTTPException leaks.
+        logger.exception("/health/data: failed to build system health report")
+        raise HTTPException(status_code=503, detail="health data unavailable") from exc
 
     return {
         "checked_at": report.checked_at.isoformat(),

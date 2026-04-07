@@ -104,6 +104,12 @@ JobStatus = Literal["running", "success", "failure"]
 
 LayerStatus = Literal["ok", "stale", "empty", "error"]
 
+# Fixed marker used in LayerHealth.detail when a per-layer query raises.
+# Exported as a module constant so test fixtures can reference the same
+# string the production code emits — preventing the test/prod drift class
+# called out in #86 round 3 review.
+LAYER_QUERY_FAILED_DETAIL_TEMPLATE = "{layer}: query failed (see server logs)"
+
 # ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
@@ -212,9 +218,39 @@ def check_all_layers(
     *,
     now: datetime | None = None,
 ) -> list[LayerHealth]:
-    """Check staleness for every monitored data layer."""
+    """Check staleness for every monitored data layer.
+
+    Each per-layer query is wrapped in a try/except so a single broken layer
+    (e.g. table missing during a partial migration) yields a ``LayerHealth``
+    with ``status="error"`` instead of bubbling out and 500-ing the entire
+    operator visibility endpoint.
+
+    Prevention-log #70: never let an infra-level fault degrade into a silent
+    HTTP 200; here we surface it per-layer so the operator can see *which*
+    layer failed, while the rest of the report still renders.
+    """
     now = now or _utcnow()
-    return [check_layer_staleness(conn, layer, now=now) for layer in ALL_LAYERS]
+    results: list[LayerHealth] = []
+    for layer in ALL_LAYERS:
+        try:
+            results.append(check_layer_staleness(conn, layer, now=now))
+        except Exception:
+            # Full exception detail goes to the server-side log only.
+            # The `detail` field is surfaced verbatim in the API response,
+            # so it must be a fixed string — leaking driver error text,
+            # SQL fragments, or table names to a bearer-token holder is
+            # the same leak class as the 5xx HTTPException one fixed in
+            # the API layer. The operator gets the layer name and a stable
+            # marker; the full traceback is in the logs.
+            logger.exception("check_all_layers: layer %s failed", layer)
+            results.append(
+                LayerHealth(
+                    layer=layer,
+                    status="error",
+                    detail=LAYER_QUERY_FAILED_DETAIL_TEMPLATE.format(layer=layer),
+                )
+            )
+    return results
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,162 @@
+"""Tests for the declared schedule registry and ``compute_next_run``.
+
+Scope:
+  - Registry shape: every entry has a unique name and a valid cadence.
+  - Registry / ``_tracked_job`` consistency: every name constant referenced
+    by a job function is also in ``SCHEDULED_JOBS`` (no drift).
+  - ``compute_next_run`` semantics for hourly / daily / weekly cadences,
+    including the strictly-greater-than-now boundary.
+
+These are pure-Python tests — no DB, no network.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from app.workers import scheduler
+from app.workers.scheduler import (
+    SCHEDULED_JOBS,
+    Cadence,
+    compute_next_run,
+)
+
+# ---------------------------------------------------------------------------
+# Registry shape
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryShape:
+    def test_names_are_unique(self) -> None:
+        names = [job.name for job in SCHEDULED_JOBS]
+        assert len(names) == len(set(names)), f"duplicate job names: {names}"
+
+    def test_descriptions_are_non_empty(self) -> None:
+        for job in SCHEDULED_JOBS:
+            assert job.description.strip(), f"job {job.name} has empty description"
+
+    def test_every_job_constant_is_in_registry(self) -> None:
+        # Every JOB_* constant in the scheduler module must appear in the
+        # registry — otherwise a function references a name that the
+        # operator visibility endpoint never reports on.
+        constants = {
+            value for name, value in vars(scheduler).items() if name.startswith("JOB_") and isinstance(value, str)
+        }
+        registry_names = {job.name for job in SCHEDULED_JOBS}
+        assert constants == registry_names, (
+            f"drift between JOB_* constants and SCHEDULED_JOBS: "
+            f"only-in-constants={constants - registry_names}, "
+            f"only-in-registry={registry_names - constants}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Cadence validators
+# ---------------------------------------------------------------------------
+
+
+class TestCadenceValidators:
+    @pytest.mark.parametrize("minute", [-1, 60, 75])
+    def test_hourly_invalid_minute_raises(self, minute: int) -> None:
+        with pytest.raises(ValueError, match="hourly minute"):
+            Cadence.hourly(minute=minute)
+
+    @pytest.mark.parametrize("hour", [-1, 24])
+    def test_daily_invalid_hour_raises(self, hour: int) -> None:
+        with pytest.raises(ValueError, match="daily hour"):
+            Cadence.daily(hour=hour)
+
+    @pytest.mark.parametrize("weekday", [-1, 7])
+    def test_weekly_invalid_weekday_raises(self, weekday: int) -> None:
+        with pytest.raises(ValueError, match="weekly weekday"):
+            Cadence.weekly(weekday=weekday, hour=0)
+
+    def test_label_hourly(self) -> None:
+        assert Cadence.hourly(minute=5).label == "hourly at :05 UTC"
+
+    def test_label_daily(self) -> None:
+        assert Cadence.daily(hour=6, minute=30).label == "daily at 06:30 UTC"
+
+    def test_label_weekly(self) -> None:
+        # weekday=0 is Monday
+        assert Cadence.weekly(weekday=0, hour=5).label == "weekly on Mon at 05:00 UTC"
+
+
+# ---------------------------------------------------------------------------
+# compute_next_run
+# ---------------------------------------------------------------------------
+
+
+_NOW = datetime(2026, 4, 7, 12, 30, 0, tzinfo=UTC)  # Tuesday 12:30 UTC
+
+
+class TestComputeNextRun:
+    def test_requires_aware_now(self) -> None:
+        with pytest.raises(ValueError, match="timezone-aware"):
+            compute_next_run(Cadence.hourly(), datetime(2026, 4, 7, 12, 0, 0))
+
+    # ---------- hourly ----------
+
+    def test_hourly_next_is_within_one_hour(self) -> None:
+        # cadence at minute 5; now is 12:30 → next is 13:05
+        result = compute_next_run(Cadence.hourly(minute=5), _NOW)
+        assert result == datetime(2026, 4, 7, 13, 5, 0, tzinfo=UTC)
+
+    def test_hourly_strictly_after_now_when_on_boundary(self) -> None:
+        # now is exactly 12:30; cadence at minute 30 → next is 13:30, not 12:30
+        on_boundary = datetime(2026, 4, 7, 12, 30, 0, tzinfo=UTC)
+        result = compute_next_run(Cadence.hourly(minute=30), on_boundary)
+        assert result == datetime(2026, 4, 7, 13, 30, 0, tzinfo=UTC)
+
+    def test_hourly_minute_after_current(self) -> None:
+        # now is 12:30; cadence at minute 45 → next is 12:45 (same hour)
+        result = compute_next_run(Cadence.hourly(minute=45), _NOW)
+        assert result == datetime(2026, 4, 7, 12, 45, 0, tzinfo=UTC)
+
+    # ---------- daily ----------
+
+    def test_daily_today_in_future(self) -> None:
+        # now 12:30; cadence at 18:00 → today 18:00
+        result = compute_next_run(Cadence.daily(hour=18), _NOW)
+        assert result == datetime(2026, 4, 7, 18, 0, 0, tzinfo=UTC)
+
+    def test_daily_today_already_passed_rolls_to_tomorrow(self) -> None:
+        # now 12:30; cadence at 06:00 → tomorrow 06:00
+        result = compute_next_run(Cadence.daily(hour=6), _NOW)
+        assert result == datetime(2026, 4, 8, 6, 0, 0, tzinfo=UTC)
+
+    def test_daily_strictly_greater_on_boundary(self) -> None:
+        on_boundary = datetime(2026, 4, 7, 6, 0, 0, tzinfo=UTC)
+        result = compute_next_run(Cadence.daily(hour=6), on_boundary)
+        assert result == datetime(2026, 4, 8, 6, 0, 0, tzinfo=UTC)
+
+    # ---------- weekly ----------
+
+    def test_weekly_later_this_week(self) -> None:
+        # _NOW is Tuesday; ask for Friday (weekday=4) at 09:00
+        result = compute_next_run(Cadence.weekly(weekday=4, hour=9), _NOW)
+        assert result == datetime(2026, 4, 10, 9, 0, 0, tzinfo=UTC)
+
+    def test_weekly_earlier_in_week_rolls_to_next_week(self) -> None:
+        # _NOW is Tuesday; ask for Monday (weekday=0) at 05:00 → next Monday
+        result = compute_next_run(Cadence.weekly(weekday=0, hour=5), _NOW)
+        # Next Monday after 2026-04-07 (Tue) is 2026-04-13.
+        assert result == datetime(2026, 4, 13, 5, 0, 0, tzinfo=UTC)
+
+    def test_weekly_same_day_strict(self) -> None:
+        # _NOW is Tuesday 12:30; ask for Tuesday at 09:00 → already passed → next week
+        result = compute_next_run(Cadence.weekly(weekday=1, hour=9), _NOW)
+        assert result == datetime(2026, 4, 14, 9, 0, 0, tzinfo=UTC)
+
+    def test_weekly_same_day_future(self) -> None:
+        # _NOW is Tuesday 12:30; ask for Tuesday at 18:00 → today
+        result = compute_next_run(Cadence.weekly(weekday=1, hour=18), _NOW)
+        assert result == datetime(2026, 4, 7, 18, 0, 0, tzinfo=UTC)
+
+    def test_returns_utc_when_now_is_other_offset(self) -> None:
+        # 12:30 UTC == 13:30 in +01:00; the cadence still resolves in UTC.
+        plus_one = _NOW.astimezone(tz=__import__("datetime").timezone(timedelta(hours=1)))
+        result = compute_next_run(Cadence.daily(hour=18), plus_one)
+        assert result == datetime(2026, 4, 7, 18, 0, 0, tzinfo=UTC)
