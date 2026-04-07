@@ -36,11 +36,28 @@ this ticket is execution only.
     "already set up", "wrong token", "no token but token required", and
     "missing token under Mode B". This is the generic-401 discipline from
     ADR 0001 applied to setup.
-- Race-safety: the empty-table check and the insert must be in a single
-  transaction. Two simultaneous `POST /auth/setup` requests must result in
-  exactly one operator row, and the loser must see the same `404` body.
-  Implementation: `INSERT … SELECT WHERE NOT EXISTS (SELECT 1 FROM operators)`
-  or equivalent, then check `cur.rowcount == 1` inside the same transaction.
+- Race-safety: two simultaneous `POST /auth/setup` requests must result
+  in exactly one operator row, and the loser must see the same `404`
+  body. `INSERT … WHERE NOT EXISTS` under PostgreSQL's default
+  `READ COMMITTED` is **not sufficient** — both transactions can pass
+  the `NOT EXISTS` predicate before either commits. The required
+  mechanism is a **transaction-scoped advisory lock** taken at the
+  start of the setup transaction:
+  ```sql
+  BEGIN;
+  SELECT pg_advisory_xact_lock(<constant>);  -- e.g. hashtext('ebull-setup')
+  SELECT 1 FROM operators LIMIT 1;            -- empty check
+  -- if non-empty: rollback, return 404
+  INSERT INTO operators (...) VALUES (...);
+  COMMIT;
+  ```
+  The lock is released automatically on transaction end. The
+  empty-check, the insert, and the session creation all happen inside
+  the locked transaction. A concurrent setup request blocks on the
+  advisory lock, then sees a non-empty operators table and returns 404.
+  A real-DB concurrency test must exercise two simultaneous requests
+  and assert exactly one success — mocks are not acceptable for this
+  test.
 
 ### Backend — bootstrap authorization
 
@@ -67,9 +84,51 @@ this ticket is execution only.
       ============================================================
       ```
     - the token is **never** written to disk
-  - the active token is consumed (zeroed in memory) on the first successful
-    `POST /auth/setup`. After that, any subsequent setup attempt under
-    Mode B fails with `404` until the process is restarted.
+  - the active token is held in a **mutable single-slot container**
+    (e.g. an instance attribute on a module-level holder object, or a
+    single-element list) so the slot can be set to `None` after first
+    use. A bare `str` reassignment is not sufficient — Python interns
+    short strings and we cannot rely on the original buffer being
+    unreachable. Note that "zeroing" the underlying string memory is
+    not achievable in CPython for an immutable `str`; the guarantee is
+    that the holder no longer returns the token, not that the bytes
+    are scrubbed from the process. After the slot is cleared, any
+    subsequent setup attempt under Mode B fails with `404` until the
+    process is restarted (which re-runs the startup token-resolution
+    path).
+  - A unit test must assert that after a successful `POST /auth/setup`,
+    presenting the same token to a second setup attempt (forced via a
+    direct DB wipe of `operators` between calls in the same process)
+    returns 404.
+
+### Backend — operator lifecycle audit
+
+Operator-lifecycle events are audit-relevant: they change *who* can place
+trades on this instance. A new audit table is added in this ticket so the
+gap does not persist while #99 / #100 land on top.
+
+- New table `operator_audit` (sql/017):
+  - `id BIGSERIAL PRIMARY KEY`
+  - `event_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+  - `event_type TEXT NOT NULL CHECK (event_type IN ('setup', 'create', 'delete', 'self_delete'))`
+  - `actor_operator_id UUID REFERENCES operators(operator_id) ON DELETE SET NULL` — null for `setup`, set for the others
+  - `target_operator_id UUID NOT NULL` — *not* a FK (target may already
+    be deleted by the time anyone reads the row); kept as raw UUID
+  - `target_username TEXT NOT NULL` — captured at write time so
+    forensic queries don't have to chase a deleted row
+  - `request_ip TEXT`
+  - `user_agent TEXT`
+- Audit rows are written **inside the same transaction** as the
+  operator mutation. A failed mutation must not leave an audit row;
+  a successful mutation must always have one.
+- Events written:
+  - `POST /auth/setup` success → `event_type='setup'`, `actor=NULL`
+  - `POST /operators` success → `event_type='create'`, actor = caller
+  - `DELETE /operators/{id}` success, target ≠ caller → `event_type='delete'`
+  - `DELETE /operators/{id}` success, target == caller → `event_type='self_delete'`
+- The audit log is queryable from `psql` for forensic checks. It is
+  not exposed via any HTTP endpoint in this ticket — that is a
+  separate UI concern and out of scope.
 
 ### Backend — operator management
 
@@ -85,7 +144,14 @@ All routes are `require_session` only. Never `service_token`.
   operator must log in separately.
 - `DELETE /operators/{id}` — delete. Rules:
   - target row must exist; otherwise 404
-  - if the target is **not** the caller: succeed (subject to row exists)
+  - if the target is **not** the caller: succeed (subject to row
+    exists). Any session rows belonging to the deleted operator are
+    removed automatically by the existing
+    `sessions.operator_id REFERENCES operators(operator_id) ON DELETE
+    CASCADE` foreign key (sql/016) — no extra DELETE needed in
+    application code, but a test must assert that a logged-in second
+    operator who is deleted by the caller has their session
+    invalidated immediately (their next `/auth/me` returns 401).
   - if the target **is** the caller (self-delete):
     - if at least one other operator row exists: the operator row
       delete and the caller's session row delete happen in the **same
@@ -223,7 +289,23 @@ All routes are `require_session` only. Never `service_token`.
 **Backend — race safety:**
 - two threads / two requests both calling `POST /auth/setup` simultaneously
   against an empty table → exactly one row created, exactly one success,
-  one 404. Use real DB transactions in this test, not mocks.
+  one 404. Use real DB transactions in this test, not mocks. The test
+  must verify that the advisory-lock path actually serialises the
+  inserts (e.g. by holding the lock manually from a third connection
+  and asserting the setup request blocks).
+
+**Backend — operator lifecycle audit:**
+- successful `/auth/setup` writes a row with `event_type='setup'`,
+  `actor_operator_id IS NULL`, target = the new operator
+- successful `POST /operators` writes a row with `event_type='create'`,
+  actor = caller, target = new operator
+- successful delete-other writes `event_type='delete'`
+- successful self-delete writes `event_type='self_delete'`
+- a failed mutation (e.g. duplicate username on `POST /operators`)
+  writes **no** audit row — the audit insert is in the same
+  transaction as the operator mutation
+- after delete, the audit row remains queryable and still carries the
+  deleted operator's username (captured at write time, not via FK)
 
 **Backend — operator management:**
 - list as authenticated operator returns own row with `is_self: true`
@@ -313,6 +395,6 @@ issues so they don't get lost:
   auto-generated token is process-memory only; if the user restarts the
   backend mid-bootstrap, they get a new token. This is fine for v1 but
   worth a follow-up if it bites.
-- **Ticket G-3 — Operator management audit log.** Add/delete operator
-  events should land in `decision_audit` (or a new `operator_audit`
-  table) eventually. Out of scope here to keep the diff small.
+- ~~**Ticket G-3 — Operator management audit log.**~~ Pulled in-scope
+  to this ticket per round-1 review. See "Backend — operator lifecycle
+  audit" above.

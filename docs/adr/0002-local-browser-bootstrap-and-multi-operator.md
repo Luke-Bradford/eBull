@@ -318,9 +318,26 @@ secrets, etc.) still applies.
 4. **The bootstrap token is single-use within a process lifetime.** Process
    restart clears the marker, which is acceptable because process restart
    is itself a host-trusted operation.
-5. **No timing oracle on `/auth/setup-status`.** It returns the same shape
-   regardless of bootstrap mode and does not leak whether a token would be
-   required, only whether a setup is needed.
+5. **No structural oracle on `/auth/setup-status`.** It returns the same
+   shape regardless of bootstrap mode and does not leak whether a token
+   would be required, only whether a setup is needed. We acknowledge a
+   residual *timing* side-channel: an empty-table query plan is not
+   identical to a populated-table plan, and on a sufficiently quiet
+   loopback instance the latency difference could in principle reveal
+   setup state. We accept this — the local trust model means a caller
+   close enough to measure that timing is already inside the trust
+   boundary, and adding caching would be more complexity than the leak
+   warrants.
+6. **Explicit UI tradeoff: setup token field is always visible.** The
+   frontend always renders the bootstrap token input on the setup page
+   (labelled "leave blank if running locally") rather than asking the
+   backend whether the token is required. This trades a small implicit
+   signal ("a token field exists, therefore the setup endpoint accepts
+   one") for the stronger property that `/auth/setup-status` cannot be
+   used to enumerate the bootstrap mode. We accept the tradeoff because
+   the field's existence reveals nothing useful — it does not reveal
+   whether the field is required, what a valid token looks like, or
+   whether one is currently configured.
 
 ---
 
