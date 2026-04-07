@@ -44,27 +44,28 @@ export function DashboardPage() {
         <ErrorBanner message="The API is unreachable. Check that the backend is running and the auth token is configured." />
       ) : null}
 
-      {/* Summary cards: skeleton while loading, inline error wrapped in
-          card chrome on failure so the layout does not collapse. */}
-      {portfolio.error !== null ? (
-        <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-          <SectionError onRetry={portfolio.refetch} />
-        </div>
-      ) : (
-        <SummaryCards data={portfolio.loading ? null : portfolio.data} />
-      )}
-
+      {/* Portfolio block: summary cards + positions table share one
+          /portfolio fetch and therefore share one error surface. Rendering
+          a SectionError in both slots would show two widgets for a single
+          failed endpoint with two redundant retry buttons. */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <div className="xl:col-span-2">
-          <Section title="Positions">
-            {portfolio.loading ? (
-              <SectionSkeleton rows={4} />
-            ) : portfolio.error !== null ? (
+        <div className="space-y-6 xl:col-span-2">
+          {portfolio.error !== null ? (
+            <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
               <SectionError onRetry={portfolio.refetch} />
-            ) : (
-              <PositionsTable positions={portfolio.data?.positions ?? []} />
-            )}
-          </Section>
+            </div>
+          ) : (
+            <>
+              <SummaryCards data={portfolio.loading ? null : portfolio.data} />
+              <Section title="Positions">
+                {portfolio.loading ? (
+                  <SectionSkeleton rows={4} />
+                ) : (
+                  <PositionsTable positions={portfolio.data?.positions ?? []} />
+                )}
+              </Section>
+            </>
+          )}
         </div>
 
         <Section title="System status">
