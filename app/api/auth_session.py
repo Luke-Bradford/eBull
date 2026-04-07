@@ -267,12 +267,12 @@ def login(
     if issued is None:
         _rate_limiter.record_failure(ip_key, username_key)
         raise _unauthorized()
-    operator_id, username, session_id, _expires_at = issued
+    operator_id, username, session_id, expires_at = issued
 
     _set_session_cookie(
         response,
         session_id=session_id,
-        max_age_seconds=int(absolute.total_seconds()),
+        max_age_seconds=max(0, int((expires_at - datetime.now(expires_at.tzinfo)).total_seconds())),
     )
     _rate_limiter.reset_username(username_key)
     logger.info("operator login: %s", username)
