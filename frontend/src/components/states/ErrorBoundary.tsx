@@ -23,11 +23,12 @@ export class ErrorBoundary extends Component<Props, State> {
 
   render(): ReactNode {
     if (this.state.error) {
+      // Render a fixed string rather than error.message — any thrown Error
+      // in a page component would otherwise surface its raw message verbatim
+      // in the DOM. The full error is logged to the console for the operator.
       return (
         <div className="p-6">
-          <ErrorBanner
-            message={`Something went wrong: ${this.state.error.message}`}
-          />
+          <ErrorBanner message="Something went wrong. Check the browser console for details." />
         </div>
       );
     }

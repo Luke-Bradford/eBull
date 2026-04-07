@@ -1,6 +1,6 @@
-node_modules
-dist
-.vite
+node_modules/
+dist/
+.vite/
 *.tsbuildinfo
 *.log
 .DS_Store

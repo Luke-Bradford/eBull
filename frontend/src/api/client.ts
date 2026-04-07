@@ -31,6 +31,17 @@ export class ApiError extends Error {
 }
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  // Contract: callers pass the backend-relative path (e.g. "/instruments"),
+  // never the proxied path. apiFetch prepends "/api" exactly once; passing
+  // "/api/..." would resolve to "/api/api/..." after the Vite proxy strip
+  // and 404 on the backend. Fail loudly in dev rather than serving a silent
+  // 404 once real fetchers land in #60–#65.
+  if (path.startsWith("/api")) {
+    throw new Error(
+      `apiFetch path must not start with "/api"; got "${path}". Pass the backend-relative path only.`,
+    );
+  }
+
   const headers = new Headers(init?.headers);
   if (authToken !== null) {
     headers.set("Authorization", `Bearer ${authToken}`);

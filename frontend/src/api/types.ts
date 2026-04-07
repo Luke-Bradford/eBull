@@ -88,7 +88,10 @@ export interface JobOverviewResponse {
   cadence: string;
   cadence_kind: CadenceKind;
   next_run_time: string;
-  next_run_time_source: "declared";
+  // Backend currently emits the literal "declared"; will gain "scheduler"
+  // when APScheduler is wired (#13). Typed as string so a new value does not
+  // silently misrepresent the payload.
+  next_run_time_source: string;
   last_status: JobLastStatus;
   last_started_at: string | null;
   last_finished_at: string | null;
