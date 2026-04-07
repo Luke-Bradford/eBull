@@ -24,6 +24,7 @@ import pytest
 
 from app.services.ops_monitor import (
     _STALENESS_THRESHOLDS,
+    LAYER_QUERY_FAILED_DETAIL_TEMPLATE,
     activate_kill_switch,
     check_all_layers,
     check_job_health,
@@ -187,7 +188,10 @@ class TestCheckAllLayers:
         # holders. The fixed marker plus the layer name is enough for
         # operator triage; the full traceback is on the server-side logs.
         universe = next(r for r in results if r.layer == "universe")
-        assert universe.detail == "universe: query failed (see server logs)"
+        # Reference the production constant directly so test/prod drift is
+        # impossible — if the template ever changes, this assertion moves
+        # with it (#86 round 3 review).
+        assert universe.detail == LAYER_QUERY_FAILED_DETAIL_TEMPLATE.format(layer="universe")
         assert "relation 'instruments' does not exist" not in universe.detail
         # Every other layer rendered normally.
         for layer, status in status_map.items():

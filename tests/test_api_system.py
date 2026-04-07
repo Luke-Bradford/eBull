@@ -22,7 +22,11 @@ from fastapi.testclient import TestClient
 from app.api.auth import require_auth
 from app.db import get_conn
 from app.main import app
-from app.services.ops_monitor import JobHealth, LayerHealth
+from app.services.ops_monitor import (
+    LAYER_QUERY_FAILED_DETAIL_TEMPLATE,
+    JobHealth,
+    LayerHealth,
+)
 from app.workers.scheduler import SCHEDULED_JOBS
 
 _NOW = datetime(2026, 4, 7, 12, 30, 0, tzinfo=UTC)
@@ -66,10 +70,13 @@ def _stale_layer(name: str) -> LayerHealth:
 
 
 def _error_layer(name: str) -> LayerHealth:
+    # Mirror the production format string from check_all_layers via the
+    # shared constant so the fixture cannot drift from real error rows
+    # (#86 round 3 review).
     return LayerHealth(
         layer=name,  # type: ignore[arg-type]
         status="error",
-        detail=f"{name}: query failed — boom",
+        detail=LAYER_QUERY_FAILED_DETAIL_TEMPLATE.format(layer=name),
     )
 
 

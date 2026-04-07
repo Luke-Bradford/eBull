@@ -104,6 +104,12 @@ JobStatus = Literal["running", "success", "failure"]
 
 LayerStatus = Literal["ok", "stale", "empty", "error"]
 
+# Fixed marker used in LayerHealth.detail when a per-layer query raises.
+# Exported as a module constant so test fixtures can reference the same
+# string the production code emits — preventing the test/prod drift class
+# called out in #86 round 3 review.
+LAYER_QUERY_FAILED_DETAIL_TEMPLATE = "{layer}: query failed (see server logs)"
+
 # ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
@@ -241,7 +247,7 @@ def check_all_layers(
                 LayerHealth(
                     layer=layer,
                     status="error",
-                    detail=f"{layer}: query failed (see server logs)",
+                    detail=LAYER_QUERY_FAILED_DETAIL_TEMPLATE.format(layer=layer),
                 )
             )
     return results
