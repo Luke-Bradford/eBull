@@ -228,13 +228,20 @@ def check_all_layers(
     for layer in ALL_LAYERS:
         try:
             results.append(check_layer_staleness(conn, layer, now=now))
-        except Exception as exc:
+        except Exception:
+            # Full exception detail goes to the server-side log only.
+            # The `detail` field is surfaced verbatim in the API response,
+            # so it must be a fixed string — leaking driver error text,
+            # SQL fragments, or table names to a bearer-token holder is
+            # the same leak class as the 5xx HTTPException one fixed in
+            # the API layer. The operator gets the layer name and a stable
+            # marker; the full traceback is in the logs.
             logger.exception("check_all_layers: layer %s failed", layer)
             results.append(
                 LayerHealth(
                     layer=layer,
                     status="error",
-                    detail=f"{layer}: query failed — {exc}",
+                    detail=f"{layer}: query failed (see server logs)",
                 )
             )
     return results

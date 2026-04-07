@@ -92,15 +92,20 @@ class TestHealthData:
         call_conn = mock_health.call_args[0][0]
         assert call_conn is conn
 
-    def test_service_error_returns_503(self) -> None:
+    def test_service_error_returns_503_without_leaking_internals(self) -> None:
         conn = _mock_conn()
         _setup(conn)
 
-        with patch("app.main.get_system_health", side_effect=RuntimeError("db down")):
+        secret_marker = "secret-table-name-do-not-leak"
+        with patch("app.main.get_system_health", side_effect=RuntimeError(secret_marker)):
             resp = client.get("/health/data")
 
         assert resp.status_code == 503
-        assert "db down" in resp.json()["detail"]
+        # Detail must be a fixed string; full exception text goes to
+        # logger.exception only. See review-prevention-log entry on
+        # internal exception text leaking into HTTP response bodies.
+        assert resp.json()["detail"] == "health data unavailable"
+        assert secret_marker not in resp.text
 
 
 # ---------------------------------------------------------------------------

@@ -171,7 +171,10 @@ def health_data(conn: psycopg.Connection[object] = Depends(get_conn)) -> dict:
     try:
         report = get_system_health(conn, job_names=[job.name for job in SCHEDULED_JOBS])
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # Fixed-string detail; full exception text goes to logger only.
+        # See review-prevention-log entry on 5xx HTTPException leaks.
+        logger.exception("/health/data: failed to build system health report")
+        raise HTTPException(status_code=503, detail="health data unavailable") from exc
 
     return {
         "checked_at": report.checked_at.isoformat(),

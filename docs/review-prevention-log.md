@@ -243,10 +243,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
-### Internal exception text leaked via `HTTPException(detail=f"...{exc}")` at 5xx
+### Internal exception text leaked into HTTP response bodies
 - First seen in: #86
-- Symptom: `/system/status` and `/system/jobs` raised `HTTPException(status_code=503, detail=f"system status unavailable: {exc}")`. The driver / SQL error message — potentially carrying schema, table names, or connection-string fragments — was echoed to any bearer-token holder. The exception was already logged via `logger.exception`, so the f-string in the HTTP response was a redundant leak.
-- Prevention: At 5xx, `HTTPException(detail=...)` must be a fixed string. Full detail goes to `logger.exception` server-side only. Before pushing a 5xx handler, grep the route file for `HTTPException(status_code=5` and confirm every `detail=` argument is a literal or constant, not an f-string interpolating an exception. Tests should raise an exception containing a unique marker and assert the marker is absent from `response.text`.
+- Symptom: Two distinct leak sites in the same PR:
+  1. `/system/status` and `/system/jobs` raised `HTTPException(status_code=503, detail=f"...: {exc}")`, echoing driver / SQL error text to bearer-token holders.
+  2. `check_all_layers` constructed `LayerHealth(detail=f"{layer}: query failed — {exc}")` in its per-layer error branch, leaking the same exception text into the `/system/status` 200 response payload (the `detail` field is surfaced verbatim in the JSON body).
+- Prevention: Any string that ends up in an HTTP response body must be a fixed phrase when it carries an exception. This applies to **both** `HTTPException(detail=...)` at any status code **and** any service-layer `detail` / `message` / `error` field that the API serialises into the response. Full exception text goes to `logger.exception` server-side only. Before pushing, grep for `f"...{exc}"`, `str(exc)`, and `{exc}` inside any field that the API surfaces — including service-layer dataclasses that flow into response models. Tests should raise an exception with a unique marker and assert the marker is absent from `response.text`.
 - Enforced in: this prevention log
 
 ---

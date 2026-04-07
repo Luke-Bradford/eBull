@@ -182,9 +182,13 @@ class TestCheckAllLayers:
         assert len(results) == 8
         status_map = {r.layer: r.status for r in results}
         assert status_map["universe"] == "error"
-        # Detail must surface the underlying exception so operators can act.
+        # Detail must NOT carry the raw exception text — that lands in the
+        # API response and would leak schema/table names to bearer-token
+        # holders. The fixed marker plus the layer name is enough for
+        # operator triage; the full traceback is on the server-side logs.
         universe = next(r for r in results if r.layer == "universe")
-        assert "relation 'instruments' does not exist" in universe.detail
+        assert universe.detail == "universe: query failed (see server logs)"
+        assert "relation 'instruments' does not exist" not in universe.detail
         # Every other layer rendered normally.
         for layer, status in status_map.items():
             if layer != "universe":
