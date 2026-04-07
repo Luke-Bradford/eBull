@@ -439,6 +439,8 @@ class TestKillSwitch:
 
         assert conn.execute.call_count == 2
         update_call, audit_call = conn.execute.call_args_list
+        # Order matters: UPDATE must precede the audit INSERT so the audit row
+        # records committed state, not a speculative future state.
         assert "UPDATE kill_switch" in update_call[0][0]
         assert "INSERT INTO runtime_config_audit" in audit_call[0][0]
         assert audit_call[0][1]["field"] == "kill_switch"
