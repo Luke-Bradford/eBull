@@ -29,7 +29,7 @@ export interface RankingsFiltersProps {
   onQueryChange: (next: RankingsQuery) => void;
   scoreThreshold: number | null;
   onScoreThresholdChange: (next: number | null) => void;
-  knownSectors: string[];
+  knownSectors: ReadonlyArray<string>;
   onClearAll: () => void;
   filtersDirty: boolean;
 }
@@ -52,7 +52,7 @@ export function RankingsFilters({
       <FilterField label="Coverage tier" htmlFor="rk-tier">
         <select
           id="rk-tier"
-          className={selectClass}
+          className={fieldClass}
           value={query.coverage_tier ?? ""}
           onChange={(e) => {
             const v = e.target.value;
@@ -74,7 +74,7 @@ export function RankingsFilters({
       <FilterField label="Sector" htmlFor="rk-sector">
         <select
           id="rk-sector"
-          className={selectClass}
+          className={fieldClass}
           value={query.sector ?? ""}
           onChange={(e) => {
             const v = e.target.value;
@@ -93,7 +93,7 @@ export function RankingsFilters({
       <FilterField label="Stance" htmlFor="rk-stance">
         <select
           id="rk-stance"
-          className={selectClass}
+          className={fieldClass}
           value={query.stance ?? ""}
           onChange={(e) => {
             const v = e.target.value;
@@ -117,7 +117,7 @@ export function RankingsFilters({
           id="rk-score"
           type="number"
           step="0.01"
-          className={`${inputClass} w-24`}
+          className={`${fieldClass} w-24`}
           value={scoreThreshold ?? ""}
           onChange={(e) => {
             const raw = e.target.value;
@@ -166,7 +166,5 @@ function FilterField({
   );
 }
 
-const selectClass =
-  "mt-1 rounded border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-700 focus:border-blue-500 focus:outline-none";
-const inputClass =
+const fieldClass =
   "mt-1 rounded border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-700 focus:border-blue-500 focus:outline-none";

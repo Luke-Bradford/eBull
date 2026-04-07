@@ -49,22 +49,25 @@ export function RankingsPage() {
     [query.coverage_tier, query.sector, query.stance],
   );
 
+  // Functional setState reads the freshest `prev` snapshot from React,
+  // not the closure-captured `knownSectors` from the render in which this
+  // effect was registered. Without this, two rapid data updates landing
+  // in the same tick could re-seed from a stale snapshot and silently
+  // drop sectors added in the first update.
   useEffect(() => {
-    if (rankings.data === null) return;
-    const fresh = new Set(knownSectors);
-    let added = false;
-    for (const item of rankings.data.items) {
-      if (item.sector !== null && !fresh.has(item.sector)) {
-        fresh.add(item.sector);
-        added = true;
+    const data = rankings.data;
+    if (data === null) return;
+    setKnownSectors((prev) => {
+      const next = new Set(prev);
+      let added = false;
+      for (const item of data.items) {
+        if (item.sector !== null && !next.has(item.sector)) {
+          next.add(item.sector);
+          added = true;
+        }
       }
-    }
-    if (added) {
-      setKnownSectors(Array.from(fresh).sort());
-    }
-    // knownSectors intentionally omitted from deps: we only react to data
-    // changes, and including it would loop on the setState above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+      return added ? Array.from(next).sort() : prev;
+    });
   }, [rankings.data]);
 
   const filtersDirty =
@@ -121,7 +124,7 @@ export function RankingsPage() {
         onQueryChange={setQuery}
         scoreThreshold={scoreThreshold}
         onScoreThresholdChange={setScoreThreshold}
-        knownSectors={knownSectors.slice()}
+        knownSectors={knownSectors}
         onClearAll={onClearAll}
         filtersDirty={filtersDirty}
       />
@@ -175,7 +178,13 @@ function computeView(args: ComputeViewArgs): RankingsView {
     return { kind: "error", onRetry };
   }
 
-  if (data.items.length === 0 && !filtersDirty) {
+  // Distinguish "engine has never run" from "engine ran but produced
+  // nothing for this filter set". The backend sets scored_at=None only
+  // when MAX(scored_at) is NULL — i.e. there are zero rows in the
+  // `scores` table for this model_version (see app/api/scores.py
+  // list_rankings step 1). A run that produced empty results would
+  // still have a scored_at timestamp.
+  if (data.scored_at === null) {
     return {
       kind: "empty",
       title: "No scoring runs yet",
@@ -188,7 +197,9 @@ function computeView(args: ComputeViewArgs): RankingsView {
     return {
       kind: "empty",
       title: "No instruments match the current filters",
-      description: "Loosen the filters or clear them to see the full ranked list.",
+      description: filtersDirty
+        ? "Loosen the filters or clear them to see the full ranked list."
+        : "The latest scoring run produced no ranked instruments.",
     };
   }
 
