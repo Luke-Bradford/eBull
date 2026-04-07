@@ -41,8 +41,8 @@ frontend-typecheck:
 up:
 	docker compose up -d
 	@echo "Waiting for postgres to be ready..."
-	@timeout 60 bash -c 'until docker exec trader-os-postgres pg_isready -U postgres -d trader_os > /dev/null 2>&1; do sleep 1; done' \
-		|| (echo "Postgres did not become ready in 60s -- check: docker logs trader-os-postgres" && exit 1)
+	@timeout 60 bash -c 'until docker exec ebull-postgres pg_isready -U postgres -d ebull > /dev/null 2>&1; do sleep 1; done' \
+		|| (echo "Postgres did not become ready in 60s -- check: docker logs ebull-postgres" && exit 1)
 	@echo "Postgres is ready."
 
 migrate: up

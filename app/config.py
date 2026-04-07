@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_env: str = "dev"
-    database_url: str = "postgresql://postgres:postgres@localhost:5432/trader_os"
+    database_url: str = "postgresql://postgres:postgres@localhost:5432/ebull"
 
     etoro_read_api_key: str | None = None
     etoro_write_api_key: str | None = None

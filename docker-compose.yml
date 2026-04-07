@@ -3,10 +3,10 @@ version: "3.9"
 services:
   postgres:
     image: postgres:16
-    container_name: trader-os-postgres
+    container_name: ebull-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-trader_os}
+      POSTGRES_DB: ${POSTGRES_DB:-ebull}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     ports:

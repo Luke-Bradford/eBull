@@ -25,13 +25,13 @@ Write-Host "[2/3] Waiting for postgres to be ready..." -ForegroundColor Cyan
 $timeout = 60
 $elapsed = 0
 while ($elapsed -lt $timeout) {
-    docker exec trader-os-postgres pg_isready -U postgres -d trader_os 2>&1 | Out-Null
+    docker exec ebull-postgres pg_isready -U postgres -d ebull 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) { break }
     Start-Sleep -Seconds 1
     $elapsed++
 }
 if ($elapsed -ge $timeout) {
-    Write-Error "Postgres did not become ready in ${timeout}s. Check: docker logs trader-os-postgres"
+    Write-Error "Postgres did not become ready in ${timeout}s. Check: docker logs ebull-postgres"
     exit 1
 }
 Write-Host "      Postgres ready." -ForegroundColor Green
