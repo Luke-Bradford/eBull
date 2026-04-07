@@ -224,15 +224,22 @@ def perform_setup(
     submitted_token: str | None,
     request_client_ip: str | None,
     user_agent: str | None,
-    request_ip: str | None,
 ) -> tuple[SetupOutcome, SetupSuccess | None]:
     """Run the locked first-run setup transaction.
+
+    ``request_client_ip`` is the TCP peer address from
+    ``request.client.host``. It is used for *both* the loopback Mode A
+    auth gate AND the audit-row provenance ``request_ip`` column --
+    these are the same value (the source IP) so the parameter is not
+    duplicated. The auth gate is in `is_setup_authorised`; the audit
+    use is the operator_audit INSERT below.
 
     Returns ``(SetupOutcome.OK, SetupSuccess(...))`` on success and
     ``(<failure>, None)`` on every failure path. The HTTP layer maps
     every non-OK outcome to the same 404 body so callers cannot
     distinguish them.
     """
+    request_ip = request_client_ip
     normalised = _normalise_username(username)
     if not normalised:
         return SetupOutcome.BAD_USERNAME, None
@@ -265,29 +272,39 @@ def perform_setup(
     session_id: str | None = None
     expires_at: datetime | None = None
 
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_BOOTSTRAP_LOCK_KEY,))
-            cur.execute("SELECT 1 FROM operators LIMIT 1")
-            if cur.fetchone() is not None:
-                already_setup = True
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO operators (username, password_hash)
-                    VALUES (%s, %s)
-                    RETURNING operator_id
-                    """,
-                    (normalised, password_hash),
-                )
-                row = cur.fetchone()
-                if row is None:
-                    raise RuntimeError("operators INSERT did not RETURNING a row")
-                operator_id = row[0]  # type: ignore[index,assignment]
+    # NOTE on structure: every DB write below this line lives inside
+    # the SINGLE ``with conn.transaction():`` block and the SINGLE
+    # ``with conn.cursor() as cur:`` block. operators INSERT,
+    # create_session (which opens its own cursor on the same conn),
+    # and the operator_audit INSERT either all commit together or all
+    # roll back together. Do not split this into sibling cursor blocks
+    # -- previous review iterations misread the indentation when the
+    # success path was in an ``if not already_setup:`` block at the
+    # same level as the cursor.
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (_BOOTSTRAP_LOCK_KEY,))
+        cur.execute("SELECT 1 FROM operators LIMIT 1")
+        if cur.fetchone() is not None:
+            already_setup = True
+        else:
+            cur.execute(
+                """
+                INSERT INTO operators (username, password_hash)
+                VALUES (%s, %s)
+                RETURNING operator_id
+                """,
+                (normalised, password_hash),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError("operators INSERT did not RETURNING a row")
+            operator_id = row[0]  # type: ignore[index,assignment]
+            if not isinstance(operator_id, UUID):
+                raise RuntimeError("operators INSERT returned non-UUID id")
 
-        if not already_setup:
-            if operator_id is None:
-                raise RuntimeError("operator_id unset on success path")
+            # create_session opens its own cursor on the same conn;
+            # because we are still inside conn.transaction() above,
+            # both writes commit or roll back together.
             session_id, expires_at = create_session(
                 conn,
                 operator_id=operator_id,
@@ -296,18 +313,17 @@ def perform_setup(
                 absolute_timeout=timedelta(hours=settings.session_absolute_timeout_hours),
             )
 
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO operator_audit (
-                        event_type, actor_operator_id, actor_username,
-                        target_operator_id, target_username,
-                        request_ip, user_agent
-                    )
-                    VALUES ('setup', NULL, NULL, %s, %s, %s, %s)
-                    """,
-                    (operator_id, normalised, request_ip, user_agent),
+            cur.execute(
+                """
+                INSERT INTO operator_audit (
+                    event_type, actor_operator_id, actor_username,
+                    target_operator_id, target_username,
+                    request_ip, user_agent
                 )
+                VALUES ('setup', NULL, NULL, %s, %s, %s, %s)
+                """,
+                (operator_id, normalised, request_ip, user_agent),
+            )
 
     if already_setup:
         # The race-loser path. The table is now permanently populated,

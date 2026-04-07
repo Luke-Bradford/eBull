@@ -93,7 +93,6 @@ def test_advisory_lock_serialises_concurrent_setup(clean_operators: None) -> Non
                 submitted_token=None,
                 request_client_ip="127.0.0.1",
                 user_agent="pytest",
-                request_ip="127.0.0.1",
             )
             result["outcome"] = outcome
             result["success"] = success
@@ -125,7 +124,6 @@ def test_advisory_lock_serialises_concurrent_setup(clean_operators: None) -> Non
             submitted_token=None,
             request_client_ip="127.0.0.1",
             user_agent="pytest",
-            request_ip="127.0.0.1",
         )
     assert outcome is SetupOutcome.ALREADY_SETUP
     assert success is None

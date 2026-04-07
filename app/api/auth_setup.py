@@ -124,7 +124,6 @@ def setup(
         submitted_token=body.setup_token,
         request_client_ip=request_client_ip,
         user_agent=user_agent,
-        request_ip=request_client_ip,
     )
 
     if outcome is not SetupOutcome.OK or success is None:

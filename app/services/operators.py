@@ -111,6 +111,18 @@ def create_operator(
     try:
         with conn.transaction():
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                # Take the same advisory lock that delete_operator uses
+                # for self-delete. This serialises create-vs-self-delete:
+                # without it, a self-delete that observes count=2 could
+                # commit at the same time a create commits, leaving the
+                # database with a single operator that the self-delete
+                # never knew about. Both branches now block on the same
+                # key, so the count check inside delete is consistent
+                # with the create that happens around it.
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    (_SELF_DELETE_LOCK_KEY,),
+                )
                 cur.execute(
                     """
                     INSERT INTO operators (username, password_hash)
