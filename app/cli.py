@@ -53,8 +53,19 @@ def _connect() -> psycopg.Connection[object]:
     return psycopg.connect(settings.database_url)
 
 
+def _normalise_username(raw: str) -> str:
+    """Trim and lower-case the input username.
+
+    The DB enforces ``username = lower(username)`` via CHECK constraint
+    (sql/016) so callers must lower-case here too. Mixed-case input is
+    accepted at the CLI for ergonomics; it is normalised before any DB
+    interaction.
+    """
+    return raw.strip().lower()
+
+
 def cmd_create_operator(args: argparse.Namespace) -> int:
-    username = args.username.strip()
+    username = _normalise_username(args.username)
     if not username:
         print("Username must not be empty.", file=sys.stderr)
         return 2
@@ -62,7 +73,10 @@ def cmd_create_operator(args: argparse.Namespace) -> int:
     password = _read_password_twice()
     password_hash = hash_password(password)
 
-    with _connect() as conn, conn.cursor() as cur:
+    # Wrap the read + conditional write in an explicit transaction so a
+    # mid-flight error rolls back cleanly instead of leaving an aborted
+    # implicit transaction on the connection.
+    with _connect() as conn, conn.transaction(), conn.cursor() as cur:
         cur.execute("SELECT operator_id FROM operators WHERE username = %s", (username,))
         existing = cur.fetchone()
         if existing is not None and not args.force:
@@ -85,12 +99,11 @@ def cmd_create_operator(args: argparse.Namespace) -> int:
                 (username, password_hash),
             )
             print(f"Created operator '{username}'.")
-        conn.commit()
     return 0
 
 
 def cmd_set_password(args: argparse.Namespace) -> int:
-    username = args.username.strip()
+    username = _normalise_username(args.username)
     if not username:
         print("Username must not be empty.", file=sys.stderr)
         return 2
@@ -98,7 +111,7 @@ def cmd_set_password(args: argparse.Namespace) -> int:
     password = _read_password_twice()
     password_hash = hash_password(password)
 
-    with _connect() as conn, conn.cursor() as cur:
+    with _connect() as conn, conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "UPDATE operators SET password_hash = %s WHERE username = %s",
             (password_hash, username),
@@ -106,7 +119,6 @@ def cmd_set_password(args: argparse.Namespace) -> int:
         if cur.rowcount == 0:
             print(f"No operator named '{username}'.", file=sys.stderr)
             return 1
-        conn.commit()
     print(f"Password updated for operator '{username}'.")
     return 0
 

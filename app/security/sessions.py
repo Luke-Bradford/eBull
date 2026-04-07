@@ -93,7 +93,14 @@ def get_active_session(
     window is rolling.
     """
     now = _utcnow()
-    with conn.cursor() as cur:
+    # Wrap the read + conditional update in an explicit transaction so
+    # every early-return path has a clear commit/rollback boundary. Without
+    # this the SELECT would leave an implicit transaction open on the
+    # pooled connection -- the pool eventually rolls it back on putback,
+    # but downstream code in the same request would inherit dirty txn
+    # state. ``conn.transaction()`` here is a real transaction at the
+    # outermost level and a savepoint when nested inside a caller txn.
+    with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
             SELECT s.session_id, s.operator_id, o.username,

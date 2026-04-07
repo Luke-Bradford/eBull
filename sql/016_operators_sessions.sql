@@ -24,7 +24,13 @@
 
 CREATE TABLE IF NOT EXISTS operators (
     operator_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    username       TEXT NOT NULL UNIQUE,
+    -- Username is stored lower-cased so the login lookup
+    -- (`WHERE username = %s` after caller-side lower) is case-insensitive
+    -- without giving up the unique-index property. The CHECK constraint
+    -- prevents raw-SQL inserts from sneaking a mixed-case row past the
+    -- application layer and creating an enumeration timing gap between
+    -- the rate-limiter bucket (lower-cased) and the DB lookup.
+    username       TEXT NOT NULL UNIQUE CHECK (username = lower(username)),
     password_hash  TEXT NOT NULL,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_login_at  TIMESTAMPTZ

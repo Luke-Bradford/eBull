@@ -16,7 +16,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { ApiError, setUnauthorizedHandler } from "@/api/client";
+import { setUnauthorizedHandler } from "@/api/client";
 import * as authApi from "@/api/auth";
 import type { Operator } from "@/api/auth";
 
@@ -80,14 +80,15 @@ export function SessionProvider({ children }: { children: ReactNode }): JSX.Elem
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        if (err instanceof ApiError && err.status === 401) {
-          // handleUnauthorized was already invoked by the interceptor;
-          // it set state to unauthenticated. Nothing else to do.
-          return;
-        }
-        // Any non-401 error during bootstrap is treated as unauthenticated
-        // for safety -- we never render the protected app on an unknown
-        // session state.
+        // Always drive state to unauthenticated regardless of error class.
+        // The 401 interceptor MAY have fired first and already done this
+        // (in which case the second call is a no-op), but we cannot rely
+        // on it having registered before the bootstrap getMe() resolved
+        // -- React StrictMode double-mounts and effect ordering across
+        // remounts make that race observable. Setting state
+        // unconditionally here closes the race so a fresh visitor never
+        // gets stuck in `status === "loading"`.
+        void err;
         setOperator(null);
         setStatus("unauthenticated");
       });

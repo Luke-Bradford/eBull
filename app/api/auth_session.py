@@ -108,6 +108,18 @@ class _RateLimiter:
 _rate_limiter = _RateLimiter()
 
 
+# Stable dummy hash used by the login handler to equalise the timing of
+# the "no such user" branch with the real verify path. Defined at module
+# level (not inside the request handler) so it is allocated once at
+# import time. Must be a valid Argon2id PHC string or argon2-cffi raises
+# before reaching the constant-time compare.
+_DUMMY_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=4$"
+    "ZHVtbXlzYWx0ZHVtbXlzYWx0$"
+    "ZHVtbXloYXNoZHVtbXloYXNoZHVtbXloYXNoZHVtbXloYXNoZHVtbXloYXNoMA"
+)
+
+
 def _ip_key(request: Request) -> str:
     # request.client may be None for some test transports.
     client = request.client
@@ -195,7 +207,14 @@ def login(
     sliding window. The counter is reset for the username on success.
     """
     ip_key = _ip_key(request)
-    username_key = _username_key(body.username)
+    # Normalise username before bucketing AND before lookup so the rate
+    # limiter and the DB query share the same canonical key. The DB
+    # enforces lower-case storage via a CHECK constraint (sql/016), so
+    # ``"Alice"`` and ``"alice"`` resolve to the same row -- and to the
+    # same rate-limiter bucket -- closing the timing-leak gap between
+    # the two paths.
+    normalised_username = body.username.strip().lower()
+    username_key = _username_key(normalised_username)
 
     if _rate_limiter.is_blocked(ip_key, username_key):
         raise _too_many()
@@ -206,19 +225,11 @@ def login(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             "SELECT operator_id, username, password_hash FROM operators WHERE username = %s",
-            (body.username.strip(),),
+            (normalised_username,),
         )
         row = cur.fetchone()
 
-    # Use a stable dummy hash so the verify-against-nobody branch still
-    # spends roughly the same time as the real branch. The dummy must be
-    # a valid Argon2id PHC string or argon2-cffi raises before hashing.
-    DUMMY_HASH = (
-        "$argon2id$v=19$m=65536,t=3,p=4$"
-        "ZHVtbXlzYWx0ZHVtbXlzYWx0$"
-        "ZHVtbXloYXNoZHVtbXloYXNoZHVtbXloYXNoZHVtbXloYXNoZHVtbXloYXNoMA"
-    )
-    stored_hash = row["password_hash"] if row is not None else DUMMY_HASH
+    stored_hash = row["password_hash"] if row is not None else _DUMMY_HASH
 
     if not verify_password(body.password, stored_hash) or row is None:
         _rate_limiter.record_failure(ip_key, username_key)
