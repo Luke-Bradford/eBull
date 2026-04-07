@@ -104,7 +104,7 @@ Before pushing any page change, grep the page file:
 
 ```bash
 grep -nE '\.loading\s*\|\|' frontend/src/pages/*.tsx     # combined loading gates
-grep -nE '\.error !== null' frontend/src/pages/*.tsx     # duplicate error surfaces
+grep -nE '\.error\b' frontend/src/pages/*.tsx            # duplicate error surfaces
 ```
 
 Each match must be deliberate. Each `useAsync` state should appear in the error branch exactly once.

@@ -26,7 +26,7 @@ Instead: cache the last *confirmed* snapshot in component state and OR it with t
 
 ```tsx
 // WRONG — disappears the moment system.data goes null on refetch
-{system?.kill_switch.active && <KillSwitchBanner reason={system.kill_switch.reason} />}
+{system?.kill_switch?.active && <KillSwitchBanner reason={system.kill_switch.reason} />}
 
 // RIGHT — cached snapshot survives the loading cycle
 const [cached, setCached] = useState<KillSwitchSnapshot | null>(null);
