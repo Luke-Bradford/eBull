@@ -32,12 +32,24 @@ const LAYER_TONE: Record<string, string> = {
 export function SystemStatusPanel({
   system,
   config,
+  systemError,
+  configError,
+  onRetrySystem,
+  onRetryConfig,
 }: {
   system: SystemStatusResponse | null;
   config: ConfigResponse | null;
+  systemError: boolean;
+  configError: boolean;
+  onRetrySystem: () => void;
+  onRetryConfig: () => void;
 }) {
   return (
     <div className="space-y-4">
+      {systemError ? (
+        <PartialError label="/system/status" onRetry={onRetrySystem} />
+      ) : null}
+      {configError ? <PartialError label="/config" onRetry={onRetryConfig} /> : null}
       <div className="flex flex-wrap items-center gap-2">
         {system ? (
           <span
@@ -126,6 +138,24 @@ function LayerRow({ layer }: { layer: LayerHealthResponse }) {
         {layer.age_seconds !== null ? ` · ${Math.round(layer.age_seconds)}s old` : ""}
       </span>
     </li>
+  );
+}
+
+function PartialError({ label, onRetry }: { label: string; onRetry: () => void }) {
+  return (
+    <div
+      role="alert"
+      className="flex items-center justify-between rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700"
+    >
+      <span>{label} failed to load.</span>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="rounded border border-red-300 bg-white px-2 py-0.5 text-[10px] font-medium text-red-700 hover:bg-red-100"
+      >
+        Retry
+      </button>
+    </div>
   );
 }
 

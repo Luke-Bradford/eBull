@@ -44,9 +44,12 @@ export function DashboardPage() {
         <ErrorBanner message="The API is unreachable. Check that the backend is running and the auth token is configured." />
       ) : null}
 
-      {/* Summary cards: skeleton while loading, inline error on failure */}
+      {/* Summary cards: skeleton while loading, inline error wrapped in
+          card chrome on failure so the layout does not collapse. */}
       {portfolio.error !== null ? (
-        <SectionError onRetry={portfolio.refetch} />
+        <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+          <SectionError onRetry={portfolio.refetch} />
+        </div>
       ) : (
         <SummaryCards data={portfolio.loading ? null : portfolio.data} />
       )}
@@ -67,17 +70,17 @@ export function DashboardPage() {
         <Section title="System status">
           {system.loading || config.loading ? (
             <SectionSkeleton rows={4} />
-          ) : system.error !== null && config.error !== null ? (
-            <SectionError
-              onRetry={() => {
-                system.refetch();
-                config.refetch();
-              }}
-            />
           ) : (
+            // Partial-failure handling: render whichever side resolved and
+            // surface a per-endpoint inline error+retry for the side that
+            // failed. The panel never silently swallows a failed endpoint.
             <SystemStatusPanel
               system={system.error !== null ? null : system.data}
               config={config.error !== null ? null : config.data}
+              systemError={system.error !== null}
+              configError={config.error !== null}
+              onRetrySystem={system.refetch}
+              onRetryConfig={config.refetch}
             />
           )}
         </Section>
