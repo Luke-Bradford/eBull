@@ -138,6 +138,14 @@ Read and apply these before pushing:
 - `.claude/skills/engineering/sql-correctness.md`
 - `.claude/skills/engineering/test-quality.md`
 
+### Frontend skills (read on any ticket touching `frontend/`)
+
+- `.claude/skills/frontend/async-data-loading.md`
+- `.claude/skills/frontend/loading-error-empty-states.md`
+- `.claude/skills/frontend/safety-state-ui.md`
+- `.claude/skills/frontend/api-shape-and-types.md`
+- `.claude/skills/frontend/operator-ui-conventions.md`
+
 ## Settled decisions
 
 → Covered in the Working order above (steps 2 and 4).
