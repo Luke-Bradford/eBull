@@ -4,15 +4,31 @@
 # Dev environment
 # ---------------------------------------------------------------------------
 
-.PHONY: help up migrate dev stop logs
+.PHONY: help up migrate dev stop logs frontend-install frontend-dev frontend-build frontend-typecheck
 
 help:
 	@echo "Usage:"
-	@echo "  make dev      — start postgres (if not running), apply migrations, start server"
-	@echo "  make up       — start postgres container only"
-	@echo "  make migrate  — apply pending SQL migrations"
-	@echo "  make stop     — stop postgres container"
-	@echo "  make logs     — tail postgres container logs"
+	@echo "  make dev                — start postgres (if not running), apply migrations, start server"
+	@echo "  make up                 — start postgres container only"
+	@echo "  make migrate            — apply pending SQL migrations"
+	@echo "  make stop               — stop postgres container"
+	@echo "  make logs               — tail postgres container logs"
+	@echo "  make frontend-install   — install frontend dependencies (pnpm)"
+	@echo "  make frontend-dev       — start the Vite dev server (proxies /api -> :8000)"
+	@echo "  make frontend-build     — production build of the frontend"
+	@echo "  make frontend-typecheck — typecheck the frontend"
+
+frontend-install:
+	cd frontend && pnpm install
+
+frontend-dev:
+	cd frontend && pnpm dev
+
+frontend-build:
+	cd frontend && pnpm build
+
+frontend-typecheck:
+	cd frontend && pnpm typecheck
 
 up:
 	docker compose up -d
