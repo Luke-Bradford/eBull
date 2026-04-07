@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from threading import Lock
 from time import monotonic
 from uuid import UUID
@@ -272,7 +272,7 @@ def login(
     _set_session_cookie(
         response,
         session_id=session_id,
-        max_age_seconds=max(0, int((expires_at - datetime.now(expires_at.tzinfo)).total_seconds())),
+        max_age_seconds=max(0, int((expires_at - datetime.now(UTC)).total_seconds())),
     )
     _rate_limiter.reset_username(username_key)
     logger.info("operator login: %s", username)
