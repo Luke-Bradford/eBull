@@ -197,8 +197,10 @@ class TestDeleteOperator:
             resp = client.delete(f"/operators/{_OTHER_ID}")
         assert resp.status_code == 204
         # Cookie not cleared on the response (no Set-Cookie wiping it).
+        # The previous form was vacuously true on an empty header; this
+        # form fails if a Max-Age=0 ever appears.
         set_cookie = resp.headers.get("set-cookie", "")
-        assert settings.session_cookie_name not in set_cookie or "Max-Age=0" not in set_cookie
+        assert "Max-Age=0" not in set_cookie
 
     def test_self_delete_returns_204_and_clears_cookie(self) -> None:
         with patch(
