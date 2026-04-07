@@ -263,6 +263,14 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### Safety-state UI cleared during data refetch
+- First seen in: #89
+- Symptom: The kill-switch banner in `SystemStatusPanel` was derived directly from `system.kill_switch.active` / `config.kill_switch.active`. Because `useAsync` clears `data` to `null` at the start of every (re)fetch, an operator hitting Retry on a failed `/system/status` or `/config` fetch saw the active-kill-switch banner disappear for the duration of the retry, even though the kill switch was confirmed active moments before. Same root cause applies to any "is the system in a dangerous state" indicator that reads from a refetchable async source.
+- Prevention: Safety-state visibility (kill switch, halt flags, "trading disabled" banners, "risk limits breached" indicators) must survive the loading cycle. Cache the last *confirmed* snapshot in component state and OR it with the live value when rendering — never derive a safety banner directly from a value that goes `null` during refetch. Mark cached snapshots as stale so the operator knows the underlying source is in flight, but **never** clear the banner just because the source is loading or errored. Fail-safe rule: if a kill-switch / halt indicator was ever observed `active=true` and a fresh `active=false` has not yet replaced it, keep showing it.
+- Enforced in: `frontend/src/components/dashboard/SystemStatusPanel.tsx`
+
+---
+
 ### Naive datetime in TIMESTAMPTZ query params
 - First seen in: #80
 - Symptom: A `datetime | None` query parameter without timezone info is sent to PostgreSQL as naive; comparing against a `TIMESTAMPTZ` column may cause mixed-offset rejection or silent misinterpretation.

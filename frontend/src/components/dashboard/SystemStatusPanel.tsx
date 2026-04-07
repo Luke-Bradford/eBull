@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type {
   ConfigResponse,
   LayerHealthResponse,
@@ -5,6 +6,13 @@ import type {
   SystemStatusResponse,
 } from "@/api/types";
 import { formatDateTime } from "@/lib/format";
+
+interface KillSwitchSnapshot {
+  active: boolean;
+  reason: string | null;
+  /** True iff the snapshot was taken from a fresh successful response. */
+  fresh: boolean;
+}
 
 const OVERALL_TONE: Record<OverallStatus, string> = {
   ok: "bg-emerald-100 text-emerald-700",
@@ -54,6 +62,37 @@ export function SystemStatusPanel({
   onRetrySystem: () => void;
   onRetryConfig: () => void;
 }) {
+  // Safety-state visibility: the kill switch banner must not disappear
+  // while one of its source endpoints is in flight or has errored. We
+  // remember the last *confirmed* kill-switch snapshot from either source
+  // and keep showing it (with a "stale" marker) until a fresh successful
+  // response says otherwise. Surfacing the banner is fail-safe — if both
+  // sources have ever reported `active=true`, the operator must keep
+  // seeing it until a fresh `active=false` clears it.
+  const [cachedKillSwitch, setCachedKillSwitch] = useState<KillSwitchSnapshot | null>(null);
+  useEffect(() => {
+    // Prefer system as the canonical source; fall back to config.
+    const fresh =
+      (system?.kill_switch ?? null) ?? (config?.kill_switch ?? null);
+    if (fresh !== null) {
+      setCachedKillSwitch({
+        active: fresh.active,
+        reason: fresh.reason,
+        fresh: true,
+      });
+    }
+  }, [system, config]);
+
+  // Live or cached, whichever exists. The cached copy is marked stale
+  // because the underlying endpoint may have errored or be retrying.
+  const liveKillSwitch =
+    system?.kill_switch ?? config?.kill_switch ?? null;
+  const displayedKillSwitch: KillSwitchSnapshot | null = liveKillSwitch
+    ? { active: liveKillSwitch.active, reason: liveKillSwitch.reason, fresh: true }
+    : cachedKillSwitch !== null
+      ? { ...cachedKillSwitch, fresh: false }
+      : null;
+
   return (
     <div className="space-y-4">
       {systemError ? (
@@ -87,16 +126,19 @@ export function SystemStatusPanel({
         ) : null}
       </div>
 
-      {(system?.kill_switch.active || config?.kill_switch.active) && (
+      {displayedKillSwitch?.active && (
         <div
           role="alert"
           className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700"
         >
           <strong>Kill switch active.</strong>{" "}
-          {system?.kill_switch.reason ?? config?.kill_switch.reason ?? "No reason recorded."}{" "}
+          {displayedKillSwitch.reason ?? "No reason recorded."}{" "}
           <span className="text-xs text-red-600">
             Toggle from the admin page when ready to resume.
           </span>
+          {!displayedKillSwitch.fresh && (
+            <span className="ml-1 text-[10px] uppercase text-red-500">(stale — refreshing)</span>
+          )}
         </div>
       )}
 
