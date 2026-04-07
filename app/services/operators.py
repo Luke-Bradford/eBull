@@ -169,7 +169,6 @@ def delete_operator(
     *,
     actor_operator_id: UUID,
     actor_username: str,
-    actor_session_id: str,
     target_operator_id: UUID,
     request_ip: str | None,
     user_agent: str | None,
@@ -225,16 +224,15 @@ def delete_operator(
             else:
                 target_username = target_row["username"]
 
+                last_operator_block = False
                 if is_self:
                     cur.execute("SELECT COUNT(*) AS n FROM operators")
                     count_row = cur.fetchone()
                     if count_row is None:
                         raise RuntimeError("COUNT(*) returned no row")
-                    operator_count = int(count_row["n"])
-                else:
-                    operator_count = 2  # not used; satisfies the branch below
+                    last_operator_block = int(count_row["n"]) <= 1
 
-                if is_self and operator_count <= 1:
+                if last_operator_block:
                     outcome = DeleteOutcome.LAST_OPERATOR
                 else:
                     # Delete the operator row. The FK cascade on
@@ -264,19 +262,14 @@ def delete_operator(
                             user_agent,
                         ),
                     )
-                    # Belt-and-braces: explicitly delete the caller's
-                    # session row inside the same transaction even
-                    # though the FK cascade would have caught it. This
-                    # makes the invariant ("after self-delete commit,
-                    # this session id is gone") explicit at the call
-                    # site rather than implicit in schema config, and
-                    # protects against a future migration changing the
-                    # FK to RESTRICT.
-                    if is_self:
-                        cur.execute(
-                            "DELETE FROM sessions WHERE session_id = %s",
-                            (actor_session_id,),
-                        )
+                    # No explicit session delete here. The FK cascade
+                    # on ``sessions.operator_id`` (sql/016) has already
+                    # removed every session row belonging to the
+                    # deleted operator -- including the caller's
+                    # current session on a self-delete. A second
+                    # explicit DELETE would target a row that no
+                    # longer exists and silently match zero rows;
+                    # reviewer correctly flagged that as misleading.
                     outcome = DeleteOutcome.OK_SELF if is_self else DeleteOutcome.OK_OTHER
 
     if outcome is None:

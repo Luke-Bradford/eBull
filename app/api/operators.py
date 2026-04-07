@@ -164,7 +164,6 @@ def delete(
         conn,
         actor_operator_id=session.operator_id,
         actor_username=session.username,
-        actor_session_id=session.session_id,
         target_operator_id=operator_id,
         request_ip=request_ip,
         user_agent=user_agent,
