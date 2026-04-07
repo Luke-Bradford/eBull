@@ -229,18 +229,15 @@ class TestPostKillSwitch:
 
     def test_activate_calls_service(self) -> None:
         _override_conn(_mock_conn())
-        with (
-            patch("app.api.config.activate_kill_switch") as mock_activate,
-            patch(
-                "app.api.config.get_kill_switch_status",
-                return_value={
-                    "is_active": True,
-                    "activated_at": _NOW,
-                    "activated_by": "op",
-                    "reason": "halt",
-                },
-            ),
-        ):
+        with patch(
+            "app.api.config.activate_kill_switch",
+            return_value={
+                "is_active": True,
+                "activated_at": _NOW,
+                "activated_by": "op",
+                "reason": "halt",
+            },
+        ) as mock_activate:
             resp = client.post(
                 "/config/kill-switch",
                 json={"active": True, "reason": "halt", "activated_by": "op"},
@@ -254,18 +251,15 @@ class TestPostKillSwitch:
 
     def test_deactivate_calls_service(self) -> None:
         _override_conn(_mock_conn())
-        with (
-            patch("app.api.config.deactivate_kill_switch") as mock_deactivate,
-            patch(
-                "app.api.config.get_kill_switch_status",
-                return_value={
-                    "is_active": False,
-                    "activated_at": None,
-                    "activated_by": None,
-                    "reason": None,
-                },
-            ),
-        ):
+        with patch(
+            "app.api.config.deactivate_kill_switch",
+            return_value={
+                "is_active": False,
+                "activated_at": None,
+                "activated_by": None,
+                "reason": None,
+            },
+        ) as mock_deactivate:
             resp = client.post(
                 "/config/kill-switch",
                 json={"active": False, "reason": "resolved", "activated_by": "op"},

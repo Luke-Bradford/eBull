@@ -425,7 +425,7 @@ def activate_kill_switch(
     activated_by: str,
     *,
     now: datetime | None = None,
-) -> None:
+) -> dict[str, Any]:
     """Activate the system-wide kill switch.
 
     Reads the prior state, writes the kill_switch UPDATE, and writes a
@@ -467,6 +467,14 @@ def activate_kill_switch(
             now=now,
         )
     logger.warning("Kill switch ACTIVATED by=%s reason=%s", activated_by, reason)
+    # Return the values just committed inside the transaction so the caller
+    # cannot race a concurrent toggle by re-reading after commit.
+    return {
+        "is_active": True,
+        "activated_at": now,
+        "activated_by": activated_by,
+        "reason": reason,
+    }
 
 
 def deactivate_kill_switch(
@@ -475,7 +483,7 @@ def deactivate_kill_switch(
     deactivated_by: str = "",
     reason: str = "",
     now: datetime | None = None,
-) -> None:
+) -> dict[str, Any]:
     """Deactivate the system-wide kill switch.
 
     Reads the prior state, writes the kill_switch UPDATE, and writes a
@@ -513,6 +521,12 @@ def deactivate_kill_switch(
             now=now,
         )
     logger.info("Kill switch DEACTIVATED")
+    return {
+        "is_active": False,
+        "activated_at": None,
+        "activated_by": None,
+        "reason": None,
+    }
 
 
 def get_kill_switch_status(

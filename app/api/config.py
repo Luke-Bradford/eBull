@@ -227,13 +227,13 @@ def post_kill_switch(
     """
     try:
         if body.active:
-            activate_kill_switch(
+            ks = activate_kill_switch(
                 conn,
                 reason=body.reason,
                 activated_by=body.activated_by,
             )
         else:
-            deactivate_kill_switch(
+            ks = deactivate_kill_switch(
                 conn,
                 deactivated_by=body.activated_by,
                 reason=body.reason,
@@ -243,6 +243,13 @@ def post_kill_switch(
         # is an environmental fault, not a programmer error.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    # Read post-write state so the response reflects the authoritative DB row
-    # (activated_at, activated_by, reason) rather than echoing the request body.
-    return _build_kill_switch_response(conn)
+    # Build the response from the values the service committed inside its own
+    # transaction — never re-read after commit, since a concurrent toggle
+    # could land between commit and re-read and make the response reflect a
+    # state the caller did not produce.
+    return KillSwitchResponse(
+        active=bool(ks["is_active"]),
+        activated_at=ks.get("activated_at"),
+        activated_by=ks.get("activated_by"),
+        reason=ks.get("reason"),
+    )
