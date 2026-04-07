@@ -163,8 +163,16 @@ def _derive_overall_status(
     - any layer "error"    → "down"  (infra fault)
     - any job "failure"    → "down"
     - any layer "stale"/"empty" → "degraded"
-    - any job "running" or unknown → "degraded"
+    - any job currently "running" → "degraded"
     - otherwise → "ok"
+
+    Jobs with ``last_status is None`` (no runs ever recorded) are deliberately
+    NOT treated as degraded on their own — a fresh deploy would otherwise
+    always report "degraded" purely because no jobs have fired yet, and the
+    per-job ``detail`` already surfaces "no runs recorded" so the operator
+    can see exactly what is missing. A fresh deploy will still report
+    "degraded" via the empty data layers, which is the more meaningful
+    signal anyway.
     """
     if kill_switch_active:
         return "down"
@@ -174,7 +182,7 @@ def _derive_overall_status(
         return "down"
     if any(layer.status in ("stale", "empty") for layer in layers):
         return "degraded"
-    if any(job.last_status != "success" for job in jobs):
+    if any(job.last_status == "running" for job in jobs):
         return "degraded"
     return "ok"
 
@@ -229,8 +237,11 @@ def get_system_status(
         jobs = [check_job_health(conn, job.name) for job in SCHEDULED_JOBS]
         ks = get_kill_switch_status(conn)
     except Exception as exc:
+        # Log the full exception server-side; the HTTP detail is a fixed
+        # string so we never leak internal schema, table names, or driver
+        # error text to a bearer-token holder.
         logger.exception("get_system_status: failed to build report")
-        raise HTTPException(status_code=503, detail=f"system status unavailable: {exc}") from exc
+        raise HTTPException(status_code=503, detail="system status unavailable") from exc
 
     overall = _derive_overall_status(layers, jobs, bool(ks["is_active"]))
 
@@ -262,7 +273,9 @@ def get_jobs(
     try:
         overviews = _build_jobs_overview(conn, SCHEDULED_JOBS, now)
     except Exception as exc:
+        # Log full detail server-side; HTTP detail is a fixed string to
+        # avoid leaking internals to bearer-token holders.
         logger.exception("get_jobs: failed to build overview")
-        raise HTTPException(status_code=503, detail=f"job overview unavailable: {exc}") from exc
+        raise HTTPException(status_code=503, detail="job overview unavailable") from exc
 
     return JobsListResponse(checked_at=now, jobs=overviews)

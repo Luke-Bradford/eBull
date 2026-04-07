@@ -264,15 +264,85 @@ class TestSystemStatus:
         assert body["kill_switch"]["active"] is True
         assert body["kill_switch"]["reason"] == "halted"
 
-    def test_service_exception_returns_503(self) -> None:
+    def test_service_exception_returns_503_without_leaking_internals(self) -> None:
+        # Detail must be a fixed string — no part of the underlying exception
+        # message (which could carry DB schema, table names, or driver text)
+        # may appear in the HTTP response. Full detail goes to logger.exception.
         _override_conn(_mock_conn())
+        secret_marker = "secret-table-name-do-not-leak"
         with patch(
             "app.api.system.check_all_layers",
-            side_effect=RuntimeError("DB unreachable"),
+            side_effect=RuntimeError(secret_marker),
         ):
             resp = client.get("/system/status")
         assert resp.status_code == 503
-        assert "system status unavailable" in resp.json()["detail"]
+        assert resp.json()["detail"] == "system status unavailable"
+        assert secret_marker not in resp.text
+
+    def test_fresh_deploy_no_job_runs_does_not_degrade_on_jobs_alone(self) -> None:
+        # A freshly deployed system has no job_runs rows. The previous rule
+        # treated `last_status is None` as degraded, which made every fresh
+        # deploy report "degraded" purely on job state. The new rule excludes
+        # None from the job degraded signal — empty data layers are the
+        # meaningful fresh-deploy signal instead.
+        _override_conn(_mock_conn())
+
+        empty_jh = JobHealth(job_name="x", detail="x: no runs recorded")
+
+        with (
+            patch("app.api.system.check_all_layers", return_value=_all_ok_layers()),
+            patch("app.api.system.check_job_health", return_value=empty_jh),
+            patch(
+                "app.api.system.get_kill_switch_status",
+                return_value={
+                    "is_active": False,
+                    "activated_at": None,
+                    "activated_by": None,
+                    "reason": None,
+                },
+            ),
+        ):
+            resp = client.get("/system/status")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        # All layers ok + every job has no recorded runs => overall ok.
+        assert body["overall_status"] == "ok"
+        for job in body["jobs"]:
+            assert job["last_status"] is None
+            assert "no runs recorded" in job["detail"]
+
+    def test_running_job_degrades_overall(self) -> None:
+        # The "running" status remains a degraded signal even when everything
+        # else is clean — it tells the operator a long-lived job is in flight
+        # so health is not yet confirmed.
+        _override_conn(_mock_conn())
+
+        running = JobHealth(
+            job_name="x",
+            last_status="running",
+            last_started_at=_NOW - timedelta(minutes=5),
+            last_finished_at=None,
+            detail="x: run still in progress",
+        )
+
+        with (
+            patch("app.api.system.check_all_layers", return_value=_all_ok_layers()),
+            patch("app.api.system.check_job_health", return_value=running),
+            patch(
+                "app.api.system.get_kill_switch_status",
+                return_value={
+                    "is_active": False,
+                    "activated_at": None,
+                    "activated_by": None,
+                    "reason": None,
+                },
+            ),
+        ):
+            resp = client.get("/system/status")
+
+        assert resp.status_code == 200
+        assert resp.json()["overall_status"] == "degraded"
 
 
 # ---------------------------------------------------------------------------
@@ -325,28 +395,40 @@ class TestSystemJobs:
             assert "no runs recorded" in job["detail"]
 
     def test_next_run_time_strictly_after_checked_at(self) -> None:
+        # Pin _utcnow so the handler's `checked_at` and the cadence
+        # computation use the exact same instant. This avoids a flake at
+        # cadence boundaries (e.g. an hourly job firing exactly at the
+        # second the test reads the clock) which could otherwise produce
+        # next_run_time == checked_at.
         _override_conn(_mock_conn())
-        with patch(
-            "app.api.system.check_job_health",
-            side_effect=lambda _conn, name: _success_job_health(name),
+        with (
+            patch("app.api.system._utcnow", return_value=_NOW),
+            patch(
+                "app.api.system.check_job_health",
+                side_effect=lambda _conn, name: _success_job_health(name),
+            ),
         ):
             resp = client.get("/system/jobs")
 
         assert resp.status_code == 200
         body = resp.json()
         checked_at = datetime.fromisoformat(body["checked_at"])
+        assert checked_at == _NOW
         for job in body["jobs"]:
             next_run = datetime.fromisoformat(job["next_run_time"])
             assert next_run > checked_at, f"{job['name']} next_run not in future"
 
-    def test_service_exception_returns_503(self) -> None:
+    def test_service_exception_returns_503_without_leaking_internals(self) -> None:
         _override_conn(_mock_conn())
+        secret_marker = "secret-table-name-do-not-leak"
         with patch(
             "app.api.system.check_job_health",
-            side_effect=RuntimeError("DB unreachable"),
+            side_effect=RuntimeError(secret_marker),
         ):
             resp = client.get("/system/jobs")
         assert resp.status_code == 503
+        assert resp.json()["detail"] == "job overview unavailable"
+        assert secret_marker not in resp.text
 
 
 # ---------------------------------------------------------------------------
