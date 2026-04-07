@@ -30,13 +30,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.api._helpers import parse_optional_int
-from app.api.auth import require_auth
+from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 
 router = APIRouter(
     prefix="/audit",
     tags=["audit"],
-    dependencies=[Depends(require_auth)],
+    dependencies=[Depends(require_session_or_service_token)],
 )
 
 MAX_PAGE_LIMIT = 200

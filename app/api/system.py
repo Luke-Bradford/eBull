@@ -16,7 +16,7 @@ Distinct from ``/health`` (liveness) and from the deprecated ``/health/data``
 ``/system/status``; the scheduled-job table on the same page polls
 ``/system/jobs``.
 
-Auth: both endpoints require operator auth via ``require_auth`` (issue #58),
+Auth: both endpoints require operator auth via ``require_session_or_service_token`` (issue #98),
 mounted on the router so individual handlers cannot accidentally be exposed
 without it. The status payload reveals data-pipeline gaps that an attacker
 could use to time abuse, so it must not be public.
@@ -43,7 +43,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.api.auth import require_auth
+from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.services.ops_monitor import (
     JobHealth,
@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/system",
     tags=["system"],
-    dependencies=[Depends(require_auth)],
+    dependencies=[Depends(require_session_or_service_token)],
 )
 
 
