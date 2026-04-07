@@ -253,21 +253,17 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
-### Shared async state must drive at most one render surface (errors and loading)
+### Frontend async render-surface isolation
 - First seen in: #89
-- Symptom: Two distinct presentation bugs with the same root cause across rounds 2 and 3 of PR #89:
-  1. A single `/portfolio` failure rendered two `SectionError` widgets (summary cards + positions section) because two presentational sections both consumed the same `useAsync` state and each rendered their own error path. One failure → two banners, two retry buttons, no way to tell them apart.
-  2. The System Status section gated rendering on `system.loading || config.loading`, so a slow or retrying endpoint hid the already-resolved sibling behind a skeleton. After a successful fetch, hitting Retry on a failed sibling re-entered `loading=true` and the resolved side disappeared until the retry resolved.
-- Prevention: Each async state on a frontend page must drive **at most one error surface and at most one loading surface**. When two sections share the same fetch, collapse them under a single guard. When two sections consume *independent* fetches, never combine their `loading` / `error` flags with `||` — each side renders its own `{loading, errored, resolved}` branch independently so a slow or retrying sibling cannot hide resolved data. Before pushing any new page, grep the page file for `\.error !== null` and `\.loading || .*\.loading` and confirm each async state appears in each branch exactly once, never combined with another state's flag. The same rule applies to retry buttons: one async state, one retry control.
-- Enforced in: `frontend/src/pages/DashboardPage.tsx`, `frontend/src/components/dashboard/SystemStatusPanel.tsx`
+- Prevention: See `.claude/skills/frontend/async-data-loading.md`
+- Enforced in: `.claude/skills/frontend/async-data-loading.md`
 
 ---
 
-### Safety-state UI cleared during data refetch
+### Frontend safety-state persistence during refetch
 - First seen in: #89
-- Symptom: The kill-switch banner in `SystemStatusPanel` was derived directly from `system.kill_switch.active` / `config.kill_switch.active`. Because `useAsync` clears `data` to `null` at the start of every (re)fetch, an operator hitting Retry on a failed `/system/status` or `/config` fetch saw the active-kill-switch banner disappear for the duration of the retry, even though the kill switch was confirmed active moments before. Same root cause applies to any "is the system in a dangerous state" indicator that reads from a refetchable async source.
-- Prevention: Safety-state visibility (kill switch, halt flags, "trading disabled" banners, "risk limits breached" indicators) must survive the loading cycle. Cache the last *confirmed* snapshot in component state and OR it with the live value when rendering — never derive a safety banner directly from a value that goes `null` during refetch. Mark cached snapshots as stale so the operator knows the underlying source is in flight, but **never** clear the banner just because the source is loading or errored. Fail-safe rule: if a kill-switch / halt indicator was ever observed `active=true` and a fresh `active=false` has not yet replaced it, keep showing it.
-- Enforced in: `frontend/src/components/dashboard/SystemStatusPanel.tsx`
+- Prevention: See `.claude/skills/frontend/safety-state-ui.md`
+- Enforced in: `.claude/skills/frontend/safety-state-ui.md`
 
 ---
 

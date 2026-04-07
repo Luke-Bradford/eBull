@@ -130,6 +130,25 @@ If no entries are relevant, say so explicitly.
 Do not skip this step because the issue seems unrelated.
 The prevention log captures recurring mistakes — the bugs that look "obviously fine" until they are not.
 
+### K. Frontend diff branch
+
+If the diff touches `frontend/`, also read and apply these before pushing:
+
+- `.claude/skills/frontend/async-data-loading.md` — `useAsync` composition, no combined loading gates, one source → one error surface
+- `.claude/skills/frontend/loading-error-empty-states.md` — all three states required, layout symmetry, no exception text in DOM
+- `.claude/skills/frontend/safety-state-ui.md` — kill-switch / halt / risk banners must survive refetch via cached snapshots
+- `.claude/skills/frontend/api-shape-and-types.md` — `types.ts` mirrors Pydantic `response_model` in the same PR; `apiFetch` path contract; auth stays in the client
+- `.claude/skills/frontend/operator-ui-conventions.md` — formatters, color semantics, density, status pill vocabulary
+
+For frontend pages, also grep:
+
+```bash
+grep -nE '\.loading\s*\|\|' frontend/src/pages/*.tsx     # combined loading gates
+grep -nE '\.error !== null' frontend/src/pages/*.tsx     # duplicate error surfaces
+```
+
+Each match must be deliberate.
+
 ## Required same-class scan
 
 After finding one query/rule/test hazard in a file, grep the entire file for the same hazard and confirm each occurrence is either correct or fixed before pushing.
@@ -155,5 +174,6 @@ Before pushing, be able to state:
 - any remaining gaps logged as tech debt
 - settled decisions checked and preserved, or explicit deviation raised before coding
 - prevention log checked; relevant entries identified or confirmed none apply
+- if `frontend/` touched: frontend skills (K) read and applied
 
 If you cannot honestly say that, do not push yet.
