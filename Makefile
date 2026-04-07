@@ -4,10 +4,12 @@
 # Dev environment
 # ---------------------------------------------------------------------------
 
-.PHONY: help up migrate dev stop logs frontend-install frontend-dev frontend-build frontend-typecheck
+.PHONY: help up migrate dev stop logs stack stack-stop frontend-install frontend-dev frontend-build frontend-typecheck
 
 help:
 	@echo "Usage:"
+	@echo "  make stack              — start the full stack (postgres + backend + frontend) in new windows"
+	@echo "  make stack-stop         — stop the full stack"
 	@echo "  make dev                — start postgres (if not running), apply migrations, start server"
 	@echo "  make up                 — start postgres container only"
 	@echo "  make migrate            — apply pending SQL migrations"
@@ -17,6 +19,12 @@ help:
 	@echo "  make frontend-dev       — start the Vite dev server (proxies /api -> :8000)"
 	@echo "  make frontend-build     — production build of the frontend"
 	@echo "  make frontend-typecheck — typecheck the frontend"
+
+stack:
+	pwsh -File ./stack.ps1
+
+stack-stop:
+	pwsh -File ./stack-stop.ps1
 
 frontend-install:
 	cd frontend && pnpm install
