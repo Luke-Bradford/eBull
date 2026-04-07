@@ -253,6 +253,14 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### Duplicate error widgets for a shared async fetch
+- First seen in: #89
+- Symptom: A single `/portfolio` failure rendered two `SectionError` widgets — one inside the summary cards slot and one inside the positions section — because two presentational sections both consumed the same `useAsync` state and each rendered their own error path. The user saw two error banners and two retry buttons for one underlying failure, with no way to tell them apart.
+- Prevention: Each async state on a frontend page should drive **at most one error surface**. When two sections share the same fetch, either (a) collapse them under a single error guard (preferred), or (b) make one of the sections render nothing on the failure path and let the other own the error UI. Before pushing any new page, grep the page file for `\.error !== null` and confirm each async state appears in the error branch exactly once. The same rule applies to retry buttons: one async state, one retry control.
+- Enforced in: `frontend/src/pages/DashboardPage.tsx`
+
+---
+
 ### Naive datetime in TIMESTAMPTZ query params
 - First seen in: #80
 - Symptom: A `datetime | None` query parameter without timezone info is sent to PostgreSQL as naive; comparing against a `TIMESTAMPTZ` column may cause mixed-offset rejection or silent misinterpretation.
