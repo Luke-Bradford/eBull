@@ -10,12 +10,15 @@ import { AdminPage } from "@/pages/AdminPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 import { LoginPage } from "@/pages/LoginPage";
+import { SetupPage } from "@/pages/SetupPage";
+import { OperatorsPage } from "@/pages/OperatorsPage";
 
 export function App() {
   return (
     <ErrorBoundary>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/setup" element={<SetupPage />} />
         <Route
           element={
             <RequireAuth>
@@ -28,6 +31,7 @@ export function App() {
           <Route path="instruments/:instrumentId" element={<InstrumentDetailPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />
           <Route path="admin" element={<AdminPage />} />
+          <Route path="operators" element={<OperatorsPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>

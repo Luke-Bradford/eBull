@@ -31,3 +31,34 @@ export function logout(): Promise<void> {
 export function getMe(): Promise<Operator> {
   return apiFetch<Operator>("/auth/me");
 }
+
+// ---------------------------------------------------------------------------
+// First-run setup (issue #106 / Ticket G)
+// ---------------------------------------------------------------------------
+
+export interface SetupStatusResponse {
+  needs_setup: boolean;
+}
+
+export interface SetupResponse {
+  operator: Operator;
+}
+
+export function getSetupStatus(): Promise<SetupStatusResponse> {
+  return apiFetch<SetupStatusResponse>("/auth/setup-status");
+}
+
+export function postSetup(
+  username: string,
+  password: string,
+  setupToken: string | null,
+): Promise<SetupResponse> {
+  return apiFetch<SetupResponse>("/auth/setup", {
+    method: "POST",
+    body: JSON.stringify({
+      username,
+      password,
+      ...(setupToken ? { setup_token: setupToken } : {}),
+    }),
+  });
+}

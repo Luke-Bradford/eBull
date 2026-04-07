@@ -20,13 +20,17 @@ import { setUnauthorizedHandler } from "@/api/client";
 import * as authApi from "@/api/auth";
 import type { Operator } from "@/api/auth";
 
-type Status = "loading" | "authenticated" | "unauthenticated";
+type Status = "loading" | "authenticated" | "unauthenticated" | "needs_setup";
 
 interface SessionContextValue {
   status: Status;
   operator: Operator | null;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  // Called by SetupPage on a successful POST /auth/setup. Mirrors the
+  // login flow -- the cookie is already set by the response, this just
+  // updates in-memory state so RequireAuth lets us through.
+  markAuthenticated: (op: Operator) => void;
 }
 
 const SessionContext = createContext<SessionContextValue | null>(null);
@@ -66,32 +70,43 @@ export function SessionProvider({ children }: { children: ReactNode }): JSX.Elem
     return () => setUnauthorizedHandler(null);
   }, [handleUnauthorized]);
 
-  // Bootstrap: probe /auth/me on first mount. A 401 here is the normal
-  // path for a fresh visitor with no cookie -- we drop into the
-  // unauthenticated state and rely on RequireAuth to redirect.
+  // Bootstrap (issue #106 / Ticket G):
+  //   1. Probe /auth/setup-status. If needs_setup, jump straight to the
+  //      setup page -- /auth/me would 401 anyway and would also fire the
+  //      401 interceptor, sending the user to /login instead of /setup.
+  //   2. Otherwise probe /auth/me. 401 = unauthenticated (normal path
+  //      for a fresh visitor with no cookie).
   useEffect(() => {
     let cancelled = false;
-    authApi
-      .getMe()
-      .then((op) => {
+    void (async () => {
+      try {
+        const { needs_setup } = await authApi.getSetupStatus();
+        if (cancelled) return;
+        if (needs_setup) {
+          setOperator(null);
+          setStatus("needs_setup");
+          return;
+        }
+      } catch {
+        // setup-status is public; failure here means the backend is
+        // unreachable. Fall through to the getMe path which will surface
+        // the same problem via the unauthenticated state.
+      }
+      try {
+        const op = await authApi.getMe();
         if (cancelled) return;
         setOperator(op);
         setStatus("authenticated");
-      })
-      .catch((err: unknown) => {
+      } catch {
         if (cancelled) return;
-        // Always drive state to unauthenticated regardless of error class.
-        // The 401 interceptor MAY have fired first and already done this
-        // (in which case the second call is a no-op), but we cannot rely
-        // on it having registered before the bootstrap getMe() resolved
-        // -- React StrictMode double-mounts and effect ordering across
-        // remounts make that race observable. Setting state
-        // unconditionally here closes the race so a fresh visitor never
-        // gets stuck in `status === "loading"`.
-        void err;
+        // Always drive state to unauthenticated regardless of error
+        // class. The 401 interceptor MAY have fired first; setting state
+        // unconditionally here closes the StrictMode/race window so a
+        // fresh visitor never gets stuck in "loading".
         setOperator(null);
         setStatus("unauthenticated");
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -116,9 +131,14 @@ export function SessionProvider({ children }: { children: ReactNode }): JSX.Elem
     }
   }, [navigate]);
 
+  const markAuthenticated = useCallback((op: Operator) => {
+    setOperator(op);
+    setStatus("authenticated");
+  }, []);
+
   const value = useMemo<SessionContextValue>(
-    () => ({ status, operator, login: doLogin, logout: doLogout }),
-    [status, operator, doLogin, doLogout],
+    () => ({ status, operator, login: doLogin, logout: doLogout, markAuthenticated }),
+    [status, operator, doLogin, doLogout, markAuthenticated],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
