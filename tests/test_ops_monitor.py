@@ -163,6 +163,33 @@ class TestCheckAllLayers:
         assert "universe" in layers
         assert "scores" in layers
 
+    def test_single_layer_failure_does_not_abort_others(self) -> None:
+        # First cursor (universe) raises mid-execute; the other 7 succeed.
+        # The aggregate must still return 8 LayerHealth entries with the
+        # broken one marked status="error". Prevention-log #70: never let
+        # one infra fault degrade the whole operator-visibility surface.
+        broken = MagicMock()
+        broken.__enter__ = MagicMock(return_value=broken)
+        broken.__exit__ = MagicMock(return_value=False)
+        broken.execute.side_effect = RuntimeError("relation 'instruments' does not exist")
+
+        cursors: list[MagicMock] = [broken]
+        cursors.extend(_make_cursor([{"latest": _NOW - timedelta(hours=1)}]) for _ in range(7))
+        conn = _make_conn(cursors)
+
+        results = check_all_layers(conn, now=_NOW)
+
+        assert len(results) == 8
+        status_map = {r.layer: r.status for r in results}
+        assert status_map["universe"] == "error"
+        # Detail must surface the underlying exception so operators can act.
+        universe = next(r for r in results if r.layer == "universe")
+        assert "relation 'instruments' does not exist" in universe.detail
+        # Every other layer rendered normally.
+        for layer, status in status_map.items():
+            if layer != "universe":
+                assert status == "ok", f"layer {layer} should be ok, got {status}"
+
     def test_mixed_status_layers(self) -> None:
         # universe: fresh, prices: stale, rest: empty
         fresh = _NOW - timedelta(hours=1)

@@ -3,6 +3,19 @@ Scheduled job stubs.
 
 Each function represents one scheduled job. Wire these into APScheduler
 (or equivalent) in a later ticket when the scheduler infrastructure is set up.
+
+This module also owns the **declared schedule registry** (``SCHEDULED_JOBS``).
+Until APScheduler is wired (#13), the registry is the single source of truth
+for:
+
+* job names — referenced from each ``_tracked_job(...)`` call site so the
+  ``job_runs.job_name`` value cannot drift from what the system reports.
+* declared cadences — informational only; ``compute_next_run`` derives the
+  next run time from these declarations rather than from a live scheduler.
+
+When APScheduler lands, ``compute_next_run`` should be replaced with live
+schedule introspection; the registry stays as the source of truth for which
+jobs exist.
 """
 
 from __future__ import annotations
@@ -10,7 +23,9 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Generator
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from typing import Literal
 
 import anthropic
 import psycopg
@@ -36,6 +51,190 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Declared schedule registry
+# ---------------------------------------------------------------------------
+#
+# Cadence semantics (UTC throughout):
+#
+#   hourly  — runs every hour at ``minute`` past the hour. ``next_run_time``
+#             is the next future occurrence of that minute, regardless of
+#             whether the previous run actually fired.
+#   daily   — runs once per day at ``hour:minute`` UTC. ``next_run_time`` is
+#             today's occurrence if it is still in the future, otherwise
+#             tomorrow's.
+#   weekly  — runs once per week on ``weekday`` (0=Monday … 6=Sunday) at
+#             ``hour:minute`` UTC.
+#
+# These cadences are *declared*, not introspected from a live scheduler. They
+# describe the intended schedule and feed the operator visibility endpoints
+# (#57). When APScheduler is wired (#13), ``compute_next_run`` should be
+# replaced with the live scheduler's next-fire-time so reality and intent are
+# reconciled at one source of truth.
+
+CadenceKind = Literal["hourly", "daily", "weekly"]
+
+
+@dataclass(frozen=True)
+class Cadence:
+    """Small typed cadence model.
+
+    Only the fields relevant to the cadence ``kind`` are consulted; the rest
+    default to zero. Constructed via the helper classmethods so call sites do
+    not have to remember which fields apply where.
+    """
+
+    kind: CadenceKind
+    minute: int = 0
+    hour: int = 0
+    weekday: int = 0  # 0=Mon (matches datetime.weekday())
+
+    @classmethod
+    def hourly(cls, *, minute: int = 0) -> Cadence:
+        if not 0 <= minute <= 59:
+            raise ValueError(f"hourly minute must be 0..59, got {minute}")
+        return cls(kind="hourly", minute=minute)
+
+    @classmethod
+    def daily(cls, *, hour: int, minute: int = 0) -> Cadence:
+        if not 0 <= hour <= 23:
+            raise ValueError(f"daily hour must be 0..23, got {hour}")
+        if not 0 <= minute <= 59:
+            raise ValueError(f"daily minute must be 0..59, got {minute}")
+        return cls(kind="daily", hour=hour, minute=minute)
+
+    @classmethod
+    def weekly(cls, *, weekday: int, hour: int, minute: int = 0) -> Cadence:
+        if not 0 <= weekday <= 6:
+            raise ValueError(f"weekly weekday must be 0..6, got {weekday}")
+        if not 0 <= hour <= 23:
+            raise ValueError(f"weekly hour must be 0..23, got {hour}")
+        if not 0 <= minute <= 59:
+            raise ValueError(f"weekly minute must be 0..59, got {minute}")
+        return cls(kind="weekly", weekday=weekday, hour=hour, minute=minute)
+
+    @property
+    def label(self) -> str:
+        """Human-readable label for API responses."""
+        if self.kind == "hourly":
+            return f"hourly at :{self.minute:02d} UTC"
+        if self.kind == "daily":
+            return f"daily at {self.hour:02d}:{self.minute:02d} UTC"
+        weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        return f"weekly on {weekday_names[self.weekday]} at {self.hour:02d}:{self.minute:02d} UTC"
+
+
+@dataclass(frozen=True)
+class ScheduledJob:
+    """A registered scheduled job."""
+
+    name: str
+    description: str
+    cadence: Cadence
+
+
+# Job-name constants. Every ``_tracked_job(...)`` call site below references
+# one of these so the literal cannot drift from the registry / job_runs row.
+JOB_NIGHTLY_UNIVERSE_SYNC = "nightly_universe_sync"
+JOB_HOURLY_MARKET_REFRESH = "hourly_market_refresh"
+JOB_DAILY_CIK_REFRESH = "daily_cik_refresh"
+JOB_DAILY_RESEARCH_REFRESH = "daily_research_refresh"
+JOB_DAILY_NEWS_REFRESH = "daily_news_refresh"
+JOB_DAILY_THESIS_REFRESH = "daily_thesis_refresh"
+JOB_MORNING_CANDIDATE_REVIEW = "morning_candidate_review"
+JOB_WEEKLY_COVERAGE_REVIEW = "weekly_coverage_review"
+JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
+
+
+# Declared schedule. Hours/minutes are deliberate-but-arbitrary placeholders
+# until APScheduler is wired — the values are stable enough for operator UI
+# planning but should not be treated as the live truth. See module docstring.
+SCHEDULED_JOBS: list[ScheduledJob] = [
+    ScheduledJob(
+        name=JOB_NIGHTLY_UNIVERSE_SYNC,
+        description="Sync the eToro tradable instrument universe to the local DB.",
+        cadence=Cadence.daily(hour=2, minute=0),
+    ),
+    ScheduledJob(
+        name=JOB_HOURLY_MARKET_REFRESH,
+        description="Refresh quotes and candles for all active Tier 1/2 instruments.",
+        cadence=Cadence.hourly(minute=5),
+    ),
+    ScheduledJob(
+        name=JOB_DAILY_CIK_REFRESH,
+        description="Refresh the SEC ticker→CIK mapping in external_identifiers.",
+        cadence=Cadence.daily(hour=3, minute=0),
+    ),
+    ScheduledJob(
+        name=JOB_DAILY_RESEARCH_REFRESH,
+        description="Refresh fundamentals and filings for active Tier 1/2 instruments.",
+        cadence=Cadence.daily(hour=3, minute=30),
+    ),
+    ScheduledJob(
+        name=JOB_DAILY_NEWS_REFRESH,
+        description="Fetch, deduplicate, and score news events for active Tier 1/2 instruments.",
+        cadence=Cadence.daily(hour=4, minute=0),
+    ),
+    ScheduledJob(
+        name=JOB_DAILY_THESIS_REFRESH,
+        description="Regenerate theses for stale Tier 1 instruments.",
+        cadence=Cadence.daily(hour=4, minute=30),
+    ),
+    ScheduledJob(
+        name=JOB_MORNING_CANDIDATE_REVIEW,
+        description="Re-score, rank, and generate trade recommendations for Tier 1 candidates.",
+        cadence=Cadence.daily(hour=6, minute=0),
+    ),
+    ScheduledJob(
+        name=JOB_WEEKLY_COVERAGE_REVIEW,
+        description="Review coverage tier assignments; promote/demote instruments.",
+        cadence=Cadence.weekly(weekday=0, hour=5, minute=0),
+    ),
+    ScheduledJob(
+        name=JOB_DAILY_TAX_RECONCILIATION,
+        description="Ingest new fills into tax_lots and re-run disposal matching.",
+        cadence=Cadence.daily(hour=23, minute=0),
+    ),
+]
+
+
+def compute_next_run(cadence: Cadence, now: datetime) -> datetime:
+    """Return the next future occurrence of ``cadence`` after ``now``.
+
+    The returned datetime is strictly greater than ``now`` — if ``now`` lands
+    exactly on a fire time we return the *following* one, which matches how
+    APScheduler reports ``next_run_time`` immediately after a fire.
+
+    ``now`` must be timezone-aware (UTC). The result is also UTC.
+
+    See module docstring for cadence semantics. This is a pure function so it
+    can be unit-tested without DB or scheduler setup.
+    """
+    if now.tzinfo is None:
+        raise ValueError("compute_next_run requires a timezone-aware 'now'")
+    now_utc = now.astimezone(UTC)
+
+    if cadence.kind == "hourly":
+        candidate = now_utc.replace(minute=cadence.minute, second=0, microsecond=0)
+        if candidate <= now_utc:
+            candidate += timedelta(hours=1)
+        return candidate
+
+    if cadence.kind == "daily":
+        candidate = now_utc.replace(hour=cadence.hour, minute=cadence.minute, second=0, microsecond=0)
+        if candidate <= now_utc:
+            candidate += timedelta(days=1)
+        return candidate
+
+    # weekly
+    candidate = now_utc.replace(hour=cadence.hour, minute=cadence.minute, second=0, microsecond=0)
+    days_ahead = (cadence.weekday - candidate.weekday()) % 7
+    candidate += timedelta(days=days_ahead)
+    if candidate <= now_utc:
+        candidate += timedelta(days=7)
+    return candidate
+
+
+# ---------------------------------------------------------------------------
 # Job tracking helper
 # ---------------------------------------------------------------------------
 
@@ -48,7 +247,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker, None, None]:
 
     Usage::
 
-        with _tracked_job("nightly_universe_sync") as tracker:
+        with _tracked_job(JOB_NIGHTLY_UNIVERSE_SYNC) as tracker:
             # ... do work ...
             tracker.row_count = summary.inserted + summary.updated
 
@@ -112,7 +311,7 @@ def nightly_universe_sync() -> None:
         logger.error("nightly_universe_sync: ETORO_READ_API_KEY not set, skipping")
         return
 
-    with _tracked_job("nightly_universe_sync") as tracker:
+    with _tracked_job(JOB_NIGHTLY_UNIVERSE_SYNC) as tracker:
         with (
             EtoroMarketDataProvider(api_key=settings.etoro_read_api_key, env=settings.etoro_env) as provider,
             psycopg.connect(settings.database_url) as conn,
@@ -142,7 +341,7 @@ def hourly_market_refresh() -> None:
     to_date = date.today()
     from_date = to_date - timedelta(days=400)
 
-    with _tracked_job("hourly_market_refresh") as tracker:
+    with _tracked_job(JOB_HOURLY_MARKET_REFRESH) as tracker:
         with (
             EtoroMarketDataProvider(api_key=settings.etoro_read_api_key, env=settings.etoro_env) as provider,
             psycopg.connect(settings.database_url) as conn,
@@ -183,7 +382,7 @@ def daily_cik_refresh() -> None:
 
     Runs daily. Idempotent — safe to re-run.
     """
-    with _tracked_job("daily_cik_refresh") as tracker:
+    with _tracked_job(JOB_DAILY_CIK_REFRESH) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
             psycopg.connect(settings.database_url) as conn,
@@ -215,7 +414,7 @@ def daily_research_refresh() -> None:
     if not settings.companies_house_api_key:
         logger.warning("daily_research_refresh: COMPANIES_HOUSE_API_KEY not set, skipping CH filings")
 
-    with _tracked_job("daily_research_refresh") as tracker:
+    with _tracked_job(JOB_DAILY_RESEARCH_REFRESH) as tracker:
         with psycopg.connect(settings.database_url) as conn:
             rows = conn.execute(
                 """
@@ -318,7 +517,7 @@ def daily_news_refresh() -> None:
     to_dt = datetime.now(tz=UTC)
     from_dt = to_dt - timedelta(hours=72)
 
-    with _tracked_job("daily_news_refresh") as tracker:
+    with _tracked_job(JOB_DAILY_NEWS_REFRESH) as tracker:
         # The DB connection is opened once and kept open for the full pipeline.
         # refresh_news() performs DB reads (dedup checks) and writes (upserts)
         # throughout its execution — the connection must not be closed early.
@@ -370,7 +569,7 @@ def daily_thesis_refresh() -> None:
         logger.error("daily_thesis_refresh: ANTHROPIC_API_KEY not set, skipping")
         return
 
-    with _tracked_job("daily_thesis_refresh") as tracker:
+    with _tracked_job(JOB_DAILY_THESIS_REFRESH) as tracker:
         logger.info("daily_thesis_refresh: checking for stale Tier 1 instruments")
         try:
             with psycopg.connect(settings.database_url) as conn:
@@ -428,7 +627,7 @@ def morning_candidate_review() -> None:
     Each phase opens its own connection so a failure in recommendations
     does not roll back the completed scoring run.
     """
-    with _tracked_job("morning_candidate_review") as tracker:
+    with _tracked_job(JOB_MORNING_CANDIDATE_REVIEW) as tracker:
         logger.info("morning_candidate_review: starting scoring run")
         try:
             with psycopg.connect(settings.database_url) as conn:
@@ -482,7 +681,7 @@ def weekly_coverage_review() -> None:
     deterministic promotion/demotion rules. Enforces Tier 1 cap.
     All changes are recorded in coverage_audit.
     """
-    with _tracked_job("weekly_coverage_review") as tracker:
+    with _tracked_job(JOB_WEEKLY_COVERAGE_REVIEW) as tracker:
         logger.info("weekly_coverage_review: starting coverage tier review")
         try:
             with psycopg.connect(settings.database_url) as conn:
@@ -515,7 +714,7 @@ def daily_tax_reconciliation() -> None:
     will be stale until the next run — acceptable because matching is
     a full delete-and-recompute and will self-correct on re-run.
     """
-    with _tracked_job("daily_tax_reconciliation") as tracker:
+    with _tracked_job(JOB_DAILY_TAX_RECONCILIATION) as tracker:
         logger.info("daily_tax_reconciliation: starting")
 
         try:

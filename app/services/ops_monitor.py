@@ -212,9 +212,32 @@ def check_all_layers(
     *,
     now: datetime | None = None,
 ) -> list[LayerHealth]:
-    """Check staleness for every monitored data layer."""
+    """Check staleness for every monitored data layer.
+
+    Each per-layer query is wrapped in a try/except so a single broken layer
+    (e.g. table missing during a partial migration) yields a ``LayerHealth``
+    with ``status="error"`` instead of bubbling out and 500-ing the entire
+    operator visibility endpoint.
+
+    Prevention-log #70: never let an infra-level fault degrade into a silent
+    HTTP 200; here we surface it per-layer so the operator can see *which*
+    layer failed, while the rest of the report still renders.
+    """
     now = now or _utcnow()
-    return [check_layer_staleness(conn, layer, now=now) for layer in ALL_LAYERS]
+    results: list[LayerHealth] = []
+    for layer in ALL_LAYERS:
+        try:
+            results.append(check_layer_staleness(conn, layer, now=now))
+        except Exception as exc:
+            logger.exception("check_all_layers: layer %s failed", layer)
+            results.append(
+                LayerHealth(
+                    layer=layer,
+                    status="error",
+                    detail=f"{layer}: query failed — {exc}",
+                )
+            )
+    return results
 
 
 # ---------------------------------------------------------------------------
