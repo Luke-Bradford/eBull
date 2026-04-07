@@ -200,18 +200,31 @@ function computeView(args: ComputeViewArgs): RankingsView {
   }
 
   if (filteredItems.length === 0) {
-    // The clear-filters button is the operator's escape hatch when a
-    // filter combination produces zero rows. The filter bar above
-    // already exposes the same control, but the issue spec requires
-    // the affordance inside the empty state itself when filters are
-    // dirty so the operator never has to hunt for the next action.
+    // Two distinct sub-cases:
+    //   - filtersDirty: a filter combination produced zero rows. The
+    //     clear-filters button is the operator's escape hatch.
+    //     (The filter bar above already exposes the same control, but
+    //     the issue spec requires the affordance inside the empty
+    //     state itself so the operator never has to hunt for the next
+    //     action.)
+    //   - !filtersDirty: the unfiltered request returned zero rows
+    //     even though a scoring run exists (an unusual but possible
+    //     state — e.g. a run that scored every candidate as filtered
+    //     out by penalties). The title must NOT imply user action
+    //     caused the empty set, since no filter is dirty.
+    if (filtersDirty) {
+      return {
+        kind: "empty",
+        title: "No instruments match the current filters",
+        description: "Loosen the filters or clear them to see the full ranked list.",
+        action: <ClearFiltersButton onClick={onClearFilters} />,
+      };
+    }
     return {
       kind: "empty",
-      title: "No instruments match the current filters",
-      description: filtersDirty
-        ? "Loosen the filters or clear them to see the full ranked list."
-        : "The latest scoring run produced no ranked instruments.",
-      action: filtersDirty ? <ClearFiltersButton onClick={onClearFilters} /> : undefined,
+      title: "Latest run produced no ranked instruments",
+      description:
+        "The most recent scoring run completed but did not surface any candidates. Check back after the next run.",
     };
   }
 
