@@ -45,7 +45,7 @@ this ticket is execution only.
   start of the setup transaction:
   ```sql
   BEGIN;
-  SELECT pg_advisory_xact_lock(<constant>);  -- e.g. hashtext('ebull-setup')
+  SELECT pg_advisory_xact_lock(7263011);  -- pinned constant, see below
   SELECT 1 FROM operators LIMIT 1;            -- empty check
   -- if non-empty: rollback, return 404
   INSERT INTO operators (...) VALUES (...);
@@ -58,6 +58,14 @@ this ticket is execution only.
   A real-DB concurrency test must exercise two simultaneous requests
   and assert exactly one success — mocks are not acceptable for this
   test.
+
+  The lock key is a **pinned integer literal** (`7263011`), defined
+  once as a named constant in the module that owns the setup endpoint
+  (e.g. `_BOOTSTRAP_LOCK_KEY = 7263011`) with a code comment tying it
+  to this ticket. The implementation must not call `hashtext()` at
+  runtime to derive it — pinning a literal makes the lock key
+  reviewable and means there is no extra round-trip just to compute
+  it.
 
 ### Backend — bootstrap authorization
 
@@ -111,13 +119,23 @@ gap does not persist while #99 / #100 land on top.
   - `id BIGSERIAL PRIMARY KEY`
   - `event_at TIMESTAMPTZ NOT NULL DEFAULT now()`
   - `event_type TEXT NOT NULL CHECK (event_type IN ('setup', 'create', 'delete', 'self_delete'))`
-  - `actor_operator_id UUID REFERENCES operators(operator_id) ON DELETE SET NULL` — null for `setup`, set for the others
-  - `target_operator_id UUID NOT NULL` — *not* a FK (target may already
-    be deleted by the time anyone reads the row); kept as raw UUID
+  - `actor_operator_id UUID` — **no FK**, kept as raw UUID. Null
+    only for `event_type='setup'`. For all other events the value is
+    captured at write time and **must not** be invalidated by a later
+    delete of the actor.
+  - `actor_username TEXT` — captured at write time alongside
+    `actor_operator_id`. Null for `setup`, NOT NULL via CHECK for
+    every other event type. Mirrors the `target_username` pattern so
+    actor identity survives later deletion of the actor row.
+  - `target_operator_id UUID NOT NULL` — **no FK**, kept as raw UUID
+    (target may already be deleted by the time anyone reads the row).
   - `target_username TEXT NOT NULL` — captured at write time so
-    forensic queries don't have to chase a deleted row
+    forensic queries don't have to chase a deleted row.
   - `request_ip TEXT`
   - `user_agent TEXT`
+  - CHECK constraint:
+    `(event_type = 'setup' AND actor_operator_id IS NULL AND actor_username IS NULL)
+     OR (event_type <> 'setup' AND actor_operator_id IS NOT NULL AND actor_username IS NOT NULL)`
 - Audit rows are written **inside the same transaction** as the
   operator mutation. A failed mutation must not leave an audit row;
   a successful mutation must always have one.
@@ -304,8 +322,14 @@ All routes are `require_session` only. Never `service_token`.
 - a failed mutation (e.g. duplicate username on `POST /operators`)
   writes **no** audit row — the audit insert is in the same
   transaction as the operator mutation
-- after delete, the audit row remains queryable and still carries the
-  deleted operator's username (captured at write time, not via FK)
+- after delete of the **target**, the audit row remains queryable and
+  still carries the deleted operator's username (captured at write
+  time, not via FK)
+- after delete of the **actor** (e.g. operator A creates operator B,
+  then operator B is later deleted by some other path), the historical
+  audit row written by A still carries A's `actor_username` and
+  `actor_operator_id` — neither field is nullified, because the audit
+  table holds no FK back to `operators`
 
 **Backend — operator management:**
 - list as authenticated operator returns own row with `is_self: true`
