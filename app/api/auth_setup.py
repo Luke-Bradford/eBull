@@ -110,8 +110,11 @@ def setup(
     non-2xx to a single fixed string.
     """
     client = request.client
-    request_host = client.host if client else None
-    request_ip = client.host if client else None
+    # ``request.client.host`` is the TCP peer address (the source IP),
+    # not the HTTP Host header. We pass it under the explicit name
+    # ``request_client_ip`` so the loopback check in is_setup_authorised
+    # is not misread as a Host-header check.
+    request_client_ip = client.host if client else None
     user_agent = request.headers.get("user-agent")
 
     outcome, success = perform_setup(
@@ -119,9 +122,9 @@ def setup(
         username=body.username,
         password=body.password,
         submitted_token=body.setup_token,
-        request_host=request_host,
+        request_client_ip=request_client_ip,
         user_agent=user_agent,
-        request_ip=request_ip,
+        request_ip=request_client_ip,
     )
 
     if outcome is not SetupOutcome.OK or success is None:

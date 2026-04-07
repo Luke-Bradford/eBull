@@ -120,7 +120,16 @@ def create(
             status_code=status.HTTP_409_CONFLICT,
             detail="Username already exists",
         )
-    assert row is not None
+    if row is None:
+        # Defensive: the service contract is (OK -> row, anything else
+        # -> None), so this branch is unreachable today. Use an
+        # explicit raise rather than ``assert`` so the guard survives
+        # ``python -O`` and produces a real 500 instead of an
+        # AssertionError if the contract is ever broken.
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
     return CreateOperatorResponse(
         operator=OperatorView(
             id=row.operator_id,

@@ -173,77 +173,79 @@ def delete_operator(
     """
     is_self = target_operator_id == actor_operator_id
 
-    try:
-        with conn.transaction():
-            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-                # Look up target by id so we can capture the username
-                # for the audit row before the operator row vanishes.
-                cur.execute(
-                    "SELECT username FROM operators WHERE operator_id = %s",
-                    (target_operator_id,),
-                )
-                target_row = cur.fetchone()
-                if target_row is None:
-                    return DeleteOutcome.NOT_FOUND
-                target_username: str = target_row["username"]
+    # Capture outcome in a local and return AFTER exiting the
+    # transaction context manager. ``return`` from inside
+    # ``with conn.transaction()`` triggers an implicit commit on the
+    # (possibly empty) tx; not wrong, but flagged in PR review for
+    # being easy to misread, so we hoist the return out.
+    outcome: DeleteOutcome | None = None
+    target_username: str | None = None
 
-                if is_self:
-                    cur.execute("SELECT COUNT(*) AS n FROM operators")
-                    count_row = cur.fetchone()
-                    assert count_row is not None
-                    if int(count_row["n"]) <= 1:
-                        return DeleteOutcome.LAST_OPERATOR
-
-                # Delete the operator row. The FK cascade on
-                # sessions.operator_id removes any session rows
-                # belonging to the deleted operator -- including the
-                # caller's current session if this is a self-delete.
-                cur.execute(
-                    "DELETE FROM operators WHERE operator_id = %s",
-                    (target_operator_id,),
-                )
-
-                cur.execute(
-                    """
-                    INSERT INTO operator_audit (
-                        event_type, actor_operator_id, actor_username,
-                        target_operator_id, target_username,
-                        request_ip, user_agent
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        "self_delete" if is_self else "delete",
-                        actor_operator_id,
-                        actor_username,
-                        target_operator_id,
-                        target_username,
-                        request_ip,
-                        user_agent,
-                    ),
-                )
-
-                # Belt-and-braces: explicitly delete the caller's
-                # session row inside the same transaction even though
-                # the FK cascade would have caught it. This makes the
-                # invariant ("after self-delete commit, this session
-                # id is gone") explicit at the call site instead of
-                # implicit in schema config -- and protects against
-                # someone changing the FK to RESTRICT in a future
-                # migration.
-                if is_self:
+    with conn.transaction():
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # Lock every operator row for the duration of this tx so
+            # two concurrent self-deletes cannot both observe count=2
+            # and both proceed. SELECT FOR UPDATE on the full set
+            # serialises any other delete attempt that also takes the
+            # lock; bare COUNT() under READ COMMITTED would not.
+            cur.execute("SELECT operator_id, username FROM operators FOR UPDATE")
+            all_operators = cur.fetchall()
+            target_row = next(
+                (r for r in all_operators if r["operator_id"] == target_operator_id),
+                None,
+            )
+            if target_row is None:
+                outcome = DeleteOutcome.NOT_FOUND
+            else:
+                target_username = target_row["username"]
+                if is_self and len(all_operators) <= 1:
+                    outcome = DeleteOutcome.LAST_OPERATOR
+                else:
+                    # Delete the operator row. The FK cascade on
+                    # sessions.operator_id removes any session rows
+                    # belonging to the deleted operator -- including
+                    # the caller's current session on self-delete.
                     cur.execute(
-                        "DELETE FROM sessions WHERE session_id = %s",
-                        (actor_session_id,),
+                        "DELETE FROM operators WHERE operator_id = %s",
+                        (target_operator_id,),
                     )
-    except Exception:
-        raise
+                    cur.execute(
+                        """
+                        INSERT INTO operator_audit (
+                            event_type, actor_operator_id, actor_username,
+                            target_operator_id, target_username,
+                            request_ip, user_agent
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            "self_delete" if is_self else "delete",
+                            actor_operator_id,
+                            actor_username,
+                            target_operator_id,
+                            target_username,
+                            request_ip,
+                            user_agent,
+                        ),
+                    )
+                    # Belt-and-braces: explicitly delete the caller's
+                    # session row inside the same transaction even
+                    # though the FK cascade would have caught it. This
+                    # makes the invariant ("after self-delete commit,
+                    # this session id is gone") explicit at the call
+                    # site rather than implicit in schema config, and
+                    # protects against a future migration changing the
+                    # FK to RESTRICT.
+                    if is_self:
+                        cur.execute(
+                            "DELETE FROM sessions WHERE session_id = %s",
+                            (actor_session_id,),
+                        )
+                    outcome = DeleteOutcome.OK_SELF if is_self else DeleteOutcome.OK_OTHER
 
-    if is_self:
+    assert outcome is not None
+    if outcome is DeleteOutcome.OK_SELF:
         logger.info("operator self-delete: %s", actor_username)
-        return DeleteOutcome.OK_SELF
-
-    # Returning OK_OTHER tells the caller the action succeeded and the
-    # caller's session is unaffected.
-    logger.info("operator deleted: %s by %s", target_username, actor_username)
-    return DeleteOutcome.OK_OTHER
+    elif outcome is DeleteOutcome.OK_OTHER:
+        logger.info("operator deleted: %s by %s", target_username, actor_username)
+    return outcome

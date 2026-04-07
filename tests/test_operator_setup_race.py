@@ -91,7 +91,7 @@ def test_advisory_lock_serialises_concurrent_setup(clean_operators: None) -> Non
                 username="alice",
                 password="correct horse battery staple",
                 submitted_token=None,
-                request_host="127.0.0.1",
+                request_client_ip="127.0.0.1",
                 user_agent="pytest",
                 request_ip="127.0.0.1",
             )
@@ -123,7 +123,7 @@ def test_advisory_lock_serialises_concurrent_setup(clean_operators: None) -> Non
             username="bob",
             password="correct horse battery staple",
             submitted_token=None,
-            request_host="127.0.0.1",
+            request_client_ip="127.0.0.1",
             user_agent="pytest",
             request_ip="127.0.0.1",
         )

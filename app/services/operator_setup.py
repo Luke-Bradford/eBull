@@ -171,21 +171,30 @@ def ensure_startup_token(*, operators_empty: bool) -> None:
 
 def is_setup_authorised(
     *,
-    request_host: str | None,
+    request_client_ip: str | None,
     submitted_token: str | None,
 ) -> bool:
     """Return True iff the request is allowed to proceed past auth.
 
     Mode A (loopback zero-config): accept with no token iff
-      * the request originates from loopback
+      * the request originates from loopback (``request_client_ip`` is
+        the source IP as reported by Starlette ``request.client.host``;
+        this is the **TCP peer**, not the HTTP ``Host`` header).
       * settings.host is loopback (the server is not LAN-bound)
       * no token is currently configured (env or in-memory slot)
 
     Mode B (token required): otherwise the request must present a token
     that matches the active token in constant time.
+
+    Reverse-proxy caveat: behind nginx/traefik/etc, ``request.client.host``
+    is the proxy's address (typically ``127.0.0.1``), not the real
+    client. eBull is documented as a local-only deployment so a reverse
+    proxy is out of scope; if you nonetheless put one in front of the
+    server, set ``EBULL_BOOTSTRAP_TOKEN`` to force Mode B and ignore the
+    loopback path entirely.
     """
     active = resolve_bootstrap_token()
-    if active is None and _is_loopback(settings.host) and _is_loopback(request_host):
+    if active is None and _is_loopback(settings.host) and _is_loopback(request_client_ip):
         return True
     if active is None:
         # Mode B applies but no token is configured -- nothing the
@@ -213,7 +222,7 @@ def perform_setup(
     username: str,
     password: str,
     submitted_token: str | None,
-    request_host: str | None,
+    request_client_ip: str | None,
     user_agent: str | None,
     request_ip: str | None,
 ) -> tuple[SetupOutcome, SetupSuccess | None]:
@@ -230,7 +239,7 @@ def perform_setup(
     if len(password) < MIN_PASSWORD_LEN:
         return SetupOutcome.BAD_PASSWORD, None
     if not is_setup_authorised(
-        request_host=request_host,
+        request_client_ip=request_client_ip,
         submitted_token=submitted_token,
     ):
         return SetupOutcome.BAD_TOKEN, None
@@ -245,13 +254,24 @@ def perform_setup(
     #   * operator_audit INSERT
     # A concurrent setup blocks on pg_advisory_xact_lock, then sees a
     # non-empty operators table and returns ALREADY_SETUP.
-    try:
-        with conn.transaction():
-            with conn.cursor() as cur:
-                cur.execute("SELECT pg_advisory_xact_lock(%s)", (_BOOTSTRAP_LOCK_KEY,))
-                cur.execute("SELECT 1 FROM operators LIMIT 1")
-                if cur.fetchone() is not None:
-                    return SetupOutcome.ALREADY_SETUP, None
+    #
+    # We capture the result in locals and return AFTER exiting the
+    # transaction context manager rather than via early return inside
+    # it. ``return`` from inside ``with conn.transaction()`` triggers
+    # an implicit commit on the (possibly empty) tx, which is harmless
+    # but obscures intent and was flagged in PR review.
+    already_setup = False
+    operator_id: UUID | None = None
+    session_id: str | None = None
+    expires_at: datetime | None = None
+
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_BOOTSTRAP_LOCK_KEY,))
+            cur.execute("SELECT 1 FROM operators LIMIT 1")
+            if cur.fetchone() is not None:
+                already_setup = True
+            else:
                 cur.execute(
                     """
                     INSERT INTO operators (username, password_hash)
@@ -261,9 +281,12 @@ def perform_setup(
                     (normalised, password_hash),
                 )
                 row = cur.fetchone()
-                assert row is not None
-                operator_id: UUID = row[0]  # type: ignore[index,assignment]
+                if row is None:
+                    raise RuntimeError("operators INSERT did not RETURNING a row")
+                operator_id = row[0]  # type: ignore[index,assignment]
 
+        if not already_setup:
+            assert operator_id is not None
             session_id, expires_at = create_session(
                 conn,
                 operator_id=operator_id,
@@ -284,12 +307,13 @@ def perform_setup(
                     """,
                     (operator_id, normalised, request_ip, user_agent),
                 )
-    except Exception:
-        # The transaction context manager already rolls back on
-        # exception; we re-raise so the HTTP layer returns a 500. We
-        # never want to swallow a setup failure as a 404 -- the
-        # generic 404 is for *expected* failure modes only.
-        raise
+
+    if already_setup:
+        # The race-loser path. The table is now permanently populated,
+        # so the bootstrap token has no further legitimate use --
+        # consume the slot so it cannot be reused by a third request.
+        _token_slot.consume()
+        return SetupOutcome.ALREADY_SETUP, None
 
     # Consume the token slot AFTER successful commit. Doing it inside
     # the tx would mean a tx rollback (e.g. session_create raising)
@@ -297,6 +321,9 @@ def perform_setup(
     # until process restart -- worse than the alternative.
     _token_slot.consume()
 
+    assert operator_id is not None
+    assert session_id is not None
+    assert expires_at is not None
     logger.info("first-run setup complete: operator=%s", normalised)
 
     return SetupOutcome.OK, SetupSuccess(
