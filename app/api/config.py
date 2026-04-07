@@ -130,10 +130,11 @@ class KillSwitchRequest(BaseModel):
 
     @model_validator(mode="after")
     def _attribution_required(self) -> KillSwitchRequest:
-        if self.active and not self.reason.strip():
-            raise ValueError("reason is required when activating the kill switch")
-        # Attribution required on every transition (activate AND deactivate),
-        # so the runtime_config_audit row always carries an operator identity.
+        # Both reason and activated_by are required on every transition
+        # (activate AND deactivate) so the runtime_config_audit row always
+        # carries operator identity and a justification.
+        if not self.reason.strip():
+            raise ValueError("reason is required for kill switch transitions")
         if not self.activated_by.strip():
             raise ValueError("activated_by is required for kill switch transitions")
         return self

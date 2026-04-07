@@ -508,6 +508,8 @@ def deactivate_kill_switch(
     """
     if not deactivated_by.strip():
         raise ValueError("deactivate_kill_switch: deactivated_by is required for attribution")
+    if not reason.strip():
+        raise ValueError("deactivate_kill_switch: reason is required for attribution")
     now = now or _utcnow()
     with conn.transaction():
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
