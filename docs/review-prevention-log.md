@@ -235,6 +235,22 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### `None` last_status silently classified into a health bucket
+- First seen in: #86
+- Symptom: `_derive_overall_status` treated `job.last_status != "success"` as `"degraded"`, which folded `None` (no runs ever recorded) into the degraded signal. Every fresh deploy reported `overall_status="degraded"` purely on job state, with no way to distinguish "never run" from "currently running" from "failed".
+- Prevention: When deriving an aggregate health status from per-job state, enumerate the bucket each `last_status` value belongs to explicitly (`"success"`, `"failure"`, `"running"`, `None`). `None` is a separate signal — it means "no evidence either way" and must not be folded into degraded/down without an explicit decision and a test that pins the choice. Add a fresh-deploy test (`last_status is None` for every job, layers ok → assert `overall_status == "ok"`).
+- Enforced in: this prevention log
+
+---
+
+### Internal exception text leaked via `HTTPException(detail=f"...{exc}")` at 5xx
+- First seen in: #86
+- Symptom: `/system/status` and `/system/jobs` raised `HTTPException(status_code=503, detail=f"system status unavailable: {exc}")`. The driver / SQL error message — potentially carrying schema, table names, or connection-string fragments — was echoed to any bearer-token holder. The exception was already logged via `logger.exception`, so the f-string in the HTTP response was a redundant leak.
+- Prevention: At 5xx, `HTTPException(detail=...)` must be a fixed string. Full detail goes to `logger.exception` server-side only. Before pushing a 5xx handler, grep the route file for `HTTPException(status_code=5` and confirm every `detail=` argument is a literal or constant, not an f-string interpolating an exception. Tests should raise an exception containing a unique marker and assert the marker is absent from `response.text`.
+- Enforced in: this prevention log
+
+---
+
 ### Naive datetime in TIMESTAMPTZ query params
 - First seen in: #80
 - Symptom: A `datetime | None` query parameter without timezone info is sent to PostgreSQL as naive; comparing against a `TIMESTAMPTZ` column may cause mixed-offset rejection or silent misinterpretation.
