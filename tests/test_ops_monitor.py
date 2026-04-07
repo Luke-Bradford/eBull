@@ -450,7 +450,7 @@ class TestKillSwitch:
     def test_deactivate_raises_on_missing_row(self) -> None:
         conn = _make_conn([_make_cursor([])])
         with pytest.raises(RuntimeError, match="kill_switch row missing"):
-            deactivate_kill_switch(conn)
+            deactivate_kill_switch(conn, deactivated_by="ops", reason="resolved")
 
     def test_status_returns_active_state(self) -> None:
         conn = _make_conn(

@@ -159,30 +159,34 @@ def update_runtime_config(
         if not auto_changed and not live_changed:
             raise RuntimeConfigNoOp("patch would not change any flag value")
 
-        update_result = conn.execute(
-            """
-            UPDATE runtime_config
-            SET enable_auto_trading = %(auto)s,
-                enable_live_trading = %(live)s,
-                updated_at          = %(at)s,
-                updated_by          = %(by)s,
-                reason              = %(reason)s
-            WHERE id = TRUE
-            """,
-            {
-                "auto": new_auto,
-                "live": new_live,
-                "at": now,
-                "by": updated_by,
-                "reason": reason,
-            },
-        )
+        # RETURNING updated_at so the caller carries the DB-committed value
+        # rather than the application-side `now`, eliminating any clock-skew
+        # gap (and surviving any future updated_at trigger).
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as upd_cur:
+            upd_cur.execute(
+                """
+                UPDATE runtime_config
+                SET enable_auto_trading = %(auto)s,
+                    enable_live_trading = %(live)s,
+                    updated_at          = %(at)s,
+                    updated_by          = %(by)s,
+                    reason              = %(reason)s
+                WHERE id = TRUE
+                RETURNING updated_at
+                """,
+                {
+                    "auto": new_auto,
+                    "live": new_live,
+                    "at": now,
+                    "by": updated_by,
+                    "reason": reason,
+                },
+            )
+            updated_row = upd_cur.fetchone()
         # review-prevention-log: "Single-row UPDATE silent no-op on missing row".
-        # The SELECT FOR UPDATE above already proved the row exists in this
-        # transaction, but we re-check rowcount as a defensive belt-and-braces
-        # against the row vanishing under us.
-        if update_result.rowcount == 0:
+        if updated_row is None:
             raise RuntimeConfigCorrupt("runtime_config UPDATE affected 0 rows — singleton vanished")
+        committed_updated_at = updated_row["updated_at"]
 
         # One audit row per *changed* field.  Unchanged fields produce no row
         # so the audit table is queryable as "history of changes" not "history
@@ -219,7 +223,7 @@ def update_runtime_config(
     return RuntimeConfig(
         enable_auto_trading=new_auto,
         enable_live_trading=new_live,
-        updated_at=now,
+        updated_at=committed_updated_at,
         updated_by=updated_by,
         reason=reason,
     )

@@ -103,8 +103,13 @@ class TestUpdateRuntimeConfig:
             )
 
     def test_full_update_writes_two_audit_rows(self) -> None:
-        # Both flags change: expect UPDATE + 2 audit INSERTs = 3 conn.execute calls
-        conn = _make_conn([_make_cursor([_row(auto=False, live=False)])])
+        # Two cursors: SELECT FOR UPDATE, then UPDATE ... RETURNING updated_at.
+        conn = _make_conn(
+            [
+                _make_cursor([_row(auto=False, live=False)]),
+                _make_cursor([{"updated_at": _NOW}]),
+            ]
+        )
         updated = update_runtime_config(
             conn,
             updated_by="op",
@@ -116,18 +121,21 @@ class TestUpdateRuntimeConfig:
         assert updated.enable_auto_trading is True
         assert updated.enable_live_trading is True
 
-        # 1 UPDATE + 2 audit INSERTs
-        assert conn.execute.call_count == 3
-        sqls = [c[0][0] for c in conn.execute.call_args_list]
-        assert any("UPDATE runtime_config" in s for s in sqls)
-        audit_calls = [c for c in conn.execute.call_args_list if "runtime_config_audit" in c[0][0]]
-        assert len(audit_calls) == 2
-
+        # UPDATE goes through the second cursor; conn.execute() is only used
+        # for the two audit INSERTs.
+        assert conn.execute.call_count == 2
+        audit_calls = conn.execute.call_args_list
+        assert all("runtime_config_audit" in c[0][0] for c in audit_calls)
         fields = {c[0][1]["field"] for c in audit_calls}
         assert fields == {"enable_auto_trading", "enable_live_trading"}
 
     def test_partial_update_only_writes_audit_for_changed_field(self) -> None:
-        conn = _make_conn([_make_cursor([_row(auto=False, live=False)])])
+        conn = _make_conn(
+            [
+                _make_cursor([_row(auto=False, live=False)]),
+                _make_cursor([{"updated_at": _NOW}]),
+            ]
+        )
         update_runtime_config(
             conn,
             updated_by="op",
@@ -135,13 +143,13 @@ class TestUpdateRuntimeConfig:
             enable_auto_trading=True,
             now=_NOW,
         )
-        # 1 UPDATE + 1 audit row for enable_auto_trading
-        assert conn.execute.call_count == 2
-        audit_calls = [c for c in conn.execute.call_args_list if "runtime_config_audit" in c[0][0]]
-        assert len(audit_calls) == 1
-        assert audit_calls[0][0][1]["field"] == "enable_auto_trading"
-        assert audit_calls[0][0][1]["old"] == "false"
-        assert audit_calls[0][0][1]["new"] == "true"
+        # 1 audit row for enable_auto_trading (UPDATE goes via second cursor)
+        assert conn.execute.call_count == 1
+        audit_call = conn.execute.call_args_list[0]
+        assert "runtime_config_audit" in audit_call[0][0]
+        assert audit_call[0][1]["field"] == "enable_auto_trading"
+        assert audit_call[0][1]["old"] == "false"
+        assert audit_call[0][1]["new"] == "true"
 
     def test_no_op_update_raises(self) -> None:
         # Patch sets enable_auto_trading=True but the row already has True.
@@ -160,7 +168,12 @@ class TestUpdateRuntimeConfig:
         assert conn.execute.call_count == 0
 
     def test_atomic_via_transaction(self) -> None:
-        conn = _make_conn([_make_cursor([_row(auto=False, live=False)])])
+        conn = _make_conn(
+            [
+                _make_cursor([_row(auto=False, live=False)]),
+                _make_cursor([{"updated_at": _NOW}]),
+            ]
+        )
         update_runtime_config(
             conn,
             updated_by="op",

@@ -435,7 +435,13 @@ def activate_kill_switch(
 
     Raises RuntimeError if the kill_switch row is missing (configuration
     corruption) — the caller must not silently believe activation succeeded.
+    Raises ValueError if `activated_by` or `reason` is empty — every
+    transition must carry attribution, regardless of call site.
     """
+    if not activated_by.strip():
+        raise ValueError("activate_kill_switch: activated_by is required for attribution")
+    if not reason.strip():
+        raise ValueError("activate_kill_switch: reason is required when activating")
     now = now or _utcnow()
     with conn.transaction():
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -497,7 +503,11 @@ def deactivate_kill_switch(
     runtime_config_audit row — all inside a single transaction.
 
     Raises RuntimeError if the kill_switch row is missing.
+    Raises ValueError if `deactivated_by` is empty — every transition must
+    carry attribution, regardless of call site.
     """
+    if not deactivated_by.strip():
+        raise ValueError("deactivate_kill_switch: deactivated_by is required for attribution")
     now = now or _utcnow()
     with conn.transaction():
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
