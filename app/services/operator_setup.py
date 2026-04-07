@@ -286,7 +286,8 @@ def perform_setup(
                 operator_id = row[0]  # type: ignore[index,assignment]
 
         if not already_setup:
-            assert operator_id is not None
+            if operator_id is None:
+                raise RuntimeError("operator_id unset on success path")
             session_id, expires_at = create_session(
                 conn,
                 operator_id=operator_id,
@@ -321,9 +322,10 @@ def perform_setup(
     # until process restart -- worse than the alternative.
     _token_slot.consume()
 
-    assert operator_id is not None
-    assert session_id is not None
-    assert expires_at is not None
+    # Defensive: the OK path always populates these. Use explicit
+    # raises rather than ``assert`` so the guards survive ``python -O``.
+    if operator_id is None or session_id is None or expires_at is None:
+        raise RuntimeError("perform_setup OK path missing operator/session state")
     logger.info("first-run setup complete: operator=%s", normalised)
 
     return SetupOutcome.OK, SetupSuccess(

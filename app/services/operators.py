@@ -26,6 +26,11 @@ from app.services.operator_setup import MIN_PASSWORD_LEN
 
 logger = logging.getLogger(__name__)
 
+# Pinned advisory-lock key for the self-delete invariant. Distinct from
+# the setup key in operator_setup.py so the two paths never block each
+# other. Documented in docs/tickets/ticket-G-first-run-setup-and-operator-management.md.
+_SELF_DELETE_LOCK_KEY = 7263012
+
 
 @dataclass(frozen=True)
 class OperatorRow:
@@ -115,7 +120,8 @@ def create_operator(
                     (normalised, password_hash),
                 )
                 row = cur.fetchone()
-                assert row is not None
+                if row is None:
+                    raise RuntimeError("operators INSERT did not RETURNING a row")
                 cur.execute(
                     """
                     INSERT INTO operator_audit (
@@ -183,22 +189,46 @@ def delete_operator(
 
     with conn.transaction():
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            # Lock every operator row for the duration of this tx so
-            # two concurrent self-deletes cannot both observe count=2
-            # and both proceed. SELECT FOR UPDATE on the full set
-            # serialises any other delete attempt that also takes the
-            # lock; bare COUNT() under READ COMMITTED would not.
-            cur.execute("SELECT operator_id, username FROM operators FOR UPDATE")
-            all_operators = cur.fetchall()
-            target_row = next(
-                (r for r in all_operators if r["operator_id"] == target_operator_id),
-                None,
+            # Self-delete needs the "is the caller the only operator?"
+            # invariant to be race-safe. We take a per-self-delete
+            # advisory lock (distinct from the setup key) so two
+            # concurrent self-delete attempts serialise without locking
+            # any operator rows -- non-self deletes, set-password, and
+            # last_login_at updates against the operators table run
+            # without contention.
+            #
+            # Non-self delete does NOT take the advisory lock: the
+            # invariant ("at least one other operator remains") is
+            # trivially preserved because the caller's own row is the
+            # +1, and concurrent self-delete by the *target* would
+            # serialise on the FK / row lock acquired by the DELETE
+            # statement itself.
+            if is_self:
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    (_SELF_DELETE_LOCK_KEY,),
+                )
+
+            cur.execute(
+                "SELECT username FROM operators WHERE operator_id = %s",
+                (target_operator_id,),
             )
+            target_row = cur.fetchone()
             if target_row is None:
                 outcome = DeleteOutcome.NOT_FOUND
             else:
                 target_username = target_row["username"]
-                if is_self and len(all_operators) <= 1:
+
+                if is_self:
+                    cur.execute("SELECT COUNT(*) AS n FROM operators")
+                    count_row = cur.fetchone()
+                    if count_row is None:
+                        raise RuntimeError("COUNT(*) returned no row")
+                    operator_count = int(count_row["n"])
+                else:
+                    operator_count = 2  # not used; satisfies the branch below
+
+                if is_self and operator_count <= 1:
                     outcome = DeleteOutcome.LAST_OPERATOR
                 else:
                     # Delete the operator row. The FK cascade on
@@ -243,7 +273,8 @@ def delete_operator(
                         )
                     outcome = DeleteOutcome.OK_SELF if is_self else DeleteOutcome.OK_OTHER
 
-    assert outcome is not None
+    if outcome is None:
+        raise RuntimeError("delete_operator exited transaction with no outcome set")
     if outcome is DeleteOutcome.OK_SELF:
         logger.info("operator self-delete: %s", actor_username)
     elif outcome is DeleteOutcome.OK_OTHER:
