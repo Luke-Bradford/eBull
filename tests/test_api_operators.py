@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -62,7 +62,7 @@ def _session_row() -> SessionRow:
     )
 
 
-def _operator_row(operator_id: uuid4, username: str) -> OperatorRow:  # type: ignore[valid-type]
+def _operator_row(operator_id: UUID, username: str) -> OperatorRow:
     now = datetime(2026, 1, 1, tzinfo=UTC)
     return OperatorRow(
         operator_id=operator_id,
