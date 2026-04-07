@@ -5,10 +5,11 @@ calls are patched at the route module's import boundary so we exercise the
 HTTP shape, the overall_status derivation, and the next-run computation
 without spinning up Postgres.
 
-conftest.py installs a no-op require_auth override globally; real auth is
-exercised in test_api_auth.py. The auth-on-route smoke test below clears
-that override per-test using the same capture-and-restore pattern as
-test_api_auth (prevention-log #81).
+conftest.py installs a no-op override on
+``require_session_or_service_token`` globally; real auth is exercised in
+test_api_auth_session.py. The auth-on-route smoke test below clears that
+override per-test using the same capture-and-restore pattern as
+test_api_auth_session (prevention-log #81).
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-from app.api.auth import require_auth
+from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.main import app
 from app.services.ops_monitor import (
@@ -451,26 +452,36 @@ class TestSystemAuthWiring:
     """
 
     def setup_method(self) -> None:
-        self._prior = app.dependency_overrides.get(require_auth)
-        app.dependency_overrides.pop(require_auth, None)
+        self._prior = app.dependency_overrides.get(require_session_or_service_token)
+        app.dependency_overrides.pop(require_session_or_service_token, None)
+        # The combined dep takes ``conn`` via Depends(get_conn); FastAPI
+        # evaluates it before reaching the function body, so we must
+        # provide a mock conn even though the no-cookie/no-bearer path
+        # raises 401 before touching the DB.
+        _override_conn(_mock_conn())
 
     def teardown_method(self) -> None:
         if self._prior is not None:
-            app.dependency_overrides[require_auth] = self._prior
+            app.dependency_overrides[require_session_or_service_token] = self._prior
         else:
-            app.dependency_overrides.pop(require_auth, None)
+            app.dependency_overrides.pop(require_session_or_service_token, None)
+        _clear_conn_override()
 
     def test_status_requires_auth(self) -> None:
-        # No bearer token + real auth dep => 401 from require_auth.
-        # We patch settings.api_key to None so the fail-closed branch runs
-        # without depending on env config.
+        # No bearer token + no session cookie + real combined dep => 401.
+        # We patch settings.service_token to None so the fail-closed branch
+        # runs without depending on env config.
         with patch("app.api.auth.settings") as mock_settings:
-            mock_settings.api_key = None
+            mock_settings.service_token = None
+            mock_settings.session_cookie_name = "ebull_session"
+            mock_settings.session_idle_timeout_minutes = 60
             resp = client.get("/system/status")
         assert resp.status_code == 401
 
     def test_jobs_requires_auth(self) -> None:
         with patch("app.api.auth.settings") as mock_settings:
-            mock_settings.api_key = None
+            mock_settings.service_token = None
+            mock_settings.session_cookie_name = "ebull_session"
+            mock_settings.session_idle_timeout_minutes = 60
             resp = client.get("/system/jobs")
         assert resp.status_code == 401

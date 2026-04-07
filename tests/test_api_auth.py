@@ -1,8 +1,18 @@
-"""Tests for app.api.auth — bearer token enforcement on protected endpoints.
+"""Tests for app.api.auth — service-token + combined-dependency enforcement.
 
-These tests bypass the conftest-level ``require_auth`` no-op override to
-exercise the real dependency. Each test clears the override at the top and
-relies on ``teardown_method`` to restore it for the rest of the suite.
+These tests bypass the conftest-level ``require_session_or_service_token``
+no-op override to exercise the real combined dependency. Each test
+captures the prior override in ``setup_method`` and restores it in
+``teardown_method`` (prevention-log #81 -- never re-fetch from the source).
+
+Coverage:
+  * service-token path: missing header / wrong token / wrong scheme /
+    unset server-side token / correct token
+  * router-level enforcement on portfolio / recommendations / audit
+  * /health and /health/db remain public
+
+Browser-session login / logout / /auth/me coverage lives in
+``test_api_auth_session.py``.
 """
 
 from __future__ import annotations
@@ -12,14 +22,14 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
-from app.api.auth import require_auth
+from app.api.auth import require_session_or_service_token
 from app.config import settings
 from app.db import get_conn
 from app.main import app
 
 client = TestClient(app)
 
-_VALID_KEY = "test-operator-key-with-32-chars!"  # 32 chars, meets min length
+_VALID_TOKEN = "test-operator-token-with-32-chars"  # 32 chars, meets min length
 
 
 def _mock_conn() -> MagicMock:
@@ -38,37 +48,31 @@ def _override_conn() -> Iterator[MagicMock]:
 class _AuthTestBase:
     """Shared setup: enable real auth and provide a stub DB connection.
 
-    The conftest installs a no-op ``require_auth`` override for the rest of
-    the suite. We pop it here so the real dependency runs, then restore it
-    in teardown so other tests are unaffected.
+    The conftest installs a no-op ``require_session_or_service_token``
+    override for the rest of the suite. We pop it here so the real
+    dependency runs, then restore it in teardown so other tests are
+    unaffected.
     """
 
     def setup_method(self) -> None:
-        self._real_key = settings.api_key
-        settings.api_key = _VALID_KEY
-        # Capture the conftest no-op override at setup time so teardown can
-        # restore it deterministically without re-importing. Re-importing in
-        # teardown could silently install None if the import path changed.
-        # If conftest hasn't installed an override (e.g. running this file in
-        # isolation in some odd way), the captured value is None and teardown
-        # will simply pop the key — the test still exercises the real
-        # require_auth dependency correctly.
-        self._prior_auth_override = app.dependency_overrides.get(require_auth)
-        app.dependency_overrides.pop(require_auth, None)
+        self._real_token = settings.service_token
+        settings.service_token = _VALID_TOKEN
+        # Capture-restore (prevention-log #81): never re-fetch in teardown.
+        self._prior_override = app.dependency_overrides.get(require_session_or_service_token)
+        app.dependency_overrides.pop(require_session_or_service_token, None)
         app.dependency_overrides[get_conn] = _override_conn
 
     def teardown_method(self) -> None:
-        settings.api_key = self._real_key
-        prior = self._prior_auth_override
-        if prior is not None:
-            app.dependency_overrides[require_auth] = prior
+        settings.service_token = self._real_token
+        if self._prior_override is not None:
+            app.dependency_overrides[require_session_or_service_token] = self._prior_override
         else:
-            app.dependency_overrides.pop(require_auth, None)
+            app.dependency_overrides.pop(require_session_or_service_token, None)
         app.dependency_overrides.pop(get_conn, None)
 
 
-class TestRequireAuth(_AuthTestBase):
-    """The require_auth dependency rejects bad / missing tokens uniformly."""
+class TestServiceTokenPath(_AuthTestBase):
+    """The combined dep accepts a valid bearer token and rejects bad ones."""
 
     def test_missing_authorization_header_returns_401(self) -> None:
         resp = client.post("/kill-switch", json={"active": False})
@@ -80,7 +84,7 @@ class TestRequireAuth(_AuthTestBase):
         resp = client.post(
             "/kill-switch",
             json={"active": False},
-            headers={"Authorization": "Bearer not-the-real-key"},
+            headers={"Authorization": "Bearer not-the-real-token-xx-xxxxxxxxx"},
         )
         assert resp.status_code == 401
         assert resp.json()["detail"] == "Unauthorized"
@@ -89,14 +93,14 @@ class TestRequireAuth(_AuthTestBase):
         resp = client.post(
             "/kill-switch",
             json={"active": False},
-            headers={"Authorization": f"Basic {_VALID_KEY}"},
+            headers={"Authorization": f"Basic {_VALID_TOKEN}"},
         )
+        # HTTPBearer surfaces a non-Bearer Authorization header as None
+        # credentials, which the combined dep then routes to the cookie
+        # path -- and there is no cookie, so 401.
         assert resp.status_code == 401
 
     def test_correct_token_is_accepted(self) -> None:
-        # The kill switch route calls deactivate_kill_switch on the conn.
-        # We don't care about its result here — we just want to prove auth
-        # let the request through. Patch the service to a no-op.
         from unittest.mock import patch
 
         with patch(
@@ -111,21 +115,17 @@ class TestRequireAuth(_AuthTestBase):
             resp = client.post(
                 "/kill-switch",
                 json={"active": False, "reason": "test", "activated_by": "ci"},
-                headers={"Authorization": f"Bearer {_VALID_KEY}"},
+                headers={"Authorization": f"Bearer {_VALID_TOKEN}"},
             )
         assert resp.status_code == 200
 
-    def test_unset_api_key_fails_closed(self) -> None:
-        """When settings.api_key is None, every protected request is rejected.
-
-        We do not treat unset config as 'auth disabled' — a misconfigured
-        deploy must not silently leave the kill switch open.
-        """
-        settings.api_key = None
+    def test_unset_service_token_fails_closed(self) -> None:
+        """When settings.service_token is None, every protected request is rejected."""
+        settings.service_token = None
         resp = client.post(
             "/kill-switch",
             json={"active": False},
-            headers={"Authorization": f"Bearer {_VALID_KEY}"},
+            headers={"Authorization": f"Bearer {_VALID_TOKEN}"},
         )
         assert resp.status_code == 401
 
@@ -149,8 +149,6 @@ class TestPublicEndpointsRemainOpen:
     """
 
     def setup_method(self) -> None:
-        # Provide a stub DB connection for /health/db so it doesn't try to
-        # reach a real pool. /health does not touch the DB.
         def _override() -> Iterator[MagicMock]:
             conn = _mock_conn()
             conn.execute.return_value = []  # /health/db iterates pg_tables result
@@ -166,7 +164,8 @@ class TestPublicEndpointsRemainOpen:
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "ok"
-        # Sanity: never leak the operator API key from /health.
+        # Sanity: never leak the operator service token from /health.
+        assert "service_token" not in body
         assert "api_key" not in body
 
     def test_health_db_is_public(self) -> None:

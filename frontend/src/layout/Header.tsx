@@ -1,19 +1,13 @@
-import { hasAuthToken } from "@/api/client";
+import { useSession } from "@/lib/session";
 
 export function Header() {
-  // Placeholder connected/disconnected indicator. Real bearer-token wiring
-  // lands with #58 — for now this just reflects whether setAuthToken() has
-  // been called in-session.
-  // TODO(#58): hasAuthToken() reads a module-level variable at render time
-  // and is NOT reactive — calling setAuthToken() will not re-render this
-  // component without a route change or full reload. Replace with a reactive
-  // store (e.g. a tiny context, zustand, or a TanStack Query auth state)
-  // when wiring the real auth flow.
-  const connected = hasAuthToken();
+  const { status, operator, logout } = useSession();
+  const connected = status === "authenticated";
+
   return (
     <header className="flex h-14 items-center justify-between border-b border-slate-200 bg-white px-6">
       <div className="text-sm font-medium text-slate-500">Operator console</div>
-      <div className="flex items-center gap-2 text-xs">
+      <div className="flex items-center gap-3 text-xs">
         <span
           className={[
             "inline-block h-2 w-2 rounded-full",
@@ -21,7 +15,20 @@ export function Header() {
           ].join(" ")}
           aria-hidden
         />
-        <span className="text-slate-600">{connected ? "connected" : "disconnected"}</span>
+        <span className="text-slate-600">
+          {connected && operator ? operator.username : "disconnected"}
+        </span>
+        {connected && (
+          <button
+            type="button"
+            onClick={() => {
+              void logout();
+            }}
+            className="rounded border border-slate-300 px-2 py-0.5 text-slate-600 hover:bg-slate-50"
+          >
+            Sign out
+          </button>
+        )}
       </div>
     </header>
   );

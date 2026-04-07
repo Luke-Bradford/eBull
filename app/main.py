@@ -11,7 +11,8 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
 from app.api.audit import router as audit_router
-from app.api.auth import require_auth
+from app.api.auth import require_session_or_service_token
+from app.api.auth_session import router as auth_session_router
 from app.api.config import KillSwitchRequest, KillSwitchResponse, post_kill_switch
 from app.api.config import router as config_router
 from app.api.filings import router as filings_router
@@ -55,6 +56,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="eBull", version="0.1.0", lifespan=lifespan)
+app.include_router(auth_session_router)
 app.include_router(audit_router)
 app.include_router(config_router)
 app.include_router(filings_router)
@@ -125,7 +127,7 @@ class TierOverrideRequest(BaseModel):
     rationale: str = Field(min_length=1)
 
 
-@app.post("/coverage/override", dependencies=[Depends(require_auth)])
+@app.post("/coverage/override", dependencies=[Depends(require_session_or_service_token)])
 def coverage_override(
     body: TierOverrideRequest,
     conn: psycopg.Connection[object] = Depends(get_conn),
@@ -160,7 +162,7 @@ def coverage_override(
 # operator scripts continue to work; remove once the admin page (#64) ships.
 
 
-@app.get("/health/data", dependencies=[Depends(require_auth)], deprecated=True, tags=["system"])
+@app.get("/health/data", dependencies=[Depends(require_session_or_service_token)], deprecated=True, tags=["system"])
 def health_data(conn: psycopg.Connection[object] = Depends(get_conn)) -> dict:
     """Deprecated alias for ``GET /system/status``.
 
@@ -218,7 +220,7 @@ def health_data(conn: psycopg.Connection[object] = Depends(get_conn)) -> dict:
 
 @app.post(
     "/kill-switch",
-    dependencies=[Depends(require_auth)],
+    dependencies=[Depends(require_session_or_service_token)],
     deprecated=True,
     tags=["config"],
 )

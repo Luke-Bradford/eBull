@@ -39,7 +39,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
-from app.api.auth import require_auth
+from app.api.auth import require_session_or_service_token
 from app.config import settings
 from app.db import get_conn
 from app.services.ops_monitor import (
@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/config",
     tags=["config"],
-    dependencies=[Depends(require_auth)],
+    dependencies=[Depends(require_session_or_service_token)],
 )
 
 
