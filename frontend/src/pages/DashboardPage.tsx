@@ -69,21 +69,22 @@ export function DashboardPage() {
         </div>
 
         <Section title="System status">
-          {system.loading || config.loading ? (
-            <SectionSkeleton rows={4} />
-          ) : (
-            // Partial-failure handling: render whichever side resolved and
-            // surface a per-endpoint inline error+retry for the side that
-            // failed. The panel never silently swallows a failed endpoint.
-            <SystemStatusPanel
-              system={system.error !== null ? null : system.data}
-              config={config.error !== null ? null : config.data}
-              systemError={system.error !== null}
-              configError={config.error !== null}
-              onRetrySystem={system.refetch}
-              onRetryConfig={config.refetch}
-            />
-          )}
+          {/* No combined loading gate: each endpoint's loading / error /
+              data state must drive its own render branch so a slow or
+              retrying endpoint cannot hide the already-resolved side.
+              See docs/review-prevention-log.md "Duplicate error widgets…"
+              and the related round-3 PR-#89 finding on shared loading
+              gates. */}
+          <SystemStatusPanel
+            system={system.error !== null ? null : system.data}
+            config={config.error !== null ? null : config.data}
+            systemLoading={system.loading}
+            configLoading={config.loading}
+            systemError={system.error !== null}
+            configError={config.error !== null}
+            onRetrySystem={system.refetch}
+            onRetryConfig={config.refetch}
+          />
         </Section>
       </div>
 

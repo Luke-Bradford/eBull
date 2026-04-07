@@ -29,9 +29,17 @@ const LAYER_TONE: Record<string, string> = {
  * Both `system` and `config` are optional so a partial failure on either
  * endpoint still renders whatever the other provided.
  */
+/**
+ * Per-side render contract: each of the two endpoints (system / config) is
+ * one of {loading, errored, resolved}. Slow or retrying endpoints must
+ * never block the resolved side from rendering — see the round-3 review
+ * finding on PR #89 about combined loading gates.
+ */
 export function SystemStatusPanel({
   system,
   config,
+  systemLoading,
+  configLoading,
   systemError,
   configError,
   onRetrySystem,
@@ -39,6 +47,8 @@ export function SystemStatusPanel({
 }: {
   system: SystemStatusResponse | null;
   config: ConfigResponse | null;
+  systemLoading: boolean;
+  configLoading: boolean;
   systemError: boolean;
   configError: boolean;
   onRetrySystem: () => void;
@@ -51,7 +61,9 @@ export function SystemStatusPanel({
       ) : null}
       {configError ? <PartialError label="/config" onRetry={onRetryConfig} /> : null}
       <div className="flex flex-wrap items-center gap-2">
-        {system ? (
+        {systemLoading ? (
+          <span className="inline-block h-4 w-16 animate-pulse rounded bg-slate-100" />
+        ) : system ? (
           <span
             className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${
               OVERALL_TONE[system.overall_status]
@@ -62,7 +74,9 @@ export function SystemStatusPanel({
         ) : (
           <span className="text-xs text-slate-400">status unavailable</span>
         )}
-        {config ? (
+        {configLoading ? (
+          <span className="inline-block h-4 w-32 animate-pulse rounded bg-slate-100" />
+        ) : config ? (
           <>
             <FlagPill label="auto trading" on={config.runtime.enable_auto_trading} />
             <FlagPill label="live trading" on={config.runtime.enable_live_trading} />
@@ -86,7 +100,13 @@ export function SystemStatusPanel({
         </div>
       )}
 
-      {system ? (
+      {systemLoading ? (
+        <div className="space-y-2">
+          <div className="h-3 w-24 animate-pulse rounded bg-slate-100" />
+          <div className="h-3 w-full animate-pulse rounded bg-slate-100" />
+          <div className="h-3 w-full animate-pulse rounded bg-slate-100" />
+        </div>
+      ) : system ? (
         <>
           <div>
             <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
