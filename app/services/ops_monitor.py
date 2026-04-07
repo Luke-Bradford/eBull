@@ -32,6 +32,8 @@ from typing import Any, Literal
 import psycopg
 import psycopg.rows
 
+from app.services.runtime_config import write_kill_switch_audit
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -423,49 +425,127 @@ def activate_kill_switch(
     activated_by: str,
     *,
     now: datetime | None = None,
-) -> None:
+) -> dict[str, Any]:
     """Activate the system-wide kill switch.
+
+    Reads the prior state, writes the kill_switch UPDATE, and writes a
+    runtime_config_audit row — all inside a single transaction so the
+    audit `old_value` cannot race a concurrent toggle and the audit row
+    cannot be skipped if the UPDATE succeeds.
 
     Raises RuntimeError if the kill_switch row is missing (configuration
     corruption) — the caller must not silently believe activation succeeded.
+    Raises ValueError if `activated_by` or `reason` is empty — every
+    transition must carry attribution, regardless of call site.
     """
+    if not activated_by.strip():
+        raise ValueError("activate_kill_switch: activated_by is required for attribution")
+    if not reason.strip():
+        raise ValueError("activate_kill_switch: reason is required when activating")
     now = now or _utcnow()
-    result = conn.execute(
-        """
-        UPDATE kill_switch
-        SET is_active = TRUE,
-            activated_at = %(at)s,
-            activated_by = %(by)s,
-            reason = %(reason)s
-        WHERE id = TRUE
-        """,
-        {"at": now, "by": activated_by, "reason": reason},
-    )
-    if result.rowcount == 0:
-        raise RuntimeError("kill_switch row missing — cannot activate; configuration corrupt")
-    conn.commit()
+    with conn.transaction():
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT is_active FROM kill_switch WHERE id = TRUE FOR UPDATE")
+            prior = cur.fetchone()
+        if prior is None:
+            raise RuntimeError("kill_switch row missing — cannot activate; configuration corrupt")
+
+        # RETURNING activated_at so the caller carries the DB-committed value
+        # rather than the application-side `now`, eliminating any app/DB clock
+        # skew in the response.
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                UPDATE kill_switch
+                SET is_active = TRUE,
+                    activated_at = %(at)s,
+                    activated_by = %(by)s,
+                    reason = %(reason)s
+                WHERE id = TRUE
+                RETURNING activated_at
+                """,
+                {"at": now, "by": activated_by, "reason": reason},
+            )
+            updated = cur.fetchone()
+        if updated is None:  # pragma: no cover — SELECT FOR UPDATE proved row exists
+            raise RuntimeError("kill_switch row missing — cannot activate; configuration corrupt")
+        committed_at = updated["activated_at"]
+
+        write_kill_switch_audit(
+            conn,
+            changed_by=activated_by,
+            reason=reason,
+            old_active=bool(prior["is_active"]),
+            new_active=True,
+            now=now,
+        )
     logger.warning("Kill switch ACTIVATED by=%s reason=%s", activated_by, reason)
+    # Return the values just committed inside the transaction so the caller
+    # cannot race a concurrent toggle by re-reading after commit.
+    return {
+        "is_active": True,
+        "activated_at": committed_at,
+        "activated_by": activated_by,
+        "reason": reason,
+    }
 
 
-def deactivate_kill_switch(conn: psycopg.Connection[Any]) -> None:
+def deactivate_kill_switch(
+    conn: psycopg.Connection[Any],
+    *,
+    deactivated_by: str = "",
+    reason: str = "",
+    now: datetime | None = None,
+) -> dict[str, Any]:
     """Deactivate the system-wide kill switch.
 
+    Reads the prior state, writes the kill_switch UPDATE, and writes a
+    runtime_config_audit row — all inside a single transaction.
+
     Raises RuntimeError if the kill_switch row is missing.
+    Raises ValueError if `deactivated_by` is empty — every transition must
+    carry attribution, regardless of call site.
     """
-    result = conn.execute(
-        """
-        UPDATE kill_switch
-        SET is_active = FALSE,
-            activated_at = NULL,
-            activated_by = NULL,
-            reason = NULL
-        WHERE id = TRUE
-        """,
-    )
-    if result.rowcount == 0:
-        raise RuntimeError("kill_switch row missing — cannot deactivate; configuration corrupt")
-    conn.commit()
+    if not deactivated_by.strip():
+        raise ValueError("deactivate_kill_switch: deactivated_by is required for attribution")
+    if not reason.strip():
+        raise ValueError("deactivate_kill_switch: reason is required for attribution")
+    now = now or _utcnow()
+    with conn.transaction():
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT is_active FROM kill_switch WHERE id = TRUE FOR UPDATE")
+            prior = cur.fetchone()
+        if prior is None:
+            raise RuntimeError("kill_switch row missing — cannot deactivate; configuration corrupt")
+
+        result = conn.execute(
+            """
+            UPDATE kill_switch
+            SET is_active = FALSE,
+                activated_at = NULL,
+                activated_by = NULL,
+                reason = NULL
+            WHERE id = TRUE
+            """,
+        )
+        if result.rowcount == 0:  # pragma: no cover
+            raise RuntimeError("kill_switch row missing — cannot deactivate; configuration corrupt")
+
+        write_kill_switch_audit(
+            conn,
+            changed_by=deactivated_by,
+            reason=reason,
+            old_active=bool(prior["is_active"]),
+            new_active=False,
+            now=now,
+        )
     logger.info("Kill switch DEACTIVATED")
+    return {
+        "is_active": False,
+        "activated_at": None,
+        "activated_by": None,
+        "reason": None,
+    }
 
 
 def get_kill_switch_status(

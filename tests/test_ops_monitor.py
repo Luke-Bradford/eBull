@@ -384,37 +384,73 @@ class TestCheckRowCountSpike:
 
 
 class TestKillSwitch:
-    """Test kill switch management functions."""
+    """Test kill switch management functions.
 
-    def test_activate_sets_fields(self) -> None:
-        conn = MagicMock()
-        conn.execute.return_value = MagicMock(rowcount=1)
-        activate_kill_switch(conn, reason="data corruption", activated_by="ops", now=_NOW)
-        conn.execute.assert_called_once()
-        params = conn.execute.call_args[0][1]
-        assert params["reason"] == "data corruption"
-        assert params["by"] == "ops"
-        assert params["at"] == _NOW
-        conn.commit.assert_called_once()
+    The transactional shape is:
+        with conn.transaction():
+            with conn.cursor() as cur: cur.execute(SELECT ... FOR UPDATE)
+            conn.execute(UPDATE)
+            conn.execute(INSERT INTO runtime_config_audit ...)
+    """
+
+    def test_activate_sets_fields_and_writes_audit(self) -> None:
+        # Two cursors are opened: SELECT FOR UPDATE, then UPDATE ... RETURNING.
+        select_cur = _make_cursor([{"is_active": False}])
+        update_cur = _make_cursor([{"activated_at": _NOW}])
+        conn = _make_conn([select_cur, update_cur])
+
+        result = activate_kill_switch(conn, reason="data corruption", activated_by="ops", now=_NOW)
+
+        # The UPDATE happens through the second cursor; the audit INSERT is the
+        # only conn.execute() call.
+        assert conn.execute.call_count == 1
+        audit_call = conn.execute.call_args_list[0]
+        assert "INSERT INTO runtime_config_audit" in audit_call[0][0]
+        assert audit_call[0][1]["field"] == "kill_switch"
+        assert audit_call[0][1]["new"] == "true"
+        assert audit_call[0][1]["old"] == "false"
+        assert audit_call[0][1]["by"] == "ops"
+
+        # The UPDATE was issued on the second cursor with RETURNING.
+        update_sql, update_params = update_cur.execute.call_args[0]
+        assert "UPDATE kill_switch" in update_sql
+        assert "RETURNING activated_at" in update_sql
+        assert update_params["reason"] == "data corruption"
+        assert update_params["by"] == "ops"
+        assert update_params["at"] == _NOW
+
+        # Returned dict carries DB-committed activated_at, not the app `now`.
+        assert result["activated_at"] == _NOW
+        assert result["activated_by"] == "ops"
+        assert result["is_active"] is True
+
+        conn.transaction.assert_called_once()
 
     def test_activate_raises_on_missing_row(self) -> None:
-        conn = MagicMock()
-        conn.execute.return_value = MagicMock(rowcount=0)
+        conn = _make_conn([_make_cursor([])])  # SELECT FOR UPDATE returns no row
         with pytest.raises(RuntimeError, match="kill_switch row missing"):
             activate_kill_switch(conn, reason="test", activated_by="ops", now=_NOW)
 
-    def test_deactivate_clears_fields(self) -> None:
-        conn = MagicMock()
+    def test_deactivate_clears_fields_and_writes_audit(self) -> None:
+        conn = _make_conn([_make_cursor([{"is_active": True}])])
         conn.execute.return_value = MagicMock(rowcount=1)
-        deactivate_kill_switch(conn)
-        conn.execute.assert_called_once()
-        conn.commit.assert_called_once()
+
+        deactivate_kill_switch(conn, deactivated_by="ops", reason="resolved", now=_NOW)
+
+        assert conn.execute.call_count == 2
+        update_call, audit_call = conn.execute.call_args_list
+        # Order matters: UPDATE must precede the audit INSERT so the audit row
+        # records committed state, not a speculative future state.
+        assert "UPDATE kill_switch" in update_call[0][0]
+        assert "INSERT INTO runtime_config_audit" in audit_call[0][0]
+        assert audit_call[0][1]["field"] == "kill_switch"
+        assert audit_call[0][1]["new"] == "false"
+        assert audit_call[0][1]["old"] == "true"
 
     def test_deactivate_raises_on_missing_row(self) -> None:
-        conn = MagicMock()
-        conn.execute.return_value = MagicMock(rowcount=0)
+        conn = _make_conn([_make_cursor([])])
         with pytest.raises(RuntimeError, match="kill_switch row missing"):
-            deactivate_kill_switch(conn)
+            deactivate_kill_switch(conn, deactivated_by="ops", reason="resolved")
 
     def test_status_returns_active_state(self) -> None:
         conn = _make_conn(
