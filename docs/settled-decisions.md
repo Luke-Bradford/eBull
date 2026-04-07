@@ -289,6 +289,12 @@ For `EXIT`:
 
 ---
 
+## Operator auth and broker-secret storage
+
+- Governed by [`docs/adr/0001-operator-auth-and-broker-secrets.md`](adr/0001-operator-auth-and-broker-secrets.md).
+
+---
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:
