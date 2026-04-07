@@ -1,8 +1,17 @@
-"""Operator-management CLI for eBull.
+"""Break-glass recovery CLI for eBull (issue #106 / ADR 0002).
+
+This CLI is **not** the normal onboarding path. The normal way to create
+the first operator is the browser-driven setup flow at ``/setup`` (see
+ADR 0002 §2). This module exists for cases where the browser path is
+unavailable:
+
+  * forgotten password                       -- ``set-password``
+  * accidentally wiped operators table       -- ``create-operator``
+  * (future, once #102 lands) bricked lockout -- ``clear-lockout``
 
 Subcommands:
-  create-operator <username>   create the (first) operator row
-  set-password    <username>   change an existing operator's password
+  create-operator <username>   recreate an operator from the host shell
+  set-password    <username>   reset an existing operator's password
 
 Both prompt for the password interactively (via ``getpass``) so it never
 appears in shell history or process listings. ``create-operator`` refuses
@@ -11,8 +20,8 @@ silently rotate credentials.
 
 Run with::
 
-    uv run python -m app.cli create-operator alice
     uv run python -m app.cli set-password    alice
+    uv run python -m app.cli create-operator alice
 
 The CLI talks to the same database as the API server (resolved via
 ``settings.database_url``), so it must be run with the same env that the

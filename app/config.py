@@ -62,6 +62,25 @@ class Settings(BaseSettings):
     # required production override.
     session_cookie_secure: bool = False
 
+    # --- First-run setup + bind address (issue #106 / ADR 0002) ---------
+    # Bind address used by uvicorn AND consulted by the bootstrap-mode
+    # check. Default is loopback, so a fresh clone of the repo runs in
+    # Mode A (zero-config setup, no token required) without the user
+    # having to do anything. Setting this to 0.0.0.0 (or any non-loopback
+    # address) flips the application into Mode B, requiring a bootstrap
+    # token for /auth/setup. The uvicorn launch command MUST read the
+    # same setting -- if uvicorn binds 0.0.0.0 but settings.host is
+    # 127.0.0.1, the loopback check will incorrectly accept setup over
+    # the LAN.
+    host: str = "127.0.0.1"
+    # Optional one-time bootstrap token for first-run setup. When set,
+    # /auth/setup requires the caller to present this exact value
+    # regardless of bind address. When unset and the server is bound to
+    # a non-loopback address, the application generates a fresh token at
+    # startup and prints it to the application log exactly once. Never
+    # logged again, never written to disk. See ADR 0002 §3.
+    bootstrap_token: str | None = None
+
     @field_validator("service_token")
     @classmethod
     def _service_token_min_length(cls, v: str | None) -> str | None:

@@ -30,6 +30,10 @@ export function RequireAuth({ children }: { children: ReactNode }): JSX.Element 
     );
   }
 
+  if (status === "needs_setup") {
+    return <Navigate to="/setup" replace />;
+  }
+
   if (status === "unauthenticated") {
     const next = encodeURIComponent(location.pathname + location.search);
     return <Navigate to={`/login?next=${next}`} replace />;
