@@ -223,8 +223,21 @@ function BrokerCredentialsSection(): JSX.Element {
         </label>
         <label className="block text-sm">
           <span className="mb-1 block text-slate-600">Label</span>
+          {/*
+            Browser-autofill defence: Chrome (and friends) treat a
+            text field followed by a password field as a sign-in
+            form and pre-fill the text field with the saved
+            username, ignoring `autoComplete="off"`. The user hit
+            this on 2026-04-08: their broker-credential label was
+            being silently overwritten with their operator
+            username. Setting an explicit non-standard `name` and
+            `autoComplete="off"` together is the most reliable
+            cross-browser way to opt this single field out of the
+            sign-in heuristic without disabling autofill globally.
+          */}
           <input
             type="text"
+            name="broker-credential-label"
             autoComplete="off"
             value={label}
             onChange={(e) => setLabel(e.target.value)}
@@ -234,9 +247,18 @@ function BrokerCredentialsSection(): JSX.Element {
         </label>
         <label className="block text-sm">
           <span className="mb-1 block text-slate-600">Secret</span>
+          {/*
+            `autoComplete="new-password"` (rather than `"off"`) is
+            the documented signal to Chrome / Safari / Firefox
+            password managers that this field is *not* a sign-in
+            password input. Without it, the browser treats the
+            preceding label field as a username, which is exactly
+            the bug fixed above. The two fixes are paired.
+          */}
           <input
             type="password"
-            autoComplete="off"
+            name="broker-credential-secret"
+            autoComplete="new-password"
             value={secret}
             onChange={(e) => setSecret(e.target.value)}
             minLength={MIN_SECRET_LEN}
