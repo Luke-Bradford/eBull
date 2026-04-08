@@ -424,9 +424,15 @@ describe("RecoveryPhraseConfirm — prop change handling", () => {
     }
     render(<Wrapper />);
 
-    // Advance to challenge stage on the first phrase.
+    // Advance to challenge stage on the first phrase and partially
+    // populate one of the input slots. We need to assert below that
+    // this populated value is cleared by the swap, not just that the
+    // stage resets — a regression where buildInitialChallenge returned
+    // stale entries would pass the previous version of this test.
     await advancePastWrittenDownGate();
-    expect(screen.getAllByText(/^Word #\d+$/)).toHaveLength(3);
+    const slotsBeforeSwap = getChallengeSlots();
+    expect(slotsBeforeSwap).toHaveLength(3);
+    await user.type(slotsBeforeSwap[0]!.input, "leftover-input");
 
     // Parent swaps phrase mid-challenge.
     await user.click(screen.getByRole("button", { name: "swap phrase" }));
@@ -439,5 +445,13 @@ describe("RecoveryPhraseConfirm — prop change handling", () => {
 
     // Written-down checkbox is reset.
     expect(screen.getByLabelText(/I have written down/i)).not.toBeChecked();
+
+    // Re-advance to the challenge stage on the new phrase and assert
+    // that every input slot is empty — a stale entry from the previous
+    // phrase would surface here.
+    await advancePastWrittenDownGate();
+    for (const { input } of getChallengeSlots()) {
+      expect(input.value).toBe("");
+    }
   });
 });
