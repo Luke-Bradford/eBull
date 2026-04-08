@@ -102,12 +102,11 @@ class TestRecoverInputValidation:
         """
         from app.api import auth_bootstrap
 
-        # Explicit reset inside the test body even though the
-        # ``client`` fixture is function-scoped (each parametrize
-        # case gets a fresh TestClient/FastAPI instance). The
-        # explicit set documents the precondition and survives
-        # any future fixture-scope change (review feedback
-        # PR #118 round 20).
+        # Explicit set inside the test body documents the
+        # precondition at the call site rather than relying on
+        # the fixture's default seed. The ``client`` fixture is
+        # function-scoped today so each parametrize case starts
+        # fresh anyway (review feedback PR #118 round 20).
         client.app.state.recovery_required = True  # type: ignore[attr-defined]
         phrase = " ".join(["abandon"] * 24)
         exc = exc_factory()  # type: ignore[operator]
