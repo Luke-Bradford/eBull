@@ -14,6 +14,7 @@ from app.api.audit import router as audit_router
 from app.api.auth import require_session_or_service_token
 from app.api.auth_session import router as auth_session_router
 from app.api.auth_setup import router as auth_setup_router
+from app.api.broker_credentials import router as broker_credentials_router
 from app.api.config import KillSwitchRequest, KillSwitchResponse, post_kill_switch
 from app.api.config import router as config_router
 from app.api.filings import router as filings_router
@@ -28,6 +29,7 @@ from app.api.theses import router as theses_router
 from app.config import settings
 from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
+from app.security.secrets_crypto import load_key as load_secrets_key
 from app.services.coverage import override_tier
 from app.services.operator_setup import ensure_startup_token, operators_empty
 from app.services.ops_monitor import get_system_health
@@ -39,6 +41,14 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Validate the broker-secret encryption key BEFORE doing anything
+    # else (issue #99). If it is missing or malformed we want to fail
+    # before binding the port -- not after migrations, not after the
+    # pool is open. load_secrets_key() raises CredentialCryptoConfigError
+    # which is a RuntimeError subclass; uvicorn will surface it and
+    # exit non-zero.
+    load_secrets_key()
+
     logger.info("Running pending migrations...")
     applied = await asyncio.to_thread(run_migrations)
     if applied:
@@ -70,6 +80,7 @@ app.include_router(auth_setup_router)
 app.include_router(auth_session_router)
 app.include_router(operators_router)
 app.include_router(audit_router)
+app.include_router(broker_credentials_router)
 app.include_router(config_router)
 app.include_router(filings_router)
 app.include_router(instruments_router)
