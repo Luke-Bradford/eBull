@@ -32,9 +32,11 @@ import logging
 import os
 import secrets
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 import psycopg
 from cryptography.hazmat.primitives import hashes
@@ -48,11 +50,7 @@ from app.security.recovery_phrase import (
     decode_phrase,
     encode_phrase,
 )
-from app.security.secrets_crypto import (
-    CredentialDecryptError,
-    decode_env_key,
-    decrypt,
-)
+from app.security.secrets_crypto import decode_env_key
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +59,13 @@ _HKDF_INFO = b"ebull-broker-encryption-key-v1"
 _DERIVED_KEY_LEN = 32
 
 BootState = Literal["clean_install", "normal", "recovery_required"]
+
+# Serialises lazy generation of the root secret on the first credential
+# save (review-prevention: concurrent first-save race surfaced on PR
+# #118). Two simultaneous create-credential requests in clean_install
+# mode would otherwise each generate a distinct root secret and the
+# operator would only ever see one valid recovery phrase.
+lazy_gen_lock = threading.Lock()
 
 
 class MasterKeyError(RuntimeError):
@@ -126,6 +131,14 @@ def write_root_secret(root_secret: bytes) -> Path:
         raise MasterKeyError(f"root secret must be exactly {ROOT_SECRET_LEN} bytes (got {len(root_secret)})")
     dest_dir = resolve_data_dir()
     dest_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        # Lock down directory perms on POSIX. Best-effort on Windows
+        # (chmod with non-write bits is mostly a no-op there); the dir
+        # lives under the user profile data dir which is already
+        # user-private.
+        os.chmod(dest_dir, 0o700)
+    except OSError:
+        pass
     dest = dest_dir / ROOT_SECRET_FILENAME
 
     fd, tmp_path_str = tempfile.mkstemp(prefix=".root_secret.", suffix=".tmp", dir=str(dest_dir))
@@ -225,34 +238,43 @@ def _newest_active_credential(
 def _key_decrypts_newest_credential(conn: psycopg.Connection[object], candidate_key: bytes) -> bool:
     """True iff *candidate_key* successfully decrypts the newest credential.
 
-    Used by both the recovery flow and the env-override verification.
-    Temporarily swaps the cached AESGCM in :mod:`secrets_crypto` so the
-    standard ``decrypt`` helper can be reused without duplicating its
-    AAD-binding logic.
+    Used by the recovery flow and env-override verification. Builds a
+    *local* AESGCM primitive instead of swapping the global cache, so
+    a candidate key can never serve a concurrent live request during
+    boot-time verification or recovery (review-prevention: AESGCM-swap
+    race surfaced on PR #118).
+
+    Field coercions: psycopg returns ``operator_id`` as :class:`UUID`
+    and ``key_version`` as ``int``; both are stringified into the AAD
+    via f-string in :func:`secrets_crypto._build_aad`. We coerce
+    explicitly here so a future row-factory change cannot silently
+    flip the AAD encoding and produce a false-negative on a valid
+    key.
     """
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    from app.security.secrets_crypto import NONCE_LEN, build_aad
+
     row = _newest_active_credential(conn)
     if row is None:
         # No verifiable row -- treat as match. Caller decides whether
         # this is a valid state (clean install vs. all-orphans).
         return True
 
-    from app.security import secrets_crypto
-
-    previous = secrets_crypto._aesgcm
-    secrets_crypto.set_active_key(candidate_key)
-    try:
-        decrypt(
-            bytes(row["ciphertext"]),  # type: ignore[arg-type]
-            operator_id=row["operator_id"],  # type: ignore[arg-type]
-            provider=row["provider"],  # type: ignore[arg-type]
-            label=row["label"],  # type: ignore[arg-type]
-            key_version=row["key_version"],  # type: ignore[arg-type]
-        )
-    except CredentialDecryptError:
+    blob = bytes(row["ciphertext"])  # type: ignore[arg-type]
+    if len(blob) < NONCE_LEN + 16:
         return False
-    finally:
-        with secrets_crypto._aesgcm_lock:
-            secrets_crypto._aesgcm = previous
+    aad = build_aad(
+        operator_id=UUID(str(row["operator_id"])),
+        provider=str(row["provider"]),
+        label=str(row["label"]),
+        key_version=int(row["key_version"]),  # type: ignore[arg-type]
+    )
+    try:
+        AESGCM(candidate_key).decrypt(blob[:NONCE_LEN], blob[NONCE_LEN:], aad)
+    except InvalidTag:
+        return False
     return True
 
 
@@ -359,18 +381,34 @@ def bootstrap(conn: psycopg.Connection[object]) -> BootResult:
 # ---------------------------------------------------------------------------
 
 
-def generate_and_persist_root_secret() -> tuple[bytes, list[str]]:
-    """Generate a fresh root secret, persist it, and return (key, phrase).
+def generate_root_secret_in_memory() -> tuple[bytes, bytes, list[str]]:
+    """Generate a fresh root secret WITHOUT persisting it yet.
 
-    Called from the credential-save handler when ``boot_state ==
-    clean_install``. Returns the derived broker-encryption key and the
-    24-word recovery phrase that the UI must show the operator exactly
-    once. Caller is responsible for installing the key into
-    ``app.state`` and flipping the boot state to ``normal``.
+    Returns ``(root_secret, derived_key, phrase)``. The caller is
+    expected to:
+
+      1. Install ``derived_key`` into the secrets_crypto cache.
+      2. Attempt the DB write (e.g. ``store_credential``).
+      3. On success, call :func:`persist_generated_root_secret` to
+         flush the file to disk and return the phrase to the operator.
+      4. On failure, call :func:`abandon_generated_root_secret` to
+         clear the cache so the next attempt re-runs the gen-then-store
+         dance fresh.
+
+    This split exists so a DB error after key generation does not
+    leave the operator with a persisted file whose recovery phrase
+    they never saw (review-prevention: phrase-lost-on-DB-error
+    surfaced on PR #118).
     """
     root_secret = secrets.token_bytes(ROOT_SECRET_LEN)
-    write_root_secret(root_secret)
-    return derive_broker_encryption_key(root_secret), encode_phrase(root_secret)
+    derived = derive_broker_encryption_key(root_secret)
+    phrase = encode_phrase(root_secret)
+    return root_secret, derived, phrase
+
+
+def persist_generated_root_secret(root_secret: bytes) -> Path:
+    """Flush a previously-generated root secret to disk."""
+    return write_root_secret(root_secret)
 
 
 def recover_from_phrase(conn: psycopg.Connection[object], phrase: list[str] | str) -> bytes:

@@ -38,7 +38,7 @@ from app.api.auth import require_session
 from app.api.auth_bootstrap import require_master_key
 from app.db import get_conn
 from app.security import master_key
-from app.security.secrets_crypto import set_active_key
+from app.security.secrets_crypto import clear_active_key, set_active_key
 from app.security.sessions import SessionRow
 from app.services.broker_credentials import (
     CredentialAlreadyExists,
@@ -151,13 +151,29 @@ def create(
     subsequent save the phrase field is null.
     """
     phrase: list[str] | None = None
+    pending_root_secret: bytes | None = None
+
+    # Lazy-gen path. Serialised across requests by lazy_gen_lock so
+    # two simultaneous first-saves cannot each generate a distinct
+    # root secret. We re-check boot_state under the lock for the
+    # standard double-checked-locking pattern -- the first request
+    # through flips it to "normal" while still holding the lock.
     if getattr(request.app.state, "boot_state", "clean_install") == "clean_install":
-        derived, phrase = master_key.generate_and_persist_root_secret()
-        set_active_key(derived)
-        request.app.state.boot_state = "normal"
-        request.app.state.needs_setup = False
-        request.app.state.recovery_required = False
-        logger.info("master key lazy-generated on first credential save")
+        with master_key.lazy_gen_lock:
+            if getattr(request.app.state, "boot_state", "clean_install") == "clean_install":
+                pending_root_secret, derived, phrase = master_key.generate_root_secret_in_memory()
+                # Install the key into the cipher cache so the
+                # store_credential call below can encrypt against it.
+                # The on-disk file is NOT written yet -- if the DB
+                # write fails we will clear the cache and the next
+                # attempt will start fresh, so the operator never
+                # ends up with a persisted secret whose phrase they
+                # never saw.
+                set_active_key(derived)
+                request.app.state.boot_state = "normal"
+                request.app.state.needs_setup = False
+                request.app.state.recovery_required = False
+                logger.info("master key lazy-generated on first credential save (pending DB confirm)")
 
     try:
         meta = store_credential(
@@ -168,15 +184,41 @@ def create(
             plaintext=body.secret,
         )
     except CredentialValidationError as exc:
+        if pending_root_secret is not None:
+            # Roll back the in-memory key install so the next attempt
+            # generates a fresh secret. The on-disk file was never
+            # written, so there is nothing to delete.
+            clear_active_key()
+            request.app.state.boot_state = "clean_install"
+            request.app.state.needs_setup = True
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
     except CredentialAlreadyExists as exc:
+        if pending_root_secret is not None:
+            clear_active_key()
+            request.app.state.boot_state = "clean_install"
+            request.app.state.needs_setup = True
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="credential already exists",
         ) from exc
+    except Exception:
+        if pending_root_secret is not None:
+            clear_active_key()
+            request.app.state.boot_state = "clean_install"
+            request.app.state.needs_setup = True
+        raise
+
+    # Store succeeded. NOW it is safe to flush the root secret to
+    # disk -- the operator will see the phrase in this response, and
+    # the persisted file matches the encrypted ciphertext we just
+    # committed.
+    if pending_root_secret is not None:
+        master_key.persist_generated_root_secret(pending_root_secret)
+        logger.info("master key root secret persisted to disk after first credential commit")
+
     return CreateCredentialResponse(credential=_to_out(meta), recovery_phrase=phrase)
 
 

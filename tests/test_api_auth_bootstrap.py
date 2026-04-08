@@ -38,12 +38,20 @@ class TestBootstrapState:
 
 
 class TestRecoverInputValidation:
+    def test_recover_called_outside_recovery_required_409(self, client: TestClient) -> None:
+        """The state-machine guard fires before any phrase processing."""
+        resp = client.post("/auth/recover", json={"phrase": "abandon " * 24})
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "recovery not required"
+
     def test_wrong_word_count_400(self, client: TestClient) -> None:
+        client.app.state.recovery_required = True  # type: ignore[attr-defined]
         resp = client.post("/auth/recover", json={"phrase": "abandon abandon"})
         assert resp.status_code == 400
         assert resp.json()["detail"] == "recovery phrase invalid"
 
     def test_empty_phrase_422(self, client: TestClient) -> None:
+        client.app.state.recovery_required = True  # type: ignore[attr-defined]
         # min_length=1 on the pydantic field -> 422 before reaching the
         # handler. Important: the handler never sees an empty body.
         resp = client.post("/auth/recover", json={"phrase": ""})

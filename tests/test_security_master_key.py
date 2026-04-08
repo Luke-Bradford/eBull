@@ -173,6 +173,29 @@ class TestBootResult:
             r.state = "clean_install"  # type: ignore[misc]
 
 
+class TestGenerateSplit:
+    """The two-phase generate -> persist API exists so a DB error after
+    key install never leaves the operator with a persisted root secret
+    whose phrase they never saw (review-prevention from PR #118)."""
+
+    def test_in_memory_does_not_touch_disk(self, isolated_data_dir: Path) -> None:
+        master_key.generate_root_secret_in_memory()
+        assert not (isolated_data_dir / "root_secret.bin").exists()
+
+    def test_persist_writes_file(self, isolated_data_dir: Path) -> None:
+        secret, _, _ = master_key.generate_root_secret_in_memory()
+        master_key.persist_generated_root_secret(secret)
+        assert (isolated_data_dir / "root_secret.bin").read_bytes() == secret
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only perms check")
+def test_data_dir_locked_to_0700(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EBULL_DATA_DIR", str(tmp_path / "secrets"))
+    write_root_secret(os.urandom(32))
+    mode = (tmp_path / "secrets").stat().st_mode & 0o777
+    assert mode == 0o700
+
+
 def test_bootstrap_function_exists() -> None:
     """Smoke test: bootstrap is importable and callable.
 

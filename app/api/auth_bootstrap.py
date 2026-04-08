@@ -108,6 +108,17 @@ def recover(
     """
     response.headers["Cache-Control"] = "no-store"
 
+    # Refuse the call entirely if the app is not in recovery_required
+    # mode (acceptance criterion / ADR-0003 §6). Recovery is meant to
+    # be used exactly once after a wiped data dir; calling it from a
+    # healthy boot state is a state-machine error and we surface it
+    # as 409 rather than silently re-deriving the key.
+    if not getattr(request.app.state, "recovery_required", False):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="recovery not required",
+        )
+
     # Pre-validate word count cheaply so a clearly-wrong submission
     # never reaches the DB verify path.
     words = body.phrase.strip().split()

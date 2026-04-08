@@ -125,6 +125,12 @@ def _build_aad(
     return f"{operator_id}|{provider}|{label}|{key_version}".encode()
 
 
+# Public alias for in-package callers (master_key verification path)
+# that need to build AAD without going through encrypt/decrypt. Keeps
+# the AAD format definition in exactly one place.
+build_aad = _build_aad
+
+
 def encrypt(
     plaintext: str,
     *,
