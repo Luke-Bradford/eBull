@@ -81,6 +81,18 @@ class Settings(BaseSettings):
     # logged again, never written to disk. See ADR 0002 §3.
     bootstrap_token: str | None = None
 
+    # --- Broker secret encryption (issue #99 / ADR 0001) ----------------
+    # Base64-encoded 32-byte key used for AES-256-GCM encryption of broker
+    # credentials (broker_credentials.ciphertext). Sourced from
+    # EBULL_SECRETS_KEY. The server refuses to start if this is missing or
+    # does not decode to exactly 32 bytes -- we never silently generate a
+    # key, because that would lock the existing ciphertext rows out after
+    # the next restart. Rotation is manual and documented in ADR 0001.
+    #
+    # Generate with:
+    #     python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
+    secrets_key: str | None = None
+
     @field_validator("service_token")
     @classmethod
     def _service_token_min_length(cls, v: str | None) -> str | None:
