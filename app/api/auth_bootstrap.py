@@ -127,15 +127,14 @@ def recover(
             detail="recovery phrase invalid",
         )
 
-    # ``recover_from_phrase`` acquires ``lazy_gen_lock`` internally
-    # for the verify -> write -> install -> set-loaded sequence,
-    # AND mutates ``app.state.broker_key_loaded`` from inside the
-    # lock. We must NOT do those mutations here because a queued
-    # lazy-gen waiter would acquire the lock the instant recovery
-    # returned, observe ``broker_key_loaded=False``, and overwrite
-    # the file we just wrote (review feedback PR #118 round 7).
-    # The remaining ``app.state`` flags below do not gate lazy-gen
-    # and are safe to set after lock release.
+    # ``recover_from_phrase`` performs the entire verify -> write
+    # -> install -> flip-all-state sequence atomically inside
+    # ``lazy_gen_lock``. We must NOT touch ``app.state`` from
+    # here for any gating flag: a concurrent reader of
+    # bootstrap-state or any handler gated on ``require_master_key``
+    # could otherwise observe an incoherent intermediate state
+    # between lock release and our writes (review feedback
+    # PR #118 round 8).
     try:
         master_key.recover_from_phrase(conn, body.phrase, request.app.state)
     except (RecoveryPhraseError, master_key.RecoveryVerificationError) as exc:
@@ -148,9 +147,6 @@ def recover(
             detail="recovery phrase invalid",
         ) from exc
 
-    request.app.state.boot_state = "normal"
-    request.app.state.recovery_required = False
-    request.app.state.needs_setup = False
     logger.info("master key recovered from phrase; boot_state=normal")
 
     return RecoverResponse(boot_state="normal", recovery_required=False)

@@ -258,8 +258,16 @@ def _key_decrypts_newest_credential(conn: psycopg.Connection[object], candidate_
 
     row = _newest_active_credential(conn)
     if row is None:
-        # No verifiable row -- treat as match. Caller decides whether
-        # this is a valid state (clean install vs. all-orphans).
+        # No verifiable row -- vacuously "matches". This branch is
+        # ONLY safe for callers that have already established the
+        # context (env-override boot validation against an
+        # all-orphans / clean-install state). The recovery path
+        # MUST NOT reach here: ``recover_from_phrase`` enforces a
+        # caller-side guard that refuses recovery when no active
+        # credential exists, because there is nothing to verify
+        # against and accepting an arbitrary phrase would let an
+        # operator install a key that decrypts nothing
+        # (review feedback PR #118 round 8).
         return True
 
     blob = bytes(row["ciphertext"])  # type: ignore[arg-type]
@@ -447,9 +455,31 @@ def recover_from_phrase(conn: psycopg.Connection[object], phrase: list[str] | st
 
     derived = derive_broker_encryption_key(root_secret)
     with lazy_gen_lock:
+        # Refuse recovery when there is nothing to verify against.
+        # ``_key_decrypts_newest_credential`` returns True on a
+        # missing row (vacuous match), which would otherwise let an
+        # operator install an arbitrary key in a no-credentials
+        # state and lock themselves out the moment a credential
+        # was created with a different key. recovery_required can
+        # only be set when ``compute_boot_state`` saw credentials,
+        # so reaching here with no row is a state-machine error
+        # (review feedback PR #118 round 8).
+        if _newest_active_credential(conn) is None:
+            raise RecoveryVerificationError("no active credential to verify recovery phrase against")
         if not _key_decrypts_newest_credential(conn, derived):
             raise RecoveryVerificationError("recovery phrase did not match stored broker credentials")
         write_root_secret(root_secret)
         set_active_key(derived)
+        # ALL gating flags must flip atomically inside the lock so
+        # a concurrent client cannot observe an incoherent
+        # intermediate state -- e.g. ``broker_key_loaded=True``
+        # while ``recovery_required`` is still ``True`` (which
+        # would cause ``require_master_key`` to 503 a request
+        # that should succeed) or a stale ``bootstrap-state``
+        # response that mixes the two (review feedback PR #118
+        # round 8).
         app_state.broker_key_loaded = True  # type: ignore[attr-defined]
+        app_state.boot_state = "normal"  # type: ignore[attr-defined]
+        app_state.recovery_required = False  # type: ignore[attr-defined]
+        app_state.needs_setup = False  # type: ignore[attr-defined]
     return derived

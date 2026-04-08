@@ -40,7 +40,11 @@ class TestBootstrapState:
 class TestRecoverInputValidation:
     def test_recover_called_outside_recovery_required_409(self, client: TestClient) -> None:
         """The state-machine guard fires before any phrase processing."""
-        resp = client.post("/auth/recover", json={"phrase": "abandon " * 24})
+        # Submit a structurally valid 24-word phrase so the test
+        # cleanly isolates the 409 (state-machine guard) from the
+        # 400 (word-count guard) -- the 409 must fire first.
+        phrase = " ".join(["abandon"] * 24)
+        resp = client.post("/auth/recover", json={"phrase": phrase})
         assert resp.status_code == 409
         assert resp.json()["detail"] == "recovery not required"
 

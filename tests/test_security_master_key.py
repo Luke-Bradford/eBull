@@ -226,3 +226,48 @@ def test_bootstrap_function_exists() -> None:
     tests, which exercise the lifespan path end-to-end.
     """
     assert callable(bootstrap)
+
+
+class TestRecoverFromPhraseGuards:
+    """State-machine guards on recover_from_phrase (#118 round 8)."""
+
+    def test_no_active_credential_rejected(self, isolated_data_dir: Path) -> None:
+        """Recovery must refuse when there is nothing to verify against.
+
+        ``_key_decrypts_newest_credential`` returns True on a missing
+        row (vacuous match) which would otherwise let an operator
+        install an arbitrary key in a no-credentials state. The
+        recovery flow has its own caller-side guard that catches
+        this; this test pins it.
+        """
+        from unittest.mock import MagicMock
+
+        from app.security.master_key import (
+            RecoveryVerificationError,
+            generate_root_secret_in_memory,
+            recover_from_phrase,
+        )
+
+        _, _, phrase = generate_root_secret_in_memory()
+        # File from the in-memory generation has not been written;
+        # nothing else on disk either.
+
+        # Cursor returns an empty result -> _newest_active_credential
+        # returns None -> recover_from_phrase must raise.
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchone.return_value = None
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+
+        app_state = MagicMock()
+        app_state.broker_key_loaded = False
+
+        with pytest.raises(RecoveryVerificationError, match="no active credential"):
+            recover_from_phrase(conn, phrase, app_state)
+
+        # State must NOT have flipped on the failure path.
+        assert app_state.broker_key_loaded is False
+        # And the file must NOT have been written.
+        assert not root_secret_path().exists()
