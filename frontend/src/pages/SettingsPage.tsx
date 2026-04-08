@@ -326,10 +326,11 @@ function BrokerCredentialsSection(): JSX.Element {
         {/*
           Both inner branches guard on `phrase !== null` even though
           the Modal is already gated on `isOpen={phrase !== null}`.
-          The confirm branch needs it for TypeScript narrowing
-          (RecoveryPhraseConfirm's `phrase` prop is required); the
-          cancel branch keeps the symmetric guard so the invariant is
-          self-documenting on both views (PR #125 round 4 nit).
+          The confirm branch needs the guard for TypeScript narrowing
+          (RecoveryPhraseConfirm's `phrase` prop is required and
+          non-nullable). The cancel branch carries the same guard so
+          the "this view never renders without a phrase" invariant is
+          visible on both sides, not just one.
         */}
         {phrase !== null && phraseModalView === "confirm" ? (
           <RecoveryPhraseConfirm
