@@ -145,15 +145,24 @@ When `POST /auth/recover` receives a phrase:
    memory via HKDF.
 3. **Wrong-phrase verification (conditional):**
    - If at least one row exists in `broker_credentials WHERE revoked_at IS
-     NULL`: select one such row (most recent first), attempt
-     `secrets_crypto.decrypt(...)` against it with the derived key and the
-     row's AAD inputs. On `CredentialDecryptError` → `400
+     NULL`: select the **most recent active non-revoked credential**, defined
+     deterministically as `ORDER BY created_at DESC, id DESC LIMIT 1` (the
+     `id` tiebreaker keeps the contract deterministic when two rows share a
+     `created_at` to microsecond precision). Attempt
+     `secrets_crypto.decrypt(...)` against that row with the derived key and
+     the row's AAD inputs. On `CredentialDecryptError` → `400
      phrase_does_not_match_database`. Nothing persisted, nothing cached, boot
      state unchanged.
    - If no active non-revoked rows exist: skip verification entirely. The
      phrase is accepted on checksum validity alone. (See "trade-offs" below.)
-4. Persist the root secret to `<data-dir>/secrets/master.key` atomically
-   (tempfile + rename, mode 0600).
+4. Persist the root secret to `<data-dir>/secrets/master.key` atomically.
+   The temporary file MUST be created in the **same destination directory**
+   (`<data-dir>/secrets/`) as the final path, so that the subsequent
+   `os.replace` is a same-filesystem rename and therefore atomic. Creating
+   the temp file in the system temp directory is not acceptable: on
+   Docker/volume deployments the system temp dir is frequently on a
+   different filesystem from the mounted data volume, which would degrade
+   the rename to a non-atomic copy. The file is written with mode `0600`.
 5. Populate the in-memory broker-encryption key on `app.state`.
 6. Flip `app.state.boot_state = normal`, `app.state.recovery_required = false`.
 7. Return 204.
@@ -280,6 +289,20 @@ manages its own master key automatically."*
 If both `EBULL_SECRETS_KEY` and a non-empty `secrets/master.key` exist and
 disagree, the env var wins (it is the explicit override) and a loud warning
 is logged.
+
+**Env override mismatch behaviour.** If `EBULL_SECRETS_KEY` is set and
+encrypted credentials exist in the database, the bootstrap module MUST
+verify the override key by attempting to decrypt the most recent active
+non-revoked credential (same `ORDER BY created_at DESC, id DESC LIMIT 1`
+contract as §4) before completing startup. On verification failure, the
+backend MUST fail loud at startup with a clear configuration error
+identifying the mismatch — it does **not** silently continue, and it does
+**not** fall through into `recovery_required`. The recovery flow is only
+for the file-based bootstrap path; an operator who has explicitly opted
+into env-override mode is responsible for supplying a key that matches
+their database, and a mismatch is a configuration bug, not a recovery
+scenario. If no active non-revoked rows exist, verification is skipped and
+the override is accepted on its own (same trade-off as §4).
 
 ### 10. Required refactor of `secrets_crypto.py`
 
