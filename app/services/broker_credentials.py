@@ -264,6 +264,15 @@ def revoke_credential(
     row returns ``CredentialNotFound`` so the caller gets a clear 404 and
     cannot accidentally treat "already revoked" as "just revoked".
     """
+    # Transaction discipline: every exit path from this function leaves
+    # the connection in either a committed or rolled-back state, never
+    # in an open implicit transaction. psycopg3 opens an implicit txn
+    # on any statement (even an UPDATE that touches no rows), so the
+    # rollback path matters for the not-found case as well as the
+    # genuine-error case. The structure below ensures rollback happens
+    # in a `finally` block when committed=False, so a rollback that
+    # itself raises does not silently mask the original exception.
+    committed = False
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -278,24 +287,25 @@ def revoke_credential(
             )
             rowcount = cur.rowcount
         if rowcount == 0:
-            # The UPDATE matched nothing but still opened an implicit
-            # transaction on the connection -- psycopg3 connections are
-            # in a transaction after any statement. Roll it back so the
-            # connection returns to the pool in a clean state, then
-            # raise. (Without the rollback, the next checkout from the
-            # pool would inherit an open transaction.)
-            conn.rollback()
             raise CredentialNotFound(f"credential {credential_id} not found")
         conn.commit()
-    except CredentialNotFound:
-        raise
-    except Exception:
-        # Any unexpected DB error (transient connectivity, deadlock,
-        # etc.) leaves the connection in an aborted-transaction state
-        # if we do not roll back here -- it would then be returned to
-        # the pool dirty and the next checkout would fail.
-        conn.rollback()
-        raise
+        committed = True
+    finally:
+        if not committed:
+            # Either CredentialNotFound on the no-row branch or any
+            # unexpected DB error. In both cases the connection has an
+            # open (and possibly aborted) transaction we must clear
+            # before returning it to the pool.
+            try:
+                conn.rollback()
+            except Exception:
+                # A rollback that itself raises (e.g. broken
+                # connection) is logged via the standard exception
+                # chaining and does not mask the original error,
+                # because we are in a `finally` -- the original
+                # exception will continue to propagate after we exit
+                # this block.
+                logger.exception("broker_credentials.revoke_credential: rollback failed")
 
 
 def _write_access_log(
