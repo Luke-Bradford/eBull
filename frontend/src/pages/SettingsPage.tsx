@@ -324,11 +324,12 @@ function BrokerCredentialsSection(): JSX.Element {
         label="Recovery phrase confirmation"
       >
         {/*
-          The Modal above is already gated on `isOpen={phrase !== null}`,
-          so when these branches render `phrase` is guaranteed non-null.
-          We still need the null check on the `RecoveryPhraseConfirm`
-          phrase prop for TypeScript narrowing -- so it stays inline
-          on the confirm branch only.
+          Both inner branches guard on `phrase !== null` even though
+          the Modal is already gated on `isOpen={phrase !== null}`.
+          The confirm branch needs it for TypeScript narrowing
+          (RecoveryPhraseConfirm's `phrase` prop is required); the
+          cancel branch keeps the symmetric guard so the invariant is
+          self-documenting on both views (PR #125 round 4 nit).
         */}
         {phrase !== null && phraseModalView === "confirm" ? (
           <RecoveryPhraseConfirm
@@ -337,7 +338,7 @@ function BrokerCredentialsSection(): JSX.Element {
             onCancel={requestPhraseDismiss}
           />
         ) : null}
-        {phraseModalView === "confirm-cancel" ? (
+        {phrase !== null && phraseModalView === "confirm-cancel" ? (
           <div className="flex flex-col gap-4">
             <h2 className="text-sm font-semibold text-slate-700">
               Close without confirming?
