@@ -134,6 +134,65 @@ describe("SettingsPage — broker credentials empty state", () => {
 });
 
 describe("SettingsPage — first-save recovery phrase modal", () => {
+  it("clears any prior createError before opening the phrase modal on a successful save", async () => {
+    // Regression for PR #125 round 2 review: a stale createError from
+    // a prior failed attempt must not remain visible behind the
+    // closed modal alongside a fresh loadError. Here we ensure the
+    // close path zeroes out createError so the operator never sees
+    // two unrelated error messages stacked together.
+    const user = userEvent.setup();
+    mockedCreate
+      .mockRejectedValueOnce(new ApiError(409, "conflict"))
+      .mockResolvedValueOnce(withPhrase());
+    mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([makeRow()]);
+
+    render(<SettingsPage />);
+    await screen.findByText(/No broker credentials saved yet/i);
+    await fillAndSubmit("primary", "secret-value-1234");
+    expect(
+      await screen.findByText(/credential with that label already exists/i),
+    ).toBeInTheDocument();
+
+    // Second submit succeeds and opens the modal.
+    await user.click(screen.getByRole("button", { name: /save credential/i }));
+    await screen.findByRole("dialog");
+
+    // Pass the challenge — closePhraseModal must clear createError.
+    await advancePastWrittenDownGate();
+    await answerChallengeCorrectly();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+    expect(
+      screen.queryByText(/credential with that label already exists/i),
+    ).toBeNull();
+  });
+
+  it("exposes the phrase modal with a single stable accessible name across both inner views", async () => {
+    // Regression for PR #125 round 2 review: previously the dialog
+    // wired aria-labelledby to either an sr-only span (in the confirm
+    // view) or an h2 (in the confirm-cancel view). Switching to
+    // aria-label means the dialog has ONE accessible name regardless
+    // of which inner view is active.
+    const user = userEvent.setup();
+    mockedCreate.mockResolvedValueOnce(withPhrase());
+    render(<SettingsPage />);
+    await screen.findByText(/No broker credentials saved yet/i);
+    await fillAndSubmit("primary", "secret-value-1234");
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Recovery phrase confirmation",
+    });
+    expect(dialog).toHaveAttribute("aria-label", "Recovery phrase confirmation");
+    expect(dialog).not.toHaveAttribute("aria-labelledby");
+
+    // Switch to confirm-cancel view and re-assert the same name.
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(
+      screen.getByRole("dialog", { name: "Recovery phrase confirmation" }),
+    ).toBeInTheDocument();
+  });
+
   it("opens the modal when the create response carries a recovery_phrase", async () => {
     mockedCreate.mockResolvedValueOnce(withPhrase());
     mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([makeRow()]);

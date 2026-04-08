@@ -33,7 +33,7 @@
  * (e.g. moving from the display stage to the challenge stage in
  * RecoveryPhraseConfirm) are picked up automatically.
  */
-import { useCallback, useEffect, useId, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 
 const TABBABLE_SELECTOR = [
@@ -56,7 +56,23 @@ function getTabbables(root: HTMLElement): HTMLElement[] {
   );
 }
 
-export interface ModalProps {
+/**
+ * Modal accepts EITHER an `aria-labelledby` wire OR an `aria-label`
+ * string, never both. The two are mutually exclusive on a `dialog`
+ * element: WAI-ARIA says aria-labelledby takes precedence, but having
+ * both is an authoring smell and tools (axe-core) flag it.
+ *
+ * `label` is the right choice when the caller's content varies across
+ * inner views (e.g. a phrase view AND a confirm-cancel view) but the
+ * dialog as a whole has a single, stable accessible name. Trying to
+ * point `aria-labelledby` at "whichever heading happens to be mounted
+ * right now" is fragile and was the underlying cause of PR #125 round
+ * 2's screen-reader correctness finding.
+ *
+ * `labelledBy` is the right choice when the dialog has a single
+ * stable heading inside it that exactly matches the accessible name.
+ */
+export type ModalProps = {
   readonly isOpen: boolean;
   /**
    * Called when the operator attempts to dismiss the modal via Escape
@@ -66,20 +82,17 @@ export interface ModalProps {
    * component never unmounts itself.
    */
   readonly onRequestClose: () => void;
-  /**
-   * The id of the heading element inside `children`. Wired into
-   * aria-labelledby on the dialog container so screen readers announce
-   * the modal title on open. The caller is responsible for rendering
-   * an element with this id.
-   */
-  readonly labelledBy: string;
   readonly children: ReactNode;
-}
+} & (
+  | { readonly labelledBy: string; readonly label?: undefined }
+  | { readonly label: string; readonly labelledBy?: undefined }
+);
 
 export function Modal({
   isOpen,
   onRequestClose,
   labelledBy,
+  label,
   children,
 }: ModalProps): JSX.Element | null {
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -183,6 +196,7 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={labelledBy}
+        aria-label={label}
         tabIndex={-1}
         onKeyDown={handleKeyDown}
         className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-lg bg-white p-5 shadow-xl outline-none"
@@ -193,12 +207,3 @@ export function Modal({
   );
 }
 
-/**
- * Convenience hook for callers that need to mint a stable id for the
- * heading element they pass to `labelledBy`. Re-exports React's
- * `useId` so call sites don't have to import it separately and so the
- * intent ("this id is for an aria-labelledby wire") is grep-able.
- */
-export function useModalHeadingId(): string {
-  return useId();
-}

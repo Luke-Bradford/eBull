@@ -17,7 +17,7 @@ import {
   revokeBrokerCredential,
 } from "@/api/brokerCredentials";
 import { RecoveryPhraseConfirm } from "@/components/security/RecoveryPhraseConfirm";
-import { Modal, useModalHeadingId } from "@/components/ui/Modal";
+import { Modal } from "@/components/ui/Modal";
 
 const MIN_SECRET_LEN = 4;
 
@@ -75,7 +75,6 @@ function BrokerCredentialsSection(): JSX.Element {
   const [phrase, setPhrase] = useState<readonly string[] | null>(null);
   const [phraseModalView, setPhraseModalView] =
     useState<PhraseModalView>("confirm");
-  const phraseHeadingId = useModalHeadingId();
 
   const refresh = useCallback(async () => {
     setLoadError(null);
@@ -159,14 +158,24 @@ function BrokerCredentialsSection(): JSX.Element {
     }
   }
 
-  function handlePhraseConfirmed(): void {
-    // Operator passed the 3-word challenge. Drop the phrase from state
-    // (it lives nowhere else), close the modal, and run the deferred
-    // list refresh so the operator sees the new row -- and any
-    // refresh failure -- now that the modal is no longer covering
-    // the page (review feedback PR #125 round 1).
+  function closePhraseModal(): void {
+    // Single shared close path for both the challenge-confirm success
+    // and the "Close anyway" branch (review feedback PR #125 round 2).
+    // Responsibilities:
+    //   - drop the phrase from state (it lives nowhere else)
+    //   - reset the inner view back to "confirm" so the next time the
+    //     modal opens it starts on the phrase, not on the warning
+    //   - clear any stale createError from a prior failed attempt --
+    //     otherwise after the modal closes the operator could see a
+    //     leftover create error AND a fresh load error side by side
+    //   - run the deferred list refresh now that the modal no longer
+    //     covers the page, so any refresh failure (loadError) is
+    //     visible to the operator (PR #125 round 1)
+    // No revoke -- the credential row is already committed and the
+    // phrase is root-secret scoped, not row scoped.
     setPhrase(null);
     setPhraseModalView("confirm");
+    setCreateError(null);
     void refresh();
   }
 
@@ -181,18 +190,6 @@ function BrokerCredentialsSection(): JSX.Element {
   function handleConfirmCancelKeep(): void {
     // "Go back" -- operator changed their mind, return to the phrase.
     setPhraseModalView("confirm");
-  }
-
-  function handleConfirmCancelClose(): void {
-    // "Yes, close anyway" -- operator has accepted the warning. Drop
-    // the phrase and close the modal. The credential row is already
-    // committed; we do not revoke it (the phrase is root-secret
-    // scoped, not row scoped, so revoking would not "undo" anything
-    // and would only add a second failure path). Run the deferred
-    // list refresh now that the modal is no longer covering the page.
-    setPhrase(null);
-    setPhraseModalView("confirm");
-    void refresh();
   }
 
   return (
@@ -318,30 +315,24 @@ function BrokerCredentialsSection(): JSX.Element {
       <Modal
         isOpen={phrase !== null}
         onRequestClose={requestPhraseDismiss}
-        labelledBy={phraseHeadingId}
+        // aria-label (not aria-labelledby) on purpose: the dialog has
+        // two inner views ("confirm" and "confirm-cancel") with
+        // different visible headings, but the dialog as a whole has a
+        // single stable accessible name. Trying to point
+        // aria-labelledby at "whichever heading is currently mounted"
+        // is fragile -- see PR #125 round 2 review.
+        label="Recovery phrase confirmation"
       >
         {phrase !== null && phraseModalView === "confirm" ? (
-          // The h2 inside RecoveryPhraseConfirm carries its own id. We
-          // mirror that into a hidden span with the modal's labelledBy
-          // id so the dialog has a stable, owned label without forcing
-          // the inner component to take an id prop.
-          <>
-            <span id={phraseHeadingId} className="sr-only">
-              Recovery phrase confirmation
-            </span>
-            <RecoveryPhraseConfirm
-              phrase={phrase}
-              onConfirmed={handlePhraseConfirmed}
-              onCancel={requestPhraseDismiss}
-            />
-          </>
+          <RecoveryPhraseConfirm
+            phrase={phrase}
+            onConfirmed={closePhraseModal}
+            onCancel={requestPhraseDismiss}
+          />
         ) : null}
         {phrase !== null && phraseModalView === "confirm-cancel" ? (
           <div className="flex flex-col gap-4">
-            <h2
-              id={phraseHeadingId}
-              className="text-sm font-semibold text-slate-700"
-            >
+            <h2 className="text-sm font-semibold text-slate-700">
               Close without confirming?
             </h2>
             <p className="text-xs text-slate-600">{CANCEL_WARNING_TEXT}</p>
@@ -355,7 +346,7 @@ function BrokerCredentialsSection(): JSX.Element {
               </button>
               <button
                 type="button"
-                onClick={handleConfirmCancelClose}
+                onClick={closePhraseModal}
                 className="rounded border border-rose-300 bg-white px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50"
               >
                 Close anyway

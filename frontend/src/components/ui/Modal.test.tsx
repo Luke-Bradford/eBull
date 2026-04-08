@@ -58,6 +58,25 @@ describe("Modal — accessibility wiring", () => {
     expect(dialog).toHaveAttribute("aria-modal", "true");
     expect(dialog).toHaveAttribute("aria-labelledby", "modal-heading");
   });
+
+  it("supports aria-label as an alternative to aria-labelledby", () => {
+    render(
+      <Modal
+        isOpen={true}
+        onRequestClose={vi.fn()}
+        label="Recovery phrase confirmation"
+      >
+        <button type="button">first</button>
+      </Modal>,
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveAttribute("aria-label", "Recovery phrase confirmation");
+    expect(dialog).not.toHaveAttribute("aria-labelledby");
+    // The dialog is discoverable by its accessible name.
+    expect(
+      screen.getByRole("dialog", { name: "Recovery phrase confirmation" }),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("Modal — focus management", () => {
