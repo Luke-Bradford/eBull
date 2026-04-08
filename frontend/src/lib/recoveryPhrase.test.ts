@@ -21,11 +21,19 @@ const VALID_PHRASE: readonly string[] = [
   "art",
 ];
 
-// Non-trivial parity vector generated from the backend's
-// `encode_phrase(bytes(range(32)))` so byte-order regressions in
-// the TS port surface immediately. The all-zeros vector cannot
-// catch a big-/little-endian mismatch because every entropy byte
-// is identical. This vector exercises 32 distinct byte values.
+// Non-trivial parity vector. Exercises 32 distinct entropy byte
+// values (`bytes(range(32))`) so any byte-order regression in the
+// TS port — which the all-zeros vector cannot detect because every
+// byte is identical — surfaces against the backend immediately.
+//
+// To re-derive this string from the source of truth (the backend
+// encoder in `app/security/recovery_phrase.py`), run:
+//
+//   uv run python -c "from app.security.recovery_phrase import encode_phrase; print(' '.join(encode_phrase(bytes(range(32)))))"
+//
+// Output is the exact string below. If this test ever starts
+// failing after a backend change to the encoder, re-run the
+// command above and replace the literal — DO NOT hand-edit it.
 const NON_TRIVIAL_PHRASE: readonly string[] =
   "abandon amount liar amount expire adjust cage candy arch gather drum bullet absurd math era live bid rhythm alien crouch range attend journey unaware".split(
     " ",
