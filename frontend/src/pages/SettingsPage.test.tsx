@@ -147,10 +147,10 @@ describe("SettingsPage — first-save recovery phrase modal", () => {
     expect(
       within(dialog).getByText(/Write down your recovery phrase/i),
     ).toBeInTheDocument();
-    // Saved row reflected in the list behind the modal.
-    await waitFor(() => {
-      expect(mockedList).toHaveBeenCalledTimes(2);
-    });
+    // List refresh is DEFERRED until the modal closes -- review
+    // feedback PR #125 round 1. Only the initial mount fetch should
+    // have fired so far.
+    expect(mockedList).toHaveBeenCalledTimes(1);
   });
 
   it("does NOT open the modal when create returns no recovery_phrase", async () => {
@@ -167,7 +167,7 @@ describe("SettingsPage — first-save recovery phrase modal", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("closes the modal after the operator passes the challenge", async () => {
+  it("closes the modal and runs the deferred list refresh after the challenge passes", async () => {
     mockedCreate.mockResolvedValueOnce(withPhrase());
     mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([makeRow()]);
 
@@ -175,12 +175,19 @@ describe("SettingsPage — first-save recovery phrase modal", () => {
     await screen.findByText(/No broker credentials saved yet/i);
     await fillAndSubmit("primary", "secret-value-1234");
     await screen.findByRole("dialog");
+    expect(mockedList).toHaveBeenCalledTimes(1);
 
     await advancePastWrittenDownGate();
     await answerChallengeCorrectly();
 
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).toBeNull();
+    });
+    // The deferred refresh runs after the modal closes, so any
+    // refresh failure surfaces to the operator instead of being
+    // hidden behind the modal.
+    await waitFor(() => {
+      expect(mockedList).toHaveBeenCalledTimes(2);
     });
   });
 });
@@ -262,6 +269,10 @@ describe("SettingsPage — phrase modal cancel gate", () => {
     // No revoke call -- the credential row stays committed (the phrase
     // is root-secret scoped, not row scoped).
     expect(mockedRevoke).not.toHaveBeenCalled();
+    // Deferred list refresh runs after the modal closes.
+    await waitFor(() => {
+      expect(mockedList).toHaveBeenCalledTimes(2);
+    });
   });
 });
 

@@ -90,12 +90,26 @@ export function Modal({
 
   useEffect(() => {
     if (!isOpen) return;
-    previouslyFocusedRef.current =
-      (document.activeElement as HTMLElement | null) ?? null;
-    // Focus the first tabbable element on open. Defer to the next tick
-    // so children that mount tabbables in their own effects (e.g. an
-    // input with autoFocus) settle first.
+    // Capture the previously-focused element BEFORE moving focus into
+    // the dialog. Two guards (review feedback PR #125 round 1):
+    //   1. Only capture if `document.activeElement` is OUTSIDE the
+    //      dialog. A rapid open→close→open cycle (e.g. parent toggles
+    //      `isOpen` twice in the same tick) could otherwise capture
+    //      the first tabbable INSIDE the dialog as the "previous"
+    //      focus, causing restoration to land on a now-unmounted
+    //      node on the next close.
+    //   2. The cleanup verifies the captured node is still attached
+    //      to the document before calling .focus(), so a parent that
+    //      tears down both the trigger and the modal in the same
+    //      flow does not throw.
     const dialog = dialogRef.current;
+    const active = document.activeElement as HTMLElement | null;
+    if (
+      active !== null &&
+      (dialog === null || !dialog.contains(active))
+    ) {
+      previouslyFocusedRef.current = active;
+    }
     if (dialog !== null) {
       const tabbables = getTabbables(dialog);
       if (tabbables.length > 0) {
@@ -108,7 +122,12 @@ export function Modal({
     }
     return () => {
       const prev = previouslyFocusedRef.current;
-      if (prev !== null && typeof prev.focus === "function") {
+      previouslyFocusedRef.current = null;
+      if (
+        prev !== null &&
+        typeof prev.focus === "function" &&
+        document.body.contains(prev)
+      ) {
         prev.focus();
       }
     };

@@ -95,6 +95,49 @@ describe("Modal — focus management", () => {
   });
 });
 
+describe("Modal — focus capture race", () => {
+  it("restores focus to the original trigger across a rapid open/close/open cycle", async () => {
+    // Regression for PR #125 round 1 review: a rapid isOpen toggle
+    // must not cause `previouslyFocusedRef` to capture a node INSIDE
+    // the dialog. The capture is now guarded so it only fires when
+    // document.activeElement is outside the dialog.
+    const user = userEvent.setup();
+    function ToggleHarness(): JSX.Element {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            trigger
+          </button>
+          <button type="button" onClick={() => setOpen(false)}>
+            close
+          </button>
+          <Modal
+            isOpen={open}
+            onRequestClose={() => setOpen(false)}
+            labelledBy="h"
+          >
+            <h2 id="h">title</h2>
+            <button type="button">inside</button>
+          </Modal>
+        </>
+      );
+    }
+    render(<ToggleHarness />);
+    const trigger = screen.getByRole("button", { name: "trigger" });
+    trigger.focus();
+    await user.click(trigger); // open
+    expect(screen.getByRole("button", { name: "inside" })).toHaveFocus();
+    await user.click(screen.getByRole("button", { name: "close" }));
+    expect(trigger).toHaveFocus();
+    // Re-open and re-close — focus must still return to the trigger,
+    // not to the "inside" button captured during the previous open.
+    await user.click(trigger);
+    await user.click(screen.getByRole("button", { name: "close" }));
+    expect(trigger).toHaveFocus();
+  });
+});
+
 describe("Modal — dismissal contract", () => {
   it("routes Escape through onRequestClose without closing itself", async () => {
     const user = userEvent.setup();

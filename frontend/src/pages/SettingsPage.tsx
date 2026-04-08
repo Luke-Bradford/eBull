@@ -109,11 +109,18 @@ function BrokerCredentialsSection(): JSX.Element {
       // commit, only operator acknowledgement of the phrase. The
       // confirm-cancel gate inside the modal protects against a
       // misclick destroying the only copy of the phrase.
+      //
+      // We DEFER the list refresh until the modal closes. Otherwise
+      // any error from `refresh()` would be set on `loadError` while
+      // the modal covers the page, hiding it from the operator
+      // (review feedback PR #125 round 1). When no modal opens we
+      // refresh inline as before.
       if (response.recovery_phrase != null && response.recovery_phrase.length > 0) {
         setPhrase(response.recovery_phrase);
         setPhraseModalView("confirm");
+      } else {
+        await refresh();
       }
-      await refresh();
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 409) {
         setCreateError("A credential with that label already exists for this provider.");
@@ -154,9 +161,13 @@ function BrokerCredentialsSection(): JSX.Element {
 
   function handlePhraseConfirmed(): void {
     // Operator passed the 3-word challenge. Drop the phrase from state
-    // (it lives nowhere else) and close the modal.
+    // (it lives nowhere else), close the modal, and run the deferred
+    // list refresh so the operator sees the new row -- and any
+    // refresh failure -- now that the modal is no longer covering
+    // the page (review feedback PR #125 round 1).
     setPhrase(null);
     setPhraseModalView("confirm");
+    void refresh();
   }
 
   function requestPhraseDismiss(): void {
@@ -177,9 +188,11 @@ function BrokerCredentialsSection(): JSX.Element {
     // the phrase and close the modal. The credential row is already
     // committed; we do not revoke it (the phrase is root-secret
     // scoped, not row scoped, so revoking would not "undo" anything
-    // and would only add a second failure path).
+    // and would only add a second failure path). Run the deferred
+    // list refresh now that the modal is no longer covering the page.
     setPhrase(null);
     setPhraseModalView("confirm");
+    void refresh();
   }
 
   return (
