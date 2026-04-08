@@ -112,31 +112,65 @@ def _apply_migrations_to_test_db() -> None:
     hard-codes ``settings.database_url`` and re-pointing it would
     require monkeypatching settings before any other test imports
     them, which is too fragile to rely on.
+
+    Connection lifecycle mirrors production exactly:
+      1. A dedicated bootstrap connection creates ``schema_migrations``
+         and commits + closes before any migration file runs. This
+         is critical -- if a future migration uses transaction-hostile
+         DDL (e.g. ``CREATE INDEX CONCURRENTLY``), a single shared
+         connection would roll back the entire batch *including the
+         tracking table itself*, leaving the test DB in a half-
+         migrated state with no record and the next run would
+         re-apply every migration and likely error on duplicate
+         objects (BLOCKING comment, PR #129 round 1).
+      2. A reader connection fetches the applied set, then closes.
+      3. Each pending migration file runs in its **own** connection,
+         committing on success and rolling back on failure -- so a
+         single broken migration cannot corrupt the tracking state
+         of the migrations that ran before it. This matches
+         ``app/db/migrations.run_migrations`` line-for-line.
     """
     files = sorted(_SQL_DIR.glob("*.sql"))
     if not files:
         return
-    with psycopg.connect(_test_database_url()) as conn:
-        with psycopg.ClientCursor(conn) as cur:
+
+    # 1. Bootstrap: schema_migrations exists and is committed before
+    #    we even look at the migration files.
+    with psycopg.connect(_test_database_url()) as bootstrap:
+        with psycopg.ClientCursor(bootstrap) as cur:
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS schema_migrations ("
                 "filename TEXT PRIMARY KEY, "
                 "applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
             )
-        with conn.cursor() as cur:
+        bootstrap.commit()
+
+    # 2. Reader: fetch the applied set on its own connection so the
+    #    per-file connections below see a consistent committed view.
+    with psycopg.connect(_test_database_url()) as reader:
+        with reader.cursor(row_factory=psycopg.rows.tuple_row) as cur:
             cur.execute("SELECT filename FROM schema_migrations")
             done = {row[0] for row in cur.fetchall()}
-        for path in files:
-            if path.name in done:
-                continue
-            sql = path.read_text(encoding="utf-8")
-            with psycopg.ClientCursor(conn) as cur:
-                cur.execute(sql)  # type: ignore[call-overload]
-                cur.execute(  # type: ignore[call-overload]
-                    "INSERT INTO schema_migrations (filename) VALUES (%s)",
-                    (path.name,),
-                )
-        conn.commit()
+
+    # 3. Per-file: a fresh connection per migration so a transaction-
+    #    hostile statement in one file cannot poison the tracking
+    #    state of the others.
+    for path in files:
+        if path.name in done:
+            continue
+        sql = path.read_text(encoding="utf-8")
+        with psycopg.connect(_test_database_url()) as conn:
+            try:
+                with psycopg.ClientCursor(conn) as cur:
+                    cur.execute(sql)  # type: ignore[call-overload]
+                    cur.execute(  # type: ignore[call-overload]
+                        "INSERT INTO schema_migrations (filename) VALUES (%s)",
+                        (path.name,),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
 
 def _test_db_available() -> bool:
@@ -147,7 +181,16 @@ def _test_db_available() -> bool:
     environments without a Postgres at all (and so the user's dev DB
     is *never* fallen back to as a side effect of an unreachable test
     DB).
+
+    The exception is logged via ``warnings.warn`` rather than
+    swallowed silently. A bare ``except Exception: return False``
+    looks identical in CI logs whether the cause is "no Postgres at
+    all" (an expected skip) or "configured role lacks CREATEDB"
+    (a real configuration bug masquerading as a clean skip). The
+    warning gives the operator something actionable.
     """
+    import warnings
+
     try:
         _ensure_test_db_exists()
         _apply_migrations_to_test_db()
@@ -155,7 +198,14 @@ def _test_db_available() -> bool:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
         return True
-    except Exception:
+    except Exception as exc:
+        warnings.warn(
+            f"ebull_test DB unavailable -- {type(exc).__name__}: {exc}. "
+            f"Race test will be skipped. If this is unexpected, check "
+            f"that the configured Postgres role has CREATEDB privilege "
+            f"and that the host/port in EBULL_DATABASE_URL is reachable.",
+            stacklevel=2,
+        )
         return False
 
 
