@@ -278,8 +278,13 @@ def revoke_credential(
             )
             rowcount = cur.rowcount
         if rowcount == 0:
-            # The UPDATE matched nothing, so there is no dirty state to
-            # roll back at this layer. Raise without touching the txn.
+            # The UPDATE matched nothing but still opened an implicit
+            # transaction on the connection -- psycopg3 connections are
+            # in a transaction after any statement. Roll it back so the
+            # connection returns to the pool in a clean state, then
+            # raise. (Without the rollback, the next checkout from the
+            # pool would inherit an open transaction.)
+            conn.rollback()
             raise CredentialNotFound(f"credential {credential_id} not found")
         conn.commit()
     except CredentialNotFound:
@@ -334,9 +339,17 @@ def load_credential_for_provider_use(
       *Audit durability*: the audit row is written on the caller's
       transaction. If the caller commits, the audit row is durable. If
       the caller rolls back, the audit row is lost along with the
-      caller's other changes. Callers on a trade path MUST commit the
-      audit row before performing the external broker call -- the
-      documented pattern is::
+      caller's other changes. **This applies to all three audit
+      paths**: success (`UPDATE last_used_at` + success log),
+      `not_found` failure (failure log only), and `decrypt_failed`
+      failure (failure log only). Even on the failure paths, the
+      function does not commit -- the caller must commit if it wants
+      the failure record to outlive its own transaction. Issue #111
+      tracks the side-connection durable-audit followup.
+
+      Callers on a trade path MUST commit the audit row before
+      performing the external broker call -- the documented pattern
+      is::
 
           secret = load_credential_for_provider_use(conn, ...)
           conn.commit()                  # audit row durable
