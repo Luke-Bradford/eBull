@@ -87,7 +87,13 @@ class JobLock:
         self._conn: psycopg.Connection[object] | None = None
 
     def __enter__(self) -> JobLock:
-        conn = psycopg.connect(self._database_url)
+        # autocommit=True so we do NOT hold an implicit transaction
+        # open for the entire job duration (PR #131 round 1 review
+        # WARNING 1). The advisory lock is session-scoped, not
+        # transaction-scoped, so autocommit changes nothing about
+        # the lock semantics -- it just stops us wasting a backend
+        # transaction slot.
+        conn = psycopg.connect(self._database_url, autocommit=True)
         try:
             with conn.cursor() as cur:
                 cur.execute(

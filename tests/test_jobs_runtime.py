@@ -9,7 +9,11 @@ Coverage:
   * Unknown job name -> UnknownJob
   * Manual trigger queues the invoker and runs it
   * Double trigger while in flight -> JobAlreadyRunning on the second
-    call (lock is acquired synchronously by trigger())
+    call (the in-process per-job ``threading.Lock`` is acquired
+    synchronously by ``trigger()`` -- the advisory ``JobLock`` lives
+    on the worker thread)
+  * Distinct-job manual triggers run concurrently (no head-of-line
+    blocking on the manual executor -- BLOCKING 2 regression target)
   * Wrapped scheduled-fire path swallows JobAlreadyRunning
 """
 
@@ -118,6 +122,36 @@ class TestManualTrigger:
             assert exc_info.value.job_name == "slow_job"
         finally:
             release_first.set()
+            rt._manual_executor.shutdown(wait=True)
+
+
+class TestDistinctJobConcurrency:
+    def test_distinct_jobs_do_not_queue(self, patched_runtime: None) -> None:
+        # BLOCKING 2 regression target: with the previous
+        # ``max_workers=1`` executor, triggering job B while job A was
+        # still running would queue B behind A and the API caller's
+        # 202 response would be a lie. Both jobs must be in flight
+        # simultaneously.
+        a_started = threading.Event()
+        b_started = threading.Event()
+        release = threading.Event()
+
+        def a() -> None:
+            a_started.set()
+            release.wait(timeout=2.0)
+
+        def b() -> None:
+            b_started.set()
+            release.wait(timeout=2.0)
+
+        rt = _make_runtime({"a": a, "b": b})
+        try:
+            rt.trigger("a")
+            assert a_started.wait(timeout=2.0), "a did not start"
+            rt.trigger("b")
+            assert b_started.wait(timeout=2.0), "b queued behind a -- head-of-line blocking regressed"
+        finally:
+            release.set()
             rt._manual_executor.shutdown(wait=True)
 
 

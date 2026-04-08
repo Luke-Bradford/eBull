@@ -46,6 +46,7 @@ scheduler's recurring jobs run on their own pool, and the per-job
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Final
@@ -147,6 +148,17 @@ class JobRuntime:
         self._database_url = database_url or settings.database_url
         # Copy so callers cannot mutate after construction.
         self._invokers: dict[str, Callable[[], None]] = dict(invokers if invokers is not None else _INVOKERS)
+        # Per-job in-process lock for synchronous 409 detection on
+        # manual triggers. The advisory ``JobLock`` (Postgres) is the
+        # cross-process source of truth and is acquired on the worker
+        # thread; this in-process lock is what lets ``trigger()``
+        # return 409 *synchronously* to the API caller without ever
+        # touching the database connection on the request thread.
+        # See PR #131 round 1 review (BLOCKING 1) for the rationale --
+        # we deliberately avoid handing a ``psycopg.Connection`` across
+        # threads, even sequentially, because the assumption that the
+        # handoff is safe is load-bearing and untested.
+        self._inflight: dict[str, threading.Lock] = {name: threading.Lock() for name in self._invokers}
         self._scheduler = BackgroundScheduler(
             timezone="UTC",
             job_defaults={
@@ -168,12 +180,19 @@ class JobRuntime:
                 "max_instances": 1,
             },
         )
-        # Manual triggers run on a small dedicated pool so they cannot
-        # starve the scheduler's recurring threads. max_workers=1
-        # because the per-job lock would serialise concurrent manual
-        # triggers anyway -- a larger pool would only let unrelated
-        # jobs queue, which is not a v1 requirement.
-        self._manual_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="job-manual")
+        # Manual-trigger executor sized so that distinct jobs do NOT
+        # queue behind each other -- one slot per wired invoker means
+        # every wired job can be in flight simultaneously without
+        # head-of-line blocking. The per-job in-process lock above
+        # already prevents two instances of the *same* job from
+        # running, so a larger pool only ever buys "unrelated jobs
+        # run concurrently", which is the correct semantics: a 202
+        # response means the job is being executed now, not queued.
+        # See PR #131 round 1 review (BLOCKING 2).
+        self._manual_executor = ThreadPoolExecutor(
+            max_workers=max(1, len(self._invokers)),
+            thread_name_prefix="job-manual",
+        )
         self._started = False
 
     # -- lifecycle ---------------------------------------------------------
@@ -217,6 +236,18 @@ class JobRuntime:
         connection pool is closed so any job currently writing to
         ``job_runs`` can finish cleanly. ``wait=True`` blocks until
         the scheduler's worker threads return.
+
+        Trade-off (PR #131 round 1 review WARNING 2): a hung job
+        will block lifespan teardown for as long as it takes the
+        process to be killed. The alternative -- ``wait=False`` --
+        would let in-flight jobs continue running while the lifespan
+        proceeds to close the connection pool, at which point the
+        job's writes to ``job_runs`` would fail against a closed
+        pool. That is strictly worse: a hung job under ``wait=True``
+        produces a visible "lifespan teardown stuck" symptom that
+        the operator notices and can investigate, whereas under
+        ``wait=False`` the symptom is silent corruption of job
+        tracking state. We accept the blocking behaviour for v1.
         """
         if not self._started:
             return
@@ -243,33 +274,48 @@ class JobRuntime:
 
         Raises:
             UnknownJob: ``job_name`` is not in the invoker registry.
-            JobAlreadyRunning: another instance of this job currently
-                holds the per-job advisory lock.
+            JobAlreadyRunning: another in-process manual trigger of
+                this job is already in flight on this app instance.
 
-        The lock is acquired *synchronously on the calling thread*
-        before the job is submitted to the executor, not inside the
-        worker. This is the only way the API endpoint can return a
-        409 Conflict to the operator who clicked the button -- if
-        the lock acquire happened inside the worker, the endpoint
-        would have already returned 202 by then.
+        The synchronous 409 path uses an in-process
+        ``threading.Lock`` per job name, *not* the Postgres advisory
+        lock. The advisory lock is held by the worker thread for the
+        duration of the run -- the request thread never touches a
+        ``psycopg.Connection``. See PR #131 round 1 review
+        (BLOCKING 1): the previous design acquired the advisory lock
+        on the request thread and handed the connection off to the
+        worker, which assumed sequential cross-thread access to a
+        ``psycopg.Connection`` was safe. The assumption is technically
+        defensible (executor.submit provides a happens-before barrier
+        and the connection is never accessed concurrently) but
+        load-bearing and untested -- one future refactor away from a
+        real bug. The in-process-lock approach eliminates the
+        cross-thread access entirely.
+
+        Edge case acknowledged: if a *scheduled* fire is currently
+        running this job, the in-process lock is free (scheduled
+        fires never touch ``_inflight``), so ``trigger()`` returns
+        202 and the worker thread will then find the advisory lock
+        held by the scheduler, log a warning, and no-op. The API
+        caller sees a 202 for a run that did nothing. PR B's
+        listing endpoint will surface this honestly. For PR A the
+        edge case is the cost of keeping the request thread off the
+        DB connection -- and is rare in practice (manual triggers
+        during 02:00 UTC scheduled fires are unusual).
         """
         invoker = self._invokers.get(job_name)
         if invoker is None:
             raise UnknownJob(job_name)
 
-        # Acquire the lock now so a contention failure surfaces
-        # synchronously to the API caller. The lock is then *handed
-        # off* to the worker thread which is responsible for
-        # releasing it via the context-manager exit. The worker uses
-        # the same JobLock instance via a closure.
-        lock = JobLock(self._database_url, job_name)
-        lock.__enter__()  # may raise JobAlreadyRunning
+        inflight = self._inflight[job_name]
+        if not inflight.acquire(blocking=False):
+            raise JobAlreadyRunning(job_name)
         try:
-            self._manual_executor.submit(self._run_with_held_lock, job_name, invoker, lock)
+            self._manual_executor.submit(self._run_manual, job_name, invoker)
         except Exception:
-            # Submission failed before the worker took ownership of
-            # the lock -- release it here so we do not strand it.
-            lock.__exit__(None, None, None)
+            # Submission failed before the worker took ownership --
+            # release the in-process lock so a retry can acquire.
+            inflight.release()
             raise
 
     # -- internals ---------------------------------------------------------
@@ -306,25 +352,37 @@ class JobRuntime:
 
         return wrapped
 
-    @staticmethod
-    def _run_with_held_lock(
-        job_name: str,
-        invoker: Callable[[], None],
-        lock: JobLock,
-    ) -> None:
+    def _run_manual(self, job_name: str, invoker: Callable[[], None]) -> None:
         """Worker-thread entry point for manual triggers.
 
-        The lock is *already held* by the time we enter -- ``trigger``
-        acquired it on the request thread so a 409 could be returned
-        to the operator. Our job is to invoke the function and then
-        release the lock no matter what happens.
+        Single-threaded with respect to the ``JobLock`` connection:
+        we acquire, hold, and release the advisory lock entirely on
+        this thread. The in-process ``_inflight`` lock that was
+        acquired on the request thread is released here in
+        ``finally`` so a retry can run.
+
+        ``JobAlreadyRunning`` from the advisory lock here means a
+        *different process* (or this process's APScheduler thread,
+        for the scheduled-fire path) holds the advisory lock. We log
+        a warning and exit; the in-process lock is still released.
         """
         try:
-            invoker()
-        except Exception:
-            logger.exception("manual trigger of %r raised", job_name)
+            try:
+                with JobLock(self._database_url, job_name):
+                    invoker()
+            except JobAlreadyRunning:
+                logger.warning(
+                    "manual trigger of %r could not acquire advisory lock "
+                    "-- another runner (scheduled fire or peer process) "
+                    "holds it. The 202 response was returned but the job "
+                    "did not run. PR B's listing endpoint will surface "
+                    "this state to the operator.",
+                    job_name,
+                )
+            except Exception:
+                logger.exception("manual trigger of %r raised", job_name)
         finally:
-            lock.__exit__(None, None, None)
+            self._inflight[job_name].release()
 
 
 # ---------------------------------------------------------------------------
