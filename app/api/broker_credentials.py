@@ -413,16 +413,34 @@ def _rollback_lazy_gen(request: Request) -> None:
     reset ``app.state`` flags. Called from inside ``lazy_gen_lock``
     so a queued first-save observes the cleaned-up state.
     """
+    path = master_key.root_secret_path()
     try:
-        path = master_key.root_secret_path()
         if path.exists():
             path.unlink()
     except OSError:
-        # An orphan file with no credential rows is still a valid
-        # clean_install state per compute_boot_state, and the next
-        # successful first-save will atomically overwrite it via
-        # os.replace. Logged but not fatal.
+        # Logged but not fatal: an orphan file with no credential
+        # rows is still a valid clean_install state per
+        # compute_boot_state, and the next successful first-save
+        # will atomically overwrite it via os.replace.
         logger.exception("lazy-gen rollback: failed to unlink persisted root secret file")
+    # Always log the final filesystem state so operators reading
+    # logs after a rollback can tell whether the next attempt
+    # enters lazy-gen cleanly (file absent) or reuses an orphan
+    # (file present, key never bound to any credential, phrase
+    # lost). The orphan branch is recoverable -- compute_boot_state
+    # will return clean_install on next boot and the operator's
+    # next save reuses the existing key -- but reading the log
+    # spares them a confusing reboot (review feedback PR #118
+    # round 14).
+    if path.exists():
+        logger.warning(
+            "lazy-gen rollback: root secret file remains on disk at %s -- "
+            "next boot will reuse it as clean_install (phrase from the "
+            "aborted save is lost)",
+            path,
+        )
+    else:
+        logger.info("lazy-gen rollback: root secret file removed cleanly")
     clear_active_key()
     request.app.state.broker_key_loaded = False
     request.app.state.boot_state = "clean_install"

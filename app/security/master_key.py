@@ -437,7 +437,7 @@ def persist_generated_root_secret(root_secret: bytes) -> Path:
     return write_root_secret(root_secret)
 
 
-def recover_from_phrase(conn: psycopg.Connection[object], phrase: list[str] | str, app_state: object) -> bytes:
+def recover_from_phrase(conn: psycopg.Connection[object], phrase: str, app_state: object) -> bytes:
     """Verify a recovery phrase and install the recovered key.
 
     Sequence:

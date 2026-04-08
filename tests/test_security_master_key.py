@@ -248,7 +248,8 @@ class TestRecoverFromPhraseGuards:
             recover_from_phrase,
         )
 
-        _, _, phrase = generate_root_secret_in_memory()
+        _, _, phrase_words = generate_root_secret_in_memory()
+        phrase = " ".join(phrase_words)
         # File from the in-memory generation has not been written;
         # nothing else on disk either.
 
@@ -287,7 +288,7 @@ class TestRecoverFromPhraseGuards:
         # canonical zero-entropy phrase). Replacing the final
         # word with a different valid wordlist entry breaks the
         # checksum.
-        phrase = (["abandon"] * 23) + ["zoo"]
+        phrase = " ".join(["abandon"] * 23 + ["zoo"])
 
         conn = MagicMock()
         app_state = MagicMock()
@@ -298,6 +299,8 @@ class TestRecoverFromPhraseGuards:
 
         assert app_state.broker_key_loaded is False
         assert not root_secret_path().exists()
-        # Lock was never even acquired -- conn.cursor must not
-        # have been called.
-        conn.cursor.assert_not_called()
+        # Lock was never even acquired -- conn must not have
+        # been touched at all (any attribute access on a
+        # MagicMock auto-creates a child mock, so we assert on
+        # mock_calls being empty rather than on cursor.called).
+        assert conn.mock_calls == []
