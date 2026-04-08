@@ -468,6 +468,22 @@ def recover_from_phrase(conn: psycopg.Connection[object], phrase: list[str] | st
 
     derived = derive_broker_encryption_key(root_secret)
     with lazy_gen_lock:
+        # Discard any in-flight transaction snapshot opened on the
+        # caller's connection BEFORE we acquired the lock, so the
+        # SELECT below sees post-lock-acquisition reality. Under
+        # PostgreSQL READ COMMITTED each statement actually fetches
+        # the latest committed data so this is paranoia, but the
+        # rollback also ensures we are not running on a connection
+        # that the caller left in a poisoned state and matches
+        # the discipline review feedback asked for (PR #118
+        # round 10).
+        try:
+            conn.rollback()
+        except psycopg.Error:
+            # A rollback that itself raises means the connection
+            # is unusable; let the SELECT below surface the real
+            # error.
+            pass
         # Single fetch + verify against the SAME row object: a
         # double fetch (once for the none-guard, once inside a
         # helper that re-queries) would race against a concurrent

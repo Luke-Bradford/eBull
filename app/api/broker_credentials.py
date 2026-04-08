@@ -35,7 +35,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_session
-from app.api.auth_bootstrap import require_master_key
 from app.db import get_conn
 from app.security import master_key
 from app.security.secrets_crypto import clear_active_key, set_active_key
@@ -136,7 +135,6 @@ def list_(
     "",
     response_model=CreateCredentialResponse,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_master_key)],
 )
 def create(
     body: CreateCredentialRequest,
@@ -234,11 +232,20 @@ def create(
                 request.app.state.recovery_required = False
                 logger.info("master key lazy-generated on first credential save (file persisted)")
                 try:
+                    # Pass the *already-normalised* provider/label
+                    # so the pre-check and the INSERT target the
+                    # exact same identity strings -- not the raw
+                    # body fields plus a re-normalisation pass
+                    # inside store_credential. The plaintext is
+                    # passed raw because secret normalisation
+                    # (strip whitespace) is idempotent and the
+                    # service layer is the canonical place for
+                    # that step (review feedback PR #118 round 10).
                     meta = store_credential(
                         conn,
                         operator_id=session.operator_id,
-                        provider=body.provider,
-                        label=body.label,
+                        provider=provider_norm,
+                        label=label_norm,
                         plaintext=body.secret,
                     )
                 except (KeyboardInterrupt, SystemExit):

@@ -160,21 +160,22 @@ def recover(
 def require_master_key(request: Request) -> None:
     """Block a request when the broker-encryption key is not loaded.
 
-    Mounted on broker credential routes that perform encryption or
-    decryption. The clean_install POST /broker-credentials handler
-    bypasses this guard via its lazy-gen sequence on the very
-    first save; every other route gated on this dependency requires
-    a loaded key.
+    Mounted on broker routes that need to encrypt or decrypt right
+    now. This dependency is intentionally NOT mounted on
+    ``POST /broker-credentials`` -- that route owns its own gating
+    because the very first save legitimately enters with no key
+    loaded and lazy-generates one inside the handler. Every other
+    route mounted on this dependency must have a loaded key.
 
     Failure modes:
       * ``recovery_required`` -> 503 ``"recovery required"``
         (operator must call /auth/recover)
-      * any other not-loaded state (clean_install with no key yet,
-        env-override misconfiguration) -> 503 ``"master key not
-        loaded"``. Without this branch a future non-create route
-        mounted on the same dependency would slip past and hit
+      * any not-loaded state (clean_install with no key yet,
+        env-override misconfiguration, internal bug) -> 503
+        ``"master key not loaded"``. Without this branch a route
+        mounted on this dependency would slip past and hit
         ``CredentialCryptoConfigError`` -> 500 instead of the
-        documented 503 (review feedback PR #118 round 9).
+        documented 503 (review feedback PR #118 round 9/10).
     """
     if getattr(request.app.state, "recovery_required", False):
         raise HTTPException(
@@ -182,20 +183,7 @@ def require_master_key(request: Request) -> None:
             detail="recovery required",
         )
     if not getattr(request.app.state, "broker_key_loaded", False):
-        # clean_install with no key yet is the only legitimate
-        # not-loaded state: it is the entry point for the very
-        # first credential save, which lazy-generates the key
-        # inside POST /broker-credentials. Any OTHER not-loaded
-        # state (env-override misconfig, internal bug) must 503
-        # rather than fall through to a 500 from the cipher
-        # cache. Note: even on the clean_install path the request
-        # MUST be POST /broker-credentials -- a future route
-        # mounted on this dependency that wanted to read or
-        # decrypt would still hit CredentialCryptoConfigError,
-        # which is the right outcome (it has no business running
-        # before any key exists).
-        if getattr(request.app.state, "boot_state", None) != "clean_install":
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="master key not loaded",
-            )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="master key not loaded",
+        )

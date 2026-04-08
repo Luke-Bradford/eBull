@@ -88,10 +88,11 @@ def _isolate_state() -> Iterator[None]:
     app.dependency_overrides[get_conn] = _gen
     app.dependency_overrides[require_session] = _session_row
 
-    # require_master_key dependency on POST /broker-credentials
-    # checks these flags; default to "normal + key loaded" so the
-    # service-mock tests run cleanly. Lazy-gen-specific behaviour
-    # has its own dedicated tests against the real handler.
+    # POST /broker-credentials no longer mounts require_master_key
+    # (the create handler self-gates so it can lazy-generate on
+    # first save). We still set these flags so the lazy-gen branch
+    # is skipped on the service-mock tests below -- "normal + key
+    # loaded" routes through the simple store_credential mock path.
     saved_state = (
         getattr(app.state, "boot_state", None),
         getattr(app.state, "broker_key_loaded", None),

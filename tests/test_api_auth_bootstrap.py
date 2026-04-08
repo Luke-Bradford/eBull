@@ -98,17 +98,20 @@ class TestRequireMasterKey:
         resp = c.get("/gated")
         assert resp.status_code == 200
 
-    def test_clean_install_no_key_passes_for_lazy_gen(self) -> None:
-        # The very first credential save lands here: clean_install,
-        # no key loaded, no recovery required. Must NOT be 503'd by
-        # the structural gate -- the create handler lazy-generates
-        # the key.
+    def test_clean_install_no_key_503(self) -> None:
+        # POST /broker-credentials does NOT mount this dependency
+        # (the create handler self-gates so it can lazy-generate
+        # on first save). Every other route mounted on this
+        # dependency must 503 in clean_install state, not pass
+        # through and hit a 500 from CredentialCryptoConfigError
+        # (review feedback PR #118 round 10).
         app, c = self._app_with_route()
         app.state.recovery_required = False
         app.state.broker_key_loaded = False
         app.state.boot_state = "clean_install"
         resp = c.get("/gated")
-        assert resp.status_code == 200
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "master key not loaded"
 
     def test_unknown_not_loaded_state_503(self) -> None:
         # An env-override misconfig or internal bug that leaves
