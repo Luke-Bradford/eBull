@@ -414,24 +414,29 @@ def _rollback_lazy_gen(request: Request) -> None:
     so a queued first-save observes the cleaned-up state.
     """
     path = master_key.root_secret_path()
-    # Single stat boundary: use ``unlink(missing_ok=True)`` so the
-    # decision-to-unlink and the post-unlink snapshot are not two
-    # separate ``path.exists()`` calls. A concurrent writer
-    # recreating the file between an ``exists()`` pre-check and the
-    # ``unlink()`` would otherwise be unlinked silently and never
-    # counted as ``file_remains`` (review feedback PR #118 round 16).
+    # Determine "removed cleanly" via the unlink syscall itself
+    # rather than a separate stat. ``FileNotFoundError`` means the
+    # file was never written by this aborted save (or already gone)
+    # -> nothing to clean up. ``unlink()`` returning normally means
+    # we removed exactly the file that existed at that instant.
+    # Any other ``OSError`` means the file may still be on disk.
+    # No second ``path.exists()`` -- a concurrent writer between
+    # the unlink and a stat could otherwise produce a spurious
+    # "file remains" warning attributing a successor save's file
+    # to this rollback (review feedback PR #118 round 17).
+    file_remains: bool
     try:
-        path.unlink(missing_ok=True)
+        path.unlink()
+        file_remains = False
+    except FileNotFoundError:
+        file_remains = False
     except OSError:
         # Logged but not fatal: an orphan file with no credential
         # rows is still a valid clean_install state per
         # compute_boot_state, and the next successful first-save
         # will atomically overwrite it via os.replace.
         logger.exception("lazy-gen rollback: failed to unlink persisted root secret file")
-    # Snapshot the final filesystem state ONCE so the log branch
-    # below cannot disagree with reality due to a concurrent
-    # writer recreating the file (review feedback PR #118 round 15).
-    file_remains = path.exists()
+        file_remains = True
     if file_remains:
         # Operators reading logs after a rollback can tell that
         # the next boot will reuse this file as clean_install

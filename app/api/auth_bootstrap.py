@@ -137,6 +137,17 @@ def recover(
     # PR #118 round 8).
     try:
         master_key.recover_from_phrase(conn, body.phrase, request.app.state)
+    except master_key.RecoveryNotApplicableError as exc:
+        # The phrase decoded fine but the last active credential
+        # was revoked between lifespan computing
+        # ``recovery_required=True`` and us acquiring the lock.
+        # Distinct from a wrong phrase: nothing to verify against
+        # (review feedback PR #118 round 17).
+        logger.warning("recovery not applicable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="no active credential to recover",
+        ) from exc
     except (RecoveryPhraseError, master_key.RecoveryVerificationError) as exc:
         # Same generic detail for every failure mode -- typo,
         # checksum, wrong-but-valid phrase. Full reason in

@@ -243,7 +243,7 @@ class TestRecoverFromPhraseGuards:
         from unittest.mock import MagicMock
 
         from app.security.master_key import (
-            RecoveryVerificationError,
+            RecoveryNotApplicableError,
             generate_root_secret_in_memory,
             recover_from_phrase,
         )
@@ -265,7 +265,7 @@ class TestRecoverFromPhraseGuards:
         app_state = MagicMock()
         app_state.broker_key_loaded = False
 
-        with pytest.raises(RecoveryVerificationError, match="no active credential"):
+        with pytest.raises(RecoveryNotApplicableError, match="no active credential"):
             recover_from_phrase(conn, phrase, app_state)
 
         # State must NOT have flipped on the failure path.

@@ -76,6 +76,16 @@ class RecoveryVerificationError(MasterKeyError):
     """Raised when a recovery phrase decodes but does not match stored ciphertext."""
 
 
+class RecoveryNotApplicableError(MasterKeyError):
+    """Raised when recovery is requested but there is no active credential to verify against.
+
+    Distinct from :class:`RecoveryVerificationError` so the API can return a
+    distinct status (409) and message instead of conflating "wrong phrase"
+    with "structurally nothing left to recover" (review feedback PR #118
+    round 17).
+    """
+
+
 @dataclass(frozen=True)
 class BootResult:
     state: BootState
@@ -516,7 +526,7 @@ def recover_from_phrase(conn: psycopg.Connection[object], phrase: str, app_state
             # against. recovery_required can only be set when
             # ``compute_boot_state`` saw credentials, so reaching
             # here with no row is a state-machine error.
-            raise RecoveryVerificationError("no active credential to verify recovery phrase against")
+            raise RecoveryNotApplicableError("no active credential to verify recovery phrase against")
         if not _key_decrypts_row(row, derived):
             raise RecoveryVerificationError("recovery phrase did not match stored broker credentials")
         write_root_secret(root_secret)
