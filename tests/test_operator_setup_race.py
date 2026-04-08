@@ -26,11 +26,14 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Iterator
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 import psycopg
+import psycopg.rows
 import pytest
 
-from app.config import settings
+from app.config import settings  # used by _swap_database to derive test URL
 from app.services.operator_setup import (
     _BOOTSTRAP_LOCK_KEY,
     SetupOutcome,
@@ -38,10 +41,117 @@ from app.services.operator_setup import (
     reset_token_slot_for_tests,
 )
 
+# ---------------------------------------------------------------------------
+# Isolated test database
+# ---------------------------------------------------------------------------
+#
+# This test runs ``TRUNCATE operators, sessions, operator_audit RESTART
+# IDENTITY CASCADE`` and the CASCADE follows the FK from
+# ``broker_credentials.operator_id`` -- so a TRUNCATE here also wipes
+# every saved broker credential. The dev database (typically ``ebull``)
+# holds the user's real operator account and live broker keys, and a
+# pytest run that points at that database destroys their working state
+# without warning. This was discovered the hard way on 2026-04-08 when
+# multiple pytest runs during a PR cycle silently wiped the user's
+# operator + demo eToro key, locking them out of the running app.
+#
+# Fix: derive an isolated ``ebull_test`` database URL from
+# ``settings.database_url`` (same host, same credentials, different
+# database name), create the database if it does not yet exist, apply
+# the project's SQL migrations to it, and run every connection in this
+# test against ``_TEST_DATABASE_URL`` instead of ``settings.database_url``.
+# A paranoid ``_assert_test_db`` guard runs before every TRUNCATE so a
+# future refactor that accidentally re-introduces ``settings.database_url``
+# fails loud instead of silently destroying user data.
 
-def _db_available() -> bool:
+_TEST_DB_NAME = "ebull_test"
+_SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
+
+
+def _swap_database(url: str, new_db: str) -> str:
+    """Return *url* with the path component replaced by ``/{new_db}``."""
+    parsed = urlparse(url)
+    return urlunparse(parsed._replace(path=f"/{new_db}"))
+
+
+def _test_database_url() -> str:
+    return _swap_database(settings.database_url, _TEST_DB_NAME)
+
+
+def _admin_database_url() -> str:
+    # Admin connection used only to ``CREATE DATABASE``. Connecting to
+    # the built-in ``postgres`` maintenance DB avoids any chance of
+    # holding a session on the database we are about to create.
+    return _swap_database(settings.database_url, "postgres")
+
+
+def _ensure_test_db_exists() -> None:
+    """Create ``ebull_test`` if it does not yet exist.
+
+    ``CREATE DATABASE`` cannot run inside a transaction, so the admin
+    connection is opened in autocommit mode. Idempotent: if the
+    database already exists we return without touching it.
+    """
+    with psycopg.connect(_admin_database_url(), autocommit=True) as admin:
+        with admin.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (_TEST_DB_NAME,))
+            if cur.fetchone() is None:
+                # Identifier interpolation: _TEST_DB_NAME is a hard-coded
+                # constant, never user input, so SQL injection is not a
+                # concern. The double-quoting still defends against a
+                # future change to the constant.
+                cur.execute(f'CREATE DATABASE "{_TEST_DB_NAME}"')
+
+
+def _apply_migrations_to_test_db() -> None:
+    """Apply every ``sql/NNN_*.sql`` file to the test DB.
+
+    Mirrors ``app/db/migrations.run_migrations`` but targets the test
+    DB URL directly instead of reading ``settings.database_url``. We
+    deliberately do not call ``run_migrations()`` itself because it
+    hard-codes ``settings.database_url`` and re-pointing it would
+    require monkeypatching settings before any other test imports
+    them, which is too fragile to rely on.
+    """
+    files = sorted(_SQL_DIR.glob("*.sql"))
+    if not files:
+        return
+    with psycopg.connect(_test_database_url()) as conn:
+        with psycopg.ClientCursor(conn) as cur:
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations ("
+                "filename TEXT PRIMARY KEY, "
+                "applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+            )
+        with conn.cursor() as cur:
+            cur.execute("SELECT filename FROM schema_migrations")
+            done = {row[0] for row in cur.fetchall()}
+        for path in files:
+            if path.name in done:
+                continue
+            sql = path.read_text(encoding="utf-8")
+            with psycopg.ClientCursor(conn) as cur:
+                cur.execute(sql)  # type: ignore[call-overload]
+                cur.execute(  # type: ignore[call-overload]
+                    "INSERT INTO schema_migrations (filename) VALUES (%s)",
+                    (path.name,),
+                )
+        conn.commit()
+
+
+def _test_db_available() -> bool:
+    """Probe (and lazily create + migrate) the test DB.
+
+    Returns False on any failure -- DNS, refused, auth, permission to
+    CREATE DATABASE, migration error -- so the test skips cleanly in
+    environments without a Postgres at all (and so the user's dev DB
+    is *never* fallen back to as a side effect of an unreachable test
+    DB).
+    """
     try:
-        with psycopg.connect(settings.database_url, connect_timeout=2) as conn:
+        _ensure_test_db_exists()
+        _apply_migrations_to_test_db()
+        with psycopg.connect(_test_database_url(), connect_timeout=2) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
         return True
@@ -50,24 +160,50 @@ def _db_available() -> bool:
 
 
 pytestmark = pytest.mark.skipif(
-    not _db_available(),
-    reason="Postgres not reachable -- skipping real-DB race test",
+    not _test_db_available(),
+    reason="ebull_test DB unavailable -- skipping real-DB race test",
 )
+
+
+def _assert_test_db(conn: psycopg.Connection[object]) -> None:
+    """Refuse to run a destructive op against anything but ``ebull_test``.
+
+    Paranoid backstop: if a future refactor accidentally passes a
+    connection to ``settings.database_url`` (the dev DB) into the
+    ``clean_operators`` fixture, this guard fails the test loudly
+    instead of silently TRUNCATing the user's working state.
+    """
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        cur.execute("SELECT current_database()")
+        row = cur.fetchone()
+        assert row is not None
+        db_name = row[0]
+    if db_name != _TEST_DB_NAME:
+        raise RuntimeError(
+            f"Refusing to TRUNCATE: connected to database {db_name!r}, "
+            f"expected {_TEST_DB_NAME!r}. The dev DB must never be wiped by tests."
+        )
 
 
 @pytest.fixture
 def clean_operators() -> Iterator[None]:
-    """Wipe operators + sessions + audit so the test starts on an empty table.
+    """Wipe operators + sessions + audit on the isolated test DB.
 
-    Uses TRUNCATE ... CASCADE so any FK-referenced rows are also cleared.
+    Uses TRUNCATE ... CASCADE so any FK-referenced rows are also
+    cleared. Every connection here points at ``ebull_test`` and the
+    ``_assert_test_db`` guard runs before every TRUNCATE so a future
+    refactor cannot regress this back onto the dev DB.
     """
-    with psycopg.connect(settings.database_url) as conn:
+    test_url = _test_database_url()
+    with psycopg.connect(test_url) as conn:
+        _assert_test_db(conn)
         with conn.cursor() as cur:
             cur.execute("TRUNCATE operators, sessions, operator_audit RESTART IDENTITY CASCADE")
         conn.commit()
     reset_token_slot_for_tests()
     yield
-    with psycopg.connect(settings.database_url) as conn:
+    with psycopg.connect(test_url) as conn:
+        _assert_test_db(conn)
         with conn.cursor() as cur:
             cur.execute("TRUNCATE operators, sessions, operator_audit RESTART IDENTITY CASCADE")
         conn.commit()
@@ -76,7 +212,8 @@ def clean_operators() -> Iterator[None]:
 
 def test_advisory_lock_serialises_concurrent_setup(clean_operators: None) -> None:
     """A held advisory lock must block perform_setup until released."""
-    blocker = psycopg.connect(settings.database_url)
+    test_url = _test_database_url()
+    blocker = psycopg.connect(test_url)
     blocker.autocommit = False
     with blocker.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (_BOOTSTRAP_LOCK_KEY,))
@@ -84,7 +221,7 @@ def test_advisory_lock_serialises_concurrent_setup(clean_operators: None) -> Non
     result: dict[str, object] = {}
 
     def worker() -> None:
-        worker_conn = psycopg.connect(settings.database_url)
+        worker_conn = psycopg.connect(test_url)
         try:
             outcome, success = perform_setup(
                 worker_conn,
@@ -116,7 +253,7 @@ def test_advisory_lock_serialises_concurrent_setup(clean_operators: None) -> Non
     assert result["outcome"] is SetupOutcome.OK
 
     # Second call against the now-populated table must short-circuit.
-    with psycopg.connect(settings.database_url) as conn:
+    with psycopg.connect(test_url) as conn:
         outcome, success = perform_setup(
             conn,
             username="bob",
