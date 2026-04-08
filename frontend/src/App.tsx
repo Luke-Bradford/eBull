@@ -11,6 +11,7 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
+import { RecoverPage } from "@/pages/RecoverPage";
 import { OperatorsPage } from "@/pages/OperatorsPage";
 
 export function App() {
@@ -19,6 +20,7 @@ export function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/setup" element={<SetupPage />} />
+        <Route path="/recover" element={<RecoverPage />} />
         <Route
           element={
             <RequireAuth>
