@@ -40,12 +40,21 @@ populated) also fails this test.
 
 from __future__ import annotations
 
-import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import settings
-from app.main import app
+# State flags the lifespan in ``app/main.py`` is contracted to write.
+# Imported here as a module-level constant so the per-test cleanup
+# loop and the post-enter coherence assertions reference the same
+# canonical list -- if a future lifespan adds another flag, updating
+# this tuple in one place keeps both checks in sync.
+_LIFESPAN_STATE_FLAGS: tuple[str, ...] = (
+    "boot_state",
+    "needs_setup",
+    "recovery_required",
+    "broker_key_loaded",
+    "db_pool",
+)
 
 
 def _db_reachable() -> bool:
@@ -53,11 +62,24 @@ def _db_reachable() -> bool:
 
     A short connect timeout keeps the skip path fast in CI envs that
     have no Postgres at all (the default psycopg connect timeout is
-    long enough to feel like a hang). Any failure -- DNS, refused,
-    auth, timeout -- is treated identically as "DB not available";
-    the smoke gate is not the place to diagnose connection problems.
+    long enough to feel like a hang). Any failure -- import-time
+    config errors, settings validation errors, DNS, refused, auth,
+    timeout -- is treated identically as "DB not available"; the
+    smoke gate is not the place to diagnose connection problems.
+
+    The settings + psycopg imports are inside the function body (not
+    at module top-level) so a Pydantic validation error reading
+    ``EBULL_DATABASE_URL`` cannot blow up pytest collection -- it
+    becomes a clean skip with the same reason string. ``Exception``
+    is the right catch breadth here: ``BaseException`` would
+    swallow ``KeyboardInterrupt`` and ``SystemExit``, which we
+    explicitly want to propagate.
     """
     try:
+        import psycopg
+
+        from app.config import settings
+
         with psycopg.connect(settings.database_url, connect_timeout=2) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
@@ -84,20 +106,33 @@ def test_app_lifespan_boots_and_state_is_coherent() -> None:
 
     The post-enter assertions then verify the lifespan actually
     populated the ``app.state`` contract documented in
-    ``app/main.py::lifespan``. A future bug that swallows an error
-    inside lifespan and yields with a half-initialised state would
-    not be caught by the bare context-manager check; these asserts
-    are the coherence backstop.
+    ``app/main.py::lifespan``. ``app`` is a module-level singleton
+    and other tests in the session may have entered ``TestClient(app)``
+    before this one, leaving stale ``app.state`` attrs from a prior
+    lifespan run. A naive ``hasattr`` check could pass against that
+    stale state even if *this* test's lifespan was somehow
+    short-circuited. To make the assertions prove this run's writes,
+    delete every flag from ``app.state`` before entering the
+    TestClient -- the post-enter assertions then unambiguously
+    reflect what lifespan wrote during this call.
     """
+    # Defer the import so the module-level skipif evaluates first;
+    # this also keeps a Pydantic settings error from blowing up
+    # collection (handled by _db_reachable's skip path).
+    from app.main import app
+
+    for flag in _LIFESPAN_STATE_FLAGS:
+        if hasattr(app.state, flag):
+            delattr(app.state, flag)
+
     with TestClient(app) as client:
         # Lifespan must have populated every flag the rest of the app
         # reads off ``app.state``. Missing attributes here mean the
-        # lifespan returned early or skipped its writes.
-        assert hasattr(app.state, "boot_state")
-        assert hasattr(app.state, "needs_setup")
-        assert hasattr(app.state, "recovery_required")
-        assert hasattr(app.state, "broker_key_loaded")
-        assert hasattr(app.state, "db_pool")
+        # lifespan returned early or skipped its writes -- and because
+        # we just deleted them above, a pass here is unambiguously
+        # this run's work, not stale state from an earlier test.
+        for flag in _LIFESPAN_STATE_FLAGS:
+            assert hasattr(app.state, flag), f"lifespan did not set app.state.{flag}"
         # boot_state must be one of the documented values; an unknown
         # string would mean the bootstrap returned a state the rest
         # of the codebase has no branch for.
