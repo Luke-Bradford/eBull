@@ -146,9 +146,12 @@ When `POST /auth/recover` receives a phrase:
 3. **Wrong-phrase verification (conditional):**
    - If at least one row exists in `broker_credentials WHERE revoked_at IS
      NULL`: select the **most recent active non-revoked credential**, defined
-     deterministically as `ORDER BY created_at DESC, id DESC LIMIT 1` (the
-     `id` tiebreaker keeps the contract deterministic when two rows share a
-     `created_at` to microsecond precision). Attempt
+     deterministically as `ORDER BY created_at DESC, id DESC LIMIT 1`. The
+     `id` tiebreaker exists to keep the contract deterministic when two
+     rows share a `created_at` to microsecond precision; `broker_credentials.id`
+     is a UUID, so `id DESC` is a stable lexicographic ordering rather than
+     an insertion-ordered one — that is fine, the goal is "always pick the
+     same row," not "pick the newest by id." Attempt
      `secrets_crypto.decrypt(...)` against that row with the derived key and
      the row's AAD inputs. On `CredentialDecryptError` → `400
      phrase_does_not_match_database`. Nothing persisted, nothing cached, boot
@@ -293,16 +296,31 @@ is logged.
 **Env override mismatch behaviour.** If `EBULL_SECRETS_KEY` is set and
 encrypted credentials exist in the database, the bootstrap module MUST
 verify the override key by attempting to decrypt the most recent active
-non-revoked credential (same `ORDER BY created_at DESC, id DESC LIMIT 1`
-contract as §4) before completing startup. On verification failure, the
-backend MUST fail loud at startup with a clear configuration error
-identifying the mismatch — it does **not** silently continue, and it does
-**not** fall through into `recovery_required`. The recovery flow is only
-for the file-based bootstrap path; an operator who has explicitly opted
-into env-override mode is responsible for supplying a key that matches
-their database, and a mismatch is a configuration bug, not a recovery
-scenario. If no active non-revoked rows exist, verification is skipped and
-the override is accepted on its own (same trade-off as §4).
+non-revoked credential whose `operator_id` references an existing
+operator — same `ORDER BY created_at DESC, id DESC LIMIT 1` contract as §4,
+plus a `JOIN operators` (or `WHERE EXISTS`) clause to exclude orphan rows.
+The orphan-row exclusion is required to avoid a boot-fail collision with
+the §5 row-4 state (operators wiped, data-dir survived): those rows are
+active non-revoked but belong to a now-nonexistent operator and a
+legitimate fresh-start env-override boot must not hard-fail against
+ciphertext it has no business decrypting.
+
+This verification MUST be sequenced **after** the DB connection pool is
+open and **before** the lifespan yields control to the app. Ticket 1's
+test plan must include an explicit ordering test.
+
+On verification failure, the backend MUST fail loud at startup with a
+clear configuration error identifying the mismatch — it does **not**
+silently continue, and it does **not** fall through into
+`recovery_required`. The recovery flow is only for the file-based
+bootstrap path; an operator who has explicitly opted into env-override
+mode is responsible for supplying a key that matches their database, and
+a mismatch is a configuration bug, not a recovery scenario.
+
+If no qualifying rows exist (either no active non-revoked rows at all, or
+the only such rows are orphans from a wiped-operators state), verification
+is skipped and the override is accepted on its own (same trade-off as
+§4).
 
 ### 10. Required refactor of `secrets_crypto.py`
 
