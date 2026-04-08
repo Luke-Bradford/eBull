@@ -101,9 +101,13 @@ def _get_aesgcm() -> AESGCM:
     if cached is not None:
         return cached
     load_key()
-    # load_key() populates _aesgcm under the lock; re-read.
+    # load_key() populates _aesgcm under the lock; re-read. We use
+    # an explicit `if x is None: raise RuntimeError` rather than
+    # `assert` so the guard survives `python -O` (review-prevention
+    # log entry on assert-as-runtime-guard in service code).
     cached = _aesgcm
-    assert cached is not None  # noqa: S101 - load_key contract
+    if cached is None:
+        raise RuntimeError("load_key() failed to populate the AESGCM cache")
     return cached
 
 

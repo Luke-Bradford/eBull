@@ -264,22 +264,33 @@ def revoke_credential(
     row returns ``CredentialNotFound`` so the caller gets a clear 404 and
     cannot accidentally treat "already revoked" as "just revoked".
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE broker_credentials
-               SET revoked_at = now()
-             WHERE id = %s
-               AND operator_id = %s
-               AND revoked_at IS NULL
-            """,
-            (credential_id, operator_id),
-        )
-        if cur.rowcount == 0:
-            # No row was touched, so there is nothing to roll back at
-            # this layer. The UPDATE itself either matched or did not.
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE broker_credentials
+                   SET revoked_at = now()
+                 WHERE id = %s
+                   AND operator_id = %s
+                   AND revoked_at IS NULL
+                """,
+                (credential_id, operator_id),
+            )
+            rowcount = cur.rowcount
+        if rowcount == 0:
+            # The UPDATE matched nothing, so there is no dirty state to
+            # roll back at this layer. Raise without touching the txn.
             raise CredentialNotFound(f"credential {credential_id} not found")
-    conn.commit()
+        conn.commit()
+    except CredentialNotFound:
+        raise
+    except Exception:
+        # Any unexpected DB error (transient connectivity, deadlock,
+        # etc.) leaves the connection in an aborted-transaction state
+        # if we do not roll back here -- it would then be returned to
+        # the pool dirty and the next checkout would fail.
+        conn.rollback()
+        raise
 
 
 def _write_access_log(
