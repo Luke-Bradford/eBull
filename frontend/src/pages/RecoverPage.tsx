@@ -45,12 +45,11 @@
  *     verify against) into a single 400 with a fixed detail
  *     string, so the frontend cannot fingerprint them.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   ChangeEvent,
   ClipboardEvent,
   FormEvent,
-  KeyboardEvent,
 } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -85,6 +84,23 @@ export function RecoverPage(): JSX.Element {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Track mount + in-flight submit so the post-success
+  // refreshBootstrapState() await cannot drive setState after the
+  // bounce effect has unmounted us, and so the bounce effect itself
+  // does not navigate to /login during the brief window after
+  // postRecover resolves but before refreshBootstrapState settles.
+  // The latter matters because the post-recover SessionProvider
+  // probe runs getMe(), which 401s on a fresh-recover session and
+  // would otherwise transition status to "unauthenticated" mid-await.
+  const mountedRef = useRef(true);
+  const submittingRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   // If the SessionProvider says we are no longer in needs_recovery
   // (e.g. another tab completed recovery, or this tab refreshed
   // bootstrap-state after a successful submit), bounce off this
@@ -92,6 +108,12 @@ export function RecoverPage(): JSX.Element {
   // already applied inside SessionProvider — we just navigate to /
   // and RequireAuth / the route guards take it from there.
   useEffect(() => {
+    // While a submit is in flight, defer all bounce decisions until
+    // refreshBootstrapState() has settled. Otherwise an intermediate
+    // SessionProvider probe (e.g. getMe → 401 mid-await) could yank
+    // the operator off /recover before the new bootstrap-state is
+    // applied, sending them to /login instead of /setup.
+    if (submittingRef.current) return;
     if (status === "needs_setup") {
       navigate("/setup", { replace: true });
     } else if (status === "authenticated") {
@@ -139,16 +161,8 @@ export function RecoverPage(): JSX.Element {
     if (error !== null) setError(null);
   }
 
-  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>): void {
-    // Block Enter on individual inputs from submitting an
-    // incomplete form -- the explicit Submit button is the
-    // only path that should run validation.
-    if (event.key === "Enter") {
-      const target = event.target as HTMLInputElement;
-      if (target.tagName === "INPUT") {
-        event.preventDefault();
-      }
-    }
+  function safeSetError(message: string | null): void {
+    if (mountedRef.current) setError(message);
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -157,51 +171,60 @@ export function RecoverPage(): JSX.Element {
 
     const trimmed = words.map((w) => w.trim().toLowerCase());
 
-    // 1. Length / non-empty check.
+    // 1. Length / non-empty check (cheap, no crypto).
     if (trimmed.some((w) => w === "")) {
       setError(`Enter all ${PHRASE_WORD_COUNT} words.`);
       return;
     }
 
-    // 2. Client-side full validation (unknown word + checksum).
-    const result = await verifyPhrase(trimmed);
-    if (!result.ok) {
-      switch (result.error.kind) {
-        case "wrong_length":
-          setError(`Enter all ${PHRASE_WORD_COUNT} words.`);
-          return;
-        case "unknown_word":
-          setError(`Word ${result.error.position} is not recognised.`);
-          return;
-        case "bad_checksum":
-          setError(CHECKSUM_ERROR);
-          return;
-      }
-    }
-
+    // Flip the in-flight gate BEFORE awaiting verifyPhrase so that
+    // a SubtleCrypto failure (e.g. insecure context) lands in the
+    // single outer try/catch below, and so the bounce effect treats
+    // any intermediate session probe as a no-op.
+    submittingRef.current = true;
     setSubmitting(true);
     try {
+      // 2. Client-side full validation (unknown word + checksum).
+      const result = await verifyPhrase(trimmed);
+      if (!result.ok) {
+        switch (result.error.kind) {
+          case "wrong_length":
+            safeSetError(`Enter all ${PHRASE_WORD_COUNT} words.`);
+            return;
+          case "unknown_word":
+            safeSetError(`Word ${result.error.position} is not recognised.`);
+            return;
+          case "bad_checksum":
+            safeSetError(CHECKSUM_ERROR);
+            return;
+        }
+      }
+
+      // 3. Submit and re-apply the §6 precedence rule.
       await postRecover(trimmed.join(" "));
-      // Re-fetch bootstrap-state so the §6 precedence rule applies
-      // to the new flags. The useEffect above then bounces this
-      // page based on the new status.
       await refreshBootstrapState();
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         if (err.status === 409) {
-          setError(CONFLICT_ERROR);
-          // Re-sync state so the bounce effect can fire.
+          safeSetError(CONFLICT_ERROR);
+          // Re-sync state so the bounce effect can fire (after the
+          // submittingRef flag is cleared in the finally below).
           void refreshBootstrapState();
         } else if (err.status === 400) {
-          setError(GENERIC_RECOVER_ERROR);
+          safeSetError(GENERIC_RECOVER_ERROR);
         } else {
-          setError(NETWORK_ERROR);
+          safeSetError(NETWORK_ERROR);
         }
       } else {
-        setError(NETWORK_ERROR);
+        // Non-ApiError throws (SubtleCrypto, network DNS, etc.)
+        // surface as the same generic network message rather than
+        // an unhandled rejection.
+        safeSetError(NETWORK_ERROR);
       }
     } finally {
-      setSubmitting(false);
+      submittingRef.current = false;
+      // Guarded so the post-success unmount path does not warn.
+      if (mountedRef.current) setSubmitting(false);
     }
   }
 
@@ -264,12 +287,15 @@ export function RecoverPage(): JSX.Element {
                   spellCheck={false}
                   autoCapitalize="none"
                   value={word}
+                  // The visible <label> text is the position number
+                  // ("1.") only; aria-label supplies the full
+                  // "Word N" accessible name for screen readers and
+                  // for *ByLabelText queries in tests.
                   aria-label={`Word ${index + 1}`}
                   onChange={(e: ChangeEvent<HTMLInputElement>) =>
                     handleWordChange(index, e.target.value)
                   }
                   onPaste={(e) => handlePaste(index, e)}
-                  onKeyDown={handleKeyDown}
                   className="w-full rounded border border-slate-300 px-2 py-1 font-mono text-sm text-slate-800"
                 />
               </li>

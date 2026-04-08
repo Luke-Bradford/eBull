@@ -117,12 +117,12 @@ export async function verifyPhrase(
     bits = (bits << BigInt(BITS_PER_WORD)) | BigInt(idx);
   }
   const embeddedChecksum = Number(bits & 0xffn);
-  let entropyInt = bits >> 8n;
+  const entropyInt = bits >> 8n;
 
   const rootSecret = new Uint8Array(ROOT_SECRET_BYTES);
   for (let i = ROOT_SECRET_BYTES - 1; i >= 0; i--) {
-    rootSecret[i] = Number(entropyInt & 0xffn);
-    entropyInt >>= 8n;
+    const shift = BigInt((ROOT_SECRET_BYTES - 1 - i) * 8);
+    rootSecret[i] = Number((entropyInt >> shift) & 0xffn);
   }
 
   const digest = new Uint8Array(
