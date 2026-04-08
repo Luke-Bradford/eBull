@@ -61,6 +61,39 @@ class TestRecoverInputValidation:
         resp = client.post("/auth/recover", json={"phrase": ""})
         assert resp.status_code == 422
 
+    def test_all_phrase_path_failures_return_generic_400(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ADR-0003 §6: every failure mode reachable via /auth/recover
+        in recovery_required state must return EXACTLY 400 with the
+        same generic detail. A distinct status (e.g. 409 for
+        RecoveryNotApplicableError) would let a caller fingerprint
+        "wrong phrase" vs "no row to verify against" by status code
+        alone (review feedback PR #118 round 18).
+        """
+        from app.api import auth_bootstrap
+        from app.security import master_key
+        from app.security.recovery_phrase import RecoveryPhraseError
+
+        client.app.state.recovery_required = True  # type: ignore[attr-defined]
+        phrase = " ".join(["abandon"] * 24)
+
+        def _make_raiser(exc: Exception):
+            def _raise(*_a: object, **_k: object) -> None:
+                raise exc
+
+            return _raise
+
+        for exc in (
+            RecoveryPhraseError("bad checksum"),
+            master_key.RecoveryVerificationError("phrase did not match"),
+            master_key.RecoveryNotApplicableError("no active credential"),
+        ):
+            monkeypatch.setattr(auth_bootstrap.master_key, "recover_from_phrase", _make_raiser(exc))
+            resp = client.post("/auth/recover", json={"phrase": phrase})
+            assert resp.status_code == 400, f"{type(exc).__name__} should map to 400"
+            assert resp.json()["detail"] == "recovery phrase invalid"
+
 
 class TestRequireMasterKey:
     """Coverage for the structural require_master_key dependency (#118 round 9).

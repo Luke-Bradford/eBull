@@ -264,12 +264,20 @@ class TestRecoverFromPhraseGuards:
 
         app_state = MagicMock()
         app_state.broker_key_loaded = False
+        app_state.boot_state = "recovery_required"
+        app_state.recovery_required = True
+        app_state.needs_setup = False
 
         with pytest.raises(RecoveryNotApplicableError, match="no active credential"):
             recover_from_phrase(conn, phrase, app_state)
 
-        # State must NOT have flipped on the failure path.
+        # NONE of the gating flags may flip on the failure path
+        # (round 18: explicitly pin every flag, not just
+        # broker_key_loaded).
         assert app_state.broker_key_loaded is False
+        assert app_state.boot_state == "recovery_required"
+        assert app_state.recovery_required is True
+        assert app_state.needs_setup is False
         # And the file must NOT have been written.
         assert not root_secret_path().exists()
 

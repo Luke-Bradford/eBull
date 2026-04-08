@@ -137,18 +137,18 @@ def recover(
     # PR #118 round 8).
     try:
         master_key.recover_from_phrase(conn, body.phrase, request.app.state)
-    except master_key.RecoveryNotApplicableError as exc:
-        # The phrase decoded fine but the last active credential
-        # was revoked between lifespan computing
-        # ``recovery_required=True`` and us acquiring the lock.
-        # Distinct from a wrong phrase: nothing to verify against
-        # (review feedback PR #118 round 17).
-        logger.warning("recovery not applicable: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="no active credential to recover",
-        ) from exc
-    except (RecoveryPhraseError, master_key.RecoveryVerificationError) as exc:
+    except (
+        RecoveryPhraseError,
+        master_key.RecoveryVerificationError,
+        master_key.RecoveryNotApplicableError,
+    ) as exc:
+        # ADR-0003 §6: every phrase-path failure mode returns the
+        # SAME generic 400 so a caller cannot fingerprint
+        # "wrong phrase" vs "no row to verify against" vs
+        # "checksum bad" by comparing status codes. The distinct
+        # exception classes exist purely for server-side logs
+        # (round 18 reverted the round-17 409 mapping that broke
+        # this contract).
         # Same generic detail for every failure mode -- typo,
         # checksum, wrong-but-valid phrase. Full reason in
         # server log.
