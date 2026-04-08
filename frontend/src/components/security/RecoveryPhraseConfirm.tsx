@@ -71,25 +71,65 @@ interface ChallengeState {
 }
 
 /**
- * Pick `count` distinct indices in `[0, length)` using
- * `crypto.getRandomValues`. Math.random is deliberately avoided — it is
- * not cryptographically strong and even though predictability of the
- * challenge positions is not a security boundary in itself, this UI
- * sits adjacent to a credential-encryption flow and a "predictable
- * RNG inside a security component" finding is not worth the argument.
+ * Draw a single uniformly-distributed integer in `[0, length)` from
+ * `crypto.getRandomValues` using rejection sampling.
+ *
+ * A naive `value % length` is biased whenever `2^32` is not an exact
+ * multiple of `length` — values in `[0, 2^32 mod length)` map to
+ * lower bins more often than higher bins. With `length = 24` the bias
+ * per draw is ~1.5e-8, which is not a security boundary in itself, but
+ * the component is deliberately using a CSPRNG to head off "predictable
+ * RNG inside a security component" review findings, and biased
+ * sampling defeats that argument by the same logic. We discard any
+ * draw that lands in the residue zone above the largest multiple of
+ * `length` that fits in `2^32` and re-roll.
+ */
+function uniformIndexBelow(length: number): number {
+  const buf = new Uint32Array(1);
+  // 2^32 - (2^32 mod length) = largest multiple of length <= 2^32.
+  // Computed in BigInt to avoid the 2^32 overflow.
+  const limit = Number(2n ** 32n - (2n ** 32n % BigInt(length)));
+  for (;;) {
+    crypto.getRandomValues(buf);
+    if (buf[0]! < limit) {
+      return buf[0]! % length;
+    }
+  }
+}
+
+/**
+ * Pick `count` distinct indices in `[0, length)` uniformly.
+ * `Math.random` is deliberately avoided — see `uniformIndexBelow`.
  */
 function pickChallengeIndices(length: number, count: number): readonly number[] {
   const safeCount = Math.min(count, length);
   const chosen = new Set<number>();
-  // Fisher–Yates would be marginally cleaner, but with 24 positions and
-  // 3 picks the rejection-sample loop terminates in expected ~3.4 draws
-  // and is easier to read.
-  const buf = new Uint32Array(1);
   while (chosen.size < safeCount) {
-    crypto.getRandomValues(buf);
-    chosen.add(buf[0]! % length);
+    chosen.add(uniformIndexBelow(length));
   }
   return [...chosen].sort((a, b) => a - b);
+}
+
+function buildInitialChallenge(
+  phrase: readonly string[],
+  challengeCount: number,
+  phraseValid: boolean,
+): ChallengeState {
+  if (!phraseValid) {
+    return { indices: [], entries: [] };
+  }
+  const indices = pickChallengeIndices(phrase.length, challengeCount);
+  return { indices, entries: indices.map(() => "") };
+}
+
+/**
+ * Stable content signature for a phrase array. Used to detect when the
+ * parent has actually swapped one phrase for another (vs. just passing
+ * a new array reference with the same content on every render). The
+ * NUL separator is safe because the wordlist is ASCII.
+ */
+function phraseContentSignature(phrase: readonly string[]): string {
+  return phrase.join("\0");
 }
 
 function isPhraseShapeValid(phrase: readonly string[]): boolean {
@@ -123,21 +163,32 @@ export function RecoveryPhraseConfirm({
   const [writtenDown, setWrittenDown] = useState(false);
   const [showError, setShowError] = useState(false);
 
-  // Generate challenge indices exactly once per component instance.
-  // useMemo with an empty dependency array would also work, but useState
-  // with an initializer is the idiomatic React 18 way to compute a
-  // value once and never regenerate it on rerender — and it makes the
-  // intent ("this is one-shot state, not derived") explicit.
-  const [challenge, setChallenge] = useState<ChallengeState>(() => {
-    if (!phraseValid) {
-      return { indices: [], entries: [] };
-    }
-    const indices = pickChallengeIndices(phrase.length, challengeCount);
-    return {
-      indices,
-      entries: indices.map(() => ""),
-    };
-  });
+  // Challenge indices are computed once on mount via the initializer.
+  // For subsequent renders we detect a real phrase content change
+  // (signature comparison, not reference) and regenerate. The
+  // signature dance is the React docs' "storing information from
+  // previous renders" pattern: compare-and-set during render so the
+  // reset is visible in the same commit, no useEffect cycle gap. This
+  // matters because:
+  //   - if the parent mounts the component with an invalid phrase
+  //     (e.g. before the API response arrives) then swaps to a valid
+  //     one, the initializer's [] is stale and we must recompute;
+  //   - if the parent passes a fresh phrase array reference every
+  //     render with the same content, we must NOT regenerate (the
+  //     "stable across rerender" regression test pins this).
+  const currentSignature = phraseContentSignature(phrase);
+  const [previousSignature, setPreviousSignature] = useState(currentSignature);
+  const [challenge, setChallenge] = useState<ChallengeState>(() =>
+    buildInitialChallenge(phrase, challengeCount, phraseValid),
+  );
+
+  if (previousSignature !== currentSignature) {
+    setPreviousSignature(currentSignature);
+    setChallenge(buildInitialChallenge(phrase, challengeCount, phraseValid));
+    setStage("display");
+    setWrittenDown(false);
+    setShowError(false);
+  }
 
   function isAllCorrect(state: ChallengeState): boolean {
     if (!phraseValid || state.indices.length === 0) {

@@ -14,7 +14,7 @@
  * "backup phrase".
  */
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -323,22 +323,121 @@ describe("RecoveryPhraseConfirm — fail-closed shapes", () => {
     );
   });
 
-  it("never persists the recovery phrase to localStorage or sessionStorage", async () => {
+  describe("storage isolation", () => {
+    let setItemSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      // Spy installed before render so the scope unambiguously covers
+      // the entire component lifecycle including any module-level work
+      // that runs as a side effect of import. Restored in afterEach to
+      // avoid bleed across test files.
+      setItemSpy = vi.spyOn(Storage.prototype, "setItem");
+    });
+
+    afterEach(() => {
+      setItemSpy.mockRestore();
+    });
+
+    it("never persists the recovery phrase to localStorage or sessionStorage", async () => {
+      const user = userEvent.setup();
+      render(
+        <RecoveryPhraseConfirm
+          phrase={VALID_PHRASE}
+          onConfirmed={vi.fn()}
+          onCancel={vi.fn()}
+        />,
+      );
+      await advancePastWrittenDownGate();
+      for (const { position, input } of getChallengeSlots()) {
+        await user.type(input, VALID_PHRASE[position - 1]!);
+      }
+      await user.click(screen.getByRole("button", { name: "Confirm" }));
+      expect(setItemSpy).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("RecoveryPhraseConfirm — prop change handling", () => {
+  it("recovers from an initial invalid phrase when the parent supplies a valid one", async () => {
     const user = userEvent.setup();
-    const setItemSpy = vi.spyOn(Storage.prototype, "setItem");
-    render(
-      <RecoveryPhraseConfirm
-        phrase={VALID_PHRASE}
-        onConfirmed={vi.fn()}
-        onCancel={vi.fn()}
-      />,
+    const onConfirmed = vi.fn();
+    function Wrapper(): JSX.Element {
+      const [phrase, setPhrase] = useState<readonly string[]>(VALID_PHRASE.slice(0, 5));
+      return (
+        <>
+          <button type="button" onClick={() => setPhrase(VALID_PHRASE)}>
+            supply valid phrase
+          </button>
+          <RecoveryPhraseConfirm
+            phrase={phrase}
+            onConfirmed={onConfirmed}
+            onCancel={vi.fn()}
+          />
+        </>
+      );
+    }
+    render(<Wrapper />);
+
+    // Initial render: invalid phrase → unavailable state.
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /Recovery phrase unavailable/i,
     );
+
+    // Parent swaps to a valid 24-word phrase.
+    await user.click(screen.getByRole("button", { name: "supply valid phrase" }));
+
+    // Component must recover into the display stage and present the
+    // 24-word list — the unavailable error is gone.
+    expect(
+      screen.getByRole("list", { name: "Recovery phrase words" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Recovery phrase unavailable/i)).toBeNull();
+
+    // And the full happy path still works against the new phrase.
     await advancePastWrittenDownGate();
     for (const { position, input } of getChallengeSlots()) {
       await user.type(input, VALID_PHRASE[position - 1]!);
     }
     await user.click(screen.getByRole("button", { name: "Confirm" }));
-    expect(setItemSpy).not.toHaveBeenCalled();
-    setItemSpy.mockRestore();
+    expect(onConfirmed).toHaveBeenCalledTimes(1);
+  });
+
+  it("resets stage and clears entries when the parent swaps to a different valid phrase", async () => {
+    const user = userEvent.setup();
+    const ALTERNATE_PHRASE: readonly string[] = VALID_PHRASE.map(
+      (w) => `${w}-alt`,
+    );
+    function Wrapper(): JSX.Element {
+      const [phrase, setPhrase] = useState<readonly string[]>(VALID_PHRASE);
+      return (
+        <>
+          <button type="button" onClick={() => setPhrase(ALTERNATE_PHRASE)}>
+            swap phrase
+          </button>
+          <RecoveryPhraseConfirm
+            phrase={phrase}
+            onConfirmed={vi.fn()}
+            onCancel={vi.fn()}
+          />
+        </>
+      );
+    }
+    render(<Wrapper />);
+
+    // Advance to challenge stage on the first phrase.
+    await advancePastWrittenDownGate();
+    expect(screen.getAllByText(/^Word #\d+$/)).toHaveLength(3);
+
+    // Parent swaps phrase mid-challenge.
+    await user.click(screen.getByRole("button", { name: "swap phrase" }));
+
+    // Component resets to the display stage with the new phrase's
+    // words. The first numbered word should now reflect ALTERNATE_PHRASE.
+    const list = screen.getByRole("list", { name: "Recovery phrase words" });
+    const items = within(list).getAllByRole("listitem");
+    expect(items[0]).toHaveTextContent("alpha-alt");
+
+    // Written-down checkbox is reset.
+    expect(screen.getByLabelText(/I have written down/i)).not.toBeChecked();
   });
 });
