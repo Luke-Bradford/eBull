@@ -40,6 +40,12 @@ def _mock_conn() -> MagicMock:
     cur = MagicMock()
     cur.__enter__ = MagicMock(return_value=cur)
     cur.__exit__ = MagicMock(return_value=False)
+    # Pre-flight duplicate check in POST /broker-credentials runs a
+    # raw SELECT and treats a non-None fetchone as "duplicate". The
+    # service-layer mock paths don't care about that query, so we
+    # default to "no existing row" -- tests that want to assert the
+    # 409 path mock the service-layer exception explicitly.
+    cur.fetchone.return_value = None
     conn.cursor.return_value = cur
     return conn
 

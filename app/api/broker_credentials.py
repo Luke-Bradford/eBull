@@ -45,6 +45,9 @@ from app.services.broker_credentials import (
     CredentialMetadata,
     CredentialNotFound,
     CredentialValidationError,
+    _normalise_label,
+    _normalise_provider,
+    _normalise_secret,
     list_credentials,
     revoke_credential,
     store_credential,
@@ -150,36 +153,53 @@ def create(
     carries the 24-word recovery phrase exactly once. On every
     subsequent save the phrase field is null.
     """
+    # Pre-validate user input and pre-check for duplicate BEFORE any
+    # lazy-gen sequence. We must never reach a state where the root
+    # secret file is on disk but a 400 / 409 user error is then
+    # returned to the operator -- they would never see the phrase but
+    # the file would still be persisted (review feedback PR #118
+    # round 3). The pre-checks below are pure / read-only and run
+    # outside ``lazy_gen_lock`` -- they cannot leak any state into
+    # the lazy-gen path.
+    try:
+        provider_norm = _normalise_provider(body.provider)
+        label_norm = _normalise_label(body.label)
+        # Validate but discard the cleaned secret here -- we hand
+        # the *original* string to store_credential below so the
+        # service-layer normalisation runs in exactly one place.
+        _normalise_secret(body.secret)
+    except CredentialValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if _active_credential_exists(conn, session.operator_id, provider_norm, label_norm):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="credential already exists")
+
     phrase: list[str] | None = None
 
     # Lazy-gen path runs only on the very first credential save in
     # clean_install mode AND only when the cipher cache is empty
     # (env-override clean_install already has the key installed and
-    # must skip generation entirely -- review feedback PR #118
-    # round 2). The whole sequence -- generate, persist file,
-    # install cache, store credential -- runs under
-    # ``lazy_gen_lock`` so a queued waiter that arrives during a
-    # rollback observes the post-rollback state, not a stale
-    # mid-flight one.
+    # must skip generation entirely). The whole sequence -- generate,
+    # persist file, install cache, store credential -- runs under
+    # ``lazy_gen_lock`` so a concurrent recovery flow or a queued
+    # waiter cannot interleave with the file write.
     needs_lazy_gen = getattr(request.app.state, "boot_state", "clean_install") == "clean_install" and not getattr(
         request.app.state, "broker_key_loaded", False
     )
     if needs_lazy_gen:
         with master_key.lazy_gen_lock:
-            # Re-check inside the lock: another waiter may have
-            # already populated the key while we queued.
+            # Re-check inside the lock: a concurrent recovery may
+            # have populated the key while we queued.
             if not getattr(request.app.state, "broker_key_loaded", False):
                 pending_root_secret, derived, phrase = master_key.generate_root_secret_in_memory()
                 # Persist the file BEFORE the DB write. If persist
                 # raises (disk full, perms), nothing has been
                 # committed yet, the key is not in the cache, and
                 # the operator just retries. If persist succeeds
-                # but the DB write later fails, we unlink the
-                # file in the rollback path below so the next
-                # attempt starts clean. Either way the invariant
-                # holds: ``credential row exists`` implies
-                # ``root secret file is on disk and the operator
-                # saw the phrase exactly once``.
+                # but the DB write later fails *for an unexpected
+                # reason* (not the pre-checked validation/dup
+                # paths -- those already 4xx'd above), we unlink
+                # the file in the rollback path so the next
+                # attempt starts clean.
                 master_key.persist_generated_root_secret(pending_root_secret)
                 set_active_key(derived)
                 request.app.state.broker_key_loaded = True
@@ -190,15 +210,46 @@ def create(
                 try:
                     return _do_store(conn, session, body, phrase)
                 except Exception:
-                    # Roll back the persisted file + cache. We are
-                    # still inside the lock so any queued waiter
-                    # observes the cleaned-up state.
+                    # We are still inside the lock so any queued
+                    # waiter observes the cleaned-up state. The
+                    # pre-checks above mean this branch should only
+                    # ever fire on a real DB / encryption error,
+                    # not on a user input error.
                     _rollback_lazy_gen(request)
                     raise
-            # Fall through: another waiter populated the key while
-            # we queued; proceed as a normal store.
+            # Fall through: a concurrent recovery populated the
+            # key while we queued; proceed as a normal store.
 
     return _do_store(conn, session, body, phrase=None)
+
+
+def _active_credential_exists(
+    conn: psycopg.Connection[object],
+    operator_id: UUID,
+    provider: str,
+    label: str,
+) -> bool:
+    """True iff (operator, provider, label) already has an active row.
+
+    Pre-flight duplicate check used by the create handler so a
+    conflict is reported as 409 BEFORE the lazy-gen sequence runs --
+    a duplicate must never trigger root-secret persistence followed
+    by a discarded phrase.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+              FROM broker_credentials
+             WHERE operator_id = %s
+               AND provider = %s
+               AND label = %s
+               AND revoked_at IS NULL
+             LIMIT 1
+            """,
+            (operator_id, provider, label),
+        )
+        return cur.fetchone() is not None
 
 
 def _do_store(
