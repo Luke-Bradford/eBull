@@ -152,10 +152,12 @@ beforeEach(() => {
   useSessionMock.mockReturnValue({
     status: "needs_setup",
     operator: null,
+    bootstrapState: { needs_setup: true, recovery_required: false },
     login: vi.fn(),
     logout: vi.fn(),
     markAuthenticated: markAuthenticatedMock,
-  } as ReturnType<typeof useSession>);
+    refreshBootstrapState: vi.fn(),
+  } as unknown as ReturnType<typeof useSession>);
 });
 
 afterEach(() => {

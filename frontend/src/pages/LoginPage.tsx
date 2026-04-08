@@ -28,7 +28,7 @@ function safeNextPath(raw: string | null): string {
 }
 
 export function LoginPage(): JSX.Element {
-  const { status, login } = useSession();
+  const { status, login, bootstrapState } = useSession();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const next = safeNextPath(searchParams.get("next"));
@@ -104,6 +104,23 @@ export function LoginPage(): JSX.Element {
         >
           {submitting ? "Signing in…" : "Sign in"}
         </button>
+        {/*
+          ADR-0003 §6: the "Recover existing eBull data" link is
+          shown ONLY when the most recent /auth/bootstrap-state
+          response said recovery_required: true. In the normal
+          case (recovery not required) this link must be hidden
+          entirely — the recovery flow is not a routine option.
+        */}
+        {bootstrapState?.recovery_required === true && (
+          <div className="mt-3 text-center text-xs">
+            <a
+              href="/recover"
+              className="text-slate-600 underline hover:text-slate-800"
+            >
+              Recover existing eBull data
+            </a>
+          </div>
+        )}
       </form>
     </div>
   );
