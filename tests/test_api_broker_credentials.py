@@ -88,12 +88,29 @@ def _isolate_state() -> Iterator[None]:
     app.dependency_overrides[get_conn] = _gen
     app.dependency_overrides[require_session] = _session_row
 
+    # require_master_key dependency on POST /broker-credentials
+    # checks these flags; default to "normal + key loaded" so the
+    # service-mock tests run cleanly. Lazy-gen-specific behaviour
+    # has its own dedicated tests against the real handler.
+    saved_state = (
+        getattr(app.state, "boot_state", None),
+        getattr(app.state, "broker_key_loaded", None),
+        getattr(app.state, "recovery_required", None),
+    )
+    app.state.boot_state = "normal"
+    app.state.broker_key_loaded = True
+    app.state.recovery_required = False
+
     client.cookies.set(settings.session_cookie_name, _SESSION_ID)
 
     yield
 
     app.dependency_overrides.clear()
     app.dependency_overrides.update(saved)
+    # Restore saved app.state to avoid leaking between tests.
+    app.state.boot_state = saved_state[0]
+    app.state.broker_key_loaded = saved_state[1]
+    app.state.recovery_required = saved_state[2]
     client.cookies.clear()
 
 

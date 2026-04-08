@@ -182,6 +182,16 @@ def create(
     # persist file, install cache, store credential -- runs under
     # ``lazy_gen_lock`` so a concurrent recovery flow or a queued
     # waiter cannot interleave with the file write.
+    #
+    # NOTE: this read of ``boot_state`` / ``broker_key_loaded`` is
+    # OUTSIDE the lock. It is a fast-fail optimisation only -- the
+    # authoritative re-check happens inside the lock at line ~190.
+    # On CPython attribute reads are atomic under the GIL so we will
+    # never see a torn value, but we MUST NOT treat this read as
+    # authoritative; a concurrent recovery could flip the flags
+    # between this check and the lock acquisition, and the in-lock
+    # re-check is what catches that case (review feedback PR #118
+    # round 9).
     needs_lazy_gen = getattr(request.app.state, "boot_state", "clean_install") == "clean_install" and not getattr(
         request.app.state, "broker_key_loaded", False
     )

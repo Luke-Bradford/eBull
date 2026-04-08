@@ -235,40 +235,23 @@ def _newest_active_credential(
         return cur.fetchone()
 
 
-def _key_decrypts_newest_credential(conn: psycopg.Connection[object], candidate_key: bytes) -> bool:
-    """True iff *candidate_key* successfully decrypts the newest credential.
+def _key_decrypts_row(row: dict[str, object], candidate_key: bytes) -> bool:
+    """True iff *candidate_key* successfully decrypts *row*'s ciphertext.
 
-    Used by the recovery flow and env-override verification. Builds a
-    *local* AESGCM primitive instead of swapping the global cache, so
-    a candidate key can never serve a concurrent live request during
-    boot-time verification or recovery (review-prevention: AESGCM-swap
-    race surfaced on PR #118).
-
-    Field coercions: psycopg returns ``operator_id`` as :class:`UUID`
-    and ``key_version`` as ``int``; both are stringified into the AAD
-    via f-string in :func:`secrets_crypto._build_aad`. We coerce
-    explicitly here so a future row-factory change cannot silently
-    flip the AAD encoding and produce a false-negative on a valid
-    key.
+    Pure verification helper: takes an explicit row so the caller
+    controls exactly which credential is being checked. Used by
+    :func:`_key_decrypts_newest_credential` (env-override boot path)
+    and :func:`recover_from_phrase` (recovery path), both of which
+    pass a row they have already fetched -- this avoids a
+    double-fetch race where a concurrent revocation between two
+    `_newest_active_credential` calls could cause one call to see
+    the row and the next to see ``None`` (review feedback PR #118
+    round 9).
     """
     from cryptography.exceptions import InvalidTag
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
     from app.security.secrets_crypto import NONCE_LEN, build_aad
-
-    row = _newest_active_credential(conn)
-    if row is None:
-        # No verifiable row -- vacuously "matches". This branch is
-        # ONLY safe for callers that have already established the
-        # context (env-override boot validation against an
-        # all-orphans / clean-install state). The recovery path
-        # MUST NOT reach here: ``recover_from_phrase`` enforces a
-        # caller-side guard that refuses recovery when no active
-        # credential exists, because there is nothing to verify
-        # against and accepting an arbitrary phrase would let an
-        # operator install a key that decrypts nothing
-        # (review feedback PR #118 round 8).
-        return True
 
     blob = bytes(row["ciphertext"])  # type: ignore[arg-type]
     if len(blob) < NONCE_LEN + 16:
@@ -284,6 +267,36 @@ def _key_decrypts_newest_credential(conn: psycopg.Connection[object], candidate_
     except InvalidTag:
         return False
     return True
+
+
+def _key_decrypts_newest_credential(conn: psycopg.Connection[object], candidate_key: bytes) -> bool:
+    """True iff *candidate_key* successfully decrypts the newest credential.
+
+    Used by the env-override verification path during boot. Builds a
+    *local* AESGCM primitive (via ``_key_decrypts_row``) instead of
+    swapping the global cache, so a candidate key can never serve a
+    concurrent live request during boot-time verification (review-
+    prevention: AESGCM-swap race surfaced on PR #118).
+
+    Field coercions: psycopg returns ``operator_id`` as :class:`UUID`
+    and ``key_version`` as ``int``; both are stringified into the AAD
+    via f-string in :func:`secrets_crypto._build_aad`. We coerce
+    explicitly in ``_key_decrypts_row`` so a future row-factory
+    change cannot silently flip the AAD encoding and produce a
+    false-negative on a valid key.
+    """
+    row = _newest_active_credential(conn)
+    if row is None:
+        # No verifiable row -- vacuously "matches". This branch is
+        # ONLY safe for callers that have already established the
+        # context (env-override boot validation against an
+        # all-orphans / clean-install state). The recovery path
+        # uses ``_key_decrypts_row`` directly with a row it has
+        # already fetched and guarded, so it never reaches this
+        # short-circuit (review feedback PR #118 round 8).
+        return True
+
+    return _key_decrypts_row(row, candidate_key)
 
 
 # ---------------------------------------------------------------------------
@@ -455,18 +468,21 @@ def recover_from_phrase(conn: psycopg.Connection[object], phrase: list[str] | st
 
     derived = derive_broker_encryption_key(root_secret)
     with lazy_gen_lock:
-        # Refuse recovery when there is nothing to verify against.
-        # ``_key_decrypts_newest_credential`` returns True on a
-        # missing row (vacuous match), which would otherwise let an
-        # operator install an arbitrary key in a no-credentials
-        # state and lock themselves out the moment a credential
-        # was created with a different key. recovery_required can
-        # only be set when ``compute_boot_state`` saw credentials,
-        # so reaching here with no row is a state-machine error
-        # (review feedback PR #118 round 8).
-        if _newest_active_credential(conn) is None:
+        # Single fetch + verify against the SAME row object: a
+        # double fetch (once for the none-guard, once inside a
+        # helper that re-queries) would race against a concurrent
+        # revocation under READ COMMITTED -- the second fetch
+        # could see ``None`` and short-circuit to "vacuous match",
+        # installing an unverified key (review feedback PR #118
+        # round 9).
+        row = _newest_active_credential(conn)
+        if row is None:
+            # Refuse recovery when there is nothing to verify
+            # against. recovery_required can only be set when
+            # ``compute_boot_state`` saw credentials, so reaching
+            # here with no row is a state-machine error.
             raise RecoveryVerificationError("no active credential to verify recovery phrase against")
-        if not _key_decrypts_newest_credential(conn, derived):
+        if not _key_decrypts_row(row, derived):
             raise RecoveryVerificationError("recovery phrase did not match stored broker credentials")
         write_root_secret(root_secret)
         set_active_key(derived)
