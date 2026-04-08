@@ -127,6 +127,14 @@ uv run pytest
 
 All four must pass.
 
+`uv run pytest` includes `tests/smoke/test_app_boots.py`, which drives
+the FastAPI lifespan through `TestClient` against the real dev DB.
+This is the gate that catches lifespan-only failures (bad SQL in
+`master_key.bootstrap`, broken imports under `app/main.py`, migration
+state mismatches) which unit tests with mocked cursors will silently
+miss. If the smoke test fails, the running server is broken — fix the
+root cause, do not skip it.
+
 If the PR touches `frontend/`, also run:
 
 ```bash
