@@ -9,7 +9,6 @@ schema constraints.
 
 from __future__ import annotations
 
-import base64
 import os
 from collections.abc import Iterator
 
@@ -25,13 +24,8 @@ from app.services.broker_credentials import (
 
 
 @pytest.fixture(autouse=True)
-def _key(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(
-        secrets_crypto.settings,
-        "secrets_key",
-        base64.b64encode(os.urandom(32)).decode(),
-    )
-    secrets_crypto._reset_for_tests()
+def _key() -> Iterator[None]:
+    secrets_crypto.set_active_key(os.urandom(32))
     yield
     secrets_crypto._reset_for_tests()
 

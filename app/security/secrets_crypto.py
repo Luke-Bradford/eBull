@@ -1,11 +1,14 @@
 """AES-256-GCM encryption for broker credentials (issue #99 / ADR 0001).
 
 Design:
-  * Single key loaded from ``settings.secrets_key`` (base64, 32 bytes
-    after decode). Validated at startup via :func:`load_key`; if the key
-    is missing, malformed, or the wrong length the server refuses to
-    start. We never fall back to a generated key -- doing so would lock
-    existing ciphertext rows out on the next restart.
+  * The 32-byte broker-encryption key is supplied at runtime by
+    :mod:`app.security.master_key` (#114 / ADR-0003) via
+    :func:`set_active_key`. The lifespan calls master_key.bootstrap()
+    which either loads the key from the persisted root secret, accepts
+    an ``EBULL_SECRETS_KEY`` env override, or leaves the cache empty
+    if the server is in clean_install / recovery_required mode. This
+    module no longer reads ``settings.secrets_key`` directly --
+    bootstrap policy lives in master_key, not here.
   * Every ciphertext row carries a ``key_version`` column. The version is
     part of the AEAD additional-authenticated-data (AAD) string so a row
     written under version N cannot be decrypted under version M. Rotation
@@ -33,8 +36,6 @@ from uuid import UUID
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from app.config import settings
-
 KEY_LEN = 32
 NONCE_LEN = 12
 KEY_VERSION_CURRENT = 1
@@ -48,7 +49,13 @@ class CredentialDecryptError(Exception):
     """Raised when a ciphertext cannot be decrypted or authenticated."""
 
 
-def _decode_key(raw: str | None) -> bytes:
+def decode_env_key(raw: str | None) -> bytes:
+    """Decode and validate a base64-encoded EBULL_SECRETS_KEY value.
+
+    Used by :mod:`app.security.master_key` when honouring the env
+    override path. Lives here so the key-format rules stay co-located
+    with the cipher that consumes them.
+    """
     if raw is None or raw == "":
         raise CredentialCryptoConfigError(
             "EBULL_SECRETS_KEY is not set. Generate with: "
@@ -69,53 +76,43 @@ _aesgcm: AESGCM | None = None
 _aesgcm_lock = threading.Lock()
 
 
-def load_key() -> bytes:
-    """Decode the secrets key, validate it, and populate the AESGCM cache.
+def set_active_key(key: bytes) -> None:
+    """Install *key* (32 raw bytes) as the active broker-encryption key.
 
-    Call once at application startup. Subsequent ``encrypt`` / ``decrypt``
-    calls reuse the same primitive instance, so the key validated at
-    startup is guaranteed to be the key actually used at runtime --
-    there is no second ``settings.secrets_key`` read from a hot path
-    that could see a mutated value.
-
-    Raises :class:`CredentialCryptoConfigError` on any problem.
+    Called by :mod:`app.security.master_key` during lifespan bootstrap,
+    after a successful recovery, and after lazy generation on the first
+    credential save. There is no auto-load fallback -- if the cache is
+    empty when ``encrypt`` / ``decrypt`` runs, the call fails loudly.
+    The HTTP layer is expected to gate broker routes behind
+    ``require_master_key`` so the empty-cache case never reaches a
+    handler in production.
     """
+    if len(key) != KEY_LEN:
+        raise CredentialCryptoConfigError(f"broker-encryption key must be exactly {KEY_LEN} bytes (got {len(key)})")
     global _aesgcm
-    decoded = _decode_key(settings.secrets_key)
     with _aesgcm_lock:
-        _aesgcm = AESGCM(decoded)
-    return decoded
+        _aesgcm = AESGCM(key)
+
+
+def clear_active_key() -> None:
+    """Drop the cached AESGCM primitive (used by recovery + tests)."""
+    global _aesgcm
+    with _aesgcm_lock:
+        _aesgcm = None
 
 
 def _get_aesgcm() -> AESGCM:
-    """Return the cached AESGCM primitive.
-
-    The cache is populated by :func:`load_key` at startup. If a hot
-    path reaches this function before startup has run (only possible in
-    tests that bypass the lifespan), we fall through to ``load_key()``
-    so the test still gets a working primitive -- but production code
-    must rely on the startup gate to surface a misconfigured key
-    before the first request lands.
-    """
-    cached = _aesgcm
-    if cached is not None:
-        return cached
-    load_key()
-    # load_key() populates _aesgcm under the lock; re-read. We use
-    # an explicit `if x is None: raise RuntimeError` rather than
-    # `assert` so the guard survives `python -O` (review-prevention
-    # log entry on assert-as-runtime-guard in service code).
     cached = _aesgcm
     if cached is None:
-        raise RuntimeError("load_key() failed to populate the AESGCM cache")
+        raise CredentialCryptoConfigError(
+            "broker-encryption key is not loaded -- master_key.bootstrap() must run before encrypt/decrypt is called"
+        )
     return cached
 
 
 def _reset_for_tests() -> None:
     """Clear the cached AESGCM so tests can swap the key mid-process."""
-    global _aesgcm
-    with _aesgcm_lock:
-        _aesgcm = None
+    clear_active_key()
 
 
 def _build_aad(

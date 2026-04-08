@@ -160,9 +160,10 @@ class TestCreate:
             )
         assert resp.status_code == 201
         body = resp.json()
-        assert body["last_four"] == "1234"
-        assert "secret" not in body
-        assert "ciphertext" not in body
+        # Response is now {credential, recovery_phrase} per #114.
+        assert body["credential"]["last_four"] == "1234"
+        assert "secret" not in body["credential"]
+        assert "ciphertext" not in body["credential"]
         # Service receives operator_id from session, not from body.
         kwargs = mock.call_args.kwargs
         assert kwargs["operator_id"] == _OPERATOR_ID

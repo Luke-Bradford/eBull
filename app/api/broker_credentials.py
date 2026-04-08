@@ -31,11 +31,14 @@ from datetime import datetime
 from uuid import UUID
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_session
+from app.api.auth_bootstrap import require_master_key
 from app.db import get_conn
+from app.security import master_key
+from app.security.secrets_crypto import set_active_key
 from app.security.sessions import SessionRow
 from app.services.broker_credentials import (
     CredentialAlreadyExists,
@@ -93,6 +96,19 @@ class CreateCredentialRequest(BaseModel):
     secret: str = Field(min_length=1, max_length=4096)
 
 
+class CreateCredentialResponse(BaseModel):
+    """POST /broker-credentials response.
+
+    Carries the standard metadata block AND -- only on the very first
+    save in clean_install mode -- the 24-word recovery phrase that the
+    operator must record. After that first save the phrase is None and
+    is never returned again from any endpoint (#114 / ADR-0003 §4).
+    """
+
+    credential: CredentialMetadataOut
+    recovery_phrase: list[str] | None = None
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -115,15 +131,34 @@ def list_(
 
 @router.post(
     "",
-    response_model=CredentialMetadataOut,
+    response_model=CreateCredentialResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_master_key)],
 )
 def create(
     body: CreateCredentialRequest,
+    request: Request,
     session: SessionRow = Depends(require_session),
     conn: psycopg.Connection[object] = Depends(get_conn),
-) -> CredentialMetadataOut:
-    """Store a new credential. Response contains metadata only."""
+) -> CreateCredentialResponse:
+    """Store a new credential.
+
+    On the very first save in clean_install mode this triggers lazy
+    generation of the root secret (#114 / ADR-0003 §4): a fresh 32-byte
+    secret is created, persisted to disk, the derived broker-encryption
+    key is installed into the secrets_crypto cache, and the response
+    carries the 24-word recovery phrase exactly once. On every
+    subsequent save the phrase field is null.
+    """
+    phrase: list[str] | None = None
+    if getattr(request.app.state, "boot_state", "clean_install") == "clean_install":
+        derived, phrase = master_key.generate_and_persist_root_secret()
+        set_active_key(derived)
+        request.app.state.boot_state = "normal"
+        request.app.state.needs_setup = False
+        request.app.state.recovery_required = False
+        logger.info("master key lazy-generated on first credential save")
+
     try:
         meta = store_credential(
             conn,
@@ -142,7 +177,7 @@ def create(
             status_code=status.HTTP_409_CONFLICT,
             detail="credential already exists",
         ) from exc
-    return _to_out(meta)
+    return CreateCredentialResponse(credential=_to_out(meta), recovery_phrase=phrase)
 
 
 @router.delete("/{credential_id}", status_code=status.HTTP_204_NO_CONTENT)
