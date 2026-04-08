@@ -50,7 +50,7 @@ from app.security.recovery_phrase import (
     decode_phrase,
     encode_phrase,
 )
-from app.security.secrets_crypto import decode_env_key
+from app.security.secrets_crypto import decode_env_key, set_active_key
 
 logger = logging.getLogger(__name__)
 
@@ -416,13 +416,29 @@ def persist_generated_root_secret(root_secret: bytes) -> Path:
     return write_root_secret(root_secret)
 
 
-def recover_from_phrase(conn: psycopg.Connection[object], phrase: list[str] | str) -> bytes:
-    """Verify a recovery phrase and persist the recovered root secret.
+def recover_from_phrase(conn: psycopg.Connection[object], phrase: list[str] | str, app_state: object) -> bytes:
+    """Verify a recovery phrase and install the recovered key.
+
+    Atomically (under ``lazy_gen_lock``):
+      1. Verify the phrase decrypts the newest active credential.
+      2. Persist the root secret to disk.
+      3. Install the derived key into the cipher cache.
+      4. Set ``app_state.broker_key_loaded = True``.
+
+    Steps 3 and 4 happen INSIDE the lock so a queued lazy-gen waiter
+    that acquires the lock the moment recovery returns observes
+    ``broker_key_loaded=True`` on its inner re-check and falls
+    through to the normal-store path instead of generating a fresh
+    root secret and overwriting the file recovery just wrote
+    (review feedback PR #118 round 7).
 
     Returns the derived broker-encryption key on success. Raises
     :class:`RecoveryPhraseError` if the phrase is malformed and
     :class:`RecoveryVerificationError` if it decodes cleanly but does
-    not match the newest active credential ciphertext.
+    not match the newest active credential ciphertext. The caller is
+    responsible for the remaining ``app_state`` flags
+    (``boot_state``, ``recovery_required``, ``needs_setup``) which
+    do not gate the lazy-gen path.
     """
     try:
         root_secret = decode_phrase(phrase)
@@ -430,16 +446,10 @@ def recover_from_phrase(conn: psycopg.Connection[object], phrase: list[str] | st
         raise
 
     derived = derive_broker_encryption_key(root_secret)
-    # Acquire lazy_gen_lock for the verify -> write window so a
-    # concurrent first-credential-save (lazy-gen) or a second
-    # parallel recovery cannot interleave between the AEAD verify
-    # and the file write. Holding the lock here -- rather than only
-    # at the HTTP handler -- means every caller (current and
-    # future, including tests and internal recovery flows) is
-    # protected without having to remember the discipline.
-    # (review feedback PR #118 round 6).
     with lazy_gen_lock:
         if not _key_decrypts_newest_credential(conn, derived):
             raise RecoveryVerificationError("recovery phrase did not match stored broker credentials")
         write_root_secret(root_secret)
+        set_active_key(derived)
+        app_state.broker_key_loaded = True  # type: ignore[attr-defined]
     return derived

@@ -33,7 +33,6 @@ from pydantic import BaseModel, Field
 from app.db import get_conn
 from app.security import master_key
 from app.security.recovery_phrase import PHRASE_WORD_COUNT, RecoveryPhraseError
-from app.security.secrets_crypto import set_active_key
 
 logger = logging.getLogger(__name__)
 
@@ -129,13 +128,16 @@ def recover(
         )
 
     # ``recover_from_phrase`` acquires ``lazy_gen_lock`` internally
-    # for its verify -> write window, so we do not take it here.
-    # Mutual exclusion against a concurrent first-credential-save
-    # (lazy-gen) is enforced inside the security module rather than
-    # depending on every HTTP caller to remember the discipline
-    # (review feedback PR #118 round 6).
+    # for the verify -> write -> install -> set-loaded sequence,
+    # AND mutates ``app.state.broker_key_loaded`` from inside the
+    # lock. We must NOT do those mutations here because a queued
+    # lazy-gen waiter would acquire the lock the instant recovery
+    # returned, observe ``broker_key_loaded=False``, and overwrite
+    # the file we just wrote (review feedback PR #118 round 7).
+    # The remaining ``app.state`` flags below do not gate lazy-gen
+    # and are safe to set after lock release.
     try:
-        derived = master_key.recover_from_phrase(conn, body.phrase)
+        master_key.recover_from_phrase(conn, body.phrase, request.app.state)
     except (RecoveryPhraseError, master_key.RecoveryVerificationError) as exc:
         # Same generic detail for every failure mode -- typo,
         # checksum, wrong-but-valid phrase. Full reason in
@@ -146,8 +148,6 @@ def recover(
             detail="recovery phrase invalid",
         ) from exc
 
-    set_active_key(derived)
-    request.app.state.broker_key_loaded = True
     request.app.state.boot_state = "normal"
     request.app.state.recovery_required = False
     request.app.state.needs_setup = False

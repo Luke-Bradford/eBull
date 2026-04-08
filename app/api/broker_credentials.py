@@ -188,32 +188,34 @@ def create(
     if needs_lazy_gen:
         with master_key.lazy_gen_lock:
             # Re-check inside the lock: a concurrent recovery may
-            # have populated the key while we queued.
+            # have populated the key while we queued. Recovery now
+            # sets ``broker_key_loaded=True`` from inside the same
+            # lock (master_key.recover_from_phrase, round 7), so
+            # this re-check is authoritative.
             if not getattr(request.app.state, "broker_key_loaded", False):
-                # Re-run the duplicate pre-check inside the lock so
-                # the (provider, label) check and the store_credential
-                # INSERT share the same serialisation window. Without
-                # this, READ COMMITTED lets a concurrent insert slip
-                # in between the outer pre-check and the lazy-gen
-                # store, which would surface as CredentialAlreadyExists
-                # AFTER the root secret file is on disk -- triggering
-                # the rollback path and unlinking the file we just
-                # wrote (review feedback PR #118 round 6).
-                if _active_credential_exists(conn, session.operator_id, provider_norm, label_norm):
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail="credential already exists",
-                    )
+                # By construction, no concurrent writer can commit a
+                # broker_credentials row in this state:
+                #   * a normal-store path requires
+                #     ``broker_key_loaded=True`` (just re-checked
+                #     above and held under the lock)
+                #   * a parallel lazy-gen path requires holding
+                #     ``lazy_gen_lock`` (we hold it)
+                #   * a recovery path also requires
+                #     ``lazy_gen_lock`` (held inside
+                #     recover_from_phrase)
+                # Therefore the outer pre-check at line 173 cannot
+                # be a false negative: any writer that committed
+                # before our outer pre-check is reflected, and no
+                # writer can commit between then and now. We do
+                # NOT re-issue _active_credential_exists -- it
+                # would share the same READ COMMITTED conn and
+                # add no isolation guarantee. The CredentialAlready
+                # Exists handler below is defense-in-depth only.
                 pending_root_secret, derived, phrase = master_key.generate_root_secret_in_memory()
                 # Persist the file BEFORE the DB write. If persist
                 # raises (disk full, perms), nothing has been
                 # committed yet, the key is not in the cache, and
-                # the operator just retries. If persist succeeds
-                # but the DB write later fails *for an unexpected
-                # reason* (not the pre-checked validation/dup
-                # paths -- those already 4xx'd above), we unlink
-                # the file in the rollback path so the next
-                # attempt starts clean.
+                # the operator just retries.
                 master_key.persist_generated_root_secret(pending_root_secret)
                 set_active_key(derived)
                 request.app.state.broker_key_loaded = True
@@ -222,38 +224,61 @@ def create(
                 request.app.state.recovery_required = False
                 logger.info("master key lazy-generated on first credential save (file persisted)")
                 try:
-                    return _do_store(conn, session, body, phrase)
+                    meta = store_credential(
+                        conn,
+                        operator_id=session.operator_id,
+                        provider=body.provider,
+                        label=body.label,
+                        plaintext=body.secret,
+                    )
                 except (KeyboardInterrupt, SystemExit):
-                    # A signal-driven shutdown mid-request must NOT
-                    # destroy the freshly-persisted root secret.
-                    # The DB write may or may not have committed
-                    # before the signal arrived; either way the
-                    # safer choice is to leave the file on disk so
-                    # the operator can recover via phrase if any
-                    # row landed, rather than guarantee data loss
-                    # by unlinking. Re-raise without rollback
-                    # (review feedback PR #118 round 6).
+                    # Signal-driven shutdown: do NOT touch the
+                    # file. The DB write may or may not have
+                    # committed; preserving the key is the only
+                    # way the operator can recover any row that
+                    # did land (round 6).
                     raise
+                except (CredentialValidationError, CredentialAlreadyExists) as exc:
+                    # Defense in depth: by construction these
+                    # cannot fire here -- validation was pre-
+                    # checked against the same normalisers, and
+                    # the in-lock invariant precludes any
+                    # concurrent insert. If they DO fire, the
+                    # safe response is to surface 4xx WITHOUT
+                    # rolling back the freshly-persisted root
+                    # secret: a CredentialAlreadyExists implies
+                    # some other credential row exists in the
+                    # DB, and we MUST NOT unlink the file (which
+                    # might be the only key protecting it). The
+                    # invariant relaxes to: ``credential row
+                    # exists`` -> ``a root secret file is on
+                    # disk``, with the phrase shown only on the
+                    # path where the row was actually committed
+                    # -- but we never reach the
+                    # phrase-display path on a 4xx response, so
+                    # the invariant holds (round 7).
+                    if isinstance(exc, CredentialAlreadyExists):
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail="credential already exists",
+                        ) from exc
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=str(exc),
+                    ) from exc
                 except Exception:
-                    # Rollback for ordinary errors only. In the
-                    # lazy-gen branch no credential row is
-                    # committed when ``_do_store`` raises (the
-                    # in-lock duplicate re-check above eliminates
-                    # the TOCTOU 409 path; remaining failures are
-                    # validation, encryption, or psycopg errors
-                    # that all leave the txn rolled back inside
-                    # ``store_credential``). The freshly-persisted
-                    # root secret protects nothing yet and the
-                    # phrase was never returned to the operator,
-                    # so rolling back file + cipher cache +
-                    # ``app.state`` is the only way to uphold the
-                    # invariant: ``credential row exists`` <->
-                    # ``root secret file on disk AND operator saw
-                    # the phrase exactly once``. We are still
-                    # inside ``lazy_gen_lock`` so any queued
-                    # waiter observes the cleaned-up state.
+                    # Genuine unexpected error (psycopg failure,
+                    # encryption error, etc.). No row was
+                    # committed, the freshly-persisted root
+                    # secret protects nothing, and the phrase
+                    # was never returned to the operator.
+                    # Rollback file + cache + state to keep the
+                    # next attempt clean. We are still inside
+                    # ``lazy_gen_lock`` so a queued waiter
+                    # observes the cleaned-up state.
                     _rollback_lazy_gen(request)
                     raise
+                return CreateCredentialResponse(credential=_to_out(meta), recovery_phrase=phrase)
             # Fall through: a concurrent recovery populated the
             # key while we queued; proceed as a normal store.
 
