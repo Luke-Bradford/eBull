@@ -127,6 +127,15 @@ uv run pytest
 
 All four must pass.
 
+If the PR touches `frontend/`, also run:
+
+```bash
+pnpm --dir frontend typecheck
+pnpm --dir frontend test
+```
+
+Both must pass.
+
 ## Required engineering skills
 
 Read and apply these before pushing:
