@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 from app.db import get_conn
 from app.security import master_key
 from app.security.recovery_phrase import PHRASE_WORD_COUNT, RecoveryPhraseError
+from app.services.operator_setup import operators_empty
 
 logger = logging.getLogger(__name__)
 
@@ -69,19 +70,36 @@ class RecoverResponse(BaseModel):
 
 
 @router.get("/bootstrap-state", response_model=BootstrapStateResponse)
-def bootstrap_state(request: Request, response: Response) -> BootstrapStateResponse:
-    """Return the current boot state from ``app.state``.
+def bootstrap_state(
+    request: Request,
+    response: Response,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> BootstrapStateResponse:
+    """Return the current boot state.
 
-    Reads in-memory flags written by the lifespan / recovery / lazy-gen
-    paths. Does not touch the database -- bootstrap state is settled
-    once at startup and only mutates via explicit recovery or first
-    credential save, both of which update ``app.state`` in-process.
+    Master-key flags (``boot_state``, ``recovery_required``) come from
+    ``app.state`` -- they are settled once at startup and only mutate
+    via explicit recovery or first credential save, both of which
+    update ``app.state`` in-process.
+
+    ``needs_setup`` is the OR of two independent conditions:
+      * the master-key bootstrap reported ``needs_setup`` (in-memory
+        flag from lifespan), AND/OR
+      * the operators table is currently empty.
+
+    The operator-empty check is re-evaluated on every call (one
+    indexed ``LIMIT 1`` query) so a wiped DB or a fresh deployment
+    that never completed first-run setup correctly routes the
+    frontend to /setup instead of stranding the user at a sign-in
+    screen with no account to sign in to.
     """
     response.headers["Cache-Control"] = "no-store"
     state = getattr(request.app.state, "boot_state", "clean_install")
+    key_needs_setup = getattr(request.app.state, "needs_setup", False)
+    no_operators = operators_empty(conn)
     return BootstrapStateResponse(
         boot_state=state,
-        needs_setup=getattr(request.app.state, "needs_setup", False),
+        needs_setup=key_needs_setup or no_operators,
         recovery_required=getattr(request.app.state, "recovery_required", False),
     )
 

@@ -6,15 +6,21 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
+from app.api import auth_bootstrap
 from app.api.auth_bootstrap import router
 from app.db import get_conn
 
 
 @pytest.fixture
-def client() -> TestClient:
+def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_conn] = lambda: None  # type: ignore[misc]
+    # bootstrap-state now consults operators_empty() with the request
+    # connection. Stub it to False so the existing tests assert the
+    # in-memory app.state branch in isolation; the new "no operators"
+    # behaviour is covered by its own dedicated test below.
+    monkeypatch.setattr(auth_bootstrap, "operators_empty", lambda _conn: False)
     app.state.boot_state = "clean_install"
     app.state.needs_setup = True
     app.state.recovery_required = False
@@ -35,6 +41,32 @@ class TestBootstrapState:
     def test_no_store_header(self, client: TestClient) -> None:
         resp = client.get("/auth/bootstrap-state")
         assert resp.headers["cache-control"] == "no-store"
+
+    def test_needs_setup_true_when_operators_table_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Empty operators table -> needs_setup True even if the
+        master-key bootstrap reported needs_setup=False.
+
+        This is the regression for the "wiped DB strands user at
+        sign-in screen with no account" bug: bootstrap-state used to
+        only mirror the in-memory master-key flag, so a fresh DB whose
+        master key was clean_install (needs_setup=False) routed the
+        frontend to /login instead of /setup.
+        """
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[get_conn] = lambda: None  # type: ignore[misc]
+        monkeypatch.setattr(auth_bootstrap, "operators_empty", lambda _conn: True)
+        app.state.boot_state = "clean_install"
+        app.state.needs_setup = False  # master key is fine
+        app.state.recovery_required = False
+        c = TestClient(app)
+
+        resp = c.get("/auth/bootstrap-state")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["needs_setup"] is True
+        assert body["boot_state"] == "clean_install"
+        assert body["recovery_required"] is False
 
 
 class TestRecoverInputValidation:

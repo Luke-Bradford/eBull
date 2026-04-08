@@ -214,7 +214,7 @@ def _credentials_exist(conn: psycopg.Connection[object]) -> bool:
             """
             SELECT 1
               FROM broker_credentials bc
-              JOIN operators o ON o.id = bc.operator_id
+              JOIN operators o ON o.operator_id = bc.operator_id
              WHERE bc.revoked_at IS NULL
              LIMIT 1
             """
@@ -240,7 +240,7 @@ def _newest_active_credential(
             SELECT bc.id, bc.operator_id, bc.provider, bc.label,
                    bc.ciphertext, bc.key_version
               FROM broker_credentials bc
-              JOIN operators o ON o.id = bc.operator_id
+              JOIN operators o ON o.operator_id = bc.operator_id
              WHERE bc.revoked_at IS NULL
              ORDER BY bc.created_at DESC, bc.id DESC
              LIMIT 1
