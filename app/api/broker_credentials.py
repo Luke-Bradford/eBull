@@ -45,10 +45,10 @@ from app.services.broker_credentials import (
     CredentialMetadata,
     CredentialNotFound,
     CredentialValidationError,
-    _normalise_label,
-    _normalise_provider,
-    _normalise_secret,
     list_credentials,
+    normalise_label,
+    normalise_provider,
+    normalise_secret,
     revoke_credential,
     store_credential,
 )
@@ -162,12 +162,12 @@ def create(
     # outside ``lazy_gen_lock`` -- they cannot leak any state into
     # the lazy-gen path.
     try:
-        provider_norm = _normalise_provider(body.provider)
-        label_norm = _normalise_label(body.label)
+        provider_norm = normalise_provider(body.provider)
+        label_norm = normalise_label(body.label)
         # Validate but discard the cleaned secret here -- we hand
         # the *original* string to store_credential below so the
         # service-layer normalisation runs in exactly one place.
-        _normalise_secret(body.secret)
+        normalise_secret(body.secret)
     except CredentialValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if _active_credential_exists(conn, session.operator_id, provider_norm, label_norm):
@@ -209,12 +209,28 @@ def create(
                 logger.info("master key lazy-generated on first credential save (file persisted)")
                 try:
                     return _do_store(conn, session, body, phrase)
+                except HTTPException:
+                    # User-error 4xx (TOCTOU duplicate slipped past
+                    # the pre-check, or a future validation path).
+                    # The freshly-persisted root secret is still
+                    # valid for the operator's next attempt and
+                    # MUST NOT be unlinked for a non-fatal user
+                    # error -- doing so would destroy a working
+                    # encryption setup over a duplicate-label
+                    # collision (review feedback PR #118 round 4).
+                    # Re-raise without rollback. The pre-flight
+                    # pass above catches the *expected* 4xx cases
+                    # before lazy-gen runs at all, so reaching
+                    # this branch is a TOCTOU race and the right
+                    # response is to keep the persisted state and
+                    # let the operator retry.
+                    raise
                 except Exception:
-                    # We are still inside the lock so any queued
-                    # waiter observes the cleaned-up state. The
-                    # pre-checks above mean this branch should only
-                    # ever fire on a real DB / encryption error,
-                    # not on a user input error.
+                    # Genuinely unexpected -- DB death, encryption
+                    # error, etc. Roll back the persisted file +
+                    # cache so the next attempt starts clean. We
+                    # are still inside the lock so any queued
+                    # waiter observes the cleaned-up state.
                     _rollback_lazy_gen(request)
                     raise
             # Fall through: a concurrent recovery populated the
