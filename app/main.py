@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.api.audit import router as audit_router
 from app.api.auth import require_session_or_service_token
+from app.api.auth_bootstrap import router as auth_bootstrap_router
 from app.api.auth_session import router as auth_session_router
 from app.api.auth_setup import router as auth_setup_router
 from app.api.broker_credentials import router as broker_credentials_router
@@ -29,7 +30,8 @@ from app.api.theses import router as theses_router
 from app.config import settings
 from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
-from app.security.secrets_crypto import load_key as load_secrets_key
+from app.security import master_key
+from app.security.secrets_crypto import set_active_key as set_broker_encryption_key
 from app.services.coverage import override_tier
 from app.services.operator_setup import ensure_startup_token, operators_empty
 from app.services.ops_monitor import get_system_health
@@ -41,14 +43,6 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # Validate the broker-secret encryption key BEFORE doing anything
-    # else (issue #99). If it is missing or malformed we want to fail
-    # before binding the port -- not after migrations, not after the
-    # pool is open. load_secrets_key() raises CredentialCryptoConfigError
-    # which is a RuntimeError subclass; uvicorn will surface it and
-    # exit non-zero.
-    load_secrets_key()
-
     logger.info("Running pending migrations...")
     applied = await asyncio.to_thread(run_migrations)
     if applied:
@@ -62,12 +56,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Connection pool opened (min=1, max=10).")
     app.state.db_pool = pool
 
-    # First-run bootstrap token (issue #106 / ADR 0002). On a non-loopback
-    # bind with no env-configured token and an empty operators table, this
-    # generates a fresh token and prints it to the log exactly once. On
-    # loopback / configured-token / non-empty cases it is a no-op.
+    # First-run bootstrap token (issue #106 / ADR 0002).
     with pool.connection() as conn:
         ensure_startup_token(operators_empty=operators_empty(conn))
+
+        # Master-key bootstrap (#114 / ADR-0003). Must run AFTER the
+        # pool is open (we need the connection to verify ciphertext)
+        # and BEFORE yield (so the boot state is fixed before the
+        # first request lands). Never raises on a missing file -- a
+        # missing file with existing credentials puts the app in
+        # recovery_required mode and the frontend routes to /recover.
+        # Does raise on EBULL_SECRETS_KEY mismatch with existing
+        # ciphertext (fail-loud, ADR-0003 §6).
+        boot = master_key.bootstrap(conn)
+    app.state.boot_state = boot.state
+    app.state.needs_setup = boot.needs_setup
+    app.state.recovery_required = boot.recovery_required
+    app.state.broker_key_loaded = boot.broker_encryption_key is not None
+    if boot.broker_encryption_key is not None:
+        set_broker_encryption_key(boot.broker_encryption_key)
+    logger.info(
+        "Master-key bootstrap: state=%s needs_setup=%s recovery_required=%s",
+        boot.state,
+        boot.needs_setup,
+        boot.recovery_required,
+    )
 
     yield
 
@@ -77,6 +90,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="eBull", version="0.1.0", lifespan=lifespan)
 app.include_router(auth_setup_router)
+app.include_router(auth_bootstrap_router)
 app.include_router(auth_session_router)
 app.include_router(operators_router)
 app.include_router(audit_router)

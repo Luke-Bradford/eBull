@@ -40,6 +40,12 @@ def _mock_conn() -> MagicMock:
     cur = MagicMock()
     cur.__enter__ = MagicMock(return_value=cur)
     cur.__exit__ = MagicMock(return_value=False)
+    # Pre-flight duplicate check in POST /broker-credentials runs a
+    # raw SELECT and treats a non-None fetchone as "duplicate". The
+    # service-layer mock paths don't care about that query, so we
+    # default to "no existing row" -- tests that want to assert the
+    # 409 path mock the service-layer exception explicitly.
+    cur.fetchone.return_value = None
     conn.cursor.return_value = cur
     return conn
 
@@ -82,12 +88,30 @@ def _isolate_state() -> Iterator[None]:
     app.dependency_overrides[get_conn] = _gen
     app.dependency_overrides[require_session] = _session_row
 
+    # POST /broker-credentials no longer mounts require_master_key
+    # (the create handler self-gates so it can lazy-generate on
+    # first save). We still set these flags so the lazy-gen branch
+    # is skipped on the service-mock tests below -- "normal + key
+    # loaded" routes through the simple store_credential mock path.
+    saved_state = (
+        getattr(app.state, "boot_state", None),
+        getattr(app.state, "broker_key_loaded", None),
+        getattr(app.state, "recovery_required", None),
+    )
+    app.state.boot_state = "normal"
+    app.state.broker_key_loaded = True
+    app.state.recovery_required = False
+
     client.cookies.set(settings.session_cookie_name, _SESSION_ID)
 
     yield
 
     app.dependency_overrides.clear()
     app.dependency_overrides.update(saved)
+    # Restore saved app.state to avoid leaking between tests.
+    app.state.boot_state = saved_state[0]
+    app.state.broker_key_loaded = saved_state[1]
+    app.state.recovery_required = saved_state[2]
     client.cookies.clear()
 
 
@@ -160,9 +184,10 @@ class TestCreate:
             )
         assert resp.status_code == 201
         body = resp.json()
-        assert body["last_four"] == "1234"
-        assert "secret" not in body
-        assert "ciphertext" not in body
+        # Response is now {credential, recovery_phrase} per #114.
+        assert body["credential"]["last_four"] == "1234"
+        assert "secret" not in body["credential"]
+        assert "ciphertext" not in body["credential"]
         # Service receives operator_id from session, not from body.
         kwargs = mock.call_args.kwargs
         assert kwargs["operator_id"] == _OPERATOR_ID

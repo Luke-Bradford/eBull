@@ -101,21 +101,21 @@ class CredentialNotFound(CredentialError):
 # ---------------------------------------------------------------------------
 
 
-def _normalise_provider(raw: str) -> str:
+def normalise_provider(raw: str) -> str:
     cleaned = raw.strip().lower()
     if cleaned not in ALLOWED_PROVIDERS:
         raise CredentialValidationError(f"unsupported provider: {raw!r}")
     return cleaned
 
 
-def _normalise_label(raw: str) -> str:
+def normalise_label(raw: str) -> str:
     cleaned = raw.strip()
     if not cleaned:
         raise CredentialValidationError("label must not be empty")
     return cleaned
 
 
-def _normalise_secret(raw: str) -> str:
+def normalise_secret(raw: str) -> str:
     cleaned = raw.strip()
     if not cleaned:
         raise CredentialValidationError("secret must not be empty")
@@ -178,9 +178,9 @@ def store_credential(
       CredentialAlreadyExists   -- an active row with the same (operator,
                                    provider, label) already exists.
     """
-    provider_norm = _normalise_provider(provider)
-    label_norm = _normalise_label(label)
-    secret_norm = _normalise_secret(plaintext)
+    provider_norm = normalise_provider(provider)
+    label_norm = normalise_label(label)
+    secret_norm = normalise_secret(plaintext)
 
     last_four = secret_norm[-4:]
     key_version = KEY_VERSION_CURRENT
@@ -373,7 +373,7 @@ def load_credential_for_provider_use(
       CredentialNotFound        -- no active credential.
       CredentialDecryptError    -- stored ciphertext failed AEAD check.
     """
-    provider_norm = _normalise_provider(provider)
+    provider_norm = normalise_provider(provider)
     caller_clean = caller.strip()
     if not caller_clean:
         raise CredentialValidationError("caller tag must not be empty")

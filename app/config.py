@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     #     python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
     secrets_key: str | None = None
 
+    # --- Local secret bootstrap data dir (issue #114 / ADR-0003) --------
+    # Directory holding the persisted root secret file. When unset we
+    # fall back to platformdirs user_data_dir("eBull"). EBULL_DATA_DIR
+    # env override takes precedence over this setting. Configurable so
+    # operators can park the file on an encrypted volume.
+    data_dir: str | None = None
+
     @field_validator("service_token")
     @classmethod
     def _service_token_min_length(cls, v: str | None) -> str | None:

@@ -360,3 +360,43 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: A crypto module exposed `load_key()` (called once at startup to fail-fast on a missing key) and `_get_aesgcm()` (called on hot paths to get the cached primitive). `load_key()` validated and returned the key but did NOT populate the cache, so the first hot-path call re-read `settings.secrets_key` independently. A test (or future reload path) that mutated `settings` between startup and the first request could silently use a different key than the one validated at boot, with no error.
 - Prevention: Any "validate at startup" function must populate the same cache the runtime path reads from, so the validated value is provably the value used at runtime. Add a regression test that calls the startup gate, mutates the underlying setting to garbage, and asserts a runtime call still works (proving it uses the cached value, not a re-read). Pattern: `load_X()` populates the global; `_get_X()` returns the global, falling through to `load_X()` only as a defensive last resort.
 - Enforced in: this prevention log
+
+---
+
+### `except BaseException` in a destructive rollback handler destroys recovery state on signals
+- First seen in: #118
+- Symptom: A lazy-gen rollback handler used `except BaseException` so that `HTTPException` (a `BaseException` subclass in older designs is not the case, but the intent was "catch literally everything") would also trigger cleanup. This caught `KeyboardInterrupt` and `SystemExit`, meaning a `Ctrl-C` or `SIGTERM` mid-request would unlink the freshly-persisted root secret file before re-raising — an unrecoverable operator lockout caused by a clean shutdown.
+- Prevention: A rollback / cleanup handler that performs destructive actions (file unlink, cache clear, state reset) MUST narrow its catch to `except Exception`. If you also want to handle some non-`Exception` cases, add explicit `except (KeyboardInterrupt, SystemExit): raise` ahead of the `Exception` handler so signals always propagate cleanly. A clean shutdown must never trigger destructive recovery paths. Grep `except BaseException` in any module that performs file or external-state cleanup and require a justification comment.
+- Enforced in: this prevention log
+
+---
+
+### TOCTOU pre-check feeding a destructive rollback path
+- First seen in: #118
+- Symptom: A pre-flight `_active_credential_exists` SELECT ran outside a lock, then a long destructive sequence (generate root secret, persist file, install key, INSERT credential) ran inside the lock. Under `READ COMMITTED`, a concurrent commit between the pre-check and the INSERT would surface as `CredentialAlreadyExists` *after* the file was already on disk, triggering the rollback path and unlinking the freshly-written root secret.
+- Prevention: When a pre-check gates a destructive sequence whose failure handler unwinds setup steps, the pre-check must be re-run inside the same lock as the destructive sequence — they must share one serialisation window. An outer pre-check is fine as a fast-fail optimisation, but the in-lock re-check is the authoritative one. Test pattern: assert that a concurrent commit between the outer and inner check is correctly turned into a 409 *before* any destructive setup runs.
+- Enforced in: this prevention log
+
+---
+
+### Mutual-exclusion lock at the call site instead of inside the atomic operation
+- First seen in: #118
+- Symptom: `recover_from_phrase` ran a verify-then-write sequence (decrypt-check newest credential, then `write_root_secret`) with no lock held internally. The HTTP handler `auth_bootstrap.recover` acquired `lazy_gen_lock` around the call, so the production path was safe — but any future caller (a test, an internal recovery flow, an admin script) that did not happen to take the same lock would race itself.
+- Prevention: When a function owns an atomic verify→write or read→modify→write sequence, the lock acquisition belongs *inside* the function, not at every call site. Caller-side locks rot the moment a new caller is added and there is no compiler check that catches it. Use `threading.RLock` if the function may be called by code that already holds the lock; otherwise document the locking discipline at the function level and remove duplicate outer acquisitions. Any state mutation that other lock holders read for their own gating decisions (e.g. setting `broker_key_loaded=True` after a recovery write) must also happen inside the same lock — releasing the lock before the gating mutation re-opens the race for any waiter that acquires it next.
+- Enforced in: this prevention log
+
+---
+
+### In-lock re-check on a long-lived `READ COMMITTED` connection adds no isolation
+- First seen in: #118
+- Symptom: A duplicate-row pre-check was re-run inside a process-level lock to "close the TOCTOU window" against the same `INSERT` issued moments later. Both queries used the same `psycopg.Connection` from the FastAPI `get_conn` dependency, which had been in a `READ COMMITTED` transaction since the start of the request. The re-check provided no additional isolation guarantee against a concurrent writer beyond what the original outer pre-check already gave.
+- Prevention: A process-level lock does not buy you DB-level isolation. If you need true serialisation against a concurrent writer between a read and a subsequent write, escalate to a DB-level boundary: `SELECT … FOR UPDATE` on a parent row, a Postgres advisory lock keyed to the natural identity, a `SERIALIZABLE` transaction, or rely on the unique constraint and catch the typed exception. Alternatively, prove via a structural invariant that no concurrent writer is possible (e.g. all writers are gated on a flag you hold + a lock you hold) and document the invariant in the call site instead of issuing a misleading "defensive" SELECT that suggests an isolation it does not provide.
+- Enforced in: this prevention log
+
+---
+
+### Stale exception-class docstring after collapsing the API mapping
+- First seen in: #118
+- Symptom: A new exception class (`RecoveryNotApplicableError`) was introduced in round 17 with a docstring asserting it existed so the API could return a *distinct 409*. Round 18 then unified the API mapping back to a generic 400 (per ADR-0003 §6, to prevent failure-mode fingerprinting), but the class-level docstring still claimed the 409 contract. A future maintainer reading the class would have plausible grounds to "restore" the 409 they thought was an oversight, silently breaking the privacy contract.
+- Prevention: When an exception class docstring embeds a status-code claim, that claim is part of the contract and must be updated in the same commit that changes the handler `except` mapping. As a mechanical check, grep for `\b(4\d\d|5\d\d)\b` inside `class ...Error` docstrings and cross-reference each hit with the corresponding `except` clause in any HTTP handler that imports the class. If you decide the wire response must be uniform, say so explicitly in the docstring and reference the ADR section that requires it.
+- Enforced in: this prevention log

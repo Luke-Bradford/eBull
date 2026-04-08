@@ -1,4 +1,4 @@
-"""Tests for app.security.secrets_crypto (issue #99)."""
+"""Tests for app.security.secrets_crypto (issue #99 / refactored in #114)."""
 
 from __future__ import annotations
 
@@ -14,9 +14,10 @@ from app.security.secrets_crypto import (
     KEY_VERSION_CURRENT,
     CredentialCryptoConfigError,
     CredentialDecryptError,
+    decode_env_key,
     decrypt,
     encrypt,
-    load_key,
+    set_active_key,
 )
 
 
@@ -25,75 +26,55 @@ def _b64key(raw: bytes) -> str:
 
 
 @pytest.fixture
-def good_key(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    """Install a fresh 32-byte base64 key on settings for the test."""
-    key_b64 = _b64key(os.urandom(32))
-    monkeypatch.setattr(secrets_crypto.settings, "secrets_key", key_b64)
-    secrets_crypto._reset_for_tests()
-    yield key_b64
+def good_key() -> Iterator[bytes]:
+    """Install a fresh 32-byte broker-encryption key for the test."""
+    key = os.urandom(32)
+    set_active_key(key)
+    yield key
     secrets_crypto._reset_for_tests()
 
 
 # ---------------------------------------------------------------------------
-# load_key startup gate
+# decode_env_key (env override decoding)
 # ---------------------------------------------------------------------------
 
 
-class TestLoadKey:
-    def test_unset_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(secrets_crypto.settings, "secrets_key", None)
+class TestDecodeEnvKey:
+    def test_unset_raises(self) -> None:
+        with pytest.raises(CredentialCryptoConfigError):
+            decode_env_key(None)
+
+    def test_empty_string_raises(self) -> None:
+        with pytest.raises(CredentialCryptoConfigError):
+            decode_env_key("")
+
+    def test_non_base64_raises(self) -> None:
+        with pytest.raises(CredentialCryptoConfigError):
+            decode_env_key("not!base64!!!")
+
+    def test_short_key_raises(self) -> None:
+        with pytest.raises(CredentialCryptoConfigError):
+            decode_env_key(_b64key(os.urandom(16)))
+
+    def test_valid_key_returns_bytes(self) -> None:
+        decoded = decode_env_key(_b64key(os.urandom(32)))
+        assert len(decoded) == 32
+
+
+# ---------------------------------------------------------------------------
+# set_active_key / cache discipline
+# ---------------------------------------------------------------------------
+
+
+class TestActiveKeyCache:
+    def test_encrypt_without_loaded_key_raises(self) -> None:
         secrets_crypto._reset_for_tests()
         with pytest.raises(CredentialCryptoConfigError):
-            load_key()
+            encrypt("x", operator_id=uuid4(), provider="etoro", label="l")
 
-    def test_empty_string_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(secrets_crypto.settings, "secrets_key", "")
-        secrets_crypto._reset_for_tests()
+    def test_set_active_key_rejects_wrong_length(self) -> None:
         with pytest.raises(CredentialCryptoConfigError):
-            load_key()
-
-    def test_non_base64_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(secrets_crypto.settings, "secrets_key", "not!base64!!!")
-        secrets_crypto._reset_for_tests()
-        with pytest.raises(CredentialCryptoConfigError):
-            load_key()
-
-    def test_short_key_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(secrets_crypto.settings, "secrets_key", _b64key(os.urandom(16)))
-        secrets_crypto._reset_for_tests()
-        with pytest.raises(CredentialCryptoConfigError):
-            load_key()
-
-    def test_valid_key_returns_bytes(self, good_key: str) -> None:
-        key = load_key()
-        assert len(key) == 32
-
-    def test_load_key_populates_cache_so_runtime_uses_validated_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Regression: previously load_key() did not populate _aesgcm,
-        so the startup gate validated one key while encrypt/decrypt
-        could later read a mutated settings.secrets_key. After load_key()
-        the cached primitive must encrypt+decrypt without re-reading
-        settings -- proven by mutating settings to garbage AFTER
-        load_key() and confirming encryption still works."""
-        good = _b64key(os.urandom(32))
-        monkeypatch.setattr(secrets_crypto.settings, "secrets_key", good)
-        secrets_crypto._reset_for_tests()
-        load_key()  # populates cache
-        # Now mutate settings to a value load_key() would reject. The
-        # already-cached primitive must continue to work.
-        monkeypatch.setattr(secrets_crypto.settings, "secrets_key", "garbage!!!")
-        op = uuid4()
-        blob = encrypt("payload", operator_id=op, provider="etoro", label="l")
-        assert (
-            decrypt(
-                blob,
-                operator_id=op,
-                provider="etoro",
-                label="l",
-                key_version=KEY_VERSION_CURRENT,
-            )
-            == "payload"
-        )
+            set_active_key(b"\x00" * 16)
         secrets_crypto._reset_for_tests()
 
 
@@ -103,7 +84,7 @@ class TestLoadKey:
 
 
 class TestRoundTrip:
-    def test_round_trip(self, good_key: str) -> None:
+    def test_round_trip(self, good_key: bytes) -> None:
         op = uuid4()
         blob = encrypt(
             "super-secret",
@@ -120,7 +101,7 @@ class TestRoundTrip:
         )
         assert result == "super-secret"
 
-    def test_blob_starts_with_random_nonce(self, good_key: str) -> None:
+    def test_blob_starts_with_random_nonce(self, good_key: bytes) -> None:
         op = uuid4()
         a = encrypt("x" * 32, operator_id=op, provider="etoro", label="l")
         b = encrypt("x" * 32, operator_id=op, provider="etoro", label="l")
@@ -134,7 +115,7 @@ class TestRoundTrip:
 
 
 class TestAADBinding:
-    def test_wrong_operator_fails(self, good_key: str) -> None:
+    def test_wrong_operator_fails(self, good_key: bytes) -> None:
         op = uuid4()
         blob = encrypt("s", operator_id=op, provider="etoro", label="l")
         with pytest.raises(CredentialDecryptError):
@@ -146,7 +127,7 @@ class TestAADBinding:
                 key_version=KEY_VERSION_CURRENT,
             )
 
-    def test_wrong_provider_fails(self, good_key: str) -> None:
+    def test_wrong_provider_fails(self, good_key: bytes) -> None:
         op = uuid4()
         blob = encrypt("s", operator_id=op, provider="etoro", label="l")
         with pytest.raises(CredentialDecryptError):
@@ -158,7 +139,7 @@ class TestAADBinding:
                 key_version=KEY_VERSION_CURRENT,
             )
 
-    def test_wrong_label_fails(self, good_key: str) -> None:
+    def test_wrong_label_fails(self, good_key: bytes) -> None:
         op = uuid4()
         blob = encrypt("s", operator_id=op, provider="etoro", label="l")
         with pytest.raises(CredentialDecryptError):
@@ -170,7 +151,7 @@ class TestAADBinding:
                 key_version=KEY_VERSION_CURRENT,
             )
 
-    def test_wrong_key_version_fails(self, good_key: str) -> None:
+    def test_wrong_key_version_fails(self, good_key: bytes) -> None:
         op = uuid4()
         blob = encrypt("s", operator_id=op, provider="etoro", label="l")
         with pytest.raises(CredentialDecryptError):
@@ -182,12 +163,11 @@ class TestAADBinding:
                 key_version=KEY_VERSION_CURRENT + 1,
             )
 
-    def test_wrong_key_fails(self, good_key: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_wrong_key_fails(self, good_key: bytes) -> None:
         op = uuid4()
         blob = encrypt("s", operator_id=op, provider="etoro", label="l")
         # Swap to a different key and try to decrypt the previous blob.
-        monkeypatch.setattr(secrets_crypto.settings, "secrets_key", _b64key(os.urandom(32)))
-        secrets_crypto._reset_for_tests()
+        set_active_key(os.urandom(32))
         with pytest.raises(CredentialDecryptError):
             decrypt(
                 blob,
@@ -197,7 +177,7 @@ class TestAADBinding:
                 key_version=KEY_VERSION_CURRENT,
             )
 
-    def test_truncated_blob_fails(self, good_key: str) -> None:
+    def test_truncated_blob_fails(self, good_key: bytes) -> None:
         with pytest.raises(CredentialDecryptError):
             decrypt(
                 b"too-short",
