@@ -61,8 +61,34 @@ class TestRecoverInputValidation:
         resp = client.post("/auth/recover", json={"phrase": ""})
         assert resp.status_code == 422
 
+    @pytest.mark.parametrize(
+        "exc_factory",
+        [
+            pytest.param(
+                lambda: __import__(
+                    "app.security.recovery_phrase", fromlist=["RecoveryPhraseError"]
+                ).RecoveryPhraseError("bad checksum"),
+                id="RecoveryPhraseError",
+            ),
+            pytest.param(
+                lambda: __import__(
+                    "app.security.master_key", fromlist=["RecoveryVerificationError"]
+                ).RecoveryVerificationError("phrase did not match"),
+                id="RecoveryVerificationError",
+            ),
+            pytest.param(
+                lambda: __import__(
+                    "app.security.master_key", fromlist=["RecoveryNotApplicableError"]
+                ).RecoveryNotApplicableError("no active credential"),
+                id="RecoveryNotApplicableError",
+            ),
+        ],
+    )
     def test_all_phrase_path_failures_return_generic_400(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        exc_factory: object,
     ) -> None:
         """ADR-0003 §6: every failure mode reachable via /auth/recover
         in recovery_required state must return EXACTLY 400 with the
@@ -70,29 +96,23 @@ class TestRecoverInputValidation:
         RecoveryNotApplicableError) would let a caller fingerprint
         "wrong phrase" vs "no row to verify against" by status code
         alone (review feedback PR #118 round 18).
+
+        Parametrized (round 19) so each exception class gets a fresh
+        monkeypatch scope rather than stacking patches in a loop.
         """
         from app.api import auth_bootstrap
-        from app.security import master_key
-        from app.security.recovery_phrase import RecoveryPhraseError
 
         client.app.state.recovery_required = True  # type: ignore[attr-defined]
         phrase = " ".join(["abandon"] * 24)
+        exc = exc_factory()  # type: ignore[operator]
 
-        def _make_raiser(exc: Exception):
-            def _raise(*_a: object, **_k: object) -> None:
-                raise exc
+        def _raise(*_a: object, **_k: object) -> None:
+            raise exc  # type: ignore[misc]
 
-            return _raise
-
-        for exc in (
-            RecoveryPhraseError("bad checksum"),
-            master_key.RecoveryVerificationError("phrase did not match"),
-            master_key.RecoveryNotApplicableError("no active credential"),
-        ):
-            monkeypatch.setattr(auth_bootstrap.master_key, "recover_from_phrase", _make_raiser(exc))
-            resp = client.post("/auth/recover", json={"phrase": phrase})
-            assert resp.status_code == 400, f"{type(exc).__name__} should map to 400"
-            assert resp.json()["detail"] == "recovery phrase invalid"
+        monkeypatch.setattr(auth_bootstrap.master_key, "recover_from_phrase", _raise)
+        resp = client.post("/auth/recover", json={"phrase": phrase})
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "recovery phrase invalid"
 
 
 class TestRequireMasterKey:

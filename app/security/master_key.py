@@ -79,10 +79,15 @@ class RecoveryVerificationError(MasterKeyError):
 class RecoveryNotApplicableError(MasterKeyError):
     """Raised when recovery is requested but there is no active credential to verify against.
 
-    Distinct from :class:`RecoveryVerificationError` so the API can return a
-    distinct status (409) and message instead of conflating "wrong phrase"
-    with "structurally nothing left to recover" (review feedback PR #118
-    round 17).
+    Distinct from :class:`RecoveryVerificationError` purely so the
+    server-side log clearly distinguishes "no row to verify against"
+    from "row exists but the derived key did not match". On the wire
+    this class is folded into the same generic 400 ``recovery phrase
+    invalid`` response as every other phrase-path failure -- ADR-0003
+    §6 forbids returning a distinct status code here because it would
+    let a caller fingerprint the failure mode by status alone (review
+    feedback PR #118 round 18, correcting the round 17 docstring that
+    referenced a 409 mapping which was never shipped).
     """
 
 
