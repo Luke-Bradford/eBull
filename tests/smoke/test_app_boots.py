@@ -121,28 +121,55 @@ def test_app_lifespan_boots_and_state_is_coherent() -> None:
     # collection (handled by _db_reachable's skip path).
     from app.main import app
 
+    # Snapshot any pre-existing flags so the teardown loop in
+    # ``finally`` can restore them if ``TestClient.__enter__`` raises.
+    # Without this, a lifespan failure (the exact thing this test
+    # exists to catch) would leave ``app.state`` half-deleted and
+    # corrupt subsequent tests in the same session that read those
+    # attrs directly. Use a sentinel rather than ``None`` because
+    # ``None`` is a legal value for some flags.
+    _SENTINEL = object()
+    snapshot: dict[str, object] = {flag: getattr(app.state, flag, _SENTINEL) for flag in _LIFESPAN_STATE_FLAGS}
     for flag in _LIFESPAN_STATE_FLAGS:
         if hasattr(app.state, flag):
             delattr(app.state, flag)
 
-    with TestClient(app) as client:
-        # Lifespan must have populated every flag the rest of the app
-        # reads off ``app.state``. Missing attributes here mean the
-        # lifespan returned early or skipped its writes -- and because
-        # we just deleted them above, a pass here is unambiguously
-        # this run's work, not stale state from an earlier test.
-        for flag in _LIFESPAN_STATE_FLAGS:
-            assert hasattr(app.state, flag), f"lifespan did not set app.state.{flag}"
-        # boot_state must be one of the documented values; an unknown
-        # string would mean the bootstrap returned a state the rest
-        # of the codebase has no branch for.
-        assert app.state.boot_state in {
-            "clean_install",
-            "normal",
-            "recovery_required",
-        }
-        # /health is the cheapest end-to-end probe that the routing
-        # layer is also wired up -- if it 500s, lifespan came up but
-        # the app object itself is broken.
-        resp = client.get("/health")
-        assert resp.status_code == 200, resp.text
+    try:
+        with TestClient(app) as client:
+            # Lifespan must have populated every flag the rest of the
+            # app reads off ``app.state``. Missing attributes here
+            # mean the lifespan returned early or skipped its writes
+            # -- and because we just deleted them above, a pass here
+            # is unambiguously this run's work, not stale state from
+            # an earlier test.
+            for flag in _LIFESPAN_STATE_FLAGS:
+                assert hasattr(app.state, flag), f"lifespan did not set app.state.{flag}"
+            # boot_state must be one of the documented values; an
+            # unknown string would mean the bootstrap returned a
+            # state the rest of the codebase has no branch for.
+            assert app.state.boot_state in {
+                "clean_install",
+                "normal",
+                "recovery_required",
+            }
+            # /health is the cheapest end-to-end probe that the
+            # routing layer is also wired up -- if it 500s, lifespan
+            # came up but the app object itself is broken.
+            resp = client.get("/health")
+            assert resp.status_code == 200, resp.text
+    finally:
+        # Restore the snapshot regardless of how the body exited.
+        # On the success path TestClient's exit hook has already run
+        # the lifespan shutdown and may have written its own values;
+        # we still restore the pre-test snapshot so a subsequent
+        # test that imported ``app`` for its non-lifespan-managed
+        # state sees exactly what it would have seen if this smoke
+        # test had not run. On the failure path (lifespan crashed
+        # mid-startup) restoration is the whole point: subsequent
+        # tests should not inherit a half-deleted state.
+        for flag, value in snapshot.items():
+            if value is _SENTINEL:
+                if hasattr(app.state, flag):
+                    delattr(app.state, flag)
+            else:
+                setattr(app.state, flag, value)
