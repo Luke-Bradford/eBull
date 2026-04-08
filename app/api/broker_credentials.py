@@ -423,16 +423,19 @@ def _rollback_lazy_gen(request: Request) -> None:
         # compute_boot_state, and the next successful first-save
         # will atomically overwrite it via os.replace.
         logger.exception("lazy-gen rollback: failed to unlink persisted root secret file")
-    # Always log the final filesystem state so operators reading
-    # logs after a rollback can tell whether the next attempt
-    # enters lazy-gen cleanly (file absent) or reuses an orphan
-    # (file present, key never bound to any credential, phrase
-    # lost). The orphan branch is recoverable -- compute_boot_state
-    # will return clean_install on next boot and the operator's
-    # next save reuses the existing key -- but reading the log
-    # spares them a confusing reboot (review feedback PR #118
-    # round 14).
-    if path.exists():
+    # Snapshot the final filesystem state ONCE so the log branch
+    # below cannot disagree with reality due to a concurrent
+    # writer recreating the file between two ``path.exists()``
+    # calls (review feedback PR #118 round 15).
+    file_remains = path.exists()
+    if file_remains:
+        # Operators reading logs after a rollback can tell that
+        # the next boot will reuse this file as clean_install
+        # and that the phrase from the aborted save is lost.
+        # The orphan branch is recoverable -- compute_boot_state
+        # returns clean_install on next boot and the operator's
+        # next save reuses the existing key -- but the warning
+        # spares them a confusing reboot.
         logger.warning(
             "lazy-gen rollback: root secret file remains on disk at %s -- "
             "next boot will reuse it as clean_install (phrase from the "
