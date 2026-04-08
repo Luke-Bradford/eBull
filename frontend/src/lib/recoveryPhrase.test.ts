@@ -21,6 +21,16 @@ const VALID_PHRASE: readonly string[] = [
   "art",
 ];
 
+// Non-trivial parity vector generated from the backend's
+// `encode_phrase(bytes(range(32)))` so byte-order regressions in
+// the TS port surface immediately. The all-zeros vector cannot
+// catch a big-/little-endian mismatch because every entropy byte
+// is identical. This vector exercises 32 distinct byte values.
+const NON_TRIVIAL_PHRASE: readonly string[] =
+  "abandon amount liar amount expire adjust cage candy arch gather drum bullet absurd math era live bid rhythm alien crouch range attend journey unaware".split(
+    " ",
+  );
+
 describe("recoveryPhrase", () => {
   it("vendors exactly 2048 wordlist entries", () => {
     expect(WORDLIST).toHaveLength(2048);
@@ -61,6 +71,14 @@ describe("recoveryPhrase", () => {
   describe("verifyPhrase", () => {
     it("accepts the canonical all-zeros test vector", async () => {
       const result = await verifyPhrase(VALID_PHRASE);
+      expect(result.ok).toBe(true);
+    });
+
+    it("accepts a non-trivial entropy vector that exercises every byte position", async () => {
+      // Pins byte-order parity with the backend port. Generated
+      // by `encode_phrase(bytes(range(32)))` in
+      // app/security/recovery_phrase.py.
+      const result = await verifyPhrase(NON_TRIVIAL_PHRASE);
       expect(result.ok).toBe(true);
     });
 

@@ -207,9 +207,19 @@ export function RecoverPage(): JSX.Element {
       if (err instanceof ApiError) {
         if (err.status === 409) {
           safeSetError(CONFLICT_ERROR);
-          // Re-sync state so the bounce effect can fire (after the
-          // submittingRef flag is cleared in the finally below).
-          void refreshBootstrapState();
+          // Await the re-sync inside the try so submittingRef stays
+          // true until the new bootstrap-state is applied. A
+          // fire-and-forget here would clear submittingRef in the
+          // finally before the SessionProvider had settled, opening
+          // the same intermediate-status bounce race the ref was
+          // introduced to prevent. Swallow secondary failures —
+          // the operator already has the conflict message and a
+          // failed re-sync will be retried by the next page load.
+          try {
+            await refreshBootstrapState();
+          } catch {
+            /* secondary refresh failure swallowed */
+          }
         } else if (err.status === 400) {
           safeSetError(GENERIC_RECOVER_ERROR);
         } else {
