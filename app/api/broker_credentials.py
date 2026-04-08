@@ -151,6 +151,21 @@ def create(
     carries the 24-word recovery phrase exactly once. On every
     subsequent save the phrase field is null.
     """
+    # Recovery-required state-machine guard: refuse credential
+    # writes while the operator must run /auth/recover. Without
+    # this guard the request would fall through to encrypt() with
+    # an empty cipher cache and return 500 instead of the
+    # documented 503 (review feedback PR #118 round 13).
+    # POST /broker-credentials does NOT mount require_master_key
+    # because the create handler self-gates so it can lazy-gen
+    # on first save -- this guard is the equivalent gate for the
+    # one boot state where lazy-gen is NOT the right answer.
+    if getattr(request.app.state, "recovery_required", False):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="recovery required",
+        )
+
     # Pre-validate user input and pre-check for duplicate BEFORE any
     # lazy-gen sequence. We must never reach a state where the root
     # secret file is on disk but a 400 / 409 user error is then

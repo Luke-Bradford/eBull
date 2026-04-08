@@ -271,3 +271,33 @@ class TestRecoverFromPhraseGuards:
         assert app_state.broker_key_loaded is False
         # And the file must NOT have been written.
         assert not root_secret_path().exists()
+
+    def test_bad_checksum_phrase_leaves_no_state(self, isolated_data_dir: Path) -> None:
+        """A phrase that passes word-count but fails checksum must
+        leave no file on disk and not flip any app_state flags
+        (review feedback PR #118 round 13).
+        """
+        from unittest.mock import MagicMock
+
+        from app.security.master_key import recover_from_phrase
+        from app.security.recovery_phrase import RecoveryPhraseError
+
+        # 24 valid BIP39 words but the wrong checksum word at the
+        # end. "abandon" * 24 has a valid checksum (it's the
+        # canonical zero-entropy phrase). Replacing the final
+        # word with a different valid wordlist entry breaks the
+        # checksum.
+        phrase = (["abandon"] * 23) + ["zoo"]
+
+        conn = MagicMock()
+        app_state = MagicMock()
+        app_state.broker_key_loaded = False
+
+        with pytest.raises(RecoveryPhraseError):
+            recover_from_phrase(conn, phrase, app_state)
+
+        assert app_state.broker_key_loaded is False
+        assert not root_secret_path().exists()
+        # Lock was never even acquired -- conn.cursor must not
+        # have been called.
+        conn.cursor.assert_not_called()

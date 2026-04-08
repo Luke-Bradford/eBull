@@ -113,7 +113,5 @@ class TestSecretNormalisation:
             assert once == twice
 
     def test_idempotent_for_provider_and_label(self) -> None:
-        from app.services.broker_credentials import normalise_label, normalise_provider
-
         assert normalise_provider(normalise_provider("  ETORO  ")) == "etoro"
         assert normalise_label(normalise_label("  primary  ")) == "primary"
