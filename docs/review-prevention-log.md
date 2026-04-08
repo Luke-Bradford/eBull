@@ -395,6 +395,22 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### Modulo bias on `crypto.getRandomValues`
+- First seen in: #124
+- Symptom: A "pick a uniform integer in `[0, n)`" helper drew a `Uint32` from `crypto.getRandomValues` and applied `% n` directly. Whenever `2^32` is not an exact multiple of `n`, the lower bins (`0 .. (2^32 mod n) - 1`) are returned marginally more often than the higher bins. With `n = 24` the bias per draw is ~1.5e-8 — not exploitable in this UI — but the same component had explicitly chosen `crypto.getRandomValues` over `Math.random` to avoid a "predictable RNG inside a security component" finding, and biased sampling defeats that argument by the same logic.
+- Prevention: Any `getRandomValues` result used with `%` for bounded integer sampling MUST use rejection sampling: discard any draw at or above the largest multiple of `n` that fits in the buffer's range, and re-roll. Pattern: `const limit = 2^bits - (2^bits mod n); do { draw = next(); } while (draw >= limit); return draw % n;`. Grep `getRandomValues` for `% ` on the same line or the next line, and require the rejection-loop pattern.
+- Enforced in: this prevention log
+
+---
+
+### Stale `useState` initializer when a parent later swaps the prop it reads
+- First seen in: #124
+- Symptom: A `useState(() => derive(prop))` initializer ran once at mount against an initial prop value (e.g. an empty/invalid phrase before the API response had arrived). When the parent then supplied a valid prop on a subsequent render, the component continued to display state derived from the original prop — the initializer did not re-run, and there was no fallback path to recompute. Specific case: a recovery-phrase confirmation component stuck in the unavailable state even after the parent supplied a valid 24-word phrase, silently stranding the operator.
+- Prevention: When a `useState(() => expr(prop))` pattern depends on a prop the parent can legitimately change after mount, add an explicit reset path. Use the React docs' "storing information from previous renders" pattern: track a stable signature of the prop in a sibling `useState`, compare it during render, and call the resetter `setState` calls inline when the signature changes. Do not rely on `useEffect` for this — the reset must be visible in the same commit, not a frame later. As a review checkpoint, grep `useState\(\(\) =>` and for each match ask: "can the parent legitimately change the props this initializer reads, after mount?" If yes, the reset path is mandatory.
+- Enforced in: this prevention log
+
+---
+
 ### Stale exception-class docstring after collapsing the API mapping
 - First seen in: #118
 - Symptom: A new exception class (`RecoveryNotApplicableError`) was introduced in round 17 with a docstring asserting it existed so the API could return a *distinct 409*. Round 18 then unified the API mapping back to a generic 400 (per ADR-0003 §6, to prevent failure-mode fingerprinting), but the class-level docstring still claimed the 409 contract. A future maintainer reading the class would have plausible grounds to "restore" the 409 they thought was an oversight, silently breaking the privacy contract.
