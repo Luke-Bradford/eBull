@@ -63,9 +63,18 @@ from pathlib import Path
 # connection directly against settings.database_url" appears in
 # practice.
 _FORBIDDEN_PATTERNS: tuple[str, ...] = (
-    "psycopg.connect(settings.database_url",
-    "ConnectionPool(settings.database_url",
-    "connect(settings.database_url",  # alias-stripped fallback
+    # Broad ``.connect(...)`` catch: matches ``psycopg.connect``,
+    # ``asyncpg.connect``, ``sqlalchemy.create_engine``-fronted
+    # connect calls -- any driver or helper that opens a single
+    # connection directly. Also matches the bare ``connect(...)``
+    # form if a future test imports the function under a name.
+    "connect(settings.database_url",
+    # Broad ``*Pool(...)`` catch: matches ``ConnectionPool``,
+    # ``AsyncConnectionPool``, and any other pool constructor a
+    # future driver might add. The original guard missed
+    # ``AsyncConnectionPool`` because it pinned the prefix
+    # (PR #129 round 3 review).
+    "Pool(settings.database_url",
 )
 
 # Files allowed to contain a forbidden pattern. Read-only paths
