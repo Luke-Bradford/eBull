@@ -260,20 +260,20 @@ def create(
                     # cannot fire here -- validation was pre-
                     # checked against the same normalisers, and
                     # the in-lock invariant precludes any
-                    # concurrent insert. If they DO fire, the
-                    # safe response is to surface 4xx WITHOUT
-                    # rolling back the freshly-persisted root
-                    # secret: a CredentialAlreadyExists implies
-                    # some other credential row exists in the
-                    # DB, and we MUST NOT unlink the file (which
-                    # might be the only key protecting it). The
-                    # invariant relaxes to: ``credential row
-                    # exists`` -> ``a root secret file is on
-                    # disk``, with the phrase shown only on the
-                    # path where the row was actually committed
-                    # -- but we never reach the
-                    # phrase-display path on a 4xx response, so
-                    # the invariant holds (round 7).
+                    # concurrent insert (broker_key_loaded=False
+                    # re-check + lazy_gen_lock held). If they DO
+                    # somehow fire, no credential row was
+                    # committed, the freshly-persisted root
+                    # secret protects nothing, and the phrase
+                    # was never returned to the operator -- so
+                    # we MUST roll back the file + cipher cache +
+                    # app.state before surfacing 4xx, otherwise
+                    # the app is left in normal boot state with
+                    # a key installed and a file on disk but no
+                    # credential row and no phrase the operator
+                    # has ever seen (review feedback PR #118
+                    # round 11, correcting round 5/7 reasoning).
+                    _rollback_lazy_gen(request)
                     if isinstance(exc, CredentialAlreadyExists):
                         raise HTTPException(
                             status_code=status.HTTP_409_CONFLICT,

@@ -468,22 +468,20 @@ def recover_from_phrase(conn: psycopg.Connection[object], phrase: list[str] | st
 
     derived = derive_broker_encryption_key(root_secret)
     with lazy_gen_lock:
-        # Discard any in-flight transaction snapshot opened on the
-        # caller's connection BEFORE we acquired the lock, so the
-        # SELECT below sees post-lock-acquisition reality. Under
-        # PostgreSQL READ COMMITTED each statement actually fetches
-        # the latest committed data so this is paranoia, but the
-        # rollback also ensures we are not running on a connection
-        # that the caller left in a poisoned state and matches
-        # the discipline review feedback asked for (PR #118
-        # round 10).
-        try:
-            conn.rollback()
-        except psycopg.Error:
-            # A rollback that itself raises means the connection
-            # is unusable; let the SELECT below surface the real
-            # error.
-            pass
+        # Snapshot freshness: the SELECT below runs on the caller's
+        # connection, which FastAPI's get_conn dependency manages.
+        # We do NOT issue conn.rollback() here -- that would
+        # silently abort any pending work the dependency expects
+        # to commit on exit, and is the kind of side-effect a
+        # service function with a borrowed Connection must avoid
+        # (review-prevention-log: mid-transaction commit/rollback
+        # in service functions). Snapshot freshness is provided
+        # by PostgreSQL's READ COMMITTED isolation: each
+        # statement observes the latest committed data, so the
+        # SELECT below sees any revocation that committed before
+        # we acquired ``lazy_gen_lock``, regardless of when the
+        # caller's transaction started (review feedback PR #118
+        # round 11, correcting round 10 defensive rollback).
         # Single fetch + verify against the SAME row object: a
         # double fetch (once for the none-guard, once inside a
         # helper that re-queries) would race against a concurrent
