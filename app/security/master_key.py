@@ -440,11 +440,21 @@ def persist_generated_root_secret(root_secret: bytes) -> Path:
 def recover_from_phrase(conn: psycopg.Connection[object], phrase: list[str] | str, app_state: object) -> bytes:
     """Verify a recovery phrase and install the recovered key.
 
-    Atomically (under ``lazy_gen_lock``):
-      1. Verify the phrase decrypts the newest active credential.
-      2. Persist the root secret to disk.
-      3. Install the derived key into the cipher cache.
-      4. Set ``app_state.broker_key_loaded = True``.
+    Sequence:
+      0. Decode the phrase + derive the key (OUTSIDE the lock --
+         pure CPU work, no shared state, fails fast on a
+         malformed phrase before we contend on the lock).
+      1. Acquire ``lazy_gen_lock``.
+      2. Verify the derived key decrypts the newest active
+         credential.
+      3. Persist the root secret to disk.
+      4. Install the derived key into the cipher cache.
+      5. Atomically flip all gating ``app_state`` flags.
+      6. Release ``lazy_gen_lock``.
+
+    Steps 2-5 are atomic under the lock; step 0 is intentionally
+    outside (review feedback PR #118 round 12, correcting an
+    earlier docstring that implied the decode step was covered).
 
     Steps 3 and 4 happen INSIDE the lock so a queued lazy-gen waiter
     that acquires the lock the moment recovery returns observes

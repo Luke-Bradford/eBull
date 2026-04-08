@@ -162,10 +162,17 @@ def create(
     try:
         provider_norm = normalise_provider(body.provider)
         label_norm = normalise_label(body.label)
-        # Validate but discard the cleaned secret here -- we hand
-        # the *original* string to store_credential below so the
-        # service-layer normalisation runs in exactly one place.
-        normalise_secret(body.secret)
+        # Capture the normalised secret here and pass it through
+        # to store_credential below, so a single normalisation
+        # pass is shared end-to-end. Previously the pre-check
+        # validated and discarded the cleaned secret, then
+        # store_credential re-normalised body.secret -- which
+        # opened a hypothetical drift window where a secret
+        # accepted by the outer pass could still raise
+        # CredentialValidationError inside the lazy-gen block
+        # and trigger _rollback_lazy_gen on a user-input error
+        # (review feedback PR #118 round 12).
+        secret_norm = normalise_secret(body.secret)
     except CredentialValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if _active_credential_exists(conn, session.operator_id, provider_norm, label_norm):
@@ -232,28 +239,44 @@ def create(
                 request.app.state.recovery_required = False
                 logger.info("master key lazy-generated on first credential save (file persisted)")
                 try:
-                    # Pass the *already-normalised* provider/label
-                    # so the pre-check and the INSERT target the
-                    # exact same identity strings -- not the raw
-                    # body fields plus a re-normalisation pass
-                    # inside store_credential. The plaintext is
-                    # passed raw because secret normalisation
-                    # (strip whitespace) is idempotent and the
-                    # service layer is the canonical place for
-                    # that step (review feedback PR #118 round 10).
+                    # Pass the *already-normalised* provider /
+                    # label / secret so the pre-check and the
+                    # INSERT share a single normalisation pass
+                    # end-to-end. Eliminates the hypothetical
+                    # drift window where a re-normalisation
+                    # inside store_credential could raise on a
+                    # value the outer pass accepted (review
+                    # feedback PR #118 round 12).
                     meta = store_credential(
                         conn,
                         operator_id=session.operator_id,
                         provider=provider_norm,
                         label=label_norm,
-                        plaintext=body.secret,
+                        plaintext=secret_norm,
                     )
                 except (KeyboardInterrupt, SystemExit):
                     # Signal-driven shutdown: do NOT touch the
-                    # file. The DB write may or may not have
-                    # committed; preserving the key is the only
-                    # way the operator can recover any row that
-                    # did land (round 6).
+                    # file. At signal time it is unknowable
+                    # whether the INSERT committed -- the signal
+                    # could fire before, during, or after the
+                    # commit. Possible outcomes:
+                    #   * Row landed: rollback would unlink the
+                    #     key protecting it -- unrecoverable
+                    #     lockout (the bug class fixed in
+                    #     rounds 2-5).
+                    #   * Row did not land: the file becomes an
+                    #     orphan. On next boot, no credentials +
+                    #     file present is treated as
+                    #     ``clean_install`` (file is reused) by
+                    #     ``compute_boot_state``, and the
+                    #     operator's next credential save
+                    #     proceeds normally with the existing
+                    #     key. The phrase is lost forever, but
+                    #     no data is at risk.
+                    # We choose preservation because the
+                    # alternative on the row-landed branch is
+                    # unrecoverable while orphan-file-no-phrase
+                    # is recoverable (round 6/12).
                     raise
                 except (CredentialValidationError, CredentialAlreadyExists) as exc:
                     # Defense in depth: by construction these
@@ -299,7 +322,14 @@ def create(
             # Fall through: a concurrent recovery populated the
             # key while we queued; proceed as a normal store.
 
-    return _do_store(conn, session, body, phrase=None)
+    return _do_store(
+        conn,
+        operator_id=session.operator_id,
+        provider=provider_norm,
+        label=label_norm,
+        plaintext=secret_norm,
+        phrase=None,
+    )
 
 
 def _active_credential_exists(
@@ -333,17 +363,20 @@ def _active_credential_exists(
 
 def _do_store(
     conn: psycopg.Connection[object],
-    session: SessionRow,
-    body: CreateCredentialRequest,
+    *,
+    operator_id: UUID,
+    provider: str,
+    label: str,
+    plaintext: str,
     phrase: list[str] | None,
 ) -> CreateCredentialResponse:
     try:
         meta = store_credential(
             conn,
-            operator_id=session.operator_id,
-            provider=body.provider,
-            label=body.label,
-            plaintext=body.secret,
+            operator_id=operator_id,
+            provider=provider,
+            label=label,
+            plaintext=plaintext,
         )
     except CredentialValidationError as exc:
         raise HTTPException(

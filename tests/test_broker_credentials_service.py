@@ -96,3 +96,24 @@ class TestSecretNormalisation:
 
     def test_minimum_length_accepted(self) -> None:
         assert normalise_secret("abcd") == "abcd"
+
+    def test_idempotent(self) -> None:
+        """A value accepted by normalise_secret must be accepted on
+        a second pass with the same result. The lazy-gen path in
+        the API layer normalises once and passes the cleaned value
+        through to store_credential -- if normalisation were not
+        idempotent, the second pass inside store_credential could
+        raise on a value the outer pass accepted, triggering
+        _rollback_lazy_gen on a non-fatal user-input error
+        (review feedback PR #118 round 12).
+        """
+        for raw in ("abcd", "  abcd  ", "abcd1234", "  long-secret-with-spaces  "):
+            once = normalise_secret(raw)
+            twice = normalise_secret(once)
+            assert once == twice
+
+    def test_idempotent_for_provider_and_label(self) -> None:
+        from app.services.broker_credentials import normalise_label, normalise_provider
+
+        assert normalise_provider(normalise_provider("  ETORO  ")) == "etoro"
+        assert normalise_label(normalise_label("  primary  ")) == "primary"
