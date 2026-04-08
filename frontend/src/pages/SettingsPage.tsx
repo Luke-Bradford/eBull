@@ -16,8 +16,33 @@ import {
   listBrokerCredentials,
   revokeBrokerCredential,
 } from "@/api/brokerCredentials";
+import { RecoveryPhraseConfirm } from "@/components/security/RecoveryPhraseConfirm";
+import { Modal, useModalHeadingId } from "@/components/ui/Modal";
 
 const MIN_SECRET_LEN = 4;
+
+/**
+ * Recovery-phrase modal sub-state (#121 / ADR-0003 §5).
+ *
+ * The modal has two inner views and we model them explicitly rather
+ * than threading two booleans:
+ *
+ *   - "confirm"        — RecoveryPhraseConfirm display + challenge
+ *   - "confirm-cancel" — fail-closed gate the operator must pass through
+ *                        when they try to dismiss the phrase via Cancel,
+ *                        Escape, or the close button. Single misclicks
+ *                        must not destroy the only copy of the phrase.
+ *
+ * On Confirm of the challenge OR on the operator confirming dismissal,
+ * we drop the phrase from component state (it lives nowhere else) and
+ * close the modal.
+ */
+type PhraseModalView = "confirm" | "confirm-cancel";
+
+const CANCEL_WARNING_TEXT =
+  "This recovery phrase will not be shown again. If you close this now, " +
+  "you may lose recovery ability for this installation's broker " +
+  "credentials unless you have backed up the app data directory.";
 
 export function SettingsPage(): JSX.Element {
   return (
@@ -43,6 +68,15 @@ function BrokerCredentialsSection(): JSX.Element {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // Recovery-phrase modal state. The phrase lives ONLY in this state
+  // for the lifetime of the modal -- never written to localStorage,
+  // sessionStorage, IndexedDB, console, or any cache. Cleared on
+  // unmount-equivalent transitions (confirm, confirmed-cancel).
+  const [phrase, setPhrase] = useState<readonly string[] | null>(null);
+  const [phraseModalView, setPhraseModalView] =
+    useState<PhraseModalView>("confirm");
+  const phraseHeadingId = useModalHeadingId();
+
   const refresh = useCallback(async () => {
     setLoadError(null);
     try {
@@ -63,11 +97,22 @@ function BrokerCredentialsSection(): JSX.Element {
     setCreateError(null);
     setCreating(true);
     try {
-      await createBrokerCredential({ provider, label, secret });
+      const response = await createBrokerCredential({ provider, label, secret });
       // Clear the secret immediately and re-fetch to show the row.
       // The form is intentionally NOT pre-populated from the response.
       setLabel("");
       setSecret("");
+      // First-save-in-clean_install path: backend returns the 24-word
+      // recovery phrase exactly once (#114 / ADR-0003 §4). Show the
+      // confirmation modal. Note: the credential row is ALREADY
+      // committed by the time we get here -- the modal cannot block
+      // commit, only operator acknowledgement of the phrase. The
+      // confirm-cancel gate inside the modal protects against a
+      // misclick destroying the only copy of the phrase.
+      if (response.recovery_phrase != null && response.recovery_phrase.length > 0) {
+        setPhrase(response.recovery_phrase);
+        setPhraseModalView("confirm");
+      }
       await refresh();
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 409) {
@@ -105,6 +150,36 @@ function BrokerCredentialsSection(): JSX.Element {
     } finally {
       setBusyId(null);
     }
+  }
+
+  function handlePhraseConfirmed(): void {
+    // Operator passed the 3-word challenge. Drop the phrase from state
+    // (it lives nowhere else) and close the modal.
+    setPhrase(null);
+    setPhraseModalView("confirm");
+  }
+
+  function requestPhraseDismiss(): void {
+    // Routed from RecoveryPhraseConfirm.onCancel AND from the Modal's
+    // Escape handler. Both go through the confirm-cancel gate -- a
+    // single misclick or stray Escape must not destroy the only copy
+    // of the phrase.
+    setPhraseModalView("confirm-cancel");
+  }
+
+  function handleConfirmCancelKeep(): void {
+    // "Go back" -- operator changed their mind, return to the phrase.
+    setPhraseModalView("confirm");
+  }
+
+  function handleConfirmCancelClose(): void {
+    // "Yes, close anyway" -- operator has accepted the warning. Drop
+    // the phrase and close the modal. The credential row is already
+    // committed; we do not revoke it (the phrase is root-secret
+    // scoped, not row scoped, so revoking would not "undo" anything
+    // and would only add a second failure path).
+    setPhrase(null);
+    setPhraseModalView("confirm");
   }
 
   return (
@@ -226,6 +301,56 @@ function BrokerCredentialsSection(): JSX.Element {
           {creating ? "Saving…" : "Save credential"}
         </button>
       </form>
+
+      <Modal
+        isOpen={phrase !== null}
+        onRequestClose={requestPhraseDismiss}
+        labelledBy={phraseHeadingId}
+      >
+        {phrase !== null && phraseModalView === "confirm" ? (
+          // The h2 inside RecoveryPhraseConfirm carries its own id. We
+          // mirror that into a hidden span with the modal's labelledBy
+          // id so the dialog has a stable, owned label without forcing
+          // the inner component to take an id prop.
+          <>
+            <span id={phraseHeadingId} className="sr-only">
+              Recovery phrase confirmation
+            </span>
+            <RecoveryPhraseConfirm
+              phrase={phrase}
+              onConfirmed={handlePhraseConfirmed}
+              onCancel={requestPhraseDismiss}
+            />
+          </>
+        ) : null}
+        {phrase !== null && phraseModalView === "confirm-cancel" ? (
+          <div className="flex flex-col gap-4">
+            <h2
+              id={phraseHeadingId}
+              className="text-sm font-semibold text-slate-700"
+            >
+              Close without confirming?
+            </h2>
+            <p className="text-xs text-slate-600">{CANCEL_WARNING_TEXT}</p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={handleConfirmCancelKeep}
+                className="rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700"
+              >
+                Go back
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmCancelClose}
+                className="rounded border border-rose-300 bg-white px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50"
+              >
+                Close anyway
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
     </section>
   );
 }
