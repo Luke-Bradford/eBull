@@ -1,5 +1,4 @@
-"""Static guard: tests must not connect to ``settings.database_url``
-to perform destructive writes.
+"""Static guard: tests must not connect to ``settings.database_url``.
 
 Why this exists
 ---------------
@@ -12,77 +11,120 @@ without a structural guard a future test author can re-introduce
 the same bug just by typing ``psycopg.connect(settings.database_url)``
 inside a fixture and adding a TRUNCATE next to it.
 
-This test is the structural guard. It walks ``tests/`` once and
-fails if any test file references ``settings.database_url``
-*except* on an explicit allowlist. The allowlist is intentionally
-short and every entry is justified inline -- read-only smoke
-probes that drive the FastAPI lifespan are allowed; anything that
-mutates persistent state is not.
+This test is the structural guard.
 
-If you are a future test author hitting this guard:
-  * Do NOT add yourself to ``_ALLOWED`` to make the test pass.
-  * Use the isolated ``ebull_test`` pattern from
-    ``tests/test_operator_setup_race.py`` instead -- copy
-    ``_swap_database`` / ``_ensure_test_db_exists`` /
-    ``_apply_migrations_to_test_db`` / ``_assert_test_db``.
-  * The PREVENTION note on PR #129 round 1 explicitly asked for
-    this guard. Removing or weakening it requires a written
-    rebuttal in a follow-up PR.
+What it catches
+---------------
+The guard greps every test file for any of the patterns in
+``_FORBIDDEN_PATTERNS``. The patterns target the *concrete bug
+shape* (a connection opened directly against ``settings.database_url``),
+not the bare token: this lets the race test refer to
+``settings.database_url`` legitimately inside its
+``_swap_database`` helper without needing an allowlist entry,
+because that helper *derives* an isolated test URL rather than
+connecting directly to the dev one.
+
+What it does not catch
+----------------------
+The grep cannot follow aliases. A test file that does
+``db_url = settings.database_url`` and then
+``psycopg.connect(db_url)`` will pass the guard but still point at
+the dev DB. This is a deliberate trade-off: a string-level grep
+catches the direct footgun (the exact pattern that hit the user)
+with zero false positives in this codebase, while an AST walk that
+follows aliases is significant scope creep and would itself need
+tests. Defence in depth for the runtime case lives in
+``_assert_test_db`` inside ``test_operator_setup_race.py``, which
+runs ``SELECT current_database()`` before any TRUNCATE and refuses
+to proceed against anything but ``ebull_test``.
+
+If you are a future test author hitting this guard
+---------------------------------------------------
+* Do NOT add yourself to ``_ALLOWED`` to make the test pass.
+* Use the isolated ``ebull_test`` pattern from
+  ``tests/test_operator_setup_race.py`` instead -- copy
+  ``_swap_database`` / ``_ensure_test_db_exists`` /
+  ``_apply_migrations_to_test_db`` / ``_assert_test_db``.
+* The PREVENTION note on PR #129 round 1 explicitly asked for
+  this guard. Removing or weakening it requires a written
+  rebuttal in a follow-up PR.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-# Files allowed to reference ``settings.database_url``. Each entry
-# must be justified -- read-only paths only. Any future addition
-# requires a comment explaining why a destructive path is not in
-# play.
+# Concrete bug-shape patterns. Each entry is a substring search;
+# any match in a non-allowlisted test file fails the guard.
+#
+# These target the exact way you would use ``settings.database_url``
+# to perform a destructive operation, not the bare token. Adding a
+# new pattern here is the right move whenever a new way to "open a
+# connection directly against settings.database_url" appears in
+# practice.
+_FORBIDDEN_PATTERNS: tuple[str, ...] = (
+    "psycopg.connect(settings.database_url",
+    "ConnectionPool(settings.database_url",
+    "connect(settings.database_url",  # alias-stripped fallback
+)
+
+# Files allowed to contain a forbidden pattern. Read-only paths
+# only; every entry must be justified inline.
+#
+# The race test (``test_operator_setup_race.py``) is intentionally
+# *not* on this list. It references the literal token
+# ``settings.database_url`` only inside ``_swap_database``, which
+# derives the test DB URL -- it never directly opens a connection
+# against the dev DB, so it does not match any forbidden pattern
+# and needs no allowlist entry. This is the whole point of greping
+# the bug shape rather than the bare token.
 _ALLOWED: dict[str, str] = {
-    # Read-only: drives the FastAPI lifespan and probes /health.
-    # The lifespan opens a connection pool against settings.database_url,
-    # but never TRUNCATEs / DELETEs / DROPs anything. The smoke test
-    # itself does not write.
-    "smoke/test_app_boots.py": "read-only lifespan probe",
-    # Read-only at the helper-function level: the destructive
-    # fixture in this file uses ``_test_database_url()``, which is
-    # *derived* from ``settings.database_url`` by swapping the
-    # database name. The literal token still appears in the source
-    # because the helpers reference it; the guard below greps for
-    # the token, so we allowlist this file with a justification.
-    "test_operator_setup_race.py": "derives ebull_test URL from settings via _swap_database",
-    # This file (the guard itself) references the token in its own
-    # source for the grep -- exclude it to avoid a self-match.
+    # Read-only reachability probe. ``test_app_boots.py`` opens a
+    # connection against ``settings.database_url`` to decide whether
+    # to skip (no Postgres -> clean skip rather than opaque error)
+    # and to drive the FastAPI lifespan via TestClient. Both paths
+    # are read-only -- the probe runs ``SELECT 1`` and the lifespan
+    # opens the pool and applies migrations, but no test code in
+    # this file ever issues a destructive statement against the
+    # connection. The smoke gate's *job* is "did the lifespan come
+    # up against the same DB the running app uses", which is
+    # unanswerable without using ``settings.database_url``.
+    "smoke/test_app_boots.py": "read-only lifespan + reachability probe",
+    # The guard itself contains the forbidden patterns as data
+    # (the ``_FORBIDDEN_PATTERNS`` literals above). Exclude it to
+    # avoid a self-match.
     "smoke/test_no_settings_url_in_destructive_paths.py": "the guard itself",
 }
 
 _TESTS_DIR = Path(__file__).resolve().parents[1]
-_TOKEN = "settings.database_url"
 
 
 def test_no_test_writes_to_dev_database_url() -> None:
-    """Fail if any test file references ``settings.database_url``
-    outside the explicit allowlist.
+    """Fail if any test file opens a connection directly against
+    ``settings.database_url`` outside the explicit allowlist.
 
-    The check is a grep, not an AST walk, on purpose: a string-level
-    match catches the token regardless of how it is spelled
-    (attribute access, f-string, comment, alias) and there is no
-    legitimate non-allowlisted reason for the literal token to
-    appear in a test file.
+    Match keys are full posix-relative paths from ``tests/``
+    (including any subdirectory prefix), so a future move of an
+    allowlisted file into a subdirectory is caught by the resulting
+    failure to match -- not by the file silently slipping past.
     """
-    offenders: list[str] = []
+    offenders: list[tuple[str, str]] = []
     for path in sorted(_TESTS_DIR.rglob("*.py")):
         rel = path.relative_to(_TESTS_DIR).as_posix()
         if rel in _ALLOWED:
             continue
         text = path.read_text(encoding="utf-8")
-        if _TOKEN in text:
-            offenders.append(rel)
+        for pattern in _FORBIDDEN_PATTERNS:
+            if pattern in text:
+                offenders.append((rel, pattern))
+                break
 
     assert not offenders, (
-        f"The following test files reference {_TOKEN!r} but are not on "
-        f"the allowlist: {offenders}. Destructive tests must connect to "
-        f"the isolated ebull_test database, not the dev DB. See "
-        f"tests/test_operator_setup_race.py for the pattern, and the "
-        f"docstring of this file for guidance."
+        "The following test files open a connection directly against "
+        "settings.database_url, which would point at the dev DB and "
+        "silently destroy user data on a destructive write:\n"
+        + "\n".join(f"  {f} (matched {p!r})" for f, p in offenders)
+        + "\n\nDestructive tests must connect to the isolated ebull_test "
+        "database, not the dev DB. See tests/test_operator_setup_race.py "
+        "for the pattern, and the docstring of this file for guidance."
     )
