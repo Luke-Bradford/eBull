@@ -33,6 +33,13 @@
 --     that finds no matching row must still be able to write a failure
 --     audit entry, and there is no credential_id to attach. Successful
 --     and wrong-key-style failures both have a credential_id.
+--
+--   * The FK on credential_id is ON DELETE SET NULL, NOT cascade. Soft-
+--     delete via revoked_at is the normal path; if a broker_credentials
+--     row is ever HARD-deleted (DBA cleanup, accidental psql), the
+--     audit log entries must survive with credential_id nulled out.
+--     CASCADE would silently destroy forensic history. Same forensic
+--     pattern as operator_audit (see 017_operator_audit.sql).
 
 CREATE TABLE IF NOT EXISTS broker_credentials (
     id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -56,7 +63,7 @@ CREATE INDEX IF NOT EXISTS broker_credentials_operator_provider_idx
 
 CREATE TABLE IF NOT EXISTS broker_credential_access_log (
     id              BIGSERIAL PRIMARY KEY,
-    credential_id   UUID REFERENCES broker_credentials(id) ON DELETE CASCADE,
+    credential_id   UUID REFERENCES broker_credentials(id) ON DELETE SET NULL,
     operator_id     UUID NOT NULL,
     accessed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     caller          TEXT NOT NULL,

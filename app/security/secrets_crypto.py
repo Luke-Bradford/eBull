@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import threading
 from uuid import UUID
 
 from cryptography.exceptions import InvalidTag
@@ -64,31 +65,53 @@ def _decode_key(raw: str | None) -> bytes:
     return decoded
 
 
-def load_key() -> bytes:
-    """Decode and validate the secrets key. Call once at startup.
-
-    Raises :class:`CredentialCryptoConfigError` on any problem. This is
-    intentionally not cached: callers that need it hot should call
-    :func:`_get_aesgcm`, which wraps the decoded key in an ``AESGCM``
-    primitive the first time it is asked.
-    """
-    return _decode_key(settings.secrets_key)
-
-
 _aesgcm: AESGCM | None = None
+_aesgcm_lock = threading.Lock()
+
+
+def load_key() -> bytes:
+    """Decode the secrets key, validate it, and populate the AESGCM cache.
+
+    Call once at application startup. Subsequent ``encrypt`` / ``decrypt``
+    calls reuse the same primitive instance, so the key validated at
+    startup is guaranteed to be the key actually used at runtime --
+    there is no second ``settings.secrets_key`` read from a hot path
+    that could see a mutated value.
+
+    Raises :class:`CredentialCryptoConfigError` on any problem.
+    """
+    global _aesgcm
+    decoded = _decode_key(settings.secrets_key)
+    with _aesgcm_lock:
+        _aesgcm = AESGCM(decoded)
+    return decoded
 
 
 def _get_aesgcm() -> AESGCM:
-    global _aesgcm
-    if _aesgcm is None:
-        _aesgcm = AESGCM(load_key())
-    return _aesgcm
+    """Return the cached AESGCM primitive.
+
+    The cache is populated by :func:`load_key` at startup. If a hot
+    path reaches this function before startup has run (only possible in
+    tests that bypass the lifespan), we fall through to ``load_key()``
+    so the test still gets a working primitive -- but production code
+    must rely on the startup gate to surface a misconfigured key
+    before the first request lands.
+    """
+    cached = _aesgcm
+    if cached is not None:
+        return cached
+    load_key()
+    # load_key() populates _aesgcm under the lock; re-read.
+    cached = _aesgcm
+    assert cached is not None  # noqa: S101 - load_key contract
+    return cached
 
 
 def _reset_for_tests() -> None:
     """Clear the cached AESGCM so tests can swap the key mid-process."""
     global _aesgcm
-    _aesgcm = None
+    with _aesgcm_lock:
+        _aesgcm = None
 
 
 def _build_aad(

@@ -68,6 +68,34 @@ class TestLoadKey:
         key = load_key()
         assert len(key) == 32
 
+    def test_load_key_populates_cache_so_runtime_uses_validated_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Regression: previously load_key() did not populate _aesgcm,
+        so the startup gate validated one key while encrypt/decrypt
+        could later read a mutated settings.secrets_key. After load_key()
+        the cached primitive must encrypt+decrypt without re-reading
+        settings -- proven by mutating settings to garbage AFTER
+        load_key() and confirming encryption still works."""
+        good = _b64key(os.urandom(32))
+        monkeypatch.setattr(secrets_crypto.settings, "secrets_key", good)
+        secrets_crypto._reset_for_tests()
+        load_key()  # populates cache
+        # Now mutate settings to a value load_key() would reject. The
+        # already-cached primitive must continue to work.
+        monkeypatch.setattr(secrets_crypto.settings, "secrets_key", "garbage!!!")
+        op = uuid4()
+        blob = encrypt("payload", operator_id=op, provider="etoro", label="l")
+        assert (
+            decrypt(
+                blob,
+                operator_id=op,
+                provider="etoro",
+                label="l",
+                key_version=KEY_VERSION_CURRENT,
+            )
+            == "payload"
+        )
+        secrets_crypto._reset_for_tests()
+
 
 # ---------------------------------------------------------------------------
 # Round trip

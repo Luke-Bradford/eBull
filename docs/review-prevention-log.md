@@ -328,3 +328,35 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: A service function used `assert row is not None` after a `RETURNING` INSERT (or after a transaction block) to enforce a DB-contract invariant. `python -O` strips assertions, so the guard vanishes in any optimised build and the next line crashes with a confusing `TypeError: 'NoneType' object is not subscriptable` (or similar) instead of the intended structured error.
 - Prevention: In service code, every guard that enforces a DB-contract or post-commit invariant must be `if x is None: raise RuntimeError(...)` (or a typed exception), not `assert`. `assert` is acceptable only for in-test fixtures and developer-only invariants that are clearly not on a production code path. Grep `^\s*assert ` in `app/services/` during pre-flight review.
 - Enforced in: this prevention log
+
+---
+
+### f-string SQL composition for column / table identifiers
+- First seen in: #110
+- Symptom: A service function built a query with `f"SELECT {_METADATA_COLS} FROM ..."` where `_METADATA_COLS` was a module-level constant string. Not exploitable today (the constant is not user-controlled), but the pattern bypasses psycopg's parameterisation for the column list and silently breaks if the constant ever contains a quote, is made configurable, or is reused on a path with caller-supplied input. Same risk class as raw `% formatting` in SQL.
+- Prevention: Never f-string-interpolate identifiers into SQL templates. Use `psycopg.sql.SQL(...).format(cols=sql.SQL(", ").join(sql.Identifier(name) for name in COLS))` for column lists; `sql.Identifier()` for table/column names; `%s` placeholders for values. Grep `f"""\s*\n.*FROM\|f"\s*SELECT\|f"\s*INSERT\|f"\s*UPDATE` under `app/services/` during pre-flight review.
+- Enforced in: this prevention log
+
+---
+
+### Mid-transaction `conn.commit()` in service functions that accept a caller's connection
+- First seen in: #110
+- Symptom: A service function (`load_credential_for_provider_use`) called `conn.commit()` internally while accepting an arbitrary `psycopg.Connection`. If the caller had any prior writes accumulated on the same connection, the function silently flushed them — a hard-to-reason-about side effect that broke transaction atomicity invisibly.
+- Prevention: A service function that accepts a caller-supplied `Connection` MUST NOT call `conn.commit()` or `conn.rollback()`. If atomicity is needed, use `with conn.transaction()` (a savepoint when nested, a top-level txn otherwise) and let exceptions propagate. The caller owns the lifecycle. Grep `conn\.commit\|conn\.rollback` in `app/services/` and verify each call site is in a function that owns its connection (e.g. opens it via `psycopg.connect`), not one that takes `conn:` as a parameter.
+- Enforced in: this prevention log
+
+---
+
+### `ON DELETE CASCADE` on `*_audit` / `*_log` tables destroys forensic history
+- First seen in: #110
+- Symptom: A migration declared `broker_credential_access_log.credential_id REFERENCES broker_credentials(id) ON DELETE CASCADE`. Soft-delete via `revoked_at` was the normal path, but a hard delete (DBA cleanup, accidental psql) would silently wipe the entire access log for that credential, violating audit-preservation guarantees.
+- Prevention: Audit / log / journal tables must use `ON DELETE SET NULL` (with the column nullable) or `ON DELETE RESTRICT`, never `ON DELETE CASCADE` to a referenced "live data" table. Same pattern as `operator_audit` (017_operator_audit.sql), which drops the FK entirely so the audit row outlives the operator. Grep `ON DELETE CASCADE` against any new migration touching a table whose name ends in `_audit` or `_log`, and reject.
+- Enforced in: this prevention log
+
+---
+
+### Startup gate must populate the runtime cache, not just validate
+- First seen in: #110
+- Symptom: A crypto module exposed `load_key()` (called once at startup to fail-fast on a missing key) and `_get_aesgcm()` (called on hot paths to get the cached primitive). `load_key()` validated and returned the key but did NOT populate the cache, so the first hot-path call re-read `settings.secrets_key` independently. A test (or future reload path) that mutated `settings` between startup and the first request could silently use a different key than the one validated at boot, with no error.
+- Prevention: Any "validate at startup" function must populate the same cache the runtime path reads from, so the validated value is provably the value used at runtime. Add a regression test that calls the startup gate, mutates the underlying setting to garbage, and asserts a runtime call still works (proving it uses the cached value, not a re-read). Pattern: `load_X()` populates the global; `_get_X()` returns the global, falling through to `load_X()` only as a defensive last resort.
+- Enforced in: this prevention log

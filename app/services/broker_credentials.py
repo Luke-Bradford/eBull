@@ -33,6 +33,7 @@ from uuid import UUID
 import psycopg
 import psycopg.errors
 import psycopg.rows
+from psycopg import sql
 
 from app.security.secrets_crypto import (
     KEY_VERSION_CURRENT,
@@ -128,7 +129,20 @@ def _normalise_secret(raw: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-_METADATA_COLS = "id, operator_id, provider, label, last_four, created_at, last_used_at, revoked_at"
+_METADATA_COL_NAMES = (
+    "id",
+    "operator_id",
+    "provider",
+    "label",
+    "last_four",
+    "created_at",
+    "last_used_at",
+    "revoked_at",
+)
+# Composed psycopg.sql.Identifier list -- safer than f-string interpolation
+# of a column-name string into a query template (review-prevention-log entry
+# on f-string SQL composition).
+_METADATA_COLS_SQL = sql.SQL(", ").join(sql.Identifier(name) for name in _METADATA_COL_NAMES)
 
 
 def _row_to_metadata(row: dict[str, object]) -> CredentialMetadata:
@@ -181,13 +195,15 @@ def store_credential(
     try:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                f"""
+                sql.SQL(
+                    """
                 INSERT INTO broker_credentials
                     (operator_id, provider, label, ciphertext,
                      last_four, key_version)
                 VALUES (%s, %s, %s, %s, %s, %s)
-                RETURNING {_METADATA_COLS}
-                """,
+                RETURNING {cols}
+                """
+                ).format(cols=_METADATA_COLS_SQL),
                 (
                     operator_id,
                     provider_norm,
@@ -225,12 +241,14 @@ def list_credentials(
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            f"""
-            SELECT {_METADATA_COLS}
+            sql.SQL(
+                """
+            SELECT {cols}
             FROM broker_credentials
             WHERE operator_id = %s
             ORDER BY (revoked_at IS NOT NULL), created_at DESC
-            """,
+            """
+            ).format(cols=_METADATA_COLS_SQL),
             (operator_id,),
         )
         return [_row_to_metadata(row) for row in cur.fetchall()]
@@ -258,7 +276,8 @@ def revoke_credential(
             (credential_id, operator_id),
         )
         if cur.rowcount == 0:
-            conn.rollback()
+            # No row was touched, so there is nothing to roll back at
+            # this layer. The UPDATE itself either matched or did not.
             raise CredentialNotFound(f"credential {credential_id} not found")
     conn.commit()
 
@@ -291,12 +310,32 @@ def load_credential_for_provider_use(
 ) -> str:
     """Decrypt and return the plaintext secret for internal provider use.
 
-    Writes an audit row on both success and failure (inside the same
-    transaction as the SELECT / UPDATE) so the forensic log cannot drop
-    under a rollback.
+    Transaction model:
+      The function does NOT call ``conn.commit()`` or ``conn.rollback()``
+      and does NOT open its own ``conn.transaction()`` block. It runs
+      the SELECT / decrypt / audit-write / ``last_used_at`` update on
+      whatever transaction the caller has set up; the caller owns the
+      lifecycle. This avoids the silent-commit footgun where calling
+      this function inside a caller's transaction would otherwise
+      flush whatever the caller had accumulated (see review-prevention
+      -log entry on mid-transaction commits in service functions).
+
+      *Audit durability*: the audit row is written on the caller's
+      transaction. If the caller commits, the audit row is durable. If
+      the caller rolls back, the audit row is lost along with the
+      caller's other changes. Callers on a trade path MUST commit the
+      audit row before performing the external broker call -- the
+      documented pattern is::
+
+          secret = load_credential_for_provider_use(conn, ...)
+          conn.commit()                  # audit row durable
+          place_order(secret, ...)       # external side effect
+
+      A future "always-durable audit on a side connection" mode is
+      tracked separately and is out of scope for this ticket.
 
     Raises:
-      CredentialValidationError -- unsupported provider.
+      CredentialValidationError -- unsupported provider / empty caller.
       CredentialNotFound        -- no active credential.
       CredentialDecryptError    -- stored ciphertext failed AEAD check.
     """
@@ -330,7 +369,6 @@ def load_credential_for_provider_use(
                 success=False,
                 failure_reason="not_found",
             )
-            conn.commit()
             raise CredentialNotFound(f"no active credential for provider {provider_norm!r}")
 
         try:
@@ -350,7 +388,6 @@ def load_credential_for_provider_use(
                 success=False,
                 failure_reason="decrypt_failed",
             )
-            conn.commit()
             raise
 
         cur.execute(
@@ -365,5 +402,4 @@ def load_credential_for_provider_use(
             success=True,
             failure_reason=None,
         )
-    conn.commit()
     return plaintext
