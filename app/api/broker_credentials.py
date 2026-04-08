@@ -209,28 +209,27 @@ def create(
                 logger.info("master key lazy-generated on first credential save (file persisted)")
                 try:
                     return _do_store(conn, session, body, phrase)
-                except HTTPException:
-                    # User-error 4xx (TOCTOU duplicate slipped past
-                    # the pre-check, or a future validation path).
-                    # The freshly-persisted root secret is still
-                    # valid for the operator's next attempt and
-                    # MUST NOT be unlinked for a non-fatal user
-                    # error -- doing so would destroy a working
-                    # encryption setup over a duplicate-label
-                    # collision (review feedback PR #118 round 4).
-                    # Re-raise without rollback. The pre-flight
-                    # pass above catches the *expected* 4xx cases
-                    # before lazy-gen runs at all, so reaching
-                    # this branch is a TOCTOU race and the right
-                    # response is to keep the persisted state and
-                    # let the operator retry.
-                    raise
-                except Exception:
-                    # Genuinely unexpected -- DB death, encryption
-                    # error, etc. Roll back the persisted file +
-                    # cache so the next attempt starts clean. We
-                    # are still inside the lock so any queued
-                    # waiter observes the cleaned-up state.
+                except BaseException:
+                    # Unconditional rollback. In the lazy-gen
+                    # branch, if ``_do_store`` raises for ANY
+                    # reason -- HTTPException (TOCTOU 409 / 400
+                    # that slipped past the pre-flight),
+                    # psycopg.Error, encryption failure, anything
+                    # -- there is no committed credential row.
+                    # Therefore the freshly-persisted root secret
+                    # protects nothing yet, and the recovery
+                    # phrase was never returned to the operator
+                    # in any response. Rolling back the file +
+                    # cipher cache + ``app.state`` is always
+                    # safe in this exact branch (no credential
+                    # to lose access to) and is the only way to
+                    # uphold the invariant: ``credential row
+                    # exists`` <-> ``root secret file on disk
+                    # AND operator saw the phrase exactly once``
+                    # (review feedback PR #118 round 5).
+                    # We are still inside ``lazy_gen_lock`` so
+                    # any queued waiter observes the cleaned-up
+                    # state.
                     _rollback_lazy_gen(request)
                     raise
             # Fall through: a concurrent recovery populated the
