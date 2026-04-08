@@ -414,9 +414,14 @@ def _rollback_lazy_gen(request: Request) -> None:
     so a queued first-save observes the cleaned-up state.
     """
     path = master_key.root_secret_path()
+    # Single stat boundary: use ``unlink(missing_ok=True)`` so the
+    # decision-to-unlink and the post-unlink snapshot are not two
+    # separate ``path.exists()`` calls. A concurrent writer
+    # recreating the file between an ``exists()`` pre-check and the
+    # ``unlink()`` would otherwise be unlinked silently and never
+    # counted as ``file_remains`` (review feedback PR #118 round 16).
     try:
-        if path.exists():
-            path.unlink()
+        path.unlink(missing_ok=True)
     except OSError:
         # Logged but not fatal: an orphan file with no credential
         # rows is still a valid clean_install state per
@@ -425,8 +430,7 @@ def _rollback_lazy_gen(request: Request) -> None:
         logger.exception("lazy-gen rollback: failed to unlink persisted root secret file")
     # Snapshot the final filesystem state ONCE so the log branch
     # below cannot disagree with reality due to a concurrent
-    # writer recreating the file between two ``path.exists()``
-    # calls (review feedback PR #118 round 15).
+    # writer recreating the file (review feedback PR #118 round 15).
     file_remains = path.exists()
     if file_remains:
         # Operators reading logs after a rollback can tell that

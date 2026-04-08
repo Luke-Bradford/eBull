@@ -49,6 +49,17 @@ class TestEncodeDecode:
         phrase = [w.upper() for w in encode_phrase(secret)]
         assert decode_phrase(phrase) == secret
 
+    def test_list_and_joined_string_equivalent(self) -> None:
+        """``decode_phrase`` accepts both ``list[str]`` and ``str``;
+        the two branches must produce identical output for the same
+        word sequence so the helper's union signature cannot drift
+        a future direct caller into a different normalisation path
+        (review feedback PR #118 round 16).
+        """
+        secret = os.urandom(ROOT_SECRET_LEN)
+        words = encode_phrase(secret)
+        assert decode_phrase(words) == decode_phrase(" ".join(words))
+
 
 class TestEncodeValidation:
     def test_wrong_length_secret_rejected(self) -> None:

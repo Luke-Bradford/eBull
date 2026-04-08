@@ -470,6 +470,17 @@ def recover_from_phrase(conn: psycopg.Connection[object], phrase: str, app_state
     responsible for the remaining ``app_state`` flags
     (``boot_state``, ``recovery_required``, ``needs_setup``) which
     do not gate the lazy-gen path.
+
+    NOTE: this function only accepts ``phrase: str`` (narrowed in
+    round 14). The underlying :func:`decode_phrase` helper still
+    accepts ``list[str] | str`` because it is the bidirectional
+    counterpart of :func:`encode_phrase` (which returns ``list[str]``)
+    and is used by direct callers in tests for round-trip
+    encode/decode. Direct callers of ``decode_phrase`` own their
+    own word-count validation; the API boundary here is the
+    only place where untrusted input enters, and that input is
+    always a single string from the JSON body
+    (review feedback PR #118 round 16).
     """
     try:
         root_secret = decode_phrase(phrase)
