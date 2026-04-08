@@ -190,6 +190,20 @@ def create(
             # Re-check inside the lock: a concurrent recovery may
             # have populated the key while we queued.
             if not getattr(request.app.state, "broker_key_loaded", False):
+                # Re-run the duplicate pre-check inside the lock so
+                # the (provider, label) check and the store_credential
+                # INSERT share the same serialisation window. Without
+                # this, READ COMMITTED lets a concurrent insert slip
+                # in between the outer pre-check and the lazy-gen
+                # store, which would surface as CredentialAlreadyExists
+                # AFTER the root secret file is on disk -- triggering
+                # the rollback path and unlinking the file we just
+                # wrote (review feedback PR #118 round 6).
+                if _active_credential_exists(conn, session.operator_id, provider_norm, label_norm):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="credential already exists",
+                    )
                 pending_root_secret, derived, phrase = master_key.generate_root_secret_in_memory()
                 # Persist the file BEFORE the DB write. If persist
                 # raises (disk full, perms), nothing has been
@@ -209,27 +223,35 @@ def create(
                 logger.info("master key lazy-generated on first credential save (file persisted)")
                 try:
                     return _do_store(conn, session, body, phrase)
-                except BaseException:
-                    # Unconditional rollback. In the lazy-gen
-                    # branch, if ``_do_store`` raises for ANY
-                    # reason -- HTTPException (TOCTOU 409 / 400
-                    # that slipped past the pre-flight),
-                    # psycopg.Error, encryption failure, anything
-                    # -- there is no committed credential row.
-                    # Therefore the freshly-persisted root secret
-                    # protects nothing yet, and the recovery
-                    # phrase was never returned to the operator
-                    # in any response. Rolling back the file +
-                    # cipher cache + ``app.state`` is always
-                    # safe in this exact branch (no credential
-                    # to lose access to) and is the only way to
-                    # uphold the invariant: ``credential row
-                    # exists`` <-> ``root secret file on disk
-                    # AND operator saw the phrase exactly once``
-                    # (review feedback PR #118 round 5).
-                    # We are still inside ``lazy_gen_lock`` so
-                    # any queued waiter observes the cleaned-up
-                    # state.
+                except (KeyboardInterrupt, SystemExit):
+                    # A signal-driven shutdown mid-request must NOT
+                    # destroy the freshly-persisted root secret.
+                    # The DB write may or may not have committed
+                    # before the signal arrived; either way the
+                    # safer choice is to leave the file on disk so
+                    # the operator can recover via phrase if any
+                    # row landed, rather than guarantee data loss
+                    # by unlinking. Re-raise without rollback
+                    # (review feedback PR #118 round 6).
+                    raise
+                except Exception:
+                    # Rollback for ordinary errors only. In the
+                    # lazy-gen branch no credential row is
+                    # committed when ``_do_store`` raises (the
+                    # in-lock duplicate re-check above eliminates
+                    # the TOCTOU 409 path; remaining failures are
+                    # validation, encryption, or psycopg errors
+                    # that all leave the txn rolled back inside
+                    # ``store_credential``). The freshly-persisted
+                    # root secret protects nothing yet and the
+                    # phrase was never returned to the operator,
+                    # so rolling back file + cipher cache +
+                    # ``app.state`` is the only way to uphold the
+                    # invariant: ``credential row exists`` <->
+                    # ``root secret file on disk AND operator saw
+                    # the phrase exactly once``. We are still
+                    # inside ``lazy_gen_lock`` so any queued
+                    # waiter observes the cleaned-up state.
                     _rollback_lazy_gen(request)
                     raise
             # Fall through: a concurrent recovery populated the

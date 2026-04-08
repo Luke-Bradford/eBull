@@ -430,8 +430,16 @@ def recover_from_phrase(conn: psycopg.Connection[object], phrase: list[str] | st
         raise
 
     derived = derive_broker_encryption_key(root_secret)
-    if not _key_decrypts_newest_credential(conn, derived):
-        raise RecoveryVerificationError("recovery phrase did not match stored broker credentials")
-
-    write_root_secret(root_secret)
+    # Acquire lazy_gen_lock for the verify -> write window so a
+    # concurrent first-credential-save (lazy-gen) or a second
+    # parallel recovery cannot interleave between the AEAD verify
+    # and the file write. Holding the lock here -- rather than only
+    # at the HTTP handler -- means every caller (current and
+    # future, including tests and internal recovery flows) is
+    # protected without having to remember the discipline.
+    # (review feedback PR #118 round 6).
+    with lazy_gen_lock:
+        if not _key_decrypts_newest_credential(conn, derived):
+            raise RecoveryVerificationError("recovery phrase did not match stored broker credentials")
+        write_root_secret(root_secret)
     return derived

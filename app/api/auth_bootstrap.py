@@ -128,31 +128,30 @@ def recover(
             detail="recovery phrase invalid",
         )
 
-    # Acquire ``lazy_gen_lock`` so a concurrent first-credential-save
-    # in clean_install mode cannot interleave with this recovery
-    # write. The lazy-gen path takes the same lock for the same
-    # reason -- the two flows are the only writers of the root
-    # secret file and they MUST be mutually exclusive (review
-    # feedback PR #118 round 3).
-    with master_key.lazy_gen_lock:
-        try:
-            derived = master_key.recover_from_phrase(conn, body.phrase)
-        except (RecoveryPhraseError, master_key.RecoveryVerificationError) as exc:
-            # Same generic detail for every failure mode -- typo,
-            # checksum, wrong-but-valid phrase. Full reason in
-            # server log.
-            logger.warning("recovery phrase rejected: %s", exc)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="recovery phrase invalid",
-            ) from exc
+    # ``recover_from_phrase`` acquires ``lazy_gen_lock`` internally
+    # for its verify -> write window, so we do not take it here.
+    # Mutual exclusion against a concurrent first-credential-save
+    # (lazy-gen) is enforced inside the security module rather than
+    # depending on every HTTP caller to remember the discipline
+    # (review feedback PR #118 round 6).
+    try:
+        derived = master_key.recover_from_phrase(conn, body.phrase)
+    except (RecoveryPhraseError, master_key.RecoveryVerificationError) as exc:
+        # Same generic detail for every failure mode -- typo,
+        # checksum, wrong-but-valid phrase. Full reason in
+        # server log.
+        logger.warning("recovery phrase rejected: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="recovery phrase invalid",
+        ) from exc
 
-        set_active_key(derived)
-        request.app.state.broker_key_loaded = True
-        request.app.state.boot_state = "normal"
-        request.app.state.recovery_required = False
-        request.app.state.needs_setup = False
-        logger.info("master key recovered from phrase; boot_state=normal")
+    set_active_key(derived)
+    request.app.state.broker_key_loaded = True
+    request.app.state.boot_state = "normal"
+    request.app.state.recovery_required = False
+    request.app.state.needs_setup = False
+    logger.info("master key recovered from phrase; boot_state=normal")
 
     return RecoverResponse(boot_state="normal", recovery_required=False)
 
