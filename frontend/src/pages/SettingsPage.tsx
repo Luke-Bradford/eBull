@@ -16,8 +16,33 @@ import {
   listBrokerCredentials,
   revokeBrokerCredential,
 } from "@/api/brokerCredentials";
+import { RecoveryPhraseConfirm } from "@/components/security/RecoveryPhraseConfirm";
+import { Modal } from "@/components/ui/Modal";
 
 const MIN_SECRET_LEN = 4;
+
+/**
+ * Recovery-phrase modal sub-state (#121 / ADR-0003 §5).
+ *
+ * The modal has two inner views and we model them explicitly rather
+ * than threading two booleans:
+ *
+ *   - "confirm"        — RecoveryPhraseConfirm display + challenge
+ *   - "confirm-cancel" — fail-closed gate the operator must pass through
+ *                        when they try to dismiss the phrase via Cancel,
+ *                        Escape, or the close button. Single misclicks
+ *                        must not destroy the only copy of the phrase.
+ *
+ * On Confirm of the challenge OR on the operator confirming dismissal,
+ * we drop the phrase from component state (it lives nowhere else) and
+ * close the modal.
+ */
+type PhraseModalView = "confirm" | "confirm-cancel";
+
+const CANCEL_WARNING_TEXT =
+  "This recovery phrase will not be shown again. If you close this now, " +
+  "you may lose recovery ability for this installation's broker " +
+  "credentials unless you have backed up the app data directory.";
 
 export function SettingsPage(): JSX.Element {
   return (
@@ -43,6 +68,14 @@ function BrokerCredentialsSection(): JSX.Element {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // Recovery-phrase modal state. The phrase lives ONLY in this state
+  // for the lifetime of the modal -- never written to localStorage,
+  // sessionStorage, IndexedDB, console, or any cache. Cleared on
+  // unmount-equivalent transitions (confirm, confirmed-cancel).
+  const [phrase, setPhrase] = useState<readonly string[] | null>(null);
+  const [phraseModalView, setPhraseModalView] =
+    useState<PhraseModalView>("confirm");
+
   const refresh = useCallback(async () => {
     setLoadError(null);
     try {
@@ -63,12 +96,30 @@ function BrokerCredentialsSection(): JSX.Element {
     setCreateError(null);
     setCreating(true);
     try {
-      await createBrokerCredential({ provider, label, secret });
+      const response = await createBrokerCredential({ provider, label, secret });
       // Clear the secret immediately and re-fetch to show the row.
       // The form is intentionally NOT pre-populated from the response.
       setLabel("");
       setSecret("");
-      await refresh();
+      // First-save-in-clean_install path: backend returns the 24-word
+      // recovery phrase exactly once (#114 / ADR-0003 §4). Show the
+      // confirmation modal. Note: the credential row is ALREADY
+      // committed by the time we get here -- the modal cannot block
+      // commit, only operator acknowledgement of the phrase. The
+      // confirm-cancel gate inside the modal protects against a
+      // misclick destroying the only copy of the phrase.
+      //
+      // We DEFER the list refresh until the modal closes. Otherwise
+      // any error from `refresh()` would be set on `loadError` while
+      // the modal covers the page, hiding it from the operator
+      // (review feedback PR #125 round 1). When no modal opens we
+      // refresh inline as before.
+      if (response.recovery_phrase != null && response.recovery_phrase.length > 0) {
+        setPhrase(response.recovery_phrase);
+        setPhraseModalView("confirm");
+      } else {
+        await refresh();
+      }
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 409) {
         setCreateError("A credential with that label already exists for this provider.");
@@ -105,6 +156,40 @@ function BrokerCredentialsSection(): JSX.Element {
     } finally {
       setBusyId(null);
     }
+  }
+
+  function closePhraseModal(): void {
+    // Single shared close path for both the challenge-confirm success
+    // and the "Close anyway" branch (review feedback PR #125 round 2).
+    // Responsibilities:
+    //   - drop the phrase from state (it lives nowhere else)
+    //   - reset the inner view back to "confirm" so the next time the
+    //     modal opens it starts on the phrase, not on the warning
+    //   - clear any stale createError from a prior failed attempt --
+    //     otherwise after the modal closes the operator could see a
+    //     leftover create error AND a fresh load error side by side
+    //   - run the deferred list refresh now that the modal no longer
+    //     covers the page, so any refresh failure (loadError) is
+    //     visible to the operator (PR #125 round 1)
+    // No revoke -- the credential row is already committed and the
+    // phrase is root-secret scoped, not row scoped.
+    setPhrase(null);
+    setPhraseModalView("confirm");
+    setCreateError(null);
+    void refresh();
+  }
+
+  function requestPhraseDismiss(): void {
+    // Routed from RecoveryPhraseConfirm.onCancel AND from the Modal's
+    // Escape handler. Both go through the confirm-cancel gate -- a
+    // single misclick or stray Escape must not destroy the only copy
+    // of the phrase.
+    setPhraseModalView("confirm-cancel");
+  }
+
+  function handleConfirmCancelKeep(): void {
+    // "Go back" -- operator changed their mind, return to the phrase.
+    setPhraseModalView("confirm");
   }
 
   return (
@@ -226,6 +311,59 @@ function BrokerCredentialsSection(): JSX.Element {
           {creating ? "Saving…" : "Save credential"}
         </button>
       </form>
+
+      <Modal
+        isOpen={phrase !== null}
+        onRequestClose={requestPhraseDismiss}
+        // aria-label (not aria-labelledby) on purpose: the dialog has
+        // two inner views ("confirm" and "confirm-cancel") with
+        // different visible headings, but the dialog as a whole has a
+        // single stable accessible name. Trying to point
+        // aria-labelledby at "whichever heading is currently mounted"
+        // is fragile -- see PR #125 round 2 review.
+        label="Recovery phrase confirmation"
+      >
+        {/*
+          Both inner branches guard on `phrase !== null` even though
+          the Modal is already gated on `isOpen={phrase !== null}`.
+          The confirm branch needs the guard for TypeScript narrowing
+          (RecoveryPhraseConfirm's `phrase` prop is required and
+          non-nullable). The cancel branch carries the same guard so
+          the "this view never renders without a phrase" invariant is
+          visible on both sides, not just one.
+        */}
+        {phrase !== null && phraseModalView === "confirm" ? (
+          <RecoveryPhraseConfirm
+            phrase={phrase}
+            onConfirmed={closePhraseModal}
+            onCancel={requestPhraseDismiss}
+          />
+        ) : null}
+        {phrase !== null && phraseModalView === "confirm-cancel" ? (
+          <div className="flex flex-col gap-4">
+            <h2 className="text-sm font-semibold text-slate-700">
+              Close without confirming?
+            </h2>
+            <p className="text-xs text-slate-600">{CANCEL_WARNING_TEXT}</p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={handleConfirmCancelKeep}
+                className="rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700"
+              >
+                Go back
+              </button>
+              <button
+                type="button"
+                onClick={closePhraseModal}
+                className="rounded border border-rose-300 bg-white px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50"
+              >
+                Close anyway
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
     </section>
   );
 }

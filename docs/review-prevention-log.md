@@ -416,3 +416,11 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: A new exception class (`RecoveryNotApplicableError`) was introduced in round 17 with a docstring asserting it existed so the API could return a *distinct 409*. Round 18 then unified the API mapping back to a generic 400 (per ADR-0003 §6, to prevent failure-mode fingerprinting), but the class-level docstring still claimed the 409 contract. A future maintainer reading the class would have plausible grounds to "restore" the 409 they thought was an oversight, silently breaking the privacy contract.
 - Prevention: When an exception class docstring embeds a status-code claim, that claim is part of the contract and must be updated in the same commit that changes the handler `except` mapping. As a mechanical check, grep for `\b(4\d\d|5\d\d)\b` inside `class ...Error` docstrings and cross-reference each hit with the corresponding `except` clause in any HTTP handler that imports the class. If you decide the wire response must be uniform, say so explicitly in the docstring and reference the ADR section that requires it.
 - Enforced in: this prevention log
+
+---
+
+### Refresh error swallowed by an overlay opened in the same handler
+- First seen in: #125
+- Symptom: A handler ran `await createX(...)` then unconditionally `await refresh()` — and on success also opened a fail-closed modal. If `refresh()` failed, its error was set on a list-level `loadError` slot that the freshly-opened modal completely covered. The operator saw their save complete and the modal appear, never knew the list re-fetch had failed, and would only discover stale data after closing the modal — at which point they would plausibly mistake the stale list for evidence that the save itself had failed.
+- Prevention: When a click handler can both open an overlay AND run a follow-up data refresh, the refresh must either (a) be deferred until the overlay closes (run from the close handlers), or (b) surface its error on a slot the overlay does not cover. Default to (a) — it gives the operator one source of truth at a time. As a review checkpoint, grep for `await refresh\(` and for each call ask: "is this inside a code path that also opens a modal/dialog/overlay in the same tick?" If yes, the refresh must be moved to the close handlers.
+- Enforced in: this prevention log
