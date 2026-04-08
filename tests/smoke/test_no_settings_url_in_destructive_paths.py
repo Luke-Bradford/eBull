@@ -103,6 +103,16 @@ _ALLOWED: dict[str, str] = {
     # (the ``_FORBIDDEN_PATTERNS`` literals above). Exclude it to
     # avoid a self-match.
     "smoke/test_no_settings_url_in_destructive_paths.py": "the guard itself",
+    # Read-only reachability probe + advisory-lock semantics test for
+    # the JobLock primitive (#13 PR A). The probe runs ``SELECT 1`` to
+    # decide whether to skip (no Postgres -> clean skip) and the test
+    # bodies exercise ``pg_try_advisory_lock`` / ``pg_advisory_unlock``,
+    # both of which are session-scoped state -- they write no rows and
+    # cannot CASCADE into broker_credentials. Cannot use the
+    # ``ebull_test`` pattern here because the JobLock implementation
+    # opens its own connection internally; the test must connect to
+    # the same DB the JobLock will resolve to via ``settings.database_url``.
+    "test_jobs_locks.py": "read-only reachability probe + advisory-lock semantics; no row writes",
 }
 
 _TESTS_DIR = Path(__file__).resolve().parents[1]

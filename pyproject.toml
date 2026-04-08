@@ -16,6 +16,7 @@ dependencies = [
   "argon2-cffi>=23.1.0",
   "cryptography>=43.0.0",
   "platformdirs>=4.2.0",
+  "apscheduler>=3.10",
 ]
 
 [tool.uv]

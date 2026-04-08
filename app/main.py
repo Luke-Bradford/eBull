@@ -20,6 +20,7 @@ from app.api.config import KillSwitchRequest, KillSwitchResponse, post_kill_swit
 from app.api.config import router as config_router
 from app.api.filings import router as filings_router
 from app.api.instruments import router as instruments_router
+from app.api.jobs import router as jobs_router
 from app.api.news import router as news_router
 from app.api.operators import router as operators_router
 from app.api.portfolio import router as portfolio_router
@@ -30,6 +31,7 @@ from app.api.theses import router as theses_router
 from app.config import settings
 from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
+from app.jobs.runtime import JobRuntime, shutdown_runtime, start_runtime
 from app.security import master_key
 from app.security.secrets_crypto import set_active_key as set_broker_encryption_key
 from app.services.coverage import override_tier
@@ -82,7 +84,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         boot.recovery_required,
     )
 
+    # Start the in-process job runtime (#13 PR A). Single job wired in
+    # this PR (nightly_universe_sync); the rest of SCHEDULED_JOBS arrives
+    # in PR B. Catch-up-on-boot is PR C -- see app/jobs/runtime.py.
+    job_runtime: JobRuntime | None
+    try:
+        job_runtime = start_runtime()
+    except Exception:
+        # Runtime startup failure must not block the app from booting --
+        # the operator can still log in, see system status, and diagnose.
+        # We log loud and continue with no runtime; manual trigger
+        # endpoints will return 503.
+        logger.exception("Job runtime failed to start; continuing without scheduler")
+        job_runtime = None
+    app.state.job_runtime = job_runtime
+
     yield
+
+    # Shut the runtime down BEFORE closing the pool so any in-flight
+    # job can still write to job_runs as part of its cleanup. The
+    # scheduler.shutdown(wait=True) inside shutdown_runtime() blocks
+    # until worker threads return.
+    shutdown_runtime(job_runtime)
+    app.state.job_runtime = None
 
     pool.close()
     logger.info("Connection pool closed.")
@@ -98,6 +122,7 @@ app.include_router(broker_credentials_router)
 app.include_router(config_router)
 app.include_router(filings_router)
 app.include_router(instruments_router)
+app.include_router(jobs_router)
 app.include_router(news_router)
 app.include_router(portfolio_router)
 app.include_router(recommendations_router)
