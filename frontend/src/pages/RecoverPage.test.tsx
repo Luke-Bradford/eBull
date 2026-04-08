@@ -11,7 +11,7 @@
  *   - phrase is never written to localStorage / sessionStorage
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { RecoverPage } from "@/pages/RecoverPage";
@@ -70,12 +70,15 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-async function fillAllInputs(words: readonly string[]): Promise<void> {
-  const user = userEvent.setup();
+function fillAllInputs(words: readonly string[]): void {
+  // Use fireEvent.change instead of userEvent.type so 24 × ~6
+  // characters of simulated keystrokes do not push the test
+  // wall-clock past vitest's 5s per-test timeout when the whole
+  // suite runs in parallel. Behaviour-wise this is identical
+  // for a controlled <input> with an onChange handler.
   for (let i = 0; i < words.length; i++) {
-    const input = screen.getByLabelText(`Word ${i + 1}`);
-    await user.clear(input);
-    await user.type(input, words[i]!);
+    const input = screen.getByLabelText(`Word ${i + 1}`) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: words[i] } });
   }
 }
 
@@ -100,7 +103,7 @@ describe("RecoverPage", () => {
     const phrase = [...VALID_PHRASE];
     phrase[4] = "notaword";
     render(<RecoverPage />);
-    await fillAllInputs(phrase);
+    fillAllInputs(phrase);
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /Recover/i }));
@@ -115,7 +118,7 @@ describe("RecoverPage", () => {
     const phrase = [...VALID_PHRASE];
     phrase[23] = "ability"; // valid wordlist entry, wrong checksum
     render(<RecoverPage />);
-    await fillAllInputs(phrase);
+    fillAllInputs(phrase);
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /Recover/i }));
@@ -132,7 +135,7 @@ describe("RecoverPage", () => {
       recovery_required: false,
     });
     render(<RecoverPage />);
-    await fillAllInputs(VALID_PHRASE);
+    fillAllInputs(VALID_PHRASE);
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /Recover/i }));
@@ -153,7 +156,7 @@ describe("RecoverPage", () => {
       new ApiError(400, "recovery phrase invalid"),
     );
     render(<RecoverPage />);
-    await fillAllInputs(VALID_PHRASE);
+    fillAllInputs(VALID_PHRASE);
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /Recover/i }));
