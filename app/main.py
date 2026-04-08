@@ -72,6 +72,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.boot_state = boot.state
     app.state.needs_setup = boot.needs_setup
     app.state.recovery_required = boot.recovery_required
+    app.state.broker_key_loaded = boot.broker_encryption_key is not None
     if boot.broker_encryption_key is not None:
         set_broker_encryption_key(boot.broker_encryption_key)
     logger.info(

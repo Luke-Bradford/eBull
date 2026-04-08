@@ -337,10 +337,15 @@ def bootstrap(conn: psycopg.Connection[object]) -> BootResult:
                 "EBULL_SECRETS_KEY does not match existing broker credential ciphertext. "
                 "Refusing to start. See ADR-0003 §6."
             )
+        # Env-override + no credentials is still a clean_install
+        # boot state -- there's nothing to encrypt yet and the
+        # frontend should still route to the setup flow. The
+        # env_key IS installed so the first credential save can
+        # encrypt against it without ever lazy-generating a file.
         return BootResult(
             state="normal" if creds_exist else "clean_install",
             broker_encryption_key=env_key,
-            needs_setup=False,
+            needs_setup=not creds_exist,
             recovery_required=False,
         )
 

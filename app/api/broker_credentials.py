@@ -151,30 +151,62 @@ def create(
     subsequent save the phrase field is null.
     """
     phrase: list[str] | None = None
-    pending_root_secret: bytes | None = None
 
-    # Lazy-gen path. Serialised across requests by lazy_gen_lock so
-    # two simultaneous first-saves cannot each generate a distinct
-    # root secret. We re-check boot_state under the lock for the
-    # standard double-checked-locking pattern -- the first request
-    # through flips it to "normal" while still holding the lock.
-    if getattr(request.app.state, "boot_state", "clean_install") == "clean_install":
+    # Lazy-gen path runs only on the very first credential save in
+    # clean_install mode AND only when the cipher cache is empty
+    # (env-override clean_install already has the key installed and
+    # must skip generation entirely -- review feedback PR #118
+    # round 2). The whole sequence -- generate, persist file,
+    # install cache, store credential -- runs under
+    # ``lazy_gen_lock`` so a queued waiter that arrives during a
+    # rollback observes the post-rollback state, not a stale
+    # mid-flight one.
+    needs_lazy_gen = getattr(request.app.state, "boot_state", "clean_install") == "clean_install" and not getattr(
+        request.app.state, "broker_key_loaded", False
+    )
+    if needs_lazy_gen:
         with master_key.lazy_gen_lock:
-            if getattr(request.app.state, "boot_state", "clean_install") == "clean_install":
+            # Re-check inside the lock: another waiter may have
+            # already populated the key while we queued.
+            if not getattr(request.app.state, "broker_key_loaded", False):
                 pending_root_secret, derived, phrase = master_key.generate_root_secret_in_memory()
-                # Install the key into the cipher cache so the
-                # store_credential call below can encrypt against it.
-                # The on-disk file is NOT written yet -- if the DB
-                # write fails we will clear the cache and the next
-                # attempt will start fresh, so the operator never
-                # ends up with a persisted secret whose phrase they
-                # never saw.
+                # Persist the file BEFORE the DB write. If persist
+                # raises (disk full, perms), nothing has been
+                # committed yet, the key is not in the cache, and
+                # the operator just retries. If persist succeeds
+                # but the DB write later fails, we unlink the
+                # file in the rollback path below so the next
+                # attempt starts clean. Either way the invariant
+                # holds: ``credential row exists`` implies
+                # ``root secret file is on disk and the operator
+                # saw the phrase exactly once``.
+                master_key.persist_generated_root_secret(pending_root_secret)
                 set_active_key(derived)
+                request.app.state.broker_key_loaded = True
                 request.app.state.boot_state = "normal"
                 request.app.state.needs_setup = False
                 request.app.state.recovery_required = False
-                logger.info("master key lazy-generated on first credential save (pending DB confirm)")
+                logger.info("master key lazy-generated on first credential save (file persisted)")
+                try:
+                    return _do_store(conn, session, body, phrase)
+                except Exception:
+                    # Roll back the persisted file + cache. We are
+                    # still inside the lock so any queued waiter
+                    # observes the cleaned-up state.
+                    _rollback_lazy_gen(request)
+                    raise
+            # Fall through: another waiter populated the key while
+            # we queued; proceed as a normal store.
 
+    return _do_store(conn, session, body, phrase=None)
+
+
+def _do_store(
+    conn: psycopg.Connection[object],
+    session: SessionRow,
+    body: CreateCredentialRequest,
+    phrase: list[str] | None,
+) -> CreateCredentialResponse:
     try:
         meta = store_credential(
             conn,
@@ -184,42 +216,40 @@ def create(
             plaintext=body.secret,
         )
     except CredentialValidationError as exc:
-        if pending_root_secret is not None:
-            # Roll back the in-memory key install so the next attempt
-            # generates a fresh secret. The on-disk file was never
-            # written, so there is nothing to delete.
-            clear_active_key()
-            request.app.state.boot_state = "clean_install"
-            request.app.state.needs_setup = True
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
     except CredentialAlreadyExists as exc:
-        if pending_root_secret is not None:
-            clear_active_key()
-            request.app.state.boot_state = "clean_install"
-            request.app.state.needs_setup = True
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="credential already exists",
         ) from exc
-    except Exception:
-        if pending_root_secret is not None:
-            clear_active_key()
-            request.app.state.boot_state = "clean_install"
-            request.app.state.needs_setup = True
-        raise
-
-    # Store succeeded. NOW it is safe to flush the root secret to
-    # disk -- the operator will see the phrase in this response, and
-    # the persisted file matches the encrypted ciphertext we just
-    # committed.
-    if pending_root_secret is not None:
-        master_key.persist_generated_root_secret(pending_root_secret)
-        logger.info("master key root secret persisted to disk after first credential commit")
-
     return CreateCredentialResponse(credential=_to_out(meta), recovery_phrase=phrase)
+
+
+def _rollback_lazy_gen(request: Request) -> None:
+    """Undo a lazy-gen install after the DB write failed.
+
+    Best-effort: unlink the persisted file, clear the cipher cache,
+    reset ``app.state`` flags. Called from inside ``lazy_gen_lock``
+    so a queued first-save observes the cleaned-up state.
+    """
+    try:
+        path = master_key.root_secret_path()
+        if path.exists():
+            path.unlink()
+    except OSError:
+        # An orphan file with no credential rows is still a valid
+        # clean_install state per compute_boot_state, and the next
+        # successful first-save will atomically overwrite it via
+        # os.replace. Logged but not fatal.
+        logger.exception("lazy-gen rollback: failed to unlink persisted root secret file")
+    clear_active_key()
+    request.app.state.broker_key_loaded = False
+    request.app.state.boot_state = "clean_install"
+    request.app.state.needs_setup = True
+    request.app.state.recovery_required = False
 
 
 @router.delete("/{credential_id}", status_code=status.HTTP_204_NO_CONTENT)

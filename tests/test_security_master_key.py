@@ -196,6 +196,29 @@ def test_data_dir_locked_to_0700(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert mode == 0o700
 
 
+class TestEnvOverrideBootState:
+    """Bootstrap with EBULL_SECRETS_KEY set is still clean_install when
+    no credentials exist (review-prevention from PR #118 round 2)."""
+
+    def test_env_override_no_creds_is_clean_install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import base64
+
+        from app.security import master_key as mk
+
+        # Stub out the DB by patching the credential-existence helper.
+        monkeypatch.setattr(mk, "_credentials_exist", lambda conn: False)
+        monkeypatch.setattr(
+            mk.settings,
+            "secrets_key",
+            base64.b64encode(os.urandom(32)).decode(),
+        )
+        result = mk.bootstrap(conn=None)  # type: ignore[arg-type]
+        assert result.state == "clean_install"
+        assert result.needs_setup is True
+        assert result.recovery_required is False
+        assert result.broker_encryption_key is not None
+
+
 def test_bootstrap_function_exists() -> None:
     """Smoke test: bootstrap is importable and callable.
 
