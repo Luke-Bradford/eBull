@@ -102,11 +102,11 @@ class TestRecoverInputValidation:
         """
         from app.api import auth_bootstrap
 
-        # Explicit set inside the test body documents the
-        # precondition at the call site rather than relying on
-        # the fixture's default seed. The ``client`` fixture is
-        # function-scoped today so each parametrize case starts
-        # fresh anyway (review feedback PR #118 round 20).
+        # The ``client`` fixture seeds ``recovery_required=False``
+        # (clean_install default), so this line is REQUIRED to put
+        # the app into recovery_required state for the test -- it
+        # is not just documentation. Do not remove (review feedback
+        # PR #118 round 22).
         client.app.state.recovery_required = True  # type: ignore[attr-defined]
         phrase = " ".join(["abandon"] * 24)
         exc = exc_factory()  # type: ignore[operator]
