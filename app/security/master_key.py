@@ -46,7 +46,6 @@ from platformdirs import user_data_dir
 from app.config import settings
 from app.security.recovery_phrase import (
     ROOT_SECRET_LEN,
-    RecoveryPhraseError,
     decode_phrase,
     encode_phrase,
 )
@@ -497,11 +496,7 @@ def recover_from_phrase(conn: psycopg.Connection[object], phrase: str, app_state
     always a single string from the JSON body
     (review feedback PR #118 round 16).
     """
-    try:
-        root_secret = decode_phrase(phrase)
-    except RecoveryPhraseError:
-        raise
-
+    root_secret = decode_phrase(phrase)
     derived = derive_broker_encryption_key(root_secret)
     with lazy_gen_lock:
         # Snapshot freshness: the SELECT below runs on the caller's
