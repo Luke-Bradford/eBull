@@ -25,7 +25,8 @@ class EtoroBrokerProvider(BrokerProvider):
     """
     eToro write API client.
 
-    Requires ETORO_WRITE_API_KEY.  Use as a context manager:
+    Callers must supply the API key (loaded from the encrypted
+    broker_credentials store).  Use as a context manager:
 
         with EtoroBrokerProvider(api_key=...) as broker:
             result = broker.place_order(...)
