@@ -374,6 +374,9 @@ class EtoroBrokerProvider(BrokerProvider):
         except httpx.HTTPError as exc:
             logger.error("eToro portfolio lookup network error: %s", exc)
             return None, f"Portfolio lookup failed: {exc}"
+        except ValueError as exc:
+            logger.error("eToro portfolio non-JSON response: %s", exc)
+            return None, "Portfolio lookup failed: non-JSON response"
 
         # Response shape: { clientPortfolio: { positions: [...] } }
         portfolio = raw.get("clientPortfolio") or {}
