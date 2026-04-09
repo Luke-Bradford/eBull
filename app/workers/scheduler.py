@@ -130,6 +130,12 @@ class ScheduledJob:
     name: str
     description: str
     cadence: Cadence
+    # When True, the job runtime will trigger this job at startup if it
+    # is overdue (last successful run's next scheduled fire <= now, or
+    # no successful run exists at all).  Set to False for jobs that are
+    # too expensive or have side-effects that make cold-start firing
+    # undesirable.
+    catch_up_on_boot: bool = True
 
 
 # Job-name constants. Every ``_tracked_job(...)`` call site below references

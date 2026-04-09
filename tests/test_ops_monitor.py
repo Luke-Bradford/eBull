@@ -361,6 +361,51 @@ class TestCheckJobHealth:
 
 
 # ---------------------------------------------------------------------------
+# TestFetchLatestSuccessfulRuns
+# ---------------------------------------------------------------------------
+
+
+class TestFetchLatestSuccessfulRuns:
+    """Tests for ``fetch_latest_successful_runs``."""
+
+    def test_returns_latest_success_per_job(self) -> None:
+        from app.services.ops_monitor import fetch_latest_successful_runs
+
+        ts1 = datetime(2026, 4, 9, 2, 0, 0, tzinfo=UTC)
+        ts2 = datetime(2026, 4, 9, 4, 0, 0, tzinfo=UTC)
+        rows = [
+            {"job_name": "job_a", "started_at": ts1},
+            {"job_name": "job_b", "started_at": ts2},
+        ]
+        conn = _make_conn([_make_cursor(rows)])
+        result = fetch_latest_successful_runs(conn, ["job_a", "job_b"])
+        assert result == {"job_a": ts1, "job_b": ts2}
+
+    def test_missing_job_is_absent_from_result(self) -> None:
+        from app.services.ops_monitor import fetch_latest_successful_runs
+
+        ts = datetime(2026, 4, 9, 2, 0, 0, tzinfo=UTC)
+        rows = [{"job_name": "job_a", "started_at": ts}]
+        conn = _make_conn([_make_cursor(rows)])
+        result = fetch_latest_successful_runs(conn, ["job_a", "job_b"])
+        assert "job_a" in result
+        assert "job_b" not in result
+
+    def test_empty_names_returns_empty_dict(self) -> None:
+        from app.services.ops_monitor import fetch_latest_successful_runs
+
+        result = fetch_latest_successful_runs(MagicMock(), [])
+        assert result == {}
+
+    def test_no_successful_runs_returns_empty_dict(self) -> None:
+        from app.services.ops_monitor import fetch_latest_successful_runs
+
+        conn = _make_conn([_make_cursor([])])
+        result = fetch_latest_successful_runs(conn, ["job_a"])
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
 # TestCheckRowCountSpike
 # ---------------------------------------------------------------------------
 
