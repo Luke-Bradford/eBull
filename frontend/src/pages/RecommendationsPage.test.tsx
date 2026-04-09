@@ -355,10 +355,10 @@ describe("RecommendationsPage — section independence", () => {
     mockedFetchRecs.mockRejectedValue(new Error("network"));
     // audit succeeds
     renderPage();
+    // Assert audit rendered successfully AND banner is absent in the same
+    // waitFor — proves section independence, not vacuous absence.
     await waitFor(() => {
       expect(screen.getByText("Guard")).toBeInTheDocument();
-    });
-    await waitFor(() => {
       expect(screen.queryByText(/API is unreachable/)).not.toBeInTheDocument();
     });
   });
