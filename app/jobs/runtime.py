@@ -57,10 +57,26 @@ from apscheduler.triggers.cron import CronTrigger
 from app.config import settings
 from app.jobs.locks import JobAlreadyRunning, JobLock
 from app.workers.scheduler import (
+    JOB_DAILY_CIK_REFRESH,
+    JOB_DAILY_NEWS_REFRESH,
+    JOB_DAILY_RESEARCH_REFRESH,
+    JOB_DAILY_TAX_RECONCILIATION,
+    JOB_DAILY_THESIS_REFRESH,
+    JOB_HOURLY_MARKET_REFRESH,
+    JOB_MORNING_CANDIDATE_REVIEW,
     JOB_NIGHTLY_UNIVERSE_SYNC,
+    JOB_WEEKLY_COVERAGE_REVIEW,
     SCHEDULED_JOBS,
     Cadence,
+    daily_cik_refresh,
+    daily_news_refresh,
+    daily_research_refresh,
+    daily_tax_reconciliation,
+    daily_thesis_refresh,
+    hourly_market_refresh,
+    morning_candidate_review,
     nightly_universe_sync,
+    weekly_coverage_review,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,8 +87,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 #
 # Maps job names from ``SCHEDULED_JOBS`` to the actual callable that
-# performs the work. PR A wires only ``nightly_universe_sync``. PR B will
-# add the remaining 8 jobs from ``app/workers/scheduler.py``.
+# performs the work. PR B wires every job declared in
+# ``app/workers/scheduler.py``: a manual trigger or a scheduled fire is
+# now a single call into the registry.
 #
 # Keeping the registry as a single ``dict[str, Callable[[], None]]``
 # rather than a class hierarchy is deliberate: every job has the same
@@ -80,9 +97,22 @@ logger = logging.getLogger(__name__)
 # job-specific to abstract over yet. If a future job needs arguments
 # (it should not, per the design notes in #13), reach for a richer
 # shape then -- not pre-emptively.
+#
+# Drift guard: ``JobRuntime.start()`` registers only the intersection of
+# this map with ``SCHEDULED_JOBS``, and ``test_jobs_runtime.py`` asserts
+# the two are equal so a job declared in the registry without an invoker
+# (or vice versa) fails the test rather than silently no-opping.
 
 _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_NIGHTLY_UNIVERSE_SYNC: nightly_universe_sync,
+    JOB_HOURLY_MARKET_REFRESH: hourly_market_refresh,
+    JOB_DAILY_CIK_REFRESH: daily_cik_refresh,
+    JOB_DAILY_RESEARCH_REFRESH: daily_research_refresh,
+    JOB_DAILY_NEWS_REFRESH: daily_news_refresh,
+    JOB_DAILY_THESIS_REFRESH: daily_thesis_refresh,
+    JOB_MORNING_CANDIDATE_REVIEW: morning_candidate_review,
+    JOB_WEEKLY_COVERAGE_REVIEW: weekly_coverage_review,
+    JOB_DAILY_TAX_RECONCILIATION: daily_tax_reconciliation,
 }
 
 

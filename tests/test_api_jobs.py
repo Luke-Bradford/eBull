@@ -17,10 +17,14 @@ unless we set it explicitly -- which is what every test below does
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
+from unittest.mock import MagicMock
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from app.db import get_conn
 from app.jobs.locks import JobAlreadyRunning
 from app.jobs.runtime import UnknownJob
 from app.main import app
@@ -83,6 +87,109 @@ class TestRunJob:
             assert "job runtime not started" in resp.json()["detail"]
         finally:
             app.state.job_runtime = None
+
+
+def _override_conn(conn: MagicMock) -> None:
+    def _gen() -> Iterator[MagicMock]:
+        yield conn
+
+    app.dependency_overrides[get_conn] = _gen
+
+
+def _clear_conn_override() -> None:
+    app.dependency_overrides.pop(get_conn, None)
+
+
+def _make_conn(rows: list[dict[str, object]]) -> MagicMock:
+    """Build a MagicMock psycopg connection that returns *rows* from a dict_row cursor."""
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.fetchall.return_value = rows
+    conn.cursor.return_value.__enter__.return_value = cur
+    conn.cursor.return_value.__exit__.return_value = None
+    return conn
+
+
+class TestListJobRuns:
+    """Tests for ``GET /jobs/runs``.
+
+    The DB connection is stubbed via ``app.dependency_overrides``; the
+    SQL itself is not exercised here -- the round-trip query against
+    real Postgres lives in the integration smoke path.
+    """
+
+    def teardown_method(self) -> None:
+        _clear_conn_override()
+
+    def test_returns_rows_in_response_shape(self) -> None:
+        rows: list[dict[str, object]] = [
+            {
+                "run_id": 42,
+                "job_name": "nightly_universe_sync",
+                "started_at": datetime(2026, 4, 9, 2, 0, 0, tzinfo=UTC),
+                "finished_at": datetime(2026, 4, 9, 2, 0, 12, tzinfo=UTC),
+                "status": "success",
+                "row_count": 1234,
+                "error_msg": None,
+            },
+            {
+                "run_id": 41,
+                "job_name": "daily_news_refresh",
+                "started_at": datetime(2026, 4, 9, 1, 0, 0, tzinfo=UTC),
+                "finished_at": None,
+                "status": "running",
+                "row_count": None,
+                "error_msg": None,
+            },
+        ]
+        _override_conn(_make_conn(rows))
+
+        resp = client.get("/jobs/runs")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 2
+        assert body["limit"] == 50
+        assert body["job_name"] is None
+        assert [item["run_id"] for item in body["items"]] == [42, 41]
+        assert body["items"][0]["status"] == "success"
+        assert body["items"][1]["finished_at"] is None
+
+    def test_passes_filter_and_limit_to_query(self) -> None:
+        conn = _make_conn([])
+        _override_conn(conn)
+
+        resp = client.get("/jobs/runs?job_name=nightly_universe_sync&limit=10")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["job_name"] == "nightly_universe_sync"
+        assert body["limit"] == 10
+        # Verify the query parameters were forwarded as bound params
+        # (parameterised, not interpolated -- regression target).
+        cur = conn.cursor.return_value.__enter__.return_value
+        called_args = cur.execute.call_args
+        params = called_args[0][1]
+        assert params["job_name"] == "nightly_universe_sync"
+        assert params["limit"] == 10
+
+    def test_limit_out_of_range_returns_422(self) -> None:
+        _override_conn(_make_conn([]))
+        resp = client.get("/jobs/runs?limit=0")
+        assert resp.status_code == 422
+        resp = client.get("/jobs/runs?limit=999")
+        assert resp.status_code == 422
+
+    def test_db_failure_returns_503_with_fixed_detail(self) -> None:
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.execute.side_effect = psycopg.OperationalError("connection refused")
+        conn.cursor.return_value.__enter__.return_value = cur
+        conn.cursor.return_value.__exit__.return_value = None
+        _override_conn(conn)
+
+        resp = client.get("/jobs/runs")
+        assert resp.status_code == 503
+        # Fixed detail string -- no driver text leaked.
+        assert resp.json()["detail"] == "job run history unavailable"
 
 
 class TestRunJobAuth:
