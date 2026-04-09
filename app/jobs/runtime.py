@@ -445,7 +445,7 @@ class JobRuntime:
         except Exception:
             # CancelledError (or any other unexpected state) — log and
             # move on; done-callbacks must not propagate.
-            logger.warning("executor future was cancelled or in unexpected state")
+            logger.warning("executor future was cancelled or in unexpected state", exc_info=True)
             return
         if exc is not None:
             logger.error("executor future raised unexpectedly: %s", exc, exc_info=exc)
