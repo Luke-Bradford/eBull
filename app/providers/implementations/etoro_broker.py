@@ -23,6 +23,11 @@ from app.providers.broker import BrokerOrderResult, BrokerProvider, OrderStatus
 
 logger = logging.getLogger(__name__)
 
+# Actions the service layer is allowed to send to place_order.
+# EXIT is routed to close_position by the service layer and must never
+# reach here. HOLD does not produce broker calls at all.
+_ALLOWED_PLACE_ORDER_ACTIONS = frozenset({"BUY", "ADD"})
+
 # Map eToro statusID values to our OrderStatus.
 # Populated from documented API responses. Edge-case status values
 # may need live validation — unknown statuses default to "pending".
@@ -100,11 +105,12 @@ class EtoroBrokerProvider(BrokerProvider):
         amount: Decimal | None,
         units: Decimal | None,
     ) -> BrokerOrderResult:
-        # EXIT should never reach place_order — the service layer routes
-        # EXIT to close_position. Guard against misrouting.
-        if action == "EXIT":
+        # Reject unrecognised actions before any HTTP call.
+        if action not in _ALLOWED_PLACE_ORDER_ACTIONS:
             logger.error(
-                "EXIT action reached place_order for instrument %d — this is a routing error in the service layer",
+                "Unrecognised action %r for instrument %d — "
+                "only BUY/ADD are valid for place_order (EXIT routes to close_position)",
+                action,
                 instrument_id,
             )
             return BrokerOrderResult(
@@ -113,7 +119,18 @@ class EtoroBrokerProvider(BrokerProvider):
                 filled_price=None,
                 filled_units=None,
                 fees=Decimal("0"),
-                raw_payload={"error": "EXIT action must use close_position, not place_order"},
+                raw_payload={"error": f"Unrecognised action {action!r} for place_order"},
+            )
+
+        # At least one of amount/units must be provided.
+        if amount is None and units is None:
+            return BrokerOrderResult(
+                broker_order_ref=None,
+                status="failed",
+                filled_price=None,
+                filled_units=None,
+                fees=Decimal("0"),
+                raw_payload={"error": "Neither amount nor units provided"},
             )
 
         # Determine endpoint and amount field based on order type.
@@ -131,12 +148,16 @@ class EtoroBrokerProvider(BrokerProvider):
                 "IsNoTakeProfit": True,
             }
         else:
+            # units is None, and the guard above rejects both-None,
+            # so amount is guaranteed non-None here.
+            if amount is None:  # pragma: no cover — unreachable after guard
+                raise RuntimeError("amount must be non-None when units is None")
             endpoint = f"{self._exec_prefix}/market-open-orders/by-amount"
             body = {
                 "InstrumentID": instrument_id,
                 "IsBuy": True,
                 "Leverage": 1,
-                "Amount": float(amount) if amount is not None else 0,
+                "Amount": float(amount),
                 "StopLossRate": None,
                 "TakeProfitRate": None,
                 "IsTslEnabled": False,
@@ -294,8 +315,16 @@ class EtoroBrokerProvider(BrokerProvider):
             )
             response.raise_for_status()
             raw = response.json()
+        except httpx.HTTPStatusError as exc:
+            raw_body = _safe_json(exc.response)
+            logger.error(
+                "eToro portfolio lookup failed: status=%d body=%s",
+                exc.response.status_code,
+                raw_body,
+            )
+            return None
         except httpx.HTTPError as exc:
-            logger.error("eToro portfolio lookup failed: %s", exc)
+            logger.error("eToro portfolio lookup network error: %s", exc)
             return None
 
         # Response shape: { clientPortfolio: { positions: [...] } }

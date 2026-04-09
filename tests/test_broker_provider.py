@@ -161,13 +161,33 @@ class TestPlaceOrderByUnits:
             assert "Amount" not in body
 
 
-class TestPlaceOrderExitGuard:
+class TestPlaceOrderActionGuard:
     def test_exit_action_returns_failed(self) -> None:
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
             result = broker.place_order(1001, "EXIT", amount=Decimal("100"), units=None)
 
             assert result.status == "failed"
             assert "EXIT" in result.raw_payload["error"]
+
+    def test_unrecognised_action_returns_failed(self) -> None:
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            result = broker.place_order(1001, "SELL", amount=Decimal("100"), units=None)
+
+            assert result.status == "failed"
+            assert "SELL" in result.raw_payload["error"]
+
+    def test_hold_action_returns_failed(self) -> None:
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            result = broker.place_order(1001, "HOLD", amount=Decimal("100"), units=None)
+
+            assert result.status == "failed"
+
+    def test_no_amount_or_units_returns_failed(self) -> None:
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            result = broker.place_order(1001, "BUY", amount=None, units=None)
+
+            assert result.status == "failed"
+            assert "Neither" in result.raw_payload["error"]
 
 
 class TestPlaceOrderRealEnv:
@@ -243,7 +263,7 @@ class TestClosePosition:
             # No close POST should have been attempted
             broker._client.post.assert_not_called()
 
-    def test_portfolio_lookup_failure_returns_failed(self) -> None:
+    def test_portfolio_lookup_failure_returns_failed_with_error(self) -> None:
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
             broker._client = MagicMock()
             broker._client.get.side_effect = httpx.ConnectError("connection refused")
@@ -251,6 +271,7 @@ class TestClosePosition:
             result = broker.close_position(1001)
 
             assert result.status == "failed"
+            assert "No open position" in result.raw_payload["error"]
             broker._client.post.assert_not_called()
 
 
