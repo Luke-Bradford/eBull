@@ -8,10 +8,12 @@ TypeError), which proves the method signatures match the interface.
 
 import pytest
 
+from app.providers.broker import BrokerProvider
 from app.providers.filings import FilingsProvider
 from app.providers.fundamentals import FundamentalsProvider
 from app.providers.implementations.companies_house import CompaniesHouseFilingsProvider
 from app.providers.implementations.etoro import EtoroMarketDataProvider
+from app.providers.implementations.etoro_broker import EtoroBrokerProvider
 from app.providers.implementations.fmp import FmpFundamentalsProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.market_data import MarketDataProvider
@@ -21,6 +23,9 @@ from app.providers.news import NewsProvider
 class TestInterfaceHierarchy:
     def test_etoro_is_market_data_provider(self) -> None:
         assert issubclass(EtoroMarketDataProvider, MarketDataProvider)
+
+    def test_etoro_broker_is_broker_provider(self) -> None:
+        assert issubclass(EtoroBrokerProvider, BrokerProvider)
 
     def test_fmp_is_fundamentals_provider(self) -> None:
         assert issubclass(FmpFundamentalsProvider, FundamentalsProvider)
@@ -36,6 +41,12 @@ class TestEtoroProvider:
     def test_context_manager_closes_cleanly(self) -> None:
         # Confirms __enter__/__exit__ are present and don't raise on close.
         with EtoroMarketDataProvider(api_key="test-key", user_key="test-user-key", env="demo"):
+            pass
+
+
+class TestEtoroBrokerProvider:
+    def test_context_manager_closes_cleanly(self) -> None:
+        with EtoroBrokerProvider(api_key="test-key", user_key="test-user-key", env="demo"):
             pass
 
 
