@@ -19,6 +19,7 @@ Coverage:
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -425,6 +426,7 @@ class TestCatchUpOnBoot:
         self,
         patched_runtime: None,
         monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         monkeypatch.setattr("app.jobs.runtime.SCHEDULED_JOBS", [_DAILY_JOB])
         monkeypatch.setattr(
@@ -440,8 +442,10 @@ class TestCatchUpOnBoot:
             database_url="postgresql://stub/stub",
             invokers={"daily_job": lambda: None},  # type: ignore[dict-item]
         )
-        # Must not raise.
-        rt._catch_up()
+        # Must not raise; must log the failure.
+        with caplog.at_level(logging.ERROR, logger="app.jobs.runtime"):
+            rt._catch_up()
+        assert "failed to query job_runs" in caplog.text
 
     def test_mixed_overdue_and_current(
         self,
