@@ -333,7 +333,8 @@ class JobRuntime:
         for name in overdue:
             invoker = self._invokers[name]
             wrapped = self._wrap_invoker(name, invoker)
-            self._manual_executor.submit(wrapped)
+            fut = self._manual_executor.submit(wrapped)
+            fut.add_done_callback(self._log_future_exception)
 
     def shutdown(self) -> None:
         """Stop the scheduler and wait for in-flight jobs to drain.
@@ -417,7 +418,8 @@ class JobRuntime:
         if not inflight.acquire(blocking=False):
             raise JobAlreadyRunning(job_name)
         try:
-            self._manual_executor.submit(self._run_manual, job_name, invoker)
+            fut = self._manual_executor.submit(self._run_manual, job_name, invoker)
+            fut.add_done_callback(self._log_future_exception)
         except Exception:
             # Submission failed before the worker took ownership --
             # release the in-process lock so a retry can acquire.
@@ -425,6 +427,22 @@ class JobRuntime:
             raise
 
     # -- internals ---------------------------------------------------------
+
+    @staticmethod
+    def _log_future_exception(fut: object) -> None:
+        """Done-callback for fire-and-forget executor submissions.
+
+        ``_wrap_invoker`` and ``_run_manual`` already catch all
+        exceptions internally, so this callback should never fire in
+        normal operation. It exists as a defensive last-resort so that
+        an unexpected executor-level failure (e.g. interpreter
+        shutdown race) is logged rather than silently swallowed.
+        """
+        # concurrent.futures.Future, but typed as object to avoid
+        # importing the type for a one-liner callback.
+        exc = getattr(fut, "exception", lambda: None)()
+        if exc is not None:
+            logger.error("executor future raised unexpectedly: %s", exc, exc_info=exc)
 
     def _wrap_invoker(self, job_name: str, invoker: Callable[[], None]) -> Callable[[], None]:
         """Wrap a scheduled invoker with the per-job advisory lock.
