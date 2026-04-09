@@ -225,6 +225,9 @@ function computeRecView(args: ComputeRecViewArgs): RecommendationsView {
     return { kind: "error", onRetry };
   }
 
+  // useAsync contract: after loading=false, exactly one of data or error
+  // is non-null. This branch is unreachable at runtime but required for
+  // TypeScript narrowing — surface as a generic error if it ever fires.
   if (items === null) return { kind: "error", onRetry };
 
   if (items.length === 0) {
@@ -268,6 +271,9 @@ function computeAuditView(args: ComputeAuditViewArgs): AuditView {
     return { kind: "error", onRetry };
   }
 
+  // useAsync contract: after loading=false, exactly one of data or error
+  // is non-null. This branch is unreachable at runtime but required for
+  // TypeScript narrowing — surface as a generic error if it ever fires.
   if (items === null) return { kind: "error", onRetry };
 
   if (items.length === 0) {

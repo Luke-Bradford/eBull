@@ -358,7 +358,9 @@ describe("RecommendationsPage — section independence", () => {
     await waitFor(() => {
       expect(screen.getByText("Guard")).toBeInTheDocument();
     });
-    expect(screen.queryByText(/API is unreachable/)).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText(/API is unreachable/)).not.toBeInTheDocument();
+    });
   });
 });
 
