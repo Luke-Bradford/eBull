@@ -8,6 +8,8 @@
  *   - /system/jobs         -> app/api/system.py
  *   - /instruments         -> app/api/instruments.py
  *   - /portfolio           -> app/api/portfolio.py
+ *   - /recommendations     -> app/api/recommendations.py
+ *   - /audit              -> app/api/audit.py
  *   - /rankings            -> app/api/scores.py
  *
  * Rule: when a backend response_model changes, update this file in the same
@@ -236,6 +238,64 @@ export interface RecommendationListItem {
 
 export interface RecommendationsListResponse {
   items: RecommendationListItem[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface RecommendationDetail {
+  recommendation_id: number;
+  instrument_id: number;
+  symbol: string;
+  company_name: string;
+  action: string;
+  status: string;
+  rationale: string;
+  score_id: number | null;
+  model_version: string | null;
+  suggested_size_pct: number | null;
+  target_entry: number | null;
+  cash_balance_known: boolean | null;
+  total_score: number | null;
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// /audit (app/api/audit.py)
+// ---------------------------------------------------------------------------
+
+export type AuditPassFail = "PASS" | "FAIL";
+export type AuditStage = "execution_guard" | "order_client";
+
+export interface AuditListItem {
+  decision_id: number;
+  decision_time: string;
+  instrument_id: number | null;
+  symbol: string | null;
+  company_name: string | null;
+  recommendation_id: number | null;
+  stage: AuditStage;
+  model_version: string | null;
+  pass_fail: AuditPassFail;
+  explanation: string;
+}
+
+export interface AuditDetail {
+  decision_id: number;
+  decision_time: string;
+  instrument_id: number | null;
+  symbol: string | null;
+  company_name: string | null;
+  recommendation_id: number | null;
+  stage: AuditStage;
+  model_version: string | null;
+  pass_fail: AuditPassFail;
+  explanation: string;
+  evidence_json: Record<string, unknown> | Record<string, unknown>[] | null;
+}
+
+export interface AuditListResponse {
+  items: AuditListItem[];
   total: number;
   offset: number;
   limit: number;
