@@ -443,8 +443,8 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
-### Positional getAllBy*()[n] in tests selects wrong element on reorder
+### Positional or unscoped selectors in tests select wrong element on reorder
 - First seen in: #135
-- Symptom: `getAllByText("Clear filters")[0]` relied on DOM render order to select the recommendations filter bar's button. If the two filter bars swapped position, the test would silently exercise the wrong component.
-- Prevention: When a test needs a specific element among multiple matches, scope the query using `getByRole` with an accessible name or find the nearest landmark and query within it — never rely on positional array indexing.
+- Symptom: `getAllByText("Clear filters")[0]` and `container.querySelector("button")` both relied on DOM render order to select the target element. If the two filter bars swapped position, the test would silently exercise the wrong component.
+- Prevention: When a test needs a specific element among multiple matches, use `within(container).getByRole("button", { name: "…" })` to scope by both container and accessible name. Never rely on positional array indexing or unscoped `querySelector`.
 - Enforced in: this prevention log

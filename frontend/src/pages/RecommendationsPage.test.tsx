@@ -13,7 +13,7 @@
  * not the network layer.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
@@ -398,7 +398,7 @@ describe("RecommendationsPage — filters", () => {
 
     // Then clear — target the recommendations filter bar specifically
     const recFilterBar = screen.getByRole("group", { name: "Recommendations filters" });
-    const clearBtn = recFilterBar.querySelector("button")!;
+    const clearBtn = within(recFilterBar).getByRole("button", { name: "Clear filters" });
     await user.click(clearBtn);
 
     await waitFor(() => {
