@@ -49,13 +49,16 @@ import logging
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from typing import Final
 
+import psycopg
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.config import settings
 from app.jobs.locks import JobAlreadyRunning, JobLock
+from app.services.ops_monitor import fetch_latest_successful_runs
 from app.workers.scheduler import (
     JOB_DAILY_CIK_REFRESH,
     JOB_DAILY_NEWS_REFRESH,
@@ -68,6 +71,8 @@ from app.workers.scheduler import (
     JOB_WEEKLY_COVERAGE_REVIEW,
     SCHEDULED_JOBS,
     Cadence,
+    ScheduledJob,
+    compute_next_run,
     daily_cik_refresh,
     daily_news_refresh,
     daily_research_refresh,
@@ -260,6 +265,75 @@ class JobRuntime:
             registered,
             sorted(self._invokers.keys()),
         )
+        self._catch_up()
+
+    def _catch_up(self) -> None:
+        """Fire overdue jobs after startup (fire-and-forget).
+
+        For each registered job with ``catch_up_on_boot=True``:
+
+        * If the job has never run successfully, it is overdue.
+        * If the job's last successful run's next scheduled fire
+          (per ``compute_next_run``) is at or before ``now``, it is
+          overdue.
+
+        Overdue jobs are submitted to the manual executor through the
+        same ``_wrap_invoker`` path as scheduled fires, so advisory
+        locks serialise catch-up against concurrent scheduled or
+        manual runs. Failures are logged and do not prevent other
+        catch-up jobs from firing.
+
+        The DB query is a single round trip (one SELECT for all job
+        names). The connection is opened, used, and closed within this
+        method — it is not shared with any other thread.
+        """
+        # Build a lookup of registered jobs that opt in to catch-up.
+        catch_up_jobs: dict[str, ScheduledJob] = {}
+        for job in SCHEDULED_JOBS:
+            if job.name in self._invokers and job.catch_up_on_boot:
+                catch_up_jobs[job.name] = job
+        if not catch_up_jobs:
+            return
+
+        now = datetime.now(UTC)
+
+        try:
+            with psycopg.connect(self._database_url) as conn:
+                latest = fetch_latest_successful_runs(
+                    conn,
+                    list(catch_up_jobs.keys()),
+                )
+        except Exception:
+            logger.exception("catch-up: failed to query job_runs; skipping catch-up")
+            return
+
+        overdue: list[str] = []
+        for name, job in catch_up_jobs.items():
+            last_success = latest.get(name)
+            if last_success is None:
+                # Never run successfully — overdue.
+                overdue.append(name)
+                continue
+            # Ensure timezone-aware for compute_next_run.
+            if last_success.tzinfo is None:
+                last_success = last_success.replace(tzinfo=UTC)
+            next_fire = compute_next_run(job.cadence, last_success)
+            if next_fire <= now:
+                overdue.append(name)
+
+        if not overdue:
+            logger.info("catch-up: all jobs are current; nothing to fire")
+            return
+
+        logger.info(
+            "catch-up: firing %d overdue job(s): %s",
+            len(overdue),
+            sorted(overdue),
+        )
+        for name in overdue:
+            invoker = self._invokers[name]
+            wrapped = self._wrap_invoker(name, invoker)
+            self._manual_executor.submit(wrapped)
 
     def shutdown(self) -> None:
         """Stop the scheduler and wait for in-flight jobs to drain.

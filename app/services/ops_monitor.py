@@ -25,6 +25,7 @@ than that threshold, the layer is flagged as stale.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -369,6 +370,37 @@ def check_job_health(
         last_finished_at=row["finished_at"],
         detail=detail,
     )
+
+
+def fetch_latest_successful_runs(
+    conn: psycopg.Connection[Any],
+    job_names: Sequence[str],
+) -> dict[str, datetime]:
+    """Return the ``started_at`` of the most recent successful run per job.
+
+    Jobs with no successful run are omitted from the result dict.  The
+    caller can distinguish "never run" (absent key) from "ran and
+    succeeded" (present key with a timestamp).
+
+    Used by the catch-up-on-boot logic in :class:`JobRuntime` to decide
+    which jobs are overdue.
+    """
+    if not job_names:
+        return {}
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (job_name)
+                   job_name, started_at
+            FROM job_runs
+            WHERE job_name = ANY(%(names)s)
+              AND status = 'success'
+            ORDER BY job_name, started_at DESC
+            """,
+            {"names": list(job_names)},
+        )
+        rows = cur.fetchall()
+    return {row["job_name"]: row["started_at"] for row in rows}
 
 
 # ---------------------------------------------------------------------------

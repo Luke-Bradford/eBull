@@ -21,11 +21,14 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 
 import pytest
 
 from app.jobs.locks import JobAlreadyRunning
 from app.jobs.runtime import JobRuntime, UnknownJob
+from app.workers.scheduler import Cadence, ScheduledJob
 
 
 class _FakeLock:
@@ -221,6 +224,7 @@ class TestStartWiring:
 
         monkeypatch.setattr(rt._scheduler, "add_job", fake_add_job)
         monkeypatch.setattr(rt._scheduler, "start", lambda: None)
+        monkeypatch.setattr(rt, "_catch_up", lambda: None)
 
         rt.start()
 
@@ -254,3 +258,223 @@ class TestProductionInvokerRegistry:
             f"  in registry but not wired: {sorted(registry_names - invoker_names)}\n"
             f"  wired but not in registry: {sorted(invoker_names - registry_names)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Catch-up on boot
+# ---------------------------------------------------------------------------
+
+# Frozen "now" used across all catch-up tests so cadence arithmetic is
+# deterministic.  Chosen to be after the daily 02:00 fire so a daily
+# job with hour=2 whose last success is >24 h ago is overdue.
+_NOW = datetime(2026, 4, 10, 3, 0, 0, tzinfo=UTC)
+
+_DAILY_JOB = ScheduledJob(
+    name="daily_job",
+    description="test daily",
+    cadence=Cadence.daily(hour=2, minute=0),
+    catch_up_on_boot=True,
+)
+
+_NO_CATCHUP_JOB = ScheduledJob(
+    name="no_catchup_job",
+    description="test no catchup",
+    cadence=Cadence.daily(hour=2, minute=0),
+    catch_up_on_boot=False,
+)
+
+
+def _make_catchup_runtime(
+    jobs: list[ScheduledJob],
+    invokers: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    latest_runs: dict[str, datetime] | None = None,
+) -> tuple[JobRuntime, list[str]]:
+    """Build a runtime wired for catch-up testing.
+
+    Returns ``(runtime, fired)`` where ``fired`` accumulates the names
+    of jobs submitted to the executor by ``_catch_up``.
+    """
+    # Replace SCHEDULED_JOBS with only the test jobs so the registry
+    # lookup inside _catch_up finds them.
+    monkeypatch.setattr("app.jobs.runtime.SCHEDULED_JOBS", jobs)
+
+    # Stub the DB query.
+    monkeypatch.setattr(
+        "app.jobs.runtime.fetch_latest_successful_runs",
+        lambda _conn, _names: latest_runs or {},
+    )
+
+    # Stub psycopg.connect so _catch_up gets a no-op connection.
+    mock_conn = MagicMock()
+    mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+    mock_conn.__exit__ = MagicMock(return_value=False)
+    monkeypatch.setattr("app.jobs.runtime.psycopg.connect", lambda _url: mock_conn)
+
+    # Pin the clock.
+    monkeypatch.setattr(
+        "app.jobs.runtime.datetime",
+        type("_FakeDT", (), {"now": staticmethod(lambda tz: _NOW)}),
+    )
+
+    rt = JobRuntime(
+        database_url="postgresql://stub/stub",
+        invokers=invokers,  # type: ignore[arg-type]
+    )
+
+    # The caller tracks invocations via side-effects in the invoker
+    # closures; the second return value is kept for signature compat.
+    return rt, []
+
+
+class TestCatchUpOnBoot:
+    """Tests for ``JobRuntime._catch_up()``.
+
+    Each test calls ``_catch_up()`` directly (not via ``start()``) so
+    the scheduler registration path is not exercised — that is already
+    covered by ``TestStartWiring``.
+    """
+
+    def test_never_run_job_is_fired(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fired: list[str] = []
+
+        def invoker() -> None:
+            fired.append("daily_job")
+
+        rt, _ = _make_catchup_runtime(
+            [_DAILY_JOB],
+            {"daily_job": invoker},
+            monkeypatch,
+            latest_runs={},  # no successful runs
+        )
+        rt._catch_up()
+        rt._manual_executor.shutdown(wait=True)
+        assert fired == ["daily_job"]
+
+    def test_overdue_job_is_fired(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fired: list[str] = []
+
+        def invoker() -> None:
+            fired.append("daily_job")
+
+        # Last success was 2 days ago — next fire would have been
+        # yesterday at 02:00, which is before _NOW.
+        two_days_ago = _NOW - timedelta(days=2)
+        rt, _ = _make_catchup_runtime(
+            [_DAILY_JOB],
+            {"daily_job": invoker},
+            monkeypatch,
+            latest_runs={"daily_job": two_days_ago},
+        )
+        rt._catch_up()
+        rt._manual_executor.shutdown(wait=True)
+        assert fired == ["daily_job"]
+
+    def test_current_job_is_not_fired(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fired: list[str] = []
+
+        def invoker() -> None:
+            fired.append("daily_job")
+
+        # Last success was 30 minutes ago — next fire is tomorrow at
+        # 02:00, which is after _NOW.
+        recent = _NOW - timedelta(minutes=30)
+        rt, _ = _make_catchup_runtime(
+            [_DAILY_JOB],
+            {"daily_job": invoker},
+            monkeypatch,
+            latest_runs={"daily_job": recent},
+        )
+        rt._catch_up()
+        rt._manual_executor.shutdown(wait=True)
+        assert fired == []
+
+    def test_catch_up_on_boot_false_skips_never_run(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fired: list[str] = []
+
+        def invoker() -> None:
+            fired.append("no_catchup_job")
+
+        rt, _ = _make_catchup_runtime(
+            [_NO_CATCHUP_JOB],
+            {"no_catchup_job": invoker},
+            monkeypatch,
+            latest_runs={},
+        )
+        rt._catch_up()
+        rt._manual_executor.shutdown(wait=True)
+        assert fired == []
+
+    def test_db_failure_logs_and_does_not_crash(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("app.jobs.runtime.SCHEDULED_JOBS", [_DAILY_JOB])
+        monkeypatch.setattr(
+            "app.jobs.runtime.psycopg.connect",
+            MagicMock(side_effect=RuntimeError("connection refused")),
+        )
+        monkeypatch.setattr(
+            "app.jobs.runtime.datetime",
+            type("_FakeDT", (), {"now": staticmethod(lambda tz: _NOW)}),
+        )
+
+        rt = JobRuntime(
+            database_url="postgresql://stub/stub",
+            invokers={"daily_job": lambda: None},  # type: ignore[dict-item]
+        )
+        # Must not raise.
+        rt._catch_up()
+
+    def test_mixed_overdue_and_current(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only the overdue job fires; the current one is skipped."""
+        fired: list[str] = []
+
+        hourly_job = ScheduledJob(
+            name="hourly_job",
+            description="test hourly",
+            cadence=Cadence.hourly(minute=5),
+            catch_up_on_boot=True,
+        )
+
+        def daily_invoker() -> None:
+            fired.append("daily_job")
+
+        def hourly_invoker() -> None:
+            fired.append("hourly_job")
+
+        # daily_job: last success 2 days ago → overdue
+        # hourly_job: last success 30 min ago → current
+        rt, _ = _make_catchup_runtime(
+            [_DAILY_JOB, hourly_job],
+            {"daily_job": daily_invoker, "hourly_job": hourly_invoker},
+            monkeypatch,
+            latest_runs={
+                "daily_job": _NOW - timedelta(days=2),
+                "hourly_job": _NOW - timedelta(minutes=30),
+            },
+        )
+        rt._catch_up()
+        rt._manual_executor.shutdown(wait=True)
+        assert fired == ["daily_job"]
