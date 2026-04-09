@@ -309,43 +309,6 @@ class _JobTracker:
         self.row_count: int | None = None
 
 
-def _load_etoro_api_key(job_name: str) -> str | None:
-    """Load the eToro API key from the encrypted credential store.
-
-    Returns the plaintext key on success, or ``None`` if the credential
-    cannot be resolved (no operator, ambiguous operator, no stored
-    credential).  Failures are logged at ERROR — the caller should skip
-    the job when ``None`` is returned.
-
-    The function opens its own connection and commits the audit row
-    before returning, so the caller can safely proceed to the external
-    broker call without an uncommitted audit row dangling.
-
-    .. deprecated::
-        Use ``_load_etoro_credentials`` once the provider constructors
-        accept both api_key and user_key (PR B).
-    """
-    try:
-        with psycopg.connect(settings.database_url) as conn:
-            op_id = sole_operator_id(conn)
-            api_key = load_credential_for_provider_use(
-                conn,
-                operator_id=op_id,
-                provider="etoro",
-                label="api_key",
-                environment=settings.etoro_env,
-                caller=job_name,
-            )
-            conn.commit()  # audit row durable before external call
-    except (NoOperatorError, AmbiguousOperatorError) as exc:
-        logger.error("%s: %s, skipping", job_name, exc)
-        return None
-    except CredentialNotFound:
-        logger.error("%s: no eToro credential stored, skipping", job_name)
-        return None
-    return api_key
-
-
 def _load_etoro_credentials(job_name: str) -> tuple[str, str] | None:
     """Load (api_key, user_key) for ``settings.etoro_env``.
 
@@ -355,9 +318,6 @@ def _load_etoro_credentials(job_name: str) -> tuple[str, str] | None:
     Each credential load is committed individually so audit rows are
     durable even if the second load fails (e.g. user_key not found
     must not silently roll back the api_key audit row).
-
-    Added in #139 but not wired to jobs until PR B rewrites the provider
-    constructors to accept both keys.
     """
     try:
         with psycopg.connect(settings.database_url) as conn:
@@ -395,13 +355,14 @@ def nightly_universe_sync() -> None:
 
     Runs nightly. Idempotent — safe to re-run.
     """
-    api_key = _load_etoro_api_key("nightly_universe_sync")
-    if api_key is None:
+    creds = _load_etoro_credentials("nightly_universe_sync")
+    if creds is None:
         return
+    api_key, user_key = creds
 
     with _tracked_job(JOB_NIGHTLY_UNIVERSE_SYNC) as tracker:
         with (
-            EtoroMarketDataProvider(api_key=api_key, env=settings.etoro_env) as provider,
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
             psycopg.connect(settings.database_url) as conn,
         ):
             summary = sync_universe(provider, conn)
@@ -419,24 +380,22 @@ def hourly_market_refresh() -> None:
     """
     Refresh quotes and candles for all active Tier 1/2 instruments.
 
-    Fetches candles from the last 400 days (enough for 1y return + buffer)
+    Fetches up to 400 daily candles (enough for 1y return + buffer)
     and the current quote for each covered instrument.
     """
-    api_key = _load_etoro_api_key("hourly_market_refresh")
-    if api_key is None:
+    creds = _load_etoro_credentials("hourly_market_refresh")
+    if creds is None:
         return
-
-    to_date = date.today()
-    from_date = to_date - timedelta(days=400)
+    api_key, user_key = creds
 
     with _tracked_job(JOB_HOURLY_MARKET_REFRESH) as tracker:
         with (
-            EtoroMarketDataProvider(api_key=api_key, env=settings.etoro_env) as provider,
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
             psycopg.connect(settings.database_url) as conn,
         ):
             rows = conn.execute(
                 """
-                SELECT i.symbol, i.instrument_id::text
+                SELECT i.instrument_id, i.symbol
                 FROM instruments i
                 JOIN coverage c ON c.instrument_id = i.instrument_id
                 WHERE i.is_tradable = TRUE
@@ -450,16 +409,17 @@ def hourly_market_refresh() -> None:
                 tracker.row_count = 0
                 return
 
-            symbols = [(row[0], row[1]) for row in rows]
-            summary = refresh_market_data(provider, conn, symbols, from_date, to_date)
+            instruments = [(row[0], row[1]) for row in rows]
+            summary = refresh_market_data(provider, conn, instruments)
         tracker.row_count = summary.candle_rows_upserted + summary.quotes_updated
 
     logger.info(
-        "Market refresh complete: symbols=%d candles=%d features=%d quotes=%d spread_flags=%d",
-        summary.symbols_refreshed,
+        "Market refresh complete: instruments=%d candles=%d features=%d quotes=%d quotes_skipped=%d spread_flags=%d",
+        summary.instruments_refreshed,
         summary.candle_rows_upserted,
         summary.features_computed,
         summary.quotes_updated,
+        summary.quotes_skipped,
         summary.spread_flags_set,
     )
 

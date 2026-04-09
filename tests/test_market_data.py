@@ -4,15 +4,19 @@ Unit tests for market data normalisation, feature computation, and spread checks
 No network calls, no database — all tests use in-memory fixtures.
 """
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.providers.implementations.etoro import (
     _normalise_candle,
     _normalise_candles,
-    _normalise_quote,
+    _normalise_instrument,
+    _normalise_instruments,
+    _normalise_rate,
+    _normalise_rates,
 )
 from app.providers.market_data import OHLCVBar, Quote
 from app.services.market_data import (
@@ -23,59 +27,133 @@ from app.services.market_data import (
 )
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures — real eToro API response shapes
 # ---------------------------------------------------------------------------
 
-FIXTURE_CANDLE_CAMEL = {
-    "Date": "2024-06-15T00:00:00",
-    "Open": "185.00",
-    "High": "187.50",
-    "Low": "184.20",
-    "Close": "186.80",
-    "Volume": "55000000",
+FIXTURE_INSTRUMENT = {
+    "instrumentID": 1001,
+    "symbolFull": "AAPL",
+    "instrumentDisplayName": "Apple",
+    "exchangeID": 10,
+    "stocksIndustryId": 42,
+    "priceSource": "Nasdaq",
+    "isInternalInstrument": False,
 }
 
-FIXTURE_CANDLE_SNAKE = {
-    "date": "2024-06-16",
-    "open": "186.80",
-    "high": "189.00",
-    "low": "185.50",
-    "close": "188.20",
-    "volume": "48000000",
+FIXTURE_INSTRUMENT_INTERNAL = {
+    **FIXTURE_INSTRUMENT,
+    "instrumentID": 9999,
+    "isInternalInstrument": True,
 }
 
+FIXTURE_CANDLE = {
+    "fromDate": "2024-06-15T00:00:00",
+    "open": 185.00,
+    "high": 187.50,
+    "low": 184.20,
+    "close": 186.80,
+    "volume": 55000000,
+}
+
+FIXTURE_CANDLE_2 = {
+    "fromDate": "2024-06-16T00:00:00",
+    "open": 186.80,
+    "high": 189.00,
+    "low": 185.50,
+    "close": 188.20,
+    "volume": 48000000,
+}
+
+FIXTURE_CANDLE_3 = {
+    "fromDate": "2024-06-14T00:00:00",
+    "open": 183.00,
+    "high": 185.10,
+    "low": 182.50,
+    "close": 185.00,
+    "volume": 60000000,
+}
+
+# Real API candle response: nested { candles: [{ instrumentId, candles: [...] }] }
 FIXTURE_CANDLES_RESPONSE = {
-    "Candles": [
-        FIXTURE_CANDLE_CAMEL,
-        FIXTURE_CANDLE_SNAKE,
+    "candles": [
         {
-            "Date": "2024-06-14T00:00:00",
-            "Open": "183.00",
-            "High": "185.10",
-            "Low": "182.50",
-            "Close": "185.00",
-            "Volume": "60000000",
-        },
-    ]
-}
-
-FIXTURE_QUOTE_CAMEL = {
-    "Bid": "186.50",
-    "Ask": "186.70",
-    "Last": "186.60",
-    "Time": "2024-06-17T14:30:00Z",
-}
-
-FIXTURE_QUOTE_WRAPPED = {
-    "quotes": [
-        {
-            "bid": "186.50",
-            "ask": "186.70",
-            "last": "186.60",
-            "timestamp": "2024-06-17T14:30:00Z",
+            "instrumentId": 1001,
+            "candles": [FIXTURE_CANDLE_3, FIXTURE_CANDLE, FIXTURE_CANDLE_2],
         }
     ]
 }
+
+FIXTURE_RATE = {
+    "instrumentID": 1001,
+    "bid": 186.50,
+    "ask": 186.70,
+    "lastExecution": 186.60,
+    "date": "2024-06-17T14:30:00Z",
+}
+
+FIXTURE_RATE_2 = {
+    "instrumentID": 1002,
+    "bid": 50.10,
+    "ask": 50.30,
+    "lastExecution": 50.20,
+    "date": "2024-06-17T14:30:00Z",
+}
+
+FIXTURE_RATES_RESPONSE = {"rates": [FIXTURE_RATE, FIXTURE_RATE_2]}
+
+
+# ---------------------------------------------------------------------------
+# Instrument normalisation
+# ---------------------------------------------------------------------------
+
+
+class TestNormaliseInstrument:
+    def test_valid_instrument(self) -> None:
+        rec = _normalise_instrument(FIXTURE_INSTRUMENT)
+        assert rec is not None
+        assert rec.provider_id == "1001"
+        assert rec.symbol == "AAPL"
+        assert rec.company_name == "Apple"
+        assert rec.exchange == "10"
+        assert rec.sector == "42"
+        assert rec.is_tradable is True
+
+    def test_currency_is_placeholder(self) -> None:
+        """currency defaults to 'USD' as a placeholder — not from the API."""
+        rec = _normalise_instrument(FIXTURE_INSTRUMENT)
+        assert rec is not None
+        assert rec.currency == "USD"
+
+    def test_internal_instrument_skipped(self) -> None:
+        assert _normalise_instrument(FIXTURE_INSTRUMENT_INTERNAL) is None
+
+    def test_missing_id_returns_none(self) -> None:
+        item = {k: v for k, v in FIXTURE_INSTRUMENT.items() if k != "instrumentID"}
+        assert _normalise_instrument(item) is None
+
+    def test_missing_symbol_returns_none(self) -> None:
+        item = {k: v for k, v in FIXTURE_INSTRUMENT.items() if k != "symbolFull"}
+        assert _normalise_instrument(item) is None
+
+
+class TestNormaliseInstruments:
+    def test_filters_internals(self) -> None:
+        raw = {"instrumentDisplayDatas": [FIXTURE_INSTRUMENT, FIXTURE_INSTRUMENT_INTERNAL]}
+        records = _normalise_instruments(raw)
+        assert len(records) == 1
+        assert records[0].symbol == "AAPL"
+
+    def test_empty_list(self) -> None:
+        assert _normalise_instruments({"instrumentDisplayDatas": []}) == []
+
+    def test_non_dict_response_raises(self) -> None:
+        with pytest.raises(ValueError, match="Expected dict"):
+            _normalise_instruments(["not", "a", "dict"])
+
+    def test_bad_items_skipped(self) -> None:
+        raw = {"instrumentDisplayDatas": [FIXTURE_INSTRUMENT, "not a dict", {}]}
+        records = _normalise_instruments(raw)
+        assert len(records) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -84,124 +162,206 @@ FIXTURE_QUOTE_WRAPPED = {
 
 
 class TestNormaliseCandle:
-    def test_camel_case_fields(self) -> None:
-        bar = _normalise_candle("AAPL", FIXTURE_CANDLE_CAMEL)
+    def test_valid_candle(self) -> None:
+        bar = _normalise_candle(FIXTURE_CANDLE)
         assert bar is not None
-        assert bar.symbol == "AAPL"
         assert bar.price_date == date(2024, 6, 15)
-        assert bar.open == Decimal("185.00")
-        assert bar.high == Decimal("187.50")
-        assert bar.low == Decimal("184.20")
-        assert bar.close == Decimal("186.80")
+        assert bar.open == Decimal("185.0")
+        assert bar.high == Decimal("187.5")
+        assert bar.low == Decimal("184.2")
+        assert bar.close == Decimal("186.8")
         assert bar.volume == 55000000
 
-    def test_snake_case_fields(self) -> None:
-        bar = _normalise_candle("AAPL", FIXTURE_CANDLE_SNAKE)
-        assert bar is not None
-        assert bar.price_date == date(2024, 6, 16)
-        assert bar.close == Decimal("188.20")
-
     def test_missing_close_returns_none(self) -> None:
-        item = {**FIXTURE_CANDLE_CAMEL}
-        del item["Close"]
-        assert _normalise_candle("AAPL", item) is None
+        item = {k: v for k, v in FIXTURE_CANDLE.items() if k != "close"}
+        assert _normalise_candle(item) is None
 
     def test_missing_date_returns_none(self) -> None:
-        item = {**FIXTURE_CANDLE_CAMEL}
-        del item["Date"]
-        assert _normalise_candle("AAPL", item) is None
+        item = {k: v for k, v in FIXTURE_CANDLE.items() if k != "fromDate"}
+        assert _normalise_candle(item) is None
 
     def test_zero_volume_becomes_none(self) -> None:
-        item = {**FIXTURE_CANDLE_CAMEL, "Volume": "0"}
-        bar = _normalise_candle("AAPL", item)
+        item = {**FIXTURE_CANDLE, "volume": 0}
+        bar = _normalise_candle(item)
         assert bar is not None
         assert bar.volume is None
 
     def test_absent_volume_becomes_none(self) -> None:
-        item = {k: v for k, v in FIXTURE_CANDLE_CAMEL.items() if k != "Volume"}
-        bar = _normalise_candle("AAPL", item)
+        item = {k: v for k, v in FIXTURE_CANDLE.items() if k != "volume"}
+        bar = _normalise_candle(item)
         assert bar is not None
         assert bar.volume is None
 
+    def test_empty_string_date_returns_none(self) -> None:
+        item = {**FIXTURE_CANDLE, "fromDate": ""}
+        assert _normalise_candle(item) is None
+
     def test_returns_ohlcv_bar(self) -> None:
-        bar = _normalise_candle("AAPL", FIXTURE_CANDLE_CAMEL)
+        bar = _normalise_candle(FIXTURE_CANDLE)
         assert isinstance(bar, OHLCVBar)
 
 
 class TestNormaliseCandles:
-    def test_sorted_oldest_first(self) -> None:
-        bars = _normalise_candles("AAPL", FIXTURE_CANDLES_RESPONSE)
+    def test_nested_response_shape(self) -> None:
+        """Real API: { candles: [{ instrumentId, candles: [...] }] }"""
+        bars = _normalise_candles(FIXTURE_CANDLES_RESPONSE)
         assert len(bars) == 3
-        assert bars[0].price_date < bars[1].price_date < bars[2].price_date
 
-    def test_snake_case_response_shape(self) -> None:
-        raw = {"candles": [FIXTURE_CANDLE_SNAKE]}
-        bars = _normalise_candles("AAPL", raw)
-        assert len(bars) == 1
-        assert bars[0].price_date == date(2024, 6, 16)
+    def test_preserves_order_from_api(self) -> None:
+        """asc direction means API returns oldest-first; normaliser preserves order."""
+        # Fixture has candles in order: 2024-06-14, 2024-06-15, 2024-06-16
+        bars = _normalise_candles(FIXTURE_CANDLES_RESPONSE)
+        assert bars[0].price_date == date(2024, 6, 14)
+        assert bars[1].price_date == date(2024, 6, 15)
+        assert bars[2].price_date == date(2024, 6, 16)
 
     def test_empty_list(self) -> None:
-        assert _normalise_candles("AAPL", {"Candles": []}) == []
+        assert _normalise_candles({"candles": []}) == []
 
     def test_non_dict_response_raises(self) -> None:
         with pytest.raises(ValueError, match="Expected dict"):
-            _normalise_candles("AAPL", ["not", "a", "dict"])
+            _normalise_candles(["not", "a", "dict"])
 
     def test_bad_items_skipped(self) -> None:
         raw = {
-            "Candles": [
-                FIXTURE_CANDLE_CAMEL,
-                {"Date": "2024-06-16"},  # missing OHLC → skipped
-                "not a dict",  # not a dict → skipped
+            "candles": [
+                {
+                    "instrumentId": 1001,
+                    "candles": [
+                        FIXTURE_CANDLE,
+                        {"fromDate": "2024-06-16"},  # missing OHLC → skipped
+                        "not a dict",  # not a dict → skipped
+                    ],
+                }
             ]
         }
-        bars = _normalise_candles("AAPL", raw)
+        bars = _normalise_candles(raw)
         assert len(bars) == 1
 
 
 # ---------------------------------------------------------------------------
-# Quote normalisation
+# Rate / quote normalisation
 # ---------------------------------------------------------------------------
 
 
-class TestNormaliseQuote:
-    def test_camel_case_top_level(self) -> None:
-        quote = _normalise_quote("AAPL", FIXTURE_QUOTE_CAMEL)
+class TestNormaliseRate:
+    def test_valid_rate(self) -> None:
+        quote = _normalise_rate(FIXTURE_RATE)
         assert quote is not None
-        assert quote.symbol == "AAPL"
-        assert quote.bid == Decimal("186.50")
-        assert quote.ask == Decimal("186.70")
-        assert quote.last == Decimal("186.60")
+        assert quote.instrument_id == 1001
+        assert quote.bid == Decimal("186.5")
+        assert quote.ask == Decimal("186.7")
+        assert quote.last == Decimal("186.6")
 
-    def test_wrapped_quotes_list(self) -> None:
-        quote = _normalise_quote("AAPL", FIXTURE_QUOTE_WRAPPED)
-        assert quote is not None
-        assert quote.bid == Decimal("186.50")
+    def test_missing_instrument_id_returns_none(self) -> None:
+        item = {k: v for k, v in FIXTURE_RATE.items() if k != "instrumentID"}
+        assert _normalise_rate(item) is None
 
     def test_missing_bid_returns_none(self) -> None:
-        item = {k: v for k, v in FIXTURE_QUOTE_CAMEL.items() if k != "Bid"}
-        assert _normalise_quote("AAPL", item) is None
+        item = {k: v for k, v in FIXTURE_RATE.items() if k != "bid"}
+        assert _normalise_rate(item) is None
 
     def test_missing_ask_returns_none(self) -> None:
-        item = {k: v for k, v in FIXTURE_QUOTE_CAMEL.items() if k != "Ask"}
-        assert _normalise_quote("AAPL", item) is None
+        item = {k: v for k, v in FIXTURE_RATE.items() if k != "ask"}
+        assert _normalise_rate(item) is None
 
     def test_zero_bid_returns_none(self) -> None:
-        # Zero bid is dropped (not a tradeable quote) with a warning rather than
-        # silently passing through to spread computation. Pins this as intentional policy.
-        item = {**FIXTURE_QUOTE_CAMEL, "Bid": "0"}
-        assert _normalise_quote("AAPL", item) is None
+        item = {**FIXTURE_RATE, "bid": 0}
+        assert _normalise_rate(item) is None
 
     def test_zero_ask_returns_none(self) -> None:
-        item = {**FIXTURE_QUOTE_CAMEL, "Ask": "0"}
-        assert _normalise_quote("AAPL", item) is None
-
-    def test_non_dict_returns_none(self) -> None:
-        assert _normalise_quote("AAPL", ["not", "a", "dict"]) is None
+        item = {**FIXTURE_RATE, "ask": 0}
+        assert _normalise_rate(item) is None
 
     def test_returns_quote(self) -> None:
-        quote = _normalise_quote("AAPL", FIXTURE_QUOTE_CAMEL)
+        quote = _normalise_rate(FIXTURE_RATE)
         assert isinstance(quote, Quote)
+
+    def test_none_last_execution(self) -> None:
+        item = {k: v for k, v in FIXTURE_RATE.items() if k != "lastExecution"}
+        quote = _normalise_rate(item)
+        assert quote is not None
+        assert quote.last is None
+
+    def test_timestamp_parsed(self) -> None:
+        quote = _normalise_rate(FIXTURE_RATE)
+        assert quote is not None
+        assert quote.timestamp == datetime(2024, 6, 17, 14, 30, tzinfo=UTC)
+
+
+class TestNormaliseRates:
+    def test_batch_response(self) -> None:
+        quotes = _normalise_rates(FIXTURE_RATES_RESPONSE)
+        assert len(quotes) == 2
+        ids = {q.instrument_id for q in quotes}
+        assert ids == {1001, 1002}
+
+    def test_empty_rates(self) -> None:
+        assert _normalise_rates({"rates": []}) == []
+
+    def test_non_dict_response_raises(self) -> None:
+        with pytest.raises(ValueError, match="Expected dict"):
+            _normalise_rates(["not", "a", "dict"])
+
+
+# ---------------------------------------------------------------------------
+# Provider get_quotes chunking
+# ---------------------------------------------------------------------------
+
+
+class TestGetQuotesChunking:
+    """Test that get_quotes chunks IDs at 100 and builds correct params."""
+
+    @patch("app.providers.implementations.etoro._persist_raw")
+    def test_empty_list_no_http_call(self, _mock_persist: MagicMock) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._client = MagicMock()
+            result = provider.get_quotes([])
+            assert result == []
+            provider._client.get.assert_not_called()
+
+    @patch("app.providers.implementations.etoro._persist_raw")
+    def test_single_batch_params(self, _mock_persist: MagicMock) -> None:
+        """instrumentIds param is comma-separated ints."""
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"rates": [FIXTURE_RATE]}
+
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._client = MagicMock()
+            provider._client.get.return_value = mock_resp
+
+            provider.get_quotes([1001, 1002, 1003])
+
+            provider._client.get.assert_called_once()
+            call_kwargs = provider._client.get.call_args
+            assert call_kwargs.kwargs["params"]["instrumentIds"] == "1001,1002,1003"
+
+    @patch("app.providers.implementations.etoro._persist_raw")
+    def test_chunking_at_101_ids(self, _mock_persist: MagicMock) -> None:
+        """101 IDs should produce exactly 2 HTTP requests (100 + 1)."""
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"rates": []}
+
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._client = MagicMock()
+            provider._client.get.return_value = mock_resp
+
+            ids = list(range(1, 102))  # 101 IDs
+            provider.get_quotes(ids)
+
+            assert provider._client.get.call_count == 2
+            # First call: 100 IDs
+            first_params = provider._client.get.call_args_list[0].kwargs["params"]["instrumentIds"]
+            assert len(first_params.split(",")) == 100
+            # Second call: 1 ID
+            second_params = provider._client.get.call_args_list[1].kwargs["params"]["instrumentIds"]
+            assert len(second_params.split(",")) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 Unit tests for the eToro instrument normaliser and universe sync logic.
 
 No network calls, no database — all tests use in-memory fixtures.
+Fixtures match the real eToro API response shape (instrumentDisplayDatas).
 """
 
 import pytest
@@ -10,52 +11,37 @@ from app.providers.implementations.etoro import _normalise_instrument, _normalis
 from app.providers.market_data import InstrumentRecord
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures — real eToro API field names
 # ---------------------------------------------------------------------------
 
-FIXTURE_INSTRUMENT_DISPLAY_DATA = {
-    "InstrumentID": 1001,
-    "SymbolFull": "AAPL",
-    "InstrumentDisplayName": "Apple Inc.",
-    "ExchangeID": "NASDAQ",
-    "PriceSource": "USD",
-    "Sector": "Technology",
-    "Industry": "Consumer Electronics",
-    "Country": "US",
-    "IsActive": True,
+FIXTURE_INSTRUMENT = {
+    "instrumentID": 1001,
+    "symbolFull": "AAPL",
+    "instrumentDisplayName": "Apple Inc.",
+    "exchangeID": 10,
+    "stocksIndustryId": 42,
+    "priceSource": "Nasdaq",
+    "isInternalInstrument": False,
 }
 
-FIXTURE_INSTRUMENT_SNAKE = {
-    "instrumentId": "2002",
-    "symbol": "BP.L",
-    "name": "BP plc",
-    "exchange": "LSE",
-    "currency": "GBP",
-    "sector": "Energy",
-    "industry": "Oil & Gas",
-    "country": "UK",
+FIXTURE_INSTRUMENT_INTERNAL = {
+    **FIXTURE_INSTRUMENT,
+    "instrumentID": 9999,
+    "isInternalInstrument": True,
 }
 
-FIXTURE_API_RESPONSE_DISPLAY_DATA = {
-    "InstrumentDisplayDatas": [
-        FIXTURE_INSTRUMENT_DISPLAY_DATA,
+FIXTURE_API_RESPONSE = {
+    "instrumentDisplayDatas": [
+        FIXTURE_INSTRUMENT,
         {
-            "InstrumentID": 1002,
-            "SymbolFull": "MSFT",
-            "InstrumentDisplayName": "Microsoft Corporation",
-            "ExchangeID": "NASDAQ",
-            "PriceSource": "USD",
-            "Sector": "Technology",
-            "Industry": "Software",
-            "Country": "US",
-            "IsActive": True,
+            "instrumentID": 1002,
+            "symbolFull": "MSFT",
+            "instrumentDisplayName": "Microsoft Corporation",
+            "exchangeID": 10,
+            "stocksIndustryId": 42,
+            "priceSource": "Nasdaq",
+            "isInternalInstrument": False,
         },
-    ]
-}
-
-FIXTURE_API_RESPONSE_SNAKE = {
-    "instruments": [
-        FIXTURE_INSTRUMENT_SNAKE,
     ]
 }
 
@@ -66,41 +52,37 @@ FIXTURE_API_RESPONSE_SNAKE = {
 
 
 class TestNormaliseInstrument:
-    def test_camel_case_fields(self) -> None:
-        record = _normalise_instrument(FIXTURE_INSTRUMENT_DISPLAY_DATA)
+    def test_real_api_fields(self) -> None:
+        record = _normalise_instrument(FIXTURE_INSTRUMENT)
         assert record is not None
         assert record.provider_id == "1001"
         assert record.symbol == "AAPL"
         assert record.company_name == "Apple Inc."
-        assert record.exchange == "NASDAQ"
-        assert record.currency == "USD"
-        assert record.sector == "Technology"
-        assert record.industry == "Consumer Electronics"
-        assert record.country == "US"
+        assert record.exchange == "10"
+        assert record.sector == "42"
         assert record.is_tradable is True
 
-    def test_snake_case_fields(self) -> None:
-        record = _normalise_instrument(FIXTURE_INSTRUMENT_SNAKE)
+    def test_currency_is_placeholder_not_from_api(self) -> None:
+        """currency defaults to 'USD' as a placeholder — the instruments
+        endpoint does not expose a currency field. priceSource is an
+        exchange name, not a currency."""
+        record = _normalise_instrument(FIXTURE_INSTRUMENT)
         assert record is not None
-        assert record.provider_id == "2002"
-        assert record.symbol == "BP.L"
-        assert record.company_name == "BP plc"
-        assert record.currency == "GBP"
+        assert record.currency == "USD"
 
     def test_missing_instrument_id_returns_none(self) -> None:
-        item = {**FIXTURE_INSTRUMENT_DISPLAY_DATA}
-        del item["InstrumentID"]
+        item = {k: v for k, v in FIXTURE_INSTRUMENT.items() if k != "instrumentID"}
         assert _normalise_instrument(item) is None
 
     def test_missing_symbol_returns_none(self) -> None:
-        item = {**FIXTURE_INSTRUMENT_DISPLAY_DATA}
-        del item["SymbolFull"]
+        item = {k: v for k, v in FIXTURE_INSTRUMENT.items() if k != "symbolFull"}
         assert _normalise_instrument(item) is None
 
     def test_optional_fields_can_be_none(self) -> None:
         item = {
-            "InstrumentID": 9999,
-            "SymbolFull": "XYZ",
+            "instrumentID": 9999,
+            "symbolFull": "XYZ",
+            "isInternalInstrument": False,
         }
         record = _normalise_instrument(item)
         assert record is not None
@@ -109,34 +91,18 @@ class TestNormaliseInstrument:
         assert record.industry is None
         assert record.country is None
 
-    def test_empty_string_optional_fields_become_none(self) -> None:
-        item = {**FIXTURE_INSTRUMENT_DISPLAY_DATA, "ExchangeID": "", "Sector": ""}
-        record = _normalise_instrument(item)
-        assert record is not None
-        assert record.exchange is None
-        assert record.sector is None
+    def test_internal_instrument_skipped(self) -> None:
+        assert _normalise_instrument(FIXTURE_INSTRUMENT_INTERNAL) is None
 
-    def test_is_active_false_camel_case(self) -> None:
-        item = {**FIXTURE_INSTRUMENT_DISPLAY_DATA, "IsActive": False}
-        record = _normalise_instrument(item)
-        assert record is not None
-        assert record.is_tradable is False
-
-    def test_is_active_false_snake_case(self) -> None:
-        item = {**FIXTURE_INSTRUMENT_SNAKE, "is_active": False}
-        record = _normalise_instrument(item)
-        assert record is not None
-        assert record.is_tradable is False
-
-    def test_is_active_absent_defaults_true(self) -> None:
-        # Neither IsActive nor is_active present → defaults to tradable
-        item = {"InstrumentID": 1001, "SymbolFull": "AAPL"}
-        record = _normalise_instrument(item)
+    def test_is_tradable_always_true(self) -> None:
+        """Only tradable instruments are returned by the API, so is_tradable
+        is always True in normalised output."""
+        record = _normalise_instrument(FIXTURE_INSTRUMENT)
         assert record is not None
         assert record.is_tradable is True
 
     def test_returns_instrument_record(self) -> None:
-        record = _normalise_instrument(FIXTURE_INSTRUMENT_DISPLAY_DATA)
+        record = _normalise_instrument(FIXTURE_INSTRUMENT)
         assert isinstance(record, InstrumentRecord)
 
 
@@ -146,19 +112,14 @@ class TestNormaliseInstrument:
 
 
 class TestNormaliseInstruments:
-    def test_camel_case_response_shape(self) -> None:
-        records = _normalise_instruments(FIXTURE_API_RESPONSE_DISPLAY_DATA)
+    def test_response_shape(self) -> None:
+        records = _normalise_instruments(FIXTURE_API_RESPONSE)
         assert len(records) == 2
         symbols = {r.symbol for r in records}
         assert symbols == {"AAPL", "MSFT"}
 
-    def test_snake_case_response_shape(self) -> None:
-        records = _normalise_instruments(FIXTURE_API_RESPONSE_SNAKE)
-        assert len(records) == 1
-        assert records[0].symbol == "BP.L"
-
     def test_empty_instruments_list(self) -> None:
-        records = _normalise_instruments({"InstrumentDisplayDatas": []})
+        records = _normalise_instruments({"instrumentDisplayDatas": []})
         assert records == []
 
     def test_non_dict_response_raises(self) -> None:
@@ -167,10 +128,21 @@ class TestNormaliseInstruments:
 
     def test_bad_items_skipped(self) -> None:
         raw = {
-            "InstrumentDisplayDatas": [
-                FIXTURE_INSTRUMENT_DISPLAY_DATA,
-                {"InstrumentID": None, "SymbolFull": None},  # both missing → skipped
+            "instrumentDisplayDatas": [
+                FIXTURE_INSTRUMENT,
+                {"instrumentID": None, "symbolFull": None},  # both missing → skipped
                 "not a dict",  # not a dict → skipped
+            ]
+        }
+        records = _normalise_instruments(raw)
+        assert len(records) == 1
+        assert records[0].symbol == "AAPL"
+
+    def test_internal_instruments_filtered(self) -> None:
+        raw = {
+            "instrumentDisplayDatas": [
+                FIXTURE_INSTRUMENT,
+                FIXTURE_INSTRUMENT_INTERNAL,
             ]
         }
         records = _normalise_instruments(raw)

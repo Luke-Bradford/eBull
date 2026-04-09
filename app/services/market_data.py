@@ -36,68 +36,91 @@ _VOLATILITY_WINDOW_DAYS = 30
 
 @dataclass(frozen=True)
 class MarketRefreshSummary:
-    symbols_refreshed: int
+    instruments_refreshed: int
     candle_rows_upserted: int
     features_computed: int
     quotes_updated: int
+    quotes_skipped: int
     spread_flags_set: int
 
 
 def refresh_market_data(
     provider: MarketDataProvider,
     conn: psycopg.Connection,  # type: ignore[type-arg]
-    symbols: list[tuple[str, str]],  # [(symbol, instrument_id), ...]
-    from_date: date,
-    to_date: date,
+    instruments: list[tuple[int, str]],  # [(instrument_id, symbol), ...]
+    lookback_days: int = 400,
     max_spread_pct: Decimal = DEFAULT_MAX_SPREAD_PCT,
 ) -> MarketRefreshSummary:
     """
-    For each symbol: fetch candles, upsert to price_daily, compute features,
-    fetch quote, upsert to quotes table with spread flag.
+    For each instrument: fetch candles, upsert to price_daily, compute
+    features, then batch-fetch quotes and upsert with spread flag.
 
-    symbols is a list of (symbol, instrument_id) tuples — instrument_id must
-    already exist in the instruments table.
+    instruments is a list of (instrument_id, symbol) tuples — instrument_id
+    must already exist in the instruments table. symbol is used for logging.
 
     Raw provider responses are persisted by the provider before being returned.
     """
     candle_rows_upserted = 0
     features_computed = 0
     quotes_updated = 0
+    quotes_skipped = 0
     spread_flags_set = 0
 
-    for symbol, instrument_id in symbols:
+    # --- Candles: per-instrument ---
+    for instrument_id, symbol in instruments:
         try:
             with conn.transaction():
-                # Candles
-                bars = provider.get_daily_candles(symbol, from_date, to_date)
+                bars = provider.get_daily_candles(instrument_id, lookback_days)
                 if bars:
                     upserted = _upsert_candles(conn, instrument_id, bars)
                     candle_rows_upserted += upserted
                     computed = _compute_and_store_features(conn, instrument_id)
                     features_computed += computed
+        except Exception:
+            logger.warning("Failed to refresh candles for %s (id=%d), skipping", symbol, instrument_id, exc_info=True)
 
-                # Quote
-                quote = provider.get_quote(symbol)
-                if quote is not None:
+    # --- Quotes: batch fetch, then per-instrument upsert ---
+    all_ids = [iid for iid, _ in instruments]
+    batch_failed = False
+    try:
+        quotes = provider.get_quotes(all_ids)
+    except Exception:
+        logger.warning("Failed to batch-fetch quotes, skipping all quote updates", exc_info=True)
+        quotes = []
+        quotes_skipped = len(instruments)
+        batch_failed = True
+
+    if not batch_failed:
+        quote_map: dict[int, Quote] = {q.instrument_id: q for q in quotes}
+
+        for instrument_id, symbol in instruments:
+            quote = quote_map.get(instrument_id)
+            if quote is None:
+                logger.debug("No quote returned for %s (id=%d), skipping quote upsert", symbol, instrument_id)
+                quotes_skipped += 1
+                continue
+            try:
+                with conn.transaction():
                     flagged = _upsert_quote(conn, instrument_id, quote, max_spread_pct)
                     quotes_updated += 1
                     if flagged:
                         spread_flags_set += 1
-        except Exception:
-            logger.warning("Failed to refresh %s, skipping symbol", symbol, exc_info=True)
+            except Exception:
+                logger.warning("Failed to upsert quote for %s (id=%d), skipping", symbol, instrument_id, exc_info=True)
 
     return MarketRefreshSummary(
-        symbols_refreshed=len(symbols),
+        instruments_refreshed=len(instruments),
         candle_rows_upserted=candle_rows_upserted,
         features_computed=features_computed,
         quotes_updated=quotes_updated,
+        quotes_skipped=quotes_skipped,
         spread_flags_set=spread_flags_set,
     )
 
 
 def _upsert_candles(
     conn: psycopg.Connection,  # type: ignore[type-arg]
-    instrument_id: str,
+    instrument_id: int,
     bars: list[OHLCVBar],
 ) -> int:
     """
@@ -146,7 +169,7 @@ def _upsert_candles(
 
 def _compute_and_store_features(
     conn: psycopg.Connection,  # type: ignore[type-arg]
-    instrument_id: str,
+    instrument_id: int,
 ) -> int:
     """
     Compute rolling returns and 30-day realised volatility for the most recent
@@ -276,7 +299,7 @@ def _compute_volatility_30d(prices: list[tuple[date, Decimal]]) -> Decimal | Non
 
 def _upsert_quote(
     conn: psycopg.Connection,  # type: ignore[type-arg]
-    instrument_id: str,
+    instrument_id: int,
     quote: Quote,
     max_spread_pct: Decimal,
 ) -> bool:

@@ -35,7 +35,7 @@ class TestInterfaceHierarchy:
 class TestEtoroProvider:
     def test_context_manager_closes_cleanly(self) -> None:
         # Confirms __enter__/__exit__ are present and don't raise on close.
-        with EtoroMarketDataProvider(api_key="test-key", env="demo"):
+        with EtoroMarketDataProvider(api_key="test-key", user_key="test-user-key", env="demo"):
             pass
 
 

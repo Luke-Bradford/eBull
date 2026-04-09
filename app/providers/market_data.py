@@ -30,7 +30,6 @@ class InstrumentRecord:
 class OHLCVBar:
     """A single daily OHLCV candle."""
 
-    symbol: str
     price_date: date
     open: Decimal
     high: Decimal
@@ -43,7 +42,7 @@ class OHLCVBar:
 class Quote:
     """A current best-bid/ask quote."""
 
-    symbol: str
+    instrument_id: int
     timestamp: datetime
     bid: Decimal
     ask: Decimal
@@ -64,15 +63,42 @@ class MarketDataProvider(ABC):
     @abstractmethod
     def get_daily_candles(
         self,
-        symbol: str,
-        from_date: date,
-        to_date: date,
+        instrument_id: int,
+        lookback_days: int,
     ) -> list[OHLCVBar]:
-        """Return OHLCV bars for a symbol over the requested date range."""
+        """Return daily OHLCV bars for an instrument.
+
+        Returns completed daily bars only — any still-forming current-day
+        bar from the API is excluded.
+
+        Ordering: oldest-first.
+
+        lookback_days is a hint, not a guarantee. The provider returns up
+        to that many trading days of data, which may be fewer calendar
+        days than requested due to weekends and holidays. The eToro
+        candle endpoint caps at 1000 candles per request; the current
+        400-day lookback is well within that limit.
+        """
 
     @abstractmethod
-    def get_quote(self, symbol: str) -> Quote | None:
+    def get_quote(self, instrument_id: int) -> Quote | None:
+        """Return the current quote for a single instrument.
+
+        Returns None if the instrument is not recognised or not
+        currently quoted.
         """
-        Return the current quote for a symbol.
-        Returns None if the symbol is not recognised or not currently quoted.
+
+    @abstractmethod
+    def get_quotes(self, instrument_ids: list[int]) -> list[Quote]:
+        """Batch quote fetch.
+
+        Implementations handle any provider-specific batching limits
+        internally. Callers pass the full list of IDs.
+
+        Returns a list of Quote objects with no ordering guarantee.
+        Each Quote carries instrument_id so callers match results
+        by ID, not by position.
+
+        Instruments that are not recognised or not currently quoted
+        are silently omitted from the result list.
         """
