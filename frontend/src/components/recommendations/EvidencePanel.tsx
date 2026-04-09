@@ -14,6 +14,7 @@ function isGuardRules(value: unknown): value is GuardRule[] {
       item !== null &&
       "rule" in item &&
       "passed" in item &&
+      typeof (item as Record<string, unknown>).passed === "boolean" &&
       "detail" in item,
   );
 }

@@ -155,7 +155,7 @@ export function RecommendationsPage() {
       <Section
         title="Recommendation history"
         action={
-          recTotal > 0 ? (
+          !recs.loading && recTotal > 0 ? (
             <Pagination
               offset={recOffset}
               limit={RECOMMENDATIONS_PAGE_LIMIT}
@@ -181,7 +181,7 @@ export function RecommendationsPage() {
       <Section
         title="Execution audit trail"
         action={
-          auditTotal > 0 ? (
+          !audit.loading && auditTotal > 0 ? (
             <Pagination
               offset={auditOffset}
               limit={AUDIT_PAGE_LIMIT}

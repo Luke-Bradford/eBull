@@ -396,10 +396,10 @@ describe("RecommendationsPage — filters", () => {
     const actionSelect = screen.getByLabelText("Action");
     await user.selectOptions(actionSelect, "EXIT");
 
-    // Then clear
-    const clearButtons = screen.getAllByText("Clear filters");
-    // First clear button is for recommendations filters
-    await user.click(clearButtons[0]!);
+    // Then clear — target the recommendations filter bar specifically
+    const recFilterBar = screen.getByRole("group", { name: "Recommendations filters" });
+    const clearBtn = recFilterBar.querySelector("button")!;
+    await user.click(clearBtn);
 
     await waitFor(() => {
       const calls = mockedFetchRecs.mock.calls;

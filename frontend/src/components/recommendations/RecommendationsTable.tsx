@@ -150,7 +150,7 @@ function ExpandedDetail({ item }: { item: RecommendationListItem }) {
         <span>Cash known: {item.cash_balance_known === null ? "—" : item.cash_balance_known ? "Yes" : "No"}</span>
         {detail.loading ? (
           <span className="animate-pulse text-slate-400">Loading score…</span>
-        ) : detail.data ? (
+        ) : detail.data?.total_score !== null && detail.data?.total_score !== undefined ? (
           <span>Total score: {formatNumber(detail.data.total_score, 2)}</span>
         ) : null}
       </div>

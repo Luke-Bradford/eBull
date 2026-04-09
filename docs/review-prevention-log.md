@@ -440,3 +440,11 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: A frontend `interface FooResponse { ... }` declared fields that did not exist on the backend response, or omitted fields the backend actually returned. Because `apiFetch<T>` casts the parsed JSON to `T` without runtime validation, the mismatch deserialised silently to `undefined` and only surfaced when a caller actually inspected the missing field — often far from the API boundary. The reverse case (declared field exists but with the wrong type) is even harder to spot because TypeScript happily accepts the unsafe cast.
 - Prevention: When adding or changing an API client function, open the backend handler and copy the response model field-for-field into the TS interface in the same commit. Treat the Pydantic class as the source of truth and the TS interface as a mirror. Until we adopt runtime schema validation (Zod parse inside `apiFetch`), the only defence is the manual cross-check: a PR description that touches `frontend/src/api/*.ts` should name the backend file + class it mirrors, and reviewers should be able to grep that class to verify shape parity. Tracked as a tech-debt for runtime validation: see follow-up issue.
 - Enforced in: this prevention log
+
+---
+
+### Positional getAllBy*()[n] in tests selects wrong element on reorder
+- First seen in: #135
+- Symptom: `getAllByText("Clear filters")[0]` relied on DOM render order to select the recommendations filter bar's button. If the two filter bars swapped position, the test would silently exercise the wrong component.
+- Prevention: When a test needs a specific element among multiple matches, scope the query using `getByRole` with an accessible name or find the nearest landmark and query within it — never rely on positional array indexing.
+- Enforced in: this prevention log
