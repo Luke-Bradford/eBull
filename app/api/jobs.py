@@ -171,17 +171,29 @@ def list_job_runs(
     # DB-layer faults only, not for swallowing arbitrary control flow.
     try:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(
-                """
-                SELECT run_id, job_name, started_at, finished_at,
-                       status, row_count, error_msg
-                FROM job_runs
-                WHERE %(job_name)s IS NULL OR job_name = %(job_name)s
-                ORDER BY started_at DESC
-                LIMIT %(limit)s
-                """,
-                {"job_name": job_name, "limit": limit},
-            )
+            if job_name is None:
+                cur.execute(
+                    """
+                    SELECT run_id, job_name, started_at, finished_at,
+                           status, row_count, error_msg
+                    FROM job_runs
+                    ORDER BY started_at DESC
+                    LIMIT %(limit)s
+                    """,
+                    {"limit": limit},
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT run_id, job_name, started_at, finished_at,
+                           status, row_count, error_msg
+                    FROM job_runs
+                    WHERE job_name = %(job_name)s
+                    ORDER BY started_at DESC
+                    LIMIT %(limit)s
+                    """,
+                    {"job_name": job_name, "limit": limit},
+                )
             rows = cur.fetchall()
     except psycopg.Error as exc:
         logger.exception("list_job_runs: query failed")
