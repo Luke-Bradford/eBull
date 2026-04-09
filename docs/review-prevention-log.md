@@ -440,3 +440,11 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: A frontend `interface FooResponse { ... }` declared fields that did not exist on the backend response, or omitted fields the backend actually returned. Because `apiFetch<T>` casts the parsed JSON to `T` without runtime validation, the mismatch deserialised silently to `undefined` and only surfaced when a caller actually inspected the missing field — often far from the API boundary. The reverse case (declared field exists but with the wrong type) is even harder to spot because TypeScript happily accepts the unsafe cast.
 - Prevention: When adding or changing an API client function, open the backend handler and copy the response model field-for-field into the TS interface in the same commit. Treat the Pydantic class as the source of truth and the TS interface as a mirror. Until we adopt runtime schema validation (Zod parse inside `apiFetch`), the only defence is the manual cross-check: a PR description that touches `frontend/src/api/*.ts` should name the backend file + class it mirrors, and reviewers should be able to grep that class to verify shape parity. Tracked as a tech-debt for runtime validation: see follow-up issue.
 - Enforced in: this prevention log
+
+---
+
+### Positional or unscoped selectors in tests select wrong element on reorder
+- First seen in: #135
+- Symptom: `getAllByText("Clear filters")[0]` and `container.querySelector("button")` both relied on DOM render order to select the target element. If the two filter bars swapped position, the test would silently exercise the wrong component.
+- Prevention: When a test needs a specific element among multiple matches, use `within(container).getByRole("button", { name: "…" })` to scope by both container and accessible name. Never rely on positional array indexing or unscoped `querySelector`.
+- Enforced in: this prevention log
