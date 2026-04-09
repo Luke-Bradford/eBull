@@ -364,19 +364,35 @@ class JobRuntime:
         ``JobAlreadyRunning`` from the advisory lock here means a
         *different process* (or this process's APScheduler thread,
         for the scheduled-fire path) holds the advisory lock. We log
-        a warning and exit; the in-process lock is still released.
+        and exit; the in-process lock is still released.
+
+        Note on the ``finally``: ``_inflight[job_name]`` is released
+        unconditionally, regardless of whether the advisory lock was
+        actually obtained. The in-process lock's sole purpose is to
+        gate the synchronous 202/409 response on the request thread
+        -- it does not track actual execution. Releasing it on every
+        worker exit (success, no-op, raise) is correct: the next
+        manual trigger should be allowed to attempt acquisition
+        fresh. ``threading.Lock`` permits acquire-on-thread-A /
+        release-on-thread-B because it is not reentrant and carries
+        no owner check.
         """
         try:
             try:
                 with JobLock(self._database_url, job_name):
                     invoker()
             except JobAlreadyRunning:
-                logger.warning(
-                    "manual trigger of %r could not acquire advisory lock "
-                    "-- another runner (scheduled fire or peer process) "
-                    "holds it. The 202 response was returned but the job "
-                    "did not run. PR B's listing endpoint will surface "
-                    "this state to the operator.",
+                # Logged at INFO -- this is an expected race (manual
+                # trigger landed during a scheduled fire or peer
+                # process run), not an operational fault. WARNING
+                # would alert-bait every manual trigger during the
+                # 02:00 UTC window with no actionable remediation
+                # until PR B's listing endpoint lands. Round 2
+                # review WARNING 2.
+                logger.info(
+                    "manual trigger of %r no-opped: advisory lock held by "
+                    "another runner (scheduled fire or peer process); the "
+                    "202 response was returned but the job did not run",
                     job_name,
                 )
             except Exception:

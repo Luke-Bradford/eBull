@@ -20,6 +20,7 @@ Coverage:
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
 
 import pytest
 
@@ -59,7 +60,9 @@ class _FakeLock:
 
 
 @pytest.fixture(autouse=True)
-def _reset_fake_locks() -> None:
+def _reset_fake_locks() -> Iterator[None]:
+    _FakeLock._held.clear()
+    yield
     _FakeLock._held.clear()
 
 
