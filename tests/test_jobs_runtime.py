@@ -231,3 +231,26 @@ class TestStartWiring:
         rt._started = True  # simulate already started
         with pytest.raises(RuntimeError):
             rt.start()
+
+
+class TestProductionInvokerRegistry:
+    """The production ``_INVOKERS`` map must equal ``SCHEDULED_JOBS``.
+
+    Drift guard for PR B: a job declared in the registry without an
+    invoker would silently 404 on the manual trigger endpoint, and an
+    invoker without a registry entry would never run on its cadence.
+    Both states are bugs we want to catch at the test layer rather
+    than discovering in production.
+    """
+
+    def test_invokers_cover_every_scheduled_job(self) -> None:
+        from app.jobs.runtime import _INVOKERS
+        from app.workers.scheduler import SCHEDULED_JOBS
+
+        registry_names = {job.name for job in SCHEDULED_JOBS}
+        invoker_names = set(_INVOKERS.keys())
+        assert registry_names == invoker_names, (
+            f"Drift between SCHEDULED_JOBS and _INVOKERS:\n"
+            f"  in registry but not wired: {sorted(registry_names - invoker_names)}\n"
+            f"  wired but not in registry: {sorted(invoker_names - registry_names)}"
+        )

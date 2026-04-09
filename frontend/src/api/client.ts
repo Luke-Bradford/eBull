@@ -72,7 +72,11 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     }
     throw new ApiError(res.status, detail);
   }
-  // 204 No Content (e.g. /auth/logout) has no body to parse.
-  if (res.status === 204) return undefined as T;
+  // 202 Accepted (e.g. POST /jobs/{name}/run) and 204 No Content
+  // (e.g. /auth/logout) both have empty bodies in this codebase.
+  // Calling res.json() on either would throw "Unexpected end of
+  // JSON input"; the contract for both endpoints is "no body, the
+  // status code is the response".
+  if (res.status === 202 || res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }

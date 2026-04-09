@@ -104,6 +104,29 @@ export interface JobsListResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /jobs/runs (app/api/jobs.py — issue #13 PR B)
+// ---------------------------------------------------------------------------
+
+export type JobRunStatus = "running" | "success" | "failure";
+
+export interface JobRunResponse {
+  run_id: number;
+  job_name: string;
+  started_at: string;
+  finished_at: string | null;
+  status: JobRunStatus;
+  row_count: number | null;
+  error_msg: string | null;
+}
+
+export interface JobRunsListResponse {
+  items: JobRunResponse[];
+  total: number;
+  limit: number;
+  job_name: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // /instruments (app/api/instruments.py)
 // ---------------------------------------------------------------------------
 
