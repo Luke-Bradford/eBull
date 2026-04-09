@@ -51,20 +51,27 @@ export function AdminPage() {
   // outlive the next refresh.
   const [rowState, setRowState] = useState<Record<string, RowState>>({});
 
+  // Depend on the stable refetch references rather than the full
+  // useAsync state objects -- ``jobs`` and ``runs`` are new objects on
+  // every render (loading/data/error transitions), but their
+  // ``refetch`` callbacks are memoised inside ``useAsync``. Closing
+  // over the state objects would recreate ``handleRun`` (and force
+  // ``JobsTable`` to re-render every row) on every async transition.
+  // Round 1 review WARNING 3.
+  const refetchJobs = jobs.refetch;
+  const refetchRuns = runs.refetch;
   const handleRun = useCallback(
     async (name: string) => {
       setRowState((prev) => ({ ...prev, [name]: { kind: "running" } }));
       try {
         await runJob(name);
         setRowState((prev) => ({ ...prev, [name]: { kind: "queued" } }));
-        // Refresh both panels: the overview's last-run column will pick
-        // up the new started_at once the worker writes job_runs, and
-        // the runs table will surface the row immediately. Use refetch
-        // (not refetch-on-poll) -- a single refresh is enough; the
-        // operator can hit the row's run button again or reload the
-        // page if they want to see further updates.
-        runs.refetch();
-        jobs.refetch();
+        // Refresh both panels so the operator's action is reflected
+        // without a manual refresh. A single refresh is enough; the
+        // operator can hit the button again or reload the page if
+        // they want to see further updates.
+        refetchRuns();
+        refetchJobs();
       } catch (err) {
         const message =
           err instanceof ApiError
@@ -77,7 +84,7 @@ export function AdminPage() {
         setRowState((prev) => ({ ...prev, [name]: { kind: "error", message } }));
       }
     },
-    [jobs, runs],
+    [refetchJobs, refetchRuns],
   );
 
   return (

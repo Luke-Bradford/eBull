@@ -25,7 +25,11 @@ export function fetchJobRuns(
   limit: number = 50,
 ): Promise<JobRunsListResponse> {
   const params = new URLSearchParams();
-  if (jobName) params.set("job_name", jobName);
+  // Use ``!= null`` (not falsy) so an empty-string filter is still
+  // forwarded to the backend rather than silently dropped. The
+  // declared type is ``string | null | undefined``; only the latter
+  // two should be treated as "no filter".
+  if (jobName != null) params.set("job_name", jobName);
   params.set("limit", String(limit));
   return apiFetch<JobRunsListResponse>(`/jobs/runs?${params.toString()}`);
 }

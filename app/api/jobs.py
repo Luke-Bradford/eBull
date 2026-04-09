@@ -78,7 +78,16 @@ class JobRunResponse(BaseModel):
 
 class JobRunsListResponse(BaseModel):
     items: list[JobRunResponse]
-    total: int  # number of rows returned (not the table total)
+    # ``count`` is the number of rows in *this response*, not a total
+    # of all matching rows in the table. Named ``count`` rather than
+    # ``total`` to avoid confusion with the paginated ``total`` field
+    # used by other list endpoints (instruments, recommendations) --
+    # this endpoint deliberately does not paginate; the operator's
+    # use case is "show me the latest N runs", not "page through every
+    # run since the dawn of time". If pagination becomes a real
+    # requirement, add ``offset`` + ``total_matching`` then; do not
+    # repurpose this field.
+    count: int
     limit: int
     job_name: str | None  # echo of the filter, for client display
 
@@ -155,6 +164,11 @@ def list_job_runs(
     Errors at the report-build level (e.g. DB unreachable) raise 503;
     we never leak driver text in the detail.
     """
+    # Narrow to ``psycopg.Error``: the auth dependency runs *before*
+    # this handler body, so an HTTPException raised by auth never
+    # passes through this try block. The narrow catch is still cheaper
+    # than a broad one and makes the intent obvious -- this try is for
+    # DB-layer faults only, not for swallowing arbitrary control flow.
     try:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
@@ -169,7 +183,7 @@ def list_job_runs(
                 {"job_name": job_name, "limit": limit},
             )
             rows = cur.fetchall()
-    except Exception as exc:
+    except psycopg.Error as exc:
         logger.exception("list_job_runs: query failed")
         raise HTTPException(status_code=503, detail="job run history unavailable") from exc
 
@@ -185,4 +199,4 @@ def list_job_runs(
         )
         for row in rows
     ]
-    return JobRunsListResponse(items=items, total=len(items), limit=limit, job_name=job_name)
+    return JobRunsListResponse(items=items, count=len(items), limit=limit, job_name=job_name)

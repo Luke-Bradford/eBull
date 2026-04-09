@@ -76,7 +76,7 @@ function runsResponse(): JobRunsListResponse {
         error_msg: null,
       },
     ],
-    total: 1,
+    count: 1,
     limit: 50,
     job_name: null,
   };

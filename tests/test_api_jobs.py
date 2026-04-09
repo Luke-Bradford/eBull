@@ -20,6 +20,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -146,7 +147,7 @@ class TestListJobRuns:
         resp = client.get("/jobs/runs")
         assert resp.status_code == 200
         body = resp.json()
-        assert body["total"] == 2
+        assert body["count"] == 2
         assert body["limit"] == 50
         assert body["job_name"] is None
         assert [item["run_id"] for item in body["items"]] == [42, 41]
@@ -180,7 +181,7 @@ class TestListJobRuns:
     def test_db_failure_returns_503_with_fixed_detail(self) -> None:
         conn = MagicMock()
         cur = MagicMock()
-        cur.execute.side_effect = RuntimeError("connection refused")
+        cur.execute.side_effect = psycopg.OperationalError("connection refused")
         conn.cursor.return_value.__enter__.return_value = cur
         conn.cursor.return_value.__exit__.return_value = None
         _override_conn(conn)

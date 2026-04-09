@@ -121,7 +121,11 @@ export interface JobRunResponse {
 
 export interface JobRunsListResponse {
   items: JobRunResponse[];
-  total: number;
+  // Number of rows in this response — NOT a paginated total. The
+  // backend deliberately does not paginate this endpoint; if a
+  // future requirement adds pagination, it will introduce a new
+  // ``total_matching`` field rather than repurposing ``count``.
+  count: number;
   limit: number;
   job_name: string | null;
 }
