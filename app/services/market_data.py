@@ -81,29 +81,32 @@ def refresh_market_data(
 
     # --- Quotes: batch fetch, then per-instrument upsert ---
     all_ids = [iid for iid, _ in instruments]
+    batch_failed = False
     try:
         quotes = provider.get_quotes(all_ids)
     except Exception:
         logger.warning("Failed to batch-fetch quotes, skipping all quote updates", exc_info=True)
         quotes = []
         quotes_skipped = len(instruments)
+        batch_failed = True
 
-    quote_map: dict[int, Quote] = {q.instrument_id: q for q in quotes}
+    if not batch_failed:
+        quote_map: dict[int, Quote] = {q.instrument_id: q for q in quotes}
 
-    for instrument_id, symbol in instruments:
-        quote = quote_map.get(instrument_id)
-        if quote is None:
-            logger.debug("No quote returned for %s (id=%d), skipping quote upsert", symbol, instrument_id)
-            quotes_skipped += 1
-            continue
-        try:
-            with conn.transaction():
-                flagged = _upsert_quote(conn, instrument_id, quote, max_spread_pct)
-                quotes_updated += 1
-                if flagged:
-                    spread_flags_set += 1
-        except Exception:
-            logger.warning("Failed to upsert quote for %s (id=%d), skipping", symbol, instrument_id, exc_info=True)
+        for instrument_id, symbol in instruments:
+            quote = quote_map.get(instrument_id)
+            if quote is None:
+                logger.debug("No quote returned for %s (id=%d), skipping quote upsert", symbol, instrument_id)
+                quotes_skipped += 1
+                continue
+            try:
+                with conn.transaction():
+                    flagged = _upsert_quote(conn, instrument_id, quote, max_spread_pct)
+                    quotes_updated += 1
+                    if flagged:
+                        spread_flags_set += 1
+            except Exception:
+                logger.warning("Failed to upsert quote for %s (id=%d), skipping", symbol, instrument_id, exc_info=True)
 
     return MarketRefreshSummary(
         instruments_refreshed=len(instruments),
