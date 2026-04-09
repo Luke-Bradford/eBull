@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     # The migration script scripts/migrate_etoro_credential.py handles the
     # one-time move from env vars to the encrypted store.
     etoro_env: str = "demo"
+    etoro_base_url: str = "https://public-api.etoro.com"
 
     fmp_api_key: str | None = None
     companies_house_api_key: str | None = None

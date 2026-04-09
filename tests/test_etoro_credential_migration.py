@@ -267,7 +267,8 @@ class TestLoadEtoroCredentials:
         call_2 = mock_load_cred.call_args_list[1]
         assert call_2.kwargs["label"] == "user_key"
         assert call_2.kwargs["environment"] == "demo"
-        mock_conn.commit.assert_called_once()
+        # Commit after each load so audit rows are durable individually
+        assert mock_conn.commit.call_count == 2
 
     @patch("app.workers.scheduler.psycopg")
     @patch("app.workers.scheduler.sole_operator_id")
@@ -288,7 +289,7 @@ class TestLoadEtoroCredentials:
     @patch("app.workers.scheduler.psycopg")
     @patch("app.workers.scheduler.load_credential_for_provider_use")
     @patch("app.workers.scheduler.sole_operator_id")
-    def test_missing_user_key_returns_none(
+    def test_missing_user_key_returns_none_but_commits_api_key_audit(
         self,
         mock_sole_op: MagicMock,
         mock_load_cred: MagicMock,
@@ -304,6 +305,10 @@ class TestLoadEtoroCredentials:
         mock_psycopg.connect.return_value.__exit__ = MagicMock(return_value=False)
 
         assert _load_etoro_credentials("test_job") is None
+        # api_key audit row must have been committed before the user_key
+        # lookup raised — partial failure must not roll back the first
+        # audit entry.
+        mock_conn.commit.assert_called_once()
 
     @patch("app.workers.scheduler.psycopg")
     @patch("app.workers.scheduler.load_credential_for_provider_use")

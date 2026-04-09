@@ -352,6 +352,10 @@ def _load_etoro_credentials(job_name: str) -> tuple[str, str] | None:
     Returns ``None`` if either credential is missing. Failures are logged
     at ERROR with the specific missing label and environment.
 
+    Each credential load is committed individually so audit rows are
+    durable even if the second load fails (e.g. user_key not found
+    must not silently roll back the api_key audit row).
+
     Added in #139 but not wired to jobs until PR B rewrites the provider
     constructors to accept both keys.
     """
@@ -366,6 +370,7 @@ def _load_etoro_credentials(job_name: str) -> tuple[str, str] | None:
                 environment=settings.etoro_env,
                 caller=job_name,
             )
+            conn.commit()  # api_key audit row durable
             user_key = load_credential_for_provider_use(
                 conn,
                 operator_id=op_id,
@@ -374,7 +379,7 @@ def _load_etoro_credentials(job_name: str) -> tuple[str, str] | None:
                 environment=settings.etoro_env,
                 caller=job_name,
             )
-            conn.commit()  # audit rows durable before external call
+            conn.commit()  # user_key audit row durable
     except (NoOperatorError, AmbiguousOperatorError) as exc:
         logger.error("%s: %s, skipping", job_name, exc)
         return None

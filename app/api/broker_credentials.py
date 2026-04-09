@@ -38,6 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_session
+from app.config import settings
 from app.db import get_conn
 from app.security import master_key
 from app.security.secrets_crypto import clear_active_key, set_active_key
@@ -502,7 +503,6 @@ def delete(
 # Validate endpoint (#139)
 # ---------------------------------------------------------------------------
 
-_ETORO_BASE_URL = "https://public-api.etoro.com"
 _VALIDATE_TIMEOUT_S = 10.0
 
 
@@ -582,7 +582,7 @@ def validate(
     # Level 1: basic auth validation
     try:
         with httpx.Client(
-            base_url=_ETORO_BASE_URL,
+            base_url=settings.etoro_base_url,
             headers=headers,
             timeout=_VALIDATE_TIMEOUT_S,
         ) as client:
@@ -626,7 +626,7 @@ def validate(
     env_check_path = f"/api/v1/trading/info/{env_norm}/pnl"
     try:
         with httpx.Client(
-            base_url=_ETORO_BASE_URL,
+            base_url=settings.etoro_base_url,
             headers=headers,
             timeout=_VALIDATE_TIMEOUT_S,
         ) as client:
