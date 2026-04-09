@@ -61,6 +61,8 @@ class _FakeLock:
 
 @pytest.fixture(autouse=True)
 def _reset_fake_locks() -> Iterator[None]:
+    # Pre-clear guards against a previous test that crashed before
+    # its teardown ran (post-clear is the normal teardown path).
     _FakeLock._held.clear()
     yield
     _FakeLock._held.clear()
