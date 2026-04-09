@@ -122,7 +122,7 @@ class EtoroBrokerProvider(BrokerProvider):
                 raw_payload={"error": f"Unrecognised action {action!r} for place_order"},
             )
 
-        # At least one of amount/units must be provided.
+        # At least one of amount/units must be provided and positive.
         if amount is None and units is None:
             return BrokerOrderResult(
                 broker_order_ref=None,
@@ -131,6 +131,16 @@ class EtoroBrokerProvider(BrokerProvider):
                 filled_units=None,
                 fees=Decimal("0"),
                 raw_payload={"error": "Neither amount nor units provided"},
+            )
+        order_value = units if units is not None else amount
+        if order_value is not None and order_value <= 0:
+            return BrokerOrderResult(
+                broker_order_ref=None,
+                status="failed",
+                filled_price=None,
+                filled_units=None,
+                fees=Decimal("0"),
+                raw_payload={"error": f"Order value must be positive, got {order_value}"},
             )
 
         # Determine endpoint and amount field based on order type.
@@ -208,7 +218,7 @@ class EtoroBrokerProvider(BrokerProvider):
         # Step 1: Resolve instrument_id → positionId via portfolio lookup.
         # The eToro close endpoint requires a positionId, not an instrumentId.
         # clientPortfolio.positions[] has both instrumentID and positionID.
-        position_id = self._resolve_position_id(instrument_id)
+        position_id, failure_reason = self._resolve_position_id(instrument_id)
         if position_id is None:
             return BrokerOrderResult(
                 broker_order_ref=None,
@@ -216,9 +226,7 @@ class EtoroBrokerProvider(BrokerProvider):
                 filled_price=None,
                 filled_units=None,
                 fees=Decimal("0"),
-                raw_payload={
-                    "error": f"No open position found for instrument {instrument_id}",
-                },
+                raw_payload={"error": failure_reason},
             )
 
         # Step 2: Close the position.
@@ -303,10 +311,11 @@ class EtoroBrokerProvider(BrokerProvider):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _resolve_position_id(self, instrument_id: int) -> int | None:
+    def _resolve_position_id(self, instrument_id: int) -> tuple[int | None, str]:
         """Look up the open positionID for an instrument via the portfolio endpoint.
 
-        Returns None if no open position exists or the lookup fails.
+        Returns (position_id, "") on success, or (None, reason) on failure.
+        The reason distinguishes network/HTTP errors from missing positions.
         """
         try:
             response = self._client.get(
@@ -322,10 +331,10 @@ class EtoroBrokerProvider(BrokerProvider):
                 exc.response.status_code,
                 raw_body,
             )
-            return None
+            return None, f"Portfolio lookup failed: HTTP {exc.response.status_code}"
         except httpx.HTTPError as exc:
             logger.error("eToro portfolio lookup network error: %s", exc)
-            return None
+            return None, f"Portfolio lookup failed: {exc}"
 
         # Response shape: { clientPortfolio: { positions: [...] } }
         portfolio = raw.get("clientPortfolio") or {}
@@ -337,14 +346,14 @@ class EtoroBrokerProvider(BrokerProvider):
             if pos.get("instrumentID") == instrument_id:
                 pos_id = pos.get("positionID")
                 if pos_id is not None:
-                    return int(pos_id)
+                    return int(pos_id), ""
 
         logger.warning(
             "No open position found for instrument %d in portfolio (%d positions checked)",
             instrument_id,
             len(positions),
         )
-        return None
+        return None, f"No open position found for instrument {instrument_id}"
 
 
 # ------------------------------------------------------------------

@@ -189,6 +189,20 @@ class TestPlaceOrderActionGuard:
             assert result.status == "failed"
             assert "Neither" in result.raw_payload["error"]
 
+    def test_zero_amount_returns_failed(self) -> None:
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            result = broker.place_order(1001, "BUY", amount=Decimal("0"), units=None)
+
+            assert result.status == "failed"
+            assert "positive" in result.raw_payload["error"]
+
+    def test_negative_units_returns_failed(self) -> None:
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            result = broker.place_order(1001, "BUY", amount=None, units=Decimal("-1"))
+
+            assert result.status == "failed"
+            assert "positive" in result.raw_payload["error"]
+
 
 class TestPlaceOrderRealEnv:
     def test_real_env_uses_correct_prefix(self) -> None:
@@ -263,7 +277,9 @@ class TestClosePosition:
             # No close POST should have been attempted
             broker._client.post.assert_not_called()
 
-    def test_portfolio_lookup_failure_returns_failed_with_error(self) -> None:
+    def test_portfolio_network_error_returns_failed_with_lookup_error(self) -> None:
+        """Network error during portfolio lookup produces a distinct error
+        message from 'no open position', so the audit payload is unambiguous."""
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
             broker._client = MagicMock()
             broker._client.get.side_effect = httpx.ConnectError("connection refused")
@@ -271,7 +287,8 @@ class TestClosePosition:
             result = broker.close_position(1001)
 
             assert result.status == "failed"
-            assert "No open position" in result.raw_payload["error"]
+            assert "Portfolio lookup failed" in result.raw_payload["error"]
+            assert "connection refused" in result.raw_payload["error"]
             broker._client.post.assert_not_called()
 
 
