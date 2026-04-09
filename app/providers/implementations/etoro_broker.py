@@ -215,7 +215,7 @@ class EtoroBrokerProvider(BrokerProvider):
                 filled_price=None,
                 filled_units=None,
                 fees=Decimal("0"),
-                raw_payload={"_ebull_action": action, "error": str(exc)},
+                raw_payload={"_ebull_action": action, "error": f"Network error: {exc}"},
             )
         except ValueError as exc:
             logger.error("eToro place_order non-JSON response: %s", exc)
@@ -285,7 +285,7 @@ class EtoroBrokerProvider(BrokerProvider):
                 filled_price=None,
                 filled_units=None,
                 fees=Decimal("0"),
-                raw_payload={"error": str(exc)},
+                raw_payload={"error": f"Network error: {exc}"},
             )
         except ValueError as exc:
             logger.error("eToro close_position non-JSON response: %s", exc)
@@ -331,7 +331,7 @@ class EtoroBrokerProvider(BrokerProvider):
                 filled_price=None,
                 filled_units=None,
                 fees=Decimal("0"),
-                raw_payload={"error": str(exc)},
+                raw_payload={"error": f"Network error: {exc}"},
             )
         except ValueError as exc:
             logger.error("eToro get_order_status non-JSON response: %s", exc)
