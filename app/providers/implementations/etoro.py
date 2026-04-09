@@ -1,8 +1,11 @@
 """
 eToro market data provider.
 
-Implements MarketDataProvider against the eToro read API.
+Implements MarketDataProvider against the real eToro public API.
 Persists raw API responses before any normalisation.
+
+Auth: three-header scheme (x-api-key, x-user-key, x-request-id).
+Base URL: https://public-api.etoro.com (configurable via settings.etoro_base_url).
 """
 
 import json
@@ -12,17 +15,20 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import TracebackType
+from uuid import uuid4
 
 import httpx
 
+from app.config import settings
 from app.providers.market_data import InstrumentRecord, MarketDataProvider, OHLCVBar, Quote
 
 logger = logging.getLogger(__name__)
 
-_ETORO_BASE_URL = "https://api.etoro.com"
-
 # Directory for raw payload dumps (relative to process working directory)
 _RAW_PAYLOAD_DIR = Path("data/raw/etoro")
+
+# eToro rates endpoint accepts at most 100 instrument IDs per request.
+_RATES_BATCH_SIZE = 100
 
 
 def _persist_raw(tag: str, payload: object) -> None:
@@ -41,22 +47,25 @@ class EtoroMarketDataProvider(MarketDataProvider):
     """
     Reads tradable instruments, candles, and quotes from the eToro API.
 
-    Callers must supply the API key (loaded from the encrypted
-    broker_credentials store). Raw responses are persisted to
-    data/raw/etoro/ before normalisation.
+    Callers must supply both ``api_key`` and ``user_key`` (loaded from
+    the encrypted broker_credentials store). Raw responses are persisted
+    to data/raw/etoro/ before normalisation.
 
     Use as a context manager to ensure the HTTP client is closed:
 
-        with EtoroMarketDataProvider(api_key=...) as provider:
-            bars = provider.get_daily_candles("AAPL", from_date, to_date)
+        with EtoroMarketDataProvider(api_key=..., user_key=...) as provider:
+            bars = provider.get_daily_candles(12345, lookback_days=400)
     """
 
-    def __init__(self, api_key: str, env: str = "demo") -> None:
+    def __init__(self, api_key: str, user_key: str, env: str = "demo") -> None:
         self._api_key = api_key
+        self._user_key = user_key
+        self._env = env
         self._client = httpx.Client(
-            base_url=_ETORO_BASE_URL,
+            base_url=settings.etoro_base_url,
             headers={
-                "Authorization": f"Bearer {self._api_key}",
+                "x-api-key": self._api_key,
+                "x-user-key": self._user_key,
                 "Content-Type": "application/json",
             },
             timeout=30.0,
@@ -73,59 +82,79 @@ class EtoroMarketDataProvider(MarketDataProvider):
     ) -> None:
         self._client.close()
 
+    def _request_headers(self) -> dict[str, str]:
+        """Per-request headers — fresh UUID for x-request-id."""
+        return {"x-request-id": str(uuid4())}
+
     # ------------------------------------------------------------------
     # Universe
     # ------------------------------------------------------------------
 
     def get_tradable_instruments(self) -> list[InstrumentRecord]:
-        """
-        Fetch the full list of tradable instruments from eToro.
-
-        Raw response is persisted before normalisation.
-        Note: pagination is not yet implemented — single request only.
-        The eToro API pagination shape will be confirmed in live testing.
-        """
-        response = self._client.get("/v1/instruments")
+        """Fetch the full list of tradable instruments from eToro."""
+        response = self._client.get(
+            "/api/v1/market-data/instruments",
+            headers=self._request_headers(),
+        )
         response.raise_for_status()
         raw = response.json()
         _persist_raw("instruments", raw)
         return _normalise_instruments(raw)
 
     # ------------------------------------------------------------------
-    # Market data
+    # Candles
     # ------------------------------------------------------------------
 
-    def get_daily_candles(self, symbol: str, from_date: date, to_date: date) -> list[OHLCVBar]:
-        """
-        Fetch daily OHLCV candles for a symbol over the requested date range.
+    def get_daily_candles(self, instrument_id: int, lookback_days: int) -> list[OHLCVBar]:
+        """Fetch daily OHLCV candles for an instrument.
 
-        Raw response is persisted before normalisation.
+        Uses ``asc`` direction so the API returns oldest-first, matching
+        the interface contract. No client-side re-sort needed.
         """
         response = self._client.get(
-            "/v1/candles/day",
-            params={
-                "symbol": symbol,
-                "from": from_date.isoformat(),
-                "to": to_date.isoformat(),
-            },
+            f"/api/v1/market-data/instruments/{instrument_id}/history/candles/asc/OneDay/{lookback_days}",
+            headers=self._request_headers(),
         )
         response.raise_for_status()
         raw = response.json()
-        _persist_raw(f"candles_{symbol}", raw)
-        return _normalise_candles(symbol, raw)
+        _persist_raw(f"candles_{instrument_id}", raw)
+        return _normalise_candles(raw)
 
-    def get_quote(self, symbol: str) -> Quote | None:
+    # ------------------------------------------------------------------
+    # Quotes
+    # ------------------------------------------------------------------
+
+    def get_quote(self, instrument_id: int) -> Quote | None:
+        """Return the current quote for a single instrument."""
+        quotes = self.get_quotes([instrument_id])
+        return quotes[0] if quotes else None
+
+    def get_quotes(self, instrument_ids: list[int]) -> list[Quote]:
+        """Batch quote fetch with automatic 100-ID chunking.
+
+        The eToro rates endpoint requires a non-empty ``instrumentIds``
+        query parameter (comma-separated) with a maximum of 100 IDs per
+        request. This method chunks internally and aggregates results.
         """
-        Return the current quote for a symbol.
-        Returns None if the symbol is not recognised or not currently quoted.
-        """
-        response = self._client.get("/v1/quotes", params={"symbol": symbol})
-        if response.status_code == 404:
-            return None
-        response.raise_for_status()
-        raw = response.json()
-        _persist_raw(f"quote_{symbol}", raw)
-        return _normalise_quote(symbol, raw)
+        if not instrument_ids:
+            return []
+
+        all_quotes: list[Quote] = []
+
+        for i in range(0, len(instrument_ids), _RATES_BATCH_SIZE):
+            chunk = instrument_ids[i : i + _RATES_BATCH_SIZE]
+            ids_param = ",".join(str(id_) for id_ in chunk)
+            response = self._client.get(
+                "/api/v1/market-data/instruments/rates",
+                params={"instrumentIds": ids_param},
+                headers=self._request_headers(),
+            )
+            response.raise_for_status()
+            raw = response.json()
+            _persist_raw(f"rates_batch_{i}", raw)
+            all_quotes.extend(_normalise_rates(raw))
+
+        return all_quotes
 
 
 # ------------------------------------------------------------------
@@ -134,16 +163,14 @@ class EtoroMarketDataProvider(MarketDataProvider):
 
 
 def _normalise_instruments(raw: object) -> list[InstrumentRecord]:
-    """
-    Normalise a raw eToro instruments API response into InstrumentRecord list.
+    """Normalise a raw eToro instruments API response into InstrumentRecord list.
 
-    Accepts both camelCase (InstrumentDisplayDatas) and snake_case (instruments)
-    shapes while the exact live API shape is confirmed.
+    Real API returns ``{ instrumentDisplayDatas: [...] }``.
     """
     if not isinstance(raw, dict):
         raise ValueError(f"Expected dict from eToro instruments endpoint, got {type(raw)}")
 
-    items: list[object] = raw.get("InstrumentDisplayDatas") or raw.get("instruments") or []
+    items: list[object] = raw.get("instrumentDisplayDatas") or []
 
     records = []
     for item in items:
@@ -156,12 +183,17 @@ def _normalise_instruments(raw: object) -> list[InstrumentRecord]:
 
 
 def _normalise_instrument(item: Mapping[str, object]) -> InstrumentRecord | None:
+    """Map a single eToro instrument dict to an InstrumentRecord.
+
+    Returns None and logs a warning if required fields are missing or
+    if ``isInternalInstrument`` is True.
     """
-    Map a single eToro instrument dict to an InstrumentRecord.
-    Returns None and logs a warning if required fields are missing.
-    """
-    instrument_id = item.get("InstrumentID") or item.get("instrumentId")
-    symbol = item.get("SymbolFull") or item.get("symbol")
+    # Skip internal instruments (restricted from public access)
+    if item.get("isInternalInstrument") is True:
+        return None
+
+    instrument_id = item.get("instrumentID")
+    symbol = item.get("symbolFull")
 
     if not instrument_id or not symbol:
         logger.warning("Skipping instrument missing ID or symbol: %s", item)
@@ -170,98 +202,125 @@ def _normalise_instrument(item: Mapping[str, object]) -> InstrumentRecord | None
     return InstrumentRecord(
         provider_id=str(instrument_id),
         symbol=str(symbol),
-        company_name=str(item.get("InstrumentDisplayName") or item.get("name") or symbol),
-        exchange=_str_or_none(item.get("ExchangeID") or item.get("exchange")),
-        currency=str(item.get("PriceSource") or item.get("currency") or "USD"),
-        sector=_str_or_none(item.get("Sector") or item.get("sector")),
-        industry=_str_or_none(item.get("Industry") or item.get("industry")),
-        country=_str_or_none(item.get("Country") or item.get("country")),
-        is_tradable=bool(item.get("IsActive") if "IsActive" in item else item.get("is_active", True)),
+        company_name=str(item.get("instrumentDisplayName") or symbol),
+        exchange=_str_or_none(item.get("exchangeID")),
+        # Placeholder: the instruments endpoint does not expose a currency
+        # field. priceSource is an exchange name (e.g. "Nasdaq"), not a
+        # currency. Default to "USD" until a reliable currency source is
+        # confirmed from real API responses. Do not treat as authoritative.
+        currency="USD",
+        sector=_str_or_none(item.get("stocksIndustryId")),
+        industry=None,  # secondary lookup deferred
+        country=None,  # not available in instruments endpoint
+        is_tradable=True,  # only tradable instruments are returned by the API
     )
 
 
-def _normalise_candles(symbol: str, raw: object) -> list[OHLCVBar]:
-    """
-    Normalise a raw eToro candles API response into OHLCVBar list.
+def _normalise_candles(raw: object) -> list[OHLCVBar]:
+    """Normalise a raw eToro candles API response into OHLCVBar list.
 
-    Accepts both camelCase (Candles) and snake_case (candles) shapes.
-    Bars with missing OHLC data are skipped with a warning.
+    Real API returns ``{ candles: [{ instrumentId, candles: [...] }] }``.
+    The outer list has one element per requested instrument; we flatten
+    the inner candle arrays.
+
+    The endpoint is called with ``asc`` direction, so bars arrive
+    oldest-first and no re-sort is needed.
     """
     if not isinstance(raw, dict):
         raise ValueError(f"Expected dict from eToro candles endpoint, got {type(raw)}")
 
-    items: list[object] = raw.get("Candles") or raw.get("candles") or []
+    outer: list[object] = raw.get("candles") or []
 
-    bars = []
-    for item in items:
-        if not isinstance(item, dict):
+    bars: list[OHLCVBar] = []
+    for group in outer:
+        if not isinstance(group, dict):
             continue
-        bar = _normalise_candle(symbol, item)
-        if bar is not None:
-            bars.append(bar)
+        inner: list[object] = group.get("candles") or []
+        for item in inner:
+            if not isinstance(item, dict):
+                continue
+            bar = _normalise_candle(item)
+            if bar is not None:
+                bars.append(bar)
 
-    # Return oldest-first so callers can compute rolling windows in order
-    bars.sort(key=lambda b: b.price_date)
     return bars
 
 
-def _normalise_candle(symbol: str, item: Mapping[str, object]) -> OHLCVBar | None:
-    """
-    Map a single eToro candle dict to an OHLCVBar.
+def _normalise_candle(item: Mapping[str, object]) -> OHLCVBar | None:
+    """Map a single eToro candle dict to an OHLCVBar.
+
     Returns None if any required OHLC field is missing.
     """
-    raw_date = item["Date"] if "Date" in item else item.get("date")
-    raw_open = item["Open"] if "Open" in item else item.get("open")
-    raw_high = item["High"] if "High" in item else item.get("high")
-    raw_low = item["Low"] if "Low" in item else item.get("low")
-    raw_close = item["Close"] if "Close" in item else item.get("close")
+    raw_date = item.get("fromDate")
+    raw_open = item.get("open")
+    raw_high = item.get("high")
+    raw_low = item.get("low")
+    raw_close = item.get("close")
 
-    if not all([raw_date, raw_open, raw_high, raw_low, raw_close]):
-        logger.warning("Skipping candle missing required fields for %s: %s", symbol, item)
+    if not all([raw_date, raw_open is not None, raw_high is not None, raw_low is not None, raw_close is not None]):
+        logger.warning("Skipping candle missing required fields: %s", item)
         return None
 
     try:
         price_date = date.fromisoformat(str(raw_date)[:10])
         return OHLCVBar(
-            symbol=symbol,
             price_date=price_date,
             open=Decimal(str(raw_open)),
             high=Decimal(str(raw_high)),
             low=Decimal(str(raw_low)),
             close=Decimal(str(raw_close)),
-            volume=_int_or_none(item.get("Volume") or item.get("volume")),
+            volume=_int_or_none(item.get("volume")),
         )
     except (ValueError, ArithmeticError) as exc:
-        logger.warning("Skipping malformed candle for %s: %s — %s", symbol, item, exc)
+        logger.warning("Skipping malformed candle: %s — %s", item, exc)
         return None
 
 
-def _normalise_quote(symbol: str, raw: object) -> Quote | None:
-    """
-    Normalise a raw eToro quote response into a Quote.
-    Returns None if bid or ask is missing.
+def _normalise_rates(raw: object) -> list[Quote]:
+    """Normalise a raw eToro rates API response into Quote list.
+
+    Real API returns ``{ rates: [...] }``.
     """
     if not isinstance(raw, dict):
+        raise ValueError(f"Expected dict from eToro rates endpoint, got {type(raw)}")
+
+    items: list[object] = raw.get("rates") or []
+
+    quotes: list[Quote] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        quote = _normalise_rate(item)
+        if quote is not None:
+            quotes.append(quote)
+    return quotes
+
+
+def _normalise_rate(item: Mapping[str, object]) -> Quote | None:
+    """Map a single eToro rate dict to a Quote.
+
+    Returns None if instrument ID or bid/ask is missing or non-positive.
+    """
+    instrument_id = item.get("instrumentID")
+    if instrument_id is None:
+        logger.warning("Skipping rate missing instrumentID: %s", item)
         return None
 
-    # Unwrap single-item list if needed: {"quotes": [{...}]}
-    data: object = raw
-    if "quotes" in raw and isinstance(raw["quotes"], list) and raw["quotes"]:
-        data = raw["quotes"][0]
-    elif "Quote" in raw:
-        data = raw["Quote"]
+    raw_bid = item.get("bid")
+    raw_ask = item.get("ask")
 
-    if not isinstance(data, dict):
+    if raw_bid is None or raw_ask is None:
+        logger.warning("Skipping rate missing bid/ask for instrument %s: %s", instrument_id, item)
         return None
 
-    raw_bid = data["Bid"] if "Bid" in data else data.get("bid")
-    raw_ask = data["Ask"] if "Ask" in data else data.get("ask")
+    bid = Decimal(str(raw_bid))
+    ask = Decimal(str(raw_ask))
 
-    if raw_bid is None or raw_ask is None or Decimal(str(raw_bid)) <= 0 or Decimal(str(raw_ask)) <= 0:
-        logger.warning("Quote for %s has absent or non-positive bid/ask: %s", symbol, raw)
+    if bid <= 0 or ask <= 0:
+        logger.warning("Rate for instrument %s has non-positive bid/ask: %s", instrument_id, item)
         return None
 
-    raw_ts = data["Time"] if "Time" in data else (data["time"] if "time" in data else data.get("timestamp"))
+    raw_ts = item.get("date")
     if raw_ts:
         try:
             quoted_at = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
@@ -270,14 +329,14 @@ def _normalise_quote(symbol: str, raw: object) -> Quote | None:
     else:
         quoted_at = datetime.now(UTC)
 
-    raw_last = data["Last"] if "Last" in data else data.get("last")
+    raw_last = item.get("lastExecution")
 
     return Quote(
-        symbol=symbol,
+        instrument_id=int(str(instrument_id)),
         timestamp=quoted_at,
-        bid=Decimal(str(raw_bid)),
-        ask=Decimal(str(raw_ask)),
-        last=Decimal(str(raw_last)) if raw_last else None,
+        bid=bid,
+        ask=ask,
+        last=Decimal(str(raw_last)) if raw_last is not None else None,
     )
 
 

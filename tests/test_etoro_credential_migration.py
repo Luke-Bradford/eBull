@@ -20,7 +20,7 @@ import pytest
 
 from app.security import secrets_crypto
 from app.services.broker_credentials import CredentialAlreadyExists, CredentialNotFound
-from app.services.operators import AmbiguousOperatorError, NoOperatorError
+from app.services.operators import NoOperatorError
 
 
 @pytest.fixture(autouse=True)
@@ -28,97 +28,6 @@ def _key() -> Iterator[None]:
     secrets_crypto.set_active_key(os.urandom(32))
     yield
     secrets_crypto._reset_for_tests()
-
-
-# ---------------------------------------------------------------------------
-# _load_etoro_api_key (scheduler helper)
-# ---------------------------------------------------------------------------
-
-
-class TestLoadEtoroApiKey:
-    """Tests for app.workers.scheduler._load_etoro_api_key."""
-
-    @patch("app.workers.scheduler.psycopg")
-    @patch("app.workers.scheduler.load_credential_for_provider_use")
-    @patch("app.workers.scheduler.sole_operator_id")
-    def test_success_returns_key(
-        self,
-        mock_sole_op: MagicMock,
-        mock_load_cred: MagicMock,
-        mock_psycopg: MagicMock,
-    ) -> None:
-        from app.workers.scheduler import _load_etoro_api_key
-
-        op_id = uuid4()
-        mock_sole_op.return_value = op_id
-        mock_load_cred.return_value = "the-api-key"
-        mock_conn = MagicMock()
-        mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_psycopg.connect.return_value.__exit__ = MagicMock(return_value=False)
-
-        result = _load_etoro_api_key("test_job")
-        assert result == "the-api-key"
-        mock_sole_op.assert_called_once_with(mock_conn)
-        mock_load_cred.assert_called_once_with(
-            mock_conn,
-            operator_id=op_id,
-            provider="etoro",
-            label="api_key",
-            environment="demo",
-            caller="test_job",
-        )
-        mock_conn.commit.assert_called_once()
-
-    @patch("app.workers.scheduler.psycopg")
-    @patch("app.workers.scheduler.sole_operator_id")
-    def test_no_operator_returns_none(
-        self,
-        mock_sole_op: MagicMock,
-        mock_psycopg: MagicMock,
-    ) -> None:
-        from app.workers.scheduler import _load_etoro_api_key
-
-        mock_sole_op.side_effect = NoOperatorError("no operator")
-        mock_conn = MagicMock()
-        mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_psycopg.connect.return_value.__exit__ = MagicMock(return_value=False)
-
-        assert _load_etoro_api_key("test_job") is None
-
-    @patch("app.workers.scheduler.psycopg")
-    @patch("app.workers.scheduler.sole_operator_id")
-    def test_ambiguous_operator_returns_none(
-        self,
-        mock_sole_op: MagicMock,
-        mock_psycopg: MagicMock,
-    ) -> None:
-        from app.workers.scheduler import _load_etoro_api_key
-
-        mock_sole_op.side_effect = AmbiguousOperatorError("two operators")
-        mock_conn = MagicMock()
-        mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_psycopg.connect.return_value.__exit__ = MagicMock(return_value=False)
-
-        assert _load_etoro_api_key("test_job") is None
-
-    @patch("app.workers.scheduler.psycopg")
-    @patch("app.workers.scheduler.load_credential_for_provider_use")
-    @patch("app.workers.scheduler.sole_operator_id")
-    def test_credential_not_found_returns_none(
-        self,
-        mock_sole_op: MagicMock,
-        mock_load_cred: MagicMock,
-        mock_psycopg: MagicMock,
-    ) -> None:
-        from app.workers.scheduler import _load_etoro_api_key
-
-        mock_sole_op.return_value = uuid4()
-        mock_load_cred.side_effect = CredentialNotFound("no cred")
-        mock_conn = MagicMock()
-        mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_psycopg.connect.return_value.__exit__ = MagicMock(return_value=False)
-
-        assert _load_etoro_api_key("test_job") is None
 
 
 # ---------------------------------------------------------------------------
