@@ -167,13 +167,15 @@ class JobRuntime:
                 # restarts after a long downtime would attempt to fire
                 # every missed instance.
                 "coalesce": True,
-                # ``misfire_grace_time=0`` -- if the fire time has
-                # passed by even a second, the run is considered
-                # missed and skipped. Combined with the absence of a
-                # persistent jobstore, this means PR A's runtime
-                # explicitly does NOT catch up missed runs on
-                # startup. Catch-up is PR C.
-                "misfire_grace_time": 0,
+                # ``misfire_grace_time=1`` -- the smallest positive
+                # integer APScheduler accepts (0 raises TypeError).
+                # Combined with the absence of a persistent jobstore,
+                # this means PR A's runtime effectively does NOT
+                # catch up missed runs on startup: a fire that is
+                # more than 1 second late is dropped. Catch-up is
+                # PR C and will be driven by ``job_runs``, not by
+                # APScheduler grace windows.
+                "misfire_grace_time": 1,
                 # One concurrent instance per job. The per-job
                 # advisory lock is the source of truth for
                 # serialisation; this is a defensive second layer.

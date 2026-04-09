@@ -54,6 +54,7 @@ _LIFESPAN_STATE_FLAGS: tuple[str, ...] = (
     "recovery_required",
     "broker_key_loaded",
     "db_pool",
+    "job_runtime",
 )
 
 
@@ -152,6 +153,19 @@ def test_app_lifespan_boots_and_state_is_coherent() -> None:
                 "normal",
                 "recovery_required",
             }
+            # The job runtime is allowed to fail to start (the
+            # lifespan catches and continues with job_runtime=None
+            # so the operator can still log in and diagnose), but a
+            # green smoke gate must mean the runtime actually came
+            # up -- otherwise a misconfigured scheduler ships
+            # invisibly. Regression target: PR #131 shipped with
+            # ``misfire_grace_time=0`` which APScheduler rejects
+            # at ``scheduler.start()``, and the lifespan swallowed
+            # the TypeError. Smoke test was green; running app had
+            # no scheduler.
+            assert app.state.job_runtime is not None, (
+                "JobRuntime failed to start during lifespan -- check backend logs for the swallowed exception"
+            )
             # /health is the cheapest end-to-end probe that the
             # routing layer is also wired up -- if it 500s, lifespan
             # came up but the app object itself is broken.
