@@ -383,7 +383,7 @@ class TestErrorHandling:
             result = broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
 
             assert result.status == "failed"
-            assert "error" in result.raw_payload
+            assert result.raw_payload.get("error", "") != ""
             assert result.raw_payload["_ebull_action"] == "BUY"
 
     def test_non_json_success_response_returns_failed(self) -> None:
