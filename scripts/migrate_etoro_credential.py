@@ -1,8 +1,10 @@
-"""One-shot migration: move eToro API key from env vars to the encrypted store.
+"""One-shot migration: move eToro API keys from env vars to the encrypted store.
 
-Reads ETORO_READ_API_KEY (and optionally ETORO_WRITE_API_KEY) from the
-environment, resolves the sole operator, and stores the credential in
-broker_credentials via the existing service layer.
+Reads ETORO_READ_API_KEY (-> label ``api_key``) and optionally
+ETORO_WRITE_API_KEY (-> label ``user_key``) from the environment,
+resolves the sole operator, and stores the credentials in
+broker_credentials with ``environment="demo"`` (the legacy env-var
+path was demo-only).
 
 This is the ONLY place in the codebase that is allowed to reference the
 old ETORO_*_API_KEY env vars after #100.
@@ -63,7 +65,7 @@ def main() -> int:
 
     migrated = 0
 
-    # Migrate ETORO_READ_API_KEY → label "read"
+    # Migrate ETORO_READ_API_KEY → label "api_key", environment "demo"
     if _READ_KEY:
         try:
             with psycopg.connect(settings.database_url) as conn:
@@ -71,15 +73,16 @@ def main() -> int:
                     conn,
                     operator_id=op_id,
                     provider="etoro",
-                    label="read",
+                    label="api_key",
+                    environment="demo",
                     plaintext=_READ_KEY,
                 )
-            print("Migrated ETORO_READ_API_KEY → broker_credentials (etoro/read)")
+            print("Migrated ETORO_READ_API_KEY → broker_credentials (etoro/api_key/demo)")
             migrated += 1
         except CredentialAlreadyExists:
-            print("Skipped ETORO_READ_API_KEY: credential (etoro/read) already exists.")
+            print("Skipped ETORO_READ_API_KEY: credential (etoro/api_key/demo) already exists.")
 
-    # Migrate ETORO_WRITE_API_KEY → label "write"
+    # Migrate ETORO_WRITE_API_KEY → label "user_key", environment "demo"
     if _WRITE_KEY:
         try:
             with psycopg.connect(settings.database_url) as conn:
@@ -87,13 +90,14 @@ def main() -> int:
                     conn,
                     operator_id=op_id,
                     provider="etoro",
-                    label="write",
+                    label="user_key",
+                    environment="demo",
                     plaintext=_WRITE_KEY,
                 )
-            print("Migrated ETORO_WRITE_API_KEY → broker_credentials (etoro/write)")
+            print("Migrated ETORO_WRITE_API_KEY → broker_credentials (etoro/user_key/demo)")
             migrated += 1
         except CredentialAlreadyExists:
-            print("Skipped ETORO_WRITE_API_KEY: credential (etoro/write) already exists.")
+            print("Skipped ETORO_WRITE_API_KEY: credential (etoro/user_key/demo) already exists.")
 
     print(f"Done. {migrated} credential(s) migrated.")
     return 0

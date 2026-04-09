@@ -50,6 +50,10 @@ logger = logging.getLogger(__name__)
 Provider = Literal["etoro"]
 ALLOWED_PROVIDERS: frozenset[str] = frozenset({"etoro"})
 
+# Canonical environment values. Validated at the service boundary so
+# callers never construct ad-hoc strings.
+ALLOWED_ENVIRONMENTS: frozenset[str] = frozenset({"demo", "real"})
+
 # Broker secrets shorter than this cannot meaningfully produce a
 # ``last_four`` preview and are almost certainly a typo. Rejected at
 # the service boundary so the HTTP layer does not need its own check.
@@ -69,6 +73,7 @@ class CredentialMetadata:
     operator_id: UUID
     provider: str
     label: str
+    environment: str
     last_four: str
     created_at: datetime
     last_used_at: datetime | None
@@ -124,6 +129,13 @@ def normalise_secret(raw: str) -> str:
     return cleaned
 
 
+def normalise_environment(raw: str) -> str:
+    cleaned = raw.strip().lower()
+    if cleaned not in ALLOWED_ENVIRONMENTS:
+        raise CredentialValidationError(f"unsupported environment: {raw!r} (must be 'demo' or 'real')")
+    return cleaned
+
+
 # ---------------------------------------------------------------------------
 # Row parsing
 # ---------------------------------------------------------------------------
@@ -134,6 +146,7 @@ _METADATA_COL_NAMES = (
     "operator_id",
     "provider",
     "label",
+    "environment",
     "last_four",
     "created_at",
     "last_used_at",
@@ -151,6 +164,7 @@ def _row_to_metadata(row: dict[str, object]) -> CredentialMetadata:
         operator_id=row["operator_id"],  # type: ignore[arg-type]
         provider=row["provider"],  # type: ignore[arg-type]
         label=row["label"],  # type: ignore[arg-type]
+        environment=row["environment"],  # type: ignore[arg-type]
         last_four=row["last_four"],  # type: ignore[arg-type]
         created_at=row["created_at"],  # type: ignore[arg-type]
         last_used_at=row["last_used_at"],  # type: ignore[arg-type]
@@ -169,17 +183,19 @@ def store_credential(
     operator_id: UUID,
     provider: str,
     label: str,
+    environment: str,
     plaintext: str,
 ) -> CredentialMetadata:
     """Encrypt and insert a new credential row.
 
     Raises:
-      CredentialValidationError -- provider / label / secret invalid.
+      CredentialValidationError -- provider / label / environment / secret invalid.
       CredentialAlreadyExists   -- an active row with the same (operator,
-                                   provider, label) already exists.
+                                   provider, label, environment) already exists.
     """
     provider_norm = normalise_provider(provider)
     label_norm = normalise_label(label)
+    env_norm = normalise_environment(environment)
     secret_norm = normalise_secret(plaintext)
 
     last_four = secret_norm[-4:]
@@ -198,9 +214,9 @@ def store_credential(
                 sql.SQL(
                     """
                 INSERT INTO broker_credentials
-                    (operator_id, provider, label, ciphertext,
+                    (operator_id, provider, label, environment, ciphertext,
                      last_four, key_version)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING {cols}
                 """
                 ).format(cols=_METADATA_COLS_SQL),
@@ -208,6 +224,7 @@ def store_credential(
                     operator_id,
                     provider_norm,
                     label_norm,
+                    env_norm,
                     ciphertext,
                     last_four,
                     key_version,
@@ -222,7 +239,9 @@ def store_credential(
         conn.commit()
     except psycopg.errors.UniqueViolation as exc:
         conn.rollback()
-        raise CredentialAlreadyExists(f"credential already exists for ({provider_norm!r}, {label_norm!r})") from exc
+        raise CredentialAlreadyExists(
+            f"credential already exists for ({provider_norm!r}, {label_norm!r}, {env_norm!r})"
+        ) from exc
     return _row_to_metadata(row)
 
 
@@ -332,9 +351,16 @@ def load_credential_for_provider_use(
     *,
     operator_id: UUID,
     provider: str,
+    label: str,
+    environment: str,
     caller: str,
 ) -> str:
     """Decrypt and return the plaintext secret for internal provider use.
+
+    Both ``label`` and ``environment`` are required -- no defaults, no
+    fallback from env-specific to global. If the credential is missing
+    for the requested ``(provider, label, environment)`` the function
+    raises ``CredentialNotFound`` with specific details.
 
     Transaction model:
       The function does NOT call ``conn.commit()`` or ``conn.rollback()``
@@ -369,11 +395,15 @@ def load_credential_for_provider_use(
       tracked separately and is out of scope for this ticket.
 
     Raises:
-      CredentialValidationError -- unsupported provider / empty caller.
-      CredentialNotFound        -- no active credential.
+      CredentialValidationError -- unsupported provider / label /
+                                   environment / empty caller.
+      CredentialNotFound        -- no active credential for the
+                                   requested (provider, label, environment).
       CredentialDecryptError    -- stored ciphertext failed AEAD check.
     """
     provider_norm = normalise_provider(provider)
+    label_norm = normalise_label(label)
+    env_norm = normalise_environment(environment)
     caller_clean = caller.strip()
     if not caller_clean:
         raise CredentialValidationError("caller tag must not be empty")
@@ -381,17 +411,17 @@ def load_credential_for_provider_use(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT id, operator_id, provider, label, ciphertext,
-                   last_four, key_version, created_at, last_used_at,
-                   revoked_at
+            SELECT id, operator_id, provider, label, environment,
+                   ciphertext, last_four, key_version, created_at,
+                   last_used_at, revoked_at
               FROM broker_credentials
              WHERE operator_id = %s
                AND provider = %s
+               AND label = %s
+               AND environment = %s
                AND revoked_at IS NULL
-             ORDER BY created_at DESC
-             LIMIT 1
             """,
-            (operator_id, provider_norm),
+            (operator_id, provider_norm, label_norm, env_norm),
         )
         row = cur.fetchone()
         if row is None:
@@ -403,7 +433,7 @@ def load_credential_for_provider_use(
                 success=False,
                 failure_reason="not_found",
             )
-            raise CredentialNotFound(f"no active credential for provider {provider_norm!r}")
+            raise CredentialNotFound(f"no active credential for ({provider_norm!r}, {label_norm!r}, {env_norm!r})")
 
         try:
             plaintext = decrypt(
