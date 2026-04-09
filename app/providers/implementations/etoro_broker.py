@@ -217,6 +217,16 @@ class EtoroBrokerProvider(BrokerProvider):
                 fees=Decimal("0"),
                 raw_payload={"_ebull_action": action, "error": str(exc)},
             )
+        except ValueError as exc:
+            logger.error("eToro place_order non-JSON response: %s", exc)
+            return BrokerOrderResult(
+                broker_order_ref=None,
+                status="failed",
+                filled_price=None,
+                filled_units=None,
+                fees=Decimal("0"),
+                raw_payload={"_ebull_action": action, "error": f"Non-JSON response: {exc}"},
+            )
 
         # Preserve the domain action in raw_payload for audit trail.
         # eToro only has IsBuy — our BUY/ADD distinction is eBull-specific.
@@ -277,6 +287,16 @@ class EtoroBrokerProvider(BrokerProvider):
                 fees=Decimal("0"),
                 raw_payload={"error": str(exc)},
             )
+        except ValueError as exc:
+            logger.error("eToro close_position non-JSON response: %s", exc)
+            return BrokerOrderResult(
+                broker_order_ref=None,
+                status="failed",
+                filled_price=None,
+                filled_units=None,
+                fees=Decimal("0"),
+                raw_payload={"error": f"Non-JSON response: {exc}"},
+            )
 
         return _normalise_close_order_response(raw)
 
@@ -312,6 +332,16 @@ class EtoroBrokerProvider(BrokerProvider):
                 filled_units=None,
                 fees=Decimal("0"),
                 raw_payload={"error": str(exc)},
+            )
+        except ValueError as exc:
+            logger.error("eToro get_order_status non-JSON response: %s", exc)
+            return BrokerOrderResult(
+                broker_order_ref=broker_order_ref,
+                status="failed",
+                filled_price=None,
+                filled_units=None,
+                fees=Decimal("0"),
+                raw_payload={"error": f"Non-JSON response: {exc}"},
             )
 
         return _normalise_order_info_response(raw, broker_order_ref)

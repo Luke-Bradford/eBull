@@ -386,6 +386,21 @@ class TestErrorHandling:
             assert "connection refused" in result.raw_payload["error"]
             assert result.raw_payload["_ebull_action"] == "BUY"
 
+    def test_non_json_success_response_returns_failed(self) -> None:
+        """When a 200 response body is not valid JSON, return status=failed."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.side_effect = ValueError("not JSON")
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._client = MagicMock()
+            broker._client.post.return_value = mock_resp
+
+            result = broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
+
+            assert result.status == "failed"
+            assert "Non-JSON" in result.raw_payload["error"]
+
     def test_non_json_error_response_fallback(self) -> None:
         """When error response is not JSON, raw_text is captured."""
         error_resp = MagicMock()
