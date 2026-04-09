@@ -41,7 +41,8 @@ class EtoroMarketDataProvider(MarketDataProvider):
     """
     Reads tradable instruments, candles, and quotes from the eToro API.
 
-    Requires ETORO_READ_API_KEY. Raw responses are persisted to
+    Callers must supply the API key (loaded from the encrypted
+    broker_credentials store). Raw responses are persisted to
     data/raw/etoro/ before normalisation.
 
     Use as a context manager to ensure the HTTP client is closed:

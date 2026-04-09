@@ -15,8 +15,10 @@ class Settings(BaseSettings):
     app_env: str = "dev"
     database_url: str = "postgresql://postgres:postgres@localhost:5432/ebull"
 
-    etoro_read_api_key: str | None = None
-    etoro_write_api_key: str | None = None
+    # eToro API credentials are now stored in the encrypted broker_credentials
+    # table (issue #99) and loaded via load_credential_for_provider_use().
+    # The migration script scripts/migrate_etoro_credential.py handles the
+    # one-time move from env vars to the encrypted store.
     etoro_env: str = "demo"
 
     fmp_api_key: str | None = None

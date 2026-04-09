@@ -35,10 +35,12 @@ from app.providers.implementations.companies_house import CompaniesHouseFilingsP
 from app.providers.implementations.etoro import EtoroMarketDataProvider
 from app.providers.implementations.fmp import FmpFundamentalsProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
+from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
 from app.services.coverage import review_coverage
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
+from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 from app.services.ops_monitor import check_row_count_spike, record_job_finish, record_job_start
 from app.services.portfolio import run_portfolio_review
 from app.services.scoring import compute_rankings
@@ -307,19 +309,50 @@ class _JobTracker:
         self.row_count: int | None = None
 
 
+def _load_etoro_api_key(job_name: str) -> str | None:
+    """Load the eToro API key from the encrypted credential store.
+
+    Returns the plaintext key on success, or ``None`` if the credential
+    cannot be resolved (no operator, ambiguous operator, no stored
+    credential).  Failures are logged at ERROR — the caller should skip
+    the job when ``None`` is returned.
+
+    The function opens its own connection and commits the audit row
+    before returning, so the caller can safely proceed to the external
+    broker call without an uncommitted audit row dangling.
+    """
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            op_id = sole_operator_id(conn)
+            api_key = load_credential_for_provider_use(
+                conn,
+                operator_id=op_id,
+                provider="etoro",
+                caller=job_name,
+            )
+            conn.commit()  # audit row durable before external call
+    except (NoOperatorError, AmbiguousOperatorError) as exc:
+        logger.error("%s: %s, skipping", job_name, exc)
+        return None
+    except CredentialNotFound:
+        logger.error("%s: no eToro credential stored, skipping", job_name)
+        return None
+    return api_key
+
+
 def nightly_universe_sync() -> None:
     """
     Sync the eToro tradable instrument universe to the local DB.
 
     Runs nightly. Idempotent — safe to re-run.
     """
-    if not settings.etoro_read_api_key:
-        logger.error("nightly_universe_sync: ETORO_READ_API_KEY not set, skipping")
+    api_key = _load_etoro_api_key("nightly_universe_sync")
+    if api_key is None:
         return
 
     with _tracked_job(JOB_NIGHTLY_UNIVERSE_SYNC) as tracker:
         with (
-            EtoroMarketDataProvider(api_key=settings.etoro_read_api_key, env=settings.etoro_env) as provider,
+            EtoroMarketDataProvider(api_key=api_key, env=settings.etoro_env) as provider,
             psycopg.connect(settings.database_url) as conn,
         ):
             summary = sync_universe(provider, conn)
@@ -340,8 +373,8 @@ def hourly_market_refresh() -> None:
     Fetches candles from the last 400 days (enough for 1y return + buffer)
     and the current quote for each covered instrument.
     """
-    if not settings.etoro_read_api_key:
-        logger.error("hourly_market_refresh: ETORO_READ_API_KEY not set, skipping")
+    api_key = _load_etoro_api_key("hourly_market_refresh")
+    if api_key is None:
         return
 
     to_date = date.today()
@@ -349,7 +382,7 @@ def hourly_market_refresh() -> None:
 
     with _tracked_job(JOB_HOURLY_MARKET_REFRESH) as tracker:
         with (
-            EtoroMarketDataProvider(api_key=settings.etoro_read_api_key, env=settings.etoro_env) as provider,
+            EtoroMarketDataProvider(api_key=api_key, env=settings.etoro_env) as provider,
             psycopg.connect(settings.database_url) as conn,
         ):
             rows = conn.execute(

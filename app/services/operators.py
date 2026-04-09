@@ -26,6 +26,52 @@ from app.services.operator_setup import MIN_PASSWORD_LEN
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Exceptions for single-operator resolution
+# ---------------------------------------------------------------------------
+
+
+class OperatorLookupError(Exception):
+    """Base for operator-resolution failures."""
+
+
+class NoOperatorError(OperatorLookupError):
+    """Raised when zero operator rows exist."""
+
+
+class AmbiguousOperatorError(OperatorLookupError):
+    """Raised when more than one operator row exists."""
+
+
+# ---------------------------------------------------------------------------
+# Single-operator resolver (issue #100)
+# ---------------------------------------------------------------------------
+
+
+def sole_operator_id(conn: psycopg.Connection[object]) -> UUID:
+    """Return the single operator's id.
+
+    The eBull v1 model assumes exactly one operator.  This helper
+    enforces that assumption loudly: zero rows is a configuration error,
+    multiple rows means the multi-operator path is live but not yet
+    wired into the calling code.
+
+    Raises:
+        NoOperatorError      -- zero rows in ``operators``.
+        AmbiguousOperatorError -- more than one row.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT operator_id FROM operators")
+        rows = cur.fetchall()
+
+    if len(rows) == 0:
+        raise NoOperatorError("no operator exists — run /auth/setup first")
+    if len(rows) > 1:
+        raise AmbiguousOperatorError(f"expected exactly one operator, found {len(rows)}")
+    return rows[0][0]  # type: ignore[no-any-return]
+
+
 # Pinned advisory-lock key for the self-delete invariant. Distinct from
 # the setup key in operator_setup.py so the two paths never block each
 # other. Documented in docs/tickets/ticket-G-first-run-setup-and-operator-management.md.
