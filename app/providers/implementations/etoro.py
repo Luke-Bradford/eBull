@@ -258,7 +258,7 @@ def _normalise_candle(item: Mapping[str, object]) -> OHLCVBar | None:
     raw_low = item.get("low")
     raw_close = item.get("close")
 
-    if any(v is None for v in (raw_date, raw_open, raw_high, raw_low, raw_close)):
+    if any(v is None or v == "" for v in (raw_date, raw_open, raw_high, raw_low, raw_close)):
         logger.warning("Skipping candle missing required fields: %s", item)
         return None
 

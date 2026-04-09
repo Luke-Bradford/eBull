@@ -192,6 +192,10 @@ class TestNormaliseCandle:
         assert bar is not None
         assert bar.volume is None
 
+    def test_empty_string_date_returns_none(self) -> None:
+        item = {**FIXTURE_CANDLE, "fromDate": ""}
+        assert _normalise_candle(item) is None
+
     def test_returns_ohlcv_bar(self) -> None:
         bar = _normalise_candle(FIXTURE_CANDLE)
         assert isinstance(bar, OHLCVBar)
