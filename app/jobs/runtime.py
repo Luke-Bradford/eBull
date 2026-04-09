@@ -440,7 +440,13 @@ class JobRuntime:
         """
         # concurrent.futures.Future, but typed as object to avoid
         # importing the type for a one-liner callback.
-        exc = getattr(fut, "exception", lambda: None)()
+        try:
+            exc = getattr(fut, "exception", lambda: None)()
+        except Exception:
+            # CancelledError (or any other unexpected state) — log and
+            # move on; done-callbacks must not propagate.
+            logger.warning("executor future was cancelled or in unexpected state")
+            return
         if exc is not None:
             logger.error("executor future raised unexpectedly: %s", exc, exc_info=exc)
 
