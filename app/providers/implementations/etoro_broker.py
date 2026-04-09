@@ -122,7 +122,16 @@ class EtoroBrokerProvider(BrokerProvider):
                 raw_payload={"error": f"Unrecognised action {action!r} for place_order"},
             )
 
-        # At least one of amount/units must be provided and positive.
+        # Exactly one of amount/units must be provided and positive.
+        if amount is not None and units is not None:
+            return BrokerOrderResult(
+                broker_order_ref=None,
+                status="failed",
+                filled_price=None,
+                filled_units=None,
+                fees=Decimal("0"),
+                raw_payload={"error": "Both amount and units provided — supply exactly one"},
+            )
         if amount is None and units is None:
             return BrokerOrderResult(
                 broker_order_ref=None,

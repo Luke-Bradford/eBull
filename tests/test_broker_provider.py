@@ -203,6 +203,18 @@ class TestPlaceOrderActionGuard:
             assert result.status == "failed"
             assert "positive" in result.raw_payload["error"]
 
+    def test_both_amount_and_units_returns_failed(self) -> None:
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            result = broker.place_order(
+                1001,
+                "BUY",
+                amount=Decimal("100"),
+                units=Decimal("0.5"),
+            )
+
+            assert result.status == "failed"
+            assert "Both" in result.raw_payload["error"]
+
 
 class TestPlaceOrderRealEnv:
     def test_real_env_uses_correct_prefix(self) -> None:
@@ -287,8 +299,8 @@ class TestClosePosition:
             result = broker.close_position(1001)
 
             assert result.status == "failed"
+            # Assert the provider-controlled prefix, not the exception string
             assert "Portfolio lookup failed" in result.raw_payload["error"]
-            assert "connection refused" in result.raw_payload["error"]
             broker._client.post.assert_not_called()
 
 
