@@ -127,7 +127,8 @@ class EtoroMarketDataProvider(MarketDataProvider):
     def get_quote(self, instrument_id: int) -> Quote | None:
         """Return the current quote for a single instrument."""
         quotes = self.get_quotes([instrument_id])
-        return quotes[0] if quotes else None
+        quote_map = {q.instrument_id: q for q in quotes}
+        return quote_map.get(instrument_id)
 
     def get_quotes(self, instrument_ids: list[int]) -> list[Quote]:
         """Batch quote fetch with automatic 100-ID chunking.
@@ -141,7 +142,7 @@ class EtoroMarketDataProvider(MarketDataProvider):
 
         all_quotes: list[Quote] = []
 
-        for i in range(0, len(instrument_ids), _RATES_BATCH_SIZE):
+        for batch_num, i in enumerate(range(0, len(instrument_ids), _RATES_BATCH_SIZE)):
             chunk = instrument_ids[i : i + _RATES_BATCH_SIZE]
             ids_param = ",".join(str(id_) for id_ in chunk)
             response = self._client.get(
@@ -151,7 +152,7 @@ class EtoroMarketDataProvider(MarketDataProvider):
             )
             response.raise_for_status()
             raw = response.json()
-            _persist_raw(f"rates_batch_{i}", raw)
+            _persist_raw(f"rates_batch{batch_num}", raw)
             all_quotes.extend(_normalise_rates(raw))
 
         return all_quotes
@@ -257,7 +258,7 @@ def _normalise_candle(item: Mapping[str, object]) -> OHLCVBar | None:
     raw_low = item.get("low")
     raw_close = item.get("close")
 
-    if not all([raw_date, raw_open is not None, raw_high is not None, raw_low is not None, raw_close is not None]):
+    if any(v is None for v in (raw_date, raw_open, raw_high, raw_low, raw_close)):
         logger.warning("Skipping candle missing required fields: %s", item)
         return None
 

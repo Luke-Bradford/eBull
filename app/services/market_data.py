@@ -86,6 +86,7 @@ def refresh_market_data(
     except Exception:
         logger.warning("Failed to batch-fetch quotes, skipping all quote updates", exc_info=True)
         quotes = []
+        quotes_skipped = len(instruments)
 
     quote_map: dict[int, Quote] = {q.instrument_id: q for q in quotes}
 
