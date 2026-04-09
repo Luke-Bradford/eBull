@@ -1,4 +1,4 @@
-"""Tests for app.api.broker_credentials (issue #99).
+"""Tests for app.api.broker_credentials (issue #99, #139).
 
 Mocks at the service-function boundary -- exercises the route shape,
 auth wiring, response schema, and 401/404/409/400 mapping without
@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -61,12 +62,18 @@ def _session_row() -> SessionRow:
     )
 
 
-def _meta(*, revoked: bool = False, label: str = "primary") -> CredentialMetadata:
+def _meta(
+    *,
+    revoked: bool = False,
+    label: str = "primary",
+    environment: str = "demo",
+) -> CredentialMetadata:
     return CredentialMetadata(
         id=_CRED_ID,
         operator_id=_OPERATOR_ID,
         provider="etoro",
         label=label,
+        environment=environment,
         last_four="1234",
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
         last_used_at=None,
@@ -148,6 +155,7 @@ class TestList:
             "id",
             "provider",
             "label",
+            "environment",
             "last_four",
             "created_at",
             "last_used_at",
@@ -186,11 +194,13 @@ class TestCreate:
         body = resp.json()
         # Response is now {credential, recovery_phrase} per #114.
         assert body["credential"]["last_four"] == "1234"
+        assert body["credential"]["environment"] == "demo"
         assert "secret" not in body["credential"]
         assert "ciphertext" not in body["credential"]
         # Service receives operator_id from session, not from body.
         kwargs = mock.call_args.kwargs
         assert kwargs["operator_id"] == _OPERATOR_ID
+        assert kwargs["environment"] == "demo"
         assert kwargs["plaintext"] == "secret-value-1234"
 
     def test_validation_error_returns_400(self) -> None:
@@ -274,3 +284,149 @@ class TestDelete:
         client.cookies.clear()
         resp = client.delete(f"/broker-credentials/{_CRED_ID}")
         assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# POST /broker-credentials/validate (#139)
+# ---------------------------------------------------------------------------
+
+
+class TestValidate:
+    """Tests for the transient credential validation endpoint."""
+
+    _BODY = {"api_key": "test-api-key", "user_key": "test-user-key", "environment": "demo"}
+
+    @patch("app.api.broker_credentials.httpx.Client")
+    def test_valid_credentials_both_levels(self, mock_client_cls: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        # L1: /me returns 200
+        me_resp = MagicMock()
+        me_resp.status_code = 200
+        me_resp.json.return_value = {"gcid": 123, "demoCid": 456, "realCid": 789}
+        # L2: /pnl returns 200
+        env_resp = MagicMock()
+        env_resp.status_code = 200
+        mock_client.get.side_effect = [me_resp, env_resp]
+
+        resp = client.post("/broker-credentials/validate", json=self._BODY)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["auth_valid"] is True
+        assert body["env_valid"] is True
+        assert body["identity"]["gcid"] == 123
+        assert body["identity"]["demo_cid"] == 456
+        assert body["identity"]["real_cid"] == 789
+        assert body["environment"] == "demo"
+
+    @patch("app.api.broker_credentials.httpx.Client")
+    def test_invalid_auth_returns_auth_valid_false(self, mock_client_cls: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        me_resp = MagicMock()
+        me_resp.status_code = 401
+        mock_client.get.return_value = me_resp
+
+        resp = client.post("/broker-credentials/validate", json=self._BODY)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["auth_valid"] is False
+        assert body["env_valid"] is False
+        assert body["env_check"] == "skipped"
+
+    @patch("app.api.broker_credentials.httpx.Client")
+    def test_valid_auth_invalid_env(self, mock_client_cls: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        me_resp = MagicMock()
+        me_resp.status_code = 200
+        me_resp.json.return_value = {"gcid": 1}
+        env_resp = MagicMock()
+        env_resp.status_code = 403
+        mock_client.get.side_effect = [me_resp, env_resp]
+
+        resp = client.post("/broker-credentials/validate", json=self._BODY)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["auth_valid"] is True
+        assert body["env_valid"] is False
+
+    @patch("app.api.broker_credentials.httpx.Client")
+    def test_network_error_handled_gracefully(self, mock_client_cls: MagicMock) -> None:
+        mock_http = MagicMock()
+        mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_http)
+        mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
+        mock_http.get.side_effect = httpx.ConnectError("connection refused")
+
+        resp = client.post("/broker-credentials/validate", json=self._BODY)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["auth_valid"] is False
+        assert body["env_valid"] is False
+
+    def test_invalid_environment_rejected(self) -> None:
+        body = {**self._BODY, "environment": "production"}
+        resp = client.post("/broker-credentials/validate", json=body)
+        assert resp.status_code == 400
+
+    def test_requires_session(self) -> None:
+        app.dependency_overrides.pop(require_session, None)
+        client.cookies.clear()
+        resp = client.post("/broker-credentials/validate", json=self._BODY)
+        assert resp.status_code == 401
+
+    @patch("app.api.broker_credentials.httpx.Client")
+    def test_no_etoro_error_details_leaked(self, mock_client_cls: MagicMock) -> None:
+        """Verify raw eToro error text is not echoed in the response."""
+        mock_client = MagicMock()
+        mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        me_resp = MagicMock()
+        me_resp.status_code = 403
+        me_resp.text = "INTERNAL_ETORO_SECRET_ERROR_DETAIL_xyz"
+        mock_client.get.return_value = me_resp
+
+        resp = client.post("/broker-credentials/validate", json=self._BODY)
+        assert resp.status_code == 200
+        assert "INTERNAL_ETORO_SECRET_ERROR_DETAIL_xyz" not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# normalise_environment (service layer, #139)
+# ---------------------------------------------------------------------------
+
+
+class TestNormaliseEnvironment:
+    def test_valid_demo(self) -> None:
+        from app.services.broker_credentials import normalise_environment
+
+        assert normalise_environment("demo") == "demo"
+
+    def test_valid_real(self) -> None:
+        from app.services.broker_credentials import normalise_environment
+
+        assert normalise_environment("real") == "real"
+
+    def test_case_normalised(self) -> None:
+        from app.services.broker_credentials import normalise_environment
+
+        assert normalise_environment("DEMO") == "demo"
+        assert normalise_environment("Real") == "real"
+
+    def test_whitespace_stripped(self) -> None:
+        from app.services.broker_credentials import normalise_environment
+
+        assert normalise_environment("  demo  ") == "demo"
+
+    def test_invalid_rejected(self) -> None:
+        from app.services.broker_credentials import normalise_environment
+
+        with pytest.raises(CredentialValidationError, match="unsupported environment"):
+            normalise_environment("production")

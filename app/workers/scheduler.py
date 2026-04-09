@@ -320,6 +320,10 @@ def _load_etoro_api_key(job_name: str) -> str | None:
     The function opens its own connection and commits the audit row
     before returning, so the caller can safely proceed to the external
     broker call without an uncommitted audit row dangling.
+
+    .. deprecated::
+        Use ``_load_etoro_credentials`` once the provider constructors
+        accept both api_key and user_key (PR B).
     """
     try:
         with psycopg.connect(settings.database_url) as conn:
@@ -328,6 +332,8 @@ def _load_etoro_api_key(job_name: str) -> str | None:
                 conn,
                 operator_id=op_id,
                 provider="etoro",
+                label="api_key",
+                environment=settings.etoro_env,
                 caller=job_name,
             )
             conn.commit()  # audit row durable before external call
@@ -338,6 +344,49 @@ def _load_etoro_api_key(job_name: str) -> str | None:
         logger.error("%s: no eToro credential stored, skipping", job_name)
         return None
     return api_key
+
+
+def _load_etoro_credentials(job_name: str) -> tuple[str, str] | None:
+    """Load (api_key, user_key) for ``settings.etoro_env``.
+
+    Returns ``None`` if either credential is missing. Failures are logged
+    at ERROR with the specific missing label and environment.
+
+    Each credential load is committed individually so audit rows are
+    durable even if the second load fails (e.g. user_key not found
+    must not silently roll back the api_key audit row).
+
+    Added in #139 but not wired to jobs until PR B rewrites the provider
+    constructors to accept both keys.
+    """
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            op_id = sole_operator_id(conn)
+            api_key = load_credential_for_provider_use(
+                conn,
+                operator_id=op_id,
+                provider="etoro",
+                label="api_key",
+                environment=settings.etoro_env,
+                caller=job_name,
+            )
+            conn.commit()  # api_key audit row durable
+            user_key = load_credential_for_provider_use(
+                conn,
+                operator_id=op_id,
+                provider="etoro",
+                label="user_key",
+                environment=settings.etoro_env,
+                caller=job_name,
+            )
+            conn.commit()  # user_key audit row durable
+    except (NoOperatorError, AmbiguousOperatorError) as exc:
+        logger.error("%s: %s, skipping", job_name, exc)
+        return None
+    except CredentialNotFound as exc:
+        logger.error("%s: %s, skipping", job_name, exc)
+        return None
+    return (api_key, user_key)
 
 
 def nightly_universe_sync() -> None:

@@ -1,11 +1,13 @@
-"""Broker credential HTTP endpoints (issue #99 / ADR 0001).
+"""Broker credential HTTP endpoints (issue #99 / ADR 0001, #139).
 
 Routes (all session-only -- never service_token):
 
-  GET    /broker-credentials       -- list metadata (active + revoked)
-  POST   /broker-credentials       -- create; body contains plaintext,
-                                      response contains metadata only
-  DELETE /broker-credentials/{id}  -- soft-delete (sets revoked_at)
+  GET    /broker-credentials            -- list metadata (active + revoked)
+  POST   /broker-credentials            -- create; body contains plaintext,
+                                           response contains metadata only
+  POST   /broker-credentials/validate   -- transient validation of candidate
+                                           credentials against the real eToro API
+  DELETE /broker-credentials/{id}       -- soft-delete (sets revoked_at)
 
 Service-token auth is intentionally not accepted. Per ADR 0001 the
 credential-management surface is operator-only by design: a service
@@ -28,13 +30,15 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
+import httpx
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_session
+from app.config import settings
 from app.db import get_conn
 from app.security import master_key
 from app.security.secrets_crypto import clear_active_key, set_active_key
@@ -45,6 +49,7 @@ from app.services.broker_credentials import (
     CredentialNotFound,
     CredentialValidationError,
     list_credentials,
+    normalise_environment,
     normalise_label,
     normalise_provider,
     normalise_secret,
@@ -73,6 +78,7 @@ class CredentialMetadataOut(BaseModel):
     id: UUID
     provider: str
     label: str
+    environment: str
     last_four: str
     created_at: datetime
     last_used_at: datetime | None
@@ -84,6 +90,7 @@ def _to_out(meta: CredentialMetadata) -> CredentialMetadataOut:
         id=meta.id,
         provider=meta.provider,
         label=meta.label,
+        environment=meta.environment,
         last_four=meta.last_four,
         created_at=meta.created_at,
         last_used_at=meta.last_used_at,
@@ -94,6 +101,10 @@ def _to_out(meta: CredentialMetadata) -> CredentialMetadataOut:
 class CreateCredentialRequest(BaseModel):
     provider: str = Field(min_length=1, max_length=64)
     label: str = Field(min_length=1, max_length=255)
+    # Transitional default: the current frontend does not send
+    # environment yet (updated in PR D). Default to "demo" so
+    # existing UI continues to work until then.
+    environment: str = Field(default="demo", min_length=1, max_length=16)
     # Upper bound is defensive: nothing sensible is 4096 chars long.
     secret: str = Field(min_length=1, max_length=4096)
 
@@ -177,6 +188,7 @@ def create(
     try:
         provider_norm = normalise_provider(body.provider)
         label_norm = normalise_label(body.label)
+        env_norm = normalise_environment(body.environment)
         # Capture the normalised secret here and pass it through
         # to store_credential below, so a single normalisation
         # pass is shared end-to-end. Previously the pre-check
@@ -190,7 +202,7 @@ def create(
         secret_norm = normalise_secret(body.secret)
     except CredentialValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    if _active_credential_exists(conn, session.operator_id, provider_norm, label_norm):
+    if _active_credential_exists(conn, session.operator_id, provider_norm, label_norm, env_norm):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="credential already exists")
 
     phrase: list[str] | None = None
@@ -267,6 +279,7 @@ def create(
                         operator_id=session.operator_id,
                         provider=provider_norm,
                         label=label_norm,
+                        environment=env_norm,
                         plaintext=secret_norm,
                     )
                 except (KeyboardInterrupt, SystemExit):
@@ -342,6 +355,7 @@ def create(
         operator_id=session.operator_id,
         provider=provider_norm,
         label=label_norm,
+        environment=env_norm,
         plaintext=secret_norm,
         phrase=None,
     )
@@ -352,8 +366,9 @@ def _active_credential_exists(
     operator_id: UUID,
     provider: str,
     label: str,
+    environment: str,
 ) -> bool:
-    """True iff (operator, provider, label) already has an active row.
+    """True iff (operator, provider, label, environment) already has an active row.
 
     Pre-flight duplicate check used by the create handler so a
     conflict is reported as 409 BEFORE the lazy-gen sequence runs --
@@ -368,10 +383,11 @@ def _active_credential_exists(
              WHERE operator_id = %s
                AND provider = %s
                AND label = %s
+               AND environment = %s
                AND revoked_at IS NULL
              LIMIT 1
             """,
-            (operator_id, provider, label),
+            (operator_id, provider, label, environment),
         )
         return cur.fetchone() is not None
 
@@ -382,6 +398,7 @@ def _do_store(
     operator_id: UUID,
     provider: str,
     label: str,
+    environment: str,
     plaintext: str,
     phrase: list[str] | None,
 ) -> CreateCredentialResponse:
@@ -391,6 +408,7 @@ def _do_store(
             operator_id=operator_id,
             provider=provider,
             label=label,
+            environment=environment,
             plaintext=plaintext,
         )
     except CredentialValidationError as exc:
@@ -479,3 +497,166 @@ def delete(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="credential not found",
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Validate endpoint (#139)
+# ---------------------------------------------------------------------------
+
+_VALIDATE_TIMEOUT_S = 10.0
+
+
+class ValidateCredentialRequest(BaseModel):
+    """Candidate credentials to validate against the real eToro API.
+
+    This is a transient probe — nothing is persisted. The caller passes
+    candidate api_key, user_key, and environment; the endpoint uses them
+    for two read-only validation calls and returns the result.
+    """
+
+    api_key: str = Field(min_length=1, max_length=4096)
+    user_key: str = Field(min_length=1, max_length=4096)
+    environment: str = Field(min_length=1, max_length=16)
+
+
+class ValidateIdentity(BaseModel):
+    """Normalised identity returned by eToro ``/api/v1/me``."""
+
+    gcid: int | None = None
+    demo_cid: int | None = None
+    real_cid: int | None = None
+
+
+class ValidateCredentialResponse(BaseModel):
+    """Result of transient credential validation.
+
+    ``auth_valid`` and ``env_valid`` reflect whether each probe
+    succeeded. Failed credentials return HTTP 200 with the flags set to
+    ``False`` — 4xx/5xx is reserved for our own API problems (bad
+    request payload, missing session).
+    """
+
+    auth_valid: bool
+    identity: ValidateIdentity | None = None
+    environment: str
+    env_valid: bool
+    env_check: str
+    note: str
+
+
+@router.post("/validate", response_model=ValidateCredentialResponse)
+def validate(
+    body: ValidateCredentialRequest,
+    session: SessionRow = Depends(require_session),
+) -> ValidateCredentialResponse:
+    """Validate candidate eToro credentials against the real API.
+
+    Two validation levels:
+      1. Basic auth — ``GET /api/v1/me`` proves the key pair is accepted
+         and returns the account identity (gcid, demoCid, realCid).
+      2. Environment — ``GET /api/v1/trading/info/{env}/pnl`` proves the
+         env-scoped trading-info surface is reachable.
+
+    Does NOT prove write permission. This is acknowledged in the
+    response ``note`` field.
+
+    The endpoint is session-gated but does not touch the DB. It uses
+    the supplied credentials transiently for the two probe calls and
+    never persists them.
+    """
+    try:
+        env_norm = normalise_environment(body.environment)
+    except CredentialValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    headers = {
+        "x-api-key": body.api_key,
+        "x-user-key": body.user_key,
+        "x-request-id": str(uuid4()),
+        "Content-Type": "application/json",
+    }
+
+    # Level 1: basic auth validation
+    try:
+        with httpx.Client(
+            base_url=settings.etoro_base_url,
+            headers=headers,
+            timeout=_VALIDATE_TIMEOUT_S,
+        ) as client:
+            me_resp = client.get("/api/v1/me")
+    except httpx.HTTPError:
+        logger.warning("credential validation: /me request failed", exc_info=True)
+        return ValidateCredentialResponse(
+            auth_valid=False,
+            identity=None,
+            environment=env_norm,
+            env_valid=False,
+            env_check="skipped",
+            note="Connection to eToro failed",
+        )
+
+    if me_resp.status_code != 200:
+        return ValidateCredentialResponse(
+            auth_valid=False,
+            identity=None,
+            environment=env_norm,
+            env_valid=False,
+            env_check="skipped",
+            note="Credentials rejected by eToro",
+        )
+
+    # Parse identity from /me response
+    try:
+        me_data = me_resp.json()
+        identity = ValidateIdentity(
+            gcid=me_data.get("gcid"),
+            demo_cid=me_data.get("demoCid"),
+            real_cid=me_data.get("realCid"),
+        )
+    except Exception:
+        logger.warning("credential validation: failed to parse /me response", exc_info=True)
+        identity = None
+
+    # Level 2: environment validation
+    # Fresh x-request-id for the second call
+    headers["x-request-id"] = str(uuid4())
+    env_check_path = f"/api/v1/trading/info/{env_norm}/pnl"
+    try:
+        with httpx.Client(
+            base_url=settings.etoro_base_url,
+            headers=headers,
+            timeout=_VALIDATE_TIMEOUT_S,
+        ) as client:
+            env_resp = client.get(env_check_path)
+    except httpx.HTTPError:
+        logger.warning("credential validation: env check request failed", exc_info=True)
+        return ValidateCredentialResponse(
+            auth_valid=True,
+            identity=identity,
+            environment=env_norm,
+            env_valid=False,
+            env_check=f"trading/info/{env_norm}/pnl unreachable",
+            note="Auth valid but environment check failed (network error). Does not verify write permission.",
+        )
+
+    if env_resp.status_code == 200:
+        return ValidateCredentialResponse(
+            auth_valid=True,
+            identity=identity,
+            environment=env_norm,
+            env_valid=True,
+            env_check=f"trading/info/{env_norm}/pnl reachable",
+            note="Does not verify write permission",
+        )
+
+    return ValidateCredentialResponse(
+        auth_valid=True,
+        identity=identity,
+        environment=env_norm,
+        env_valid=False,
+        env_check=f"trading/info/{env_norm}/pnl returned {env_resp.status_code}",
+        note="Auth valid but environment check failed. Does not verify write permission.",
+    )
