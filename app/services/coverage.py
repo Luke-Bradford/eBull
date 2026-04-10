@@ -741,6 +741,10 @@ def seed_coverage(
             ON CONFLICT DO NOTHING
             """
         )
-        seeded = max(result.rowcount, 0) if result.rowcount is not None else 0
+        if result.rowcount < 0:
+            raise RuntimeError(
+                f"seed_coverage INSERT returned rowcount={result.rowcount}; server did not report a command tag"
+            )
+        seeded = result.rowcount
         logger.info("seed_coverage: seeded %d instruments at Tier 3", seeded)
         return SeedResult(seeded=seeded, already_populated=False)

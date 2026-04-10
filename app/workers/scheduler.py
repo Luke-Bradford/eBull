@@ -365,33 +365,34 @@ def nightly_universe_sync() -> None:
             EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
             psycopg.connect(settings.database_url) as conn,
         ):
-            # Explicit outer transaction so both sync_universe and
-            # seed_coverage share a single commit boundary.  Each
+            # Two separate transactions so a coverage-seeding failure
+            # does not roll back a completed universe sync.  Each
             # function opens its own conn.transaction() (savepoints)
             # internally; the outer transaction ensures a clean,
-            # well-defined connection state between calls.
+            # well-defined connection state for each call.
             #
             # All references to summary/seed_result stay inside the
-            # transaction block to avoid UnboundLocalError if __exit__
+            # transaction blocks to avoid UnboundLocalError if __exit__
             # raises (prevention-log entry from PR #148 round 1).
             with conn.transaction():
                 summary = sync_universe(provider, conn)
 
-                # First-run bootstrap: if the coverage table is empty after a
-                # successful universe sync, seed all tradable instruments at
-                # Tier 3.  This is a no-op on subsequent runs (seed_coverage
-                # checks for existing rows and skips if non-empty).
+            # First-run bootstrap: if the coverage table is empty after a
+            # successful universe sync, seed all tradable instruments at
+            # Tier 3.  This is a no-op on subsequent runs (seed_coverage
+            # checks for existing rows and skips if non-empty).
+            with conn.transaction():
                 seed_result = seed_coverage(conn)
 
-                tracker.row_count = summary.inserted + summary.updated + seed_result.seeded
+            tracker.row_count = summary.inserted + summary.updated + seed_result.seeded
 
-                logger.info(
-                    "Universe sync complete: inserted=%d updated=%d deactivated=%d seeded_coverage=%d",
-                    summary.inserted,
-                    summary.updated,
-                    summary.deactivated,
-                    seed_result.seeded,
-                )
+            logger.info(
+                "Universe sync complete: inserted=%d updated=%d deactivated=%d seeded_coverage=%d",
+                summary.inserted,
+                summary.updated,
+                summary.deactivated,
+                seed_result.seeded,
+            )
 
 
 def hourly_market_refresh() -> None:

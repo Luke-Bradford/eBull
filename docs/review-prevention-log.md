@@ -486,5 +486,5 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 ### psycopg v3 rowcount sentinel (-1) treated as valid count
 - First seen in: #145
 - Symptom: `result.rowcount` is `-1` in psycopg v3 when the server does not report a row count. Code using `if result.rowcount is not None else 0` passes `-1` through to `tracker.row_count`, producing invalid row counts in job history.
-- Prevention: Always guard `result.rowcount` with `max(result.rowcount, 0)` (not just `is not None`). psycopg v3 uses `-1` as a sentinel for "count unavailable", not `None`.
+- Prevention: Guard `result.rowcount` with an explicit check: raise on `-1` rather than silently clamping with `max()`. A `-1` from a DML statement that should report a count (INSERT, UPDATE, DELETE) indicates a genuine server-side anomaly that must surface as an error, not be hidden.
 - Enforced in: this prevention log
