@@ -84,9 +84,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         boot.recovery_required,
     )
 
-    # Start the in-process job runtime (#13 PR A). Single job wired in
-    # this PR (nightly_universe_sync); the rest of SCHEDULED_JOBS arrives
-    # in PR B. Catch-up-on-boot is PR C -- see app/jobs/runtime.py.
+    # Start the in-process job runtime (#13). All SCHEDULED_JOBS are
+    # registered with APScheduler; catch-up fires overdue jobs at boot.
     job_runtime: JobRuntime | None
     try:
         job_runtime = start_runtime()

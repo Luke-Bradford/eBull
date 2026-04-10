@@ -27,10 +27,9 @@ Fail-closed posture (prevention-log #70):
     ``status="error"`` rows so a single broken layer does not 503 the whole
     response.
 
-``next_run_time`` is derived from the *declared* cadence in the registry, not
-from a live scheduler — APScheduler is not yet wired (#13). When it lands,
-``compute_next_run`` should be replaced with the live scheduler's next-fire
-time so reality and intent reconcile at one source of truth.
+``next_run_time`` is sourced from the live APScheduler scheduler when the
+runtime is available, falling back to the declared cadence computation
+(``compute_next_run``) when the runtime is absent (e.g. in tests).
 """
 
 from __future__ import annotations
@@ -40,11 +39,12 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
+from app.jobs.runtime import JobRuntime
 from app.services.ops_monitor import (
     JobHealth,
     LayerHealth,
@@ -114,7 +114,7 @@ class JobOverviewResponse(BaseModel):
     cadence: str
     cadence_kind: Literal["hourly", "daily", "weekly"]
     next_run_time: datetime
-    next_run_time_source: Literal["declared"]  # see module docstring
+    next_run_time_source: Literal["live", "declared"]
     last_status: Literal["running", "success", "failure", "skipped"] | None
     last_started_at: datetime | None
     last_finished_at: datetime | None
@@ -195,18 +195,28 @@ def _build_jobs_overview(
     conn: psycopg.Connection[object],
     registry: list[ScheduledJob],
     now: datetime,
+    live_times: dict[str, datetime | None] | None = None,
 ) -> list[JobOverviewResponse]:
     overviews: list[JobOverviewResponse] = []
     for job in registry:
         health = check_job_health(conn, job.name)
+        # Prefer live next-fire time from APScheduler when available;
+        # fall back to declared cadence computation otherwise.
+        live_nrt = live_times.get(job.name) if live_times else None
+        if live_nrt is not None:
+            next_run = live_nrt
+            source: Literal["live", "declared"] = "live"
+        else:
+            next_run = compute_next_run(job.cadence, now)
+            source = "declared"
         overviews.append(
             JobOverviewResponse(
                 name=job.name,
                 description=job.description,
                 cadence=job.cadence.label,
                 cadence_kind=job.cadence.kind,
-                next_run_time=compute_next_run(job.cadence, now),
-                next_run_time_source="declared",
+                next_run_time=next_run,
+                next_run_time_source=source,
                 last_status=health.last_status,
                 last_started_at=health.last_started_at,
                 last_finished_at=health.last_finished_at,
@@ -261,20 +271,21 @@ def get_system_status(
 
 @router.get("/jobs", response_model=JobsListResponse)
 def get_jobs(
+    request: Request,
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> JobsListResponse:
-    """Declared scheduled jobs with computed next-run time and last result.
+    """Declared scheduled jobs with live next-run time and last result.
 
-    ``next_run_time`` is derived from the declared cadence (see module
-    docstring); ``next_run_time_source`` is always ``"declared"`` until
-    APScheduler is wired (#13).
+    ``next_run_time`` is sourced from the live APScheduler scheduler
+    when the runtime is available (``next_run_time_source="live"``),
+    falling back to the declared cadence computation otherwise.
     """
     now = _utcnow()
+    runtime: JobRuntime | None = getattr(request.app.state, "job_runtime", None)
+    live_times = runtime.get_next_run_times() if runtime is not None else None
     try:
-        overviews = _build_jobs_overview(conn, SCHEDULED_JOBS, now)
+        overviews = _build_jobs_overview(conn, SCHEDULED_JOBS, now, live_times=live_times)
     except Exception as exc:
-        # Log full detail server-side; HTTP detail is a fixed string to
-        # avoid leaking internals to bearer-token holders.
         logger.exception("get_jobs: failed to build overview")
         raise HTTPException(status_code=503, detail="job overview unavailable") from exc
 

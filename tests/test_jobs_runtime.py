@@ -238,6 +238,50 @@ class TestStartWiring:
             rt.start()
 
 
+class TestGetNextRunTimes:
+    def test_returns_live_fire_times_from_scheduler(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """get_next_run_times queries APScheduler's in-memory jobs."""
+        from app.workers.scheduler import JOB_DAILY_CIK_REFRESH
+
+        fire_time = datetime(2026, 4, 11, 3, 0, 0, tzinfo=UTC)
+
+        fake_aps_job = MagicMock()
+        fake_aps_job.next_run_time = fire_time
+
+        rt = _make_runtime({JOB_DAILY_CIK_REFRESH: lambda: None})
+        monkeypatch.setattr(
+            rt._scheduler,
+            "get_job",
+            lambda job_id: fake_aps_job if job_id == f"recurring:{JOB_DAILY_CIK_REFRESH}" else None,
+        )
+
+        result = rt.get_next_run_times()
+        assert result[JOB_DAILY_CIK_REFRESH] == fire_time
+
+    def test_returns_none_for_missing_scheduler_job(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If APScheduler doesn't know about a job, return None."""
+        from app.workers.scheduler import JOB_DAILY_CIK_REFRESH
+
+        rt = _make_runtime({JOB_DAILY_CIK_REFRESH: lambda: None})
+        monkeypatch.setattr(rt._scheduler, "get_job", lambda _job_id: None)
+
+        result = rt.get_next_run_times()
+        assert result[JOB_DAILY_CIK_REFRESH] is None
+
+    def test_excludes_unwired_jobs(self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Jobs not in the invoker map are excluded from results."""
+        rt = _make_runtime({"not_in_registry": lambda: None})
+        monkeypatch.setattr(rt._scheduler, "get_job", lambda _job_id: None)
+
+        result = rt.get_next_run_times()
+        # SCHEDULED_JOBS entries that aren't wired should not appear.
+        assert "not_in_registry" not in result
+
+
 class TestProductionInvokerRegistry:
     """Every scheduled job must have an invoker; on-demand jobs may exist
     in ``_INVOKERS`` without a ``SCHEDULED_JOBS`` entry.
