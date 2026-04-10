@@ -209,13 +209,13 @@ class TestStartWiring:
         # Wire an invoker for a name that IS in SCHEDULED_JOBS, plus
         # one that is not. start() should register the first and
         # silently ignore the second.
-        from app.workers.scheduler import JOB_NIGHTLY_UNIVERSE_SYNC
+        from app.workers.scheduler import JOB_DAILY_CIK_REFRESH
 
         added: list[str] = []
 
         rt = _make_runtime(
             {
-                JOB_NIGHTLY_UNIVERSE_SYNC: lambda: None,
+                JOB_DAILY_CIK_REFRESH: lambda: None,
                 "not_in_registry": lambda: None,
             }
         )
@@ -229,7 +229,7 @@ class TestStartWiring:
 
         rt.start()
 
-        assert added == [f"recurring:{JOB_NIGHTLY_UNIVERSE_SYNC}"]
+        assert added == [f"recurring:{JOB_DAILY_CIK_REFRESH}"]
 
     def test_double_start_raises(self, patched_runtime: None) -> None:
         rt = _make_runtime({})
@@ -267,7 +267,7 @@ class TestProductionInvokerRegistry:
         registry_names = {job.name for job in SCHEDULED_JOBS}
         invoker_names = set(_INVOKERS.keys())
         on_demand = invoker_names - registry_names
-        assert on_demand == {"daily_tax_reconciliation"}, (
+        assert on_demand == {"daily_tax_reconciliation", "nightly_universe_sync"}, (
             f"Unexpected on-demand invokers (update this test if intentional): {sorted(on_demand)}"
         )
 

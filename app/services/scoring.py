@@ -846,7 +846,11 @@ def compute_rankings(
     if model_version not in _WEIGHT_MODES:
         raise KeyError(f"Unknown model_version: {model_version!r}")
 
-    # Eligible instruments
+    # Eligible instruments — all tradable instruments with a coverage row
+    # and at least some data.  No tier gate: scoring runs for every tier
+    # (including T3) so the weekly coverage review can promote on
+    # deterministic signals alone.  The coverage JOIN ensures scores are
+    # only created for instruments that review_coverage can see.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as elig_cur:
         elig_cur.execute(
             """
@@ -854,7 +858,6 @@ def compute_rankings(
             FROM instruments i
             JOIN coverage c ON c.instrument_id = i.instrument_id
             WHERE i.is_tradable = TRUE
-              AND c.coverage_tier = 1
               AND (
                   EXISTS (SELECT 1 FROM theses t WHERE t.instrument_id = i.instrument_id)
                   OR EXISTS (SELECT 1 FROM fundamentals_snapshot f WHERE f.instrument_id = i.instrument_id)
@@ -867,7 +870,7 @@ def compute_rankings(
 
     instrument_ids = [int(r["instrument_id"]) for r in rows]
     if not instrument_ids:
-        logger.info("compute_rankings: no eligible Tier 1 instruments found")
+        logger.info("compute_rankings: no eligible instruments found")
         return RankingResult(scored=[], model_version=model_version)
 
     logger.info("compute_rankings: scoring %d eligible instrument(s) [model=%s]", len(instrument_ids), model_version)
