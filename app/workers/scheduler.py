@@ -621,8 +621,8 @@ def daily_research_refresh() -> None:
             logger.info("daily_research_refresh: no CIK mappings, skipping SEC fundamentals")
 
         # Fundamentals — FMP (fallback for non-US instruments)
+        fmp_symbols = [(sym, iid) for sym, iid in symbols if sym.upper() not in cik_map]
         if settings.fmp_api_key:
-            fmp_symbols = [(sym, iid) for sym, iid in symbols if sym.upper() not in cik_map]
             if fmp_symbols:
                 with (
                     FmpFundamentalsProvider(api_key=settings.fmp_api_key) as fmp,
@@ -636,6 +636,11 @@ def daily_research_refresh() -> None:
                     fmp_summary.snapshots_upserted,
                     fmp_summary.symbols_skipped,
                 )
+        elif fmp_symbols:
+            logger.warning(
+                "FMP_API_KEY not set; %d non-US instruments will have no fundamentals",
+                len(fmp_symbols),
+            )
 
         # Filings — SEC EDGAR
         with (
