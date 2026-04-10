@@ -1126,8 +1126,8 @@ class TestBootstrapTier2Cohort:
         assert inner["bootstrap_cap"] == BOOTSTRAP_T2_CAP
         assert "deadlock" in inner["reason"]
 
-    def test_writes_inside_transaction(self) -> None:
-        """All promotion writes must be in a single transaction."""
+    def test_count_and_writes_inside_single_transaction(self) -> None:
+        """Count check + promotion writes must be in one transaction (no TOCTOU)."""
         candidates = [self._make_candidate(1, "AAPL")]
         conn = self._mock_conn(t12_count=0, candidates=candidates)
         bootstrap_tier2_cohort(conn)
