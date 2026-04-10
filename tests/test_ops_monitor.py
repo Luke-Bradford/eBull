@@ -271,8 +271,8 @@ class TestRecordJobFinish:
 class TestRecordJobSkip:
     """Test job skip recording.
 
-    ``record_job_skip`` uses ``conn.execute(...).fetchone()`` directly
-    (no separate cursor block).
+    ``record_job_skip`` uses ``conn.transaction()`` + ``conn.execute()``
+    (no separate cursor block, no explicit ``conn.commit()``).
     """
 
     @staticmethod
@@ -287,7 +287,7 @@ class TestRecordJobSkip:
         conn = self._conn_returning((99,))
         run_id = record_job_skip(conn, "test_job", "no coverage rows", now=_NOW)
         assert run_id == 99
-        conn.commit.assert_called_once()
+        conn.transaction.assert_called_once()
 
     def test_inserts_skipped_status_with_reason(self) -> None:
         conn = self._conn_returning((1,))
@@ -302,6 +302,12 @@ class TestRecordJobSkip:
         conn = self._conn_returning(None)
         with pytest.raises(RuntimeError, match="no row"):
             record_job_skip(conn, "test_job", "reason", now=_NOW)
+
+    def test_does_not_call_conn_commit_directly(self) -> None:
+        """Commit is handled by conn.transaction(), not conn.commit()."""
+        conn = self._conn_returning((1,))
+        record_job_skip(conn, "test_job", "reason", now=_NOW)
+        conn.commit.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -337,18 +337,19 @@ def record_job_skip(
     single atomic insert is the honest representation.
     """
     now = now or _utcnow()
-    row = conn.execute(
-        """
-        INSERT INTO job_runs (job_name, started_at, finished_at, status, row_count, error_msg)
-        VALUES (%(name)s, %(ts)s, %(ts)s, 'skipped', 0, %(reason)s)
-        RETURNING run_id
-        """,
-        {"name": job_name, "ts": now, "reason": reason},
-    ).fetchone()
-    conn.commit()
-    if row is None:
-        raise RuntimeError("job_runs INSERT returned no row")
-    return int(row[0])
+    with conn.transaction():
+        row = conn.execute(
+            """
+            INSERT INTO job_runs (job_name, started_at, finished_at, status, row_count, error_msg)
+            VALUES (%(name)s, %(ts)s, %(ts)s, 'skipped', 0, %(reason)s)
+            RETURNING run_id
+            """,
+            {"name": job_name, "ts": now, "reason": reason},
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("job_runs INSERT returned no row")
+        run_id = int(row[0])
+    return run_id
 
 
 def check_job_health(

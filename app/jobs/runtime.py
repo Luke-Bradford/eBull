@@ -330,8 +330,13 @@ class JobRuntime:
 
         # Check prerequisites for overdue jobs and split into
         # fire-list vs skip-list.  ``processed`` tracks jobs that have
-        # already been categorised (and, for skips, committed to the DB)
-        # so the fallback path does not re-fire already-skipped jobs.
+        # already been categorised so the fallback path does not
+        # re-fire already-skipped jobs.
+        #
+        # ``processed.add(name)`` is called BEFORE ``record_job_skip``
+        # so that if the skip recording raises after committing the
+        # row, the job is still marked as processed and won't be
+        # double-fired in the fallback path.
         firing: list[str] = []
         skipped: list[tuple[str, str]] = []  # (name, reason)
         processed: set[str] = set()
@@ -342,9 +347,9 @@ class JobRuntime:
                     if job.prerequisite is not None:
                         met, reason = job.prerequisite(conn)
                         if not met:
+                            processed.add(name)
                             record_job_skip(conn, name, reason)
                             skipped.append((name, reason))
-                            processed.add(name)
                             continue
                     firing.append(name)
                     processed.add(name)
@@ -353,7 +358,6 @@ class JobRuntime:
             # Only fire jobs that were not already processed (skipped
             # jobs already have committed job_runs rows).
             firing = [n for n in overdue if n not in processed]
-            skipped = [(n, r) for n, r in skipped if n in processed]
 
         for name, reason in skipped:
             logger.info("catch-up: skipping %s — prerequisite not met: %s", name, reason)
