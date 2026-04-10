@@ -282,8 +282,8 @@ def get_jobs(
     """
     now = _utcnow()
     runtime: JobRuntime | None = getattr(request.app.state, "job_runtime", None)
-    live_times = runtime.get_next_run_times() if runtime is not None else None
     try:
+        live_times = runtime.get_next_run_times() if runtime is not None else None
         overviews = _build_jobs_overview(conn, SCHEDULED_JOBS, now, live_times=live_times)
     except Exception as exc:
         logger.exception("get_jobs: failed to build overview")

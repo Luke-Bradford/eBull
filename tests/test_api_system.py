@@ -453,17 +453,21 @@ class TestSystemJobs:
     def test_falls_back_to_declared_when_no_runtime(self) -> None:
         """Without a runtime, next_run_time_source is 'declared'."""
         _override_conn(_mock_conn())
+        prev = getattr(app.state, "job_runtime", None)
         app.state.job_runtime = None
-        with patch(
-            "app.api.system.check_job_health",
-            side_effect=lambda _conn, name: _success_job_health(name),
-        ):
-            resp = client.get("/system/jobs")
+        try:
+            with patch(
+                "app.api.system.check_job_health",
+                side_effect=lambda _conn, name: _success_job_health(name),
+            ):
+                resp = client.get("/system/jobs")
 
-        assert resp.status_code == 200
-        body = resp.json()
-        for job in body["jobs"]:
-            assert job["next_run_time_source"] == "declared"
+            assert resp.status_code == 200
+            body = resp.json()
+            for job in body["jobs"]:
+                assert job["next_run_time_source"] == "declared"
+        finally:
+            app.state.job_runtime = prev
 
     def test_service_exception_returns_503_without_leaking_internals(self) -> None:
         _override_conn(_mock_conn())

@@ -272,14 +272,17 @@ class TestGetNextRunTimes:
         result = rt.get_next_run_times()
         assert result[JOB_DAILY_CIK_REFRESH] is None
 
-    def test_excludes_unwired_jobs(self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Jobs not in the invoker map are excluded from results."""
-        rt = _make_runtime({"not_in_registry": lambda: None})
+    def test_excludes_unwired_scheduled_jobs(self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch) -> None:
+        """SCHEDULED_JOBS entries not in the invoker map are excluded."""
+        from app.workers.scheduler import JOB_DAILY_CIK_REFRESH, JOB_HOURLY_MARKET_REFRESH
+
+        # Wire only one of two scheduled jobs — the other should be absent.
+        rt = _make_runtime({JOB_DAILY_CIK_REFRESH: lambda: None})
         monkeypatch.setattr(rt._scheduler, "get_job", lambda _job_id: None)
 
         result = rt.get_next_run_times()
-        # SCHEDULED_JOBS entries that aren't wired should not appear.
-        assert "not_in_registry" not in result
+        assert JOB_DAILY_CIK_REFRESH in result
+        assert JOB_HOURLY_MARKET_REFRESH not in result
 
 
 class TestProductionInvokerRegistry:
