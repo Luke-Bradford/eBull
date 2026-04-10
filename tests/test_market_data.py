@@ -506,9 +506,16 @@ class TestCandlesAreFresh:
         conn = _mock_conn_with_latest_date(date(2026, 4, 9))
         assert _candles_are_fresh(conn, 1, today) is True
 
-    def test_stale_when_latest_is_two_days_ago(self) -> None:
+    def test_fresh_over_weekend(self) -> None:
+        """Friday candle is fresh on Monday (3-day gap covers weekends)."""
+        monday = date(2026, 4, 13)  # Monday
+        friday = date(2026, 4, 10)  # previous Friday
+        conn = _mock_conn_with_latest_date(friday)
+        assert _candles_are_fresh(conn, 1, monday) is True
+
+    def test_stale_when_latest_is_four_days_ago(self) -> None:
         today = date(2026, 4, 10)
-        conn = _mock_conn_with_latest_date(date(2026, 4, 8))
+        conn = _mock_conn_with_latest_date(date(2026, 4, 6))
         assert _candles_are_fresh(conn, 1, today) is False
 
     def test_stale_when_no_data(self) -> None:

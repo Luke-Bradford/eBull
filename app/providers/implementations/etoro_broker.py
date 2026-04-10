@@ -73,13 +73,18 @@ class EtoroBrokerProvider(BrokerProvider):
             timeout=30.0,
         )
         # Separate throttle rates for reads (GET 60/min) and writes (POST 20/min).
+        # Both share the same _last_request_at timestamp so interleaved
+        # GET+POST calls cannot exceed the API's combined rate limit.
+        shared_ts: list[float] = [0.0]
         self._http_read = ResilientClient(
             self._client,
             min_request_interval_s=_ETORO_READ_INTERVAL_S,
+            shared_last_request=shared_ts,
         )
         self._http_write = ResilientClient(
             self._client,
             min_request_interval_s=_ETORO_WRITE_INTERVAL_S,
+            shared_last_request=shared_ts,
         )
 
         # Environment-scoped path prefixes for trading endpoints.

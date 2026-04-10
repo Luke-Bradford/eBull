@@ -132,9 +132,14 @@ def _candles_are_fresh(
     instrument_id: int,
     today: date,
 ) -> bool:
-    """Return True if price_daily already has a row for today (or yesterday for
-    pre-market calls).  Daily candles don't change intraday, so re-fetching is
-    pure waste when a row for the current trading day already exists.
+    """Return True if price_daily already has a row recent enough to skip.
+
+    Daily candles don't change intraday, so re-fetching is pure waste
+    when a row for the current trading day already exists.
+
+    The 3-day window covers weekends: Friday's candle is fresh until
+    Monday (gap = 3 calendar days).  On a normal weekday the gap is 0
+    or 1 (pre-market before today's candle posts).
     """
     row = conn.execute(
         """
@@ -148,8 +153,8 @@ def _candles_are_fresh(
     if row is None or row[0] is None:
         return False
     latest_date: date = row[0]
-    # Fresh if latest candle is from today or yesterday (covers pre-market).
-    return (today - latest_date).days <= 1
+    # Fresh if latest candle is within 3 calendar days (covers weekends).
+    return (today - latest_date).days <= 3
 
 
 def _upsert_candles(
