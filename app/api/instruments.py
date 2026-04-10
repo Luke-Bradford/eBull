@@ -118,6 +118,7 @@ def _parse_quote(row: dict[str, object]) -> QuoteSnapshot | None:
 @router.get("", response_model=InstrumentListResponse)
 def list_instruments(
     conn: psycopg.Connection[object] = Depends(get_conn),
+    search: str | None = Query(default=None, max_length=100),
     sector: str | None = Query(default=None),
     coverage_tier: int | None = Query(default=None, ge=1, le=3),
     exchange: str | None = Query(default=None),
@@ -127,6 +128,8 @@ def list_instruments(
     """Paginated instrument list with optional filters.
 
     Filters:
+      - search: prefix match on symbol or case-insensitive substring on
+        instrument_display_name (company_name)
       - sector: exact match on instruments.sector
       - coverage_tier: exact match (1/2/3); untiered instruments excluded
       - exchange: exact match on instruments.exchange
@@ -137,6 +140,12 @@ def list_instruments(
     where_clauses: list[str] = []
     filter_params: dict[str, object] = {}
 
+    if search is not None:
+        search = search.strip()
+        if search:
+            where_clauses.append("(i.symbol ILIKE %(search_prefix)s OR i.company_name ILIKE %(search_contains)s)")
+            filter_params["search_prefix"] = f"{search}%"
+            filter_params["search_contains"] = f"%{search}%"
     if sector is not None:
         where_clauses.append("i.sector = %(sector)s")
         filter_params["sector"] = sector
