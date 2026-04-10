@@ -19,6 +19,7 @@ import {
 import type { InstrumentListItem } from "@/api/types";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
+import { Pagination } from "@/components/ui/Pagination";
 import { useAsync } from "@/lib/useAsync";
 import { formatMoney } from "@/lib/format";
 
@@ -280,31 +281,11 @@ export function InstrumentsPage() {
               onToggleSort={toggleSort}
               pageScopedSort={totalPages > 1}
             />
-            {totalPages > 1 && (
-              <div className="mt-3 flex items-center justify-between text-xs text-slate-500">
-                <span>
-                  Page {page + 1} of {totalPages}
-                </span>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    disabled={page === 0}
-                    onClick={() => setPage((p) => p - 1)}
-                    className="rounded border border-slate-200 bg-white px-2 py-1 font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
-                  >
-                    Previous
-                  </button>
-                  <button
-                    type="button"
-                    disabled={page >= totalPages - 1}
-                    onClick={() => setPage((p) => p + 1)}
-                    className="rounded border border-slate-200 bg-white px-2 py-1 font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
-                  >
-                    Next
-                  </button>
-                </div>
-              </div>
-            )}
+            <Pagination
+              page={page}
+              totalPages={totalPages}
+              onPageChange={setPage}
+            />
           </>
         )}
       </Section>
