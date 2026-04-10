@@ -38,9 +38,9 @@ _RAW_PAYLOAD_DIR = Path("data/raw/etoro_broker")
 def _persist_raw(tag: str, payload: bytes) -> None:
     """Write raw API response bytes to disk before normalisation.
 
-    Best-effort: must not block the primary read path.  Logs at ERROR
-    for OS-level failures (disk full, permission denied) and WARNING
-    for anything else.
+    Raises ``OSError`` on disk-level failures (permission denied, disk full)
+    so the caller can decide whether to abort or continue.  Non-OS exceptions
+    are logged and swallowed.
     """
     try:
         _RAW_PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -48,7 +48,7 @@ def _persist_raw(tag: str, payload: bytes) -> None:
         path = _RAW_PAYLOAD_DIR / f"{tag}_{ts}.json"
         path.write_bytes(payload)
     except OSError:
-        logger.error("OS error persisting raw payload for tag=%s", tag, exc_info=True)
+        raise
     except Exception:
         logger.warning("Failed to persist raw payload for tag=%s", tag, exc_info=True)
 
@@ -409,7 +409,13 @@ class EtoroBrokerProvider(BrokerProvider):
             f"{self._info_prefix}/portfolio",
             headers=self._request_headers(),
         )
-        _persist_raw("etoro_portfolio", response.content)
+        try:
+            _persist_raw("etoro_portfolio", response.content)
+        except OSError:
+            logger.error(
+                "Failed to persist raw portfolio payload — continuing with response",
+                exc_info=True,
+            )
         response.raise_for_status()
         raw = response.json()
 
