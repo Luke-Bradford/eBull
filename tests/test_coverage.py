@@ -1137,6 +1137,7 @@ class TestBootstrapTier2Cohort:
         count_cursor = self._cursor_mocks[0]
         lock_sql = str(count_cursor.execute.call_args_list[0])
         assert "pg_advisory_xact_lock" in lock_sql
+        assert "::bigint" in lock_sql
 
     def test_default_cap_matches_constant(self) -> None:
         """Verify the default cap parameter is BOOTSTRAP_T2_CAP."""

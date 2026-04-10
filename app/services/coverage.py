@@ -57,6 +57,8 @@ TIER_1_CAP: int = 50
 
 # Bootstrap: max instruments to promote from T3→T2 on first run
 BOOTSTRAP_T2_CAP: int = 200
+# Advisory lock ID for bootstrap_tier2_cohort (arbitrary; unique within the app)
+_BOOTSTRAP_LOCK_ID: int = 737_001
 
 # Review frequency mapping — duplicated from thesis.py; extract when touched next
 _REVIEW_FREQUENCY_DAYS: dict[str, int] = {
@@ -827,10 +829,12 @@ def bootstrap_tier2_cohort(
     # Advisory lock + transaction makes the check-then-act atomic even
     # under READ COMMITTED.  The lock is released when the transaction
     # ends, so concurrent callers block rather than both seeing count=0.
-    _BOOTSTRAP_LOCK_ID = 737_001  # arbitrary; unique within the app
     with conn.transaction():
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(%(lock_id)s)", {"lock_id": _BOOTSTRAP_LOCK_ID})
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(%(lock_id)s::bigint)",
+                {"lock_id": _BOOTSTRAP_LOCK_ID},
+            )
             cur.execute("SELECT COUNT(*) AS cnt FROM coverage WHERE coverage_tier IN (1, 2)")
             row = cur.fetchone()
             t12_count = int(row["cnt"]) if row is not None else 0
