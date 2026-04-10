@@ -742,9 +742,7 @@ def seed_coverage(
             """
         )
         if result.rowcount == -1:
-            raise RuntimeError(
-                f"seed_coverage INSERT returned rowcount={result.rowcount}; server did not report a command tag"
-            )
+            raise RuntimeError("seed_coverage INSERT INTO coverage: server did not report a command tag (rowcount=-1)")
         seeded = result.rowcount
         logger.info("seed_coverage: seeded %d instruments at Tier 3", seeded)
         return SeedResult(seeded=seeded, already_populated=False)
