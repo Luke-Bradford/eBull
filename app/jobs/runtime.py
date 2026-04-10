@@ -341,7 +341,7 @@ class JobRuntime:
         skipped: list[tuple[str, str]] = []  # (name, reason)
         processed: set[str] = set()
         try:
-            with psycopg.connect(self._database_url) as conn:
+            with psycopg.connect(self._database_url, autocommit=True) as conn:
                 for name in overdue:
                     job = catch_up_jobs[name]
                     if job.prerequisite is not None:
@@ -518,7 +518,7 @@ class JobRuntime:
             # bypass prerequisites so the operator can force a run).
             if job is not None and job.prerequisite is not None:
                 try:
-                    with psycopg.connect(database_url) as conn:
+                    with psycopg.connect(database_url, autocommit=True) as conn:
                         met, reason = job.prerequisite(conn)
                         if not met:
                             record_job_skip(conn, job_name, reason)

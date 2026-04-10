@@ -343,7 +343,7 @@ def _make_catchup_runtime(
     mock_conn = MagicMock()
     mock_conn.__enter__ = MagicMock(return_value=mock_conn)
     mock_conn.__exit__ = MagicMock(return_value=False)
-    monkeypatch.setattr("app.jobs.runtime.psycopg.connect", lambda _url: mock_conn)
+    monkeypatch.setattr("app.jobs.runtime.psycopg.connect", lambda _url, **_kw: mock_conn)
 
     # Pin the clock.
     monkeypatch.setattr(
@@ -630,7 +630,7 @@ class TestCatchUpPrerequisites:
         mock_conn = MagicMock()
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__ = MagicMock(return_value=False)
-        monkeypatch.setattr("app.jobs.runtime.psycopg.connect", lambda _url: mock_conn)
+        monkeypatch.setattr("app.jobs.runtime.psycopg.connect", lambda _url, **_kw: mock_conn)
         monkeypatch.setattr(
             "app.jobs.runtime.datetime",
             type("_FakeDT", (), {"now": staticmethod(lambda tz: _NOW)}),
@@ -674,7 +674,7 @@ class TestScheduledFirePrerequisite:
         mock_conn = MagicMock()
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__ = MagicMock(return_value=False)
-        monkeypatch.setattr("app.jobs.runtime.psycopg.connect", lambda _url: mock_conn)
+        monkeypatch.setattr("app.jobs.runtime.psycopg.connect", lambda _url, **_kw: mock_conn)
         monkeypatch.setattr("app.jobs.runtime.SCHEDULED_JOBS", [_PREREQ_UNMET_JOB])
 
         rt = _make_runtime({"prereq_unmet_job": invoker})
@@ -695,7 +695,7 @@ class TestScheduledFirePrerequisite:
         mock_conn = MagicMock()
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__ = MagicMock(return_value=False)
-        monkeypatch.setattr("app.jobs.runtime.psycopg.connect", lambda _url: mock_conn)
+        monkeypatch.setattr("app.jobs.runtime.psycopg.connect", lambda _url, **_kw: mock_conn)
         monkeypatch.setattr("app.jobs.runtime.SCHEDULED_JOBS", [_PREREQ_MET_JOB])
 
         rt = _make_runtime({"prereq_met_job": invoker})
