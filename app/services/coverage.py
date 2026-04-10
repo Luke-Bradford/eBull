@@ -27,6 +27,7 @@ Promotion is one step per review cycle (T3→T2 or T2→T1, never T3→T1).
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -53,6 +54,11 @@ DEMOTE_T2_TO_T3_SCORE: float = 0.45
 
 # Tier 1 hard cap
 TIER_1_CAP: int = 50
+
+# Bootstrap: max instruments to promote from T3→T2 on first run
+BOOTSTRAP_T2_CAP: int = 200
+# Advisory lock ID for bootstrap_tier2_cohort (arbitrary; unique within the app)
+_BOOTSTRAP_LOCK_ID: int = 737_001
 
 # Review frequency mapping — duplicated from thesis.py; extract when touched next
 _REVIEW_FREQUENCY_DAYS: dict[str, int] = {
@@ -746,3 +752,137 @@ def seed_coverage(
         seeded = result.rowcount
         logger.info("seed_coverage: seeded %d instruments at Tier 3", seeded)
         return SeedResult(seeded=seeded, already_populated=False)
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap: break the T3-only deadlock
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BootstrapResult:
+    """Outcome of ``bootstrap_tier2_cohort``."""
+
+    promoted: int
+    skipped_reason: str | None
+
+
+def _select_bootstrap_candidates(
+    conn: psycopg.Connection[Any],
+    cap: int,
+) -> Sequence[dict[str, Any]]:
+    """Select the best T3 instruments for initial T2 promotion.
+
+    Ranking criteria (descending priority):
+      1. Has a CIK mapping — enables SEC filings ingestion.
+      2. Symbol alphabetical — deterministic tiebreak for reproducibility.
+
+    Sector diversity is not applied because sector data is NULL for all
+    eToro-sourced instruments at bootstrap time.  Once fundamentals are
+    ingested for the T2 cohort, the weekly coverage review can use real
+    sector data for subsequent promotion decisions.
+
+    Requires: caller must hold an active transaction with the bootstrap
+    advisory lock (``pg_advisory_xact_lock(_BOOTSTRAP_LOCK_ID)``) so
+    the candidate read is atomic with the subsequent writes.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT
+                i.instrument_id,
+                i.symbol,
+                (e.external_identifier_id IS NOT NULL) AS has_cik
+            FROM instruments i
+            JOIN coverage c ON c.instrument_id = i.instrument_id
+            LEFT JOIN external_identifiers e
+                ON  e.instrument_id = i.instrument_id
+                AND e.identifier_type = 'cik'
+                AND e.is_primary = TRUE
+            WHERE i.is_tradable = TRUE
+              AND c.coverage_tier = 3
+            ORDER BY
+                (e.external_identifier_id IS NOT NULL) DESC,
+                i.symbol ASC
+            LIMIT %(cap)s
+            """,
+            {"cap": cap},
+        )
+        return cur.fetchall()
+
+
+def bootstrap_tier2_cohort(
+    conn: psycopg.Connection[Any],
+    cap: int = BOOTSTRAP_T2_CAP,
+) -> BootstrapResult:
+    """Promote an initial cohort from T3 to T2 to break the pipeline deadlock.
+
+    The normal promotion path (T3→T2) requires a thesis and a score, but
+    thesis generation and scoring only run for T1/T2 instruments.  When
+    the entire coverage table is T3 — as it is after first-run seeding —
+    no job can produce the data that promotion depends on.
+
+    This function fires **once**, when no T1/T2 coverage rows exist, to
+    seed a starter T2 cohort.  Subsequent runs detect existing T1/T2 rows
+    and skip immediately.
+
+    Each promotion is recorded in ``coverage_audit`` with a clear
+    bootstrap rationale so the audit trail explains why these instruments
+    were promoted without the usual score/thesis prerequisites.
+
+    Concurrency: an advisory lock (``pg_advisory_xact_lock``) inside
+    the transaction prevents duplicate promotions if two runs overlap.
+    """
+    # Advisory lock + transaction makes the check-then-act atomic even
+    # under READ COMMITTED.  The lock is released when the transaction
+    # ends, so concurrent callers block rather than both seeing count=0.
+    with conn.transaction():
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(%(lock_id)s::bigint)",
+                {"lock_id": _BOOTSTRAP_LOCK_ID},
+            )
+            cur.execute("SELECT COUNT(*) AS cnt FROM coverage WHERE coverage_tier IN (1, 2)")
+            row = cur.fetchone()
+            t12_count = int(row["cnt"]) if row is not None else 0
+
+        if t12_count > 0:
+            logger.info(
+                "bootstrap_tier2_cohort: %d T1/T2 rows already exist, skipping",
+                t12_count,
+            )
+            return BootstrapResult(promoted=0, skipped_reason="T1/T2 coverage already exists")
+
+        candidates = _select_bootstrap_candidates(conn, cap)
+        if not candidates:
+            logger.warning("bootstrap_tier2_cohort: no eligible T3 instruments found")
+            return BootstrapResult(promoted=0, skipped_reason="no eligible T3 instruments")
+        promoted = 0
+        for cand in candidates:
+            instrument_id = int(cand["instrument_id"])
+            symbol = cand["symbol"]
+            has_cik = bool(cand["has_cik"])
+
+            evidence: dict[str, object] = {
+                "symbol": symbol,
+                "has_cik": has_cik,
+                "bootstrap_cap": cap,
+                "reason": "initial T2 seed to break pipeline deadlock",
+            }
+
+            change = TierChange(
+                instrument_id=instrument_id,
+                old_tier=3,
+                new_tier=2,
+                change_type="promotion",
+                rationale=f"bootstrap: T3→T2 seed (has_cik={has_cik})",
+                evidence=evidence,
+            )
+            _apply_tier_change(conn, change)
+            promoted += 1
+
+    logger.info(
+        "bootstrap_tier2_cohort: promoted %d instruments from T3 to T2",
+        promoted,
+    )
+    return BootstrapResult(promoted=promoted, skipped_reason=None)
