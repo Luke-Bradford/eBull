@@ -48,6 +48,7 @@ import {
   formatNumber,
   formatPct,
 } from "@/lib/format";
+import { safeExternalUrl } from "@/lib/safeUrl";
 import { useAsync } from "@/lib/useAsync";
 
 // ---------------------------------------------------------------------------
@@ -169,14 +170,17 @@ function InstrumentDetailContent({ instrumentId }: { instrumentId: number }) {
     );
   }
 
-  // All sources failed — page-level banner.
+  // All sources failed — page-level banner.  Every useAsync result on
+  // this page must be listed here; omitting one lets the banner fire
+  // too eagerly.
   const allFailed =
     instrument.error &&
     thesis.error &&
     scores.error &&
     filings.error &&
     news.error &&
-    recommendations.error;
+    recommendations.error &&
+    portfolio.error;
 
   if (allFailed) {
     return (
@@ -464,8 +468,8 @@ function ScoreHistoryTable({ items }: { items: ScoreHistoryItem[] }) {
           </tr>
         </thead>
         <tbody>
-          {items.map((s) => (
-            <tr key={s.scored_at} className="border-b border-slate-50">
+          {items.map((s, idx) => (
+            <tr key={`${s.scored_at}-${idx}`} className="border-b border-slate-50">
               <td className="px-2 py-2 text-xs text-slate-500">{formatDateTime(s.scored_at)}</td>
               <td className="px-2 py-2 text-right tabular-nums">{formatNumber(s.total_score, 1)}</td>
               <td className="px-2 py-2 text-right tabular-nums">{s.rank ?? "—"}</td>
@@ -507,9 +511,9 @@ function FilingsTable({ items }: { items: FilingItem[] }) {
                 {f.red_flag_score !== null ? formatNumber(f.red_flag_score, 1) : "—"}
               </td>
               <td className="px-2 py-2">
-                {f.source_url ? (
+                {safeExternalUrl(f.source_url) ? (
                   <a
-                    href={f.source_url}
+                    href={safeExternalUrl(f.source_url)!}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-blue-600 hover:underline"
@@ -546,9 +550,9 @@ function NewsTable({ items }: { items: NewsItem[] }) {
             <tr key={n.news_event_id} className="border-b border-slate-50">
               <td className="px-2 py-2 text-xs text-slate-500">{formatDateTime(n.event_time)}</td>
               <td className="max-w-sm truncate px-2 py-2">
-                {n.url ? (
+                {safeExternalUrl(n.url) ? (
                   <a
-                    href={n.url}
+                    href={safeExternalUrl(n.url)!}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-blue-600 hover:underline"

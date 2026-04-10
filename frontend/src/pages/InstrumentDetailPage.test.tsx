@@ -144,7 +144,7 @@ function renderPage(instrumentId = "42") {
   return render(
     <MemoryRouter initialEntries={[`/instruments/${instrumentId}`]}>
       <Routes>
-        <Route path="instruments/:instrumentId" element={<InstrumentDetailPage />} />
+        <Route path="/instruments/:instrumentId" element={<InstrumentDetailPage />} />
       </Routes>
     </MemoryRouter>,
   );
