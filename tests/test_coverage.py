@@ -1049,6 +1049,7 @@ class TestBootstrapTier2Cohort:
             cursor_calls.append(cand_cursor)
 
         conn.cursor.side_effect = cursor_calls
+        self._cursor_mocks = cursor_calls
 
         conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
         conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
@@ -1126,12 +1127,16 @@ class TestBootstrapTier2Cohort:
         assert inner["bootstrap_cap"] == BOOTSTRAP_T2_CAP
         assert "deadlock" in inner["reason"]
 
-    def test_count_and_writes_inside_single_transaction(self) -> None:
-        """Count check + promotion writes must be in one transaction (no TOCTOU)."""
+    def test_advisory_lock_and_writes_inside_single_transaction(self) -> None:
+        """Advisory lock + count check + writes must share one transaction."""
         candidates = [self._make_candidate(1, "AAPL")]
         conn = self._mock_conn(t12_count=0, candidates=candidates)
         bootstrap_tier2_cohort(conn)
         conn.transaction.assert_called_once()
+        # The count cursor (first) must have the advisory lock call
+        count_cursor = self._cursor_mocks[0]
+        lock_sql = str(count_cursor.execute.call_args_list[0])
+        assert "pg_advisory_xact_lock" in lock_sql
 
     def test_default_cap_matches_constant(self) -> None:
         """Verify the default cap parameter is BOOTSTRAP_T2_CAP."""
