@@ -741,7 +741,7 @@ def seed_coverage(
             ON CONFLICT DO NOTHING
             """
         )
-        if result.rowcount < 0:
+        if result.rowcount == -1:
             raise RuntimeError(
                 f"seed_coverage INSERT returned rowcount={result.rowcount}; server did not report a command tag"
             )

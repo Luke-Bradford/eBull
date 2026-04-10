@@ -374,9 +374,14 @@ def nightly_universe_sync() -> None:
             # All variable references stay inside the transaction block
             # that defines them to avoid UnboundLocalError if __exit__
             # raises (prevention-log entry from PR #148 round 1).
+            # row_count accumulates across blocks without cross-block
+            # reads of tracker.row_count.
+            row_count = 0
+
             with conn.transaction():
                 summary = sync_universe(provider, conn)
-                tracker.row_count = summary.inserted + summary.updated
+                row_count = summary.inserted + summary.updated
+                tracker.row_count = row_count
                 logger.info(
                     "Universe sync: inserted=%d updated=%d deactivated=%d",
                     summary.inserted,
@@ -390,7 +395,8 @@ def nightly_universe_sync() -> None:
             # checks for existing rows and skips if non-empty).
             with conn.transaction():
                 seed_result = seed_coverage(conn)
-                tracker.row_count = (tracker.row_count or 0) + seed_result.seeded
+                row_count += seed_result.seeded
+                tracker.row_count = row_count
                 logger.info(
                     "Coverage seed: seeded=%d already_populated=%s",
                     seed_result.seeded,
