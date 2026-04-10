@@ -38,7 +38,7 @@ from app.providers.implementations.etoro import EtoroMarketDataProvider
 from app.providers.implementations.fmp import FmpFundamentalsProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
-from app.services.coverage import review_coverage, seed_coverage
+from app.services.coverage import bootstrap_tier2_cohort, review_coverage, seed_coverage
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
@@ -472,6 +472,20 @@ def nightly_universe_sync() -> None:
                     "Coverage seed: seeded=%d already_populated=%s",
                     seed_result.seeded,
                     seed_result.already_populated,
+                )
+
+            # Bootstrap: if no T1/T2 coverage rows exist, promote an
+            # initial cohort to T2 so downstream jobs (market data,
+            # filings, scoring) can start producing data.  This is a
+            # one-time operation — once T2 rows exist it becomes a no-op.
+            with conn.transaction():
+                bootstrap_result = bootstrap_tier2_cohort(conn)
+                row_count += bootstrap_result.promoted
+                tracker.row_count = row_count
+                logger.info(
+                    "Coverage bootstrap: promoted=%d skipped_reason=%s",
+                    bootstrap_result.promoted,
+                    bootstrap_result.skipped_reason,
                 )
 
 

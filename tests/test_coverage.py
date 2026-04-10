@@ -16,11 +16,13 @@ Coverage:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.services.coverage import (
+    BOOTSTRAP_T2_CAP,
     DEMOTE_T1_TO_T2_SCORE,
     DEMOTE_T2_TO_T3_SCORE,
     PROMOTE_T2_TO_T1_CONFIDENCE,
@@ -35,6 +37,7 @@ from app.services.coverage import (
     _evaluate_promotion,
     _has_tier1_required_data,
     _is_thesis_fresh,
+    bootstrap_tier2_cohort,
     override_tier,
     review_coverage,
     seed_coverage,
@@ -976,3 +979,160 @@ class TestSeedCoverage:
         conn = self._mock_conn(coverage_count=0, inserted_rows=10)
         seed_coverage(conn)
         conn.transaction.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# bootstrap_tier2_cohort
+# ---------------------------------------------------------------------------
+
+
+class TestBootstrapTier2Cohort:
+    """
+    Tests for the bootstrap function that breaks the T3-only deadlock.
+
+    The bootstrap fires once when no T1/T2 coverage rows exist, promotes
+    up to BOOTSTRAP_T2_CAP instruments to T2, and becomes a no-op on all
+    subsequent runs.
+    """
+
+    @staticmethod
+    def _make_candidate(
+        instrument_id: int,
+        symbol: str,
+        has_cik: bool = True,
+    ) -> dict[str, object]:
+        return {
+            "instrument_id": instrument_id,
+            "symbol": symbol,
+            "has_cik": has_cik,
+        }
+
+    def _mock_conn(
+        self,
+        t12_count: int,
+        candidates: list[dict[str, object]] | None = None,
+    ) -> MagicMock:
+        """Build a mock connection for bootstrap_tier2_cohort tests.
+
+        Cursor calls are dispatched by SQL substring:
+          - "coverage_tier IN (1, 2)" → returns t12_count
+          - candidate SELECT → returns candidates list
+
+        conn.execute is recorded for later assertion (UPDATE + INSERT audit).
+        """
+        conn = MagicMock()
+        self._writes: list[tuple[str, dict[str, Any]]] = []
+
+        def _record_execute(sql: str, params: dict[str, Any] | None = None) -> MagicMock:
+            if params is not None:
+                self._writes.append((sql, params))
+            return MagicMock()
+
+        conn.execute.side_effect = _record_execute
+
+        # Track cursor calls in order: first is T1/T2 count, second is candidates
+        cursor_calls: list[MagicMock] = []
+
+        # Cursor 1: T1/T2 count
+        count_cursor = MagicMock()
+        count_cursor.fetchone.return_value = {"cnt": t12_count}
+        count_cursor.__enter__ = MagicMock(return_value=count_cursor)
+        count_cursor.__exit__ = MagicMock(return_value=False)
+        cursor_calls.append(count_cursor)
+
+        # Cursor 2: candidate selection (only if t12_count == 0)
+        if candidates is not None:
+            cand_cursor = MagicMock()
+            cand_cursor.fetchall.return_value = candidates
+            cand_cursor.__enter__ = MagicMock(return_value=cand_cursor)
+            cand_cursor.__exit__ = MagicMock(return_value=False)
+            cursor_calls.append(cand_cursor)
+
+        conn.cursor.side_effect = cursor_calls
+
+        conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
+        conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
+
+        return conn
+
+    def test_promotes_when_no_t12_exist(self) -> None:
+        """When T1/T2 count is 0, bootstrap promotes the candidate set to T2."""
+        candidates = [
+            self._make_candidate(1, "AAPL", has_cik=True),
+            self._make_candidate(2, "MSFT", has_cik=True),
+            self._make_candidate(3, "ZZZ", has_cik=False),
+        ]
+        conn = self._mock_conn(t12_count=0, candidates=candidates)
+        result = bootstrap_tier2_cohort(conn)
+
+        assert result.promoted == 3
+        assert result.skipped_reason is None
+
+        # Each promotion writes: 1 UPDATE coverage + 1 INSERT coverage_audit
+        update_writes = [w for w in self._writes if "UPDATE coverage" in w[0]]
+        audit_writes = [w for w in self._writes if "INSERT INTO coverage_audit" in w[0]]
+        assert len(update_writes) == 3
+        assert len(audit_writes) == 3
+
+        # Verify audit records have correct change_type and rationale
+        for _, params in audit_writes:
+            assert params["change_type"] == "promotion"
+            assert params["old_tier"] == 3
+            assert params["new_tier"] == 2
+            rationale = str(params["rationale"])
+            assert "bootstrap" in rationale
+
+    def test_skips_when_t12_exist(self) -> None:
+        """When T1/T2 rows already exist, bootstrap is a no-op."""
+        conn = self._mock_conn(t12_count=5)
+        result = bootstrap_tier2_cohort(conn)
+
+        assert result.promoted == 0
+        assert result.skipped_reason == "T1/T2 coverage already exists"
+        # No candidate query or writes should have happened
+        assert len(self._writes) == 0
+
+    def test_skips_when_no_eligible_candidates(self) -> None:
+        """When T1/T2 count is 0 but no T3 candidates qualify, return 0."""
+        conn = self._mock_conn(t12_count=0, candidates=[])
+        result = bootstrap_tier2_cohort(conn)
+
+        assert result.promoted == 0
+        assert result.skipped_reason == "no eligible T3 instruments"
+
+    def test_respects_cap_parameter(self) -> None:
+        """The cap limits how many instruments are promoted."""
+        candidates = [self._make_candidate(i, f"SYM{i}") for i in range(5)]
+        conn = self._mock_conn(t12_count=0, candidates=candidates)
+        result = bootstrap_tier2_cohort(conn, cap=5)
+
+        # The mock returns exactly 5 candidates (the SQL LIMIT is the cap);
+        # all 5 should be promoted.
+        assert result.promoted == 5
+
+    def test_evidence_includes_bootstrap_metadata(self) -> None:
+        """Each audit record carries bootstrap-specific evidence."""
+        candidates = [self._make_candidate(42, "AAPL", has_cik=True)]
+        conn = self._mock_conn(t12_count=0, candidates=candidates)
+        bootstrap_tier2_cohort(conn)
+
+        audit_writes = [w for w in self._writes if "INSERT INTO coverage_audit" in w[0]]
+        assert len(audit_writes) == 1
+        evidence_raw = audit_writes[0][1]["evidence_json"]
+        # evidence_json is wrapped in Jsonb; access the inner obj
+        inner: dict[str, Any] = evidence_raw.obj if hasattr(evidence_raw, "obj") else evidence_raw
+        assert inner["symbol"] == "AAPL"
+        assert inner["has_cik"] is True
+        assert inner["bootstrap_cap"] == BOOTSTRAP_T2_CAP
+        assert "deadlock" in inner["reason"]
+
+    def test_runs_inside_transaction(self) -> None:
+        """The count check and all promotions must be in the same transaction."""
+        candidates = [self._make_candidate(1, "AAPL")]
+        conn = self._mock_conn(t12_count=0, candidates=candidates)
+        bootstrap_tier2_cohort(conn)
+        conn.transaction.assert_called_once()
+
+    def test_default_cap_matches_constant(self) -> None:
+        """Verify the default cap parameter is BOOTSTRAP_T2_CAP."""
+        assert BOOTSTRAP_T2_CAP == 200
