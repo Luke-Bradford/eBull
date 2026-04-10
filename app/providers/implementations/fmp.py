@@ -32,11 +32,16 @@ from types import TracebackType
 import httpx
 
 from app.providers.fundamentals import FundamentalsProvider, FundamentalsSnapshot
+from app.providers.resilient_client import ResilientClient
 
 logger = logging.getLogger(__name__)
 
 _FMP_BASE_URL = "https://financialmodelingprep.com/api"
 _RAW_PAYLOAD_DIR = Path("data/raw/fmp")
+
+# FMP rate limit: ~250 req/min on Premium (plan-dependent).
+# 0.25s interval ≈ 240/min — ~4% headroom.
+_FMP_REQUEST_INTERVAL_S = 0.25
 
 
 def _persist_raw(tag: str, payload: object) -> None:
@@ -65,6 +70,10 @@ class FmpFundamentalsProvider(FundamentalsProvider):
         self._client = httpx.Client(
             base_url=_FMP_BASE_URL,
             timeout=30.0,
+        )
+        self._http = ResilientClient(
+            self._client,
+            min_request_interval_s=_FMP_REQUEST_INTERVAL_S,
         )
 
     def __enter__(self) -> "FmpFundamentalsProvider":
@@ -175,7 +184,7 @@ class FmpFundamentalsProvider(FundamentalsProvider):
     # ------------------------------------------------------------------
 
     def _fetch_balance_sheet(self, symbol: str, limit: int) -> list[dict[str, object]]:
-        resp = self._client.get(
+        resp = self._http.get(
             f"/v3/balance-sheet-statement/{symbol}",
             params={"period": "quarter", "limit": limit, "apikey": self._api_key},
         )
@@ -185,7 +194,7 @@ class FmpFundamentalsProvider(FundamentalsProvider):
         return raw if isinstance(raw, list) else []
 
     def _fetch_income(self, symbol: str, limit: int) -> list[dict[str, object]]:
-        resp = self._client.get(
+        resp = self._http.get(
             f"/v3/income-statement/{symbol}",
             params={"period": "quarter", "limit": limit, "apikey": self._api_key},
         )
@@ -195,7 +204,7 @@ class FmpFundamentalsProvider(FundamentalsProvider):
         return raw if isinstance(raw, list) else []
 
     def _fetch_cashflow(self, symbol: str, limit: int) -> list[dict[str, object]]:
-        resp = self._client.get(
+        resp = self._http.get(
             f"/v3/cash-flow-statement/{symbol}",
             params={"period": "quarter", "limit": limit, "apikey": self._api_key},
         )
@@ -205,7 +214,7 @@ class FmpFundamentalsProvider(FundamentalsProvider):
         return raw if isinstance(raw, list) else []
 
     def _fetch_ttm_income(self, symbol: str) -> dict[str, object] | None:
-        resp = self._client.get(
+        resp = self._http.get(
             f"/v3/income-statement-ttm/{symbol}",
             params={"apikey": self._api_key},
         )
@@ -217,7 +226,7 @@ class FmpFundamentalsProvider(FundamentalsProvider):
         return None
 
     def _fetch_ttm_cashflow(self, symbol: str) -> dict[str, object] | None:
-        resp = self._client.get(
+        resp = self._http.get(
             f"/v3/cash-flow-statement-ttm/{symbol}",
             params={"apikey": self._api_key},
         )

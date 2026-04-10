@@ -39,8 +39,13 @@ def refresh_fundamentals(
     """
     upserted = 0
     skipped = 0
+    fresh_skipped = 0
+    today = date.today()
 
     for symbol, instrument_id in symbols:
+        if _fundamentals_are_fresh(conn, instrument_id, today):
+            fresh_skipped += 1
+            continue
         try:
             snap = provider.get_latest_snapshot(symbol)
             if snap is None:
@@ -52,6 +57,13 @@ def refresh_fundamentals(
         except Exception:
             logger.warning("Fundamentals: failed to refresh %s, skipping", symbol, exc_info=True)
             skipped += 1
+
+    if fresh_skipped:
+        logger.info(
+            "Fundamentals freshness skip: %d/%d instruments already current-quarter",
+            fresh_skipped,
+            len(symbols),
+        )
 
     return FundamentalsRefreshSummary(
         symbols_attempted=len(symbols),
@@ -98,6 +110,35 @@ def refresh_fundamentals_history(
         snapshots_upserted=upserted,
         symbols_skipped=skipped,
     )
+
+
+def _current_quarter_start(today: date) -> date:
+    """Return the first day of the current calendar quarter."""
+    quarter_month = ((today.month - 1) // 3) * 3 + 1
+    return date(today.year, quarter_month, 1)
+
+
+def _fundamentals_are_fresh(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_id: str,
+    today: date,
+) -> bool:
+    """Return True if fundamentals_snapshot has a row with as_of_date in the
+    current calendar quarter.  Fundamentals update quarterly — daily re-fetch
+    for an instrument that already has current-quarter data is pure waste.
+    """
+    quarter_start = _current_quarter_start(today)
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM fundamentals_snapshot
+        WHERE instrument_id = %(instrument_id)s
+          AND as_of_date >= %(quarter_start)s
+        LIMIT 1
+        """,
+        {"instrument_id": instrument_id, "quarter_start": quarter_start},
+    ).fetchone()
+    return row is not None
 
 
 def _upsert_snapshot(

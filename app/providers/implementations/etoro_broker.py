@@ -20,6 +20,7 @@ import httpx
 
 from app.config import settings
 from app.providers.broker import BrokerOrderResult, BrokerProvider, OrderStatus
+from app.providers.resilient_client import ResilientClient
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,12 @@ _ALLOWED_PLACE_ORDER_ACTIONS = frozenset({"BUY", "ADD"})
 # Map eToro statusID values to our OrderStatus.
 # Populated from documented API responses. Edge-case status values
 # may need live validation — unknown statuses default to "pending".
+# eToro rate limits: 60 GET/min (read), 20 POST/min (write).
+# Read: 1.1s interval ≈ 55/min (~8% headroom).
+# Write: 3.5s interval ≈ 17/min (~15% headroom).
+_ETORO_READ_INTERVAL_S = 1.1
+_ETORO_WRITE_INTERVAL_S = 3.5
+
 _STATUS_MAP: dict[str, OrderStatus] = {
     "Executed": "filled",
     "Filled": "filled",
@@ -64,6 +71,20 @@ class EtoroBrokerProvider(BrokerProvider):
                 "Content-Type": "application/json",
             },
             timeout=30.0,
+        )
+        # Separate throttle rates for reads (GET 60/min) and writes (POST 20/min).
+        # Both share the same _last_request_at timestamp so interleaved
+        # GET+POST calls cannot exceed the API's combined rate limit.
+        shared_ts: list[float] = [0.0]
+        self._http_read = ResilientClient(
+            self._client,
+            min_request_interval_s=_ETORO_READ_INTERVAL_S,
+            shared_last_request=shared_ts,
+        )
+        self._http_write = ResilientClient(
+            self._client,
+            min_request_interval_s=_ETORO_WRITE_INTERVAL_S,
+            shared_last_request=shared_ts,
         )
 
         # Environment-scoped path prefixes for trading endpoints.
@@ -185,7 +206,7 @@ class EtoroBrokerProvider(BrokerProvider):
             }
 
         try:
-            response = self._client.post(
+            response = self._http_write.post(
                 endpoint,
                 json=body,
                 headers=self._request_headers(),
@@ -255,7 +276,7 @@ class EtoroBrokerProvider(BrokerProvider):
         }
 
         try:
-            response = self._client.post(
+            response = self._http_write.post(
                 f"{self._exec_prefix}/market-close-orders/positions/{position_id}",
                 json=body,
                 headers=self._request_headers(),
@@ -302,7 +323,7 @@ class EtoroBrokerProvider(BrokerProvider):
 
     def get_order_status(self, broker_order_ref: str) -> BrokerOrderResult:
         try:
-            response = self._client.get(
+            response = self._http_read.get(
                 f"{self._info_prefix}/orders/{broker_order_ref}",
                 headers=self._request_headers(),
             )
@@ -357,7 +378,7 @@ class EtoroBrokerProvider(BrokerProvider):
         The reason distinguishes network/HTTP errors from missing positions.
         """
         try:
-            response = self._client.get(
+            response = self._http_read.get(
                 f"{self._info_prefix}/portfolio",
                 headers=self._request_headers(),
             )

@@ -66,8 +66,14 @@ def refresh_market_data(
     quotes_skipped = 0
     spread_flags_set = 0
 
-    # --- Candles: per-instrument ---
+    today = date.today()
+    candles_skipped = 0
+
+    # --- Candles: per-instrument (with freshness skip) ---
     for instrument_id, symbol in instruments:
+        if _candles_are_fresh(conn, instrument_id, today):
+            candles_skipped += 1
+            continue
         try:
             with conn.transaction():
                 bars = provider.get_daily_candles(instrument_id, lookback_days)
@@ -78,6 +84,9 @@ def refresh_market_data(
                     features_computed += computed
         except Exception:
             logger.warning("Failed to refresh candles for %s (id=%d), skipping", symbol, instrument_id, exc_info=True)
+
+    if candles_skipped:
+        logger.info("Candle freshness skip: %d/%d instruments already fresh", candles_skipped, len(instruments))
 
     # --- Quotes: batch fetch, then per-instrument upsert ---
     all_ids = [iid for iid, _ in instruments]
@@ -116,6 +125,36 @@ def refresh_market_data(
         quotes_skipped=quotes_skipped,
         spread_flags_set=spread_flags_set,
     )
+
+
+def _candles_are_fresh(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_id: int,
+    today: date,
+) -> bool:
+    """Return True if price_daily already has a row recent enough to skip.
+
+    Daily candles don't change intraday, so re-fetching is pure waste
+    when a row for the current trading day already exists.
+
+    The 3-day window covers weekends: Friday's candle is fresh until
+    Monday (gap = 3 calendar days).  On a normal weekday the gap is 0
+    or 1 (pre-market before today's candle posts).
+    """
+    row = conn.execute(
+        """
+        SELECT MAX(price_date)
+        FROM price_daily
+        WHERE instrument_id = %(instrument_id)s
+        """,
+        {"instrument_id": instrument_id},
+    ).fetchone()
+    # Aggregate always returns one row; the column value is None when empty.
+    if row is None or row[0] is None:
+        return False
+    latest_date: date = row[0]
+    # Fresh if latest candle is within 3 calendar days (covers weekends).
+    return (today - latest_date).days <= 3
 
 
 def _upsert_candles(

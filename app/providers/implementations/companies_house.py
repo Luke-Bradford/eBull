@@ -32,12 +32,17 @@ from types import TracebackType
 import httpx
 
 from app.providers.filings import FilingEvent, FilingNotFound, FilingSearchResult, FilingsProvider
+from app.providers.resilient_client import ResilientClient
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.company-information.service.gov.uk"
 _RAW_PAYLOAD_DIR = Path("data/raw/companies_house")
 _PAGE_SIZE = 100
+
+# Companies House rate limit: 600 req/5 min (= 2 req/s avg).
+# 0.55s interval ≈ 109/min — ~9% headroom.
+_CH_REQUEST_INTERVAL_S = 0.55
 
 
 def _persist_raw(tag: str, payload: object) -> None:
@@ -69,6 +74,10 @@ class CompaniesHouseFilingsProvider(FilingsProvider):
             base_url=BASE_URL,
             auth=(api_key, ""),  # CH uses API key as HTTP Basic username
             timeout=30.0,
+        )
+        self._http = ResilientClient(
+            self._client,
+            min_request_interval_s=_CH_REQUEST_INTERVAL_S,
         )
 
     def __enter__(self) -> "CompaniesHouseFilingsProvider":
@@ -127,7 +136,7 @@ class CompaniesHouseFilingsProvider(FilingsProvider):
             )
         company_number, transaction_id = parts
 
-        resp = self._client.get(f"/company/{company_number}/filing-history/{transaction_id}")
+        resp = self._http.get(f"/company/{company_number}/filing-history/{transaction_id}")
         if resp.status_code == 404:
             raise FilingNotFound(f"Filing not found: {provider_filing_id}")
         resp.raise_for_status()
@@ -142,7 +151,7 @@ class CompaniesHouseFilingsProvider(FilingsProvider):
 
     def _fetch_filing_history(self, company_number: str) -> list[dict[str, object]] | None:
         """Fetch filing history, returning a flat list of filing items."""
-        resp = self._client.get(
+        resp = self._http.get(
             f"/company/{company_number}/filing-history",
             params={"items_per_page": _PAGE_SIZE, "start_index": 0},
         )

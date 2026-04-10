@@ -21,6 +21,7 @@ from app.providers.implementations.etoro import (
 from app.providers.market_data import OHLCVBar, Quote
 from app.services.market_data import (
     DEFAULT_MAX_SPREAD_PCT,
+    _candles_are_fresh,
     _compute_rolling_returns,
     _compute_volatility_30d,
     compute_spread_pct,
@@ -317,10 +318,10 @@ class TestGetQuotesChunking:
         from app.providers.implementations.etoro import EtoroMarketDataProvider
 
         with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
-            provider._client = MagicMock()
+            provider._http = MagicMock()
             result = provider.get_quotes([])
             assert result == []
-            provider._client.get.assert_not_called()
+            provider._http.get.assert_not_called()
 
     @patch("app.providers.implementations.etoro._persist_raw")
     def test_single_batch_params(self, _mock_persist: MagicMock) -> None:
@@ -329,15 +330,16 @@ class TestGetQuotesChunking:
 
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"rates": [FIXTURE_RATE]}
+        mock_resp.raise_for_status = MagicMock()
 
         with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
-            provider._client = MagicMock()
-            provider._client.get.return_value = mock_resp
+            provider._http = MagicMock()
+            provider._http.get.return_value = mock_resp
 
             provider.get_quotes([1001, 1002, 1003])
 
-            provider._client.get.assert_called_once()
-            call_kwargs = provider._client.get.call_args
+            provider._http.get.assert_called_once()
+            call_kwargs = provider._http.get.call_args
             assert call_kwargs.kwargs["params"]["instrumentIds"] == "1001,1002,1003"
 
     @patch("app.providers.implementations.etoro._persist_raw")
@@ -347,20 +349,21 @@ class TestGetQuotesChunking:
 
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"rates": []}
+        mock_resp.raise_for_status = MagicMock()
 
         with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
-            provider._client = MagicMock()
-            provider._client.get.return_value = mock_resp
+            provider._http = MagicMock()
+            provider._http.get.return_value = mock_resp
 
             ids = list(range(1, 102))  # 101 IDs
             provider.get_quotes(ids)
 
-            assert provider._client.get.call_count == 2
+            assert provider._http.get.call_count == 2
             # First call: 100 IDs
-            first_params = provider._client.get.call_args_list[0].kwargs["params"]["instrumentIds"]
+            first_params = provider._http.get.call_args_list[0].kwargs["params"]["instrumentIds"]
             assert len(first_params.split(",")) == 100
             # Second call: 1 ID
-            second_params = provider._client.get.call_args_list[1].kwargs["params"]["instrumentIds"]
+            second_params = provider._http.get.call_args_list[1].kwargs["params"]["instrumentIds"]
             assert len(second_params.split(",")) == 1
 
 
@@ -475,3 +478,47 @@ class TestComputeSpreadPct:
         spread = compute_spread_pct(Decimal("100"), Decimal("100.50"))
         assert spread is not None
         assert spread < DEFAULT_MAX_SPREAD_PCT
+
+
+# ---------------------------------------------------------------------------
+# Candle freshness skip
+# ---------------------------------------------------------------------------
+
+
+def _mock_conn_with_latest_date(latest_date: date | None) -> MagicMock:
+    """Build a mock connection whose execute().fetchone() returns (latest_date,)."""
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    # Aggregate always returns one row; column is None if table empty.
+    mock_cursor.fetchone.return_value = (latest_date,) if latest_date is not None else (None,)
+    mock_conn.execute.return_value = mock_cursor
+    return mock_conn
+
+
+class TestCandlesAreFresh:
+    def test_fresh_when_latest_is_today(self) -> None:
+        today = date(2026, 4, 10)
+        conn = _mock_conn_with_latest_date(today)
+        assert _candles_are_fresh(conn, 1, today) is True
+
+    def test_fresh_when_latest_is_yesterday(self) -> None:
+        today = date(2026, 4, 10)
+        conn = _mock_conn_with_latest_date(date(2026, 4, 9))
+        assert _candles_are_fresh(conn, 1, today) is True
+
+    def test_fresh_over_weekend(self) -> None:
+        """Friday candle is fresh on Monday (3-day gap covers weekends)."""
+        monday = date(2026, 4, 13)  # Monday
+        friday = date(2026, 4, 10)  # previous Friday
+        conn = _mock_conn_with_latest_date(friday)
+        assert _candles_are_fresh(conn, 1, monday) is True
+
+    def test_stale_when_latest_is_four_days_ago(self) -> None:
+        today = date(2026, 4, 10)
+        conn = _mock_conn_with_latest_date(date(2026, 4, 6))
+        assert _candles_are_fresh(conn, 1, today) is False
+
+    def test_stale_when_no_data(self) -> None:
+        today = date(2026, 4, 10)
+        conn = _mock_conn_with_latest_date(None)
+        assert _candles_are_fresh(conn, 1, today) is False

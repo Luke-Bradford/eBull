@@ -6,6 +6,7 @@ No network calls, no database — all tests use in-memory fixtures.
 
 from datetime import date
 from decimal import Decimal
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -30,6 +31,7 @@ from app.providers.implementations.sec_edgar import (
     _parse_cik_mapping,
     _zero_pad_cik,
 )
+from app.services.fundamentals import _current_quarter_start, _fundamentals_are_fresh
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -361,3 +363,55 @@ class TestFilingsProviderIsAbstract:
     def test_cannot_instantiate_directly(self) -> None:
         with pytest.raises(TypeError):
             FilingsProvider()  # type: ignore[abstract]
+
+
+# ---------------------------------------------------------------------------
+# Fundamentals freshness skip (#168)
+# ---------------------------------------------------------------------------
+
+
+class TestCurrentQuarterStart:
+    def test_q1(self) -> None:
+        assert _current_quarter_start(date(2026, 2, 15)) == date(2026, 1, 1)
+
+    def test_q2(self) -> None:
+        assert _current_quarter_start(date(2026, 4, 10)) == date(2026, 4, 1)
+
+    def test_q3(self) -> None:
+        assert _current_quarter_start(date(2026, 9, 30)) == date(2026, 7, 1)
+
+    def test_q4(self) -> None:
+        assert _current_quarter_start(date(2026, 12, 1)) == date(2026, 10, 1)
+
+    def test_first_day_of_quarter(self) -> None:
+        assert _current_quarter_start(date(2026, 7, 1)) == date(2026, 7, 1)
+
+
+def _mock_conn_fundamentals_fresh(has_row: bool) -> MagicMock:
+    """Build a mock connection for fundamentals freshness check."""
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = (1,) if has_row else None
+    mock_conn.execute.return_value = mock_cursor
+    return mock_conn
+
+
+class TestFundamentalsAreFresh:
+    def test_fresh_when_current_quarter_data_exists(self) -> None:
+        today = date(2026, 4, 10)
+        conn = _mock_conn_fundamentals_fresh(has_row=True)
+        assert _fundamentals_are_fresh(conn, "1", today) is True
+
+    def test_stale_when_no_current_quarter_data(self) -> None:
+        today = date(2026, 4, 10)
+        conn = _mock_conn_fundamentals_fresh(has_row=False)
+        assert _fundamentals_are_fresh(conn, "1", today) is False
+
+    def test_uses_correct_quarter_start_in_query(self) -> None:
+        today = date(2026, 5, 20)
+        conn = _mock_conn_fundamentals_fresh(has_row=False)
+        _fundamentals_are_fresh(conn, "42", today)
+        call_args = conn.execute.call_args
+        params = call_args[0][1]
+        assert params["quarter_start"] == date(2026, 4, 1)
+        assert params["instrument_id"] == "42"
