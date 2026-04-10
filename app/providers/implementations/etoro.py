@@ -167,9 +167,22 @@ class EtoroMarketDataProvider(MarketDataProvider):
                     headers=self._request_headers(),
                 )
                 response.raise_for_status()
-            except httpx.HTTPStatusError:
+            except httpx.HTTPStatusError as exc:
+                # Persist the error response body for diagnosis.
+                _persist_raw(f"rates_batch{batch_num}_error", exc.response.text)
                 logger.warning(
-                    "Rates chunk %d failed (%d IDs), skipping",
+                    "Rates chunk %d failed (%d IDs, status %d), skipping",
+                    batch_num,
+                    len(chunk),
+                    exc.response.status_code,
+                    exc_info=True,
+                )
+                failed_chunks += 1
+                continue
+            except httpx.RequestError:
+                # Network-level failure (timeout, connection reset) — no response to persist.
+                logger.warning(
+                    "Rates chunk %d network error (%d IDs), skipping",
                     batch_num,
                     len(chunk),
                     exc_info=True,
