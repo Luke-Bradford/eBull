@@ -4,8 +4,9 @@ Broker provider interface.
 eToro is the v1 implementation.  All domain code imports this interface only —
 never the concrete provider.
 
-The broker provider handles write operations: placing orders, closing positions,
-and checking order status.  It does not own DB access or domain logic.
+The broker provider handles trading operations (placing orders, closing
+positions, checking status) and portfolio reads (open positions, account
+balance).  It does not own DB access or domain logic.
 """
 
 from __future__ import annotations
@@ -30,9 +31,29 @@ class BrokerOrderResult:
     raw_payload: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class BrokerPosition:
+    """A single open position as reported by the broker."""
+
+    instrument_id: int
+    units: Decimal
+    open_price: Decimal
+    current_price: Decimal
+    raw_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BrokerPortfolio:
+    """Snapshot of the broker account: positions + available cash."""
+
+    positions: list[BrokerPosition]
+    available_cash: Decimal
+    raw_payload: dict[str, Any]
+
+
 class BrokerProvider(ABC):
     """
-    Interface for broker write operations.
+    Interface for broker operations.
 
     v1 implementation: EtoroBrokerProvider
     """
@@ -66,4 +87,12 @@ class BrokerProvider(ABC):
         Check the current status of a previously placed order.
 
         Returns the latest state from the broker.
+        """
+
+    @abstractmethod
+    def get_portfolio(self) -> BrokerPortfolio:
+        """
+        Fetch the current portfolio from the broker.
+
+        Returns all open positions and available cash.
         """

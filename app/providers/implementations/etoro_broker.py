@@ -11,18 +11,41 @@ Trading endpoints are environment-scoped: /demo/ prefix for demo, no prefix for 
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from types import TracebackType
 from typing import Any
 
 import httpx
 
 from app.config import settings
-from app.providers.broker import BrokerOrderResult, BrokerProvider, OrderStatus
+from app.providers.broker import (
+    BrokerOrderResult,
+    BrokerPortfolio,
+    BrokerPosition,
+    BrokerProvider,
+    OrderStatus,
+)
 from app.providers.resilient_client import ResilientClient
 
 logger = logging.getLogger(__name__)
+
+_RAW_PAYLOAD_DIR = Path("data/raw/etoro_broker")
+
+
+def _persist_raw(tag: str, payload: object) -> None:
+    """Write raw API response to disk before normalisation."""
+    try:
+        _RAW_PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        path = _RAW_PAYLOAD_DIR / f"{tag}_{ts}.json"
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        logger.warning("Failed to persist raw payload for tag=%s", tag, exc_info=True)
+
 
 # Actions the service layer is allowed to send to place_order.
 # EXIT is routed to close_position by the service layer and must never
@@ -366,6 +389,50 @@ class EtoroBrokerProvider(BrokerProvider):
             )
 
         return _normalise_order_info_response(raw, broker_order_ref)
+
+    # ------------------------------------------------------------------
+    # Portfolio reads
+    # ------------------------------------------------------------------
+
+    def get_portfolio(self) -> BrokerPortfolio:
+        """Fetch open positions and available cash from the eToro portfolio endpoint.
+
+        Raises on HTTP or network errors (caller should handle).
+        """
+        response = self._http_read.get(
+            f"{self._info_prefix}/portfolio",
+            headers=self._request_headers(),
+        )
+        raw = response.json()
+        _persist_raw("etoro_portfolio", raw)
+        response.raise_for_status()
+
+        portfolio = raw.get("clientPortfolio") or {}
+        raw_positions: list[dict[str, Any]] = portfolio.get("positions") or []
+        credit = portfolio.get("credit")
+
+        positions: list[BrokerPosition] = []
+        for pos in raw_positions:
+            if not isinstance(pos, dict):
+                continue
+            iid = pos.get("instrumentID")
+            if iid is None:
+                continue
+            positions.append(
+                BrokerPosition(
+                    instrument_id=int(iid),
+                    units=Decimal(str(pos.get("units", 0))),
+                    open_price=Decimal(str(pos.get("openPrice", 0))),
+                    current_price=Decimal(str(pos.get("currentPrice", 0))),
+                    raw_payload=pos,
+                )
+            )
+
+        return BrokerPortfolio(
+            positions=positions,
+            available_cash=Decimal(str(credit)) if credit is not None else Decimal("0"),
+            raw_payload=raw,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers

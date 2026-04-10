@@ -55,6 +55,7 @@ from app.services.ops_monitor import fetch_latest_successful_runs, record_job_sk
 from app.workers.scheduler import (
     JOB_DAILY_CIK_REFRESH,
     JOB_DAILY_NEWS_REFRESH,
+    JOB_DAILY_PORTFOLIO_SYNC,
     JOB_DAILY_RESEARCH_REFRESH,
     JOB_DAILY_TAX_RECONCILIATION,
     JOB_DAILY_THESIS_REFRESH,
@@ -68,6 +69,7 @@ from app.workers.scheduler import (
     compute_next_run,
     daily_cik_refresh,
     daily_news_refresh,
+    daily_portfolio_sync,
     daily_research_refresh,
     daily_tax_reconciliation,
     daily_thesis_refresh,
@@ -107,6 +109,7 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_DAILY_RESEARCH_REFRESH: daily_research_refresh,
     JOB_DAILY_NEWS_REFRESH: daily_news_refresh,
     JOB_DAILY_THESIS_REFRESH: daily_thesis_refresh,
+    JOB_DAILY_PORTFOLIO_SYNC: daily_portfolio_sync,
     JOB_MORNING_CANDIDATE_REVIEW: morning_candidate_review,
     JOB_WEEKLY_COVERAGE_REVIEW: weekly_coverage_review,
     JOB_DAILY_TAX_RECONCILIATION: daily_tax_reconciliation,
