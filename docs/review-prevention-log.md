@@ -520,3 +520,11 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: Candle freshness check used `<= 1 day` window, so on Monday, Friday's candle (2 days old) was considered stale and triggered unnecessary API requests — weekend candles never exist for equity markets.
 - Prevention: Any freshness check using calendar-day gaps must account for the longest possible non-trading gap (3 days: Friday→Monday). Add explicit weekend boundary test cases (e.g. `today=Monday, latest=Friday`) when writing freshness logic.
 - Enforced in: this prevention log
+
+---
+
+### Persist error response body before swallowing HTTP exceptions in providers
+- First seen in: #171
+- Symptom: `get_quotes()` caught `httpx.HTTPStatusError` on a 500 response but skipped the chunk without persisting the error response body. The 500 body (which may contain diagnostic info from the upstream API) was silently discarded, violating the raw-payload persistence rule.
+- Prevention: When catching `httpx.HTTPStatusError` in provider code to skip/continue, call `_persist_raw(tag + "_error", exc.response.text)` before logging or continuing. Network errors (`httpx.RequestError`) have no response body — log with `exc_info` only.
+- Enforced in: this prevention log

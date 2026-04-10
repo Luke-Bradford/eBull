@@ -28,8 +28,10 @@ logger = logging.getLogger(__name__)
 # Directory for raw payload dumps (relative to process working directory)
 _RAW_PAYLOAD_DIR = Path("data/raw/etoro")
 
-# eToro rates endpoint accepts at most 100 instrument IDs per request.
-_RATES_BATCH_SIZE = 100
+# eToro rates endpoint accepts at most 100 instrument IDs per request
+# (OpenAPI spec maxItems: 100).  We use 50 to reduce blast radius when
+# eToro returns 500 on a chunk containing a problematic ID.
+_RATES_BATCH_SIZE = 50
 
 # eToro rate limit: 60 GET requests per minute (rolling window).
 # 1.1s inter-request interval ≈ 55 req/min — ~8% headroom.
@@ -140,29 +142,64 @@ class EtoroMarketDataProvider(MarketDataProvider):
         return quote_map.get(instrument_id)
 
     def get_quotes(self, instrument_ids: list[int]) -> list[Quote]:
-        """Batch quote fetch with automatic 100-ID chunking.
+        """Batch quote fetch with automatic chunking.
 
-        The eToro rates endpoint requires a non-empty ``instrumentIds``
-        query parameter (comma-separated) with a maximum of 100 IDs per
-        request. This method chunks internally and aggregates results.
+        The eToro rates endpoint accepts up to 100 instrument IDs per
+        request (OpenAPI ``maxItems: 100``).  We chunk at 50 to reduce
+        blast radius.  If a chunk fails after retries, the error is
+        logged and the remaining chunks continue — partial results are
+        returned rather than failing the entire batch.
         """
         if not instrument_ids:
             return []
 
         all_quotes: list[Quote] = []
+        failed_chunks = 0
+        total_chunks = (len(instrument_ids) + _RATES_BATCH_SIZE - 1) // _RATES_BATCH_SIZE
 
         for batch_num, i in enumerate(range(0, len(instrument_ids), _RATES_BATCH_SIZE)):
             chunk = instrument_ids[i : i + _RATES_BATCH_SIZE]
             ids_param = ",".join(str(id_) for id_ in chunk)
-            response = self._http.get(
-                "/api/v1/market-data/instruments/rates",
-                params={"instrumentIds": ids_param},
-                headers=self._request_headers(),
-            )
-            response.raise_for_status()
+            try:
+                response = self._http.get(
+                    "/api/v1/market-data/instruments/rates",
+                    params={"instrumentIds": ids_param},
+                    headers=self._request_headers(),
+                )
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                # Persist the error response body for diagnosis.
+                _persist_raw(f"rates_batch{batch_num}_error", exc.response.text)
+                logger.warning(
+                    "Rates chunk %d failed (%d IDs, status %d), skipping",
+                    batch_num,
+                    len(chunk),
+                    exc.response.status_code,
+                    exc_info=True,
+                )
+                failed_chunks += 1
+                continue
+            except httpx.RequestError:
+                # Network-level failure (timeout, connection reset) — no response to persist.
+                logger.warning(
+                    "Rates chunk %d network error (%d IDs), skipping",
+                    batch_num,
+                    len(chunk),
+                    exc_info=True,
+                )
+                failed_chunks += 1
+                continue
             raw = response.json()
             _persist_raw(f"rates_batch{batch_num}", raw)
             all_quotes.extend(_normalise_rates(raw))
+
+        if failed_chunks:
+            logger.warning(
+                "Rates fetch: %d/%d chunks failed, returning %d partial quotes",
+                failed_chunks,
+                total_chunks,
+                len(all_quotes),
+            )
 
         return all_quotes
 

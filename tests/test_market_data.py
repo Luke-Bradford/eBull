@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from app.providers.implementations.etoro import (
@@ -311,7 +312,7 @@ class TestNormaliseRates:
 
 
 class TestGetQuotesChunking:
-    """Test that get_quotes chunks IDs at 100 and builds correct params."""
+    """Test that get_quotes chunks IDs at 50 and builds correct params."""
 
     @patch("app.providers.implementations.etoro._persist_raw")
     def test_empty_list_no_http_call(self, _mock_persist: MagicMock) -> None:
@@ -343,8 +344,8 @@ class TestGetQuotesChunking:
             assert call_kwargs.kwargs["params"]["instrumentIds"] == "1001,1002,1003"
 
     @patch("app.providers.implementations.etoro._persist_raw")
-    def test_chunking_at_101_ids(self, _mock_persist: MagicMock) -> None:
-        """101 IDs should produce exactly 2 HTTP requests (100 + 1)."""
+    def test_chunking_at_51_ids(self, _mock_persist: MagicMock) -> None:
+        """51 IDs should produce exactly 2 HTTP requests (50 + 1)."""
         from app.providers.implementations.etoro import EtoroMarketDataProvider
 
         mock_resp = MagicMock()
@@ -355,16 +356,49 @@ class TestGetQuotesChunking:
             provider._http = MagicMock()
             provider._http.get.return_value = mock_resp
 
-            ids = list(range(1, 102))  # 101 IDs
+            ids = list(range(1, 52))  # 51 IDs
             provider.get_quotes(ids)
 
             assert provider._http.get.call_count == 2
-            # First call: 100 IDs
+            # First call: 50 IDs
             first_params = provider._http.get.call_args_list[0].kwargs["params"]["instrumentIds"]
-            assert len(first_params.split(",")) == 100
+            assert len(first_params.split(",")) == 50
             # Second call: 1 ID
             second_params = provider._http.get.call_args_list[1].kwargs["params"]["instrumentIds"]
             assert len(second_params.split(",")) == 1
+
+    @patch("app.providers.implementations.etoro._persist_raw")
+    def test_failed_chunk_does_not_poison_others(self, _mock_persist: MagicMock) -> None:
+        """If one chunk 500s, the rest still return quotes."""
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        ok_resp = MagicMock()
+        ok_resp.json.return_value = {"rates": [FIXTURE_RATE]}
+        ok_resp.raise_for_status = MagicMock()
+
+        error_response = httpx.Response(500, content=b'{"error":"internal"}')
+        fail_resp = MagicMock()
+        fail_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500",
+            request=httpx.Request("GET", "https://x"),
+            response=error_response,
+        )
+
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            # First chunk succeeds, second fails
+            provider._http.get.side_effect = [ok_resp, fail_resp]
+
+            ids = list(range(1, 52))  # 51 IDs → 2 chunks
+            result = provider.get_quotes(ids)
+
+            # Should return the quotes from the successful chunk
+            assert len(result) == 1
+            assert provider._http.get.call_count == 2
+            # Error response body must be persisted for diagnosis
+            persist_calls = {call[0][0]: call[0][1] for call in _mock_persist.call_args_list}
+            assert "rates_batch1_error" in persist_calls
+            assert '{"error":"internal"}' in persist_calls["rates_batch1_error"]
 
 
 # ---------------------------------------------------------------------------
