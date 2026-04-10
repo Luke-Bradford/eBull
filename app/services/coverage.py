@@ -741,6 +741,6 @@ def seed_coverage(
             ON CONFLICT DO NOTHING
             """
         )
-        seeded = result.rowcount if result.rowcount is not None else 0
+        seeded = max(result.rowcount, 0) if result.rowcount is not None else 0
         logger.info("seed_coverage: seeded %d instruments at Tier 3", seeded)
         return SeedResult(seeded=seeded, already_populated=False)
