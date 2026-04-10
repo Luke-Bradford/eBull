@@ -101,3 +101,17 @@ export function validateBrokerCredential(input: {
     },
   );
 }
+
+/**
+ * Validate already-stored credentials by loading them from the DB
+ * server-side and probing eToro. Returns the same response shape as
+ * the transient validate endpoint.
+ *
+ * Returns 404 if either api_key or user_key is not stored.
+ */
+export function validateStoredCredentials(): Promise<ValidateCredentialResponse> {
+  return apiFetch<ValidateCredentialResponse>(
+    "/broker-credentials/validate-stored",
+    { method: "POST" },
+  );
+}

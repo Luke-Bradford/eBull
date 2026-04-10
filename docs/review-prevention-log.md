@@ -496,3 +496,11 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `if (query.search)` in an API fetcher suppressed the query param for any falsy-but-valid string (e.g. `"0"`). The declared type was `string | null`, but the guard treated `""` and `"0"` identically to `null`.
 - Prevention: In frontend API fetcher files, use `!== null` (or `!== undefined`) to gate nullable string params — never bare truthiness. Grep `if \(query\.\w+\)` in `frontend/src/api/` and confirm each match uses explicit null/undefined checks.
 - Enforced in: this prevention log
+
+---
+
+### Revoke-then-create sequences must surface partial failure
+- First seen in: #144
+- Symptom: A credential edit/replace flow revokes the old credential then creates a new one. If the create call fails after revoke succeeds, the credential is silently destroyed — the operator sees a generic error but doesn't know the old key is already gone.
+- Prevention: Any client-side revoke-then-create sequence must track whether the revoke has already executed. If the subsequent create fails, surface a specific error message naming the destroyed credential and directing the operator to re-enter it. Use a mode-independent error display (e.g. `actionError` rendered outside conditional form sections) because mode may transition after `refresh()`.
+- Enforced in: this prevention log

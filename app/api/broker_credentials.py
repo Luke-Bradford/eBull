@@ -2,12 +2,14 @@
 
 Routes (all session-only -- never service_token):
 
-  GET    /broker-credentials            -- list metadata (active + revoked)
-  POST   /broker-credentials            -- create; body contains plaintext,
-                                           response contains metadata only
-  POST   /broker-credentials/validate   -- transient validation of candidate
-                                           credentials against the real eToro API
-  DELETE /broker-credentials/{id}       -- soft-delete (sets revoked_at)
+  GET    /broker-credentials                  -- list metadata (active + revoked)
+  POST   /broker-credentials                  -- create; body contains plaintext,
+                                                 response contains metadata only
+  POST   /broker-credentials/validate         -- transient validation of candidate
+                                                 credentials against the real eToro API
+  POST   /broker-credentials/validate-stored  -- validate already-stored credentials
+                                                 by loading from DB and probing eToro
+  DELETE /broker-credentials/{id}             -- soft-delete (sets revoked_at)
 
 Service-token auth is intentionally not accepted. Per ADR 0001 the
 credential-management surface is operator-only by design: a service
@@ -45,10 +47,12 @@ from app.security.secrets_crypto import clear_active_key, set_active_key
 from app.security.sessions import SessionRow
 from app.services.broker_credentials import (
     CredentialAlreadyExists,
+    CredentialDecryptError,
     CredentialMetadata,
     CredentialNotFound,
     CredentialValidationError,
     list_credentials,
+    load_credential_for_provider_use,
     normalise_environment,
     normalise_label,
     normalise_provider,
@@ -544,6 +548,115 @@ class ValidateCredentialResponse(BaseModel):
     note: str
 
 
+def _probe_etoro(
+    api_key: str,
+    user_key: str,
+    environment: str,
+) -> ValidateCredentialResponse:
+    """Run two read-only probes against the eToro API.
+
+    Extracted so both ``/validate`` (transient credentials) and
+    ``/validate-stored`` (DB-loaded credentials) share the same logic.
+
+    Level 1: ``GET /api/v1/me`` — proves the key pair is accepted.
+    Level 2: ``GET /api/v1/trading/info/{env}/pnl`` — proves the
+    environment surface is reachable.
+
+    Does NOT prove write permission (acknowledged in the ``note``).
+
+    ``environment`` is normalised internally — callers do not need to
+    pre-normalise, though doing so is harmless (idempotent).
+    """
+    environment = normalise_environment(environment)
+    headers = {
+        "x-api-key": api_key,
+        "x-user-key": user_key,
+        "x-request-id": str(uuid4()),
+        "Content-Type": "application/json",
+    }
+
+    # Level 1: basic auth validation
+    try:
+        with httpx.Client(
+            base_url=settings.etoro_base_url,
+            headers=headers,
+            timeout=_VALIDATE_TIMEOUT_S,
+        ) as client:
+            me_resp = client.get("/api/v1/me")
+    except httpx.HTTPError:
+        logger.warning("credential validation: /me request failed", exc_info=True)
+        return ValidateCredentialResponse(
+            auth_valid=False,
+            identity=None,
+            environment=environment,
+            env_valid=False,
+            env_check="skipped",
+            note="Connection to eToro failed",
+        )
+
+    if me_resp.status_code != 200:
+        return ValidateCredentialResponse(
+            auth_valid=False,
+            identity=None,
+            environment=environment,
+            env_valid=False,
+            env_check="skipped",
+            note="Credentials rejected by eToro",
+        )
+
+    # Parse identity from /me response
+    try:
+        me_data = me_resp.json()
+        identity = ValidateIdentity(
+            gcid=me_data.get("gcid"),
+            demo_cid=me_data.get("demoCid"),
+            real_cid=me_data.get("realCid"),
+        )
+    except Exception:
+        logger.warning("credential validation: failed to parse /me response", exc_info=True)
+        identity = None
+
+    # Level 2: environment validation
+    headers["x-request-id"] = str(uuid4())
+    env_check_path = f"/api/v1/trading/info/{environment}/pnl"
+    try:
+        with httpx.Client(
+            base_url=settings.etoro_base_url,
+            headers=headers,
+            timeout=_VALIDATE_TIMEOUT_S,
+        ) as client:
+            env_resp = client.get(env_check_path)
+    except httpx.HTTPError:
+        logger.warning("credential validation: env check request failed", exc_info=True)
+        return ValidateCredentialResponse(
+            auth_valid=True,
+            identity=identity,
+            environment=environment,
+            env_valid=False,
+            env_check=f"trading/info/{environment}/pnl unreachable",
+            note="Auth valid but environment check failed (network error). Does not verify write permission.",
+        )
+
+    if env_resp.status_code == 200:
+        return ValidateCredentialResponse(
+            auth_valid=True,
+            identity=identity,
+            environment=environment,
+            env_valid=True,
+            env_check=f"trading/info/{environment}/pnl reachable",
+            note="Does not verify write permission",
+        )
+
+    return ValidateCredentialResponse(
+        auth_valid=True,
+        identity=identity,
+        environment=environment,
+        env_valid=False,
+        env_check=f"trading/info/{environment}/pnl returned {env_resp.status_code}",
+        note="Auth valid but environment check failed. Does not verify write permission.",
+    )
+
+
 @router.post("/validate", response_model=ValidateCredentialResponse)
 def validate(
     body: ValidateCredentialRequest,
@@ -572,91 +685,62 @@ def validate(
             detail=str(exc),
         ) from exc
 
-    headers = {
-        "x-api-key": body.api_key,
-        "x-user-key": body.user_key,
-        "x-request-id": str(uuid4()),
-        "Content-Type": "application/json",
-    }
+    return _probe_etoro(body.api_key, body.user_key, env_norm)
 
-    # Level 1: basic auth validation
+
+@router.post("/validate-stored", response_model=ValidateCredentialResponse)
+def validate_stored(
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> ValidateCredentialResponse:
+    """Validate already-stored eToro credentials against the real API.
+
+    Loads both ``api_key`` and ``user_key`` from the DB for the session's
+    operator, decrypts them, and runs the same two-level eToro probe as
+    ``/validate``. Nothing is persisted beyond the access-log entries
+    written by ``load_credential_for_provider_use``.
+
+    Returns 404 if either credential is missing. Returns 503 if
+    decryption fails (key material issue).
+    """
+    environment = "demo"  # hardcoded for v1, matches frontend ENVIRONMENT constant
+
     try:
-        with httpx.Client(
-            base_url=settings.etoro_base_url,
-            headers=headers,
-            timeout=_VALIDATE_TIMEOUT_S,
-        ) as client:
-            me_resp = client.get("/api/v1/me")
-    except httpx.HTTPError:
-        logger.warning("credential validation: /me request failed", exc_info=True)
-        return ValidateCredentialResponse(
-            auth_valid=False,
-            identity=None,
-            environment=env_norm,
-            env_valid=False,
-            env_check="skipped",
-            note="Connection to eToro failed",
+        api_key = load_credential_for_provider_use(
+            conn,
+            operator_id=session.operator_id,
+            provider="etoro",
+            label="api_key",
+            environment=environment,
+            caller="validate-stored",
         )
-
-    if me_resp.status_code != 200:
-        return ValidateCredentialResponse(
-            auth_valid=False,
-            identity=None,
-            environment=env_norm,
-            env_valid=False,
-            env_check="skipped",
-            note="Credentials rejected by eToro",
+        user_key = load_credential_for_provider_use(
+            conn,
+            operator_id=session.operator_id,
+            provider="etoro",
+            label="user_key",
+            environment=environment,
+            caller="validate-stored",
         )
+    except CredentialNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Both api_key and user_key must be stored before validating.",
+        ) from exc
+    except CredentialDecryptError as exc:
+        logger.error("validate-stored: decryption failed", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Credential decryption failed. Check server key material.",
+        ) from exc
 
-    # Parse identity from /me response
+    # Commit audit rows before the external probe call (audit durability).
+    conn.commit()
+
     try:
-        me_data = me_resp.json()
-        identity = ValidateIdentity(
-            gcid=me_data.get("gcid"),
-            demo_cid=me_data.get("demoCid"),
-            real_cid=me_data.get("realCid"),
-        )
-    except Exception:
-        logger.warning("credential validation: failed to parse /me response", exc_info=True)
-        identity = None
-
-    # Level 2: environment validation
-    # Fresh x-request-id for the second call
-    headers["x-request-id"] = str(uuid4())
-    env_check_path = f"/api/v1/trading/info/{env_norm}/pnl"
-    try:
-        with httpx.Client(
-            base_url=settings.etoro_base_url,
-            headers=headers,
-            timeout=_VALIDATE_TIMEOUT_S,
-        ) as client:
-            env_resp = client.get(env_check_path)
-    except httpx.HTTPError:
-        logger.warning("credential validation: env check request failed", exc_info=True)
-        return ValidateCredentialResponse(
-            auth_valid=True,
-            identity=identity,
-            environment=env_norm,
-            env_valid=False,
-            env_check=f"trading/info/{env_norm}/pnl unreachable",
-            note="Auth valid but environment check failed (network error). Does not verify write permission.",
-        )
-
-    if env_resp.status_code == 200:
-        return ValidateCredentialResponse(
-            auth_valid=True,
-            identity=identity,
-            environment=env_norm,
-            env_valid=True,
-            env_check=f"trading/info/{env_norm}/pnl reachable",
-            note="Does not verify write permission",
-        )
-
-    return ValidateCredentialResponse(
-        auth_valid=True,
-        identity=identity,
-        environment=env_norm,
-        env_valid=False,
-        env_check=f"trading/info/{env_norm}/pnl returned {env_resp.status_code}",
-        note="Auth valid but environment check failed. Does not verify write permission.",
-    )
+        return _probe_etoro(api_key, user_key, environment)
+    except CredentialValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid environment for stored credential validation.",
+        ) from exc
