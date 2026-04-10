@@ -58,7 +58,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.config import settings
 from app.jobs.locks import JobAlreadyRunning, JobLock
-from app.services.ops_monitor import fetch_latest_successful_runs
+from app.services.ops_monitor import fetch_latest_successful_runs, record_job_skip
 from app.workers.scheduler import (
     JOB_DAILY_CIK_REFRESH,
     JOB_DAILY_NEWS_REFRESH,
@@ -231,6 +231,11 @@ class JobRuntime:
             thread_name_prefix="job-manual",
         )
         self._started = False
+        # Name → ScheduledJob lookup for prerequisite checks in the
+        # scheduled-fire path.
+        self._job_registry: dict[str, ScheduledJob] = {
+            job.name: job for job in SCHEDULED_JOBS if job.name in self._invokers
+        }
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -277,11 +282,9 @@ class JobRuntime:
           (per ``compute_next_run``) is at or before ``now``, it is
           overdue.
 
-        Overdue jobs are submitted to the manual executor through the
-        same ``_wrap_invoker`` path as scheduled fires, so advisory
-        locks serialise catch-up against concurrent scheduled or
-        manual runs. Failures are logged and do not prevent other
-        catch-up jobs from firing.
+        Overdue jobs whose prerequisite check returns ``False`` are
+        skipped with a ``job_runs`` row of status='skipped' and a
+        single INFO log line.
 
         The DB query is a single round trip (one SELECT for all job
         names). The connection is opened, used, and closed within this
@@ -325,12 +328,45 @@ class JobRuntime:
             logger.info("catch-up: all jobs are current; nothing to fire")
             return
 
-        logger.info(
-            "catch-up: firing %d overdue job(s): %s",
-            len(overdue),
-            sorted(overdue),
-        )
-        for name in overdue:
+        # Check prerequisites for overdue jobs and split into
+        # fire-list vs skip-list.
+        firing: list[str] = []
+        skipped: list[tuple[str, str]] = []  # (name, reason)
+        try:
+            with psycopg.connect(self._database_url) as conn:
+                for name in overdue:
+                    job = catch_up_jobs[name]
+                    if job.prerequisite is not None:
+                        met, reason = job.prerequisite(conn)
+                        if not met:
+                            skipped.append((name, reason))
+                            record_job_skip(conn, name, reason)
+                            continue
+                    firing.append(name)
+        except Exception:
+            logger.exception("catch-up: prerequisite check failed; firing all overdue jobs")
+            firing = overdue
+            skipped = []
+
+        for name, reason in skipped:
+            logger.info("catch-up: skipping %s — prerequisite not met: %s", name, reason)
+
+        total = len(firing) + len(skipped)
+        if firing:
+            logger.info(
+                "catch-up: firing %d of %d overdue job(s) (%d skipped): %s",
+                len(firing),
+                total,
+                len(skipped),
+                sorted(firing),
+            )
+        elif skipped:
+            logger.info(
+                "catch-up: all %d overdue job(s) skipped (no upstream data)",
+                total,
+            )
+
+        for name in firing:
             invoker = self._invokers[name]
             wrapped = self._wrap_invoker(name, invoker)
             fut = self._manual_executor.submit(wrapped)
@@ -451,19 +487,46 @@ class JobRuntime:
             logger.error("executor future raised unexpectedly: %s", exc, exc_info=exc)
 
     def _wrap_invoker(self, job_name: str, invoker: Callable[[], None]) -> Callable[[], None]:
-        """Wrap a scheduled invoker with the per-job advisory lock.
+        """Wrap a scheduled invoker with prerequisite check + advisory lock.
 
-        The scheduled fire path takes the lock inside the worker (no
-        operator is waiting for a synchronous response, so we do not
-        need the surface-level 409 path the manual trigger uses).
-        Lock contention here is a normal condition -- a scheduled
-        fire that overlaps a still-running manual trigger -- and is
-        logged at INFO and skipped, not raised, because APScheduler
-        would otherwise log a noisy traceback for an expected race.
+        The scheduled fire path checks the prerequisite (if any) before
+        acquiring the lock.  If the prerequisite is not met, a
+        ``job_runs`` row with status='skipped' is recorded and the
+        invoker is not called.
+
+        Lock contention is a normal condition -- a scheduled fire that
+        overlaps a still-running manual trigger -- and is logged at INFO
+        and skipped, not raised, because APScheduler would otherwise log
+        a noisy traceback for an expected race.
         """
         database_url = self._database_url
+        job = self._job_registry.get(job_name)
 
         def wrapped() -> None:
+            # Prerequisite gate (scheduled fires only — manual triggers
+            # bypass prerequisites so the operator can force a run).
+            if job is not None and job.prerequisite is not None:
+                try:
+                    with psycopg.connect(database_url) as conn:
+                        met, reason = job.prerequisite(conn)
+                        if not met:
+                            record_job_skip(conn, job_name, reason)
+                            logger.info(
+                                "scheduled fire of %r skipped — prerequisite not met: %s",
+                                job_name,
+                                reason,
+                            )
+                            return
+                except Exception:
+                    # If the prerequisite check itself fails, let the
+                    # job run — failing open is safer than silently
+                    # skipping real work.
+                    logger.warning(
+                        "prerequisite check for %r failed; running job anyway",
+                        job_name,
+                        exc_info=True,
+                    )
+
             try:
                 with JobLock(database_url, job_name):
                     invoker()

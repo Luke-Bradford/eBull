@@ -94,7 +94,7 @@ class KillSwitchStateResponse(BaseModel):
 
 class JobHealthResponse(BaseModel):
     name: str
-    last_status: Literal["running", "success", "failure"] | None
+    last_status: Literal["running", "success", "failure", "skipped"] | None
     last_started_at: datetime | None
     last_finished_at: datetime | None
     detail: str
@@ -115,7 +115,7 @@ class JobOverviewResponse(BaseModel):
     cadence_kind: Literal["hourly", "daily", "weekly"]
     next_run_time: datetime
     next_run_time_source: Literal["declared"]  # see module docstring
-    last_status: Literal["running", "success", "failure"] | None
+    last_status: Literal["running", "success", "failure", "skipped"] | None
     last_started_at: datetime | None
     last_finished_at: datetime | None
     detail: str

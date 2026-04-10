@@ -40,6 +40,7 @@ const STATUS_TONE: Record<string, string> = {
   success: "text-emerald-600",
   failure: "text-red-600",
   running: "text-amber-600",
+  skipped: "text-slate-400",
 };
 
 export function AdminPage() {

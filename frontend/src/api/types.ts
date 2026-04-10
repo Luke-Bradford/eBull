@@ -49,7 +49,7 @@ export interface ConfigResponse {
 
 export type LayerStatus = "ok" | "stale" | "empty" | "error";
 export type OverallStatus = "ok" | "degraded" | "down";
-export type JobLastStatus = "running" | "success" | "failure" | null;
+export type JobLastStatus = "running" | "success" | "failure" | "skipped" | null;
 export type CadenceKind = "hourly" | "daily" | "weekly";
 
 export interface LayerHealthResponse {
@@ -109,7 +109,7 @@ export interface JobsListResponse {
 // /jobs/runs (app/api/jobs.py — issue #13 PR B)
 // ---------------------------------------------------------------------------
 
-export type JobRunStatus = "running" | "success" | "failure";
+export type JobRunStatus = "running" | "success" | "failure" | "skipped";
 
 export interface JobRunResponse {
   run_id: number;

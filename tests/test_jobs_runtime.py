@@ -284,6 +284,22 @@ _NO_CATCHUP_JOB = ScheduledJob(
     catch_up_on_boot=False,
 )
 
+_PREREQ_MET_JOB = ScheduledJob(
+    name="prereq_met_job",
+    description="test with met prerequisite",
+    cadence=Cadence.daily(hour=2, minute=0),
+    catch_up_on_boot=True,
+    prerequisite=lambda _conn: (True, ""),
+)
+
+_PREREQ_UNMET_JOB = ScheduledJob(
+    name="prereq_unmet_job",
+    description="test with unmet prerequisite",
+    cadence=Cadence.daily(hour=2, minute=0),
+    catch_up_on_boot=True,
+    prerequisite=lambda _conn: (False, "no coverage rows"),
+)
+
 
 def _make_catchup_runtime(
     jobs: list[ScheduledJob],
@@ -304,6 +320,12 @@ def _make_catchup_runtime(
     monkeypatch.setattr(
         "app.jobs.runtime.fetch_latest_successful_runs",
         lambda _conn, _names: latest_runs or {},
+    )
+
+    # Stub record_job_skip so catch-up can record skips without a real DB.
+    monkeypatch.setattr(
+        "app.jobs.runtime.record_job_skip",
+        lambda _conn, _name, _reason: 0,
     )
 
     # Stub psycopg.connect so _catch_up gets a no-op connection.
@@ -482,3 +504,190 @@ class TestCatchUpOnBoot:
         rt._catch_up()
         rt._manual_executor.shutdown(wait=True)
         assert fired == ["daily_job"]
+
+
+# ---------------------------------------------------------------------------
+# Catch-up with prerequisites
+# ---------------------------------------------------------------------------
+
+
+class TestCatchUpPrerequisites:
+    """Tests for prerequisite-gated catch-up on boot."""
+
+    def test_unmet_prerequisite_skips_overdue_job(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fired: list[str] = []
+
+        def invoker() -> None:
+            fired.append("prereq_unmet_job")
+
+        rt, _ = _make_catchup_runtime(
+            [_PREREQ_UNMET_JOB],
+            {"prereq_unmet_job": invoker},
+            monkeypatch,
+            latest_runs={},  # never run → overdue
+        )
+        rt._catch_up()
+        rt._manual_executor.shutdown(wait=True)
+        assert fired == []  # skipped, not fired
+
+    def test_met_prerequisite_fires_overdue_job(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fired: list[str] = []
+
+        def invoker() -> None:
+            fired.append("prereq_met_job")
+
+        rt, _ = _make_catchup_runtime(
+            [_PREREQ_MET_JOB],
+            {"prereq_met_job": invoker},
+            monkeypatch,
+            latest_runs={},
+        )
+        rt._catch_up()
+        rt._manual_executor.shutdown(wait=True)
+        assert fired == ["prereq_met_job"]
+
+    def test_mixed_prerequisites_only_met_jobs_fire(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fired: list[str] = []
+
+        def met_invoker() -> None:
+            fired.append("prereq_met_job")
+
+        def unmet_invoker() -> None:
+            fired.append("prereq_unmet_job")
+
+        rt, _ = _make_catchup_runtime(
+            [_PREREQ_MET_JOB, _PREREQ_UNMET_JOB],
+            {"prereq_met_job": met_invoker, "prereq_unmet_job": unmet_invoker},
+            monkeypatch,
+            latest_runs={},
+        )
+        rt._catch_up()
+        rt._manual_executor.shutdown(wait=True)
+        assert fired == ["prereq_met_job"]
+
+    def test_no_prerequisite_job_fires_normally(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Jobs without a prerequisite (None) are always fired when overdue."""
+        fired: list[str] = []
+
+        def invoker() -> None:
+            fired.append("daily_job")
+
+        rt, _ = _make_catchup_runtime(
+            [_DAILY_JOB],
+            {"daily_job": invoker},
+            monkeypatch,
+            latest_runs={},
+        )
+        rt._catch_up()
+        rt._manual_executor.shutdown(wait=True)
+        assert fired == ["daily_job"]
+
+    def test_prerequisite_check_records_skip(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When a prerequisite is unmet, record_job_skip is called."""
+        skip_calls: list[tuple[str, str]] = []
+
+        monkeypatch.setattr("app.jobs.runtime.SCHEDULED_JOBS", [_PREREQ_UNMET_JOB])
+        monkeypatch.setattr(
+            "app.jobs.runtime.fetch_latest_successful_runs",
+            lambda _conn, _names: {},
+        )
+        monkeypatch.setattr(
+            "app.jobs.runtime.record_job_skip",
+            lambda _conn, name, reason: skip_calls.append((name, reason)) or 0,
+        )
+
+        mock_conn = MagicMock()
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr("app.jobs.runtime.psycopg.connect", lambda _url: mock_conn)
+        monkeypatch.setattr(
+            "app.jobs.runtime.datetime",
+            type("_FakeDT", (), {"now": staticmethod(lambda tz: _NOW)}),
+        )
+
+        rt = JobRuntime(
+            database_url="postgresql://stub/stub",
+            invokers={"prereq_unmet_job": lambda: None},  # type: ignore[dict-item]
+        )
+        rt._catch_up()
+        rt._manual_executor.shutdown(wait=True)
+        assert len(skip_calls) == 1
+        assert skip_calls[0] == ("prereq_unmet_job", "no coverage rows")
+
+
+# ---------------------------------------------------------------------------
+# Scheduled-fire prerequisite gate
+# ---------------------------------------------------------------------------
+
+
+class TestScheduledFirePrerequisite:
+    """Tests for prerequisite checking in the scheduled-fire wrapper."""
+
+    def test_unmet_prerequisite_skips_scheduled_fire(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        invocations: list[int] = []
+
+        def invoker() -> None:
+            invocations.append(1)
+
+        # Stub record_job_skip.
+        monkeypatch.setattr(
+            "app.jobs.runtime.record_job_skip",
+            lambda _conn, _name, _reason: 0,
+        )
+
+        # Stub psycopg.connect for the prerequisite check.
+        mock_conn = MagicMock()
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr("app.jobs.runtime.psycopg.connect", lambda _url: mock_conn)
+        monkeypatch.setattr("app.jobs.runtime.SCHEDULED_JOBS", [_PREREQ_UNMET_JOB])
+
+        rt = _make_runtime({"prereq_unmet_job": invoker})
+        wrapped = rt._wrap_invoker("prereq_unmet_job", invoker)
+        wrapped()
+        assert invocations == []  # invoker was NOT called
+
+    def test_met_prerequisite_runs_scheduled_fire(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        invocations: list[int] = []
+
+        def invoker() -> None:
+            invocations.append(1)
+
+        mock_conn = MagicMock()
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr("app.jobs.runtime.psycopg.connect", lambda _url: mock_conn)
+        monkeypatch.setattr("app.jobs.runtime.SCHEDULED_JOBS", [_PREREQ_MET_JOB])
+
+        rt = _make_runtime({"prereq_met_job": invoker})
+        wrapped = rt._wrap_invoker("prereq_met_job", invoker)
+        wrapped()
+        assert invocations == [1]

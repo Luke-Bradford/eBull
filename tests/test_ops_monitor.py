@@ -34,6 +34,7 @@ from app.services.ops_monitor import (
     get_kill_switch_status,
     get_system_health,
     record_job_finish,
+    record_job_skip,
     record_job_start,
 )
 
@@ -263,6 +264,36 @@ class TestRecordJobFinish:
 
 
 # ---------------------------------------------------------------------------
+# TestRecordJobSkip
+# ---------------------------------------------------------------------------
+
+
+class TestRecordJobSkip:
+    """Test job skip recording."""
+
+    def test_returns_run_id(self) -> None:
+        conn = _make_conn([_make_cursor([{"run_id": 99}])])
+        run_id = record_job_skip(conn, "test_job", "no coverage rows", now=_NOW)
+        assert run_id == 99
+        conn.commit.assert_called_once()
+
+    def test_inserts_skipped_status_with_reason(self) -> None:
+        cur = _make_cursor([{"run_id": 1}])
+        conn = _make_conn([cur])
+        record_job_skip(conn, "my_job", "no Tier 1/2 coverage rows", now=_NOW)
+        call_args = cur.execute.call_args
+        params = call_args[0][1]
+        assert params["name"] == "my_job"
+        assert params["reason"] == "no Tier 1/2 coverage rows"
+        assert "skipped" in call_args[0][0]
+
+    def test_raises_if_no_row_returned(self) -> None:
+        conn = _make_conn([_make_cursor([])])
+        with pytest.raises(RuntimeError, match="no row"):
+            record_job_skip(conn, "test_job", "reason", now=_NOW)
+
+
+# ---------------------------------------------------------------------------
 # TestCheckJobHealth
 # ---------------------------------------------------------------------------
 
@@ -337,6 +368,26 @@ class TestCheckJobHealth:
         result = check_job_health(conn, "test_job")
         assert result.last_status == "running"
         assert "still in progress" in result.detail
+
+    def test_skipped_run_shows_reason(self) -> None:
+        conn = _make_conn(
+            [
+                _make_cursor(
+                    [
+                        {
+                            "status": "skipped",
+                            "started_at": _NOW,
+                            "finished_at": _NOW,
+                            "error_msg": "no Tier 1/2 coverage rows",
+                        }
+                    ]
+                )
+            ]
+        )
+        result = check_job_health(conn, "test_job")
+        assert result.last_status == "skipped"
+        assert "skipped" in result.detail
+        assert "no Tier 1/2 coverage rows" in result.detail
 
     @patch("app.services.ops_monitor._utcnow", return_value=_NOW)
     def test_stuck_running_treated_as_failure(self, mock_now: MagicMock) -> None:
