@@ -50,6 +50,7 @@ import {
   listBrokerCredentials,
   validateBrokerCredential,
 } from "@/api/brokerCredentials";
+import { runJob } from "@/api/jobs";
 import { ValidationResultDisplay } from "@/components/broker/ValidationResultDisplay";
 import { useRecoveryPhraseModal } from "@/components/security/RecoveryPhraseModal";
 import { deriveCredentialSetMode, ENVIRONMENT } from "@/lib/credentialSetMode";
@@ -178,6 +179,8 @@ export function SetupPage(): JSX.Element {
     e.preventDefault();
     setBrokerError(null);
     setBrokerSubmitting(true);
+    // Capture mode before save so we can detect first-time creation.
+    const wasCreate = mode === "create";
     try {
       let phrase: readonly string[] | null = null;
 
@@ -206,6 +209,14 @@ export function SetupPage(): JSX.Element {
 
       setBrokerApiKey("");
       setBrokerUserKey("");
+
+      // First-run bootstrap: kick off the universe sync so the pipeline
+      // starts populating data.  Only on first-time create (not Repair).
+      // Fire-and-forget — errors are swallowed because the operator can
+      // always trigger this manually from Admin.
+      if (wasCreate) {
+        runJob("nightly_universe_sync").catch(() => {});
+      }
 
       // If the first save triggered a recovery phrase, show the modal
       // now that both credentials are durable.

@@ -37,6 +37,7 @@ from app.services.coverage import (
     _is_thesis_fresh,
     override_tier,
     review_coverage,
+    seed_coverage,
 )
 
 _NOW = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
@@ -908,3 +909,70 @@ class TestOverrideTier:
         audit_writes = [(sql, params) for sql, params in self._writes if "INSERT INTO coverage_audit" in sql]
         assert len(audit_writes) == 1
         assert audit_writes[0][1]["change_type"] == "override"
+
+
+# ---------------------------------------------------------------------------
+# seed_coverage
+# ---------------------------------------------------------------------------
+
+
+class TestSeedCoverage:
+    """
+    Tests for the first-run bootstrap seeding function.
+    """
+
+    def _mock_conn(self, coverage_count: int, inserted_rows: int) -> MagicMock:
+        """Build a mock connection for seed_coverage tests.
+
+        The first cursor call returns the coverage count.
+        The execute call (bulk INSERT) returns a result with rowcount.
+        """
+        conn = MagicMock()
+
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = {"cnt": coverage_count}
+        mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_cursor.__exit__ = MagicMock(return_value=False)
+        conn.cursor.return_value = mock_cursor
+
+        mock_result = MagicMock()
+        mock_result.rowcount = inserted_rows
+        conn.execute.return_value = mock_result
+
+        conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
+        conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
+        return conn
+
+    def test_seeds_when_empty(self) -> None:
+        """Empty coverage table triggers INSERT of tradable instruments."""
+        conn = self._mock_conn(coverage_count=0, inserted_rows=500)
+        result = seed_coverage(conn)
+        assert result.seeded == 500
+        assert result.already_populated is False
+        # Verify the INSERT was called
+        conn.execute.assert_called_once()
+        sql = conn.execute.call_args[0][0]
+        assert "INSERT INTO coverage" in sql
+        assert "is_tradable = TRUE" in sql
+
+    def test_noop_when_populated(self) -> None:
+        """Non-empty coverage table skips seeding entirely."""
+        conn = self._mock_conn(coverage_count=100, inserted_rows=0)
+        result = seed_coverage(conn)
+        assert result.seeded == 0
+        assert result.already_populated is True
+        # The bulk INSERT should not have been called
+        conn.execute.assert_not_called()
+
+    def test_seeds_zero_when_no_tradable_instruments(self) -> None:
+        """Empty coverage + no tradable instruments = 0 seeded."""
+        conn = self._mock_conn(coverage_count=0, inserted_rows=0)
+        result = seed_coverage(conn)
+        assert result.seeded == 0
+        assert result.already_populated is False
+
+    def test_runs_inside_transaction(self) -> None:
+        """The count check and INSERT must be in the same transaction."""
+        conn = self._mock_conn(coverage_count=0, inserted_rows=10)
+        seed_coverage(conn)
+        conn.transaction.assert_called_once()

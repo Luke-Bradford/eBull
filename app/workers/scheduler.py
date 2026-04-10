@@ -36,7 +36,7 @@ from app.providers.implementations.etoro import EtoroMarketDataProvider
 from app.providers.implementations.fmp import FmpFundamentalsProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
-from app.services.coverage import review_coverage
+from app.services.coverage import review_coverage, seed_coverage
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
@@ -365,15 +365,43 @@ def nightly_universe_sync() -> None:
             EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
             psycopg.connect(settings.database_url) as conn,
         ):
-            summary = sync_universe(provider, conn)
-        tracker.row_count = summary.inserted + summary.updated
+            # Two separate transactions so a coverage-seeding failure
+            # does not roll back a completed universe sync.  Each
+            # function opens its own conn.transaction() (savepoints)
+            # internally; the outer transaction ensures a clean,
+            # well-defined connection state for each call.
+            #
+            # All variable references stay inside the transaction block
+            # that defines them to avoid UnboundLocalError if __exit__
+            # raises (prevention-log entry from PR #148 round 1).
+            # row_count accumulates across blocks without cross-block
+            # reads of tracker.row_count.
+            row_count = 0
 
-    logger.info(
-        "Universe sync complete: inserted=%d updated=%d deactivated=%d",
-        summary.inserted,
-        summary.updated,
-        summary.deactivated,
-    )
+            with conn.transaction():
+                summary = sync_universe(provider, conn)
+                row_count = summary.inserted + summary.updated
+                tracker.row_count = row_count
+                logger.info(
+                    "Universe sync: inserted=%d updated=%d deactivated=%d",
+                    summary.inserted,
+                    summary.updated,
+                    summary.deactivated,
+                )
+
+            # First-run bootstrap: if the coverage table is empty after a
+            # successful universe sync, seed all tradable instruments at
+            # Tier 3.  This is a no-op on subsequent runs (seed_coverage
+            # checks for existing rows and skips if non-empty).
+            with conn.transaction():
+                seed_result = seed_coverage(conn)
+                row_count += seed_result.seeded
+                tracker.row_count = row_count
+                logger.info(
+                    "Coverage seed: seeded=%d already_populated=%s",
+                    seed_result.seeded,
+                    seed_result.already_populated,
+                )
 
 
 def hourly_market_refresh() -> None:

@@ -456,3 +456,35 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `place_order(amount=None, units=None)` fell through to the by-amount branch with `Amount: 0`, submitting a zero-amount live order to the broker instead of failing fast. The ABC contract allows both parameters to be `None` so the caller can provide exactly one, but without a pre-call guard the provider silently picked a default.
 - Prevention: Any broker provider `place_order` implementation must validate that exactly one of `amount`/`units` is non-None before selecting the endpoint branch. Also validate that the chosen value is positive. Guard against unrecognised action strings with an allowlist before any HTTP call.
 - Enforced in: this prevention log
+
+---
+
+### UnboundLocalError from variables assigned only inside conn.transaction()
+- First seen in: #145
+- Symptom: `seeded = result.rowcount` was assigned inside `with conn.transaction()` but the `return SeedResult(seeded=...)` was after the block. If `conn.transaction().__exit__` raises on commit failure, `seeded` is never assigned and the return raises `UnboundLocalError`.
+- Prevention: Variables assigned inside a `with conn.transaction()` block must either be (a) initialised before the block, or (b) only referenced inside the block. Prefer returning from inside the block when the return value depends on the transaction succeeding.
+- Enforced in: this prevention log
+
+---
+
+### Shared connection state between transaction-managing functions
+- First seen in: #145
+- Symptom: `sync_universe(conn)` and `seed_coverage(conn)` each opened their own `conn.transaction()` on a shared connection. Without an explicit outer transaction, the connection state between calls depended on psycopg3's implicit transaction behaviour, which is correct but non-obvious and fragile to refactoring.
+- Prevention: When two functions that each manage their own `conn.transaction()` are called sequentially on the same connection, wrap them in an explicit outer `conn.transaction()` to make the commit boundary and connection state unambiguous. Document that inner `conn.transaction()` calls become savepoints.
+- Enforced in: this prevention log
+
+---
+
+### Fire-and-forget job triggers missing first-time guard
+- First seen in: #145
+- Symptom: `runJob("nightly_universe_sync")` fired unconditionally after credential save in SetupPage, while SettingsPage correctly gated the same call on `wasCreate`. A returning operator re-entering the wizard would trigger a redundant sync.
+- Prevention: Fire-and-forget job triggers in multi-step wizards or forms must be gated on a first-time-only condition (e.g. `mode === "create"` captured before the save). Both SetupPage and SettingsPage trigger paths must stay in sync.
+- Enforced in: this prevention log
+
+---
+
+### psycopg v3 rowcount sentinel (-1) treated as valid count
+- First seen in: #145
+- Symptom: `result.rowcount` is `-1` in psycopg v3 when the server does not report a row count. Code using `if result.rowcount is not None else 0` passes `-1` through to `tracker.row_count`, producing invalid row counts in job history.
+- Prevention: Guard `result.rowcount` with an explicit check: raise on `-1` rather than silently clamping with `max()`. A `-1` from a DML statement that should report a count (INSERT, UPDATE, DELETE) indicates a genuine server-side anomaly that must surface as an error, not be hidden.
+- Enforced in: this prevention log

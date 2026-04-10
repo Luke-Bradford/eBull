@@ -26,6 +26,7 @@ import {
   revokeBrokerCredential,
   validateBrokerCredential,
 } from "@/api/brokerCredentials";
+import { runJob } from "@/api/jobs";
 import { ValidationResultDisplay } from "@/components/broker/ValidationResultDisplay";
 import { useRecoveryPhraseModal } from "@/components/security/RecoveryPhraseModal";
 import { deriveCredentialSetMode, ENVIRONMENT } from "@/lib/credentialSetMode";
@@ -113,6 +114,8 @@ function BrokerCredentialsSection(): JSX.Element {
     e.preventDefault();
     setCreateError(null);
     setCreating(true);
+    // Capture mode before the save so we can detect first-time creation.
+    const wasCreate = mode === "create";
     try {
       let phrase: readonly string[] | null = null;
 
@@ -137,6 +140,13 @@ function BrokerCredentialsSection(): JSX.Element {
           environment: ENVIRONMENT,
           secret: userKey,
         });
+      }
+
+      // First-run bootstrap: kick off the universe sync when both keys
+      // are saved for the first time.  Fire-and-forget — errors are
+      // swallowed because the operator can always trigger manually.
+      if (wasCreate) {
+        runJob("nightly_universe_sync").catch(() => {});
       }
 
       // If the first save triggered a recovery phrase, show the modal
