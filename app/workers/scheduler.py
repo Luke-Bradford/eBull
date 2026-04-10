@@ -370,6 +370,10 @@ def nightly_universe_sync() -> None:
             # function opens its own conn.transaction() (savepoints)
             # internally; the outer transaction ensures a clean,
             # well-defined connection state between calls.
+            #
+            # All references to summary/seed_result stay inside the
+            # transaction block to avoid UnboundLocalError if __exit__
+            # raises (prevention-log entry from PR #148 round 1).
             with conn.transaction():
                 summary = sync_universe(provider, conn)
 
@@ -379,15 +383,15 @@ def nightly_universe_sync() -> None:
                 # checks for existing rows and skips if non-empty).
                 seed_result = seed_coverage(conn)
 
-        tracker.row_count = summary.inserted + summary.updated + seed_result.seeded
+                tracker.row_count = summary.inserted + summary.updated + seed_result.seeded
 
-    logger.info(
-        "Universe sync complete: inserted=%d updated=%d deactivated=%d seeded_coverage=%d",
-        summary.inserted,
-        summary.updated,
-        summary.deactivated,
-        seed_result.seeded,
-    )
+                logger.info(
+                    "Universe sync complete: inserted=%d updated=%d deactivated=%d seeded_coverage=%d",
+                    summary.inserted,
+                    summary.updated,
+                    summary.deactivated,
+                    seed_result.seeded,
+                )
 
 
 def hourly_market_refresh() -> None:

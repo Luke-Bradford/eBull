@@ -722,6 +722,12 @@ def seed_coverage(
             # COUNT(*) always returns exactly one row; the value is 0 when empty.
             count = int(row["cnt"]) if row is not None else 0
 
+        # Note: the COUNT and INSERT run as separate statements within the
+        # same savepoint.  A concurrent transaction could theoretically
+        # insert rows between them, causing us to return seeded=0 with
+        # already_populated=False.  This is cosmetic — the only caller
+        # (nightly_universe_sync) holds an advisory lock, so concurrency
+        # cannot arise.  ON CONFLICT DO NOTHING is defence-in-depth.
         if count > 0:
             logger.info("seed_coverage: table already has %d rows, skipping", count)
             return SeedResult(seeded=0, already_populated=True)
