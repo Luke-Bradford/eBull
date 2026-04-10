@@ -478,15 +478,16 @@ def nightly_universe_sync() -> None:
             # initial cohort to T2 so downstream jobs (market data,
             # filings, scoring) can start producing data.  This is a
             # one-time operation — once T2 rows exist it becomes a no-op.
-            with conn.transaction():
-                bootstrap_result = bootstrap_tier2_cohort(conn)
-                row_count += bootstrap_result.promoted
-                tracker.row_count = row_count
-                logger.info(
-                    "Coverage bootstrap: promoted=%d skipped_reason=%s",
-                    bootstrap_result.promoted,
-                    bootstrap_result.skipped_reason,
-                )
+            # No outer conn.transaction() — bootstrap_tier2_cohort manages
+            # its own transaction internally.
+            bootstrap_result = bootstrap_tier2_cohort(conn)
+            row_count += bootstrap_result.promoted
+            tracker.row_count = row_count
+            logger.info(
+                "Coverage bootstrap: promoted=%d skipped_reason=%s",
+                bootstrap_result.promoted,
+                bootstrap_result.skipped_reason,
+            )
 
 
 def hourly_market_refresh() -> None:

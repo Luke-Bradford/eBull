@@ -824,24 +824,28 @@ def bootstrap_tier2_cohort(
     bootstrap rationale so the audit trail explains why these instruments
     were promoted without the usual score/thesis prerequisites.
     """
+    # Check T1/T2 count outside any transaction to avoid an empty
+    # commit on every subsequent (no-op) run.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("SELECT COUNT(*) AS cnt FROM coverage WHERE coverage_tier IN (1, 2)")
+        row = cur.fetchone()
+        t12_count = int(row["cnt"]) if row is not None else 0
+
+    if t12_count > 0:
+        logger.info(
+            "bootstrap_tier2_cohort: %d T1/T2 rows already exist, skipping",
+            t12_count,
+        )
+        return BootstrapResult(promoted=0, skipped_reason="T1/T2 coverage already exists")
+
+    candidates = _select_bootstrap_candidates(conn, cap)
+    if not candidates:
+        logger.warning("bootstrap_tier2_cohort: no eligible T3 instruments found")
+        return BootstrapResult(promoted=0, skipped_reason="no eligible T3 instruments")
+
+    # All writes (UPDATE coverage + INSERT coverage_audit) are inside a
+    # single transaction so either all promotions land or none do.
     with conn.transaction():
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute("SELECT COUNT(*) AS cnt FROM coverage WHERE coverage_tier IN (1, 2)")
-            row = cur.fetchone()
-            t12_count = int(row["cnt"]) if row is not None else 0
-
-        if t12_count > 0:
-            logger.info(
-                "bootstrap_tier2_cohort: %d T1/T2 rows already exist, skipping",
-                t12_count,
-            )
-            return BootstrapResult(promoted=0, skipped_reason="T1/T2 coverage already exists")
-
-        candidates = _select_bootstrap_candidates(conn, cap)
-        if not candidates:
-            logger.warning("bootstrap_tier2_cohort: no eligible T3 instruments found")
-            return BootstrapResult(promoted=0, skipped_reason="no eligible T3 instruments")
-
         promoted = 0
         for cand in candidates:
             instrument_id = int(cand["instrument_id"])
@@ -866,8 +870,8 @@ def bootstrap_tier2_cohort(
             _apply_tier_change(conn, change)
             promoted += 1
 
-        logger.info(
-            "bootstrap_tier2_cohort: promoted %d instruments from T3 to T2",
-            promoted,
-        )
-        return BootstrapResult(promoted=promoted, skipped_reason=None)
+    logger.info(
+        "bootstrap_tier2_cohort: promoted %d instruments from T3 to T2",
+        promoted,
+    )
+    return BootstrapResult(promoted=promoted, skipped_reason=None)
