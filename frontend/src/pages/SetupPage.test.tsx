@@ -307,8 +307,11 @@ describe("SetupPage — step 2 (broker, optional)", () => {
     mockedCreate
       .mockResolvedValueOnce(withoutPhrase())  // api_key succeeds
       .mockRejectedValueOnce(new Error("boom")); // user_key fails
-    // After error, refreshCredentials returns the saved api_key.
-    mockedList.mockResolvedValueOnce([apiKeyRow()]);
+    // Mount fetch on step-2 entry returns empty (fresh setup), then
+    // post-error refresh returns the saved api_key.
+    mockedList
+      .mockResolvedValueOnce([])           // mount fetch
+      .mockResolvedValueOnce([apiKeyRow()]); // post-error refresh
 
     render(<SetupPage />);
     await completeStep1();

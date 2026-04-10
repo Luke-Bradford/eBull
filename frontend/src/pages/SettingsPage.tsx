@@ -27,31 +27,9 @@ import {
   validateBrokerCredential,
 } from "@/api/brokerCredentials";
 import { useRecoveryPhraseModal } from "@/components/security/RecoveryPhraseModal";
+import { deriveCredentialSetMode, ENVIRONMENT } from "@/lib/credentialSetMode";
 
 const MIN_SECRET_LEN = 4;
-const ENVIRONMENT = "demo";
-
-type CredentialSetMode = "create" | "repair" | "complete";
-
-function deriveMode(
-  rows: BrokerCredentialView[] | null,
-): { mode: CredentialSetMode; missingLabel: "api_key" | "user_key" | null } {
-  if (rows === null) return { mode: "create", missingLabel: null };
-
-  const active = rows.filter(
-    (r) =>
-      r.provider === "etoro" &&
-      r.environment === ENVIRONMENT &&
-      r.revoked_at === null,
-  );
-  const hasApiKey = active.some((r) => r.label === "api_key");
-  const hasUserKey = active.some((r) => r.label === "user_key");
-
-  if (hasApiKey && hasUserKey) return { mode: "complete", missingLabel: null };
-  if (hasApiKey) return { mode: "repair", missingLabel: "user_key" };
-  if (hasUserKey) return { mode: "repair", missingLabel: "api_key" };
-  return { mode: "create", missingLabel: null };
-}
 
 export function SettingsPage(): JSX.Element {
   return (
@@ -82,7 +60,7 @@ function BrokerCredentialsSection(): JSX.Element {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const { mode, missingLabel } = useMemo(() => deriveMode(rows), [rows]);
+  const { mode, missingLabel } = useMemo(() => deriveCredentialSetMode(rows), [rows]);
 
   // Clear stale validation result when inputs change or mode transitions.
   useEffect(() => {
@@ -135,47 +113,38 @@ function BrokerCredentialsSection(): JSX.Element {
     setCreateError(null);
     setCreating(true);
     try {
+      let phrase: readonly string[] | null = null;
+
+      // Save api_key if needed (Create mode or Repair with api_key missing).
       if (mode === "create" || (mode === "repair" && missingLabel === "api_key")) {
-        const keyValue = mode === "repair" ? apiKey : apiKey;
         const response = await createBrokerCredential({
           provider: "etoro",
           label: "api_key",
           environment: ENVIRONMENT,
-          secret: keyValue,
+          secret: apiKey,
         });
         if (response.recovery_phrase != null && response.recovery_phrase.length > 0) {
-          // Recovery phrase shown — defer refresh + second save until
-          // modal closes. But we need to save user_key too in Create mode.
-          // Store a flag so the modal onClose path can continue.
-          if (mode === "create") {
-            // Save user_key immediately — the phrase modal is about the
-            // root secret, not the individual credential. The second
-            // credential should be committed before the modal opens so
-            // both rows are durable.
-            await createBrokerCredential({
-              provider: "etoro",
-              label: "user_key",
-              environment: ENVIRONMENT,
-              secret: userKey,
-            });
-          }
-          setApiKey("");
-          setUserKey("");
-          phraseModal.open(response.recovery_phrase);
-          return;
+          phrase = response.recovery_phrase;
         }
       }
 
-      // Save user_key if we're in Create mode and haven't saved it yet,
-      // or if we're in Repair mode and user_key is the missing one.
+      // Save user_key if needed (Create mode or Repair with user_key missing).
       if (mode === "create" || (mode === "repair" && missingLabel === "user_key")) {
-        const keyValue = mode === "repair" ? userKey : userKey;
         await createBrokerCredential({
           provider: "etoro",
           label: "user_key",
           environment: ENVIRONMENT,
-          secret: keyValue,
+          secret: userKey,
         });
+      }
+
+      // If the first save triggered a recovery phrase, show the modal
+      // now that both credentials are durable.
+      if (phrase !== null) {
+        setApiKey("");
+        setUserKey("");
+        phraseModal.open(phrase);
+        return;
       }
 
       setApiKey("");

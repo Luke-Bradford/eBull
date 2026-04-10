@@ -51,35 +51,14 @@ import {
   validateBrokerCredential,
 } from "@/api/brokerCredentials";
 import { useRecoveryPhraseModal } from "@/components/security/RecoveryPhraseModal";
+import { deriveCredentialSetMode, ENVIRONMENT } from "@/lib/credentialSetMode";
 import { useSession } from "@/lib/session";
 
 const GENERIC_ERROR = "Setup unavailable or invalid token.";
 const MIN_PASSWORD_LEN = 12;
 const MIN_SECRET_LEN = 4;
-const ENVIRONMENT = "demo";
 
 type WizardStep = "operator" | "broker";
-type CredentialSetMode = "create" | "repair" | "complete";
-
-function deriveMode(
-  rows: BrokerCredentialView[] | null,
-): { mode: CredentialSetMode; missingLabel: "api_key" | "user_key" | null } {
-  if (rows === null) return { mode: "create", missingLabel: null };
-
-  const active = rows.filter(
-    (r) =>
-      r.provider === "etoro" &&
-      r.environment === ENVIRONMENT &&
-      r.revoked_at === null,
-  );
-  const hasApiKey = active.some((r) => r.label === "api_key");
-  const hasUserKey = active.some((r) => r.label === "user_key");
-
-  if (hasApiKey && hasUserKey) return { mode: "complete", missingLabel: null };
-  if (hasApiKey) return { mode: "repair", missingLabel: "user_key" };
-  if (hasUserKey) return { mode: "repair", missingLabel: "api_key" };
-  return { mode: "create", missingLabel: null };
-}
 
 export function SetupPage(): JSX.Element {
   const { status, markAuthenticated } = useSession();
@@ -103,7 +82,7 @@ export function SetupPage(): JSX.Element {
 
   // Credential-set mode detection for partial-save recovery.
   const [credRows, setCredRows] = useState<BrokerCredentialView[] | null>(null);
-  const derived = deriveMode(credRows);
+  const derived = deriveCredentialSetMode(credRows);
   const mode = derived.mode;
   const missingLabel = derived.missingLabel;
 
@@ -112,6 +91,14 @@ export function SetupPage(): JSX.Element {
   const [validationResult, setValidationResult] =
     useState<ValidateCredentialResponse | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
+
+  // Fetch existing credentials when entering step 2 so that
+  // partial-save state from a prior session is correctly detected.
+  useEffect(() => {
+    if (step === "broker") {
+      void refreshCredentials();
+    }
+  }, [step]);
 
   // Clear stale validation result when inputs change or mode transitions.
   useEffect(() => {
@@ -191,7 +178,9 @@ export function SetupPage(): JSX.Element {
     setBrokerError(null);
     setBrokerSubmitting(true);
     try {
-      // Save api_key if needed.
+      let phrase: readonly string[] | null = null;
+
+      // Save api_key if needed (Create mode or Repair with api_key missing).
       if (mode === "create" || (mode === "repair" && missingLabel === "api_key")) {
         const response = await createBrokerCredential({
           provider: "etoro",
@@ -200,24 +189,11 @@ export function SetupPage(): JSX.Element {
           secret: brokerApiKey,
         });
         if (response.recovery_phrase != null && response.recovery_phrase.length > 0) {
-          // Save user_key before showing the phrase modal (both rows
-          // must be durable before the wizard completes).
-          if (mode === "create") {
-            await createBrokerCredential({
-              provider: "etoro",
-              label: "user_key",
-              environment: ENVIRONMENT,
-              secret: brokerUserKey,
-            });
-          }
-          setBrokerApiKey("");
-          setBrokerUserKey("");
-          phraseModal.open(response.recovery_phrase);
-          return;
+          phrase = response.recovery_phrase;
         }
       }
 
-      // Save user_key if needed.
+      // Save user_key if needed (Create mode or Repair with user_key missing).
       if (mode === "create" || (mode === "repair" && missingLabel === "user_key")) {
         await createBrokerCredential({
           provider: "etoro",
@@ -229,6 +205,14 @@ export function SetupPage(): JSX.Element {
 
       setBrokerApiKey("");
       setBrokerUserKey("");
+
+      // If the first save triggered a recovery phrase, show the modal
+      // now that both credentials are durable.
+      if (phrase !== null) {
+        phraseModal.open(phrase);
+        return;
+      }
+
       completeWizard();
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 409) {
