@@ -781,6 +781,10 @@ def _select_bootstrap_candidates(
     eToro-sourced instruments at bootstrap time.  Once fundamentals are
     ingested for the T2 cohort, the weekly coverage review can use real
     sector data for subsequent promotion decisions.
+
+    Requires: caller must hold an active transaction with the bootstrap
+    advisory lock (``pg_advisory_xact_lock(_BOOTSTRAP_LOCK_ID)``) so
+    the candidate read is atomic with the subsequent writes.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
