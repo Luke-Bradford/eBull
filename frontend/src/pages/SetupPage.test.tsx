@@ -26,6 +26,7 @@ import {
 import { postSetup } from "@/api/auth";
 import type { Operator } from "@/api/auth";
 import { ApiError } from "@/api/client";
+import { runJob } from "@/api/jobs";
 import { useSession } from "@/lib/session";
 
 vi.mock("@/api/auth", async () => {
@@ -39,6 +40,9 @@ vi.mock("@/api/brokerCredentials", () => ({
   createBrokerCredential: vi.fn(),
   listBrokerCredentials: vi.fn(),
   validateBrokerCredential: vi.fn(),
+}));
+vi.mock("@/api/jobs", () => ({
+  runJob: vi.fn(),
 }));
 
 const navigateMock = vi.fn();
@@ -56,6 +60,7 @@ const mockedPostSetup = vi.mocked(postSetup);
 const mockedCreate = vi.mocked(createBrokerCredential);
 const mockedList = vi.mocked(listBrokerCredentials);
 const mockedValidate = vi.mocked(validateBrokerCredential);
+const mockedRunJob = vi.mocked(runJob);
 
 const OPERATOR: Operator = {
   id: "00000000-0000-0000-0000-000000000001",
@@ -144,6 +149,8 @@ beforeEach(() => {
     markAuthenticated: markAuthenticatedMock,
     refreshBootstrapState: vi.fn(),
   } as unknown as ReturnType<typeof useSession>);
+  mockedRunJob.mockReset();
+  mockedRunJob.mockResolvedValue(undefined);
   // Default: no credentials exist (fresh setup).
   mockedList.mockResolvedValue([]);
 });
@@ -351,5 +358,55 @@ describe("SetupPage — edge case 2", () => {
     });
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(navigateMock).toHaveBeenCalledWith("/", { replace: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// First-run bootstrap trigger (#145)
+// ---------------------------------------------------------------------------
+
+describe("SetupPage — first-run bootstrap trigger", () => {
+  it("fires nightly_universe_sync after both credentials are saved", async () => {
+    mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
+    mockedCreate
+      .mockResolvedValueOnce(withoutPhrase())
+      .mockResolvedValueOnce(withoutPhrase());
+
+    render(<SetupPage />);
+    await completeStep1();
+    await fillStep2("test-api-key", "test-user-key");
+
+    await waitFor(() => {
+      expect(mockedRunJob).toHaveBeenCalledWith("nightly_universe_sync");
+    });
+  });
+
+  it("does not fire universe sync when operator skips credentials", async () => {
+    const user = userEvent.setup();
+    mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
+    render(<SetupPage />);
+    await completeStep1();
+    await screen.findByRole("button", { name: /Skip for now/i });
+
+    await user.click(screen.getByRole("button", { name: /Skip for now/i }));
+
+    expect(mockedRunJob).not.toHaveBeenCalled();
+  });
+
+  it("swallows universe sync errors silently", async () => {
+    mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
+    mockedCreate
+      .mockResolvedValueOnce(withoutPhrase())
+      .mockResolvedValueOnce(withoutPhrase());
+    mockedRunJob.mockRejectedValueOnce(new Error("409 already running"));
+
+    render(<SetupPage />);
+    await completeStep1();
+    await fillStep2("test-api-key", "test-user-key");
+
+    // Wizard still completes despite runJob failure.
+    await waitFor(() => {
+      expect(markAuthenticatedMock).toHaveBeenCalledTimes(1);
+    });
   });
 });

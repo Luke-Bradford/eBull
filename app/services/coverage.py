@@ -681,3 +681,58 @@ def override_tier(
     )
 
     return change
+
+
+# ---------------------------------------------------------------------------
+# First-run seeding
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SeedResult:
+    """Outcome of ``seed_coverage``."""
+
+    seeded: int
+    already_populated: bool
+
+
+def seed_coverage(
+    conn: psycopg.Connection[Any],
+) -> SeedResult:
+    """Seed initial Tier 3 coverage rows for all tradable instruments.
+
+    This is a first-run bootstrap helper: it inserts coverage rows
+    only when the coverage table is completely empty.  Once seeded, the
+    weekly coverage review promotes instruments through 3→2→1 on its
+    normal schedule.
+
+    Uses ``ON CONFLICT DO NOTHING`` so a concurrent call is safe (the
+    second caller inserts zero rows rather than racing).
+
+    Opens its own ``conn.transaction()`` so the read (empty check) and
+    the write (bulk INSERT) are atomic.
+    """
+    with conn.transaction():
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT COUNT(*) AS cnt FROM coverage")
+            row = cur.fetchone()
+            # COUNT(*) always returns exactly one row; the value is 0 when empty.
+            count = int(row["cnt"]) if row is not None else 0
+
+        if count > 0:
+            logger.info("seed_coverage: table already has %d rows, skipping", count)
+            return SeedResult(seeded=0, already_populated=True)
+
+        result = conn.execute(
+            """
+            INSERT INTO coverage (instrument_id, coverage_tier)
+            SELECT instrument_id, 3
+            FROM instruments
+            WHERE is_tradable = TRUE
+            ON CONFLICT DO NOTHING
+            """
+        )
+        seeded = result.rowcount if result.rowcount is not None else 0
+
+    logger.info("seed_coverage: seeded %d instruments at Tier 3", seeded)
+    return SeedResult(seeded=seeded, already_populated=False)

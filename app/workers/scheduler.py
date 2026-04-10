@@ -36,7 +36,7 @@ from app.providers.implementations.etoro import EtoroMarketDataProvider
 from app.providers.implementations.fmp import FmpFundamentalsProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
-from app.services.coverage import review_coverage
+from app.services.coverage import review_coverage, seed_coverage
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
@@ -366,13 +366,21 @@ def nightly_universe_sync() -> None:
             psycopg.connect(settings.database_url) as conn,
         ):
             summary = sync_universe(provider, conn)
-        tracker.row_count = summary.inserted + summary.updated
+
+            # First-run bootstrap: if the coverage table is empty after a
+            # successful universe sync, seed all tradable instruments at
+            # Tier 3.  This is a no-op on subsequent runs (seed_coverage
+            # checks for existing rows and skips if non-empty).
+            seed_result = seed_coverage(conn)
+
+        tracker.row_count = summary.inserted + summary.updated + seed_result.seeded
 
     logger.info(
-        "Universe sync complete: inserted=%d updated=%d deactivated=%d",
+        "Universe sync complete: inserted=%d updated=%d deactivated=%d seeded_coverage=%d",
         summary.inserted,
         summary.updated,
         summary.deactivated,
+        seed_result.seeded,
     )
 
 

@@ -9,6 +9,7 @@ import { SummaryCards } from "@/components/dashboard/SummaryCards";
 import { PositionsTable } from "@/components/dashboard/PositionsTable";
 import { RecentRecommendations } from "@/components/dashboard/RecentRecommendations";
 import { SystemStatusPanel } from "@/components/dashboard/SystemStatusPanel";
+import { BootstrapProgress, isBootstrapping } from "@/components/dashboard/BootstrapProgress";
 
 /**
  * Operator dashboard (#60).
@@ -48,6 +49,14 @@ export function DashboardPage() {
 
       {allFailed ? (
         <ErrorBanner message="The API is unreachable. Check that the backend is running and the auth token is configured." />
+      ) : null}
+
+      {/* First-run bootstrap progress — shown when all data layers are
+          empty (credentials saved but pipeline not yet populated). The
+          panel derives its stage from /system/status layer + job states
+          and disappears once data starts flowing. */}
+      {!system.loading && system.data !== null && isBootstrapping(system.data) ? (
+        <BootstrapProgress system={system.data} />
       ) : null}
 
       {/* Portfolio block: summary cards + positions table share one
