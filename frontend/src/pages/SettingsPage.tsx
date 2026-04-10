@@ -161,6 +161,9 @@ function BrokerCredentialsSection(): JSX.Element {
     setCreating(true);
     // Capture mode before the save so we can detect first-time creation.
     const wasCreate = mode === "create";
+    // When the recovery-phrase modal opens, its onClose callback owns the
+    // refresh — skip the finally refresh so we don't double-refresh.
+    let showingPhrase = false;
     try {
       let phrase: readonly string[] | null = null;
 
@@ -195,17 +198,18 @@ function BrokerCredentialsSection(): JSX.Element {
       }
 
       // If the first save triggered a recovery phrase, show the modal
-      // now that both credentials are durable.
+      // now that both credentials are durable. The modal's onClose
+      // callback calls refresh(), so we skip the finally refresh.
       if (phrase !== null) {
         setApiKey("");
         setUserKey("");
+        showingPhrase = true;
         phraseModal.open(phrase);
         return;
       }
 
       setApiKey("");
       setUserKey("");
-      await refresh();
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 409) {
         setCreateError("A credential with that label already exists. Revoke it first to replace.");
@@ -214,11 +218,14 @@ function BrokerCredentialsSection(): JSX.Element {
       } else {
         setCreateError("Could not save credential.");
       }
-      // Re-derive mode from the refreshed list in case the first call
-      // succeeded but the second failed (partial state).
-      await refresh();
     } finally {
       setCreating(false);
+      // Always re-derive mode from server state, whether success or
+      // partial failure (e.g. first key saved, second failed → Repair).
+      // Skip when the phrase modal is open — its onClose owns the refresh.
+      if (!showingPhrase) {
+        await refresh();
+      }
     }
   }
 
@@ -236,16 +243,15 @@ function BrokerCredentialsSection(): JSX.Element {
     setBusyId(row.id);
     try {
       await revokeBrokerCredential(row.id);
-      await refresh();
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 404) {
         setActionError("That credential no longer exists.");
-        await refresh();
       } else {
         setActionError("Could not revoke credential.");
       }
     } finally {
       setBusyId(null);
+      await refresh();
     }
   }
 
@@ -305,7 +311,6 @@ function BrokerCredentialsSection(): JSX.Element {
       });
       setEditSecret("");
       setManageAction("idle");
-      await refresh();
     } catch (err: unknown) {
       // If the old key was already revoked but the new save failed, the
       // credential set is now incomplete.  After refresh() the mode will
@@ -321,9 +326,9 @@ function BrokerCredentialsSection(): JSX.Element {
       } else {
         setEditError("Could not update credential.");
       }
-      await refresh();
     } finally {
       setEditing(false);
+      await refresh();
     }
   }
 
@@ -365,7 +370,6 @@ function BrokerCredentialsSection(): JSX.Element {
       setApiKey("");
       setUserKey("");
       setManageAction("idle");
-      await refresh();
     } catch (err: unknown) {
       // After refresh() the mode may transition away from "complete",
       // hiding the replace form.  Surface partial-failure via actionError
@@ -381,9 +385,9 @@ function BrokerCredentialsSection(): JSX.Element {
       } else {
         setEditError("Could not replace credentials.");
       }
-      await refresh();
     } finally {
       setEditing(false);
+      await refresh();
     }
   }
 
