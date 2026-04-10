@@ -507,10 +507,10 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
-### Multiple ResilientClient instances on same httpx.Client must share throttle state
+### Multiple ResilientClient instances sharing a rate limit must share throttle state
 - First seen in: #168
-- Symptom: eToro broker created separate `_http_read` and `_http_write` ResilientClient wrappers around the same `httpx.Client` with independent `_last_request_at` timestamps. Interleaved GET+POST calls had no coordination, so combined request rate could exceed API limits without either client detecting it.
-- Prevention: When creating multiple `ResilientClient` instances that share an underlying `httpx.Client`, pass a shared `list[float]` via the `shared_last_request` parameter. Grep for `ResilientClient(` calls in any provider file — if two or more wrap the same client, verify they share a timestamp list.
+- Symptom: eToro broker created separate `_http_read` and `_http_write` ResilientClient wrappers with independent `_last_request_at` timestamps. Same issue hit SEC EDGAR where two different `httpx.Client` instances (different hosts) share the same API rate limit. Interleaved calls had no coordination, so combined request rate could exceed API limits without either client detecting it.
+- Prevention: When creating multiple `ResilientClient` instances that share a rate limit — whether wrapping the same or different `httpx.Client` objects — pass a shared `list[float]` via the `shared_last_request` parameter. Grep for `ResilientClient(` calls in any provider file — if two or more exist in the same class, verify they share a timestamp list.
 - Enforced in: this prevention log
 
 ---

@@ -85,14 +85,18 @@ class SecFilingsProvider(FilingsProvider):
             timeout=30.0,
         )
         # Both clients share the same SEC rate limit (10 req/s).
-        # ResilientClient replaces the old _rate_limit() method.
+        # Shared timestamp ensures interleaved calls to different hosts
+        # don't exceed the combined limit.
+        shared_ts: list[float] = [0.0]
         self._http = ResilientClient(
             self._client,
             min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
+            shared_last_request=shared_ts,
         )
         self._http_tickers = ResilientClient(
             self._tickers_client,
             min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
+            shared_last_request=shared_ts,
         )
 
     def __enter__(self) -> "SecFilingsProvider":
