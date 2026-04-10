@@ -1,21 +1,20 @@
-"""
-Scheduled job stubs.
+"""Scheduled job functions and declared schedule registry.
 
-Each function represents one scheduled job. Wire these into APScheduler
-(or equivalent) in a later ticket when the scheduler infrastructure is set up.
+Each function represents one scheduled job. The ``JobRuntime`` in
+``app.jobs.runtime`` registers them with APScheduler and handles
+catch-up, prerequisite checks, and manual triggers.
 
-This module also owns the **declared schedule registry** (``SCHEDULED_JOBS``).
-Until APScheduler is wired (#13), the registry is the single source of truth
-for:
+This module owns the **declared schedule registry** (``SCHEDULED_JOBS``),
+which is the single source of truth for:
 
 * job names — referenced from each ``_tracked_job(...)`` call site so the
   ``job_runs.job_name`` value cannot drift from what the system reports.
-* declared cadences — informational only; ``compute_next_run`` derives the
-  next run time from these declarations rather than from a live scheduler.
+* declared cadences — APScheduler ``CronTrigger`` instances are derived
+  from these via ``_trigger_for()`` in ``runtime.py``.
 
-When APScheduler lands, ``compute_next_run`` should be replaced with live
-schedule introspection; the registry stays as the source of truth for which
-jobs exist.
+The ``/system/jobs`` endpoint uses live APScheduler introspection for
+``next_run_time``; ``compute_next_run`` remains as a pure utility for
+catch-up-on-boot and tests.
 """
 
 from __future__ import annotations
@@ -70,11 +69,10 @@ logger = logging.getLogger(__name__)
 #   weekly  — runs once per week on ``weekday`` (0=Monday … 6=Sunday) at
 #             ``hour:minute`` UTC.
 #
-# These cadences are *declared*, not introspected from a live scheduler. They
-# describe the intended schedule and feed the operator visibility endpoints
-# (#57). When APScheduler is wired (#13), ``compute_next_run`` should be
-# replaced with the live scheduler's next-fire-time so reality and intent are
-# reconciled at one source of truth.
+# These cadences feed the APScheduler ``CronTrigger`` registration in
+# ``app.jobs.runtime``. The ``/system/jobs`` endpoint reads the live
+# next-fire-time from APScheduler; ``compute_next_run`` is retained as
+# a pure utility for catch-up-on-boot and tests.
 
 CadenceKind = Literal["hourly", "daily", "weekly"]
 

@@ -426,6 +426,50 @@ class TestSystemJobs:
             next_run = datetime.fromisoformat(job["next_run_time"])
             assert next_run > checked_at, f"{job['name']} next_run not in future"
 
+    def test_live_next_run_time_from_runtime(self) -> None:
+        """When job_runtime is on app.state, next_run_time comes from APScheduler."""
+        _override_conn(_mock_conn())
+        fire_time = _NOW + timedelta(hours=1)
+        live_times = {job.name: fire_time for job in SCHEDULED_JOBS}
+        mock_runtime = MagicMock()
+        mock_runtime.get_next_run_times.return_value = live_times
+        prev = getattr(app.state, "job_runtime", None)
+        app.state.job_runtime = mock_runtime
+        try:
+            with patch(
+                "app.api.system.check_job_health",
+                side_effect=lambda _conn, name: _success_job_health(name),
+            ):
+                resp = client.get("/system/jobs")
+
+            assert resp.status_code == 200
+            body = resp.json()
+            for job in body["jobs"]:
+                assert job["next_run_time_source"] == "live"
+                nrt = datetime.fromisoformat(job["next_run_time"])
+                assert nrt == fire_time
+        finally:
+            app.state.job_runtime = prev
+
+    def test_falls_back_to_declared_when_no_runtime(self) -> None:
+        """Without a runtime, next_run_time_source is 'declared'."""
+        _override_conn(_mock_conn())
+        prev = getattr(app.state, "job_runtime", None)
+        app.state.job_runtime = None
+        try:
+            with patch(
+                "app.api.system.check_job_health",
+                side_effect=lambda _conn, name: _success_job_health(name),
+            ):
+                resp = client.get("/system/jobs")
+
+            assert resp.status_code == 200
+            body = resp.json()
+            for job in body["jobs"]:
+                assert job["next_run_time_source"] == "declared"
+        finally:
+            app.state.job_runtime = prev
+
     def test_service_exception_returns_503_without_leaking_internals(self) -> None:
         _override_conn(_mock_conn())
         secret_marker = "secret-table-name-do-not-leak"

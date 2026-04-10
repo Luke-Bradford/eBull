@@ -5,21 +5,14 @@ The scheduler runs job functions on its own thread pool; the manual
 trigger endpoint also routes through the same wrapper so a manual run
 and a scheduled fire are indistinguishable from a tracking standpoint.
 
-PR A scope (locked):
+Features:
 
-* Wires exactly one job -- ``nightly_universe_sync`` -- so the runtime
-  can be exercised end-to-end without trying to bring up nine providers
-  in one go. PR B will populate the rest of ``_INVOKERS`` from the
-  declared registry.
-* No catch-up. ``coalesce=True`` + ``misfire_grace_time=0`` means a
-  freshly-restarted scheduler will *not* fire missed runs at boot.
-  Catch-up belongs in PR C and will be driven by reading ``job_runs``,
-  not by APScheduler's in-memory state.
-* No pipeline runner.
-* The manual trigger response carries no run_id -- the operator looks
-  status up via the existing ``/system/status``. Avoids a post-hoc
-  lookup race for run_id, and PR B's listing endpoint will provide a
-  richer response shape.
+* All ``SCHEDULED_JOBS`` are registered with APScheduler cron triggers.
+* Catch-up-on-boot fires overdue jobs (based on ``job_runs`` history).
+* Prerequisite checks gate scheduled fires and catch-up.
+* Manual triggers run on a dedicated ``ThreadPoolExecutor``.
+* ``get_next_run_times()`` exposes live APScheduler fire times for the
+  ``/system/jobs`` endpoint.
 
 Why ``BackgroundScheduler`` and not ``AsyncIOScheduler``:
 
@@ -92,9 +85,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 #
 # Maps job names from ``SCHEDULED_JOBS`` to the actual callable that
-# performs the work. PR B wires every job declared in
-# ``app/workers/scheduler.py``: a manual trigger or a scheduled fire is
-# now a single call into the registry.
+# performs the work. A manual trigger or a scheduled fire is a single
+# call into the registry.
 #
 # Keeping the registry as a single ``dict[str, Callable[[], None]]``
 # rather than a class hierarchy is deliberate: every job has the same
@@ -205,11 +197,9 @@ class JobRuntime:
                 # ``misfire_grace_time=1`` -- the smallest positive
                 # integer APScheduler accepts (0 raises TypeError).
                 # Combined with the absence of a persistent jobstore,
-                # this means PR A's runtime effectively does NOT
-                # catch up missed runs on startup: a fire that is
-                # more than 1 second late is dropped. Catch-up is
-                # PR C and will be driven by ``job_runs``, not by
-                # APScheduler grace windows.
+                # a fire that is more than 1 second late is dropped.
+                # Catch-up is driven by ``_catch_up()`` reading
+                # ``job_runs``, not by APScheduler grace windows.
                 "misfire_grace_time": 1,
                 # One concurrent instance per job. The per-job
                 # advisory lock is the source of truth for
@@ -270,6 +260,9 @@ class JobRuntime:
             registered,
             sorted(self._invokers.keys()),
         )
+        # Log next-fire times for operator visibility.
+        for name, nrt in self.get_next_run_times().items():
+            logger.info("  %s → next fire at %s", name, nrt)
         self._catch_up()
 
     def _catch_up(self) -> None:
@@ -416,6 +409,23 @@ class JobRuntime:
         self._started = False
         logger.info("JobRuntime stopped")
 
+    # -- introspection -----------------------------------------------------
+
+    def get_next_run_times(self) -> dict[str, datetime | None]:
+        """Return the live next-fire time for each registered job.
+
+        Queries APScheduler's in-memory job store. Returns ``None`` for
+        a job name if the scheduler has no record of it (e.g. it was
+        paused or removed). On-demand-only jobs are not included.
+        """
+        result: dict[str, datetime | None] = {}
+        for job in SCHEDULED_JOBS:
+            if job.name not in self._invokers:
+                continue
+            aps_job = self._scheduler.get_job(f"recurring:{job.name}")
+            result[job.name] = aps_job.next_run_time if aps_job is not None else None
+        return result
+
     # -- triggers ----------------------------------------------------------
 
     def trigger(self, job_name: str) -> None:
@@ -451,11 +461,10 @@ class JobRuntime:
         fires never touch ``_inflight``), so ``trigger()`` returns
         202 and the worker thread will then find the advisory lock
         held by the scheduler, log a warning, and no-op. The API
-        caller sees a 202 for a run that did nothing. PR B's
-        listing endpoint will surface this honestly. For PR A the
-        edge case is the cost of keeping the request thread off the
-        DB connection -- and is rare in practice (manual triggers
-        during 02:00 UTC scheduled fires are unusual).
+        caller sees a 202 for a run that did nothing. The
+        ``/system/jobs`` endpoint surfaces this honestly. This edge
+        case is rare in practice (manual triggers during scheduled
+        fires are unusual).
         """
         invoker = self._invokers.get(job_name)
         if invoker is None:
@@ -590,9 +599,7 @@ class JobRuntime:
                 # trigger landed during a scheduled fire or peer
                 # process run), not an operational fault. WARNING
                 # would alert-bait every manual trigger during the
-                # 02:00 UTC window with no actionable remediation
-                # until PR B's listing endpoint lands. Round 2
-                # review WARNING 2.
+                # 02:00 UTC window with no actionable remediation.
                 logger.info(
                     "manual trigger of %r no-opped: advisory lock held by "
                     "another runner (scheduled fire or peer process); the "
