@@ -21,6 +21,7 @@ import httpx
 
 from app.config import settings
 from app.providers.market_data import InstrumentRecord, MarketDataProvider, OHLCVBar, Quote
+from app.providers.resilient_client import ResilientClient
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,10 @@ _RAW_PAYLOAD_DIR = Path("data/raw/etoro")
 
 # eToro rates endpoint accepts at most 100 instrument IDs per request.
 _RATES_BATCH_SIZE = 100
+
+# eToro rate limit: 60 GET requests per minute (rolling window).
+# 1.1s inter-request interval ≈ 55 req/min — ~8% headroom.
+_ETORO_READ_INTERVAL_S = 1.1
 
 
 def _persist_raw(tag: str, payload: object) -> None:
@@ -70,6 +75,10 @@ class EtoroMarketDataProvider(MarketDataProvider):
             },
             timeout=30.0,
         )
+        self._http = ResilientClient(
+            self._client,
+            min_request_interval_s=_ETORO_READ_INTERVAL_S,
+        )
 
     def __enter__(self) -> "EtoroMarketDataProvider":
         return self
@@ -92,7 +101,7 @@ class EtoroMarketDataProvider(MarketDataProvider):
 
     def get_tradable_instruments(self) -> list[InstrumentRecord]:
         """Fetch the full list of tradable instruments from eToro."""
-        response = self._client.get(
+        response = self._http.get(
             "/api/v1/market-data/instruments",
             headers=self._request_headers(),
         )
@@ -111,7 +120,7 @@ class EtoroMarketDataProvider(MarketDataProvider):
         Uses ``asc`` direction so the API returns oldest-first, matching
         the interface contract. No client-side re-sort needed.
         """
-        response = self._client.get(
+        response = self._http.get(
             f"/api/v1/market-data/instruments/{instrument_id}/history/candles/asc/OneDay/{lookback_days}",
             headers=self._request_headers(),
         )
@@ -145,7 +154,7 @@ class EtoroMarketDataProvider(MarketDataProvider):
         for batch_num, i in enumerate(range(0, len(instrument_ids), _RATES_BATCH_SIZE)):
             chunk = instrument_ids[i : i + _RATES_BATCH_SIZE]
             ids_param = ",".join(str(id_) for id_ in chunk)
-            response = self._client.get(
+            response = self._http.get(
                 "/api/v1/market-data/instruments/rates",
                 params={"instrumentIds": ids_param},
                 headers=self._request_headers(),

@@ -95,13 +95,13 @@ class TestPlaceOrderByAmount:
         mock_resp.json.return_value = FIXTURE_OPEN_ORDER_RESPONSE
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.post.return_value = mock_resp
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
 
             broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
 
-            broker._client.post.assert_called_once()
-            call_args = broker._client.post.call_args
+            broker._http_write.post.assert_called_once()
+            call_args = broker._http_write.post.call_args
             endpoint = call_args.args[0]
             body = call_args.kwargs["json"]
 
@@ -117,8 +117,8 @@ class TestPlaceOrderByAmount:
         mock_resp.json.return_value = FIXTURE_OPEN_ORDER_RESPONSE
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.post.return_value = mock_resp
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
 
             result = broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
 
@@ -132,8 +132,8 @@ class TestPlaceOrderByAmount:
         mock_resp.json.return_value = {**FIXTURE_OPEN_ORDER_RESPONSE}
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.post.return_value = mock_resp
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
 
             result = broker.place_order(1001, "ADD", amount=Decimal("50"), units=None)
 
@@ -146,12 +146,12 @@ class TestPlaceOrderByUnits:
         mock_resp.json.return_value = FIXTURE_OPEN_ORDER_RESPONSE
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.post.return_value = mock_resp
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
 
             broker.place_order(1001, "BUY", amount=None, units=Decimal("0.5"))
 
-            call_args = broker._client.post.call_args
+            call_args = broker._http_write.post.call_args
             endpoint = call_args.args[0]
             body = call_args.kwargs["json"]
 
@@ -222,12 +222,12 @@ class TestPlaceOrderRealEnv:
         mock_resp.json.return_value = FIXTURE_OPEN_ORDER_RESPONSE
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="real") as broker:
-            broker._client = MagicMock()
-            broker._client.post.return_value = mock_resp
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
 
             broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
 
-            endpoint = broker._client.post.call_args.args[0]
+            endpoint = broker._http_write.post.call_args.args[0]
             assert endpoint == "/api/v1/trading/execution/market-open-orders/by-amount"
             assert "/demo/" not in endpoint
 
@@ -247,25 +247,26 @@ class TestClosePosition:
         close_resp.json.return_value = FIXTURE_CLOSE_ORDER_RESPONSE
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
+            broker._http_read = MagicMock()
+            broker._http_write = MagicMock()
             # First call: portfolio GET; second call: close POST
-            broker._client.get.return_value = portfolio_resp
-            broker._client.post.return_value = close_resp
+            broker._http_read.get.return_value = portfolio_resp
+            broker._http_write.post.return_value = close_resp
 
             result = broker.close_position(1001)
 
             # Portfolio lookup
-            broker._client.get.assert_called_once()
-            get_endpoint = broker._client.get.call_args.args[0]
+            broker._http_read.get.assert_called_once()
+            get_endpoint = broker._http_read.get.call_args.args[0]
             assert get_endpoint == "/api/v1/trading/info/demo/portfolio"
 
             # Close call uses resolved positionId
-            broker._client.post.assert_called_once()
-            post_endpoint = broker._client.post.call_args.args[0]
+            broker._http_write.post.assert_called_once()
+            post_endpoint = broker._http_write.post.call_args.args[0]
             assert post_endpoint == "/api/v1/trading/execution/demo/market-close-orders/positions/98765"
 
             # Close body
-            body = broker._client.post.call_args.kwargs["json"]
+            body = broker._http_write.post.call_args.kwargs["json"]
             assert body["InstrumentID"] == 1001
             assert body["UnitsToDeduct"] is None
 
@@ -279,29 +280,31 @@ class TestClosePosition:
         }
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.get.return_value = portfolio_resp
+            broker._http_read = MagicMock()
+            broker._http_write = MagicMock()
+            broker._http_read.get.return_value = portfolio_resp
 
             result = broker.close_position(9999)
 
             assert result.status == "failed"
             assert "No open position" in result.raw_payload["error"]
             # No close POST should have been attempted
-            broker._client.post.assert_not_called()
+            broker._http_write.post.assert_not_called()
 
     def test_portfolio_network_error_returns_failed_with_lookup_error(self) -> None:
         """Network error during portfolio lookup produces a distinct error
         message from 'no open position', so the audit payload is unambiguous."""
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.get.side_effect = httpx.ConnectError("connection refused")
+            broker._http_read = MagicMock()
+            broker._http_write = MagicMock()
+            broker._http_read.get.side_effect = httpx.ConnectError("connection refused")
 
             result = broker.close_position(1001)
 
             assert result.status == "failed"
             # Assert the provider-controlled prefix, not the exception string
             assert "Portfolio lookup failed" in result.raw_payload["error"]
-            broker._client.post.assert_not_called()
+            broker._http_write.post.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -315,13 +318,13 @@ class TestGetOrderStatus:
         mock_resp.json.return_value = FIXTURE_ORDER_INFO_RESPONSE
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.get.return_value = mock_resp
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
 
             broker.get_order_status("12345")
 
-            broker._client.get.assert_called_once()
-            endpoint = broker._client.get.call_args.args[0]
+            broker._http_read.get.assert_called_once()
+            endpoint = broker._http_read.get.call_args.args[0]
             assert endpoint == "/api/v1/trading/info/demo/orders/12345"
 
     def test_returns_pending_status(self) -> None:
@@ -329,8 +332,8 @@ class TestGetOrderStatus:
         mock_resp.json.return_value = FIXTURE_ORDER_INFO_RESPONSE
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.get.return_value = mock_resp
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
 
             result = broker.get_order_status("12345")
 
@@ -340,8 +343,8 @@ class TestGetOrderStatus:
     def test_preserves_ref_on_failure(self) -> None:
         """When HTTP fails, the original broker_order_ref is preserved."""
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.get.side_effect = httpx.ConnectError("timeout")
+            broker._http_read = MagicMock()
+            broker._http_read.get.side_effect = httpx.ConnectError("timeout")
 
             result = broker.get_order_status("12345")
 
@@ -362,8 +365,8 @@ class TestErrorHandling:
         error_resp.text = '{"message": "Bad request"}'
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.post.side_effect = httpx.HTTPStatusError(
+            broker._http_write = MagicMock()
+            broker._http_write.post.side_effect = httpx.HTTPStatusError(
                 "400",
                 request=MagicMock(),
                 response=error_resp,
@@ -377,8 +380,8 @@ class TestErrorHandling:
 
     def test_network_error_returns_failed_with_error_string(self) -> None:
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.post.side_effect = httpx.ConnectError("connection refused")
+            broker._http_write = MagicMock()
+            broker._http_write.post.side_effect = httpx.ConnectError("connection refused")
 
             result = broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
 
@@ -393,8 +396,8 @@ class TestErrorHandling:
         mock_resp.json.side_effect = ValueError("not JSON")
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.post.return_value = mock_resp
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
 
             result = broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
 
@@ -409,8 +412,8 @@ class TestErrorHandling:
         error_resp.text = "Internal Server Error"
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.post.side_effect = httpx.HTTPStatusError(
+            broker._http_write = MagicMock()
+            broker._http_write.post.side_effect = httpx.HTTPStatusError(
                 "500",
                 request=MagicMock(),
                 response=error_resp,
@@ -498,12 +501,12 @@ class TestRequestBodyShape:
         mock_resp.json.return_value = FIXTURE_OPEN_ORDER_RESPONSE
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.post.return_value = mock_resp
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
 
             broker.place_order(1001, "BUY", amount=Decimal("250"), units=None)
 
-            body = broker._client.post.call_args.kwargs["json"]
+            body = broker._http_write.post.call_args.kwargs["json"]
             assert body["IsBuy"] is True
             assert body["Leverage"] == 1
             assert body["StopLossRate"] is None
@@ -517,12 +520,12 @@ class TestRequestBodyShape:
         mock_resp.json.return_value = FIXTURE_OPEN_ORDER_RESPONSE
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.post.return_value = mock_resp
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
 
             broker.place_order(1001, "BUY", amount=None, units=Decimal("3.5"))
 
-            body = broker._client.post.call_args.kwargs["json"]
+            body = broker._http_write.post.call_args.kwargs["json"]
             # Field is AmountInUnits, NOT Units
             assert body["AmountInUnits"] == 3.5
             assert "Units" not in body
@@ -535,12 +538,13 @@ class TestRequestBodyShape:
         close_resp.json.return_value = FIXTURE_CLOSE_ORDER_RESPONSE
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._client = MagicMock()
-            broker._client.get.return_value = portfolio_resp
-            broker._client.post.return_value = close_resp
+            broker._http_read = MagicMock()
+            broker._http_write = MagicMock()
+            broker._http_read.get.return_value = portfolio_resp
+            broker._http_write.post.return_value = close_resp
 
             broker.close_position(1001)
 
-            body = broker._client.post.call_args.kwargs["json"]
+            body = broker._http_write.post.call_args.kwargs["json"]
             assert body["InstrumentID"] == 1001
             assert body["UnitsToDeduct"] is None

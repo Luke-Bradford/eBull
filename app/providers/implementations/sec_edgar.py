@@ -27,7 +27,6 @@ Provider contract:
 
 import json
 import logging
-import time
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import TracebackType
@@ -35,6 +34,7 @@ from types import TracebackType
 import httpx
 
 from app.providers.filings import FilingEvent, FilingNotFound, FilingSearchResult, FilingsProvider
+from app.providers.resilient_client import ResilientClient
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,16 @@ class SecFilingsProvider(FilingsProvider):
             headers={"User-Agent": user_agent, "Accept": "application/json"},
             timeout=30.0,
         )
-        self._last_request_at: float = 0.0
+        # Both clients share the same SEC rate limit (10 req/s).
+        # ResilientClient replaces the old _rate_limit() method.
+        self._http = ResilientClient(
+            self._client,
+            min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
+        )
+        self._http_tickers = ResilientClient(
+            self._tickers_client,
+            min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
+        )
 
     def __enter__(self) -> "SecFilingsProvider":
         return self
@@ -144,8 +153,7 @@ class SecFilingsProvider(FilingsProvider):
 
         # Fetch the filing index JSON
         path = f"/Archives/edgar/data/{int(cik_padded)}/{accession_no_dashes}/{accession_no_dashes}-index.json"
-        self._rate_limit()
-        resp = self._client.get(path)
+        resp = self._http.get(path)
         if resp.status_code == 404:
             raise FilingNotFound(f"Filing not found: {provider_filing_id}")
         resp.raise_for_status()
@@ -165,8 +173,7 @@ class SecFilingsProvider(FilingsProvider):
 
         Called by the service layer during the daily CIK refresh job.
         """
-        self._rate_limit()
-        resp = self._tickers_client.get(_TICKERS_URL)
+        resp = self._http_tickers.get(_TICKERS_URL)
         resp.raise_for_status()
         raw = resp.json()
         _persist_raw("sec_tickers", raw)
@@ -178,8 +185,7 @@ class SecFilingsProvider(FilingsProvider):
 
     def _fetch_submissions(self, cik_padded: str) -> dict[str, object] | None:
         path = f"/submissions/CIK{cik_padded}.json"
-        self._rate_limit()
-        resp = self._client.get(path)
+        resp = self._http.get(path)
         if resp.status_code == 404:
             logger.warning("SEC: no submissions found for CIK %s", cik_padded)
             return None
@@ -187,13 +193,6 @@ class SecFilingsProvider(FilingsProvider):
         raw = resp.json()
         _persist_raw(f"sec_submissions_{cik_padded}", raw)
         return raw  # type: ignore[return-value]
-
-    def _rate_limit(self) -> None:
-        """Enforce minimum inter-request interval to respect SEC fair-use policy."""
-        elapsed = time.monotonic() - self._last_request_at
-        if elapsed < _MIN_REQUEST_INTERVAL_S:
-            time.sleep(_MIN_REQUEST_INTERVAL_S - elapsed)
-        self._last_request_at = time.monotonic()
 
 
 # ------------------------------------------------------------------
