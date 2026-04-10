@@ -38,8 +38,9 @@ _RAW_PAYLOAD_DIR = Path("data/raw/etoro_broker")
 def _persist_raw(tag: str, payload: bytes) -> None:
     """Write raw API response bytes to disk before normalisation.
 
-    Re-raises ``OSError`` subclasses (permission denied, disk full) so the
-    caller knows the file was not written.  Other exceptions are logged.
+    Best-effort: must not block the primary read path.  Logs at ERROR
+    for OS-level failures (disk full, permission denied) and WARNING
+    for anything else.
     """
     try:
         _RAW_PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -47,7 +48,7 @@ def _persist_raw(tag: str, payload: bytes) -> None:
         path = _RAW_PAYLOAD_DIR / f"{tag}_{ts}.json"
         path.write_bytes(payload)
     except OSError:
-        raise
+        logger.error("OS error persisting raw payload for tag=%s", tag, exc_info=True)
     except Exception:
         logger.warning("Failed to persist raw payload for tag=%s", tag, exc_info=True)
 

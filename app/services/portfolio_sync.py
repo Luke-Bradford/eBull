@@ -105,6 +105,17 @@ def sync_portfolio(
             updated += 1
         else:
             # New position from broker — opened externally.
+            # Try to extract actual open date from broker raw payload;
+            # fall back to sync time if the broker doesn't provide it.
+            # Known limitation: eToro's OpenAPI spec does not document
+            # an openDateTime field, so this may always fall back.
+            open_date = now.date()
+            raw_open = bp.raw_payload.get("openDateTime")
+            if isinstance(raw_open, str):
+                try:
+                    open_date = datetime.fromisoformat(raw_open).date()
+                except ValueError:
+                    pass
             conn.execute(
                 """
                 INSERT INTO positions
@@ -122,7 +133,7 @@ def sync_portfolio(
                 """,
                 {
                     "iid": bp.instrument_id,
-                    "date": now.date(),
+                    "date": open_date,
                     "price": bp.open_price,
                     "units": bp.units,
                     "cost": bp.open_price * bp.units,

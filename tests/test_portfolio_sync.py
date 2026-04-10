@@ -145,6 +145,38 @@ class TestExternallyOpenedPosition:
         # unrealized = (55 - 50) * 3 = 15
         assert params["upnl"] == Decimal("15")
 
+    def test_open_date_defaults_to_now_without_raw_field(self) -> None:
+        pos = _pos(instrument_id=99)
+        conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
+        sync_portfolio(conn, _portfolio([pos]), now=_NOW)
+
+        insert_calls = [
+            c
+            for c in conn.execute.call_args_list
+            if isinstance(c.args[0], str) and "INSERT INTO positions" in c.args[0]
+        ]
+        assert insert_calls[0].args[1]["date"] == _NOW.date()
+
+    def test_open_date_extracted_from_raw_payload(self) -> None:
+        pos = BrokerPosition(
+            instrument_id=99,
+            units=Decimal("5"),
+            open_price=Decimal("100"),
+            current_price=Decimal("110"),
+            raw_payload={"openDateTime": "2026-03-15T10:30:00Z"},
+        )
+        conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
+        sync_portfolio(conn, _portfolio([pos]), now=_NOW)
+
+        insert_calls = [
+            c
+            for c in conn.execute.call_args_list
+            if isinstance(c.args[0], str) and "INSERT INTO positions" in c.args[0]
+        ]
+        from datetime import date
+
+        assert insert_calls[0].args[1]["date"] == date(2026, 3, 15)
+
 
 class TestExternallyClosedPosition:
     """Local position absent from broker → zero out."""
