@@ -203,13 +203,6 @@ def _has_any_coverage(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     return (False, "coverage table is empty")
 
 
-def _has_any_tradable(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
-    """True if at least one tradable instrument exists."""
-    if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM instruments WHERE is_tradable = TRUE)")):
-        return (True, "")
-    return (False, "no tradable instruments")
-
-
 def _has_scores(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     """True if at least one score row exists."""
     if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM scores)")):
@@ -247,7 +240,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         name=JOB_DAILY_RESEARCH_REFRESH,
         description="Refresh fundamentals and filings for all tradable instruments.",
         cadence=Cadence.daily(hour=3, minute=30),
-        prerequisite=_has_any_tradable,
+        prerequisite=_has_any_coverage,
     ),
     ScheduledJob(
         name=JOB_DAILY_NEWS_REFRESH,

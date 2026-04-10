@@ -846,16 +846,17 @@ def compute_rankings(
     if model_version not in _WEIGHT_MODES:
         raise KeyError(f"Unknown model_version: {model_version!r}")
 
-    # Eligible instruments — all tradable instruments with at least some data.
-    # No tier gate: scoring runs for every instrument that has fundamentals,
-    # price history, or a thesis.  This lets T3 instruments accumulate scores
-    # so the weekly coverage review can promote them to T2 on deterministic
-    # signals alone.
+    # Eligible instruments — all tradable instruments with a coverage row
+    # and at least some data.  No tier gate: scoring runs for every tier
+    # (including T3) so the weekly coverage review can promote on
+    # deterministic signals alone.  The coverage JOIN ensures scores are
+    # only created for instruments that review_coverage can see.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as elig_cur:
         elig_cur.execute(
             """
             SELECT DISTINCT i.instrument_id
             FROM instruments i
+            JOIN coverage c ON c.instrument_id = i.instrument_id
             WHERE i.is_tradable = TRUE
               AND (
                   EXISTS (SELECT 1 FROM theses t WHERE t.instrument_id = i.instrument_id)
