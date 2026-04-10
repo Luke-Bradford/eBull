@@ -211,9 +211,10 @@ class SecFundamentalsProvider(FundamentalsProvider):
         if resp.status_code == 404:
             logger.info("SEC fundamentals: no company facts for CIK %s", cik)
             return None
-        resp.raise_for_status()
+        # Persist raw response before raise — non-negotiable for auditability.
         raw = resp.json()
         _persist_raw(f"sec_facts_{cik_padded}", raw)
+        resp.raise_for_status()
         return raw  # type: ignore[no-any-return]
 
 
@@ -390,14 +391,15 @@ def _build_latest_snapshot(
 
     fcf: float | None = None
     if operating_cf is not None:
-        # CapEx is reported as a positive outflow in XBRL; FCF = OCF - CapEx
-        fcf = operating_cf - (capex or 0)
+        # CapEx is typically a positive outflow in XBRL.  Some filers
+        # report it as negative (cash outflow sign convention) — normalise
+        # to positive before subtracting.
+        fcf = operating_cf - abs(capex) if capex is not None else operating_cf
 
     net_debt: float | None = None
     if debt is not None and cash is not None:
         net_debt = debt - cash
-    elif debt is not None:
-        net_debt = debt  # assume zero cash if missing
+    # If cash is unknown, leave net_debt as None rather than assuming zero
 
     book_value: float | None = None
     if equity is not None and shares is not None and shares != 0:
@@ -543,13 +545,11 @@ def _build_snapshot_for_date(
 
     fcf: float | None = None
     if operating_cf is not None:
-        fcf = operating_cf - (capex or 0)
+        fcf = operating_cf - abs(capex) if capex is not None else operating_cf
 
     net_debt: float | None = None
     if debt is not None and cash is not None:
         net_debt = debt - cash
-    elif debt is not None:
-        net_debt = debt
 
     book_value: float | None = None
     if equity is not None and shares is not None and shares != 0:
