@@ -480,3 +480,11 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `runJob("nightly_universe_sync")` fired unconditionally after credential save in SetupPage, while SettingsPage correctly gated the same call on `wasCreate`. A returning operator re-entering the wizard would trigger a redundant sync.
 - Prevention: Fire-and-forget job triggers in multi-step wizards or forms must be gated on a first-time-only condition (e.g. `mode === "create"` captured before the save). Both SetupPage and SettingsPage trigger paths must stay in sync.
 - Enforced in: this prevention log
+
+---
+
+### psycopg v3 rowcount sentinel (-1) treated as valid count
+- First seen in: #145
+- Symptom: `result.rowcount` is `-1` in psycopg v3 when the server does not report a row count. Code using `if result.rowcount is not None else 0` passes `-1` through to `tracker.row_count`, producing invalid row counts in job history.
+- Prevention: Always guard `result.rowcount` with `max(result.rowcount, 0)` (not just `is not None`). psycopg v3 uses `-1` as a sentinel for "count unavailable", not `None`.
+- Enforced in: this prevention log
