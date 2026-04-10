@@ -22,13 +22,15 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
 import anthropic
 import psycopg
+import psycopg.rows
+import psycopg.sql
 
 from app.config import settings
 from app.providers.implementations.companies_house import CompaniesHouseFilingsProvider
@@ -125,6 +127,15 @@ class Cadence:
         return f"weekly on {weekday_names[self.weekday]} at {self.hour:02d}:{self.minute:02d} UTC"
 
 
+PrerequisiteResult = tuple[bool, str]
+"""(met, reason) — True if the prerequisite is satisfied; reason explains why not."""
+
+# Type alias for prerequisite callables.  Each takes a psycopg connection
+# and returns (met, reason).  The connection is opened by the caller
+# (catch-up or scheduled-fire path) and closed after the check.
+PrerequisiteFn = Callable[[psycopg.Connection[Any]], PrerequisiteResult]
+
+
 @dataclass(frozen=True)
 class ScheduledJob:
     """A registered scheduled job."""
@@ -138,6 +149,11 @@ class ScheduledJob:
     # too expensive or have side-effects that make cold-start firing
     # undesirable.
     catch_up_on_boot: bool = True
+    # Optional prerequisite check.  When set, the catch-up and
+    # scheduled-fire paths call this before running the job.  If
+    # the check returns (False, reason), the job is skipped and a
+    # ``job_runs`` row with status='skipped' is recorded.
+    prerequisite: PrerequisiteFn | None = None
 
 
 # Job-name constants. Every ``_tracked_job(...)`` call site below references
@@ -153,55 +169,110 @@ JOB_WEEKLY_COVERAGE_REVIEW = "weekly_coverage_review"
 JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
 
 
+# ---------------------------------------------------------------------------
+# Prerequisite checks
+# ---------------------------------------------------------------------------
+#
+# Each returns (met: bool, reason: str).  The reason is recorded in the
+# job_runs.error_msg column when the job is skipped and in the boot
+# catch-up summary log line.
+
+
+def _exists(conn: psycopg.Connection[Any], sql: psycopg.sql.SQL) -> bool:
+    """Run a ``SELECT EXISTS(...)`` query and return the boolean result.
+
+    Uses an explicit ``tuple_row`` factory so the result is always
+    positional, regardless of the connection-level ``row_factory``.
+    """
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        row = cur.execute(sql).fetchone()
+    return row is not None and bool(row[0])
+
+
+def _has_coverage_tier12(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if at least one Tier 1 or Tier 2 coverage row exists."""
+    if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM coverage WHERE coverage_tier IN (1, 2))")):
+        return (True, "")
+    return (False, "no Tier 1/2 coverage rows")
+
+
+def _has_any_coverage(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if the coverage table has at least one row."""
+    if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM coverage)")):
+        return (True, "")
+    return (False, "coverage table is empty")
+
+
+def _has_scores(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if at least one score row exists."""
+    if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM scores)")):
+        return (True, "")
+    return (False, "no scores rows")
+
+
+def _has_tier1_stale_theses(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if at least one Tier 1 instrument exists (thesis staleness is checked by the job itself)."""
+    if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM coverage WHERE coverage_tier = 1)")):
+        return (True, "")
+    return (False, "no Tier 1 instruments")
+
+
 # Declared schedule. Hours/minutes are deliberate-but-arbitrary placeholders
 # until APScheduler is wired — the values are stable enough for operator UI
 # planning but should not be treated as the live truth. See module docstring.
 SCHEDULED_JOBS: list[ScheduledJob] = [
+    # -- Always-on: data infrastructure, no prerequisites ----------------
     ScheduledJob(
         name=JOB_NIGHTLY_UNIVERSE_SYNC,
         description="Sync the eToro tradable instrument universe to the local DB.",
         cadence=Cadence.daily(hour=2, minute=0),
     ),
     ScheduledJob(
-        name=JOB_HOURLY_MARKET_REFRESH,
-        description="Refresh quotes and candles for all active Tier 1/2 instruments.",
-        cadence=Cadence.hourly(minute=5),
-    ),
-    ScheduledJob(
         name=JOB_DAILY_CIK_REFRESH,
         description="Refresh the SEC ticker→CIK mapping in external_identifiers.",
         cadence=Cadence.daily(hour=3, minute=0),
+    ),
+    # -- Pipeline: skip when upstream data is absent ---------------------
+    ScheduledJob(
+        name=JOB_HOURLY_MARKET_REFRESH,
+        description="Refresh quotes and candles for all active Tier 1/2 instruments.",
+        cadence=Cadence.hourly(minute=5),
+        prerequisite=_has_coverage_tier12,
     ),
     ScheduledJob(
         name=JOB_DAILY_RESEARCH_REFRESH,
         description="Refresh fundamentals and filings for active Tier 1/2 instruments.",
         cadence=Cadence.daily(hour=3, minute=30),
+        prerequisite=_has_coverage_tier12,
     ),
     ScheduledJob(
         name=JOB_DAILY_NEWS_REFRESH,
         description="Fetch, deduplicate, and score news events for active Tier 1/2 instruments.",
         cadence=Cadence.daily(hour=4, minute=0),
+        prerequisite=_has_coverage_tier12,
     ),
     ScheduledJob(
         name=JOB_DAILY_THESIS_REFRESH,
         description="Regenerate theses for stale Tier 1 instruments.",
         cadence=Cadence.daily(hour=4, minute=30),
+        prerequisite=_has_tier1_stale_theses,
     ),
     ScheduledJob(
         name=JOB_MORNING_CANDIDATE_REVIEW,
         description="Re-score, rank, and generate trade recommendations for Tier 1 candidates.",
         cadence=Cadence.daily(hour=6, minute=0),
+        prerequisite=_has_scores,
     ),
     ScheduledJob(
         name=JOB_WEEKLY_COVERAGE_REVIEW,
         description="Review coverage tier assignments; promote/demote instruments.",
         cadence=Cadence.weekly(weekday=0, hour=5, minute=0),
+        prerequisite=_has_any_coverage,
     ),
-    ScheduledJob(
-        name=JOB_DAILY_TAX_RECONCILIATION,
-        description="Ingest new fills into tax_lots and re-run disposal matching.",
-        cadence=Cadence.daily(hour=23, minute=0),
-    ),
+    # -- On-demand jobs are NOT listed here.  They stay in _INVOKERS
+    # (runtime.py) so "Run now" in the Admin UI works, but they are
+    # not registered with APScheduler and do not participate in
+    # catch-up.  Currently on-demand: daily_tax_reconciliation.
 ]
 
 

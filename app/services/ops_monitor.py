@@ -101,7 +101,7 @@ _LAYER_QUERIES: dict[LayerName, str] = {
 # (previous_count * threshold), it is flagged as a potential broken source.
 _SPIKE_RATIO_THRESHOLD: float = 0.5
 
-JobStatus = Literal["running", "success", "failure"]
+JobStatus = Literal["running", "success", "failure", "skipped"]
 
 LayerStatus = Literal["ok", "stale", "empty", "error"]
 
@@ -319,6 +319,47 @@ def record_job_finish(
     conn.commit()
 
 
+def record_job_skip(
+    conn: psycopg.Connection[Any],
+    job_name: str,
+    reason: str,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Record a skipped job run (prerequisite not met).
+
+    Inserts a single ``job_runs`` row with ``status='skipped'``,
+    ``started_at = finished_at = now``, and the skip reason in
+    ``error_msg``.  Returns the ``run_id``.
+
+    Callers open the connection with ``autocommit=True``.
+    ``conn.transaction()`` wraps the INSERT in an explicit
+    ``BEGIN``/``COMMIT`` pair (psycopg v3 does this when the
+    connection is in autocommit mode).
+
+    This is intentionally separate from the start/finish pair used by
+    ``_tracked_job`` — a skipped job has no execution phase, so a
+    single insert is the honest representation.
+    """
+    assert conn.autocommit, (
+        "record_job_skip requires autocommit=True so conn.transaction() issues a real BEGIN/COMMIT, not a savepoint"
+    )
+    now = now or _utcnow()
+    with conn.transaction():
+        row = conn.execute(
+            """
+            INSERT INTO job_runs (job_name, started_at, finished_at, status, row_count, error_msg)
+            VALUES (%(name)s, %(ts)s, %(ts)s, 'skipped', 0, %(reason)s)
+            RETURNING run_id
+            """,
+            {"name": job_name, "ts": now, "reason": reason},
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("job_runs INSERT returned no row")
+        run_id = int(row[0])
+    return run_id
+
+
 def check_job_health(
     conn: psycopg.Connection[Any],
     job_name: str,
@@ -346,7 +387,11 @@ def check_job_health(
     status: JobStatus = row["status"]
     detail = ""
 
-    if status == "failure":
+    if status == "skipped":
+        detail = f"{job_name}: last run skipped"
+        if row["error_msg"]:
+            detail += f" — {row['error_msg']}"
+    elif status == "failure":
         detail = f"{job_name}: last run failed"
         if row["error_msg"]:
             detail += f" — {row['error_msg']}"

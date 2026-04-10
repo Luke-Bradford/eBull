@@ -34,6 +34,7 @@ from app.services.ops_monitor import (
     get_kill_switch_status,
     get_system_health,
     record_job_finish,
+    record_job_skip,
     record_job_start,
 )
 
@@ -263,6 +264,54 @@ class TestRecordJobFinish:
 
 
 # ---------------------------------------------------------------------------
+# TestRecordJobSkip
+# ---------------------------------------------------------------------------
+
+
+class TestRecordJobSkip:
+    """Test job skip recording.
+
+    ``record_job_skip`` uses ``conn.transaction()`` + ``conn.execute()``
+    (no separate cursor block, no explicit ``conn.commit()``).
+    """
+
+    @staticmethod
+    def _conn_returning(row: tuple[Any, ...] | None) -> MagicMock:
+        conn = _make_conn([])
+        conn.autocommit = True
+        result = MagicMock()
+        result.fetchone.return_value = row
+        conn.execute.return_value = result
+        return conn
+
+    def test_returns_run_id(self) -> None:
+        conn = self._conn_returning((99,))
+        run_id = record_job_skip(conn, "test_job", "no coverage rows", now=_NOW)
+        assert run_id == 99
+        conn.transaction.assert_called_once()
+
+    def test_inserts_skipped_status_with_reason(self) -> None:
+        conn = self._conn_returning((1,))
+        record_job_skip(conn, "my_job", "no Tier 1/2 coverage rows", now=_NOW)
+        call_args = conn.execute.call_args
+        params = call_args[0][1]
+        assert params["name"] == "my_job"
+        assert params["reason"] == "no Tier 1/2 coverage rows"
+        assert "skipped" in call_args[0][0]
+
+    def test_raises_if_no_row_returned(self) -> None:
+        conn = self._conn_returning(None)
+        with pytest.raises(RuntimeError, match="no row"):
+            record_job_skip(conn, "test_job", "reason", now=_NOW)
+
+    def test_does_not_call_conn_commit_directly(self) -> None:
+        """Commit is handled by conn.transaction(), not conn.commit()."""
+        conn = self._conn_returning((1,))
+        record_job_skip(conn, "test_job", "reason", now=_NOW)
+        conn.commit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # TestCheckJobHealth
 # ---------------------------------------------------------------------------
 
@@ -337,6 +386,26 @@ class TestCheckJobHealth:
         result = check_job_health(conn, "test_job")
         assert result.last_status == "running"
         assert "still in progress" in result.detail
+
+    def test_skipped_run_shows_reason(self) -> None:
+        conn = _make_conn(
+            [
+                _make_cursor(
+                    [
+                        {
+                            "status": "skipped",
+                            "started_at": _NOW,
+                            "finished_at": _NOW,
+                            "error_msg": "no Tier 1/2 coverage rows",
+                        }
+                    ]
+                )
+            ]
+        )
+        result = check_job_health(conn, "test_job")
+        assert result.last_status == "skipped"
+        assert "skipped" in result.detail
+        assert "no Tier 1/2 coverage rows" in result.detail
 
     @patch("app.services.ops_monitor._utcnow", return_value=_NOW)
     def test_stuck_running_treated_as_failure(self, mock_now: MagicMock) -> None:

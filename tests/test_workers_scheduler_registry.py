@@ -37,19 +37,20 @@ class TestRegistryShape:
         for job in SCHEDULED_JOBS:
             assert job.description.strip(), f"job {job.name} has empty description"
 
-    def test_every_job_constant_is_in_registry(self) -> None:
-        # Every JOB_* constant in the scheduler module must appear in the
-        # registry — otherwise a function references a name that the
-        # operator visibility endpoint never reports on.
+    def test_every_job_constant_is_scheduled_or_on_demand(self) -> None:
+        # Every JOB_* constant must be either in SCHEDULED_JOBS or in the
+        # documented on-demand set.  On-demand jobs have a constant and
+        # an invoker but are not registered with APScheduler.
+        from app.jobs.runtime import _INVOKERS
+
         constants = {
             value for name, value in vars(scheduler).items() if name.startswith("JOB_") and isinstance(value, str)
         }
         registry_names = {job.name for job in SCHEDULED_JOBS}
-        assert constants == registry_names, (
-            f"drift between JOB_* constants and SCHEDULED_JOBS: "
-            f"only-in-constants={constants - registry_names}, "
-            f"only-in-registry={registry_names - constants}"
-        )
+        invoker_names = set(_INVOKERS.keys())
+        # Every constant must appear in at least one of the two sets.
+        unaccounted = constants - registry_names - invoker_names
+        assert not unaccounted, f"JOB_* constants not in SCHEDULED_JOBS or _INVOKERS: {sorted(unaccounted)}"
 
 
 # ---------------------------------------------------------------------------
