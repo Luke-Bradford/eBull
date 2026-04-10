@@ -264,6 +264,27 @@ describe("InstrumentsPage — pagination", () => {
     });
     expect(screen.getByText("Previous")).toBeDisabled();
     expect(screen.getByText("Next")).not.toBeDisabled();
+    // Page number buttons rendered
+    expect(screen.getByText("1")).toBeInTheDocument();
+    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
+  });
+
+  it("clicking a page number fetches that page", async () => {
+    mockedFetch.mockResolvedValue(makeResponse({ total: 120 }));
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Page 1 of 3")).toBeInTheDocument();
+    });
+
+    const user = userEvent.setup();
+    await user.click(screen.getByText("3"));
+
+    await waitFor(() => {
+      const calls = mockedFetch.mock.calls;
+      const lastCall = calls[calls.length - 1]!;
+      expect(lastCall[0]).toMatchObject({ offset: 100 });
+    });
   });
 
   it("clicking Next fetches next page", async () => {
