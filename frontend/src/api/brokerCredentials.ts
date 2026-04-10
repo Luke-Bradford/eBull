@@ -20,6 +20,7 @@ export interface BrokerCredentialView {
   id: string;
   provider: BrokerProvider;
   label: string;
+  environment: string;
   last_four: string;
   created_at: string;
   last_used_at: string | null;
@@ -55,6 +56,7 @@ export interface CreateBrokerCredentialResponse {
 export function createBrokerCredential(input: {
   provider: BrokerProvider;
   label: string;
+  environment: string;
   secret: string;
 }): Promise<CreateBrokerCredentialResponse> {
   return apiFetch<CreateBrokerCredentialResponse>("/broker-credentials", {
@@ -65,4 +67,37 @@ export function createBrokerCredential(input: {
 
 export function revokeBrokerCredential(id: string): Promise<void> {
   return apiFetch<void>(`/broker-credentials/${id}`, { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------------
+// Validate (transient probe — nothing is persisted)
+// ---------------------------------------------------------------------------
+
+export interface ValidateIdentity {
+  gcid: number | null;
+  demo_cid: number | null;
+  real_cid: number | null;
+}
+
+export interface ValidateCredentialResponse {
+  auth_valid: boolean;
+  identity: ValidateIdentity | null;
+  environment: string;
+  env_valid: boolean;
+  env_check: string;
+  note: string;
+}
+
+export function validateBrokerCredential(input: {
+  api_key: string;
+  user_key: string;
+  environment: string;
+}): Promise<ValidateCredentialResponse> {
+  return apiFetch<ValidateCredentialResponse>(
+    "/broker-credentials/validate",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
 }

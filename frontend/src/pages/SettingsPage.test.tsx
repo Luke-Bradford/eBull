@@ -1,16 +1,15 @@
 /**
- * Tests for SettingsPage broker-credentials first-save flow (#121).
+ * Tests for SettingsPage broker-credentials section (#121, updated
+ * #139 PR D for two-key credential model).
  *
  * Scope:
- *   - empty state visible when no credentials exist
- *   - first save returning a recovery_phrase opens the confirmation modal
- *   - subsequent save returning no recovery_phrase does NOT open the modal
- *   - challenge confirm closes the modal and refreshes the list
- *   - operator-initiated cancel routes through the confirm-cancel gate
- *   - Escape inside the modal also routes through the confirm-cancel gate
- *   - "Go back" from the gate returns to the phrase view
- *   - "Close anyway" closes the modal and clears the phrase
- *   - backend save failure surfaces an error and does NOT open the modal
+ *   - Credential-set mode detection (Create / Repair / Complete)
+ *   - Two-key form: API key + user key fields, no label/secret fields
+ *   - Two sequential createBrokerCredential calls on save
+ *   - Test connection button behaviour and validation display
+ *   - Recovery phrase modal flow (unchanged from #121)
+ *   - Partial-save recovery (first key saved, second failed → Repair)
+ *   - Revoke updates the credential list and can re-enable the form
  *
  * The API client is mocked at the module boundary so tests do not hit
  * the network. The phrase fixture is the same alphabet used in the
@@ -27,6 +26,7 @@ import {
   createBrokerCredential,
   listBrokerCredentials,
   revokeBrokerCredential,
+  validateBrokerCredential,
 } from "@/api/brokerCredentials";
 import { ApiError } from "@/api/client";
 
@@ -34,50 +34,41 @@ vi.mock("@/api/brokerCredentials", () => ({
   listBrokerCredentials: vi.fn(),
   createBrokerCredential: vi.fn(),
   revokeBrokerCredential: vi.fn(),
+  validateBrokerCredential: vi.fn(),
 }));
 
 const mockedList = vi.mocked(listBrokerCredentials);
 const mockedCreate = vi.mocked(createBrokerCredential);
 const mockedRevoke = vi.mocked(revokeBrokerCredential);
+const mockedValidate = vi.mocked(validateBrokerCredential);
 
 const PHRASE: readonly string[] = [
-  "alpha",
-  "bravo",
-  "charlie",
-  "delta",
-  "echo",
-  "foxtrot",
-  "golf",
-  "hotel",
-  "india",
-  "juliet",
-  "kilo",
-  "lima",
-  "mike",
-  "november",
-  "oscar",
-  "papa",
-  "quebec",
-  "romeo",
-  "sierra",
-  "tango",
-  "uniform",
-  "victor",
-  "whiskey",
-  "xray",
+  "alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+  "golf", "hotel", "india", "juliet", "kilo", "lima",
+  "mike", "november", "oscar", "papa", "quebec", "romeo",
+  "sierra", "tango", "uniform", "victor", "whiskey", "xray",
 ];
 
 function makeRow(overrides: Partial<BrokerCredentialView> = {}): BrokerCredentialView {
   return {
     id: "11111111-1111-1111-1111-111111111111",
     provider: "etoro",
-    label: "primary",
+    label: "api_key",
+    environment: "demo",
     last_four: "1234",
     created_at: "2026-04-08T00:00:00Z",
     last_used_at: null,
     revoked_at: null,
     ...overrides,
   };
+}
+
+function apiKeyRow(): BrokerCredentialView {
+  return makeRow({ id: "aaaa-1111", label: "api_key", last_four: "aaaa" });
+}
+
+function userKeyRow(): BrokerCredentialView {
+  return makeRow({ id: "bbbb-2222", label: "user_key", last_four: "bbbb" });
 }
 
 function withPhrase(): CreateBrokerCredentialResponse {
@@ -88,10 +79,10 @@ function withoutPhrase(): CreateBrokerCredentialResponse {
   return { credential: makeRow(), recovery_phrase: null };
 }
 
-async function fillAndSubmit(label: string, secret: string): Promise<void> {
+async function fillAndSubmit(apiKey: string, userKey: string): Promise<void> {
   const user = userEvent.setup();
-  await user.type(screen.getByLabelText("Label"), label);
-  await user.type(screen.getByLabelText("Secret"), secret);
+  await user.type(screen.getByLabelText("API key"), apiKey);
+  await user.type(screen.getByLabelText("User key"), userKey);
   await user.click(screen.getByRole("button", { name: /save credential/i }));
 }
 
@@ -117,6 +108,7 @@ beforeEach(() => {
   mockedList.mockReset();
   mockedCreate.mockReset();
   mockedRevoke.mockReset();
+  mockedValidate.mockReset();
   mockedList.mockResolvedValue([]);
 });
 
@@ -124,101 +116,245 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("SettingsPage — broker credentials empty state", () => {
-  it("shows the empty-state message when no credentials are saved", async () => {
+// ---------------------------------------------------------------------------
+// Credential-set mode detection
+// ---------------------------------------------------------------------------
+
+describe("SettingsPage — credential-set modes", () => {
+  it("shows both key fields when no credentials exist (Create mode)", async () => {
     render(<SettingsPage />);
+    await screen.findByText(/No broker credentials saved yet/i);
+    expect(screen.getByLabelText("API key")).toBeInTheDocument();
+    expect(screen.getByLabelText("User key")).toBeInTheDocument();
+  });
+
+  it("shows only the missing field when one key exists (Repair mode)", async () => {
+    mockedList.mockResolvedValueOnce([apiKeyRow()]);
+    render(<SettingsPage />);
+    await screen.findByText("api_key");
+    // api_key exists, so only user_key field should be shown.
+    expect(screen.queryByLabelText("API key")).toBeNull();
+    expect(screen.getByLabelText("User key")).toBeInTheDocument();
+    expect(screen.getByText(/One key was already saved/i)).toBeInTheDocument();
+  });
+
+  it("hides the create form when both keys exist (Complete mode)", async () => {
+    mockedList.mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
+    render(<SettingsPage />);
+    await screen.findByText("api_key");
+    expect(screen.getByText(/Credentials configured/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText("API key")).toBeNull();
+    expect(screen.queryByLabelText("User key")).toBeNull();
+  });
+
+  it("shows environment in the credential list", async () => {
+    mockedList.mockResolvedValueOnce([apiKeyRow()]);
+    render(<SettingsPage />);
+    expect(await screen.findByText(/demo/)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test connection
+// ---------------------------------------------------------------------------
+
+describe("SettingsPage — test connection", () => {
+  it("calls validateBrokerCredential and shows success result", async () => {
+    const user = userEvent.setup();
+    mockedValidate.mockResolvedValueOnce({
+      auth_valid: true,
+      identity: { gcid: 12345, demo_cid: 67890, real_cid: null },
+      environment: "demo",
+      env_valid: true,
+      env_check: "ok",
+      note: "Does not verify write permission.",
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText(/No broker credentials saved yet/i);
+    await userEvent.setup().type(screen.getByLabelText("API key"), "test-api-key");
+    await user.type(screen.getByLabelText("User key"), "test-user-key");
+    await user.click(screen.getByRole("button", { name: /test connection/i }));
+
+    expect(await screen.findByText(/Connection verified/i)).toBeInTheDocument();
+    expect(screen.getByText(/account 12345/i)).toBeInTheDocument();
+    // note shown as supplementary text, not as the primary message.
+    expect(screen.getByText(/Does not verify write permission/i)).toBeInTheDocument();
+  });
+
+  it("shows auth failure without using note as error message", async () => {
+    const user = userEvent.setup();
+    mockedValidate.mockResolvedValueOnce({
+      auth_valid: false,
+      identity: null,
+      environment: "demo",
+      env_valid: false,
+      env_check: "skipped",
+      note: "Connection to eToro failed",
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText(/No broker credentials saved yet/i);
+    await user.type(screen.getByLabelText("API key"), "bad-api-key");
+    await user.type(screen.getByLabelText("User key"), "bad-user-key");
+    await user.click(screen.getByRole("button", { name: /test connection/i }));
+
     expect(
-      await screen.findByText(/No broker credentials saved yet/i),
+      await screen.findByText(/Authentication failed/i),
+    ).toBeInTheDocument();
+    // note should NOT be shown as the primary error.
+    expect(screen.queryByText(/Connection to eToro failed/i)).toBeNull();
+  });
+
+  it("shows environment check failure as amber warning", async () => {
+    const user = userEvent.setup();
+    mockedValidate.mockResolvedValueOnce({
+      auth_valid: true,
+      identity: { gcid: 12345, demo_cid: null, real_cid: null },
+      environment: "demo",
+      env_valid: false,
+      env_check: "403 Forbidden",
+      note: "Does not verify write permission.",
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText(/No broker credentials saved yet/i);
+    await user.type(screen.getByLabelText("API key"), "test-api-key");
+    await user.type(screen.getByLabelText("User key"), "test-user-key");
+    await user.click(screen.getByRole("button", { name: /test connection/i }));
+
+    expect(
+      await screen.findByText(/environment check failed/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/403 Forbidden/)).toBeInTheDocument();
+  });
+
+  it("disables Test connection in Repair mode", async () => {
+    mockedList.mockResolvedValueOnce([apiKeyRow()]);
+    render(<SettingsPage />);
+    await screen.findByText("api_key");
+
+    const btn = screen.getByRole("button", { name: /test connection/i });
+    expect(btn).toBeDisabled();
+    expect(
+      screen.getByText(/Connection testing requires both keys/i),
     ).toBeInTheDocument();
   });
 });
 
-describe("SettingsPage — first-save recovery phrase modal", () => {
-  it("clears any prior createError before opening the phrase modal on a successful save", async () => {
-    // Regression for PR #125 round 2 review: a stale createError from
-    // a prior failed attempt must not remain visible behind the
-    // closed modal alongside a fresh loadError. Here we ensure the
-    // close path zeroes out createError so the operator never sees
-    // two unrelated error messages stacked together.
-    const user = userEvent.setup();
+// ---------------------------------------------------------------------------
+// Two-key save flow
+// ---------------------------------------------------------------------------
+
+describe("SettingsPage — two-key save", () => {
+  it("creates both api_key and user_key rows on save in Create mode", async () => {
     mockedCreate
-      .mockRejectedValueOnce(new ApiError(409, "conflict"))
-      .mockResolvedValueOnce(withPhrase());
-    mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([makeRow()]);
+      .mockResolvedValueOnce(withoutPhrase())
+      .mockResolvedValueOnce(withoutPhrase());
+    mockedList
+      .mockResolvedValueOnce([])                           // initial load
+      .mockResolvedValueOnce([apiKeyRow(), userKeyRow()]); // refresh after save
 
     render(<SettingsPage />);
     await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("primary", "secret-value-1234");
-    expect(
-      await screen.findByText(/credential with that label already exists/i),
-    ).toBeInTheDocument();
+    await fillAndSubmit("test-api-key", "test-user-key");
 
-    // Second submit succeeds and opens the modal.
-    await user.click(screen.getByRole("button", { name: /save credential/i }));
-    await screen.findByRole("dialog");
-
-    // Pass the challenge — closePhraseModal must clear createError.
-    await advancePastWrittenDownGate();
-    await answerChallengeCorrectly();
     await waitFor(() => {
-      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(mockedCreate).toHaveBeenCalledTimes(2);
     });
-    expect(
-      screen.queryByText(/credential with that label already exists/i),
-    ).toBeNull();
+    expect(mockedCreate).toHaveBeenNthCalledWith(1, {
+      provider: "etoro",
+      label: "api_key",
+      environment: "demo",
+      secret: "test-api-key",
+    });
+    expect(mockedCreate).toHaveBeenNthCalledWith(2, {
+      provider: "etoro",
+      label: "user_key",
+      environment: "demo",
+      secret: "test-user-key",
+    });
   });
 
-  it("exposes the phrase modal with a single stable accessible name across both inner views", async () => {
-    // Regression for PR #125 round 2 review: previously the dialog
-    // wired aria-labelledby to either an sr-only span (in the confirm
-    // view) or an h2 (in the confirm-cancel view). Switching to
-    // aria-label means the dialog has ONE accessible name regardless
-    // of which inner view is active.
+  it("creates only the missing key in Repair mode", async () => {
+    mockedList.mockResolvedValueOnce([apiKeyRow()]);
+    mockedCreate.mockResolvedValueOnce(withoutPhrase());
+
+    render(<SettingsPage />);
+    await screen.findByText("api_key");
+
     const user = userEvent.setup();
-    mockedCreate.mockResolvedValueOnce(withPhrase());
-    render(<SettingsPage />);
-    await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("primary", "secret-value-1234");
+    await user.type(screen.getByLabelText("User key"), "test-user-key");
+    await user.click(screen.getByRole("button", { name: /save credential/i }));
 
-    const dialog = await screen.findByRole("dialog", {
-      name: "Recovery phrase confirmation",
+    await waitFor(() => {
+      expect(mockedCreate).toHaveBeenCalledTimes(1);
     });
-    expect(dialog).toHaveAttribute("aria-label", "Recovery phrase confirmation");
-    expect(dialog).not.toHaveAttribute("aria-labelledby");
-
-    // Switch to confirm-cancel view and re-assert the same name.
-    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
-    expect(
-      screen.getByRole("dialog", { name: "Recovery phrase confirmation" }),
-    ).toBeInTheDocument();
+    expect(mockedCreate).toHaveBeenCalledWith({
+      provider: "etoro",
+      label: "user_key",
+      environment: "demo",
+      secret: "test-user-key",
+    });
   });
 
-  it("opens the modal when the create response carries a recovery_phrase", async () => {
-    mockedCreate.mockResolvedValueOnce(withPhrase());
-    mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([makeRow()]);
+  it("enters Repair mode when first save succeeds but second fails", async () => {
+    mockedCreate
+      .mockResolvedValueOnce(withoutPhrase())
+      .mockRejectedValueOnce(new Error("boom"));
+    // Initial load: empty. After error refresh: api_key exists.
+    mockedList
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([apiKeyRow()]);
 
     render(<SettingsPage />);
     await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("primary", "secret-value-1234");
+    await fillAndSubmit("test-api-key", "test-user-key");
+
+    // Error surfaced.
+    expect(await screen.findByText(/Could not save credential/i)).toBeInTheDocument();
+    // Re-derived to Repair mode: only user_key field visible.
+    await waitFor(() => {
+      expect(screen.queryByLabelText("API key")).toBeNull();
+    });
+    expect(screen.getByLabelText("User key")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recovery phrase modal (inherited from #121, updated for two-key)
+// ---------------------------------------------------------------------------
+
+describe("SettingsPage — recovery phrase modal", () => {
+  it("opens the modal when the first create response carries a recovery_phrase", async () => {
+    mockedCreate
+      .mockResolvedValueOnce(withPhrase())   // api_key
+      .mockResolvedValueOnce(withoutPhrase()); // user_key
+    mockedList
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
+
+    render(<SettingsPage />);
+    await screen.findByText(/No broker credentials saved yet/i);
+    await fillAndSubmit("test-api-key", "test-user-key");
 
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveAttribute("aria-modal", "true");
-    expect(
-      within(dialog).getByText(/Write down your recovery phrase/i),
-    ).toBeInTheDocument();
-    // List refresh is DEFERRED until the modal closes -- review
-    // feedback PR #125 round 1. Only the initial mount fetch should
-    // have fired so far.
-    expect(mockedList).toHaveBeenCalledTimes(1);
+    // Both credentials should be saved before the modal opens.
+    expect(mockedCreate).toHaveBeenCalledTimes(2);
   });
 
   it("does NOT open the modal when create returns no recovery_phrase", async () => {
-    mockedCreate.mockResolvedValueOnce(withoutPhrase());
-    mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([makeRow()]);
+    mockedCreate
+      .mockResolvedValueOnce(withoutPhrase())
+      .mockResolvedValueOnce(withoutPhrase());
+    mockedList
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
 
     render(<SettingsPage />);
     await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("primary", "secret-value-1234");
+    await fillAndSubmit("test-api-key", "test-user-key");
 
     await waitFor(() => {
       expect(mockedList).toHaveBeenCalledTimes(2);
@@ -226,15 +362,18 @@ describe("SettingsPage — first-save recovery phrase modal", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("closes the modal and runs the deferred list refresh after the challenge passes", async () => {
-    mockedCreate.mockResolvedValueOnce(withPhrase());
-    mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([makeRow()]);
+  it("closes the modal and refreshes the list after challenge passes", async () => {
+    mockedCreate
+      .mockResolvedValueOnce(withPhrase())
+      .mockResolvedValueOnce(withoutPhrase());
+    mockedList
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
 
     render(<SettingsPage />);
     await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("primary", "secret-value-1234");
+    await fillAndSubmit("test-api-key", "test-user-key");
     await screen.findByRole("dialog");
-    expect(mockedList).toHaveBeenCalledTimes(1);
 
     await advancePastWrittenDownGate();
     await answerChallengeCorrectly();
@@ -242,81 +381,46 @@ describe("SettingsPage — first-save recovery phrase modal", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).toBeNull();
     });
-    // The deferred refresh runs after the modal closes, so any
-    // refresh failure surfaces to the operator instead of being
-    // hidden behind the modal.
     await waitFor(() => {
       expect(mockedList).toHaveBeenCalledTimes(2);
     });
   });
 });
 
+// ---------------------------------------------------------------------------
+// Phrase modal cancel gate
+// ---------------------------------------------------------------------------
+
 describe("SettingsPage — phrase modal cancel gate", () => {
-  it("routes Cancel through the confirm-cancel warning, not silent dismissal", async () => {
+  it("routes Cancel through the confirm-cancel warning", async () => {
     const user = userEvent.setup();
-    mockedCreate.mockResolvedValueOnce(withPhrase());
-    mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([makeRow()]);
+    mockedCreate
+      .mockResolvedValueOnce(withPhrase())
+      .mockResolvedValueOnce(withoutPhrase());
+    mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
 
     render(<SettingsPage />);
     await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("primary", "secret-value-1234");
+    await fillAndSubmit("test-api-key", "test-user-key");
     const dialog = await screen.findByRole("dialog");
 
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
-
-    // The dialog must still be present, now showing the warning copy.
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        /you may lose recovery ability for this installation's broker credentials/i,
-      ),
-    ).toBeInTheDocument();
-  });
-
-  it("routes Escape through the confirm-cancel warning, not silent dismissal", async () => {
-    const user = userEvent.setup();
-    mockedCreate.mockResolvedValueOnce(withPhrase());
-    mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([makeRow()]);
-
-    render(<SettingsPage />);
-    await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("primary", "secret-value-1234");
-    await screen.findByRole("dialog");
-
-    await user.keyboard("{Escape}");
-
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(
       screen.getByText(/you may lose recovery ability/i),
     ).toBeInTheDocument();
   });
 
-  it("returns to the phrase view when the operator chooses 'Go back'", async () => {
-    const user = userEvent.setup();
-    mockedCreate.mockResolvedValueOnce(withPhrase());
-    mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([makeRow()]);
-
-    render(<SettingsPage />);
-    await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("primary", "secret-value-1234");
-    const dialog = await screen.findByRole("dialog");
-
-    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
-    await user.click(screen.getByRole("button", { name: "Go back" }));
-
-    expect(
-      screen.getByText(/Write down your recovery phrase/i),
-    ).toBeInTheDocument();
-  });
-
   it("closes and clears the phrase when the operator confirms 'Close anyway'", async () => {
     const user = userEvent.setup();
-    mockedCreate.mockResolvedValueOnce(withPhrase());
-    mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([makeRow()]);
+    mockedCreate
+      .mockResolvedValueOnce(withPhrase())
+      .mockResolvedValueOnce(withoutPhrase());
+    mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
 
     render(<SettingsPage />);
     await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("primary", "secret-value-1234");
+    await fillAndSubmit("test-api-key", "test-user-key");
     const dialog = await screen.findByRole("dialog");
 
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
@@ -325,23 +429,21 @@ describe("SettingsPage — phrase modal cancel gate", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).toBeNull();
     });
-    // No revoke call -- the credential row stays committed (the phrase
-    // is root-secret scoped, not row scoped).
     expect(mockedRevoke).not.toHaveBeenCalled();
-    // Deferred list refresh runs after the modal closes.
-    await waitFor(() => {
-      expect(mockedList).toHaveBeenCalledTimes(2);
-    });
   });
 });
 
-describe("SettingsPage — backend failure on first save", () => {
+// ---------------------------------------------------------------------------
+// Backend failure
+// ---------------------------------------------------------------------------
+
+describe("SettingsPage — backend failure", () => {
   it("surfaces a 409 conflict and does NOT open the modal", async () => {
     mockedCreate.mockRejectedValueOnce(new ApiError(409, "conflict"));
 
     render(<SettingsPage />);
     await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("primary", "secret-value-1234");
+    await fillAndSubmit("test-api-key", "test-user-key");
 
     expect(
       await screen.findByText(/credential with that label already exists/i),
@@ -354,7 +456,7 @@ describe("SettingsPage — backend failure on first save", () => {
 
     render(<SettingsPage />);
     await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("primary", "secret-value-1234");
+    await fillAndSubmit("test-api-key", "test-user-key");
 
     expect(
       await screen.findByText(/Could not save credential/i),

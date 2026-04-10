@@ -10,22 +10,20 @@
  *   leaks which input was wrong.
  *
  * Step 2: Broker credential (optional)  -- ADR-0003 Ticket 2c (#122)
- *   Brand-new step. The operator MAY enter a broker credential right
- *   here, in which case the same first-save flow as the post-onboarding
- *   broker-credentials section runs inline (see SettingsPage / #121).
- *   The step is fully skippable: "Skip for now" navigates to / without
- *   storing anything, and the operator can save their first credential
- *   later from /settings.
+ *   Updated in #139 PR D for two-key credential model. The operator
+ *   enters both API key and user key. Labels are fixed as "api_key"
+ *   and "user_key"; environment is hardcoded to "demo" in v1.
  *
- *   Edge case 2 (ADR-0003 §5 row 3): if the broker key file already
- *   exists at wizard time, the backend silently re-uses it and the
- *   POST /broker-credentials response carries no recovery_phrase. The
- *   wizard then completes with NO modal shown -- "no phrase displayed
- *   at any point". The frontend does not need a separate signal for
- *   this case; the absence of `recovery_phrase` on the response is
- *   the same flag #121 already keys off, and that single condition
- *   covers both "fresh install, lazy gen ran" and "key file already
- *   present".
+ *   The "Test connection" button calls POST /broker-credentials/validate,
+ *   which is session-gated. This works because step 2 only runs after
+ *   step 1 completes — POST /auth/setup sets the session cookie on its
+ *   response, so the browser is already authenticated by the time step 2
+ *   renders. The session cookie is present even though markAuthenticated
+ *   is deferred (deferred for the React in-memory flag, not the cookie).
+ *
+ *   Credential-set mode detection mirrors SettingsPage: after a partial
+ *   save failure, the form re-derives mode from the credential list and
+ *   shows only the missing key's field.
  *
  * markAuthenticated discipline (#122):
  *   In the single-step incarnation we called markAuthenticated AND
@@ -45,29 +43,49 @@ import { useNavigate } from "react-router-dom";
 import { ApiError } from "@/api/client";
 import { postSetup } from "@/api/auth";
 import type { Operator } from "@/api/auth";
-import { createBrokerCredential } from "@/api/brokerCredentials";
+import {
+  type BrokerCredentialView,
+  type ValidateCredentialResponse,
+  createBrokerCredential,
+  listBrokerCredentials,
+  validateBrokerCredential,
+} from "@/api/brokerCredentials";
 import { useRecoveryPhraseModal } from "@/components/security/RecoveryPhraseModal";
 import { useSession } from "@/lib/session";
 
 const GENERIC_ERROR = "Setup unavailable or invalid token.";
 const MIN_PASSWORD_LEN = 12;
 const MIN_SECRET_LEN = 4;
-const BROKER_GENERIC_ERROR = "Could not save credential.";
-const BROKER_CONFLICT_ERROR =
-  "A credential with that label already exists for this provider.";
-const BROKER_VALIDATION_ERROR = "Provider, label, or secret is invalid.";
+const ENVIRONMENT = "demo";
 
 type WizardStep = "operator" | "broker";
+type CredentialSetMode = "create" | "repair" | "complete";
+
+function deriveMode(
+  rows: BrokerCredentialView[] | null,
+): { mode: CredentialSetMode; missingLabel: "api_key" | "user_key" | null } {
+  if (rows === null) return { mode: "create", missingLabel: null };
+
+  const active = rows.filter(
+    (r) =>
+      r.provider === "etoro" &&
+      r.environment === ENVIRONMENT &&
+      r.revoked_at === null,
+  );
+  const hasApiKey = active.some((r) => r.label === "api_key");
+  const hasUserKey = active.some((r) => r.label === "user_key");
+
+  if (hasApiKey && hasUserKey) return { mode: "complete", missingLabel: null };
+  if (hasApiKey) return { mode: "repair", missingLabel: "user_key" };
+  if (hasUserKey) return { mode: "repair", missingLabel: "api_key" };
+  return { mode: "create", missingLabel: null };
+}
 
 export function SetupPage(): JSX.Element {
   const { status, markAuthenticated } = useSession();
   const navigate = useNavigate();
 
   const [step, setStep] = useState<WizardStep>("operator");
-  // The operator is created at the end of step 1 and held here until
-  // the wizard completes. markAuthenticated is deferred until then so
-  // the redirect-on-authenticated effect below does not yank the
-  // operator off the page mid-wizard.
   const [pendingOperator, setPendingOperator] = useState<Operator | null>(null);
 
   // Step 1 form state.
@@ -77,23 +95,31 @@ export function SetupPage(): JSX.Element {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Step 2 form state. Provider is locked to "etoro" -- mirroring the
-  // SettingsPage broker-credentials section.
-  const [brokerLabel, setBrokerLabel] = useState("");
-  const [brokerSecret, setBrokerSecret] = useState("");
+  // Step 2 form state — two-key model.
+  const [brokerApiKey, setBrokerApiKey] = useState("");
+  const [brokerUserKey, setBrokerUserKey] = useState("");
   const [brokerSubmitting, setBrokerSubmitting] = useState(false);
   const [brokerError, setBrokerError] = useState<string | null>(null);
 
+  // Credential-set mode detection for partial-save recovery.
+  const [credRows, setCredRows] = useState<BrokerCredentialView[] | null>(null);
+  const derived = deriveMode(credRows);
+  const mode = derived.mode;
+  const missingLabel = derived.missingLabel;
+
+  // Validation state.
+  const [validating, setValidating] = useState(false);
+  const [validationResult, setValidationResult] =
+    useState<ValidateCredentialResponse | null>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
+
+  // Clear stale validation result when inputs change or mode transitions.
+  useEffect(() => {
+    setValidationResult(null);
+    setValidationError(null);
+  }, [brokerApiKey, brokerUserKey, mode]);
+
   function completeWizard(): void {
-    // Single shared "wizard is finished" path. Used by:
-    //   - "Skip for now" on step 2 (no credential stored)
-    //   - successful save with no recovery_phrase (edge case 2)
-    //   - the recovery-phrase modal close (challenge confirm OR
-    //     "Close anyway" -- both run through the hook's onClose)
-    // Flips the in-memory session flag and navigates to /. The cookie
-    // was set by /auth/setup back in step 1, so the operator is
-    // already authenticated as far as the backend is concerned; this
-    // just makes RequireAuth let them through.
     if (pendingOperator !== null) {
       markAuthenticated(pendingOperator);
     }
@@ -104,13 +130,6 @@ export function SetupPage(): JSX.Element {
     onClose: completeWizard,
   });
 
-  // Bootstrap bounce: if the SessionProvider has already determined
-  // the operator is fully authenticated (e.g. they hit /setup directly
-  // after a previous setup completed), bounce off this page. We
-  // deliberately do NOT bounce on `status === "authenticated"` while
-  // the wizard is mid-flight -- markAuthenticated only runs at the
-  // end of the wizard, so during steps 1-2 the SessionProvider's
-  // status is still "needs_setup" and this effect is a no-op.
   useEffect(() => {
     if (status === "authenticated") {
       navigate("/", { replace: true });
@@ -129,17 +148,41 @@ export function SetupPage(): JSX.Element {
         password,
         setupToken.trim() === "" ? null : setupToken.trim(),
       );
-      // Stash the operator for the deferred markAuthenticated call
-      // and advance to step 2. The cookie is already on the response
-      // so the broker POST in step 2 will authenticate.
       setPendingOperator(operator);
       setStep("broker");
     } catch {
-      // Single fixed phrase for every failure mode -- matches the
-      // backend's generic-404 discipline.
       setError(GENERIC_ERROR);
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function refreshCredentials(): Promise<void> {
+    try {
+      const data = await listBrokerCredentials();
+      setCredRows(data);
+    } catch {
+      // On the setup page, failure to list credentials is non-fatal —
+      // the operator can still enter both keys (Create mode).
+      setCredRows(null);
+    }
+  }
+
+  async function handleTestConnection(): Promise<void> {
+    setValidationResult(null);
+    setValidationError(null);
+    setValidating(true);
+    try {
+      const result = await validateBrokerCredential({
+        api_key: brokerApiKey,
+        user_key: brokerUserKey,
+        environment: ENVIRONMENT,
+      });
+      setValidationResult(result);
+    } catch {
+      setValidationError("Could not reach the validation endpoint.");
+    } finally {
+      setValidating(false);
     }
   }
 
@@ -148,40 +191,56 @@ export function SetupPage(): JSX.Element {
     setBrokerError(null);
     setBrokerSubmitting(true);
     try {
-      const response = await createBrokerCredential({
-        provider: "etoro",
-        label: brokerLabel,
-        secret: brokerSecret,
-      });
-      // Drop the secret from local state immediately on success.
-      setBrokerSecret("");
-      if (
-        response.recovery_phrase != null &&
-        response.recovery_phrase.length > 0
-      ) {
-        // Lazy-gen path: open the phrase modal. completeWizard runs
-        // from the modal's onClose so navigation only happens after
-        // the operator has acknowledged the phrase (or accepted the
-        // installation-wide warning on the cancel gate).
-        phraseModal.open(response.recovery_phrase);
-      } else {
-        // Edge case 2: a key file already exists, no phrase to show.
-        // Wizard is done.
-        completeWizard();
+      // Save api_key if needed.
+      if (mode === "create" || (mode === "repair" && missingLabel === "api_key")) {
+        const response = await createBrokerCredential({
+          provider: "etoro",
+          label: "api_key",
+          environment: ENVIRONMENT,
+          secret: brokerApiKey,
+        });
+        if (response.recovery_phrase != null && response.recovery_phrase.length > 0) {
+          // Save user_key before showing the phrase modal (both rows
+          // must be durable before the wizard completes).
+          if (mode === "create") {
+            await createBrokerCredential({
+              provider: "etoro",
+              label: "user_key",
+              environment: ENVIRONMENT,
+              secret: brokerUserKey,
+            });
+          }
+          setBrokerApiKey("");
+          setBrokerUserKey("");
+          phraseModal.open(response.recovery_phrase);
+          return;
+        }
       }
+
+      // Save user_key if needed.
+      if (mode === "create" || (mode === "repair" && missingLabel === "user_key")) {
+        await createBrokerCredential({
+          provider: "etoro",
+          label: "user_key",
+          environment: ENVIRONMENT,
+          secret: brokerUserKey,
+        });
+      }
+
+      setBrokerApiKey("");
+      setBrokerUserKey("");
+      completeWizard();
     } catch (err: unknown) {
-      // Operator stays on step 2 with form values preserved (except
-      // the secret, which is preserved here too because we have not
-      // confirmed that it actually committed). "Skip for now" remains
-      // available so a transient backend failure does not lock the
-      // operator out of completing setup.
       if (err instanceof ApiError && err.status === 409) {
-        setBrokerError(BROKER_CONFLICT_ERROR);
+        setBrokerError("A credential with that label already exists. Revoke it from Settings to replace.");
       } else if (err instanceof ApiError && err.status === 400) {
-        setBrokerError(BROKER_VALIDATION_ERROR);
+        setBrokerError("Invalid API key or user key value.");
       } else {
-        setBrokerError(BROKER_GENERIC_ERROR);
+        setBrokerError("Could not save credential.");
       }
+      // Re-derive mode from the refreshed list in case the first call
+      // succeeded but the second failed (partial state).
+      await refreshCredentials();
     } finally {
       setBrokerSubmitting(false);
     }
@@ -198,6 +257,14 @@ export function SetupPage(): JSX.Element {
       </div>
     );
   }
+
+  const showApiKeyField = mode === "create" || (mode === "repair" && missingLabel === "api_key");
+  const showUserKeyField = mode === "create" || (mode === "repair" && missingLabel === "user_key");
+  const canTestConnection = mode === "create" && brokerApiKey.length >= MIN_SECRET_LEN && brokerUserKey.length >= MIN_SECRET_LEN;
+  const canSave =
+    !brokerSubmitting &&
+    (showApiKeyField ? brokerApiKey.length >= MIN_SECRET_LEN : true) &&
+    (showUserKeyField ? brokerUserKey.length >= MIN_SECRET_LEN : true);
 
   return (
     <div className="flex h-screen w-screen items-center justify-center bg-slate-50">
@@ -270,54 +337,126 @@ export function SetupPage(): JSX.Element {
             {submitting ? "Creating…" : "Create operator"}
           </button>
         </form>
+      ) : mode === "complete" ? (
+        <div className="w-full max-w-sm rounded border border-slate-200 bg-white p-6 shadow-sm">
+          <h1 className="mb-1 text-lg font-semibold text-slate-800">
+            Credentials configured
+          </h1>
+          <p className="mb-4 text-xs text-slate-500">
+            Both eToro credentials are saved. You can manage them from Settings.
+          </p>
+          <button
+            type="button"
+            onClick={completeWizard}
+            className="w-full rounded bg-slate-800 py-2 text-sm font-medium text-white"
+          >
+            Continue
+          </button>
+        </div>
       ) : (
         <form
           onSubmit={handleBrokerSubmit}
-          className="w-full max-w-sm rounded border border-slate-200 bg-white p-6 shadow-sm"
+          className="w-full max-w-sm space-y-3 rounded border border-slate-200 bg-white p-6 shadow-sm"
         >
-          <h1 className="mb-1 text-lg font-semibold text-slate-800">
-            Add a broker credential
+          <h1 className="text-lg font-semibold text-slate-800">
+            {mode === "repair" ? "Complete credential setup" : "Add eToro credentials"}
           </h1>
-          <p className="mb-4 text-xs text-slate-500">
-            You can add an eToro credential now or skip this step and add one
-            later from Settings. eBull will not place any orders until at least
-            one credential is saved.
+          <p className="text-xs text-slate-500">
+            {mode === "repair"
+              ? `One key was already saved. Enter the missing ${missingLabel === "api_key" ? "API key" : "user key"} to complete the credential pair.`
+              : "You can add your eToro API key and user key now or skip this step and add them later from Settings. eBull will not place any orders until both credentials are saved."}
           </p>
-          <label className="mb-3 block text-sm">
-            <span className="mb-1 block text-slate-600">Provider</span>
-            <select
-              value="etoro"
-              disabled
-              className="w-full rounded border border-slate-300 bg-slate-50 px-2 py-1.5 text-sm text-slate-700"
+
+          {showApiKeyField && (
+            <label className="block text-sm">
+              <span className="mb-1 block text-slate-600">API key</span>
+              <input
+                type="password"
+                name="broker-credential-api-key"
+                autoComplete="new-password"
+                value={brokerApiKey}
+                onChange={(e) => setBrokerApiKey(e.target.value)}
+                minLength={MIN_SECRET_LEN}
+                required
+                className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+              />
+            </label>
+          )}
+
+          {showUserKeyField && (
+            <label className="block text-sm">
+              <span className="mb-1 block text-slate-600">User key</span>
+              <input
+                type="password"
+                name="broker-credential-user-key"
+                autoComplete="new-password"
+                value={brokerUserKey}
+                onChange={(e) => setBrokerUserKey(e.target.value)}
+                minLength={MIN_SECRET_LEN}
+                required
+                className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+              />
+            </label>
+          )}
+
+          {/* Test connection — only in Create mode (both keys present). */}
+          <div className="space-y-1">
+            <button
+              type="button"
+              onClick={() => void handleTestConnection()}
+              disabled={!canTestConnection || validating}
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
             >
-              <option value="etoro">eToro</option>
-            </select>
-          </label>
-          <label className="mb-3 block text-sm">
-            <span className="mb-1 block text-slate-600">Label</span>
-            <input
-              type="text"
-              autoComplete="off"
-              value={brokerLabel}
-              onChange={(e) => setBrokerLabel(e.target.value)}
-              className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
-            />
-          </label>
-          <label className="mb-4 block text-sm">
-            <span className="mb-1 block text-slate-600">Secret</span>
-            <input
-              type="password"
-              autoComplete="off"
-              value={brokerSecret}
-              onChange={(e) => setBrokerSecret(e.target.value)}
-              minLength={MIN_SECRET_LEN}
-              className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
-            />
-          </label>
+              {validating ? "Testing…" : "Test connection"}
+            </button>
+            {mode === "repair" && (
+              <p className="text-xs text-slate-400">
+                Connection testing requires both keys. The already-saved key cannot be read back.
+              </p>
+            )}
+          </div>
+
+          {/* Validation result display. */}
+          {validationError !== null && (
+            <div role="alert" className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
+              {validationError}
+            </div>
+          )}
+          {validationResult !== null && !validationResult.auth_valid && (
+            <div role="alert" className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
+              Authentication failed — check your API key and user key.
+            </div>
+          )}
+          {validationResult !== null && validationResult.auth_valid && !validationResult.env_valid && (
+            <div className="space-y-1">
+              <div className="rounded bg-amber-50 px-2 py-1.5 text-xs text-amber-700">
+                Authenticated, but environment check failed: {validationResult.env_check}
+              </div>
+              {validationResult.note && (
+                <p className="text-xs text-slate-400">{validationResult.note}</p>
+              )}
+            </div>
+          )}
+          {validationResult !== null && validationResult.auth_valid && validationResult.env_valid && (
+            <div className="space-y-1">
+              <div className="rounded bg-emerald-50 px-2 py-1.5 text-xs text-emerald-700">
+                Connection verified
+                {validationResult.identity?.gcid != null && (
+                  <span className="ml-1 text-emerald-600">
+                    (account {validationResult.identity.gcid})
+                  </span>
+                )}
+              </div>
+              {validationResult.note && (
+                <p className="text-xs text-slate-400">{validationResult.note}</p>
+              )}
+            </div>
+          )}
+
           {brokerError !== null && (
             <div
               role="alert"
-              className="mb-3 rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700"
+              className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700"
             >
               {brokerError}
             </div>
@@ -333,14 +472,10 @@ export function SetupPage(): JSX.Element {
             </button>
             <button
               type="submit"
-              disabled={
-                brokerSubmitting ||
-                brokerLabel.trim() === "" ||
-                brokerSecret.length < MIN_SECRET_LEN
-              }
+              disabled={!canSave}
               className="flex-1 rounded bg-slate-800 py-2 text-sm font-medium text-white disabled:bg-slate-400"
             >
-              {brokerSubmitting ? "Saving…" : "Save credential"}
+              {brokerSubmitting ? "Saving…" : "Save credentials"}
             </button>
           </div>
         </form>
