@@ -27,6 +27,7 @@ import {
   listBrokerCredentials,
   revokeBrokerCredential,
   validateBrokerCredential,
+  validateStoredCredentials,
 } from "@/api/brokerCredentials";
 import { ApiError } from "@/api/client";
 
@@ -35,12 +36,14 @@ vi.mock("@/api/brokerCredentials", () => ({
   createBrokerCredential: vi.fn(),
   revokeBrokerCredential: vi.fn(),
   validateBrokerCredential: vi.fn(),
+  validateStoredCredentials: vi.fn(),
 }));
 
 const mockedList = vi.mocked(listBrokerCredentials);
 const mockedCreate = vi.mocked(createBrokerCredential);
 const mockedRevoke = vi.mocked(revokeBrokerCredential);
 const mockedValidate = vi.mocked(validateBrokerCredential);
+const mockedValidateStored = vi.mocked(validateStoredCredentials);
 
 const PHRASE: readonly string[] = [
   "alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
@@ -109,6 +112,7 @@ beforeEach(() => {
   mockedCreate.mockReset();
   mockedRevoke.mockReset();
   mockedValidate.mockReset();
+  mockedValidateStored.mockReset();
   mockedList.mockResolvedValue([]);
 });
 
@@ -462,5 +466,190 @@ describe("SettingsPage — backend failure", () => {
       await screen.findByText(/Could not save credential/i),
     ).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Complete mode — management panel (#144)
+// ---------------------------------------------------------------------------
+
+describe("SettingsPage — complete mode management", () => {
+  beforeEach(() => {
+    mockedList.mockResolvedValue([apiKeyRow(), userKeyRow()]);
+  });
+
+  it("shows Test connection and Replace both buttons", async () => {
+    render(<SettingsPage />);
+    await screen.findByText(/Credentials configured/i);
+    expect(screen.getByRole("button", { name: /test connection/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /replace both/i })).toBeInTheDocument();
+  });
+
+  it("shows Edit button on each active credential row", async () => {
+    render(<SettingsPage />);
+    await screen.findByText("api_key");
+    const editButtons = screen.getAllByRole("button", { name: "Edit" });
+    expect(editButtons).toHaveLength(2);
+  });
+
+  it("test connection calls validateStoredCredentials and shows result", async () => {
+    mockedValidateStored.mockResolvedValueOnce({
+      auth_valid: true,
+      identity: { gcid: 999, demo_cid: null, real_cid: null },
+      environment: "demo",
+      env_valid: true,
+      env_check: "ok",
+      note: "Does not verify write permission",
+    });
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+    await screen.findByText(/Credentials configured/i);
+    await user.click(screen.getByRole("button", { name: /test connection/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Connection verified/i)).toBeInTheDocument();
+    });
+    expect(mockedValidateStored).toHaveBeenCalledOnce();
+    // Transient validate should NOT have been called
+    expect(mockedValidate).not.toHaveBeenCalled();
+  });
+
+  it("shows error when stored validation returns 404", async () => {
+    mockedValidateStored.mockRejectedValueOnce(new ApiError(404, "not found"));
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+    await screen.findByText(/Credentials configured/i);
+    await user.click(screen.getByRole("button", { name: /test connection/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/must be stored/i)).toBeInTheDocument();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Edit single key (#144)
+// ---------------------------------------------------------------------------
+
+describe("SettingsPage — edit single key", () => {
+  beforeEach(() => {
+    mockedList.mockResolvedValue([apiKeyRow(), userKeyRow()]);
+    mockedRevoke.mockResolvedValue(undefined);
+    mockedCreate.mockResolvedValue(withoutPhrase());
+  });
+
+  it("opens edit form for API key and saves (revoke + create)", async () => {
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+    await screen.findByText("api_key");
+
+    // Click Edit on the first credential row
+    const editButtons = screen.getAllByRole("button", { name: "Edit" });
+    await user.click(editButtons[0]!);
+
+    // Edit form should appear
+    expect(screen.getByText("Edit API key")).toBeInTheDocument();
+    const input = screen.getByLabelText("New API key");
+    await user.type(input, "new-secret-value");
+
+    // After save, list refreshes — set up the mock for refresh
+    mockedList.mockResolvedValueOnce([
+      makeRow({ id: "new-id", label: "api_key", last_four: "alue" }),
+      userKeyRow(),
+    ]);
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      // Revoke was called for the old api_key
+      expect(mockedRevoke).toHaveBeenCalledWith("aaaa-1111");
+    });
+    // Create was called with the new secret
+    expect(mockedCreate).toHaveBeenCalledWith({
+      provider: "etoro",
+      label: "api_key",
+      environment: "demo",
+      secret: "new-secret-value",
+    });
+  });
+
+  it("cancel returns to idle management panel", async () => {
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+    await screen.findByText("api_key");
+
+    const editButtons = screen.getAllByRole("button", { name: "Edit" });
+    await user.click(editButtons[0]!);
+
+    expect(screen.getByText("Edit API key")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    // Should be back to idle — management buttons visible
+    expect(screen.getByRole("button", { name: /test connection/i })).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Replace both keys (#144)
+// ---------------------------------------------------------------------------
+
+describe("SettingsPage — replace both keys", () => {
+  beforeEach(() => {
+    mockedList.mockResolvedValue([apiKeyRow(), userKeyRow()]);
+    mockedRevoke.mockResolvedValue(undefined);
+    mockedCreate.mockResolvedValue(withoutPhrase());
+  });
+
+  it("opens replace form and saves (revoke both + create both)", async () => {
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+    await screen.findByText(/Credentials configured/i);
+
+    await user.click(screen.getByRole("button", { name: /replace both/i }));
+
+    expect(screen.getByText("Replace both keys")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("New API key"), "new-api");
+    await user.type(screen.getByLabelText("New user key"), "new-user");
+
+    mockedList.mockResolvedValueOnce([
+      makeRow({ id: "new-api-id", label: "api_key" }),
+      makeRow({ id: "new-user-id", label: "user_key" }),
+    ]);
+
+    await user.click(screen.getByRole("button", { name: /^replace both$/i }));
+
+    await waitFor(() => {
+      // Both old credentials revoked
+      expect(mockedRevoke).toHaveBeenCalledTimes(2);
+    });
+    // Both new credentials created
+    expect(mockedCreate).toHaveBeenCalledTimes(2);
+  });
+
+  it("replace form has working test connection with candidate keys", async () => {
+    mockedValidate.mockResolvedValueOnce({
+      auth_valid: true,
+      identity: null,
+      environment: "demo",
+      env_valid: true,
+      env_check: "ok",
+      note: "test",
+    });
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+    await screen.findByText(/Credentials configured/i);
+
+    await user.click(screen.getByRole("button", { name: /replace both/i }));
+    await user.type(screen.getByLabelText("New API key"), "test-api");
+    await user.type(screen.getByLabelText("New user key"), "test-user");
+
+    await user.click(screen.getByRole("button", { name: /test connection/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Connection verified/i)).toBeInTheDocument();
+    });
+    // Should use transient validate, not stored
+    expect(mockedValidate).toHaveBeenCalledOnce();
+    expect(mockedValidateStored).not.toHaveBeenCalled();
   });
 });

@@ -2,7 +2,7 @@
  * /settings page.
  *
  * Hosts the broker credentials section (issue #99 / Ticket B, updated
- * in #139 PR D for two-key credential model).
+ * in #139 PR D for two-key credential model, #144 for edit/replace UX).
  *
  * Credential-set mode detection:
  *   The eToro two-key model requires exactly two active credential rows
@@ -11,7 +11,7 @@
  *   to derive one of three modes:
  *     - Create: neither key exists — show both fields.
  *     - Repair: one key exists, one missing — show only the missing field.
- *     - Complete: both keys exist — hide the create form.
+ *     - Complete: both keys exist — show management actions.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -25,6 +25,7 @@ import {
   listBrokerCredentials,
   revokeBrokerCredential,
   validateBrokerCredential,
+  validateStoredCredentials,
 } from "@/api/brokerCredentials";
 import { runJob } from "@/api/jobs";
 import { ValidationResultDisplay } from "@/components/broker/ValidationResultDisplay";
@@ -32,6 +33,9 @@ import { useRecoveryPhraseModal } from "@/components/security/RecoveryPhraseModa
 import { deriveCredentialSetMode, ENVIRONMENT } from "@/lib/credentialSetMode";
 
 const MIN_SECRET_LEN = 4;
+
+/** Which action is active in the "complete" mode management panel. */
+type ManageAction = "idle" | "edit-api_key" | "edit-user_key" | "replace";
 
 export function SettingsPage(): JSX.Element {
   return (
@@ -62,6 +66,12 @@ function BrokerCredentialsSection(): JSX.Element {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // Management panel state (complete mode only).
+  const [manageAction, setManageAction] = useState<ManageAction>("idle");
+  const [editSecret, setEditSecret] = useState("");
+  const [editError, setEditError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+
   const { mode, missingLabel } = useMemo(() => deriveCredentialSetMode(rows), [rows]);
 
   // Clear stale validation result when inputs change or mode transitions.
@@ -69,6 +79,15 @@ function BrokerCredentialsSection(): JSX.Element {
     setValidationResult(null);
     setValidationError(null);
   }, [apiKey, userKey, mode]);
+
+  // Reset management action when mode changes away from complete.
+  useEffect(() => {
+    if (mode !== "complete") {
+      setManageAction("idle");
+      setEditSecret("");
+      setEditError(null);
+    }
+  }, [mode]);
 
   const phraseModal = useRecoveryPhraseModal({
     onClose: () => {
@@ -92,6 +111,8 @@ function BrokerCredentialsSection(): JSX.Element {
     void refresh();
   }, [refresh]);
 
+  // -- Test connection (transient candidate keys) -------------------------
+
   async function handleTestConnection(): Promise<void> {
     setValidationResult(null);
     setValidationError(null);
@@ -109,6 +130,30 @@ function BrokerCredentialsSection(): JSX.Element {
       setValidating(false);
     }
   }
+
+  // -- Test connection (stored keys) --------------------------------------
+
+  async function handleTestStored(): Promise<void> {
+    setValidationResult(null);
+    setValidationError(null);
+    setValidating(true);
+    try {
+      const result = await validateStoredCredentials();
+      setValidationResult(result);
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 404) {
+        setValidationError("Both credentials must be stored before testing.");
+      } else if (err instanceof ApiError && err.status === 503) {
+        setValidationError("Credential decryption failed. Check server key material.");
+      } else {
+        setValidationError("Could not reach the validation endpoint.");
+      }
+    } finally {
+      setValidating(false);
+    }
+  }
+
+  // -- Create flow (initial setup or repair) ------------------------------
 
   async function handleCreate(e: FormEvent<HTMLFormElement>): Promise<void> {
     e.preventDefault();
@@ -177,6 +222,8 @@ function BrokerCredentialsSection(): JSX.Element {
     }
   }
 
+  // -- Revoke flow --------------------------------------------------------
+
   async function handleRevoke(row: BrokerCredentialView): Promise<void> {
     setActionError(null);
     if (
@@ -199,6 +246,123 @@ function BrokerCredentialsSection(): JSX.Element {
       }
     } finally {
       setBusyId(null);
+    }
+  }
+
+  // -- Edit single key (complete mode) ------------------------------------
+
+  function startEdit(label: "api_key" | "user_key"): void {
+    setManageAction(label === "api_key" ? "edit-api_key" : "edit-user_key");
+    setEditSecret("");
+    setEditError(null);
+    setValidationResult(null);
+    setValidationError(null);
+  }
+
+  function startReplace(): void {
+    setManageAction("replace");
+    setApiKey("");
+    setUserKey("");
+    setEditError(null);
+    setValidationResult(null);
+    setValidationError(null);
+  }
+
+  function cancelManage(): void {
+    setManageAction("idle");
+    setEditSecret("");
+    setApiKey("");
+    setUserKey("");
+    setEditError(null);
+    setValidationResult(null);
+    setValidationError(null);
+  }
+
+  async function handleEditSave(e: FormEvent<HTMLFormElement>): Promise<void> {
+    e.preventDefault();
+    const label = manageAction === "edit-api_key" ? "api_key" : "user_key";
+    setEditError(null);
+    setEditing(true);
+    try {
+      // Find the existing active credential for this label to revoke it.
+      const existing = rows?.find(
+        (r) =>
+          r.label === label &&
+          r.provider === "etoro" &&
+          r.environment === ENVIRONMENT &&
+          r.revoked_at === null,
+      );
+      if (existing) {
+        await revokeBrokerCredential(existing.id);
+      }
+      await createBrokerCredential({
+        provider: "etoro",
+        label,
+        environment: ENVIRONMENT,
+        secret: editSecret,
+      });
+      setEditSecret("");
+      setManageAction("idle");
+      await refresh();
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 409) {
+        setEditError("A credential with that label already exists.");
+      } else if (err instanceof ApiError && err.status === 400) {
+        setEditError("Invalid key value.");
+      } else {
+        setEditError("Could not update credential.");
+      }
+      await refresh();
+    } finally {
+      setEditing(false);
+    }
+  }
+
+  async function handleReplaceSave(e: FormEvent<HTMLFormElement>): Promise<void> {
+    e.preventDefault();
+    setEditError(null);
+    setEditing(true);
+    try {
+      // Revoke both existing active credentials.
+      const activeRows = rows?.filter(
+        (r) =>
+          r.provider === "etoro" &&
+          r.environment === ENVIRONMENT &&
+          r.revoked_at === null,
+      ) ?? [];
+      for (const row of activeRows) {
+        await revokeBrokerCredential(row.id);
+      }
+
+      // Create both new credentials.
+      await createBrokerCredential({
+        provider: "etoro",
+        label: "api_key",
+        environment: ENVIRONMENT,
+        secret: apiKey,
+      });
+      await createBrokerCredential({
+        provider: "etoro",
+        label: "user_key",
+        environment: ENVIRONMENT,
+        secret: userKey,
+      });
+
+      setApiKey("");
+      setUserKey("");
+      setManageAction("idle");
+      await refresh();
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 409) {
+        setEditError("A credential with that label already exists.");
+      } else if (err instanceof ApiError && err.status === 400) {
+        setEditError("Invalid key value.");
+      } else {
+        setEditError("Could not replace credentials.");
+      }
+      await refresh();
+    } finally {
+      setEditing(false);
     }
   }
 
@@ -234,6 +398,14 @@ function BrokerCredentialsSection(): JSX.Element {
         <ul className="divide-y divide-slate-200 rounded border border-slate-200 bg-white">
           {rows.map((row) => {
             const revoked = row.revoked_at !== null;
+            const isActiveEtoro =
+              row.provider === "etoro" &&
+              row.environment === ENVIRONMENT &&
+              !revoked;
+            const editLabel =
+              row.label === "api_key" || row.label === "user_key"
+                ? (row.label as "api_key" | "user_key")
+                : null;
             return (
               <li
                 key={row.id}
@@ -250,16 +422,28 @@ function BrokerCredentialsSection(): JSX.Element {
                     </span>
                   )}
                 </div>
-                {!revoked && (
-                  <button
-                    type="button"
-                    onClick={() => void handleRevoke(row)}
-                    disabled={busyId === row.id}
-                    className="rounded border border-rose-300 px-2 py-1 text-xs text-rose-700 hover:bg-rose-50 disabled:opacity-50"
-                  >
-                    {busyId === row.id ? "Revoking…" : "Revoke"}
-                  </button>
-                )}
+                <div className="flex gap-2">
+                  {mode === "complete" && isActiveEtoro && editLabel !== null && (
+                    <button
+                      type="button"
+                      onClick={() => startEdit(editLabel)}
+                      disabled={manageAction !== "idle"}
+                      className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                    >
+                      Edit
+                    </button>
+                  )}
+                  {!revoked && (
+                    <button
+                      type="button"
+                      onClick={() => void handleRevoke(row)}
+                      disabled={busyId === row.id}
+                      className="rounded border border-rose-300 px-2 py-1 text-xs text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                    >
+                      {busyId === row.id ? "Revoking…" : "Revoke"}
+                    </button>
+                  )}
+                </div>
               </li>
             );
           })}
@@ -271,13 +455,174 @@ function BrokerCredentialsSection(): JSX.Element {
         </p>
       )}
 
-      {mode === "complete" ? (
-        <div className="max-w-sm rounded border border-slate-200 bg-white p-4">
-          <p className="text-sm text-slate-700">
-            Credentials configured. Revoke existing credentials to replace them.
-          </p>
+      {/* Complete mode — management panel */}
+      {mode === "complete" && manageAction === "idle" && (
+        <div className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4">
+          <p className="text-sm text-slate-700">Credentials configured.</p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void handleTestStored()}
+              disabled={validating}
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              {validating ? "Testing…" : "Test connection"}
+            </button>
+            <button
+              type="button"
+              onClick={startReplace}
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+            >
+              Replace both
+            </button>
+          </div>
+          <ValidationResultDisplay
+            result={validationResult}
+            error={validationError}
+          />
         </div>
-      ) : (
+      )}
+
+      {/* Complete mode — edit single key */}
+      {mode === "complete" && (manageAction === "edit-api_key" || manageAction === "edit-user_key") && (
+        <form
+          onSubmit={handleEditSave}
+          className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4"
+        >
+          <h3 className="text-sm font-medium text-slate-700">
+            Edit {manageAction === "edit-api_key" ? "API key" : "user key"}
+          </h3>
+          <p className="text-xs text-slate-500">
+            Enter the new value. The existing key will be revoked and replaced.
+          </p>
+          <label className="block text-sm">
+            <span className="mb-1 block text-slate-600">
+              {manageAction === "edit-api_key" ? "New API key" : "New user key"}
+            </span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={editSecret}
+              onChange={(e) => setEditSecret(e.target.value)}
+              minLength={MIN_SECRET_LEN}
+              required
+              className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+            />
+          </label>
+          {editError !== null && (
+            <div role="alert" className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
+              {editError}
+            </div>
+          )}
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              disabled={editing || editSecret.length < MIN_SECRET_LEN}
+              className="rounded bg-slate-800 px-3 py-1.5 text-sm font-medium text-white disabled:bg-slate-400"
+            >
+              {editing ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              onClick={cancelManage}
+              disabled={editing}
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/* Complete mode — replace both keys */}
+      {mode === "complete" && manageAction === "replace" && (
+        <form
+          onSubmit={handleReplaceSave}
+          className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4"
+        >
+          <h3 className="text-sm font-medium text-slate-700">Replace both keys</h3>
+          <p className="text-xs text-slate-500">
+            Enter new values for both keys. The existing pair will be revoked and replaced.
+            You can test the new credentials before saving.
+          </p>
+          <label className="block text-sm">
+            <span className="mb-1 block text-slate-600">New API key</span>
+            <input
+              type="password"
+              name="broker-credential-api-key"
+              autoComplete="new-password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              minLength={MIN_SECRET_LEN}
+              required
+              className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="mb-1 block text-slate-600">New user key</span>
+            <input
+              type="password"
+              name="broker-credential-user-key"
+              autoComplete="new-password"
+              value={userKey}
+              onChange={(e) => setUserKey(e.target.value)}
+              minLength={MIN_SECRET_LEN}
+              required
+              className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+            />
+          </label>
+
+          <div className="space-y-1">
+            <button
+              type="button"
+              onClick={() => void handleTestConnection()}
+              disabled={
+                apiKey.length < MIN_SECRET_LEN ||
+                userKey.length < MIN_SECRET_LEN ||
+                validating
+              }
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              {validating ? "Testing…" : "Test connection"}
+            </button>
+          </div>
+
+          <ValidationResultDisplay
+            result={validationResult}
+            error={validationError}
+          />
+
+          {editError !== null && (
+            <div role="alert" className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
+              {editError}
+            </div>
+          )}
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              disabled={
+                editing ||
+                apiKey.length < MIN_SECRET_LEN ||
+                userKey.length < MIN_SECRET_LEN
+              }
+              className="rounded bg-slate-800 px-3 py-1.5 text-sm font-medium text-white disabled:bg-slate-400"
+            >
+              {editing ? "Replacing…" : "Replace both"}
+            </button>
+            <button
+              type="button"
+              onClick={cancelManage}
+              disabled={editing}
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/* Create / Repair mode — initial setup form */}
+      {mode !== "complete" && (
         <form
           onSubmit={handleCreate}
           className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4"
@@ -368,4 +713,3 @@ function BrokerCredentialsSection(): JSX.Element {
     </section>
   );
 }
-

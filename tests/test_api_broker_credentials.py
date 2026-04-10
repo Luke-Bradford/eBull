@@ -399,6 +399,95 @@ class TestValidate:
 
 
 # ---------------------------------------------------------------------------
+# POST /broker-credentials/validate-stored (#144)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateStored:
+    """Tests for the stored-credential validation endpoint."""
+
+    @patch("app.api.broker_credentials.httpx.Client")
+    @patch("app.api.broker_credentials.load_credential_for_provider_use")
+    def test_valid_stored_credentials(self, mock_load: MagicMock, mock_client_cls: MagicMock) -> None:
+        mock_load.side_effect = ["stored-api-key", "stored-user-key"]
+
+        mock_client = MagicMock()
+        mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        me_resp = MagicMock()
+        me_resp.status_code = 200
+        me_resp.json.return_value = {"gcid": 42}
+        env_resp = MagicMock()
+        env_resp.status_code = 200
+        mock_client.get.side_effect = [me_resp, env_resp]
+
+        resp = client.post("/broker-credentials/validate-stored")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["auth_valid"] is True
+        assert body["env_valid"] is True
+        assert body["identity"]["gcid"] == 42
+
+    @patch("app.api.broker_credentials.load_credential_for_provider_use")
+    def test_missing_credential_returns_404(self, mock_load: MagicMock) -> None:
+        mock_load.side_effect = CredentialNotFound("no active credential")
+
+        resp = client.post("/broker-credentials/validate-stored")
+        assert resp.status_code == 404
+        assert "must be stored" in resp.json()["detail"]
+
+    @patch("app.api.broker_credentials.load_credential_for_provider_use")
+    def test_decrypt_failure_returns_503(self, mock_load: MagicMock) -> None:
+        from app.services.broker_credentials import CredentialDecryptError
+
+        mock_load.side_effect = CredentialDecryptError("bad ciphertext")
+
+        resp = client.post("/broker-credentials/validate-stored")
+        assert resp.status_code == 503
+        assert "decryption failed" in resp.json()["detail"].lower()
+
+    @patch("app.api.broker_credentials.load_credential_for_provider_use")
+    def test_no_etoro_error_details_leaked(self, mock_load: MagicMock) -> None:
+        """Verify raw CredentialDecryptError text is not echoed."""
+        from app.services.broker_credentials import CredentialDecryptError
+
+        mock_load.side_effect = CredentialDecryptError("SECRET_INTERNAL_xyz")
+
+        resp = client.post("/broker-credentials/validate-stored")
+        assert "SECRET_INTERNAL_xyz" not in resp.text
+
+    def test_requires_session(self) -> None:
+        app.dependency_overrides.pop(require_session, None)
+        client.cookies.clear()
+        resp = client.post("/broker-credentials/validate-stored")
+        assert resp.status_code == 401
+
+    @patch("app.api.broker_credentials.httpx.Client")
+    @patch("app.api.broker_credentials.load_credential_for_provider_use")
+    def test_loads_both_keys_with_correct_labels(self, mock_load: MagicMock, mock_client_cls: MagicMock) -> None:
+        mock_load.side_effect = ["key-a", "key-b"]
+
+        mock_client = MagicMock()
+        mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
+        me_resp = MagicMock()
+        me_resp.status_code = 200
+        me_resp.json.return_value = {}
+        env_resp = MagicMock()
+        env_resp.status_code = 200
+        mock_client.get.side_effect = [me_resp, env_resp]
+
+        client.post("/broker-credentials/validate-stored")
+
+        assert mock_load.call_count == 2
+        call_labels = [c.kwargs["label"] for c in mock_load.call_args_list]
+        assert call_labels == ["api_key", "user_key"]
+        call_callers = [c.kwargs["caller"] for c in mock_load.call_args_list]
+        assert all(c == "validate-stored" for c in call_callers)
+
+
+# ---------------------------------------------------------------------------
 # normalise_environment (service layer, #139)
 # ---------------------------------------------------------------------------
 
