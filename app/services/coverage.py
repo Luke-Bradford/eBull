@@ -707,10 +707,13 @@ def seed_coverage(
     normal schedule.
 
     Uses ``ON CONFLICT DO NOTHING`` so a concurrent call is safe (the
-    second caller inserts zero rows rather than racing).
+    second caller inserts zero rows rather than racing).  In practice,
+    concurrency cannot arise because this is only called from
+    ``nightly_universe_sync`` which holds an advisory lock.
 
-    Opens its own ``conn.transaction()`` so the read (empty check) and
-    the write (bulk INSERT) are atomic.
+    Opens its own ``conn.transaction()`` (a savepoint when nested inside
+    a caller-managed transaction) so the read (empty check) and the
+    write (bulk INSERT) are atomic.
     """
     with conn.transaction():
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -733,6 +736,5 @@ def seed_coverage(
             """
         )
         seeded = result.rowcount if result.rowcount is not None else 0
-
-    logger.info("seed_coverage: seeded %d instruments at Tier 3", seeded)
-    return SeedResult(seeded=seeded, already_populated=False)
+        logger.info("seed_coverage: seeded %d instruments at Tier 3", seeded)
+        return SeedResult(seeded=seeded, already_populated=False)

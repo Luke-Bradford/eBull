@@ -365,13 +365,19 @@ def nightly_universe_sync() -> None:
             EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
             psycopg.connect(settings.database_url) as conn,
         ):
-            summary = sync_universe(provider, conn)
+            # Explicit outer transaction so both sync_universe and
+            # seed_coverage share a single commit boundary.  Each
+            # function opens its own conn.transaction() (savepoints)
+            # internally; the outer transaction ensures a clean,
+            # well-defined connection state between calls.
+            with conn.transaction():
+                summary = sync_universe(provider, conn)
 
-            # First-run bootstrap: if the coverage table is empty after a
-            # successful universe sync, seed all tradable instruments at
-            # Tier 3.  This is a no-op on subsequent runs (seed_coverage
-            # checks for existing rows and skips if non-empty).
-            seed_result = seed_coverage(conn)
+                # First-run bootstrap: if the coverage table is empty after a
+                # successful universe sync, seed all tradable instruments at
+                # Tier 3.  This is a no-op on subsequent runs (seed_coverage
+                # checks for existing rows and skips if non-empty).
+                seed_result = seed_coverage(conn)
 
         tracker.row_count = summary.inserted + summary.updated + seed_result.seeded
 
