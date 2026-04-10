@@ -37,6 +37,7 @@ from app.providers.implementations.companies_house import CompaniesHouseFilingsP
 from app.providers.implementations.etoro import EtoroMarketDataProvider
 from app.providers.implementations.fmp import FmpFundamentalsProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
+from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
 from app.services.coverage import review_coverage, seed_coverage
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
@@ -250,9 +251,9 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_DAILY_THESIS_REFRESH,
-        description="Regenerate theses for stale Tier 1 instruments.",
+        description="Regenerate theses for stale Tier 1/2 instruments.",
         cadence=Cadence.daily(hour=4, minute=30),
-        prerequisite=_has_tier1_stale_theses,
+        prerequisite=_has_coverage_tier12,
     ),
     ScheduledJob(
         name=JOB_MORNING_CANDIDATE_REVIEW,
@@ -551,7 +552,8 @@ def daily_research_refresh() -> None:
     Refresh fundamentals and filings for all tradable instruments.
 
     Runs daily. Fetches:
-      - FMP fundamentals snapshot (latest) for each tradable symbol
+      - SEC XBRL fundamentals (primary, free) for US instruments with a CIK
+      - FMP fundamentals (fallback) for remaining instruments if API key is set
       - SEC EDGAR filing metadata for US instruments with a known CIK
       - Companies House filing metadata for UK instruments with a company_number
 
@@ -560,8 +562,6 @@ def daily_research_refresh() -> None:
     T3 instruments, enabling the weekly coverage review to promote them
     to T2 on deterministic signals alone.
     """
-    if not settings.fmp_api_key:
-        logger.error("daily_research_refresh: FMP_API_KEY not set, skipping fundamentals")
     if not settings.companies_house_api_key:
         logger.warning("daily_research_refresh: COMPANIES_HOUSE_API_KEY not set, skipping CH filings")
 
@@ -576,6 +576,18 @@ def daily_research_refresh() -> None:
                 """
             ).fetchall()
 
+            # Build symbol→CIK mapping for SEC fundamentals
+            cik_rows = conn.execute(
+                """
+                SELECT i.symbol, ei.identifier_value
+                FROM external_identifiers ei
+                JOIN instruments i ON i.instrument_id = ei.instrument_id
+                WHERE ei.provider = 'sec'
+                  AND ei.identifier_type = 'cik'
+                  AND i.is_tradable = TRUE
+                """
+            ).fetchall()
+
         if not rows:
             logger.info("daily_research_refresh: no tradable instruments found, skipping")
             tracker.row_count = 0
@@ -583,24 +595,51 @@ def daily_research_refresh() -> None:
 
         symbols = [(row[0], row[1]) for row in rows]
         instrument_ids = [row[1] for row in rows]
+        cik_map = {row[0].upper(): row[1] for row in cik_rows}
         from_date = date.today() - timedelta(days=30)
         to_date = date.today()
 
         total_rows = 0
 
-        # Fundamentals (FMP)
-        if settings.fmp_api_key:
+        # Fundamentals — SEC XBRL (primary, free, US equities)
+        sec_symbols = [(sym, iid) for sym, iid in symbols if sym.upper() in cik_map]
+        if sec_symbols:
             with (
-                FmpFundamentalsProvider(api_key=settings.fmp_api_key) as fmp,
+                SecFundamentalsProvider(user_agent=settings.sec_user_agent) as sec_fund,
                 psycopg.connect(settings.database_url) as conn,
             ):
-                summary = refresh_fundamentals(fmp, conn, symbols)
+                sec_fund.set_cik_cache(cik_map)
+                summary = refresh_fundamentals(sec_fund, conn, sec_symbols)
             total_rows += summary.snapshots_upserted
             logger.info(
-                "Fundamentals refresh: attempted=%d upserted=%d skipped=%d",
+                "SEC fundamentals refresh: attempted=%d upserted=%d skipped=%d",
                 summary.symbols_attempted,
                 summary.snapshots_upserted,
                 summary.symbols_skipped,
+            )
+        else:
+            logger.info("daily_research_refresh: no CIK mappings, skipping SEC fundamentals")
+
+        # Fundamentals — FMP (fallback for non-US instruments)
+        fmp_symbols = [(sym, iid) for sym, iid in symbols if sym.upper() not in cik_map]
+        if settings.fmp_api_key:
+            if fmp_symbols:
+                with (
+                    FmpFundamentalsProvider(api_key=settings.fmp_api_key) as fmp,
+                    psycopg.connect(settings.database_url) as conn,
+                ):
+                    fmp_summary = refresh_fundamentals(fmp, conn, fmp_symbols)
+                total_rows += fmp_summary.snapshots_upserted
+                logger.info(
+                    "FMP fundamentals refresh (non-US fallback): attempted=%d upserted=%d skipped=%d",
+                    fmp_summary.symbols_attempted,
+                    fmp_summary.snapshots_upserted,
+                    fmp_summary.symbols_skipped,
+                )
+        elif fmp_symbols:
+            logger.warning(
+                "FMP_API_KEY not set; %d non-US instruments will have no fundamentals",
+                len(fmp_symbols),
             )
 
         # Filings — SEC EDGAR
@@ -719,20 +758,31 @@ def daily_thesis_refresh() -> None:
         return
 
     with _tracked_job(JOB_DAILY_THESIS_REFRESH) as tracker:
-        logger.info("daily_thesis_refresh: checking for stale Tier 1 instruments")
+        logger.info("daily_thesis_refresh: checking for stale Tier 1/2 instruments")
         try:
             with psycopg.connect(settings.database_url) as conn:
-                stale = find_stale_instruments(conn, tier=1)
+                # Generate theses for T1 and T2 instruments.  T2 instruments
+                # need theses to be promoted to T1 (coverage.py requires
+                # thesis for T2→T1).  The portfolio manager also requires a
+                # thesis with stance="buy" before recommending a BUY.
+                stale_t1 = find_stale_instruments(conn, tier=1)
+                stale_t2 = find_stale_instruments(conn, tier=2)
+                stale = stale_t1 + stale_t2
         except Exception:
             logger.error("daily_thesis_refresh: failed to query stale instruments", exc_info=True)
             return
 
         if not stale:
-            logger.info("daily_thesis_refresh: no stale Tier 1 instruments found")
+            logger.info("daily_thesis_refresh: no stale Tier 1/2 instruments found")
             tracker.row_count = 0
             return
 
-        logger.info("daily_thesis_refresh: %d stale instrument(s) to refresh", len(stale))
+        logger.info(
+            "daily_thesis_refresh: %d stale instrument(s) to refresh (T1=%d T2=%d)",
+            len(stale),
+            len(stale_t1),
+            len(stale_t2),
+        )
 
         claude_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 

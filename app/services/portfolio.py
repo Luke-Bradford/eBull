@@ -53,6 +53,11 @@ MAX_SECTOR_EXPOSURE_PCT: float = 0.25  # 25 %
 
 # Minimum total_score for a BUY recommendation
 MIN_BUY_SCORE: float = 0.35
+# Score threshold for buying without a thesis.  When score exceeds this,
+# the deterministic signals alone (fundamentals, momentum, filings) are
+# strong enough that a thesis is not required.  This allows the pipeline
+# to operate autonomously without AI spend for clear-cut opportunities.
+MIN_SCORE_ONLY_BUY: float = 0.55
 
 # Minimum improvement thresholds for ADD conviction check
 ADD_MIN_CONFIDENCE_DELTA: float = 0.05
@@ -528,7 +533,7 @@ def _evaluate_buy(
     BUY requires:
       - portfolio (held + already-approved BUYs this run) below max_active_positions
       - total_score >= MIN_BUY_SCORE
-      - thesis exists with stance == "buy"
+      - thesis with stance == "buy", OR total_score >= MIN_SCORE_ONLY_BUY
       - no severe red flags
       - sector concentration passes, accounting for BUYs already approved this run
       - cash sufficient if known; if unknown, note cash_check_deferred
@@ -549,8 +554,11 @@ def _evaluate_buy(
 
     thesis = details.get("thesis")
     if thesis is None:
-        return False, "No thesis available"
-    if thesis.get("stance") != "buy":
+        # Allow BUY on strong deterministic score alone (no AI spend needed).
+        # Below this threshold, thesis validation is required.
+        if total_score < MIN_SCORE_ONLY_BUY:
+            return False, f"No thesis and score {total_score:.3f} below score-only threshold={MIN_SCORE_ONLY_BUY}"
+    elif thesis.get("stance") != "buy":
         return False, f"Thesis stance {thesis.get('stance')!r} is not 'buy'"
 
     max_red_flag: float | None = details.get("max_red_flag")
@@ -578,10 +586,11 @@ def _evaluate_buy(
 
     rank = latest_score.get("rank")
     cash_note = "" if cash is not None else "; cash_check_deferred (ledger empty)"
+    thesis_note = "" if thesis is not None else "; score-only entry (no thesis)"
     return (
         True,
         f"Entry candidate: score={total_score:.3f} rank={rank}; "
-        f"initial allocation {MAX_INITIAL_POSITION_PCT:.0%} of AUM{cash_note}",
+        f"initial allocation {MAX_INITIAL_POSITION_PCT:.0%} of AUM{cash_note}{thesis_note}",
     )
 
 

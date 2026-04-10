@@ -398,16 +398,13 @@ def _compute_penalties(
 ) -> list[PenaltyRecord]:
     penalties: list[PenaltyRecord] = []
 
-    # Stale thesis
-    if thesis_created_at is None:
-        penalties.append(
-            PenaltyRecord(
-                name="stale_thesis",
-                deduction=_PENALTY_STALE_THESIS,
-                reason="no thesis exists",
-            )
-        )
-    elif (now - thesis_created_at).days > _THESIS_STALE_DAYS:
+    # Stale thesis — only penalise when a thesis exists but is outdated.
+    # Missing thesis is NOT penalised: T3→T2 promotion is based on
+    # deterministic signals alone (per #169), and T2→T1 promotion
+    # enforces thesis existence in coverage.py.  Penalising missing
+    # thesis here would prevent instruments from ever reaching the score
+    # threshold needed for promotion.
+    if thesis_created_at is not None and (now - thesis_created_at).days > _THESIS_STALE_DAYS:
         age_days = (now - thesis_created_at).days
         penalties.append(
             PenaltyRecord(

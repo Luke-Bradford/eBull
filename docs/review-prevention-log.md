@@ -528,3 +528,19 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `get_quotes()` caught `httpx.HTTPStatusError` on a 500 response but skipped the chunk without persisting the error response body. The 500 body (which may contain diagnostic info from the upstream API) was silently discarded, violating the raw-payload persistence rule.
 - Prevention: When catching `httpx.HTTPStatusError` in provider code to skip/continue, call `_persist_raw(tag + "_error", exc.response.text)` before logging or continuing. Network errors (`httpx.RequestError`) have no response body — log with `exc_info` only.
 - Enforced in: this prevention log
+
+---
+
+### Raw payload persistence must precede raise_for_status()
+- First seen in: #177
+- Symptom: `_fetch_company_facts` called `resp.raise_for_status()` before `_persist_raw()`, so non-404 HTTP errors (429, 503) raised before the raw payload was written to disk, losing diagnostic data.
+- Prevention: In provider HTTP methods, always call `_persist_raw()` before `resp.raise_for_status()`. The persist call captures the response body for auditability regardless of status code.
+- Enforced in: this prevention log
+
+---
+
+### XBRL CapEx sign convention varies between filers
+- First seen in: #177
+- Symptom: FCF calculation `operating_cf - capex` was incorrect for filers reporting CapEx as a negative number (cash outflow sign convention), inflating FCF.
+- Prevention: When subtracting CapEx from operating CF, use `abs(capex)` to normalise for sign convention differences. Apply to both latest-snapshot and historical-snapshot builders.
+- Enforced in: this prevention log
