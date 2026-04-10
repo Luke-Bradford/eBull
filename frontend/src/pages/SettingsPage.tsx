@@ -283,6 +283,7 @@ function BrokerCredentialsSection(): JSX.Element {
     const label = manageAction === "edit-api_key" ? "api_key" : "user_key";
     setEditError(null);
     setEditing(true);
+    let revoked = false;
     try {
       // Find the existing active credential for this label to revoke it.
       const existing = rows?.find(
@@ -294,6 +295,7 @@ function BrokerCredentialsSection(): JSX.Element {
       );
       if (existing) {
         await revokeBrokerCredential(existing.id);
+        revoked = true;
       }
       await createBrokerCredential({
         provider: "etoro",
@@ -305,7 +307,14 @@ function BrokerCredentialsSection(): JSX.Element {
       setManageAction("idle");
       await refresh();
     } catch (err: unknown) {
-      if (err instanceof ApiError && err.status === 409) {
+      // If the old key was already revoked but the new save failed, the
+      // credential set is now incomplete.  After refresh() the mode will
+      // transition to "repair", hiding the edit form — so surface the
+      // error via actionError (rendered outside mode-specific sections).
+      if (revoked) {
+        const msg = `The old ${label} was revoked but the replacement failed — re-enter it below.`;
+        setActionError(msg);
+      } else if (err instanceof ApiError && err.status === 409) {
         setEditError("A credential with that label already exists.");
       } else if (err instanceof ApiError && err.status === 400) {
         setEditError("Invalid key value.");
@@ -322,6 +331,9 @@ function BrokerCredentialsSection(): JSX.Element {
     e.preventDefault();
     setEditError(null);
     setEditing(true);
+    // Track progress so the error message reflects what actually happened.
+    let revokedCount = 0;
+    let createdApiKey = false;
     try {
       // Revoke both existing active credentials.
       const activeRows = rows?.filter(
@@ -332,6 +344,7 @@ function BrokerCredentialsSection(): JSX.Element {
       ) ?? [];
       for (const row of activeRows) {
         await revokeBrokerCredential(row.id);
+        revokedCount += 1;
       }
 
       // Create both new credentials.
@@ -341,6 +354,7 @@ function BrokerCredentialsSection(): JSX.Element {
         environment: ENVIRONMENT,
         secret: apiKey,
       });
+      createdApiKey = true;
       await createBrokerCredential({
         provider: "etoro",
         label: "user_key",
@@ -353,7 +367,14 @@ function BrokerCredentialsSection(): JSX.Element {
       setManageAction("idle");
       await refresh();
     } catch (err: unknown) {
-      if (err instanceof ApiError && err.status === 409) {
+      // After refresh() the mode may transition away from "complete",
+      // hiding the replace form.  Surface partial-failure via actionError
+      // (rendered outside mode-specific sections) so the operator sees it.
+      if (revokedCount > 0 && !createdApiKey) {
+        setActionError("Old credentials were revoked but neither replacement was saved — re-enter both below.");
+      } else if (createdApiKey) {
+        setActionError("api_key was saved but user_key failed — re-enter user_key below.");
+      } else if (err instanceof ApiError && err.status === 409) {
         setEditError("A credential with that label already exists.");
       } else if (err instanceof ApiError && err.status === 400) {
         setEditError("Invalid key value.");

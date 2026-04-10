@@ -587,6 +587,28 @@ describe("SettingsPage — edit single key", () => {
     // Should be back to idle — management buttons visible
     expect(screen.getByRole("button", { name: /test connection/i })).toBeInTheDocument();
   });
+
+  it("surfaces partial failure when revoke succeeds but create fails", async () => {
+    mockedRevoke.mockResolvedValue(undefined);
+    mockedCreate.mockRejectedValueOnce(new Error("network"));
+    // After refresh, the revoked key is gone → repair mode
+    mockedList.mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
+    mockedList.mockResolvedValueOnce([userKeyRow()]);
+
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+    await screen.findByText("api_key");
+
+    const editButtons = screen.getAllByRole("button", { name: "Edit" });
+    await user.click(editButtons[0]!);
+
+    await user.type(screen.getByLabelText("New API key"), "new-val");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(/old api_key was revoked/i);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -624,6 +646,30 @@ describe("SettingsPage — replace both keys", () => {
     });
     // Both new credentials created
     expect(mockedCreate).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces partial failure when api_key created but user_key fails", async () => {
+    mockedRevoke.mockResolvedValue(undefined);
+    // api_key create succeeds, user_key create fails
+    mockedCreate
+      .mockResolvedValueOnce(withoutPhrase())
+      .mockRejectedValueOnce(new Error("network"));
+    // After refresh, only api_key exists → repair mode
+    mockedList.mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
+    mockedList.mockResolvedValueOnce([makeRow({ label: "api_key" })]);
+
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+    await screen.findByText(/Credentials configured/i);
+
+    await user.click(screen.getByRole("button", { name: /replace both/i }));
+    await user.type(screen.getByLabelText("New API key"), "new-api");
+    await user.type(screen.getByLabelText("New user key"), "new-user");
+    await user.click(screen.getByRole("button", { name: /^replace both$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(/api_key was saved but user_key failed/i);
+    });
   });
 
   it("replace form has working test connection with candidate keys", async () => {

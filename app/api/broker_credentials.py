@@ -563,7 +563,11 @@ def _probe_etoro(
     environment surface is reachable.
 
     Does NOT prove write permission (acknowledged in the ``note``).
+
+    ``environment`` is normalised internally — callers do not need to
+    pre-normalise, though doing so is harmless (idempotent).
     """
+    environment = normalise_environment(environment)
     headers = {
         "x-api-key": api_key,
         "x-user-key": user_key,
