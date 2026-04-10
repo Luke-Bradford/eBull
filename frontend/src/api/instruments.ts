@@ -1,5 +1,5 @@
 import { apiFetch } from "@/api/client";
-import type { InstrumentListResponse } from "@/api/types";
+import type { InstrumentDetail, InstrumentListResponse } from "@/api/types";
 
 export interface InstrumentsQuery {
   search: string | null;
@@ -25,4 +25,10 @@ export function fetchInstruments(
   params.set("limit", String(query.limit));
   const qs = params.toString();
   return apiFetch<InstrumentListResponse>(`/instruments?${qs}`);
+}
+
+export function fetchInstrumentDetail(
+  instrumentId: number,
+): Promise<InstrumentDetail> {
+  return apiFetch<InstrumentDetail>(`/instruments/${instrumentId}`);
 }
