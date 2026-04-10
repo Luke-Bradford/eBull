@@ -36,7 +36,7 @@
  *   even with the in-memory React flag deferred.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -50,6 +50,7 @@ import {
   listBrokerCredentials,
   validateBrokerCredential,
 } from "@/api/brokerCredentials";
+import { ValidationResultDisplay } from "@/components/broker/ValidationResultDisplay";
 import { useRecoveryPhraseModal } from "@/components/security/RecoveryPhraseModal";
 import { deriveCredentialSetMode, ENVIRONMENT } from "@/lib/credentialSetMode";
 import { useSession } from "@/lib/session";
@@ -92,13 +93,24 @@ export function SetupPage(): JSX.Element {
     useState<ValidateCredentialResponse | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
 
+  const refreshCredentials = useCallback(async (): Promise<void> => {
+    try {
+      const data = await listBrokerCredentials();
+      setCredRows(data);
+    } catch {
+      // On the setup page, failure to list credentials is non-fatal —
+      // the operator can still enter both keys (Create mode).
+      setCredRows(null);
+    }
+  }, []);
+
   // Fetch existing credentials when entering step 2 so that
   // partial-save state from a prior session is correctly detected.
   useEffect(() => {
     if (step === "broker") {
       void refreshCredentials();
     }
-  }, [step]);
+  }, [step, refreshCredentials]);
 
   // Clear stale validation result when inputs change or mode transitions.
   useEffect(() => {
@@ -141,17 +153,6 @@ export function SetupPage(): JSX.Element {
       setError(GENERIC_ERROR);
     } finally {
       setSubmitting(false);
-    }
-  }
-
-  async function refreshCredentials(): Promise<void> {
-    try {
-      const data = await listBrokerCredentials();
-      setCredRows(data);
-    } catch {
-      // On the setup page, failure to list credentials is non-fatal —
-      // the operator can still enter both keys (Create mode).
-      setCredRows(null);
     }
   }
 
@@ -400,42 +401,10 @@ export function SetupPage(): JSX.Element {
             )}
           </div>
 
-          {/* Validation result display. */}
-          {validationError !== null && (
-            <div role="alert" className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
-              {validationError}
-            </div>
-          )}
-          {validationResult !== null && !validationResult.auth_valid && (
-            <div role="alert" className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
-              Authentication failed — check your API key and user key.
-            </div>
-          )}
-          {validationResult !== null && validationResult.auth_valid && !validationResult.env_valid && (
-            <div className="space-y-1">
-              <div className="rounded bg-amber-50 px-2 py-1.5 text-xs text-amber-700">
-                Authenticated, but environment check failed: {validationResult.env_check}
-              </div>
-              {validationResult.note && (
-                <p className="text-xs text-slate-400">{validationResult.note}</p>
-              )}
-            </div>
-          )}
-          {validationResult !== null && validationResult.auth_valid && validationResult.env_valid && (
-            <div className="space-y-1">
-              <div className="rounded bg-emerald-50 px-2 py-1.5 text-xs text-emerald-700">
-                Connection verified
-                {validationResult.identity?.gcid != null && (
-                  <span className="ml-1 text-emerald-600">
-                    (account {validationResult.identity.gcid})
-                  </span>
-                )}
-              </div>
-              {validationResult.note && (
-                <p className="text-xs text-slate-400">{validationResult.note}</p>
-              )}
-            </div>
-          )}
+          <ValidationResultDisplay
+            result={validationResult}
+            error={validationError}
+          />
 
           {brokerError !== null && (
             <div
