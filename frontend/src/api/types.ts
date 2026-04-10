@@ -335,3 +335,111 @@ export interface RankingsListResponse {
   model_version: string;
   scored_at: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// /rankings/history/{instrument_id} (app/api/scores.py)
+// ---------------------------------------------------------------------------
+
+export interface ScoreHistoryItem {
+  scored_at: string;
+  total_score: number | null;
+  raw_total: number | null;
+  quality_score: number | null;
+  value_score: number | null;
+  turnaround_score: number | null;
+  momentum_score: number | null;
+  sentiment_score: number | null;
+  confidence_score: number | null;
+  penalties_json: Record<string, unknown>[] | null;
+  explanation: string | null;
+  rank: number | null;
+  rank_delta: number | null;
+  model_version: string;
+}
+
+export interface ScoreHistoryResponse {
+  instrument_id: number;
+  items: ScoreHistoryItem[];
+}
+
+// ---------------------------------------------------------------------------
+// /theses/{instrument_id} (app/api/theses.py)
+// ---------------------------------------------------------------------------
+
+export interface ThesisDetail {
+  thesis_id: number;
+  instrument_id: number;
+  thesis_version: number;
+  thesis_type: string;
+  stance: string;
+  confidence_score: number | null;
+  buy_zone_low: number | null;
+  buy_zone_high: number | null;
+  base_value: number | null;
+  bull_value: number | null;
+  bear_value: number | null;
+  break_conditions_json: string[] | null;
+  memo_markdown: string;
+  critic_json: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface ThesisHistoryResponse {
+  instrument_id: number;
+  items: ThesisDetail[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+// ---------------------------------------------------------------------------
+// /filings/{instrument_id} (app/api/filings.py)
+// ---------------------------------------------------------------------------
+
+export interface FilingItem {
+  filing_event_id: number;
+  instrument_id: number;
+  filing_date: string;
+  filing_type: string | null;
+  provider: string;
+  source_url: string | null;
+  primary_document_url: string | null;
+  extracted_summary: string | null;
+  red_flag_score: number | null;
+  created_at: string;
+}
+
+export interface FilingsListResponse {
+  instrument_id: number;
+  symbol: string | null;
+  items: FilingItem[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+// ---------------------------------------------------------------------------
+// /news/{instrument_id} (app/api/news.py)
+// ---------------------------------------------------------------------------
+
+export interface NewsItem {
+  news_event_id: number;
+  instrument_id: number;
+  event_time: string;
+  source: string | null;
+  headline: string;
+  category: string | null;
+  sentiment_score: number | null;
+  importance_score: number | null;
+  snippet: string | null;
+  url: string | null;
+}
+
+export interface NewsListResponse {
+  instrument_id: number;
+  symbol: string | null;
+  items: NewsItem[];
+  total: number;
+  offset: number;
+  limit: number;
+}
