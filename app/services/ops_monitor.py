@@ -341,6 +341,9 @@ def record_job_skip(
     ``_tracked_job`` — a skipped job has no execution phase, so a
     single insert is the honest representation.
     """
+    assert conn.autocommit, (
+        "record_job_skip requires autocommit=True so conn.transaction() issues a real BEGIN/COMMIT, not a savepoint"
+    )
     now = now or _utcnow()
     with conn.transaction():
         row = conn.execute(

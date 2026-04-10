@@ -278,6 +278,7 @@ class TestRecordJobSkip:
     @staticmethod
     def _conn_returning(row: tuple[Any, ...] | None) -> MagicMock:
         conn = _make_conn([])
+        conn.autocommit = True
         result = MagicMock()
         result.fetchone.return_value = row
         conn.execute.return_value = result
