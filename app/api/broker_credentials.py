@@ -737,4 +737,10 @@ def validate_stored(
     # Commit audit rows before the external probe call (audit durability).
     conn.commit()
 
-    return _probe_etoro(api_key, user_key, environment)
+    try:
+        return _probe_etoro(api_key, user_key, environment)
+    except CredentialValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc

@@ -371,19 +371,27 @@ function BrokerCredentialsSection(): JSX.Element {
       setUserKey("");
       setManageAction("idle");
     } catch (err: unknown) {
-      // After refresh() the mode may transition away from "complete",
-      // hiding the replace form.  Surface partial-failure via actionError
-      // (rendered outside mode-specific sections) so the operator sees it.
-      if (revokedCount > 0 && !createdApiKey) {
-        setActionError("Old credentials were revoked but neither replacement was saved — re-enter both below.");
-      } else if (createdApiKey) {
-        setActionError("api_key was saved but user_key failed — re-enter user_key below.");
-      } else if (err instanceof ApiError && err.status === 409) {
-        setEditError("A credential with that label already exists.");
+      // Determine the user-facing error message.  Specific API errors
+      // (409/400) take priority over generic partial-failure messaging
+      // so the operator sees the actionable detail.
+      let message: string;
+      if (err instanceof ApiError && err.status === 409) {
+        message = "A credential with that label already exists.";
       } else if (err instanceof ApiError && err.status === 400) {
-        setEditError("Invalid key value.");
+        message = "Invalid key value.";
       } else {
-        setEditError("Could not replace credentials.");
+        message = "Could not replace credentials.";
+      }
+
+      // If revokes already happened, the mode will transition after
+      // refresh — surface via actionError (rendered outside mode-
+      // conditional sections) and prepend context about what was lost.
+      if (createdApiKey) {
+        setActionError(`api_key was saved but user_key failed — re-enter user_key below. ${message}`);
+      } else if (revokedCount > 0) {
+        setActionError(`Old credentials were revoked but neither replacement was saved — re-enter both below. ${message}`);
+      } else {
+        setEditError(message);
       }
     } finally {
       setEditing(false);
