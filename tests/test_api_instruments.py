@@ -207,6 +207,35 @@ class TestListInstruments:
         assert resp.status_code == 200
         assert resp.json()["items"][0]["latest_quote"] is None
 
+    def test_filter_by_search(self) -> None:
+        row = _make_instrument_row(symbol="AAPL", company_name="Apple Inc")
+        conn = _with_conn([[{"cnt": 1}], [row]])
+        resp = client.get("/instruments", params={"search": "AAP"})
+
+        assert resp.status_code == 200
+        cur = conn.cursor.return_value
+        # Both count and items queries should receive search params
+        count_params = cur.execute.call_args_list[0][0][1]
+        assert count_params["search_prefix"] == "AAP%"
+        assert count_params["search_contains"] == "%AAP%"
+        items_params = cur.execute.call_args_list[1][0][1]
+        assert items_params["search_prefix"] == "AAP%"
+        assert items_params["search_contains"] == "%AAP%"
+
+    def test_search_whitespace_only_ignored(self) -> None:
+        """A search string of only whitespace should be treated as no search."""
+        conn = _with_conn([[{"cnt": 0}], []])
+        resp = client.get("/instruments", params={"search": "   "})
+
+        assert resp.status_code == 200
+        cur = conn.cursor.return_value
+        count_params = cur.execute.call_args_list[0][0][1]
+        assert "search_prefix" not in count_params
+
+    def test_search_max_length_rejected(self) -> None:
+        resp = client.get("/instruments", params={"search": "a" * 101})
+        assert resp.status_code == 422
+
     def test_filter_by_sector(self) -> None:
         row = _make_instrument_row(sector="Technology")
         conn = _with_conn([[{"cnt": 1}], [row]])
@@ -284,6 +313,15 @@ class TestListInstruments:
         assert "limit" not in count_params
         assert "offset" not in count_params
         assert count_params["sector"] == "Tech"
+
+    def test_search_count_query_includes_where_clause(self) -> None:
+        """COUNT query must include the ILIKE search filter when search is active."""
+        conn = _with_conn([[{"cnt": 0}], []])
+        client.get("/instruments", params={"search": "App"})
+
+        cur = conn.cursor.return_value
+        count_sql: str = cur.execute.call_args_list[0][0][0]
+        assert "ILIKE" in count_sql
 
     def test_count_query_omits_coverage_join_when_no_tier_filter(self) -> None:
         """When coverage_tier filter is not active, COUNT query should not join coverage."""

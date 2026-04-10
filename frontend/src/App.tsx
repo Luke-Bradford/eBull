@@ -13,6 +13,7 @@ import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
 import { RecoverPage } from "@/pages/RecoverPage";
 import { OperatorsPage } from "@/pages/OperatorsPage";
+import { InstrumentsPage } from "@/pages/InstrumentsPage";
 
 export function App() {
   return (
@@ -30,6 +31,7 @@ export function App() {
         >
           <Route index element={<DashboardPage />} />
           <Route path="rankings" element={<RankingsPage />} />
+          <Route path="instruments" element={<InstrumentsPage />} />
           <Route path="instruments/:instrumentId" element={<InstrumentDetailPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />
           <Route path="admin" element={<AdminPage />} />
