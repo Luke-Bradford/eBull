@@ -433,6 +433,7 @@ class TestSystemJobs:
         live_times = {job.name: fire_time for job in SCHEDULED_JOBS}
         mock_runtime = MagicMock()
         mock_runtime.get_next_run_times.return_value = live_times
+        prev = getattr(app.state, "job_runtime", None)
         app.state.job_runtime = mock_runtime
         try:
             with patch(
@@ -448,7 +449,7 @@ class TestSystemJobs:
                 nrt = datetime.fromisoformat(job["next_run_time"])
                 assert nrt == fire_time
         finally:
-            app.state.job_runtime = None
+            app.state.job_runtime = prev
 
     def test_falls_back_to_declared_when_no_runtime(self) -> None:
         """Without a runtime, next_run_time_source is 'declared'."""
