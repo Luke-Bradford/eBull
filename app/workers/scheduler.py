@@ -371,11 +371,18 @@ def nightly_universe_sync() -> None:
             # internally; the outer transaction ensures a clean,
             # well-defined connection state for each call.
             #
-            # All references to summary/seed_result stay inside the
-            # transaction blocks to avoid UnboundLocalError if __exit__
+            # All variable references stay inside the transaction block
+            # that defines them to avoid UnboundLocalError if __exit__
             # raises (prevention-log entry from PR #148 round 1).
             with conn.transaction():
                 summary = sync_universe(provider, conn)
+                tracker.row_count = summary.inserted + summary.updated
+                logger.info(
+                    "Universe sync: inserted=%d updated=%d deactivated=%d",
+                    summary.inserted,
+                    summary.updated,
+                    summary.deactivated,
+                )
 
             # First-run bootstrap: if the coverage table is empty after a
             # successful universe sync, seed all tradable instruments at
@@ -383,16 +390,12 @@ def nightly_universe_sync() -> None:
             # checks for existing rows and skips if non-empty).
             with conn.transaction():
                 seed_result = seed_coverage(conn)
-
-            tracker.row_count = summary.inserted + summary.updated + seed_result.seeded
-
-            logger.info(
-                "Universe sync complete: inserted=%d updated=%d deactivated=%d seeded_coverage=%d",
-                summary.inserted,
-                summary.updated,
-                summary.deactivated,
-                seed_result.seeded,
-            )
+                tracker.row_count = (tracker.row_count or 0) + seed_result.seeded
+                logger.info(
+                    "Coverage seed: seeded=%d already_populated=%s",
+                    seed_result.seeded,
+                    seed_result.already_populated,
+                )
 
 
 def hourly_market_refresh() -> None:
