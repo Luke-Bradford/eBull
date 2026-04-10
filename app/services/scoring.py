@@ -846,15 +846,17 @@ def compute_rankings(
     if model_version not in _WEIGHT_MODES:
         raise KeyError(f"Unknown model_version: {model_version!r}")
 
-    # Eligible instruments
+    # Eligible instruments — all tradable instruments with at least some data.
+    # No tier gate: scoring runs for every instrument that has fundamentals,
+    # price history, or a thesis.  This lets T3 instruments accumulate scores
+    # so the weekly coverage review can promote them to T2 on deterministic
+    # signals alone.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as elig_cur:
         elig_cur.execute(
             """
             SELECT DISTINCT i.instrument_id
             FROM instruments i
-            JOIN coverage c ON c.instrument_id = i.instrument_id
             WHERE i.is_tradable = TRUE
-              AND c.coverage_tier = 1
               AND (
                   EXISTS (SELECT 1 FROM theses t WHERE t.instrument_id = i.instrument_id)
                   OR EXISTS (SELECT 1 FROM fundamentals_snapshot f WHERE f.instrument_id = i.instrument_id)
@@ -867,7 +869,7 @@ def compute_rankings(
 
     instrument_ids = [int(r["instrument_id"]) for r in rows]
     if not instrument_ids:
-        logger.info("compute_rankings: no eligible Tier 1 instruments found")
+        logger.info("compute_rankings: no eligible instruments found")
         return RankingResult(scored=[], model_version=model_version)
 
     logger.info("compute_rankings: scoring %d eligible instrument(s) [model=%s]", len(instrument_ids), model_version)

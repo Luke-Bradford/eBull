@@ -38,7 +38,7 @@ from app.providers.implementations.etoro import EtoroMarketDataProvider
 from app.providers.implementations.fmp import FmpFundamentalsProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
-from app.services.coverage import bootstrap_tier2_cohort, review_coverage, seed_coverage
+from app.services.coverage import review_coverage, seed_coverage
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
@@ -203,6 +203,13 @@ def _has_any_coverage(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     return (False, "coverage table is empty")
 
 
+def _has_any_tradable(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if at least one tradable instrument exists."""
+    if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM instruments WHERE is_tradable = TRUE)")):
+        return (True, "")
+    return (False, "no tradable instruments")
+
+
 def _has_scores(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     """True if at least one score row exists."""
     if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM scores)")):
@@ -222,11 +229,8 @@ def _has_tier1_stale_theses(conn: psycopg.Connection[Any]) -> PrerequisiteResult
 # planning but should not be treated as the live truth. See module docstring.
 SCHEDULED_JOBS: list[ScheduledJob] = [
     # -- Always-on: data infrastructure, no prerequisites ----------------
-    ScheduledJob(
-        name=JOB_NIGHTLY_UNIVERSE_SYNC,
-        description="Sync the eToro tradable instrument universe to the local DB.",
-        cadence=Cadence.daily(hour=2, minute=0),
-    ),
+    # nightly_universe_sync is on-demand only (eToro's instrument list
+    # barely changes).  It stays in _INVOKERS for "Run now" in the Admin UI.
     ScheduledJob(
         name=JOB_DAILY_CIK_REFRESH,
         description="Refresh the SEC ticker→CIK mapping in external_identifiers.",
@@ -241,9 +245,9 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_DAILY_RESEARCH_REFRESH,
-        description="Refresh fundamentals and filings for active Tier 1/2 instruments.",
+        description="Refresh fundamentals and filings for all tradable instruments.",
         cadence=Cadence.daily(hour=3, minute=30),
-        prerequisite=_has_coverage_tier12,
+        prerequisite=_has_any_tradable,
     ),
     ScheduledJob(
         name=JOB_DAILY_NEWS_REFRESH,
@@ -474,20 +478,7 @@ def nightly_universe_sync() -> None:
                     seed_result.already_populated,
                 )
 
-            # Bootstrap: if no T1/T2 coverage rows exist, promote an
-            # initial cohort to T2 so downstream jobs (market data,
-            # filings, scoring) can start producing data.  This is a
-            # one-time operation — once T2 rows exist it becomes a no-op.
-            # No outer conn.transaction() — bootstrap_tier2_cohort manages
-            # its own transaction internally.
-            bootstrap_result = bootstrap_tier2_cohort(conn)
-            row_count += bootstrap_result.promoted
             tracker.row_count = row_count
-            logger.info(
-                "Coverage bootstrap: promoted=%d skipped_reason=%s",
-                bootstrap_result.promoted,
-                bootstrap_result.skipped_reason,
-            )
 
 
 def hourly_market_refresh() -> None:
@@ -564,12 +555,17 @@ def daily_cik_refresh() -> None:
 
 def daily_research_refresh() -> None:
     """
-    Refresh fundamentals and filings for all active Tier 1/2 instruments.
+    Refresh fundamentals and filings for all tradable instruments.
 
     Runs daily. Fetches:
-      - FMP fundamentals snapshot (latest) for each covered symbol
+      - FMP fundamentals snapshot (latest) for each tradable symbol
       - SEC EDGAR filing metadata for US instruments with a known CIK
       - Companies House filing metadata for UK instruments with a company_number
+
+    No tier gate — fundamentals and filings are cheap batch operations.
+    Hydrating data for the full universe lets scoring produce scores for
+    T3 instruments, enabling the weekly coverage review to promote them
+    to T2 on deterministic signals alone.
     """
     if not settings.fmp_api_key:
         logger.error("daily_research_refresh: FMP_API_KEY not set, skipping fundamentals")
@@ -582,15 +578,13 @@ def daily_research_refresh() -> None:
                 """
                 SELECT i.symbol, i.instrument_id::text
                 FROM instruments i
-                JOIN coverage c ON c.instrument_id = i.instrument_id
                 WHERE i.is_tradable = TRUE
-                  AND c.coverage_tier IN (1, 2)
                 ORDER BY i.symbol
                 """
             ).fetchall()
 
         if not rows:
-            logger.info("daily_research_refresh: no covered instruments found, skipping")
+            logger.info("daily_research_refresh: no tradable instruments found, skipping")
             tracker.row_count = 0
             return
 
