@@ -844,6 +844,7 @@ def daily_portfolio_sync() -> None:
 
         with psycopg.connect(settings.database_url) as conn:
             result = sync_portfolio(conn, portfolio)
+            conn.commit()
 
         tracker.row_count = (
             result.positions_updated + result.positions_opened_externally + result.positions_closed_externally

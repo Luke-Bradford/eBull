@@ -11,7 +11,6 @@ Trading endpoints are environment-scoped: /demo/ prefix for demo, no prefix for 
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -36,13 +35,19 @@ logger = logging.getLogger(__name__)
 _RAW_PAYLOAD_DIR = Path("data/raw/etoro_broker")
 
 
-def _persist_raw(tag: str, payload: object) -> None:
-    """Write raw API response to disk before normalisation."""
+def _persist_raw(tag: str, payload: bytes) -> None:
+    """Write raw API response bytes to disk before normalisation.
+
+    Re-raises ``OSError`` subclasses (permission denied, disk full) so the
+    caller knows the file was not written.  Other exceptions are logged.
+    """
     try:
         _RAW_PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         path = _RAW_PAYLOAD_DIR / f"{tag}_{ts}.json"
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        path.write_bytes(payload)
+    except OSError:
+        raise
     except Exception:
         logger.warning("Failed to persist raw payload for tag=%s", tag, exc_info=True)
 
@@ -403,9 +408,9 @@ class EtoroBrokerProvider(BrokerProvider):
             f"{self._info_prefix}/portfolio",
             headers=self._request_headers(),
         )
-        raw = response.json()
-        _persist_raw("etoro_portfolio", raw)
+        _persist_raw("etoro_portfolio", response.content)
         response.raise_for_status()
+        raw = response.json()
 
         portfolio = raw.get("clientPortfolio") or {}
         raw_positions: list[dict[str, Any]] = portfolio.get("positions") or []

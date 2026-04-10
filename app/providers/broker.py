@@ -12,6 +12,7 @@ balance).  It does not own DB access or domain logic.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal
@@ -46,7 +47,7 @@ class BrokerPosition:
 class BrokerPortfolio:
     """Snapshot of the broker account: positions + available cash."""
 
-    positions: list[BrokerPosition]
+    positions: Sequence[BrokerPosition]
     available_cash: Decimal
     raw_payload: dict[str, Any]
 

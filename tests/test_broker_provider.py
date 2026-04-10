@@ -10,7 +10,7 @@ No network calls — all HTTP interactions are mocked.
 from __future__ import annotations
 
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import httpx
 
@@ -577,10 +577,12 @@ FIXTURE_FULL_PORTFOLIO_RESPONSE = {
 }
 
 
+@patch("app.providers.implementations.etoro_broker._persist_raw")
 class TestGetPortfolio:
-    def test_returns_positions_and_cash(self) -> None:
+    def test_returns_positions_and_cash(self, _mock_persist: MagicMock) -> None:
         mock_resp = MagicMock()
         mock_resp.json.return_value = FIXTURE_FULL_PORTFOLIO_RESPONSE
+        mock_resp.content = b"{}"
         mock_resp.status_code = 200
         mock_resp.raise_for_status = MagicMock()
 
@@ -603,9 +605,10 @@ class TestGetPortfolio:
         assert p2.instrument_id == 1002
         assert p2.units == Decimal("10.0")
 
-    def test_empty_portfolio(self) -> None:
+    def test_empty_portfolio(self, _mock_persist: MagicMock) -> None:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"clientPortfolio": {"positions": [], "credit": 100000}}
+        mock_resp.content = b"{}"
         mock_resp.status_code = 200
         mock_resp.raise_for_status = MagicMock()
 
@@ -615,12 +618,13 @@ class TestGetPortfolio:
 
             result = broker.get_portfolio()
 
-        assert result.positions == []
+        assert len(result.positions) == 0
         assert result.available_cash == Decimal("100000")
 
-    def test_missing_credit_defaults_to_zero(self) -> None:
+    def test_missing_credit_defaults_to_zero(self, _mock_persist: MagicMock) -> None:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"clientPortfolio": {"positions": []}}
+        mock_resp.content = b"{}"
         mock_resp.status_code = 200
         mock_resp.raise_for_status = MagicMock()
 
@@ -632,9 +636,10 @@ class TestGetPortfolio:
 
         assert result.available_cash == Decimal("0")
 
-    def test_calls_correct_endpoint(self) -> None:
+    def test_calls_correct_endpoint(self, _mock_persist: MagicMock) -> None:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"clientPortfolio": {"positions": [], "credit": 0}}
+        mock_resp.content = b"{}"
         mock_resp.status_code = 200
         mock_resp.raise_for_status = MagicMock()
 
