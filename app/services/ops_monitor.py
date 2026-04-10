@@ -332,9 +332,14 @@ def record_job_skip(
     ``started_at = finished_at = now``, and the skip reason in
     ``error_msg``.  Returns the ``run_id``.
 
+    Callers open the connection with ``autocommit=True``.
+    ``conn.transaction()`` wraps the INSERT in an explicit
+    ``BEGIN``/``COMMIT`` pair (psycopg v3 does this when the
+    connection is in autocommit mode).
+
     This is intentionally separate from the start/finish pair used by
     ``_tracked_job`` — a skipped job has no execution phase, so a
-    single atomic insert is the honest representation.
+    single insert is the honest representation.
     """
     now = now or _utcnow()
     with conn.transaction():
