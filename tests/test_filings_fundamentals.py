@@ -31,6 +31,13 @@ from app.providers.implementations.sec_edgar import (
     _parse_cik_mapping,
     _zero_pad_cik,
 )
+from app.providers.implementations.sec_fundamentals import (
+    _build_latest_snapshot,
+    _get_entries,
+    _latest_annual_value,
+    _latest_point_in_time,
+    _ttm_from_quarters,
+)
 from app.services.fundamentals import _current_quarter_start, _fundamentals_are_fresh
 
 # ---------------------------------------------------------------------------
@@ -415,3 +422,161 @@ class TestFundamentalsAreFresh:
         params = call_args[0][1]
         assert params["quarter_start"] == date(2026, 4, 1)
         assert params["instrument_id"] == "42"
+
+
+# ---------------------------------------------------------------------------
+# SEC XBRL fundamentals normaliser tests
+# ---------------------------------------------------------------------------
+
+
+def _xbrl_entry(
+    val: float,
+    end: str,
+    form: str = "10-K",
+    fp: str = "FY",
+    start: str | None = None,
+) -> dict:
+    """Build a minimal XBRL fact entry."""
+    entry: dict = {"val": val, "end": end, "form": form, "fp": fp, "filed": end}
+    if start is not None:
+        entry["start"] = start
+    return entry
+
+
+def _make_gaap(facts: dict[str, list[dict]]) -> dict:
+    """Wrap fact lists into {tag: {units: {USD: entries}}} structure."""
+    return {tag: {"units": {"USD": entries}} for tag, entries in facts.items()}
+
+
+class TestSecXbrlGetEntries:
+    def test_returns_first_matching_tag(self) -> None:
+        gaap = _make_gaap(
+            {
+                "Revenues": [_xbrl_entry(1000, "2025-12-31")],
+                "SalesRevenueNet": [_xbrl_entry(2000, "2025-12-31")],
+            }
+        )
+        entries = _get_entries(gaap, ("Revenues", "SalesRevenueNet"))
+        assert len(entries) == 1
+        assert entries[0]["val"] == 1000
+
+    def test_falls_through_missing_tags(self) -> None:
+        gaap = _make_gaap({"SalesRevenueNet": [_xbrl_entry(2000, "2025-12-31")]})
+        entries = _get_entries(gaap, ("Revenues", "SalesRevenueNet"))
+        assert entries[0]["val"] == 2000
+
+    def test_empty_when_no_tags_match(self) -> None:
+        gaap = _make_gaap({})
+        assert _get_entries(gaap, ("Revenues",)) == []
+
+    def test_shares_unit_type(self) -> None:
+        gaap = {"CommonStockSharesOutstanding": {"units": {"shares": [_xbrl_entry(1_000_000, "2025-12-31")]}}}
+        entries = _get_entries(gaap, ("CommonStockSharesOutstanding",))
+        assert len(entries) == 1
+        assert entries[0]["val"] == 1_000_000
+
+
+class TestSecXbrlLatestAnnualValue:
+    def test_picks_most_recent_10k(self) -> None:
+        entries = [
+            _xbrl_entry(100, "2023-12-31"),
+            _xbrl_entry(200, "2024-12-31"),
+            _xbrl_entry(50, "2025-03-31", form="10-Q", fp="Q1"),
+        ]
+        val, d = _latest_annual_value(entries)
+        assert val == 200
+        assert d == date(2024, 12, 31)
+
+    def test_returns_none_when_no_annual(self) -> None:
+        entries = [_xbrl_entry(50, "2025-03-31", form="10-Q", fp="Q1")]
+        val, d = _latest_annual_value(entries)
+        assert val is None
+        assert d is None
+
+
+class TestSecXbrlLatestPointInTime:
+    def test_picks_most_recent(self) -> None:
+        entries = [
+            _xbrl_entry(100, "2024-12-31"),
+            _xbrl_entry(200, "2025-03-31", form="10-Q", fp="Q1"),
+        ]
+        val, d = _latest_point_in_time(entries)
+        assert val == 200
+        assert d == date(2025, 3, 31)
+
+
+class TestSecXbrlTtmFromQuarters:
+    def test_sums_four_quarters(self) -> None:
+        entries = [
+            _xbrl_entry(100, "2025-03-31", form="10-Q", fp="Q1", start="2025-01-01"),
+            _xbrl_entry(200, "2025-06-30", form="10-Q", fp="Q2", start="2025-04-01"),
+            _xbrl_entry(300, "2025-09-30", form="10-Q", fp="Q3", start="2025-07-01"),
+            _xbrl_entry(400, "2025-12-31", form="10-Q", fp="Q4", start="2025-10-01"),
+        ]
+        assert _ttm_from_quarters(entries) == 1000
+
+    def test_returns_none_with_fewer_than_four(self) -> None:
+        entries = [
+            _xbrl_entry(100, "2025-03-31", form="10-Q", fp="Q1", start="2025-01-01"),
+            _xbrl_entry(200, "2025-06-30", form="10-Q", fp="Q2", start="2025-04-01"),
+        ]
+        assert _ttm_from_quarters(entries) is None
+
+    def test_ignores_annual_entries(self) -> None:
+        """Annual entries (365-day span) should be filtered out by the
+        60-120 day duration check."""
+        entries = [
+            _xbrl_entry(1000, "2025-12-31", form="10-K", fp="FY", start="2025-01-01"),
+            _xbrl_entry(100, "2025-03-31", form="10-Q", fp="Q1", start="2025-01-01"),
+            _xbrl_entry(200, "2025-06-30", form="10-Q", fp="Q2", start="2025-04-01"),
+        ]
+        assert _ttm_from_quarters(entries) is None
+
+
+class TestSecXbrlBuildLatestSnapshot:
+    def test_builds_complete_snapshot(self) -> None:
+        gaap = _make_gaap(
+            {
+                "Revenues": [_xbrl_entry(1_000_000, "2025-09-30")],
+                "GrossProfit": [_xbrl_entry(400_000, "2025-09-30")],
+                "OperatingIncomeLoss": [_xbrl_entry(200_000, "2025-09-30")],
+                "NetCashProvidedByUsedInOperatingActivities": [_xbrl_entry(300_000, "2025-09-30")],
+                "PaymentsToAcquirePropertyPlantAndEquipment": [_xbrl_entry(50_000, "2025-09-30")],
+                "CashAndCashEquivalentsAtCarryingValue": [
+                    _xbrl_entry(500_000, "2025-09-30", form="10-Q", fp="Q3"),
+                ],
+                "LongTermDebt": [
+                    _xbrl_entry(200_000, "2025-09-30", form="10-Q", fp="Q3"),
+                ],
+            }
+        )
+        snap = _build_latest_snapshot("TEST", gaap)
+        assert snap is not None
+        assert snap.symbol == "TEST"
+        assert snap.revenue_ttm == Decimal("1000000")
+        assert snap.gross_margin == Decimal("0.4")
+        assert snap.operating_margin == Decimal("0.2")
+        assert snap.fcf == Decimal("250000")  # 300k - 50k
+        assert snap.cash == Decimal("500000")
+        assert snap.debt == Decimal("200000")
+        assert snap.net_debt == Decimal("-300000")  # 200k - 500k
+
+    def test_returns_none_when_no_balance_sheet_data(self) -> None:
+        gaap = _make_gaap({"Revenues": [_xbrl_entry(1_000_000, "2025-09-30")]})
+        snap = _build_latest_snapshot("TEST", gaap)
+        # No balance sheet data means no as_of_date can be determined
+        assert snap is None
+
+    def test_handles_missing_revenue_gracefully(self) -> None:
+        gaap = _make_gaap(
+            {
+                "CashAndCashEquivalentsAtCarryingValue": [
+                    _xbrl_entry(500_000, "2025-09-30", form="10-Q", fp="Q3"),
+                ],
+            }
+        )
+        snap = _build_latest_snapshot("TEST", gaap)
+        assert snap is not None
+        assert snap.revenue_ttm is None
+        assert snap.gross_margin is None
+        assert snap.operating_margin is None

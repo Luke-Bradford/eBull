@@ -497,7 +497,8 @@ class TestEvaluateBuy:
         assert should_buy is False
         assert "red flag" in reason.lower()
 
-    def test_no_thesis_blocks_buy(self) -> None:
+    def test_no_thesis_high_score_allows_buy(self) -> None:
+        """Score above MIN_SCORE_ONLY_BUY allows BUY without thesis."""
         details: dict[str, Any] = {}
         latest_score = _score(total_score=0.80)
         should_buy, reason = _evaluate_buy(
@@ -512,8 +513,27 @@ class TestEvaluateBuy:
             pending_buy_count=0,
             pending_sector_pct={},
         )
+        assert should_buy is True
+        assert "score-only" in reason.lower()
+
+    def test_no_thesis_low_score_blocks_buy(self) -> None:
+        """Score below MIN_SCORE_ONLY_BUY blocks BUY without thesis."""
+        details: dict[str, Any] = {}
+        latest_score = _score(total_score=0.40)
+        should_buy, reason = _evaluate_buy(
+            1,
+            "AAPL",
+            "Technology",
+            details,
+            latest_score,
+            self._no_positions(),
+            total_aum=100_000.0,
+            cash=10_000.0,
+            pending_buy_count=0,
+            pending_sector_pct={},
+        )
         assert should_buy is False
-        assert "thesis" in reason.lower()
+        assert "score-only threshold" in reason.lower()
 
 
 # ---------------------------------------------------------------------------

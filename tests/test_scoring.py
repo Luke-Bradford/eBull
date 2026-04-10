@@ -318,10 +318,13 @@ class TestComputePenalties:
         names = [p.name for p in penalties]
         assert "stale_thesis" in names
 
-    def test_no_thesis_triggers_stale(self) -> None:
+    def test_no_thesis_does_not_trigger_penalty(self) -> None:
+        """Missing thesis is not penalised — T3→T2 promotion relies on
+        deterministic signals alone (per #169).  Only stale (existing but
+        outdated) theses incur a penalty."""
         penalties = self._base_call(thesis_created_at=None)
         names = [p.name for p in penalties]
-        assert "stale_thesis" in names
+        assert "stale_thesis" not in names
 
     def test_missing_critical_data_triggers(self) -> None:
         penalties = self._base_call(has_missing_critical_data=True)
@@ -659,7 +662,9 @@ class TestComputeScore:
         )
         result = compute_score(1, conn, "v1-balanced")
         penalty_names = [p.name for p in result.penalties]
-        assert "stale_thesis" in penalty_names
+        # Missing thesis is no longer penalised (per #169 — T3→T2
+        # promotion relies on deterministic signals, not thesis).
+        assert "stale_thesis" not in penalty_names
 
     def test_unknown_model_version_raises(self) -> None:
         conn = MagicMock()
