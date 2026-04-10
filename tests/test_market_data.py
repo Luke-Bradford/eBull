@@ -376,11 +376,12 @@ class TestGetQuotesChunking:
         ok_resp.json.return_value = {"rates": [FIXTURE_RATE]}
         ok_resp.raise_for_status = MagicMock()
 
+        error_response = httpx.Response(500, content=b'{"error":"internal"}')
         fail_resp = MagicMock()
         fail_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
             "500",
             request=httpx.Request("GET", "https://x"),
-            response=httpx.Response(500),
+            response=error_response,
         )
 
         with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
@@ -394,6 +395,10 @@ class TestGetQuotesChunking:
             # Should return the quotes from the successful chunk
             assert len(result) == 1
             assert provider._http.get.call_count == 2
+            # Error response body must be persisted for diagnosis
+            persist_calls = {call[0][0]: call[0][1] for call in _mock_persist.call_args_list}
+            assert "rates_batch1_error" in persist_calls
+            assert '{"error":"internal"}' in persist_calls["rates_batch1_error"]
 
 
 # ---------------------------------------------------------------------------
