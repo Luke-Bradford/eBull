@@ -16,11 +16,11 @@ export function fetchInstruments(
   query: InstrumentsQuery,
 ): Promise<InstrumentListResponse> {
   const params = new URLSearchParams();
-  if (query.search) params.set("search", query.search);
-  if (query.sector) params.set("sector", query.sector);
+  if (query.search !== null) params.set("search", query.search);
+  if (query.sector !== null) params.set("sector", query.sector);
   if (query.coverage_tier !== null)
     params.set("coverage_tier", String(query.coverage_tier));
-  if (query.exchange) params.set("exchange", query.exchange);
+  if (query.exchange !== null) params.set("exchange", query.exchange);
   params.set("offset", String(query.offset));
   params.set("limit", String(query.limit));
   const qs = params.toString();

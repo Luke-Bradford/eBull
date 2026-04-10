@@ -143,6 +143,13 @@ export function InstrumentsPage() {
   const [knownSectors, setKnownSectors] = useState<string[]>([]);
   const [knownExchanges, setKnownExchanges] = useState<string[]>([]);
 
+  // Reset accumulated filter options when filters change (prevents stale
+  // options from prior queries lingering in the dropdowns).
+  useEffect(() => {
+    setKnownSectors([]);
+    setKnownExchanges([]);
+  }, [filters]);
+
   useEffect(() => {
     if (!result.data) return;
     setKnownSectors((prev) => {
@@ -271,6 +278,7 @@ export function InstrumentsPage() {
               items={sorted}
               sort={sort}
               onToggleSort={toggleSort}
+              pageScopedSort={totalPages > 1}
             />
             {totalPages > 1 && (
               <div className="mt-3 flex items-center justify-between text-xs text-slate-500">
@@ -365,10 +373,12 @@ function InstrumentsTable({
   items,
   sort,
   onToggleSort,
+  pageScopedSort,
 }: {
   items: InstrumentListItem[];
   sort: { key: SortKey; dir: SortDir };
   onToggleSort: (key: SortKey) => void;
+  pageScopedSort: boolean;
 }) {
   return (
     <div className="overflow-x-auto">
@@ -380,6 +390,7 @@ function InstrumentsTable({
                 key={col.key}
                 className={`cursor-pointer select-none py-2 pr-4 ${col.align === "right" ? "text-right" : ""}`}
                 onClick={() => onToggleSort(col.key)}
+                title={pageScopedSort ? "Sorts within this page only" : undefined}
               >
                 {col.label}
                 <SortIndicator
@@ -389,6 +400,13 @@ function InstrumentsTable({
               </th>
             ))}
           </tr>
+          {pageScopedSort && sort.key !== "symbol" && (
+            <tr>
+              <td colSpan={COLUMNS.length} className="pb-1 text-[10px] normal-case tracking-normal text-slate-400">
+                Sorted within this page only. Server order is by symbol.
+              </td>
+            </tr>
+          )}
         </thead>
         <tbody className="divide-y divide-slate-100">
           {items.map((item) => (
