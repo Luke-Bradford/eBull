@@ -825,6 +825,9 @@ def bootstrap_tier2_cohort(
     Each promotion is recorded in ``coverage_audit`` with a clear
     bootstrap rationale so the audit trail explains why these instruments
     were promoted without the usual score/thesis prerequisites.
+
+    Concurrency: an advisory lock (``pg_advisory_xact_lock``) inside
+    the transaction prevents duplicate promotions if two runs overlap.
     """
     # Advisory lock + transaction makes the check-then-act atomic even
     # under READ COMMITTED.  The lock is released when the transaction
