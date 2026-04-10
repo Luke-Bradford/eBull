@@ -29,6 +29,8 @@ from typing import Any, Literal
 
 import anthropic
 import psycopg
+import psycopg.rows
+import psycopg.sql
 
 from app.config import settings
 from app.providers.implementations.companies_house import CompaniesHouseFilingsProvider
@@ -176,34 +178,41 @@ JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
 # catch-up summary log line.
 
 
+def _exists(conn: psycopg.Connection[Any], sql: psycopg.sql.SQL) -> bool:
+    """Run a ``SELECT EXISTS(...)`` query and return the boolean result.
+
+    Uses an explicit ``tuple_row`` factory so the result is always
+    positional, regardless of the connection-level ``row_factory``.
+    """
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        row = cur.execute(sql).fetchone()
+    return row is not None and bool(row[0])
+
+
 def _has_coverage_tier12(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     """True if at least one Tier 1 or Tier 2 coverage row exists."""
-    row = conn.execute("SELECT EXISTS(SELECT 1 FROM coverage WHERE coverage_tier IN (1, 2)) AS ok").fetchone()
-    if row is not None and row[0]:
+    if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM coverage WHERE coverage_tier IN (1, 2))")):
         return (True, "")
     return (False, "no Tier 1/2 coverage rows")
 
 
 def _has_any_coverage(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     """True if the coverage table has at least one row."""
-    row = conn.execute("SELECT EXISTS(SELECT 1 FROM coverage) AS ok").fetchone()
-    if row is not None and row[0]:
+    if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM coverage)")):
         return (True, "")
     return (False, "coverage table is empty")
 
 
 def _has_scores(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     """True if at least one score row exists."""
-    row = conn.execute("SELECT EXISTS(SELECT 1 FROM scores) AS ok").fetchone()
-    if row is not None and row[0]:
+    if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM scores)")):
         return (True, "")
     return (False, "no scores rows")
 
 
 def _has_tier1_stale_theses(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     """True if at least one Tier 1 instrument exists (thesis staleness is checked by the job itself)."""
-    row = conn.execute("SELECT EXISTS(SELECT 1 FROM coverage WHERE coverage_tier = 1) AS ok").fetchone()
-    if row is not None and row[0]:
+    if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM coverage WHERE coverage_tier = 1)")):
         return (True, "")
     return (False, "no Tier 1 instruments")
 
@@ -260,13 +269,10 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.weekly(weekday=0, hour=5, minute=0),
         prerequisite=_has_any_coverage,
     ),
-    # -- On-demand: not part of the default scheduled flow ---------------
-    ScheduledJob(
-        name=JOB_DAILY_TAX_RECONCILIATION,
-        description="Ingest new fills into tax_lots and re-run disposal matching.",
-        cadence=Cadence.daily(hour=23, minute=0),
-        catch_up_on_boot=False,
-    ),
+    # -- On-demand jobs are NOT listed here.  They stay in _INVOKERS
+    # (runtime.py) so "Run now" in the Admin UI works, but they are
+    # not registered with APScheduler and do not participate in
+    # catch-up.  Currently on-demand: daily_tax_reconciliation.
 ]
 
 

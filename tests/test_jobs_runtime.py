@@ -239,25 +239,36 @@ class TestStartWiring:
 
 
 class TestProductionInvokerRegistry:
-    """The production ``_INVOKERS`` map must equal ``SCHEDULED_JOBS``.
+    """Every scheduled job must have an invoker; on-demand jobs may exist
+    in ``_INVOKERS`` without a ``SCHEDULED_JOBS`` entry.
 
-    Drift guard for PR B: a job declared in the registry without an
-    invoker would silently 404 on the manual trigger endpoint, and an
-    invoker without a registry entry would never run on its cadence.
-    Both states are bugs we want to catch at the test layer rather
-    than discovering in production.
+    Drift guard: a job declared in the registry without an invoker
+    would silently 404 on the manual trigger endpoint.
     """
 
-    def test_invokers_cover_every_scheduled_job(self) -> None:
+    def test_every_scheduled_job_has_an_invoker(self) -> None:
         from app.jobs.runtime import _INVOKERS
         from app.workers.scheduler import SCHEDULED_JOBS
 
         registry_names = {job.name for job in SCHEDULED_JOBS}
         invoker_names = set(_INVOKERS.keys())
-        assert registry_names == invoker_names, (
-            f"Drift between SCHEDULED_JOBS and _INVOKERS:\n"
-            f"  in registry but not wired: {sorted(registry_names - invoker_names)}\n"
-            f"  wired but not in registry: {sorted(invoker_names - registry_names)}"
+        missing = registry_names - invoker_names
+        assert not missing, f"Scheduled jobs without invokers (would never fire): {sorted(missing)}"
+
+    def test_every_invoker_is_scheduled_or_on_demand(self) -> None:
+        """On-demand jobs live in _INVOKERS but not SCHEDULED_JOBS.
+
+        This test documents the expected on-demand set so adding a new
+        invoker without scheduling it is a deliberate, visible choice.
+        """
+        from app.jobs.runtime import _INVOKERS
+        from app.workers.scheduler import SCHEDULED_JOBS
+
+        registry_names = {job.name for job in SCHEDULED_JOBS}
+        invoker_names = set(_INVOKERS.keys())
+        on_demand = invoker_names - registry_names
+        assert on_demand == {"daily_tax_reconciliation"}, (
+            f"Unexpected on-demand invokers (update this test if intentional): {sorted(on_demand)}"
         )
 
 

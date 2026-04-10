@@ -329,9 +329,12 @@ class JobRuntime:
             return
 
         # Check prerequisites for overdue jobs and split into
-        # fire-list vs skip-list.
+        # fire-list vs skip-list.  ``processed`` tracks jobs that have
+        # already been categorised (and, for skips, committed to the DB)
+        # so the fallback path does not re-fire already-skipped jobs.
         firing: list[str] = []
         skipped: list[tuple[str, str]] = []  # (name, reason)
+        processed: set[str] = set()
         try:
             with psycopg.connect(self._database_url) as conn:
                 for name in overdue:
@@ -339,14 +342,18 @@ class JobRuntime:
                     if job.prerequisite is not None:
                         met, reason = job.prerequisite(conn)
                         if not met:
-                            skipped.append((name, reason))
                             record_job_skip(conn, name, reason)
+                            skipped.append((name, reason))
+                            processed.add(name)
                             continue
                     firing.append(name)
+                    processed.add(name)
         except Exception:
-            logger.exception("catch-up: prerequisite check failed; firing all overdue jobs")
-            firing = overdue
-            skipped = []
+            logger.exception("catch-up: prerequisite check failed; firing unprocessed overdue jobs")
+            # Only fire jobs that were not already processed (skipped
+            # jobs already have committed job_runs rows).
+            firing = [n for n in overdue if n not in processed]
+            skipped = [(n, r) for n, r in skipped if n in processed]
 
         for name, reason in skipped:
             logger.info("catch-up: skipping %s — prerequisite not met: %s", name, reason)

@@ -8,6 +8,10 @@
 --
 -- Issue: #146
 
+BEGIN;
+
 ALTER TABLE job_runs
     DROP CONSTRAINT job_runs_status_check,
     ADD CONSTRAINT job_runs_status_check CHECK (status IN ('running', 'success', 'failure', 'skipped'));
+
+COMMIT;
