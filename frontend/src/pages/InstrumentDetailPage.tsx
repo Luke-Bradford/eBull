@@ -502,30 +502,33 @@ function FilingsTable({ items }: { items: FilingItem[] }) {
           </tr>
         </thead>
         <tbody>
-          {items.map((f) => (
-            <tr key={f.filing_event_id} className="border-b border-slate-50">
-              <td className="px-2 py-2 text-xs text-slate-500">{f.filing_date}</td>
-              <td className="px-2 py-2 text-xs">{f.filing_type ?? "—"}</td>
-              <td className="max-w-sm truncate px-2 py-2">{f.extracted_summary ?? "—"}</td>
-              <td className="px-2 py-2 text-right tabular-nums">
-                {f.red_flag_score !== null ? formatNumber(f.red_flag_score, 1) : "—"}
-              </td>
-              <td className="px-2 py-2">
-                {safeExternalUrl(f.source_url) ? (
-                  <a
-                    href={safeExternalUrl(f.source_url)!}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-blue-600 hover:underline"
-                  >
-                    View
-                  </a>
-                ) : (
-                  "—"
-                )}
-              </td>
-            </tr>
-          ))}
+          {items.map((f) => {
+            const href = safeExternalUrl(f.source_url);
+            return (
+              <tr key={f.filing_event_id} className="border-b border-slate-50">
+                <td className="px-2 py-2 text-xs text-slate-500">{f.filing_date}</td>
+                <td className="px-2 py-2 text-xs">{f.filing_type ?? "—"}</td>
+                <td className="max-w-sm truncate px-2 py-2">{f.extracted_summary ?? "—"}</td>
+                <td className="px-2 py-2 text-right tabular-nums">
+                  {f.red_flag_score !== null ? formatNumber(f.red_flag_score, 1) : "—"}
+                </td>
+                <td className="px-2 py-2">
+                  {href ? (
+                    <a
+                      href={href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-600 hover:underline"
+                    >
+                      View
+                    </a>
+                  ) : (
+                    "—"
+                  )}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -546,13 +549,15 @@ function NewsTable({ items }: { items: NewsItem[] }) {
           </tr>
         </thead>
         <tbody>
-          {items.map((n) => (
+          {items.map((n) => {
+            const href = safeExternalUrl(n.url);
+            return (
             <tr key={n.news_event_id} className="border-b border-slate-50">
               <td className="px-2 py-2 text-xs text-slate-500">{formatDateTime(n.event_time)}</td>
               <td className="max-w-sm truncate px-2 py-2">
-                {safeExternalUrl(n.url) ? (
+                {href ? (
                   <a
-                    href={safeExternalUrl(n.url)!}
+                    href={href}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-blue-600 hover:underline"
@@ -571,7 +576,8 @@ function NewsTable({ items }: { items: NewsItem[] }) {
               </td>
               <td className="px-2 py-2 text-xs text-slate-500">{n.source ?? "—"}</td>
             </tr>
-          ))}
+          );
+          })}
         </tbody>
       </table>
     </div>
