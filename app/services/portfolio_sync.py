@@ -31,8 +31,13 @@ from typing import Any
 
 import psycopg
 import psycopg.rows
+import psycopg.types.json
 
-from app.providers.broker import BrokerPortfolio, BrokerPosition
+from app.providers.broker import (
+    BrokerMirror,
+    BrokerPortfolio,
+    BrokerPosition,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +115,174 @@ def _aggregate_by_instrument(
             raw_payloads=[bp.raw_payload for bp in group],
         )
     return result
+
+
+def _sync_mirrors(
+    conn: psycopg.Connection[Any],
+    mirrors: Sequence[BrokerMirror],
+    now: datetime,
+) -> tuple[int, int, int]:
+    """Upsert copy_traders/copy_mirrors/copy_mirror_positions from a
+    freshly-parsed mirror payload. Returns
+    ``(mirrors_upserted, mirror_positions_upserted, mirrors_closed)``.
+
+    Must be called inside the caller's transaction — this function
+    never commits. Caller owns rollback on any raise.
+
+    Disappearance handling (total → raise, partial → soft-close)
+    lives in the caller or in a follow-up step; this function only
+    handles the rows that are present in the payload.
+
+    Single-writer serialisation is guaranteed by JobRuntime's
+    APScheduler+JobLock stack (spec §2.3.1); _sync_mirrors does not
+    take its own advisory lock.
+    """
+    mirrors_upserted = 0
+    mirror_positions_upserted = 0
+
+    for mirror in mirrors:
+        # 1. Upsert the trader row (parent_cid is the identity spine).
+        conn.execute(
+            """
+            INSERT INTO copy_traders (
+                parent_cid, parent_username, first_seen_at, updated_at
+            ) VALUES (
+                %(cid)s, %(username)s, %(now)s, %(now)s
+            )
+            ON CONFLICT (parent_cid) DO UPDATE SET
+                parent_username = EXCLUDED.parent_username,
+                updated_at = EXCLUDED.updated_at
+            """,
+            {
+                "cid": mirror.parent_cid,
+                "username": mirror.parent_username,
+                "now": now,
+            },
+        )
+
+        # 2. Upsert the mirror row. active=TRUE, closed_at=NULL on
+        #    every row the payload contains — re-copy of a
+        #    previously-closed mirror_id flips those back to live.
+        conn.execute(
+            """
+            INSERT INTO copy_mirrors (
+                mirror_id, parent_cid, initial_investment,
+                deposit_summary, withdrawal_summary,
+                available_amount, closed_positions_net_profit,
+                stop_loss_percentage, stop_loss_amount,
+                mirror_status_id, mirror_calculation_type,
+                pending_for_closure, started_copy_date,
+                active, closed_at, raw_payload, updated_at
+            ) VALUES (
+                %(mirror_id)s, %(parent_cid)s, %(initial_investment)s,
+                %(deposit_summary)s, %(withdrawal_summary)s,
+                %(available_amount)s, %(closed_positions_net_profit)s,
+                %(stop_loss_percentage)s, %(stop_loss_amount)s,
+                %(mirror_status_id)s, %(mirror_calculation_type)s,
+                %(pending_for_closure)s, %(started_copy_date)s,
+                TRUE, NULL, %(raw_payload)s, %(now)s
+            )
+            ON CONFLICT (mirror_id) DO UPDATE SET
+                parent_cid                  = EXCLUDED.parent_cid,
+                initial_investment          = EXCLUDED.initial_investment,
+                deposit_summary             = EXCLUDED.deposit_summary,
+                withdrawal_summary          = EXCLUDED.withdrawal_summary,
+                available_amount            = EXCLUDED.available_amount,
+                closed_positions_net_profit = EXCLUDED.closed_positions_net_profit,
+                stop_loss_percentage        = EXCLUDED.stop_loss_percentage,
+                stop_loss_amount            = EXCLUDED.stop_loss_amount,
+                mirror_status_id            = EXCLUDED.mirror_status_id,
+                mirror_calculation_type     = EXCLUDED.mirror_calculation_type,
+                pending_for_closure         = EXCLUDED.pending_for_closure,
+                started_copy_date           = EXCLUDED.started_copy_date,
+                active                      = TRUE,
+                closed_at                   = NULL,
+                raw_payload                 = EXCLUDED.raw_payload,
+                updated_at                  = EXCLUDED.updated_at
+            """,
+            {
+                "mirror_id": mirror.mirror_id,
+                "parent_cid": mirror.parent_cid,
+                "initial_investment": mirror.initial_investment,
+                "deposit_summary": mirror.deposit_summary,
+                "withdrawal_summary": mirror.withdrawal_summary,
+                "available_amount": mirror.available_amount,
+                "closed_positions_net_profit": mirror.closed_positions_net_profit,
+                "stop_loss_percentage": mirror.stop_loss_percentage,
+                "stop_loss_amount": mirror.stop_loss_amount,
+                "mirror_status_id": mirror.mirror_status_id,
+                "mirror_calculation_type": mirror.mirror_calculation_type,
+                "pending_for_closure": mirror.pending_for_closure,
+                "started_copy_date": mirror.started_copy_date,
+                "raw_payload": psycopg.types.json.Jsonb(mirror.raw_payload),
+                "now": now,
+            },
+        )
+        mirrors_upserted += 1
+
+        # 3. Upsert every nested position in the payload. Eviction
+        #    of disappeared positions is a separate statement (see
+        #    Task 12).
+        for pos in mirror.positions:
+            conn.execute(
+                """
+                INSERT INTO copy_mirror_positions (
+                    mirror_id, position_id, parent_position_id,
+                    instrument_id, is_buy, units, amount,
+                    initial_amount_in_dollars, open_rate,
+                    open_conversion_rate, open_date_time,
+                    take_profit_rate, stop_loss_rate,
+                    total_fees, leverage, raw_payload, updated_at
+                ) VALUES (
+                    %(mirror_id)s, %(position_id)s, %(parent_position_id)s,
+                    %(instrument_id)s, %(is_buy)s, %(units)s, %(amount)s,
+                    %(initial_amount)s, %(open_rate)s,
+                    %(open_conversion_rate)s, %(open_date_time)s,
+                    %(take_profit_rate)s, %(stop_loss_rate)s,
+                    %(total_fees)s, %(leverage)s, %(raw_payload)s,
+                    %(now)s
+                )
+                ON CONFLICT (mirror_id, position_id) DO UPDATE SET
+                    parent_position_id        = EXCLUDED.parent_position_id,
+                    instrument_id             = EXCLUDED.instrument_id,
+                    is_buy                    = EXCLUDED.is_buy,
+                    units                     = EXCLUDED.units,
+                    amount                    = EXCLUDED.amount,
+                    initial_amount_in_dollars = EXCLUDED.initial_amount_in_dollars,
+                    open_rate                 = EXCLUDED.open_rate,
+                    open_conversion_rate      = EXCLUDED.open_conversion_rate,
+                    open_date_time            = EXCLUDED.open_date_time,
+                    take_profit_rate          = EXCLUDED.take_profit_rate,
+                    stop_loss_rate            = EXCLUDED.stop_loss_rate,
+                    total_fees                = EXCLUDED.total_fees,
+                    leverage                  = EXCLUDED.leverage,
+                    raw_payload               = EXCLUDED.raw_payload,
+                    updated_at                = EXCLUDED.updated_at
+                """,
+                {
+                    "mirror_id": mirror.mirror_id,
+                    "position_id": pos.position_id,
+                    "parent_position_id": pos.parent_position_id,
+                    "instrument_id": pos.instrument_id,
+                    "is_buy": pos.is_buy,
+                    "units": pos.units,
+                    "amount": pos.amount,
+                    "initial_amount": pos.initial_amount_in_dollars,
+                    "open_rate": pos.open_rate,
+                    "open_conversion_rate": pos.open_conversion_rate,
+                    "open_date_time": pos.open_date_time,
+                    "take_profit_rate": pos.take_profit_rate,
+                    "stop_loss_rate": pos.stop_loss_rate,
+                    "total_fees": pos.total_fees,
+                    "leverage": pos.leverage,
+                    "raw_payload": psycopg.types.json.Jsonb(pos.raw_payload),
+                    "now": now,
+                },
+            )
+            mirror_positions_upserted += 1
+
+    mirrors_closed = 0  # populated by Task 12 soft-close step
+    return mirrors_upserted, mirror_positions_upserted, mirrors_closed
 
 
 def sync_portfolio(
@@ -297,6 +470,9 @@ def sync_portfolio(
             cash_delta,
         )
 
+    # 4. Reconcile copy-trading mirrors (spec §2.3).
+    mirrors_upserted, mirror_positions_upserted, mirrors_closed = _sync_mirrors(conn, portfolio.mirrors, now)
+
     return PortfolioSyncResult(
         positions_updated=updated,
         positions_opened_externally=opened_externally,
@@ -304,4 +480,7 @@ def sync_portfolio(
         cash_delta=cash_delta,
         broker_cash=broker_cash,
         local_cash=local_cash,
+        mirrors_upserted=mirrors_upserted,
+        mirrors_closed=mirrors_closed,
+        mirror_positions_upserted=mirror_positions_upserted,
     )

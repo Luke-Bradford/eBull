@@ -18,6 +18,12 @@
 -- for audit. See spec §1 and §2.3.4.
 --
 -- Issue: #183
+--
+-- Note on updated_at: Postgres DEFAULT NOW() only applies on INSERT.
+-- UPDATE paths (the ON CONFLICT DO UPDATE clauses in the Python
+-- _sync_mirrors helper in app/services/portfolio_sync.py) are
+-- responsible for refreshing updated_at explicitly. All three tables
+-- in this migration follow that contract. See spec §2.3.
 
 BEGIN;
 
