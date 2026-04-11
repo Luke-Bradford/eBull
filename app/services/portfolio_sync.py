@@ -220,9 +220,26 @@ def _sync_mirrors(
         )
         mirrors_upserted += 1
 
-        # 3. Upsert every nested position in the payload. Eviction
-        #    of disappeared positions is a separate statement (see
-        #    Task 12).
+        # 3a. Evict nested positions that have closed since the last
+        #     sync. Passing the new IDs as a single array parameter
+        #     sidesteps the empty-list SQL parser error and exploits
+        #     Postgres's `position_id <> ALL('{}')` === TRUE semantics
+        #     to correctly delete every existing row when the payload
+        #     has zero positions for this mirror.
+        current_position_ids = [int(p.position_id) for p in mirror.positions]
+        conn.execute(
+            """
+            DELETE FROM copy_mirror_positions
+            WHERE mirror_id = %(mirror_id)s
+              AND position_id <> ALL(%(position_ids)s::bigint[])
+            """,
+            {
+                "mirror_id": mirror.mirror_id,
+                "position_ids": current_position_ids,
+            },
+        )
+
+        # 3b. Upsert every position in the payload.
         for pos in mirror.positions:
             conn.execute(
                 """
@@ -281,7 +298,7 @@ def _sync_mirrors(
             )
             mirror_positions_upserted += 1
 
-    mirrors_closed = 0  # populated by Task 12 soft-close step
+    mirrors_closed = 0  # populated by Task 13 soft-close step
     return mirrors_upserted, mirror_positions_upserted, mirrors_closed
 
 

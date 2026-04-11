@@ -7,6 +7,7 @@ tests/test_operator_setup_race.py.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
 from typing import Any
 
@@ -90,3 +91,96 @@ def test_sync_mirrors_idempotent_resync(conn: psycopg.Connection[Any]) -> None:
     assert _count(conn, "copy_traders") == 2
     assert _count(conn, "copy_mirrors") == 2
     assert _count(conn, "copy_mirror_positions") == 6
+
+
+def test_sync_mirrors_evicts_closed_nested_positions(
+    conn: psycopg.Connection[Any],
+) -> None:
+    """Spec §2.3.2: a nested position removed from the payload is
+    DELETEd from copy_mirror_positions. Sibling positions in the
+    same mirror and positions in other mirrors are untouched.
+    copy_mirrors.active stays TRUE."""
+    payload = two_mirror_payload()
+    sync_portfolio(conn, payload, now=_NOW)
+    conn.commit()
+    assert _count(conn, "copy_mirror_positions") == 6
+
+    # Remove one nested position from the first mirror and re-sync.
+    trimmed_positions = payload.mirrors[0].positions[1:]  # drop pos 1001
+    trimmed_mirror = dataclasses.replace(payload.mirrors[0], positions=trimmed_positions)
+    trimmed_payload = dataclasses.replace(
+        payload,
+        mirrors=(trimmed_mirror, payload.mirrors[1]),
+    )
+    sync_portfolio(conn, trimmed_payload, now=_NOW)
+    conn.commit()
+
+    # The removed row is gone, siblings remain.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT position_id FROM copy_mirror_positions
+            WHERE mirror_id = %s ORDER BY position_id
+            """,
+            (payload.mirrors[0].mirror_id,),
+        )
+        remaining = [r["position_id"] for r in cur.fetchall()]
+    assert remaining == [1002, 1003]
+
+    # The other mirror is untouched.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM copy_mirror_positions WHERE mirror_id = %s",
+            (payload.mirrors[1].mirror_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row["n"] == 3
+
+    # The mirror row itself is still active.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT active FROM copy_mirrors WHERE mirror_id = %s",
+            (payload.mirrors[0].mirror_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row["active"] is True
+
+
+def test_sync_mirrors_evicts_all_positions_when_mirror_empties(
+    conn: psycopg.Connection[Any],
+) -> None:
+    """Spec §2.3.2: an empty positions[] evicts every nested row for
+    that mirror (exploits Postgres `position_id <> ALL('{}')` === TRUE
+    semantics)."""
+    payload = two_mirror_payload()
+    sync_portfolio(conn, payload, now=_NOW)
+    conn.commit()
+
+    empty_mirror = dataclasses.replace(payload.mirrors[0], positions=())
+    emptied_payload = dataclasses.replace(
+        payload,
+        mirrors=(empty_mirror, payload.mirrors[1]),
+    )
+    sync_portfolio(conn, emptied_payload, now=_NOW)
+    conn.commit()
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM copy_mirror_positions WHERE mirror_id = %s",
+            (payload.mirrors[0].mirror_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row["n"] == 0
+
+    # Mirror B is untouched.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM copy_mirror_positions WHERE mirror_id = %s",
+            (payload.mirrors[1].mirror_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row["n"] == 3
