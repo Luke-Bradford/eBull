@@ -129,9 +129,16 @@ def _sync_mirrors(
     Must be called inside the caller's transaction — this function
     never commits. Caller owns rollback on any raise.
 
-    Disappearance handling (total → raise, partial → soft-close)
-    lives in the caller or in a follow-up step; this function only
-    handles the rows that are present in the payload.
+    Disappearance handling is split by scope:
+
+    - **Total disappearance** (payload empty AND active local rows
+      exist) is handled by the caller-side pre-write guard in
+      ``sync_portfolio``, which raises BEFORE any writes. Placing
+      it there means a rollback does not silently discard already-
+      written position/cash state from the same sync cycle.
+    - **Partial disappearance** (payload non-empty, some mirrors
+      absent) is handled here as a soft-close step (§2.3.4) after
+      the per-mirror upsert loop.
 
     Single-writer serialisation is guaranteed by JobRuntime's
     APScheduler+JobLock stack (spec §2.3.1); _sync_mirrors does not
@@ -299,12 +306,14 @@ def _sync_mirrors(
             )
             mirror_positions_upserted += 1
 
-    # 4. Disappearance handling (§2.3.4).
+    # 4. Partial-disappearance soft-close (§2.3.4).
     #
     # Total disappearance (payload empty AND active local rows
-    # exist) is handled in step 5 below — it raises to force
-    # operator investigation. Here we soft-close mirrors that have
-    # disappeared from a NON-EMPTY payload.
+    # exist) is handled by the caller-side pre-write guard in
+    # `sync_portfolio` — it raises BEFORE any writes happen so
+    # position/cash work is not silently rolled back. Here we
+    # only handle the partial case: mirrors that have disappeared
+    # from a NON-EMPTY payload are soft-closed.
     payload_mirror_ids = [int(m.mirror_id) for m in mirrors]
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -312,16 +321,6 @@ def _sync_mirrors(
         active_local_ids = {int(r["mirror_id"]) for r in cur.fetchall()}
 
     disappeared_ids = sorted(active_local_ids - set(payload_mirror_ids))
-
-    if not payload_mirror_ids and active_local_ids:
-        # Total disappearance — raise for operator investigation.
-        # See step 5 (Task 14) for the exact error contract.
-        raise RuntimeError(
-            "Broker returned empty mirrors[] but "
-            f"{len(active_local_ids)} active local mirror(s) exist — "
-            "refusing to soft-close en masse. Likely upstream API "
-            "regression; investigate before manual cleanup."
-        )
 
     if disappeared_ids:
         conn.execute(
@@ -380,6 +379,30 @@ def sync_portfolio(
             """
         ).fetchall()
     local_instrument_ids = {row["instrument_id"] for row in local_rows}
+
+    # Pre-write mirror guard (§2.3.4).
+    #
+    # Symmetric with the position guard below, but hoisted above
+    # every write: if the broker returned an empty mirrors[] list
+    # while we have active local mirror rows, refuse the whole
+    # sync cycle before any positions, cash, or mirror upserts run.
+    # Placing this here (rather than inside _sync_mirrors at step
+    # 4) means the raise does not roll back already-written
+    # position/cash state — nothing is written yet. Suspicious
+    # broker state for mirrors implies the entire payload should
+    # not be trusted for this cycle; the operator investigates
+    # before the next run is allowed to touch any state.
+    if not portfolio.mirrors:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            row = cur.execute("SELECT COUNT(*) AS n FROM copy_mirrors WHERE active = TRUE").fetchone()
+        active_mirror_count = int(row["n"]) if row else 0
+        if active_mirror_count > 0:
+            raise RuntimeError(
+                "Broker returned empty mirrors[] but "
+                f"{active_mirror_count} active local mirror(s) exist — "
+                "refusing to soft-close en masse. Likely upstream API "
+                "regression; investigate before manual cleanup."
+            )
 
     # 1. Upsert broker positions into local state.
     for agg in broker_positions.values():
