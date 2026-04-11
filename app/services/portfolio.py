@@ -806,14 +806,17 @@ def run_portfolio_review(
 
     prior_recs = _load_prior_recommendations(conn, all_ids)
 
-    # AUM
+    # AUM — positions + cash + mirror_equity (§6.3).
+    # _load_mirror_equity is a sibling helper in this module.
     total_market_value = sum(p.market_value for p in positions.values())
-    total_aum = total_market_value + (cash if cash_known else 0.0)
+    mirror_equity = _load_mirror_equity(conn)
+    total_aum = total_market_value + (cash if cash_known else 0.0) + mirror_equity
 
     logger.info(
-        "run_portfolio_review: positions=%d cash=%s aum=%.2f ranked=%d model=%s",
+        "run_portfolio_review: positions=%d cash=%s mirror_equity=%.2f aum=%.2f ranked=%d model=%s",
         len(positions),
         f"{cash:.2f}" if cash_known else "unknown",
+        mirror_equity,
         total_aum,
         len(ranked_ids),
         model_version,

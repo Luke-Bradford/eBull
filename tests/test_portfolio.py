@@ -569,7 +569,11 @@ class TestShouldPersistHold:
 #   4. _load_instrument_details — 4 cursors (instruments, theses, prev_thesis, filing_events)
 #   5. _load_prev_scores    — cursor: scores (prev)
 #   6. _load_prior_recommendations — cursor: trade_recommendations
-#   7. conn.transaction() + N×conn.execute(INSERT)
+#   7. _load_mirror_equity  — cursor: CTE over copy_mirrors + copy_mirror_positions + quotes (#187)
+#   8. conn.transaction() + N×conn.execute(INSERT)
+#
+# _make_conn automatically appends a terminal zero-mirror_equity cursor for
+# step 7, so per-test cursor_sequence lists only need to enumerate steps 1-6.
 #
 # We build per-call cursor mocks via side_effect on conn.cursor so each
 # call gets its own MagicMock with the right fetchall/fetchone result.
@@ -592,9 +596,17 @@ def _make_conn(cursor_sequence: list[MagicMock]) -> MagicMock:
     conn.cursor() calls consume cursor_sequence in order.
     conn.execute() returns a no-op mock (INSERTs only).
     conn.transaction() is a no-op context manager.
+
+    A terminal ``_load_mirror_equity`` cursor yielding
+    ``{"total": 0.0}`` is appended automatically so existing per-test
+    sequences do not need to track the new cursor that run_portfolio_review
+    consumes after _load_prior_recommendations (#187, spec §6.3). Tests
+    that need a non-zero mirror_equity must append their own cursor
+    BEFORE the terminal pad — none currently do.
     """
+    padded = [*cursor_sequence, _make_cursor([{"total": 0.0}])]
     conn = MagicMock()
-    conn.cursor.side_effect = cursor_sequence
+    conn.cursor.side_effect = padded
     conn.execute.return_value = MagicMock()
     conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
     conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
@@ -989,8 +1001,9 @@ class TestRunPortfolioReview:
             ),
             _make_cursor([]),  # prev thesis
             _make_cursor([]),  # filing_events
-            # _load_prev_scores for held instrument 10 (it IS ranked)
-            _make_cursor([]),
+            # NOTE: _load_prev_scores is skipped because held instrument 10 is
+            # NOT in ranked_scores (only 1, 2 are), so held_ranked_ids is empty
+            # and _load_prev_scores returns early without opening a cursor.
             # prior recs
             _make_cursor([]),
         ]
