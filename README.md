@@ -11,9 +11,10 @@ Long-horizon AI-assisted investment engine for eToro.
 ## Repo structure
 
 - `app/` — services, providers, workers, and API
-- `sql/` — Postgres migrations (001–010)
+- `sql/` — Postgres migrations (001–021 and counting)
 - `docs/` — architecture, scoring model, trading policy, tax engine
 - `.claude/` — project guidance, skills, agents, and hooks
+- `frontend/` — React + Vite operator dashboard (pnpm)
 - `tests/` — pytest suite
 - `docker-compose.yml` — local Postgres
 
@@ -24,20 +25,21 @@ Backend services implemented:
 - Market data (OHLCV, quotes, features)
 - Filings and fundamentals (SEC EDGAR, Companies House, FMP)
 - News and sentiment
+- Thesis engine (#6)
 - Scoring and ranking engine
 - Portfolio manager
 - Execution guard
-
-Remaining backend:
-- Thesis engine (#6)
 - eToro order client (#10)
 - Tax ledger (#11)
 - Coverage tier management (#12)
+- REST API layer (FastAPI) and operator dashboard
+- Ops monitoring (job runs, runtime config, admin page)
+- Broker credential management with durable audit log
 
-Not yet started:
-- API layer (REST endpoints for frontend)
-- Frontend / dashboard
-- Ops monitoring and admin controls
+Currently in flight:
+
+- Copy-trading ingestion (#183 Track 1a), AUM correction (#187
+  Track 1b), browsing UX (#188 Track 1.5), discovery (#189 Track 2)
 
 ## Local setup
 
@@ -45,7 +47,7 @@ Not yet started:
 cp .env.example .env
 docker compose up -d
 uv run uvicorn app.main:app --reload
-cd frontend && npm install && npm run dev
+pnpm --dir frontend install && pnpm --dir frontend dev
 ```
 
 Open <http://localhost:5173>. On a fresh database the app drops into
