@@ -233,7 +233,9 @@ def _load_sector_exposure(
     the caller must treat this as a hard failure, not a pass.
     current_sector_pct is the fraction of AUM currently in the same sector as
     instrument_id (excluding the instrument itself, since it is unowned for BUY).
-    total_aum = SUM(position mark-to-market) + cash.  Returns 0.0 when unknown.
+    total_aum = SUM(position mark-to-market) + cash + active mirror equity.
+    Returns 0.0 when unknown. Mirrors expand the denominator only — the sector
+    numerator is untouched (spec §4, #187).
     """
     # Instrument sector
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
