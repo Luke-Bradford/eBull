@@ -139,6 +139,7 @@ def _sync_mirrors(
     """
     mirrors_upserted = 0
     mirror_positions_upserted = 0
+    mirrors_closed = 0
 
     for mirror in mirrors:
         # 1. Upsert the trader row (parent_cid is the identity spine).
@@ -298,7 +299,52 @@ def _sync_mirrors(
             )
             mirror_positions_upserted += 1
 
-    mirrors_closed = 0  # populated by Task 13 soft-close step
+    # 4. Disappearance handling (§2.3.4).
+    #
+    # Total disappearance (payload empty AND active local rows
+    # exist) is handled in step 5 below — it raises to force
+    # operator investigation. Here we soft-close mirrors that have
+    # disappeared from a NON-EMPTY payload.
+    payload_mirror_ids = [int(m.mirror_id) for m in mirrors]
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("SELECT mirror_id FROM copy_mirrors WHERE active = TRUE")
+        active_local_ids = {int(r["mirror_id"]) for r in cur.fetchall()}
+
+    disappeared_ids = sorted(active_local_ids - set(payload_mirror_ids))
+
+    if not payload_mirror_ids and active_local_ids:
+        # Total disappearance — raise for operator investigation.
+        # See step 5 (Task 14) for the exact error contract.
+        raise RuntimeError(
+            "Broker returned empty mirrors[] but "
+            f"{len(active_local_ids)} active local mirror(s) exist — "
+            "refusing to soft-close en masse. Likely upstream API "
+            "regression; investigate before manual cleanup."
+        )
+
+    if disappeared_ids:
+        conn.execute(
+            """
+            UPDATE copy_mirrors
+               SET active = FALSE,
+                   closed_at = %(now)s,
+                   updated_at = %(now)s
+             WHERE mirror_id = ANY(%(disappeared_ids)s::bigint[])
+               AND active = TRUE
+            """,
+            {
+                "now": now,
+                "disappeared_ids": disappeared_ids,
+            },
+        )
+        for mirror_id in disappeared_ids:
+            logger.info(
+                "mirror %d disappeared from payload — marked closed",
+                mirror_id,
+            )
+        mirrors_closed = len(disappeared_ids)
+
     return mirrors_upserted, mirror_positions_upserted, mirrors_closed
 
 

@@ -20,6 +20,7 @@ from app.services.portfolio_sync import sync_portfolio
 from tests.fixtures.copy_mirrors import (
     _NOW,
     two_mirror_payload,
+    two_mirror_seed_rows,
 )
 from tests.test_operator_setup_race import (
     _assert_test_db,
@@ -184,3 +185,97 @@ def test_sync_mirrors_evicts_all_positions_when_mirror_empties(
         row = cur.fetchone()
         assert row is not None
         assert row["n"] == 3
+
+
+def test_sync_mirrors_partial_disappearance_soft_closes(
+    conn: psycopg.Connection[Any],
+) -> None:
+    """Spec §2.3.4: a mirror that disappears from the payload
+    (while other mirrors are still present) is soft-closed —
+    active=FALSE, closed_at=%(now)s. Nested positions are RETAINED
+    for audit."""
+    two_mirror_seed_rows(conn)
+    conn.commit()
+    assert _count(conn, "copy_mirrors") == 2
+
+    # Sync a payload that only contains the second mirror.
+    full_payload = two_mirror_payload()
+    partial_payload = dataclasses.replace(
+        full_payload,
+        mirrors=(full_payload.mirrors[1],),  # drop mirror A
+    )
+    result = sync_portfolio(conn, partial_payload, now=_NOW)
+    conn.commit()
+
+    # Mirror A: soft-closed, nested positions retained.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT active, closed_at FROM copy_mirrors
+            WHERE mirror_id = %s
+            """,
+            (full_payload.mirrors[0].mirror_id,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row["active"] is False
+    assert row["closed_at"] == _NOW
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM copy_mirror_positions WHERE mirror_id = %s",
+            (full_payload.mirrors[0].mirror_id,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row["n"] == 3  # retained for audit
+
+    # Mirror B: still active.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT active FROM copy_mirrors WHERE mirror_id = %s",
+            (full_payload.mirrors[1].mirror_id,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row["active"] is True
+
+    assert result.mirrors_closed == 1
+
+
+def test_sync_mirrors_recopy_resurrects_closed_mirror(
+    conn: psycopg.Connection[Any],
+) -> None:
+    """Spec §2.3.4 / §1.2: if eToro reuses a previously-seen
+    mirror_id, the ON CONFLICT DO UPDATE clause resets
+    active=TRUE, closed_at=NULL so the mirror is live again."""
+    two_mirror_seed_rows(conn)
+    # Pre-close mirror A so it starts the test soft-closed.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE copy_mirrors
+               SET active = FALSE,
+                   closed_at = %(closed)s
+             WHERE mirror_id = %(mid)s
+            """,
+            {
+                "closed": _NOW,
+                "mid": two_mirror_payload().mirrors[0].mirror_id,
+            },
+        )
+    conn.commit()
+
+    # Sync the full payload — mirror A re-appears.
+    sync_portfolio(conn, two_mirror_payload(), now=_NOW)
+    conn.commit()
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT active, closed_at FROM copy_mirrors WHERE mirror_id = %s",
+            (two_mirror_payload().mirrors[0].mirror_id,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row["active"] is True
+    assert row["closed_at"] is None
