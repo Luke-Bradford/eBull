@@ -48,6 +48,7 @@ import psycopg
 import psycopg.rows
 from psycopg.types.json import Jsonb
 
+from app.services.portfolio import _load_mirror_equity
 from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
 
 logger = logging.getLogger(__name__)
@@ -283,7 +284,8 @@ def _load_sector_exposure(
         row = cur.fetchone()
     cash = float(row["balance"]) if row is not None and row["balance"] is not None else 0.0
 
-    total_aum = total_positions + cash
+    mirror_equity = _load_mirror_equity(conn)
+    total_aum = total_positions + cash + mirror_equity
     current_sector_pct = (sector_values.get(sector, 0.0) / total_aum) if total_aum > 0 else 0.0
 
     return True, sector, current_sector_pct, total_aum
