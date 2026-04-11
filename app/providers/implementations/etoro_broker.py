@@ -77,6 +77,20 @@ _STATUS_MAP: dict[str, OrderStatus] = {
 }
 
 
+class PortfolioParseError(Exception):
+    """Raised when a mirrors[] row cannot be parsed safely.
+
+    Directly subclasses Exception (NOT ValueError / TypeError /
+    KeyError / decimal.DecimalException) so the outer parse loop can
+    distinguish it from incidental exceptions and re-raise. Never
+    swallowed by any `except (KeyError, ValueError, TypeError,
+    decimal.DecimalException)` block.
+
+    See spec §2.2.1 for the hierarchy rationale and §2.3.3 for the
+    strict-raise sync contract that depends on it.
+    """
+
+
 class EtoroBrokerProvider(BrokerProvider):
     """
     eToro trading API client.
