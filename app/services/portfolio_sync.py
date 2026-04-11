@@ -196,6 +196,16 @@ def sync_portfolio(
                     -- Otherwise preserve the existing source (adds to
                     -- an already-open position shouldn't flip
                     -- ownership).
+                    --
+                    -- Evaluation order: in Postgres ON CONFLICT DO
+                    -- UPDATE, every SET expression reads from the
+                    -- *pre-update* row snapshot — SET is not a
+                    -- sequential assignment.  So `positions.current_units`
+                    -- in this CASE WHEN refers to the value BEFORE the
+                    -- `current_units = EXCLUDED.current_units` assignment
+                    -- above, regardless of SET ordering.  See
+                    -- https://www.postgresql.org/docs/current/sql-insert.html
+                    -- (ON CONFLICT DO UPDATE — "existing row" semantics).
                     source         = CASE
                         WHEN positions.current_units <= 0
                             THEN EXCLUDED.source

@@ -315,6 +315,15 @@ def _update_position_buy(
             -- preserve the existing source — an eBull ADD into an
             -- already-open broker_sync position shouldn't claim
             -- ownership of the original external open.
+            --
+            -- Evaluation order: in Postgres ON CONFLICT DO UPDATE,
+            -- every SET expression reads from the *pre-update* row
+            -- snapshot — SET is not a sequential assignment.  So
+            -- `positions.current_units` in this CASE WHEN refers to
+            -- the value BEFORE the `current_units = ...` assignment
+            -- above, regardless of SET ordering.  See
+            -- https://www.postgresql.org/docs/current/sql-insert.html
+            -- (ON CONFLICT DO UPDATE — "existing row" semantics).
             source        = CASE
                 WHEN positions.current_units <= 0
                     THEN EXCLUDED.source
