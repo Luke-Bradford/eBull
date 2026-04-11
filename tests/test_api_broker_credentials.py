@@ -370,6 +370,27 @@ class TestValidate:
         assert body["auth_valid"] is False
         assert body["env_valid"] is False
 
+    @patch("app.api.broker_credentials.httpx.Client")
+    def test_timeout_error_handled_gracefully(self, mock_client_cls: MagicMock) -> None:
+        """Regression for #162: httpx.TimeoutException must be caught
+        and returned as a 200 with auth_valid=False, not propagated as
+        an unhandled 500. The catch at _probe_etoro's except clause is
+        httpx.HTTPError (the base class), which covers TimeoutException,
+        ReadError, ConnectError, and the rest of the transport-error
+        hierarchy. This test pins the timeout branch explicitly so a
+        future narrowing of the catch cannot silently regress it.
+        """
+        mock_http = MagicMock()
+        mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_http)
+        mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
+        mock_http.get.side_effect = httpx.TimeoutException("read timeout")
+
+        resp = client.post("/broker-credentials/validate", json=self._BODY)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["auth_valid"] is False
+        assert body["env_valid"] is False
+
     def test_invalid_environment_rejected(self) -> None:
         body = {**self._BODY, "environment": "production"}
         resp = client.post("/broker-credentials/validate", json=body)
