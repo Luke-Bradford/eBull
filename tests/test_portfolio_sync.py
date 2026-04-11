@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
@@ -16,8 +15,7 @@ from app.services.portfolio_sync import (
     _aggregate_by_instrument,
     sync_portfolio,
 )
-
-_NOW = datetime(2026, 4, 10, 5, 30, tzinfo=UTC)
+from tests.fixtures.copy_mirrors import _NOW
 
 
 def _is_zero_out_update(sql_arg: Any) -> bool:
@@ -73,6 +71,7 @@ def _mock_conn(
     Cursor SQL dispatch matches on substrings.  Priority:
     - 'FROM positions' → local position rows as dicts
     - 'FROM cash_ledger' → local cash sum as dict
+    - 'FROM copy_mirrors' → {"n": 0} (no mirror state in these tests)
     - Everything else → default MagicMock
 
     Note: substring matching cannot detect structural SQL errors like
@@ -91,6 +90,11 @@ def _mock_conn(
             result.fetchall.return_value = position_rows
         elif "FROM cash_ledger" in stripped:
             result.fetchone.return_value = {"total": local_cash}
+        elif "FROM copy_mirrors" in stripped:
+            # Pre-write mirror guard queries copy_mirrors for an
+            # active count. These tests have no mirror state, so
+            # 0 lets the guard fall through cleanly.
+            result.fetchone.return_value = {"n": 0}
         return result
 
     mock_cursor = MagicMock()
@@ -620,3 +624,22 @@ class TestReopenedPositionOpenDate:
         ]
         sql = insert_calls[0].args[0]
         assert "open_date      = EXCLUDED.open_date" in sql
+
+
+def test_portfolio_sync_result_has_mirror_counters() -> None:
+    """Spec §2.3 result extension — mirrors_upserted, mirrors_closed,
+    mirror_positions_upserted are part of the return contract."""
+    result = PortfolioSyncResult(
+        positions_updated=0,
+        positions_opened_externally=0,
+        positions_closed_externally=0,
+        cash_delta=Decimal("0"),
+        broker_cash=Decimal("0"),
+        local_cash=Decimal("0"),
+        mirrors_upserted=2,
+        mirrors_closed=1,
+        mirror_positions_upserted=6,
+    )
+    assert result.mirrors_upserted == 2
+    assert result.mirrors_closed == 1
+    assert result.mirror_positions_upserted == 6

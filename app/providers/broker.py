@@ -14,6 +14,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -44,12 +45,63 @@ class BrokerPosition:
 
 
 @dataclass(frozen=True)
+class BrokerMirrorPosition:
+    """A single nested position inside a copy-trader mirror.
+
+    `amount` is the pre-converted USD cost basis reported by eToro.
+    `open_rate` is the entry price in the instrument's native
+    currency; `open_conversion_rate` is the native→USD FX rate at
+    open. Both are required — see spec §1.3 "openConversionRate NOT
+    NULL" for the AUM correctness reason.
+    """
+
+    position_id: int
+    parent_position_id: int
+    instrument_id: int
+    is_buy: bool
+    units: Decimal
+    amount: Decimal
+    initial_amount_in_dollars: Decimal
+    open_rate: Decimal
+    open_conversion_rate: Decimal
+    open_date_time: datetime
+    take_profit_rate: Decimal | None
+    stop_loss_rate: Decimal | None
+    total_fees: Decimal
+    leverage: int
+    raw_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BrokerMirror:
+    """A single copy-trading mirror (one per copy session with a trader)."""
+
+    mirror_id: int
+    parent_cid: int
+    parent_username: str
+    initial_investment: Decimal
+    deposit_summary: Decimal
+    withdrawal_summary: Decimal
+    available_amount: Decimal
+    closed_positions_net_profit: Decimal
+    stop_loss_percentage: Decimal | None
+    stop_loss_amount: Decimal | None
+    mirror_status_id: int | None
+    mirror_calculation_type: int | None
+    pending_for_closure: bool
+    started_copy_date: datetime
+    positions: Sequence[BrokerMirrorPosition]
+    raw_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class BrokerPortfolio:
-    """Snapshot of the broker account: positions + available cash."""
+    """Snapshot of the broker account: positions + available cash + mirrors."""
 
     positions: Sequence[BrokerPosition]
     available_cash: Decimal
     raw_payload: dict[str, Any]
+    mirrors: Sequence[BrokerMirror] = ()
 
 
 class BrokerProvider(ABC):

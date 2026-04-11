@@ -873,10 +873,14 @@ def daily_portfolio_sync() -> None:
         )
         logger.info(
             "Portfolio sync complete: updated=%d opened_ext=%d closed_ext=%d "
+            "mirrors_up=%d mirrors_closed=%d mirror_positions_up=%d "
             "broker_cash=%.2f local_cash=%.2f delta=%.2f",
             result.positions_updated,
             result.positions_opened_externally,
             result.positions_closed_externally,
+            result.mirrors_upserted,
+            result.mirrors_closed,
+            result.mirror_positions_upserted,
             result.broker_cash,
             result.local_cash,
             result.cash_delta,

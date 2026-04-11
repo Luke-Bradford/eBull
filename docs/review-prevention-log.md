@@ -571,3 +571,21 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: Tests for the reset-on-reopen `CASE WHEN positions.current_units <= 0 THEN EXCLUDED.source ELSE positions.source END` asserted the CASE WHEN text appears in the captured SQL after calling `sync_portfolio` once with `local_positions=[]`. Because the mock guarantees the INSERT path (no pre-existing row), Postgres never reaches the ON CONFLICT branch — the assertion passes purely because the text is present in the INSERT string, not because the conflict branch was actually evaluated. A broken CASE WHEN (wrong predicate, swapped arms) would still pass.
 - Prevention: SQL-shape assertions are only meaningful for clauses that the single code path being exercised will actually run. For ON CONFLICT / CASE WHEN / trigger-gated logic, either (a) drive the mock to produce an actual conflict and assert on effects, or (b) write a DB-level integration test against a real schema that inserts, reinserts, and reads back the resolved value. Never rely on substring-in-SQL as a proxy for "the conflict branch works."
 - Enforced in: this prevention log
+
+---
+
+### Module-level `def` inside a class body silently orphans adjacent test methods
+
+- First seen in: #191
+- Symptom: A new module-level `def test_foo()` was inserted between two methods of an existing test class, with the new function placed at column 0 (outdent-to-module). Python's class-body parsing rule is that the first statement at an outer indent closes the class — so the **next** method after the orphaned function was silently reparsed as a nested function inside `def test_foo`, never collected by pytest. No `SyntaxError` fires, `py_compile` passes, targeted pytest for the class shows a test count one lower than before but doesn't fail. The bug hides until the reviewer notices the diff re-indents an existing method.
+- Prevention: When adding a module-level test function to a file that already contains test classes, place it **after** every class in the file — never between class methods. Before pushing a test-file diff, run `uv run python -c "import ast; [print(f'{n.name}: {[m.name for m in n.body if isinstance(m, ast.FunctionDef)]}') for n in ast.parse(open('tests/<file>.py').read()).body if isinstance(n, ast.ClassDef)]"` to confirm every expected method is still inside its class. A drop in method count between pre- and post-edit is the canary. `py_compile` is **not** sufficient — the orphaned file is syntactically valid Python.
+- Enforced in: this prevention log
+
+---
+
+### Raising inside a shared transaction helper after prior writes rolls back more than the helper's own work
+
+- First seen in: #191
+- Symptom: `_sync_mirrors()` raised `RuntimeError` on total mirror disappearance inside `sync_portfolio`'s transaction, *after* position and cash writes had already executed in the same transaction. The rollback discarded legitimate position/cash updates that had nothing to do with the mirror state — a broader blast radius than the spec's "operator investigates mirrors" framing implied.
+- Prevention: When adding a `raise` inside a function that is called inside a caller's transaction, explicitly ask: *what other writes have already happened in this transaction when I raise?* If the answer is "writes I did not intend to roll back," hoist the raise to the caller **before** any of those writes run. Document the split scope in the helper's docstring so future callers know the helper no longer owns that guard.
+- Enforced in: `.claude/skills/engineering/pre-flight-review.md` section F

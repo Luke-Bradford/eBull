@@ -9,11 +9,17 @@ No network calls — all HTTP interactions are mocked.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import httpx
 
+from app.providers.broker import (
+    BrokerMirror,
+    BrokerMirrorPosition,
+    BrokerPortfolio,
+)
 from app.providers.implementations.etoro_broker import (
     EtoroBrokerProvider,
     _normalise_close_order_response,
@@ -659,3 +665,67 @@ class TestGetPortfolio:
 
             url = broker._http_read.get.call_args.args[0]
             assert url == "/api/v1/trading/info/demo/portfolio"
+
+
+# ---------------------------------------------------------------------------
+# BrokerMirrorPosition / BrokerMirror / BrokerPortfolio.mirrors
+# ---------------------------------------------------------------------------
+
+
+def test_broker_mirror_position_round_trip() -> None:
+    pos = BrokerMirrorPosition(
+        position_id=1001,
+        parent_position_id=5001,
+        instrument_id=42,
+        is_buy=True,
+        units=Decimal("6.28927"),
+        amount=Decimal("101.08"),
+        initial_amount_in_dollars=Decimal("101.08"),
+        open_rate=Decimal("1207.4994"),
+        open_conversion_rate=Decimal("0.01331"),
+        open_date_time=datetime(2026, 4, 10, 0, 0, tzinfo=UTC),
+        take_profit_rate=None,
+        stop_loss_rate=None,
+        total_fees=Decimal("0"),
+        leverage=1,
+        raw_payload={"positionID": 1001},
+    )
+    assert pos.units == Decimal("6.28927")
+    assert pos.open_conversion_rate == Decimal("0.01331")
+    assert pos.is_buy is True
+    assert pos.raw_payload["positionID"] == 1001
+
+
+def test_broker_mirror_round_trip() -> None:
+    mirror = BrokerMirror(
+        mirror_id=15712187,
+        parent_cid=111,
+        parent_username="thomaspj",
+        initial_investment=Decimal("20000"),
+        deposit_summary=Decimal("0"),
+        withdrawal_summary=Decimal("0"),
+        available_amount=Decimal("2800.33"),
+        closed_positions_net_profit=Decimal("-110.34"),
+        stop_loss_percentage=None,
+        stop_loss_amount=None,
+        mirror_status_id=None,
+        mirror_calculation_type=None,
+        pending_for_closure=False,
+        started_copy_date=datetime(2025, 1, 1, tzinfo=UTC),
+        positions=(),
+        raw_payload={"mirrorID": 15712187},
+    )
+    assert mirror.mirror_id == 15712187
+    assert mirror.parent_username == "thomaspj"
+    assert mirror.positions == ()
+
+
+def test_broker_portfolio_mirrors_defaults_to_empty_tuple() -> None:
+    """Existing callers must still be able to construct BrokerPortfolio
+    without supplying mirrors (spec §2.1 non-breaking addition)."""
+    portfolio = BrokerPortfolio(
+        positions=(),
+        available_cash=Decimal("0"),
+        raw_payload={},
+    )
+    assert portfolio.mirrors == ()

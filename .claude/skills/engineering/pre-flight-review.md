@@ -83,6 +83,7 @@ Ask:
 - is the upsert key correct?
 - is the write atomic where it needs to be?
 - could two writers race and produce inconsistent versions?
+- **transaction rollback scope:** for every new `raise` inside a function called from a shared transaction, ask: *what other writes have already executed in this transaction when I raise?* If the rollback would discard writes that are not the helper's concern, hoist the raise to the caller **before** those writes run. Document the split scope in the helper's docstring.
 
 ### G. Interface cleanliness
 Check:

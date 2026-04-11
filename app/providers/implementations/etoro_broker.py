@@ -11,7 +11,9 @@ Trading endpoints are environment-scoped: /demo/ prefix for demo, no prefix for 
 
 from __future__ import annotations
 
+import decimal
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -22,6 +24,8 @@ import httpx
 
 from app.config import settings
 from app.providers.broker import (
+    BrokerMirror,
+    BrokerMirrorPosition,
     BrokerOrderResult,
     BrokerPortfolio,
     BrokerPosition,
@@ -75,6 +79,20 @@ _STATUS_MAP: dict[str, OrderStatus] = {
     "Failed": "failed",
     "Cancelled": "rejected",
 }
+
+
+class PortfolioParseError(Exception):
+    """Raised when a mirrors[] row cannot be parsed safely.
+
+    Directly subclasses Exception (NOT ValueError / TypeError /
+    KeyError / decimal.DecimalException) so the outer parse loop can
+    distinguish it from incidental exceptions and re-raise. Never
+    swallowed by any `except (KeyError, ValueError, TypeError,
+    decimal.DecimalException)` block.
+
+    See spec §2.2.1 for the hierarchy rationale and §2.3.3 for the
+    strict-raise sync contract that depends on it.
+    """
 
 
 class EtoroBrokerProvider(BrokerProvider):
@@ -422,6 +440,7 @@ class EtoroBrokerProvider(BrokerProvider):
         portfolio = raw.get("clientPortfolio") or {}
         raw_positions: list[dict[str, Any]] = portfolio.get("positions") or []
         credit = portfolio.get("credit")
+        raw_mirrors: list[Any] = portfolio.get("mirrors") or []
 
         positions: list[BrokerPosition] = []
         for pos in raw_positions:
@@ -457,6 +476,7 @@ class EtoroBrokerProvider(BrokerProvider):
             positions=positions,
             available_cash=Decimal(str(credit)) if credit is not None else Decimal("0"),
             raw_payload=raw,
+            mirrors=tuple(_parse_mirrors_payload(raw_mirrors)),
         )
 
     # ------------------------------------------------------------------
@@ -546,6 +566,153 @@ def _normalise_order_info_response(
     ``amount``, ``units``, and ``positions[]`` with ``positionID``.
     """
     return _build_result(raw, raw, fallback_ref=broker_order_ref)
+
+
+def _parse_mirror_position(payload: dict[str, Any]) -> BrokerMirrorPosition:
+    """Parse a nested copy-mirror position payload into a typed dataclass.
+
+    Pure normaliser — no I/O, no instance state. Required fields
+    raise KeyError on absence; numeric fields go through
+    Decimal(str(value)) and raise decimal.InvalidOperation
+    (a subclass of decimal.DecimalException) on non-numeric input.
+    The caller (_parse_mirror) wraps both exception types in a
+    PortfolioParseError with position-index attribution.
+
+    openConversionRate is required — see spec §2.2.2 and the
+    74/198 non-USD positions on demo mirror 15712187 that would
+    otherwise be AUM-nonsense.
+    """
+
+    def _opt_decimal(key: str) -> Decimal | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        return Decimal(str(value))
+
+    return BrokerMirrorPosition(
+        position_id=int(payload["positionID"]),
+        parent_position_id=int(payload["parentPositionID"]),
+        instrument_id=int(payload["instrumentID"]),
+        is_buy=bool(payload["isBuy"]),
+        units=Decimal(str(payload["units"])),
+        amount=Decimal(str(payload["amount"])),
+        initial_amount_in_dollars=Decimal(str(payload["initialAmountInDollars"])),
+        open_rate=Decimal(str(payload["openRate"])),
+        open_conversion_rate=Decimal(str(payload["openConversionRate"])),
+        open_date_time=_parse_iso_datetime(payload["openDateTime"]),
+        take_profit_rate=_opt_decimal("takeProfitRate"),
+        stop_loss_rate=_opt_decimal("stopLossRate"),
+        total_fees=Decimal(str(payload.get("totalFees", "0"))),
+        leverage=int(payload.get("leverage", 1)),
+        raw_payload=payload,
+    )
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    """Parse an ISO-8601 datetime string from an eToro payload.
+
+    eToro returns `2026-04-10T00:00:00Z`; Python's fromisoformat
+    below 3.11 rejects the trailing `Z`, so we normalise to `+00:00`.
+    """
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    return datetime.fromisoformat(value)
+
+
+def _parse_mirror(payload: dict[str, Any]) -> BrokerMirror:
+    """Parse a top-level copy-trading mirror payload.
+
+    Nested positions are iterated under an inner try/except that
+    wraps (KeyError, ValueError, TypeError, decimal.DecimalException)
+    in PortfolioParseError with mirror_id + position index
+    attribution. See spec §2.2.2 for why the inner wrap is mandatory
+    — without it, a single malformed nested position degrades to a
+    top-level error message that cannot tell the operator *which*
+    row failed.
+
+    Top-level numeric/string extraction may also raise
+    (KeyError / ValueError / TypeError / DecimalException); those
+    propagate up to the outer get_portfolio loop where §2.2.2's
+    fallback wrap catches and re-raises as PortfolioParseError
+    keyed on the mirror_id alone.
+    """
+    raw_positions = payload.get("positions") or []
+    parsed_positions: list[BrokerMirrorPosition] = []
+    for idx, pos in enumerate(raw_positions):
+        try:
+            parsed_positions.append(_parse_mirror_position(pos))
+        except (KeyError, ValueError, TypeError, decimal.DecimalException) as exc:
+            raise PortfolioParseError(f"Mirror {payload.get('mirrorID')!r} position[{idx}]: {exc}") from exc
+
+    def _opt_decimal(key: str) -> Decimal | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        return Decimal(str(value))
+
+    def _opt_int(key: str) -> int | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        return int(value)
+
+    return BrokerMirror(
+        mirror_id=int(payload["mirrorID"]),
+        parent_cid=int(payload["parentCID"]),
+        parent_username=str(payload["parentUsername"]),
+        initial_investment=Decimal(str(payload["initialInvestment"])),
+        deposit_summary=Decimal(str(payload.get("depositSummary", "0"))),
+        withdrawal_summary=Decimal(str(payload.get("withdrawalSummary", "0"))),
+        available_amount=Decimal(str(payload["availableAmount"])),
+        closed_positions_net_profit=Decimal(str(payload["closedPositionsNetProfit"])),
+        stop_loss_percentage=_opt_decimal("stopLossPercentage"),
+        stop_loss_amount=_opt_decimal("stopLossAmount"),
+        mirror_status_id=_opt_int("mirrorStatusID"),
+        mirror_calculation_type=_opt_int("mirrorCalculationType"),
+        pending_for_closure=bool(payload.get("pendingForClosure", False)),
+        started_copy_date=_parse_iso_datetime(payload["startedCopyDate"]),
+        positions=tuple(parsed_positions),
+        raw_payload=payload,
+    )
+
+
+def _parse_mirrors_payload(
+    raw_mirrors: Sequence[Any],
+) -> list[BrokerMirror]:
+    """Parse clientPortfolio.mirrors[] into a list of BrokerMirror.
+
+    Implements the outer top-level loop from spec §2.2.2:
+
+    1. Rows that are not dicts, or dicts with no `mirrorID` key, are
+       logged and skipped (the ONLY surviving log-and-skip path —
+       they cannot collide with any known local row, so silent skip
+       is safe).
+    2. Rows with a recognisable `mirrorID` are parsed via
+       `_parse_mirror`. Any failure raises PortfolioParseError —
+       log-and-skip on a known mirror_id would look like a
+       disappearance to §2.3.4's soft-close and silently destroy
+       the local row.
+    3. PortfolioParseError raised by the nested-position wrap inside
+       `_parse_mirror` is re-raised unchanged so the caller sees the
+       `position[idx]` attribution.
+    4. Any other exception escaping `_parse_mirror` (KeyError,
+       ValueError, TypeError, decimal.DecimalException) is
+       fallback-wrapped in PortfolioParseError with mirror_id-only
+       attribution.
+    """
+    mirrors: list[BrokerMirror] = []
+    for m in raw_mirrors:
+        if not isinstance(m, dict) or "mirrorID" not in m:
+            logger.warning("Skipping unrecognisable mirrors[] element: %r", m)
+            continue
+
+        try:
+            mirrors.append(_parse_mirror(m))
+        except PortfolioParseError:
+            raise
+        except (KeyError, ValueError, TypeError, decimal.DecimalException) as exc:
+            raise PortfolioParseError(f"Failed to parse mirror {m.get('mirrorID')!r}: {exc}") from exc
+    return mirrors
 
 
 def _build_result(
