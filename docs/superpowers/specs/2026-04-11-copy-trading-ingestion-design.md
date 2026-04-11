@@ -1267,22 +1267,46 @@ imported by every test that needs them via
      position (quote present) and at least one position is
      tested with no quote (quote absent → falls back to
      cost basis).
-  4. **An `instruments` row for at least one of the mirror
-     instrument IDs** — §8.5's `_load_sector_exposure` call
-     needs a matching instrument in `instruments` to resolve a
-     sector. The fixture picks one mirror-held instrument as
-     the "guard test instrument" and sets its sector to an
-     explicit value so the sector-numerator assertion in §8.5
-     is deterministic.
-  5. **A single `latest_scores` row** for any instrument (does
-     NOT need to be one of the mirror-held IDs) keyed on
-     `model_version = "v1-balanced"` — this is the §8.6 Test 2
-     precondition that prevents `run_portfolio_review` from
-     early-returning at
+  4. **An `instruments` row for the deterministic "guard test
+     instrument"** — §8.5's `_load_sector_exposure` call needs
+     a matching instrument in `instruments` to resolve a sector.
+     The fixture pins the guard test instrument to a single
+     constant `_GUARD_INSTRUMENT_ID: int = 990001` (chosen to
+     be well above any seed data in `sql/001_init.sql` and
+     reused everywhere the fixture is imported) and also pins
+     its sector to `_GUARD_INSTRUMENT_SECTOR: str = 'technology'`.
+     The active mirror's `copy_mirror_positions` from component 2
+     includes `_GUARD_INSTRUMENT_ID` as one of its instrument
+     IDs so §8.5's sector-numerator assertion has a concrete
+     mirror-side denominator contribution. §8.5 adds its own
+     eBull `positions` row and `cash_ledger` row **on top of**
+     `mirror_aum_fixture` inside the individual test (the same
+     additive pattern §8.4's identity tests use — see component
+     6) so component 6's "empty by default" invariant is not
+     violated for §8.6's delta tests.
+  5. **A single `scores` row** with the exact contract
+     `run_portfolio_review._load_ranked_scores` requires at
+     [portfolio.py:181-209](app/services/portfolio.py#L181-L209):
+     - `instrument_id` MUST reference an `instruments` row that
+       exists in this fixture (reuse the "guard test instrument"
+       from component 4 so only one `instruments` row is needed)
+     - `model_version = 'v1-balanced'` (the default the review
+       path loads under — string-exact match to
+       [portfolio.py:722](app/services/portfolio.py#L722))
+     - `rank` IS NOT NULL (any integer; `rank = 1` is fine) —
+       the `WHERE rank IS NOT NULL` clause at
+       [portfolio.py:203](app/services/portfolio.py#L203)
+       otherwise filters the row out
+     - `total_score` any non-null numeric (e.g. `0.5`) so the
+       row sorts deterministically; `scored_at` can take the
+       `DEFAULT NOW()` from `sql/001_init.sql:111`
+     This is the §8.6 Test 2 precondition that prevents
+     `run_portfolio_review` from early-returning at
      [portfolio.py:733](app/services/portfolio.py#L733) before
      it reaches the AUM block. Without this row the review
      path never exercises `_load_mirror_equity`, so the test
-     is silently a no-op.
+     is silently a no-op. (The `scores` table is the real
+     table; there is no `latest_scores` table in this repo.)
   6. **Empty `positions` and `cash_ledger`** — the fixture
      intentionally carries no eBull-owned positions or cash so
      the expected `total_aum` in the delta tests is exactly
@@ -1484,33 +1508,49 @@ the private helper that returns `total_aum` and is the exact
 function §6.1 modifies to add `_load_mirror_equity(conn)` to the
 existing `total_positions + cash` sum.
 
-Fixture: `mirror_aum_fixture` (§8.0) seeded into `ebull_test`,
-plus an `instruments` row for the instrument passed to
-`_load_sector_exposure` (any instrument_id present in the mirror
-positions will do). No `evaluate_recommendation`,
-`trade_recommendations`, `kill_switch`, or `runtime_config` setup
-needed — `_load_sector_exposure` does not touch those tables.
+Fixture: `mirror_aum_fixture` (§8.0) seeded into `ebull_test`.
+The fixture's component 4 already seeds an `instruments` row for
+`_GUARD_INSTRUMENT_ID = 990001` and includes that id as one of the
+active mirror's `copy_mirror_positions`, so
+`_load_sector_exposure(conn, _GUARD_INSTRUMENT_ID)` resolves the
+sector via the existing instrument lookup. Each scenario below
+adds its own eBull `positions` and `cash_ledger` rows on top of
+the base fixture (the same additive pattern §8.4's identity
+tests use) — this keeps `mirror_aum_fixture`'s component 6
+"empty by default" invariant intact for §8.6's delta tests. No
+`evaluate_recommendation`, `trade_recommendations`, `kill_switch`,
+or `runtime_config` setup needed — `_load_sector_exposure` does
+not touch those tables.
 
 Scenarios:
 
-- **Empty baseline (no mirrors at all).** `_load_sector_exposure`
-  returns `total_aum == positions_mv + cash`, the pre-PR contract.
-- **Active mirror adds to denominator.** Seed
-  `mirror_aum_fixture`'s active mirror (with positions + available
-  cash + matching quotes). `_load_sector_exposure` now returns
-  `total_aum == positions_mv + cash + _load_mirror_equity(conn)`
-  where `_load_mirror_equity(conn)` is computed once from the
-  same connection as the expected additive contribution.
+- **Empty baseline (no mirrors at all).** Start from a DB that
+  has only the `instruments` row and one eBull `positions` +
+  `cash_ledger` row (i.e. delete the `copy_mirrors` rows the
+  base fixture seeded). `_load_sector_exposure(conn,
+  _GUARD_INSTRUMENT_ID)` returns
+  `total_aum == positions_mv + cash`, the pre-PR contract.
+- **Active mirror adds to denominator.** With the base fixture's
+  active mirror present and one eBull `positions` +
+  `cash_ledger` row layered on top, `_load_sector_exposure`
+  returns `total_aum == positions_mv + cash +
+  _load_mirror_equity(conn)` where `_load_mirror_equity(conn)`
+  is computed once from the same connection as the expected
+  additive contribution.
 - **Closed mirror contributes nothing.** Flip `mirror_aum_fixture`'s
   active mirror to `active = FALSE` via an `UPDATE` at test
   setup. `_load_sector_exposure` returns the baseline again —
   soft-closed mirrors do not inflate the denominator.
-- **Sector numerator unchanged.** With an active mirror holding an
-  instrument NOT in `positions`, `_load_sector_exposure`'s
-  `current_sector_pct` numerator is unaffected. The mirror only
-  expands the denominator; the rule stays more permissive, not
-  less. This is the regression test for §4 "execution guard
-  isolation".
+- **Sector numerator unchanged.** Query under a second
+  `instrument_id` that belongs to a *different* sector than
+  `_GUARD_INSTRUMENT_SECTOR` (seeded via an extra `instruments`
+  row in this scenario only). The mirror's
+  `_GUARD_INSTRUMENT_ID` position therefore contributes to the
+  denominator but NOT the numerator, so
+  `current_sector_pct` is unaffected by the mirror's presence.
+  The mirror only expands the denominator; the rule stays more
+  permissive, not less. This is the regression test for §4
+  "execution guard isolation".
 
 ### 8.6 AUM delta tests per call site
 
@@ -1545,12 +1585,18 @@ FALSE`) → `mirror_equity == 0.0` and `total_aum` returns to
 `positions + cash`.
 
 **Test 2 — `run_portfolio_review` path.** Calls
-`run_portfolio_review(conn)` with the `mirror_aum_fixture`
-**plus at least one `latest_scores` row** (any instrument,
-matching `model_version`) so the early-return at
+`run_portfolio_review(conn)` with the `mirror_aum_fixture`,
+which already seeds the single `scores` row required by
+`_load_ranked_scores` at
+[portfolio.py:181-209](app/services/portfolio.py#L181-L209)
+(`model_version = 'v1-balanced'`, `rank IS NOT NULL`,
+`instrument_id` referencing the fixture's guard test
+instrument). This ensures the early-return at
 [portfolio.py:733](app/services/portfolio.py#L733) is not hit
-and the AUM block actually runs. `latest_scores` setup is part
-of `mirror_aum_fixture` (see §8.0). Assertion:
+and the AUM block at
+[portfolio.py:751-753](app/services/portfolio.py#L751-L753)
+actually runs. The `scores` row setup is part of
+`mirror_aum_fixture` (see §8.0 component 5). Assertion:
 
 - `result.total_aum == (positions_market_value + (cash or 0.0) + expected_mirror_contribution)`
 
@@ -1679,9 +1725,14 @@ locked:
   module instead of declaring it locally. (§8.0, locked round 5.)
 - `mirror_aum_fixture` seeds two mirrors (one active, one
   closed) with positions/quotes, **plus** one `instruments` row
-  for the guard sector-exposure assertion, **plus** one
-  `latest_scores` row so `run_portfolio_review` does not early-
-  return before reaching the AUM block. (§8.0, locked round 5.)
+  for the guard sector-exposure assertion, **plus** one `scores`
+  row (`model_version = 'v1-balanced'`, `rank IS NOT NULL`,
+  `instrument_id` = the guard test instrument) so
+  `run_portfolio_review` does not early-return at
+  [portfolio.py:733](app/services/portfolio.py#L733) before
+  reaching the AUM block. (§8.0, locked round 5; `scores`
+  table name corrected from the round-5 mis-named
+  `latest_scores` in round 6.)
 - AUM correction at all three call sites tested via
   `_load_mirror_equity(conn)` as the expected additive
   contribution — no cross-path `mirror_equity` field equality
@@ -1962,13 +2013,14 @@ Findings and resolutions:
   before the AUM block ever runs; and that `mirror_aum_
   fixture` as defined in round 4 did not seed an
   `instruments` row for the guard path's sector lookup,
-  nor a `latest_scores` row to bypass the review early-
+  nor a ranked `scores` row to bypass the review early-
   return. This meant §8.6 Test 2 (review path) would
   silently be a no-op. Fix: `mirror_aum_fixture`'s §8.0
   entry now explicitly enumerates six components: two
   mirrors, their positions, matching quotes, an
-  `instruments` row for the guard path, a `latest_scores`
-  row for the review path, and empty
+  `instruments` row for the guard path, a `scores` row
+  for the review path (see round 6 / AJ below for the
+  table-name correction), and empty
   `positions`/`cash_ledger` so the expected `total_aum`
   collapses to `_load_mirror_equity(conn)` plus `(0 + 0)`
   in the delta tests.
@@ -1984,6 +2036,42 @@ Findings and resolutions:
   bit-identical, so behaviour is preserved; the coupling
   direction (tests depend on fixtures, not the reverse)
   is now correct. §10 reflects this as a locked decision.
+
+### Round 6 — Codex regression check of the Round 5 revision
+
+See `.claude/codex-spec-review-v6.log` in the branch history.
+Rounds 1-5's AA-AI findings were verified as addressed; one
+new concrete blocker was raised:
+
+- **AJ. `latest_scores` is not a real table.** Codex v6
+  observed that §8.0 component 5, §8.6 Test 2, §10, and
+  Appendix A Round 5 (AH) all referenced seeding a
+  `latest_scores` row to bypass the
+  [portfolio.py:733](app/services/portfolio.py#L733)
+  early-return, but the actual table read by
+  `run_portfolio_review` via
+  [`_load_ranked_scores`](app/services/portfolio.py#L181-L209)
+  is `scores`, with the additional constraints
+  `model_version = 'v1-balanced'` and `rank IS NOT NULL`.
+  If writing-plans implemented the spec literally it would
+  seed a non-existent table and the review-path test would
+  fail at insert time. Fix: every `latest_scores` reference
+  in §8.0 (component 5), §8.6 (Test 2), §10 (locked
+  decisions), and Appendix A Round 5 (AH) was replaced
+  with `scores`, with explicit inline column-contract
+  enumeration and file:line citations for the `WHERE`
+  clauses the seeded row must satisfy. The fixture's
+  single `scores` row also pins `instrument_id` to the
+  same "guard test instrument" used in component 4, so
+  only one `instruments` row is needed for the whole
+  review + guard test setup.
+
+All five residual `latest_scores` occurrences replaced;
+`grep latest_scores` on the spec now returns only two
+negating references (§8.0 component 5's trailing
+"there is no `latest_scores` table in this repo" clarifier
+and §10's "corrected from the round-5 mis-named
+`latest_scores`" provenance note).
 
 ## Appendix B. Track 1.5 — REST endpoint and frontend panel
 
