@@ -589,3 +589,21 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `_sync_mirrors()` raised `RuntimeError` on total mirror disappearance inside `sync_portfolio`'s transaction, *after* position and cash writes had already executed in the same transaction. The rollback discarded legitimate position/cash updates that had nothing to do with the mirror state — a broader blast radius than the spec's "operator investigates mirrors" framing implied.
 - Prevention: When adding a `raise` inside a function that is called inside a caller's transaction, explicitly ask: *what other writes have already happened in this transaction when I raise?* If the answer is "writes I did not intend to roll back," hoist the raise to the caller **before** any of those writes run. Document the split scope in the helper's docstring so future callers know the helper no longer owns that guard.
 - Enforced in: `.claude/skills/engineering/pre-flight-review.md` section F
+
+---
+
+### Plan documents drift from the prevention log
+
+- First seen in: #193
+- Symptom: An implementation plan under `docs/superpowers/plans/` contained a code-block showing `assert row is not None` for a DB-contract guard inside `app/services/`. The production code shipped correctly (using `RuntimeError` per prevention #109), but the plan's code block still showed the forbidden `assert` pattern. A future re-run of the plan by a fresh implementation agent would reintroduce the bug directly into production service code — exactly what the prevention-log rule is meant to stop.
+- Prevention: When fixing a prevention-log hit during pre-flight review, grep the committed plan document for the same bad pattern and update it in the same PR. Plan files that appear under `docs/superpowers/plans/` are treated as historical record, but they also serve as a source of truth if the plan is re-run — so any code snippet that contradicts a prevention rule must be corrected in place. Pre-push check: `grep -rn "assert row is not None" docs/superpowers/plans/` should return zero lines touched by the current branch.
+- Enforced in: this prevention log
+
+---
+
+### `INSERT INTO instruments` fixtures must supply `is_tradable`
+
+- First seen in: #193
+- Symptom: `tests/fixtures/copy_mirrors.py::mtm_delta_mirror_fixture` wrote `INSERT INTO instruments (instrument_id, symbol, company_name) VALUES (...)` without `is_tradable`. The `instruments` table schema (`sql/001_init.sql:1-13`) has `is_tradable BOOLEAN DEFAULT TRUE`, so the insert succeeded on the local dev schema — but every other fixture in the same file explicitly supplies `is_tradable=TRUE`, so the omission read as a bug to a reviewer and also risked silently inserting rows with `NULL is_tradable` on any schema migration that removes the column default.
+- Prevention: Every `INSERT INTO instruments` in a test fixture must supply `is_tradable` explicitly, even when the current schema has a default. `is_tradable` is load-bearing for the universe filter (`SELECT ... WHERE is_tradable`), so a `NULL` value silently excludes the row from every production query and corrupts the fixture's contract with whatever test uses it. Pre-push check: `grep -rn "INSERT INTO instruments" tests/fixtures/ | grep -v is_tradable` should return zero lines.
+- Enforced in: this prevention log

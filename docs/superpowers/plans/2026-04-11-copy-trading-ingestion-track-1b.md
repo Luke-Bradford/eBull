@@ -614,9 +614,15 @@ def _load_mirror_equity(conn: psycopg.Connection[Any]) -> float:
         cur.execute(sql)
         row = cur.fetchone()
     # COALESCE(SUM(...), 0) guarantees exactly one row with a
-    # non-NULL numeric; row is never None. Dead-code None-guard
-    # prevention rule #75.
-    assert row is not None  # CTE with COALESCE always returns one row
+    # non-NULL numeric, so row should never be None. Use an
+    # explicit RuntimeError (not `assert`) so the guard survives
+    # `python -O` — see prevention log entry "`assert` as a
+    # runtime guard in service code" (#109).
+    if row is None:  # pragma: no cover — driver/CTE invariant violation
+        raise RuntimeError(
+            "_load_mirror_equity: COALESCE(SUM(...), 0) CTE returned no rows; "
+            "driver invariant violated"
+        )
     return float(row["total"])
 ```
 

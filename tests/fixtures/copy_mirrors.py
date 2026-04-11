@@ -640,8 +640,8 @@ def mtm_delta_mirror_fixture(
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO instruments (instrument_id, symbol, company_name)
-            VALUES (4201, 'MTM_FIXTURE', 'MTM Fixture Instrument')
+            INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable)
+            VALUES (4201, 'MTM_FIXTURE', 'MTM Fixture Instrument', TRUE)
             ON CONFLICT (instrument_id) DO NOTHING
             """
         )
