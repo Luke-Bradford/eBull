@@ -1,13 +1,25 @@
 """§8.6 Test 2 — AUM delta test for the run_portfolio_review path.
 
 The mirror_aum_fixture's `scores` row is load-bearing: without
-it, run_portfolio_review returns early at portfolio.py:791
+it, run_portfolio_review returns early at portfolio.py:801
 before touching the AUM block, and this test is silently a
 no-op (prevention discipline, spec §8.0 component 5).
+
+Defence-in-depth: the non-early-return test captures
+``caplog`` and asserts the **full-path** log line
+(``"run_portfolio_review: positions=... ranked=..."`` emitted
+at portfolio.py:828) is present and the **early-return** log
+line (``"no ranked candidates and no open positions"`` emitted
+at portfolio.py:802) is absent. This pins the code path
+directly — a future fixture regression that accidentally
+elided the scores row would fail the log assertion before
+the arithmetic assertion, so the test cannot become
+vacuously equivalent to the early-return test below.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from typing import Any
 
@@ -46,9 +58,16 @@ def conn() -> Iterator[psycopg.Connection[Any]]:
 
 def test_run_portfolio_review_total_aum_includes_mirror_equity(
     conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """§8.6 Test 2: result.total_aum carries the mirror contribution
     on top of positions + cash.
+
+    Asserts (via caplog) that the **full AUM-block path** runs —
+    not the early-return path at portfolio.py:801. Without this
+    log assertion the test could become vacuously equivalent to
+    ``test_run_portfolio_review_early_return_reports_mirror_equity``
+    if a future change elided the fixture's scores row.
     """
     mirror_aum_fixture(conn)
     conn.commit()
@@ -56,10 +75,38 @@ def test_run_portfolio_review_total_aum_includes_mirror_equity(
     expected_mirror = _load_mirror_equity(conn)
     assert expected_mirror == pytest.approx(1550.0, abs=1e-6)
 
-    result = run_portfolio_review(conn)
+    with caplog.at_level(logging.INFO, logger="app.services.portfolio"):
+        result = run_portfolio_review(conn)
+
     # Base fixture has empty positions + cash, so expected total_aum
     # is exactly the mirror contribution.
     assert result.total_aum == pytest.approx(expected_mirror, abs=1e-6)
+
+    # Prove the full AUM-block path ran — pin the distinct log line
+    # emitted at portfolio.py:828 ("positions=... ranked=...") and
+    # confirm the early-return log at portfolio.py:802 was NOT
+    # emitted. The two log messages are disjoint by construction,
+    # so this pins the execution path directly.
+    full_path_log = next(
+        (r for r in caplog.records if "ranked=1 model=v1-balanced" in r.getMessage()),
+        None,
+    )
+    assert full_path_log is not None, (
+        "run_portfolio_review took an unexpected code path — the full "
+        "AUM-block log line was not emitted. The test may have "
+        "regressed to the early-return path, making the total_aum "
+        "assertion above vacuously equivalent to "
+        "test_run_portfolio_review_early_return_reports_mirror_equity."
+    )
+    early_return_log = next(
+        (r for r in caplog.records if "no ranked candidates and no open positions" in r.getMessage()),
+        None,
+    )
+    assert early_return_log is None, (
+        "run_portfolio_review took the early-return path — this test "
+        "is meant to exercise the FULL AUM block, not the early-return. "
+        "Check that mirror_aum_fixture is still seeding the scores row."
+    )
 
 
 def test_run_portfolio_review_soft_close_baseline(
