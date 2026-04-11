@@ -547,6 +547,15 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### Guard-ordering in raise-before-write tests
+
+- First seen in: #184
+- Symptom: Test for a guard that is supposed to raise *before* any writes asserted only that a specific write kind (zero-out UPDATEs) was absent from `conn.execute.call_args_list` after the exception. A broken guard that raised *after* one or more real writes could still satisfy the assertion as long as the writes were of a different shape.
+- Prevention: When asserting "guard prevents writes," check that the entire write-channel call list is empty at the point of raising — e.g. `assert conn.execute.call_args_list == []` if the production code routes all writes through `conn.execute` — rather than filtering for the specific write shape the guard is supposed to prevent. The strongest form of the assertion is "zero writes of any kind," not "zero writes of the kind I expected."
+- Enforced in: this prevention log
+
+---
+
 ### Fragile SQL string matching in tests breaks silently under whitespace changes
 
 - First seen in: #184

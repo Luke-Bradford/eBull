@@ -252,10 +252,24 @@ class TestEmptyBrokerGuard:
             local_positions=[(7, Decimal("10"))],
             local_cash=Decimal("0"),
         )
-        with pytest.raises(RuntimeError, match="empty positions"):
+        # Match on the distinctive "refusing to zero" phrase from the
+        # guard's error message rather than generic substrings, so an
+        # accidental RuntimeError raised elsewhere in the call stack
+        # would not satisfy this assertion.
+        with pytest.raises(RuntimeError, match="refusing to zero"):
             sync_portfolio(conn, _portfolio([]), now=_NOW)
 
-    def test_does_not_zero_any_positions_when_raising(self) -> None:
+    def test_guard_raises_before_any_write(self) -> None:
+        """Strongest form of the guard test: raise happens before any write.
+
+        The production code's ``conn.execute(...)`` path is used only
+        for writes (UPDATE/INSERT); reads go through
+        ``conn.cursor(...)``.  So if the guard fires *before* the
+        zeroing loop, ``conn.execute.call_args_list`` must be empty at
+        the point of raising.  This catches a broken guard that moves
+        to *after* the zeroing loop (or partway through it) because
+        any UPDATE issued before the raise would leave a recorded call.
+        """
         conn = _mock_conn(
             local_positions=[(7, Decimal("10")), (8, Decimal("5"))],
             local_cash=Decimal("0"),
@@ -263,9 +277,9 @@ class TestEmptyBrokerGuard:
         with pytest.raises(RuntimeError):
             sync_portfolio(conn, _portfolio([]), now=_NOW)
 
-        # No zero-out UPDATEs must have been issued.
-        zero_updates = [c for c in conn.execute.call_args_list if _is_zero_out_update(c.args[0])]
-        assert zero_updates == []
+        # Zero writes must have occurred. Stronger than "no zero-out
+        # updates" — catches any write attempted before the raise.
+        assert conn.execute.call_args_list == []
 
     def test_empty_broker_with_empty_local_does_not_raise(self) -> None:
         """Boundary: fully empty on both sides is a valid no-op."""
