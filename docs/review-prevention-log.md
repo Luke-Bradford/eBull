@@ -562,3 +562,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: Test asserted against the exact SQL fragment `"current_units  = 0"` (two spaces, matching column alignment in the production query). Any reformat that changes whitespace would make the substring match return no hits, and the `assert len(matches) == 1` would silently pass or a `not in` assertion would become vacuously true — the test would stop catching regressions without failing.
 - Prevention: When matching raw SQL strings in tests, normalise whitespace first (`re.sub(r"\s+", " ", sql)`) and match the normalised form, or — better — extract a named helper (e.g. `_is_zero_out_update(sql)`) so the fragile concern is isolated. Never embed whitespace-alignment in a test literal.
 - Enforced in: this prevention log
+
+---
+
+### SQL-shape tests on single-path calls can't exercise the ON CONFLICT branch
+
+- First seen in: #185
+- Symptom: Tests for the reset-on-reopen `CASE WHEN positions.current_units <= 0 THEN EXCLUDED.source ELSE positions.source END` asserted the CASE WHEN text appears in the captured SQL after calling `sync_portfolio` once with `local_positions=[]`. Because the mock guarantees the INSERT path (no pre-existing row), Postgres never reaches the ON CONFLICT branch — the assertion passes purely because the text is present in the INSERT string, not because the conflict branch was actually evaluated. A broken CASE WHEN (wrong predicate, swapped arms) would still pass.
+- Prevention: SQL-shape assertions are only meaningful for clauses that the single code path being exercised will actually run. For ON CONFLICT / CASE WHEN / trigger-gated logic, either (a) drive the mock to produce an actual conflict and assert on effects, or (b) write a DB-level integration test against a real schema that inserts, reinserts, and reads back the resolved value. Never rely on substring-in-SQL as a proxy for "the conflict branch works."
+- Enforced in: this prevention log

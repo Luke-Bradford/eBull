@@ -32,6 +32,7 @@ Cursor call order inside execute_order (demo EXIT):
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -45,6 +46,7 @@ from app.services.order_client import (
     _load_latest_quote_price,
     _load_position_units,
     _synthetic_fill,
+    _update_position_buy,
     execute_order,
 )
 from app.services.runtime_config import RuntimeConfig, RuntimeConfigCorrupt
@@ -666,3 +668,60 @@ class TestExecuteOrderRuntimeConfigCorrupt:
 
         # No order should have been persisted, no audit row written.
         conn.transaction.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestUpdatePositionBuySource
+# ---------------------------------------------------------------------------
+
+
+class TestUpdatePositionBuySource:
+    """Verify _update_position_buy writes ``source='ebull'`` and resets on reopen.
+
+    Issue #180 — the positions ``source`` column identifies who currently
+    manages the open units.  Every eBull-originated BUY must insert
+    ``'ebull'``.  On reopen (ON CONFLICT into a closed row), source must
+    flip to ``'ebull'`` too; on ADD into an already-open position, the
+    existing source must be preserved so an ebull ADD into a
+    broker_sync-owned position doesn't claim ownership of the original
+    external open.
+    """
+
+    def test_insert_emits_source_literal_and_reopen_reset_clause(self) -> None:
+        """INSERT carries the 'ebull' literal AND the reset CASE WHEN.
+
+        With a mocked connection, ``_update_position_buy`` captures a
+        single SQL string per call regardless of whether Postgres would
+        take the INSERT or the ON CONFLICT branch at runtime — the
+        branch decision is made by the planner, not by us.  So the
+        unit-level guarantee we can assert here is SQL *shape*: a
+        single captured string must contain both the hard-coded VALUES
+        literal and the reset CASE WHEN, evaluated together from one
+        call.
+
+        End-to-end verification that Postgres actually routes closed
+        rows through the reset arm is tracked in the DB integration
+        test backlog (#186) — unreachable from a mocked connection.
+        """
+        conn = _make_conn([])
+        _update_position_buy(
+            conn,
+            instrument_id=42,
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            now=_NOW,
+        )
+
+        assert conn.execute.call_count == 1
+        sql = conn.execute.call_args_list[0].args[0]
+        normalised = re.sub(r"\s+", " ", sql)
+
+        # Hard-coded VALUES literal — no parameter placeholder.
+        assert "INSERT INTO positions" in normalised
+        assert "'ebull'" in normalised
+        # Reset CASE WHEN: pre-update row fully closed → overwrite
+        # source; otherwise preserve.  Postgres evaluates CASE against
+        # the pre-update row, so SET-list ordering is irrelevant.
+        assert "positions.current_units <= 0" in normalised
+        assert "EXCLUDED.source" in normalised
+        assert "ELSE positions.source" in normalised

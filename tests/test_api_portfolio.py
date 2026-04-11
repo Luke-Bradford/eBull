@@ -38,6 +38,7 @@ def _make_position_row(
     avg_cost: float | None = 180.00,
     current_units: float = 10.0,
     cost_basis: float = 1800.00,
+    source: str = "ebull",
     updated_at: datetime = _NOW,
     last: float | None = 190.00,
 ) -> dict[str, Any]:
@@ -50,6 +51,7 @@ def _make_position_row(
         "avg_cost": avg_cost,
         "current_units": current_units,
         "cost_basis": cost_basis,
+        "source": source,
         "updated_at": updated_at,
         "last": last,
     }
@@ -273,6 +275,19 @@ class TestGetPortfolio:
         resp = client.get("/portfolio")
         assert resp.status_code == 200
         assert resp.json()["positions"][0]["open_date"] == "2026-01-15"
+
+    def test_source_exposed_in_response(self) -> None:
+        """source column (ebull vs broker_sync) is passed through to the API response."""
+        ebull_pos = _make_position_row(instrument_id=1, symbol="AAPL", source="ebull")
+        broker_pos = _make_position_row(instrument_id=2, symbol="MSFT", source="broker_sync")
+        _with_conn([[ebull_pos, broker_pos], [_make_cash_row(0.0)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        items = resp.json()["positions"]
+        by_symbol = {item["symbol"]: item for item in items}
+        assert by_symbol["AAPL"]["source"] == "ebull"
+        assert by_symbol["MSFT"]["source"] == "broker_sync"
 
     def test_zero_unit_positions_excluded_by_sql_filter(self) -> None:
         """Zero-unit positions are excluded via WHERE filter in the SQL query.

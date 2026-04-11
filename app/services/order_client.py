@@ -299,14 +299,36 @@ def _update_position_buy(
     conn.execute(
         """
         INSERT INTO positions
-            (instrument_id, open_date, avg_cost, current_units, cost_basis, updated_at)
+            (instrument_id, open_date, avg_cost, current_units,
+             cost_basis, source, updated_at)
         VALUES
-            (%(iid)s, %(date)s, %(price)s, %(units)s, %(cost)s, %(now)s)
+            (%(iid)s, %(date)s, %(price)s, %(units)s,
+             %(cost)s, 'ebull', %(now)s)
         ON CONFLICT (instrument_id) DO UPDATE SET
             current_units = positions.current_units + EXCLUDED.current_units,
             cost_basis    = positions.cost_basis + EXCLUDED.cost_basis,
             avg_cost      = (positions.cost_basis + EXCLUDED.cost_basis)
                             / NULLIF(positions.current_units + EXCLUDED.current_units, 0),
+            -- Reset source on reopen: if the existing row is fully
+            -- closed (current_units <= 0) this BUY is reopening it
+            -- under eBull, so source flips to 'ebull'. Otherwise
+            -- preserve the existing source — an eBull ADD into an
+            -- already-open broker_sync position shouldn't claim
+            -- ownership of the original external open.
+            --
+            -- Evaluation order: in Postgres ON CONFLICT DO UPDATE,
+            -- every SET expression reads from the *pre-update* row
+            -- snapshot — SET is not a sequential assignment.  So
+            -- `positions.current_units` in this CASE WHEN refers to
+            -- the value BEFORE the `current_units = ...` assignment
+            -- above, regardless of SET ordering.  See
+            -- https://www.postgresql.org/docs/current/sql-insert.html
+            -- (ON CONFLICT DO UPDATE — "existing row" semantics).
+            source        = CASE
+                WHEN positions.current_units <= 0
+                    THEN EXCLUDED.source
+                ELSE positions.source
+            END,
             updated_at    = EXCLUDED.updated_at
         """,
         {
