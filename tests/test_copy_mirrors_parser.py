@@ -9,10 +9,17 @@ loop in etoro_broker.get_portfolio's mirrors[] branch.
 from __future__ import annotations
 
 import decimal
+from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Any
 
 import pytest
 
-from app.providers.implementations.etoro_broker import PortfolioParseError
+from app.providers.broker import BrokerMirrorPosition
+from app.providers.implementations.etoro_broker import (
+    PortfolioParseError,
+    _parse_mirror_position,
+)
 
 
 def test_portfolio_parse_error_is_direct_exception_subclass() -> None:
@@ -36,3 +43,76 @@ def test_portfolio_parse_error_is_raisable_with_cause() -> None:
     with pytest.raises(PortfolioParseError) as excinfo:
         raise PortfolioParseError("wrap") from inner
     assert excinfo.value.__cause__ is inner
+
+
+def _make_position_payload(**overrides: Any) -> dict[str, Any]:
+    """Return a valid mirror-position payload; override any field."""
+    base: dict[str, Any] = {
+        "positionID": 1001,
+        "parentPositionID": 5001,
+        "instrumentID": 42,
+        "isBuy": True,
+        "units": "6.28927",
+        "amount": "101.08",
+        "initialAmountInDollars": "101.08",
+        "openRate": "1207.4994",
+        "openConversionRate": "0.01331",
+        "openDateTime": "2026-04-10T00:00:00Z",
+        "takeProfitRate": None,
+        "stopLossRate": None,
+        "totalFees": "0",
+        "leverage": 1,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_parse_mirror_position_happy_path_non_usd() -> None:
+    payload = _make_position_payload()
+    pos = _parse_mirror_position(payload)
+    assert isinstance(pos, BrokerMirrorPosition)
+    assert pos.position_id == 1001
+    assert pos.instrument_id == 42
+    assert pos.is_buy is True
+    assert pos.units == Decimal("6.28927")
+    assert pos.open_rate == Decimal("1207.4994")
+    assert pos.open_conversion_rate == Decimal("0.01331")  # FX round-trip
+    assert pos.open_date_time == datetime(2026, 4, 10, 0, 0, tzinfo=UTC)
+    assert pos.take_profit_rate is None
+    assert pos.stop_loss_rate is None
+    assert pos.total_fees == Decimal("0")
+    assert pos.leverage == 1
+    assert pos.raw_payload is payload  # stored as-is
+
+
+def test_parse_mirror_position_missing_open_conversion_rate_raises() -> None:
+    """Spec §2.2.2: openConversionRate is a required field in prod
+    — no silent default. A mirror-position without it raises."""
+    payload = _make_position_payload()
+    del payload["openConversionRate"]
+    with pytest.raises(KeyError):
+        _parse_mirror_position(payload)
+
+
+def test_parse_mirror_position_non_numeric_units_raises_decimal_exc() -> None:
+    """Spec §2.2.2 + §8.1: Decimal(str('bogus')) raises
+    decimal.InvalidOperation, a subclass of DecimalException —
+    NOT a ValueError. This test pins the exception type so the
+    caller's `except DecimalException` clause catches correctly."""
+    payload = _make_position_payload(units="bogus")
+    with pytest.raises(decimal.DecimalException):
+        _parse_mirror_position(payload)
+
+
+def test_parse_mirror_position_optional_fields_none() -> None:
+    payload = _make_position_payload(takeProfitRate=None, stopLossRate=None)
+    pos = _parse_mirror_position(payload)
+    assert pos.take_profit_rate is None
+    assert pos.stop_loss_rate is None
+
+
+def test_parse_mirror_position_optional_fields_present() -> None:
+    payload = _make_position_payload(takeProfitRate="1500.0", stopLossRate="1000.0")
+    pos = _parse_mirror_position(payload)
+    assert pos.take_profit_rate == Decimal("1500.0")
+    assert pos.stop_loss_rate == Decimal("1000.0")

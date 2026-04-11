@@ -22,6 +22,7 @@ import httpx
 
 from app.config import settings
 from app.providers.broker import (
+    BrokerMirrorPosition,
     BrokerOrderResult,
     BrokerPortfolio,
     BrokerPosition,
@@ -560,6 +561,57 @@ def _normalise_order_info_response(
     ``amount``, ``units``, and ``positions[]`` with ``positionID``.
     """
     return _build_result(raw, raw, fallback_ref=broker_order_ref)
+
+
+def _parse_mirror_position(payload: dict[str, Any]) -> BrokerMirrorPosition:
+    """Parse a nested copy-mirror position payload into a typed dataclass.
+
+    Pure normaliser — no I/O, no instance state. Required fields
+    raise KeyError on absence; numeric fields go through
+    Decimal(str(value)) and raise decimal.InvalidOperation
+    (a subclass of decimal.DecimalException) on non-numeric input.
+    The caller (_parse_mirror) wraps both exception types in a
+    PortfolioParseError with position-index attribution.
+
+    openConversionRate is required — see spec §2.2.2 and the
+    74/198 non-USD positions on demo mirror 15712187 that would
+    otherwise be AUM-nonsense.
+    """
+
+    def _opt_decimal(key: str) -> Decimal | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        return Decimal(str(value))
+
+    return BrokerMirrorPosition(
+        position_id=int(payload["positionID"]),
+        parent_position_id=int(payload["parentPositionID"]),
+        instrument_id=int(payload["instrumentID"]),
+        is_buy=bool(payload["isBuy"]),
+        units=Decimal(str(payload["units"])),
+        amount=Decimal(str(payload["amount"])),
+        initial_amount_in_dollars=Decimal(str(payload["initialAmountInDollars"])),
+        open_rate=Decimal(str(payload["openRate"])),
+        open_conversion_rate=Decimal(str(payload["openConversionRate"])),
+        open_date_time=_parse_iso_datetime(payload["openDateTime"]),
+        take_profit_rate=_opt_decimal("takeProfitRate"),
+        stop_loss_rate=_opt_decimal("stopLossRate"),
+        total_fees=Decimal(str(payload.get("totalFees", "0"))),
+        leverage=int(payload.get("leverage", 1)),
+        raw_payload=payload,
+    )
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    """Parse an ISO-8601 datetime string from an eToro payload.
+
+    eToro returns `2026-04-10T00:00:00Z`; Python's fromisoformat
+    below 3.11 rejects the trailing `Z`, so we normalise to `+00:00`.
+    """
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    return datetime.fromisoformat(value)
 
 
 def _build_result(
