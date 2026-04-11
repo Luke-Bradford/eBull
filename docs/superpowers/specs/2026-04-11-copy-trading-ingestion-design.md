@@ -168,20 +168,25 @@ disappears from the next `/portfolio` payload." Deleting the local
 row on disappearance loses history; raising on disappearance turns
 every normal un-copy into a failed sync and a manual `DELETE FROM`.
 Soft-close splits the difference: a mirror that disappears from the
-payload is marked `active=false, closed_at=NOW()`, nested positions
-are retained on the closed row for audit, AUM queries filter on
-`active=true`, and re-copying the same `mirror_id` (rare but
-possible if eToro recycles IDs) flips `active` back to true in the
-upsert path. The partial `copy_mirrors_active_idx` is populated only
-by the small set of live rows, so the AUM denominator filter stays
-cheap as closed mirrors accumulate over time.
+payload is marked `active=false, closed_at=<injected sync
+timestamp>`, nested positions are retained on the closed row for
+audit, AUM queries filter on `active=true`, and re-copying the same
+`mirror_id` (rare but possible if eToro recycles IDs) flips `active`
+back to true in the upsert path. The partial
+`copy_mirrors_active_idx` is populated only by the small set of
+live rows, so the AUM denominator filter stays cheap as closed
+mirrors accumulate over time. (§2.3.4 specifies the SQL binding for
+the injected timestamp; this prose intentionally avoids writing
+`NOW()` so a reader does not mis-implement it as DB wall clock.)
 
 **`active` is synthetic, not sourced from the payload.** The
 mirror JSON does not contain an `active` field — it's an
 eBull-local column derived from "is this mirror_id present in the
 latest sync." The upsert sets `active=TRUE, closed_at=NULL` on
-every row in the payload; §2.3.4 sets `active=FALSE, closed_at=NOW()`
-on local rows absent from the payload.
+every row in the payload; §2.3.4 sets `active=FALSE, closed_at=<injected
+sync timestamp>` on local rows absent from the payload (see §2.3.4 for
+the `%(now)s` binding — this prose deliberately mirrors the soft-close
+paragraph above).
 
 **Why `deposit_summary` / `withdrawal_summary` are first-class
 columns and not buried in JSONB.** Funded capital for a mirror is
@@ -429,29 +434,74 @@ for m in raw_mirrors:
     try:
         mirrors.append(_parse_mirror(m))
     except PortfolioParseError:
-        # Nested-position failure or top-level known-mirror failure.
+        # Nested-position failure (raised from _parse_mirror with
+        # mirror_id + position index context), or top-level
+        # known-mirror failure that _parse_mirror already wrapped.
         # Re-raise unchanged — §2.3.3 requires full sync rollback,
         # and §2.3.4 soft-close must not silently fire on a
         # mirrorID that we still see in the payload.
         raise
-    except (KeyError, ValueError, TypeError) as exc:
-        # Top-level known-mirror parse failure: mirrorID present
-        # but a required top-level field missing or malformed.
-        # Wrap and raise — this row is a known mirror, soft-close
-        # would silently drop it from AUM, so the sync must abort.
+    except (
+        KeyError,
+        ValueError,
+        TypeError,
+        decimal.DecimalException,
+    ) as exc:
+        # Fallback wrap for exceptions that leaked past
+        # _parse_mirror's own try/except. `decimal.DecimalException`
+        # is the parent of `decimal.InvalidOperation`, which
+        # `Decimal(str(value))` raises on non-numeric input — it is
+        # NOT a ValueError, so it must be caught explicitly or the
+        # outer loop would miss it. Attribution falls to the
+        # top-level mirror (no position index) since this branch
+        # only fires if the wrapping inside _parse_mirror missed it.
         raise PortfolioParseError(
             f"Failed to parse mirror {m.get('mirrorID')!r}: {exc}"
         ) from exc
 ```
 
-**Nested-position parse.** `_parse_mirror` recursively normalises
-the nested `positions[]` via `_parse_mirror_position`. Any parse
-failure on a nested position raises `PortfolioParseError` directly
-(not wrapped in `ValueError`) with the mirror_id, position index,
-and the underlying exception. The mirror as a whole fails; no
-partial mirror is ever returned to the sync layer. §2.3.3 enforces
-this as the reason the sync transaction rolls back before eviction
-or soft-close touches the DB.
+**Nested-position parse — wrap at call site.** `_parse_mirror`
+iterates over `raw_positions` with its own inner try/except:
+
+```python
+def _parse_mirror(m: dict[str, Any]) -> BrokerMirror:
+    # ... required top-level field extraction with Decimal(str(...))
+    # ... top-level numeric/string conversions may raise
+    raw_positions = m.get("positions") or []
+    parsed_positions: list[BrokerMirrorPosition] = []
+    for idx, pos in enumerate(raw_positions):
+        try:
+            parsed_positions.append(_parse_mirror_position(pos))
+        except (
+            KeyError,
+            ValueError,
+            TypeError,
+            decimal.DecimalException,
+        ) as exc:
+            raise PortfolioParseError(
+                f"Mirror {m.get('mirrorID')!r} "
+                f"position[{idx}]: {exc}"
+            ) from exc
+    return BrokerMirror(...)
+```
+
+This guarantees that *every* nested-position parse failure carries
+`mirror_id + position index` in the error message, and that the
+`PortfolioParseError` is raised *from within* `_parse_mirror` so
+the outer loop's `except PortfolioParseError: raise` catches and
+re-raises it without the attribution degrading to a top-level
+message. §2.3.3 uses this as the reason the sync transaction rolls
+back before eviction or soft-close touches the DB.
+
+**Decimal conversion is the common hazard.** Every payload numeric
+field goes through `Decimal(str(value))`. A non-numeric value (e.g.
+`units: "bogus"`) raises `decimal.InvalidOperation`, a subclass of
+`decimal.DecimalException`, **not** a `ValueError`. Both the inner
+`_parse_mirror` wrap and the outer top-level wrap list
+`decimal.DecimalException` explicitly. Test `8.1` asserts the
+hierarchy: `isinstance(decimal.InvalidOperation(),
+decimal.DecimalException) is True` and no path silently loses a
+malformed decimal.
 
 **Why no log-and-skip path survives for rows with a `mirrorID`.**
 The only safe skip is a row the parser cannot match back to a local
@@ -937,13 +987,60 @@ fix AUM everywhere the dashboard and review paths read it. There are
 **three** AUM call sites in the current codebase, and each needs an
 explicit update in this PR:
 
+### 6.0 Shared helper — `_load_mirror_equity(conn)`
+
+All three call sites run the exact same §3.4 mirror-equity SQL, so
+the query is defined once as a module-level helper and imported
+by each call site. Codex v4 (finding AA) flagged that the earlier
+revision implicitly put this helper in `app/services/portfolio.py`
+(where `_load_cash` / `_load_positions` already live) but then
+called it like a shared helper from two other call sites, without
+naming the module. That ambiguity is closed now.
+
+**Location:**
+[app/services/portfolio.py](app/services/portfolio.py), as a
+module-level private function alongside the existing `_load_cash`
+([portfolio.py:114](app/services/portfolio.py#L114)) and
+`_load_positions` ([portfolio.py:129](app/services/portfolio.py#L129))
+helpers. No new file. The existing read-helper pattern in that
+module is the natural home, and there is no circular import risk
+(neither `execution_guard` nor `api/portfolio.py` is currently
+imported by `services/portfolio.py`).
+
+**Signature:**
+
+```python
+def _load_mirror_equity(conn: psycopg.Connection[Any]) -> float:
+    """Return the summed mirror_equity across all active mirrors.
+
+    Runs the §3.4 mirror-equity SQL under the existing connection
+    and returns a non-negative float (0.0 when copy_mirrors is
+    empty or every row is active = FALSE — matches §3.4's
+    COALESCE(SUM(...), 0) contract, see §6.4 for why `0.0` not
+    `None`).
+    """
+```
+
+**Importers:** `app/services/execution_guard.py` (§6.1),
+`app/api/portfolio.py` (§6.2), and the rest of
+`app/services/portfolio.py` itself (§6.3, `run_portfolio_review`).
+All three call it the same way:
+`mirror_equity = _load_mirror_equity(conn)` inside the existing
+connection scope, and add the float to their respective
+`total_aum` running totals. No call site re-implements the SQL.
+
+The §8.4 identity tests, the §8.5 guard integration test, and the
+§8.6 three-call-site consistency test all exercise this exact
+helper — §8.4's "empty `copy_mirrors` → `0.0`" regression test is
+written as `_load_mirror_equity(conn)`, not as an inline query.
+
 ### 6.1 `app/services/execution_guard.py` (lines 245-289)
 
 Primary site — the execution guard denominator. Loads positions and
 cash, computes `total_aum`, then applies position-% and sector-% rules
-as ratios. Update: add the `mirror_equity` CTE from §3.4 and sum it
-into `total_aum`. Sector and per-position aggregates are NOT touched,
-which is what §4 is about.
+as ratios. Update: import `_load_mirror_equity` from §6.0 and sum its
+return value into `total_aum`. Sector and per-position aggregates
+are NOT touched, which is what §4 is about.
 
 ### 6.2 `app/api/portfolio.py` (`get_portfolio`, lines 111-175)
 
@@ -953,9 +1050,9 @@ and computes `total_aum = total_market + (cash_balance or 0.0)` at
 line 166. This is a separate code path — the query change in §3
 does not touch it.
 
-Update: after computing `total_market` and `cash_balance`, run the
-mirror-equity query from §3.4 and add the result to `total_aum`.
-The `PortfolioResponse` pydantic `BaseModel`
+Update: after computing `total_market` and `cash_balance`, import
+and call `_load_mirror_equity` from §6.0 and add the result to
+`total_aum`. The `PortfolioResponse` pydantic `BaseModel`
 ([api/portfolio.py:63-67](app/api/portfolio.py#L63-L67)) grows one
 new required-with-default field `mirror_equity: float = 0.0` so the
 frontend can display the breakdown (AUM = positions + cash +
@@ -981,9 +1078,9 @@ execution guard sees — otherwise recommendations could be made
 against a denominator that the guard will then reject against a
 different denominator.
 
-Update: add a new `_load_mirror_equity(conn) -> float` helper that
-runs the §3.4 query (`WHERE m.active` filter included, see §3.4),
-and sum its result into `total_aum` at line 753.
+Update: add `mirror_equity = _load_mirror_equity(conn)` at line
+752 (the helper is now a sibling in the same module, per §6.0)
+and sum it into `total_aum` at line 753.
 
 **No audit persistence.** The earlier revision of this spec claimed
 `run_portfolio_review` would capture `mirror_equity` into a
@@ -1104,9 +1201,12 @@ because mirrors never become `positions` rows.
 Codex v3 (finding Y) flagged that several test scenarios share the
 same underlying data shape and should be backed by named fixtures,
 not narrative prose, so test authors cannot silently drift. The
-fixtures below live in `tests/conftest.py` (or a new
-`tests/fixtures/copy_mirrors.py`) and are imported by every test
-that needs them.
+fixtures below live in a **new file**
+`tests/fixtures/copy_mirrors.py` (not `tests/conftest.py`, which
+already carries cross-cutting DB fixtures — bloating it further
+would bury copy-trading state in unrelated tests). They are
+imported by every test that needs them via
+`from tests.fixtures.copy_mirrors import two_mirror_payload` etc.
 
 - **`two_mirror_payload`** — `BrokerPortfolio` with 2 mirrors × 3
   nested positions each, derived from the real
@@ -1120,10 +1220,12 @@ that needs them.
   ready for "seed the DB, call sync with a *different* payload"
   tests. Used by disappearance, re-copy, and parser-abort tests.
 - **`mirror_aum_fixture`** — one `active = TRUE` mirror and one
-  `active = FALSE` mirror (both carrying positions and cash),
-  used by the "closed mirror excluded from AUM" and
-  "three-call-site consistency" tests. Has deterministic numbers
-  so the expected `total_aum` is computable by hand.
+  `active = FALSE` mirror (both carrying positions and cash) plus
+  matching quote rows for every position. This is the fixture used
+  by §8.4's "closed mirror excluded from AUM" test, the §8.4 guard
+  integration test ("existing guard baseline + one mirror"), **and**
+  the §8.4 three-call-site consistency test. Has deterministic
+  numbers so the expected `total_aum` is computable by hand.
 - **`no_quote_mirror_fixture`** — the empirically-reconciled mirror
   15712187 shape (`available = 2800.33`, positions
   `amount = 50.00` and `amount = 17039.33`) with no matching quotes
@@ -1135,10 +1237,17 @@ that needs them.
   FX test (and its short-side variant, which flips `is_buy`
   and swaps the quote).
 
-All fixtures pass a frozen `datetime(2026, 4, 11, 5, 30,
-tzinfo=timezone.utc)` as `now` so `closed_at` / `updated_at`
-assertions are deterministic — this is the injected `now`
-parameter §2.3.4 requires.
+**Frozen `now` value.** All fixtures share the module constant
+`_NOW = datetime(2026, 4, 10, 5, 30, tzinfo=UTC)`, reusing the
+exact value already declared at
+[tests/test_portfolio_sync.py:20](tests/test_portfolio_sync.py#L20).
+Picking the existing value rather than a new one means tests that
+sit alongside each other can assert the same timestamp without
+importing two different `_NOW` constants, and it avoids Codex v4's
+drift warning. The new fixture file re-exports `_NOW` (or imports
+from the existing test module) so there is one canonical value.
+This is the `now` parameter §2.3.4 binds as `%(now)s` in the
+soft-close SQL.
 
 ### 8.1 Parser unit tests (pure, no DB)
 
@@ -1158,15 +1267,30 @@ parameter §2.3.4 requires.
   exception, message names the mirror_id. No partial result.
 - **Malformed nested position** (missing required field, non-numeric
   `units`, missing `openConversionRate`) → `_parse_mirror` raises
-  `PortfolioParseError` naming the mirror_id and position index.
-  No partial-mirror result. This is the strict inner-loop behaviour
-  from §2.2.2 and the parser-failure safeguard from §2.3.3.
+  `PortfolioParseError`. Tests assert the raised exception's
+  `str(exc)` contains both the mirror_id **and** the position index
+  (`"position[2]"` shape) — the inner-loop wrap in §2.2.2
+  guarantees this context survives the outer loop's re-raise. This
+  is the strict inner-loop behaviour from §2.2.2 and the parser-
+  failure safeguard from §2.3.3.
+- **Non-numeric `units` hits `decimal.InvalidOperation`, not
+  `ValueError`** (Codex v4 finding AB). `units: "bogus"` →
+  `Decimal(str("bogus"))` raises `decimal.InvalidOperation`.
+  `_parse_mirror`'s inner catch list in §2.2.2 names
+  `decimal.DecimalException`, so this is caught and re-raised as
+  `PortfolioParseError` with full position-index context, not
+  leaked to the outer top-level wrap. Test asserts exactly this
+  path: the raised type is `PortfolioParseError`, the `__cause__`
+  is a `decimal.InvalidOperation`, and the message contains the
+  position index.
 - **`PortfolioParseError` hierarchy test.** Assertions:
   `issubclass(PortfolioParseError, Exception) is True` AND
   `issubclass(PortfolioParseError, (ValueError, TypeError,
-  KeyError)) is False`. This protects against a future refactor
-  that accidentally subclasses `ValueError` and defeats the
-  outer-loop re-raise. (Codex v3 finding U.)
+  KeyError, decimal.DecimalException)) is False`. This protects
+  against a future refactor that accidentally subclasses
+  `ValueError` (or any of the other catch-list exceptions) and
+  defeats the outer-loop re-raise. (Codex v3 finding U, extended
+  by Codex v4 finding AB.)
 - Missing optional fields (stop loss, take profit) → `None` on
   the `BrokerMirrorPosition` dataclass.
 - **`openConversionRate` is required in production.** A unit test
@@ -1253,34 +1377,40 @@ Every test below starts from `two_mirror_seed_rows` and calls
   is the regression test for the §6.4 contract change (Codex v3
   finding W).
 
-**Guard AUM integration test:**
+### 8.5 Guard AUM integration test
 
-- Existing guard test fixture + one mirror containing a single
-  USD position with `amount = 1000`, `open_rate = 10`, no quote →
-  `total_aum` increases by exactly `available_amount + 1000`.
-- Same fixture + a quote higher than `open_rate` → AUM delta grows
-  by the MTM delta.
-- Same fixture with the mirror soft-closed → AUM returns to the
-  pre-mirror baseline.
-- Sector exposure check on an instrument that is held in a mirror but
-  not in `positions` → sector exposure numerator is 0 (mirror is
-  ignored for concentration), AUM denominator is still increased
-  (rule is more permissive, not less).
+Uses `mirror_aum_fixture` + the existing guard baseline fixture.
+Scenarios:
 
-**Three-call-site AUM consistency test:**
+- Baseline (no active mirrors, all mirror rows soft-closed) →
+  `total_aum` equals the existing guard baseline.
+- Active `mirror_aum_fixture` mirror with its positions and cash →
+  `total_aum` increases by exactly
+  `available_amount + SUM(amount) + SUM(MTM delta)` as computed
+  from the fixture's known values.
+- Sector exposure check on an instrument that is held in the
+  mirror but not in `positions` → sector exposure numerator is 0
+  (mirror is ignored for concentration), AUM denominator is still
+  increased (rule is more permissive, not less).
+- Soft-close the same mirror (flip `active = FALSE` with an
+  `UPDATE` statement at test-setup time) → AUM returns to the
+  baseline.
 
-A single DB fixture is observed through all three AUM paths in one
-test to prove they agree:
+### 8.6 Three-call-site AUM consistency test
+
+Uses `mirror_aum_fixture` — the same DB state is observed through
+all three AUM paths in one test to prove they agree:
 
 1. Direct `execution_guard` call via `run_execution_guard`
 2. `GET /api/portfolio` via `TestClient`
 3. `run_portfolio_review`
 
-All three must report the same `total_aum`. This is the regression
-test for §6 — if a future PR updates one AUM path but not the
-others, this test fails. The test does **not** assert anything
-about persisted AUM snapshots, because (per §6.3) no AUM snapshot
-is persisted anywhere in this PR.
+All three must report the same `total_aum`, and specifically the
+same `mirror_equity` component. This is the regression test for
+§6 — if a future PR updates one AUM path but not the others, this
+test fails. The test does **not** assert anything about persisted
+AUM snapshots, because (per §6.3) no AUM snapshot is persisted
+anywhere in this PR.
 
 **Smoke gate:** `tests/smoke/test_app_boots.py` remains green (the
 FastAPI lifespan touches nothing new; migration 022 runs during
@@ -1337,7 +1467,7 @@ might need is not.
 
 ## 10. Open questions
 
-None at v3 spec-revision time. The load-bearing decisions are all
+None at v4 spec-revision time. The load-bearing decisions are all
 locked:
 
 - Three-table split (`copy_traders`, `copy_mirrors`,
@@ -1355,7 +1485,10 @@ locked:
   all are log-and-skipped.
 - `PortfolioParseError` declared in
   `app.providers.implementations.etoro_broker` as a direct
-  `Exception` subclass (not `ValueError` / `TypeError` / `KeyError`).
+  `Exception` subclass (not `ValueError` / `TypeError` / `KeyError`
+  / `decimal.DecimalException`). Inner `_parse_mirror` wrap and
+  outer top-level wrap both include `decimal.DecimalException` in
+  their catch list.
 - `openConversionRate` required in production; default only in
   test helpers.
 - `mirror_equity: float = 0.0` (not `float | None`) on
@@ -1363,6 +1496,14 @@ locked:
 - `_sync_mirrors` soft-close SQL binds the injected `now`
   parameter (not DB `NOW()`) so frozen-time tests are
   deterministic.
+- `_load_mirror_equity(conn)` is a module-level helper in
+  `app/services/portfolio.py` alongside `_load_cash` /
+  `_load_positions`, imported by `execution_guard`, `api/portfolio`,
+  and `run_portfolio_review` (§6.0).
+- Shared copy-trading test fixtures live in a new file
+  `tests/fixtures/copy_mirrors.py` (not `conftest.py`) and reuse
+  the existing `_NOW = datetime(2026, 4, 10, 5, 30, UTC)`
+  constant from `tests/test_portfolio_sync.py:20`.
 - AUM correction at all three call sites
   (execution_guard / api/portfolio / run_portfolio_review), no
   persisted AUM snapshot.
@@ -1372,7 +1513,7 @@ locked:
   historical gain series, cohort signals) is a separate ticket
   opened when this spec merges.
 
-If a fourth round of review surfaces new questions they will be
+If a fifth round of review surfaces new questions they will be
 appended here before the writing-plans handoff.
 
 ## Appendix A. Revision log
@@ -1539,6 +1680,64 @@ Findings and resolutions:
   soft-close). Fix: §9 now explicitly records that the work moved
   out of Track 2 in round 2 rather than silently deleting the
   bullet, so future readers understand the migration.
+
+### Round 4 — Codex review of the round-3 revision
+
+See `.claude/codex-spec-review-v4.log` in the branch history.
+Findings and resolutions:
+
+- **AA. `_load_mirror_equity(conn)` module location unspecified.**
+  Codex v4 observed that §6.3 implicitly placed the helper in
+  `app/services/portfolio.py` but §8.4 and §6.1 / §6.2 called it
+  like a shared helper without naming the module, leaving
+  writing-plans to guess whether to duplicate SQL or cross-import.
+  Fix: new §6.0 subsection declares the helper at module level in
+  `app/services/portfolio.py` alongside `_load_cash` /
+  `_load_positions`, pinning signature and importers. All three
+  call sites now explicitly import from §6.0.
+- **AB. `decimal.DecimalException` not in §2.2.2 catch list.**
+  Codex v4 observed that `Decimal(str("bogus"))` raises
+  `decimal.InvalidOperation` — a subclass of
+  `decimal.DecimalException`, **not** `ValueError`. The round-3
+  outer catch `except (KeyError, ValueError, TypeError)` would
+  miss it, leaking a bare `DecimalException` past the outer loop
+  and defeating the strict-raise guarantee. Fix: §2.2.2 now adds
+  `decimal.DecimalException` to both the outer top-level wrap
+  catch and the inner `_parse_mirror` per-position wrap. §8.1
+  adds the "non-numeric units" regression test asserting that
+  `__cause__` is a `decimal.InvalidOperation` and the message
+  contains the position index. §8.1 also extends the hierarchy
+  test to assert `PortfolioParseError` is NOT a
+  `DecimalException` subclass.
+- **AC. §8.4 narrative "existing guard fixture" and three-call-
+  site fixture.** Codex v4 observed that §8.4's guard integration
+  test and three-call-site consistency test still described the
+  DB state narratively ("existing guard test fixture + one
+  mirror", "a single DB fixture") rather than naming one of the
+  §8.0 fixtures. Fix: the guard test and the consistency test
+  both now explicitly use `mirror_aum_fixture` (whose §8.0 entry
+  was extended to cover all three usages). §8.4's closed-mirror
+  test, §8.5 guard integration, and §8.6 three-call-site test
+  all name this fixture by name.
+- **AD. §8.0 fixture path was "or".** Codex v4 observed that the
+  path was hedged as `tests/conftest.py` OR
+  `tests/fixtures/copy_mirrors.py`. Fix: §8.0 now pins the path
+  to `tests/fixtures/copy_mirrors.py` (new file, not bloating
+  `conftest.py`) and standardises the import pattern.
+- **AE. §8.0 frozen `now` drifted from existing `_NOW`.** Codex
+  v4 observed that the spec declared
+  `datetime(2026, 4, 11, 5, 30, UTC)` while
+  [tests/test_portfolio_sync.py:20](tests/test_portfolio_sync.py#L20)
+  already uses `datetime(2026, 4, 10, 5, 30, UTC)`. Fix: §8.0
+  now reuses the existing `_NOW` value so tests that sit
+  alongside each other share one canonical timestamp.
+- **AF. §1.2 prose still said `closed_at=NOW()`.** Codex v4
+  flagged that leaving the prose form of "NOW()" in the §1.2
+  narrative could lead a reader (or a future `writing-plans`
+  invocation) to mis-implement the soft-close SQL as DB wall
+  clock instead of the injected `now`. Fix: §1.2 now says
+  "marked `active=false, closed_at=<injected sync timestamp>`"
+  with an explicit forward pointer to §2.3.4.
 
 ## Appendix B. Track 1.5 — REST endpoint and frontend panel
 
