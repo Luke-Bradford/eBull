@@ -579,6 +579,25 @@ class TestPositionSource:
         assert "EXCLUDED.source" in normalised
         assert "ELSE positions.source" in normalised
 
+
+def test_portfolio_sync_result_has_mirror_counters() -> None:
+    """Spec §2.3 result extension — mirrors_upserted, mirrors_closed,
+    mirror_positions_upserted are part of the return contract."""
+    result = PortfolioSyncResult(
+        positions_updated=0,
+        positions_opened_externally=0,
+        positions_closed_externally=0,
+        cash_delta=Decimal("0"),
+        broker_cash=Decimal("0"),
+        local_cash=Decimal("0"),
+        mirrors_upserted=2,
+        mirrors_closed=1,
+        mirror_positions_upserted=6,
+    )
+    assert result.mirrors_upserted == 2
+    assert result.mirrors_closed == 1
+    assert result.mirror_positions_upserted == 6
+
     def test_update_path_does_not_overwrite_source(self) -> None:
         """Existing open position — UPDATE must NOT touch source.
 

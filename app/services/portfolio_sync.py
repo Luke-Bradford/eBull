@@ -50,6 +50,9 @@ class PortfolioSyncResult:
     cash_delta: Decimal
     broker_cash: Decimal
     local_cash: Decimal
+    mirrors_upserted: int = 0
+    mirrors_closed: int = 0
+    mirror_positions_upserted: int = 0
 
 
 @dataclass
