@@ -45,6 +45,7 @@ from app.services.market_data import refresh_market_data
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 from app.services.ops_monitor import check_row_count_spike, record_job_finish, record_job_start
 from app.services.portfolio import run_portfolio_review
+from app.services.portfolio_sync import sync_portfolio
 from app.services.scoring import compute_rankings
 from app.services.sentiment import ClaudeSentimentScorer
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
@@ -166,6 +167,7 @@ JOB_DAILY_THESIS_REFRESH = "daily_thesis_refresh"
 JOB_MORNING_CANDIDATE_REVIEW = "morning_candidate_review"
 JOB_WEEKLY_COVERAGE_REVIEW = "weekly_coverage_review"
 JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
+JOB_DAILY_PORTFOLIO_SYNC = "daily_portfolio_sync"
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +254,11 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         description="Regenerate theses for stale Tier 1/2 instruments.",
         cadence=Cadence.daily(hour=4, minute=30),
         prerequisite=_has_coverage_tier12,
+    ),
+    ScheduledJob(
+        name=JOB_DAILY_PORTFOLIO_SYNC,
+        description="Sync positions and cash from eToro broker to local state.",
+        cadence=Cadence.daily(hour=5, minute=30),
     ),
     ScheduledJob(
         name=JOB_MORNING_CANDIDATE_REVIEW,
@@ -811,6 +818,47 @@ def daily_thesis_refresh() -> None:
         generated,
         skipped,
     )
+
+
+def daily_portfolio_sync() -> None:
+    """Sync positions and cash from eToro to local state.
+
+    Runs before morning_candidate_review so recommendations use fresh
+    portfolio data. Requires eToro broker credentials; skips gracefully
+    if credentials are missing.
+    """
+    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+
+    creds = _load_etoro_credentials(JOB_DAILY_PORTFOLIO_SYNC)
+    if creds is None:
+        return
+
+    api_key, user_key = creds
+    with _tracked_job(JOB_DAILY_PORTFOLIO_SYNC) as tracker:
+        with EtoroBrokerProvider(
+            api_key=api_key,
+            user_key=user_key,
+            env=settings.etoro_env,
+        ) as broker:
+            portfolio = broker.get_portfolio()
+
+        with psycopg.connect(settings.database_url) as conn:
+            result = sync_portfolio(conn, portfolio)
+            conn.commit()
+
+        tracker.row_count = (
+            result.positions_updated + result.positions_opened_externally + result.positions_closed_externally
+        )
+        logger.info(
+            "Portfolio sync complete: updated=%d opened_ext=%d closed_ext=%d "
+            "broker_cash=%.2f local_cash=%.2f delta=%.2f",
+            result.positions_updated,
+            result.positions_opened_externally,
+            result.positions_closed_externally,
+            result.broker_cash,
+            result.local_cash,
+            result.cash_delta,
+        )
 
 
 def morning_candidate_review() -> None:

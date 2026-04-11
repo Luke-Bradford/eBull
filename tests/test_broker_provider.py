@@ -10,7 +10,7 @@ No network calls — all HTTP interactions are mocked.
 from __future__ import annotations
 
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import httpx
 
@@ -548,3 +548,106 @@ class TestRequestBodyShape:
             body = broker._http_write.post.call_args.kwargs["json"]
             assert body["InstrumentID"] == 1001
             assert body["UnitsToDeduct"] is None
+
+
+# ---------------------------------------------------------------------------
+# get_portfolio
+# ---------------------------------------------------------------------------
+
+FIXTURE_FULL_PORTFOLIO_RESPONSE = {
+    "clientPortfolio": {
+        "positions": [
+            {
+                "instrumentID": 1001,
+                "positionID": 98765,
+                "units": 5.0,
+                "openPrice": 150.00,
+                "currentPrice": 160.00,
+            },
+            {
+                "instrumentID": 1002,
+                "positionID": 98766,
+                "units": 10.0,
+                "openPrice": 50.00,
+                "currentPrice": 48.50,
+            },
+        ],
+        "credit": 50000.50,
+    },
+}
+
+
+@patch("app.providers.implementations.etoro_broker._persist_raw")
+class TestGetPortfolio:
+    def test_returns_positions_and_cash(self, _mock_persist: MagicMock) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = FIXTURE_FULL_PORTFOLIO_RESPONSE
+        mock_resp.content = b"{}"
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+
+            result = broker.get_portfolio()
+
+        assert len(result.positions) == 2
+        assert result.available_cash == Decimal("50000.50")
+
+        p1 = result.positions[0]
+        assert p1.instrument_id == 1001
+        assert p1.units == Decimal("5.0")
+        assert p1.open_price == Decimal("150.0")
+        assert p1.current_price == Decimal("160.0")
+
+        p2 = result.positions[1]
+        assert p2.instrument_id == 1002
+        assert p2.units == Decimal("10.0")
+
+    def test_empty_portfolio(self, _mock_persist: MagicMock) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"clientPortfolio": {"positions": [], "credit": 100000}}
+        mock_resp.content = b"{}"
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+
+            result = broker.get_portfolio()
+
+        assert len(result.positions) == 0
+        assert result.available_cash == Decimal("100000")
+
+    def test_missing_credit_defaults_to_zero(self, _mock_persist: MagicMock) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"clientPortfolio": {"positions": []}}
+        mock_resp.content = b"{}"
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+
+            result = broker.get_portfolio()
+
+        assert result.available_cash == Decimal("0")
+
+    def test_calls_correct_endpoint(self, _mock_persist: MagicMock) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"clientPortfolio": {"positions": [], "credit": 0}}
+        mock_resp.content = b"{}"
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+
+            broker.get_portfolio()
+
+            url = broker._http_read.get.call_args.args[0]
+            assert url == "/api/v1/trading/info/demo/portfolio"
