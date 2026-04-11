@@ -637,6 +637,13 @@ def mtm_delta_mirror_fixture(
     with conn.cursor() as cur:
         cur.execute(
             """
+            INSERT INTO instruments (instrument_id, symbol, company_name)
+            VALUES (4201, 'MTM_FIXTURE', 'MTM Fixture Instrument')
+            ON CONFLICT (instrument_id) DO NOTHING
+            """
+        )
+        cur.execute(
+            """
             INSERT INTO copy_traders (parent_cid, parent_username,
                                       first_seen_at, updated_at)
             VALUES (911, 'mtm_fixture', %(now)s, %(now)s)
