@@ -533,6 +533,84 @@ class TestMultiPositionSync:
         assert params["price"] == expected_avg
 
 
+class TestPositionSource:
+    """Verify INSERT path writes source='broker_sync' and handles close/reopen.
+
+    Issue #180 — positions rows carry a ``source`` column identifying who
+    currently manages the open units.  The sync path (broker-discovered)
+    must always insert ``'broker_sync'`` and, on reopen (the ON CONFLICT
+    path where the existing row has zero units), reset source so the
+    new opener is reflected.
+    """
+
+    def test_insert_sets_source_to_broker_sync(self) -> None:
+        """New broker-discovered position → INSERT has literal 'broker_sync'."""
+        pos = _pos(instrument_id=99)
+        conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
+        sync_portfolio(conn, _portfolio([pos]), now=_NOW)
+
+        insert_calls = [
+            c
+            for c in conn.execute.call_args_list
+            if isinstance(c.args[0], str) and "INSERT INTO positions" in c.args[0]
+        ]
+        assert len(insert_calls) == 1
+        sql = insert_calls[0].args[0]
+        # Literal — no parameter placeholder — matches the production
+        # SQL's hard-coded 'broker_sync' value.  Whitespace-tolerant
+        # via normalisation to avoid brittle alignment dependence.
+        normalised = re.sub(r"\s+", " ", sql)
+        assert "'broker_sync'" in normalised
+
+    def test_insert_conflict_clause_resets_source_on_reopen(self) -> None:
+        """ON CONFLICT DO UPDATE uses CASE WHEN to reset source for reopen.
+
+        The reset semantics are: when the existing row is fully closed
+        (``current_units <= 0``), overwrite source with the incoming
+        ``'broker_sync'``; otherwise preserve the existing source.  This
+        behaviour is expressed in SQL via a CASE WHEN clause, not in
+        Python, so the assertion checks the SQL shape.
+        """
+        pos = _pos(instrument_id=99)
+        conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
+        sync_portfolio(conn, _portfolio([pos]), now=_NOW)
+
+        insert_calls = [
+            c
+            for c in conn.execute.call_args_list
+            if isinstance(c.args[0], str) and "INSERT INTO positions" in c.args[0]
+        ]
+        sql = insert_calls[0].args[0]
+        normalised = re.sub(r"\s+", " ", sql)
+        # The reset condition: when the existing row is fully closed,
+        # overwrite source from EXCLUDED; otherwise keep what's there.
+        assert "positions.current_units <= 0" in normalised
+        assert "EXCLUDED.source" in normalised
+        assert "ELSE positions.source" in normalised
+
+    def test_update_path_does_not_overwrite_source(self) -> None:
+        """Existing open position — UPDATE must NOT touch source.
+
+        When the broker reports units for a position we already have
+        open locally, we update units and unrealized_pnl only.  The
+        source column must not appear in the UPDATE SQL at all — adding
+        it would silently flip ebull-owned positions to broker_sync on
+        every sync cycle.
+        """
+        pos = _pos(instrument_id=42, units=Decimal("5"), open_price=Decimal("100"), current_price=Decimal("120"))
+        conn = _mock_conn(local_positions=[(42, Decimal("5"))], local_cash=Decimal("5000"))
+        sync_portfolio(conn, _portfolio([pos], Decimal("5000")), now=_NOW)
+
+        update_calls = [
+            c for c in conn.execute.call_args_list if isinstance(c.args[0], str) and "UPDATE positions SET" in c.args[0]
+        ]
+        assert len(update_calls) == 1
+        sql = update_calls[0].args[0]
+        # The update path updates only units/pnl/updated_at.  "source ="
+        # must not appear, else we would clobber ebull ownership.
+        assert "source" not in sql.lower()
+
+
 class TestReopenedPositionOpenDate:
     """ON CONFLICT should update open_date for reopened positions."""
 

@@ -32,6 +32,7 @@ Cursor call order inside execute_order (demo EXIT):
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -45,6 +46,7 @@ from app.services.order_client import (
     _load_latest_quote_price,
     _load_position_units,
     _synthetic_fill,
+    _update_position_buy,
     execute_order,
 )
 from app.services.runtime_config import RuntimeConfig, RuntimeConfigCorrupt
@@ -666,3 +668,63 @@ class TestExecuteOrderRuntimeConfigCorrupt:
 
         # No order should have been persisted, no audit row written.
         conn.transaction.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestUpdatePositionBuySource
+# ---------------------------------------------------------------------------
+
+
+class TestUpdatePositionBuySource:
+    """Verify _update_position_buy writes ``source='ebull'`` and resets on reopen.
+
+    Issue #180 — the positions ``source`` column identifies who currently
+    manages the open units.  Every eBull-originated BUY must insert
+    ``'ebull'``.  On reopen (ON CONFLICT into a closed row), source must
+    flip to ``'ebull'`` too; on ADD into an already-open position, the
+    existing source must be preserved so an ebull ADD into a
+    broker_sync-owned position doesn't claim ownership of the original
+    external open.
+    """
+
+    def test_insert_sets_source_to_ebull(self) -> None:
+        """New BUY → INSERT has literal 'ebull'."""
+        conn = _make_conn([])
+        _update_position_buy(
+            conn,
+            instrument_id=42,
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            now=_NOW,
+        )
+
+        assert conn.execute.call_count == 1
+        sql = conn.execute.call_args_list[0].args[0]
+        normalised = re.sub(r"\s+", " ", sql)
+        # Hard-coded 'ebull' literal in the VALUES list — no parameter
+        # placeholder.
+        assert "'ebull'" in normalised
+        assert "INSERT INTO positions" in normalised
+
+    def test_insert_conflict_clause_resets_source_on_reopen(self) -> None:
+        """ON CONFLICT DO UPDATE uses CASE WHEN to reset source for reopen.
+
+        Reset condition: when the existing row is fully closed
+        (``current_units <= 0``), overwrite source with EXCLUDED
+        (``'ebull'``); otherwise preserve the existing source.  This is
+        expressed in SQL, not Python, so the assertion checks the SQL
+        shape.
+        """
+        conn = _make_conn([])
+        _update_position_buy(
+            conn,
+            instrument_id=42,
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            now=_NOW,
+        )
+        sql = conn.execute.call_args_list[0].args[0]
+        normalised = re.sub(r"\s+", " ", sql)
+        assert "positions.current_units <= 0" in normalised
+        assert "EXCLUDED.source" in normalised
+        assert "ELSE positions.source" in normalised

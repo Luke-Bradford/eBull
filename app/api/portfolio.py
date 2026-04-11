@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from app.api._helpers import parse_optional_float
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
+from app.domain.positions import PositionSource
 
 router = APIRouter(
     prefix="/portfolio",
@@ -55,6 +56,7 @@ class PositionItem(BaseModel):
     cost_basis: float
     market_value: float
     unrealized_pnl: float
+    source: PositionSource
     updated_at: datetime
 
 
@@ -95,6 +97,7 @@ def _parse_position(row: dict[str, object]) -> PositionItem:
         cost_basis=cost_basis,
         market_value=market_value,
         unrealized_pnl=unrealized_pnl,
+        source=row["source"],  # type: ignore[arg-type]
         updated_at=row["updated_at"],  # type: ignore[arg-type]
     )
 
@@ -130,7 +133,7 @@ def get_portfolio(
     positions_sql = """
         SELECT p.instrument_id, i.symbol, i.company_name,
                p.open_date, p.avg_cost, p.current_units, p.cost_basis,
-               p.updated_at,
+               p.source, p.updated_at,
                q.last
         FROM positions p
         JOIN instruments i USING (instrument_id)

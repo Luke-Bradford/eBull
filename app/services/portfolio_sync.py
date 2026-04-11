@@ -179,16 +179,28 @@ def sync_portfolio(
                 """
                 INSERT INTO positions
                     (instrument_id, open_date, avg_cost, current_units,
-                     cost_basis, unrealized_pnl, updated_at)
+                     cost_basis, unrealized_pnl, source, updated_at)
                 VALUES
                     (%(iid)s, %(date)s, %(price)s, %(units)s,
-                     %(cost)s, %(upnl)s, %(now)s)
+                     %(cost)s, %(upnl)s, 'broker_sync', %(now)s)
                 ON CONFLICT (instrument_id) DO UPDATE SET
                     current_units  = EXCLUDED.current_units,
                     avg_cost       = EXCLUDED.avg_cost,
                     cost_basis     = EXCLUDED.cost_basis,
                     unrealized_pnl = EXCLUDED.unrealized_pnl,
                     open_date      = EXCLUDED.open_date,
+                    -- Reset source on reopen: if the existing row is
+                    -- fully closed (current_units <= 0) this conflict
+                    -- path is reopening it externally, so the new
+                    -- opener ('broker_sync') becomes the source.
+                    -- Otherwise preserve the existing source (adds to
+                    -- an already-open position shouldn't flip
+                    -- ownership).
+                    source         = CASE
+                        WHEN positions.current_units <= 0
+                            THEN EXCLUDED.source
+                        ELSE positions.source
+                    END,
                     updated_at     = EXCLUDED.updated_at
                 """,
                 {
