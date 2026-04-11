@@ -230,9 +230,12 @@ def _load_mirror_equity(conn: psycopg.Connection[Any]) -> float:
         cur.execute(sql)
         row = cur.fetchone()
     # COALESCE(SUM(...), 0) guarantees exactly one row with a
-    # non-NULL numeric; row is never None. Dead-code None-guard
-    # prevention rule #75.
-    assert row is not None  # CTE with COALESCE always returns one row
+    # non-NULL numeric, so row should never be None. Use an
+    # explicit RuntimeError (not `assert`) so the guard survives
+    # `python -O` — see prevention log entry "`assert` as a
+    # runtime guard in service code" (#109).
+    if row is None:  # pragma: no cover — driver/CTE invariant violation
+        raise RuntimeError("_load_mirror_equity: COALESCE(SUM(...), 0) CTE returned no rows; driver invariant violated")
     return float(row["total"])
 
 
@@ -788,12 +791,22 @@ def run_portfolio_review(
         if iid not in score_by_id:
             all_ids.append(iid)
 
+    # Load mirror_equity eagerly so the early-return path below still
+    # reports an honest total_aum (§6.3 contract: total_aum MUST include
+    # mirror_equity at every call site, even when no recommendations run).
+    # Without this hoist, a run with active copy_mirrors but no scores
+    # and no positions would return total_aum=0.0 — factually wrong.
+    mirror_equity = _load_mirror_equity(conn)
+
     if not all_ids:
-        logger.info("run_portfolio_review: no ranked candidates and no open positions")
+        logger.info(
+            "run_portfolio_review: no ranked candidates and no open positions (mirror_equity=%.2f)",
+            mirror_equity,
+        )
         return PortfolioReviewResult(
             recommendations=[],
             run_at=run_at,
-            total_aum=0.0,
+            total_aum=mirror_equity + (cash if cash_known else 0.0),
             cash=cash,
             active_positions=0,
         )
@@ -807,9 +820,9 @@ def run_portfolio_review(
     prior_recs = _load_prior_recommendations(conn, all_ids)
 
     # AUM — positions + cash + mirror_equity (§6.3).
-    # _load_mirror_equity is a sibling helper in this module.
+    # mirror_equity was loaded above (pre-early-return) so the contract
+    # holds for both the recommendation path and the no-work path.
     total_market_value = sum(p.market_value for p in positions.values())
-    mirror_equity = _load_mirror_equity(conn)
     total_aum = total_market_value + (cash if cash_known else 0.0) + mirror_equity
 
     logger.info(
