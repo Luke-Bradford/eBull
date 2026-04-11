@@ -68,8 +68,9 @@ day one:
   the numbers right in the guard, the dashboard top-line, and the
   recommender without also having to ship a new REST surface, a new
   React component, and the UX copy for un-copying. `PortfolioResponse`
-  does grow an optional `mirror_equity: float | None` field in this
-  PR so the existing dashboard top-line can show the breakdown.
+  does grow a `mirror_equity: float = 0.0` field in this PR so the
+  existing dashboard top-line can show the breakdown (see §6.4 for
+  why `0.0` over `None`).
 
 Deferred to **Track 2** (new ticket opened when this spec merges):
 
@@ -372,52 +373,105 @@ sync.
 The existing `portfolio = raw.get("clientPortfolio") or {}` block is
 extended with a second parse pass over `portfolio.get("mirrors") or []`.
 
-Two-tier parsing, reflecting Codex v2 feedback on silent parse
-failures:
+#### 2.2.1 `PortfolioParseError` exception type
 
-**Top-level mirror parse — log-and-skip.** If a `mirrors[]` element
-is not a dict or is missing a required identifier, log a warning and
-continue:
+A new exception is declared in
+`app/providers/implementations/etoro_broker.py`:
+
+```python
+class PortfolioParseError(Exception):
+    """Raised when a mirrors[] row cannot be parsed safely.
+
+    Directly subclasses Exception (NOT ValueError / TypeError /
+    KeyError) so the outer parse loop can distinguish it from
+    incidental exceptions and re-raise. Never swallowed by any
+    `except (KeyError, ValueError, TypeError)` block.
+    """
+```
+
+**Hierarchy rationale (Codex v3 finding U).** `PortfolioParseError`
+must be a direct subclass of `Exception`. If it subclassed
+`ValueError` (which `_parse_mirror_position` naturally raises for
+numeric conversion errors) the outer loop's `except (KeyError,
+ValueError, TypeError)` clause would silently swallow it, defeating
+§2.3.3's strict-raise. The outer loop catches `PortfolioParseError`
+*first* and re-raises, then falls through to the incidental
+`(KeyError, ValueError, TypeError)` catch for the narrow "payload
+shape is unrecognisable" case below.
+
+Module path used throughout the spec and tests:
+`app.providers.implementations.etoro_broker.PortfolioParseError`.
+
+#### 2.2.2 Strict-raise parse contract
+
+Codex v3 (finding V) flagged that a log-and-skip on top-level mirror
+rows interacts badly with the §2.3.4 soft-close: a known mirror whose
+top-level fields parse-fail would be log-skipped, then interpreted as
+"disappeared from the payload", then silently soft-closed and dropped
+from AUM. That is the exact data-loss failure mode §2.3.3 already
+rejected for nested positions.
+
+**v1 rule — strict raise on any row that carries a recognisable
+`mirrorID`.** The top-level parse loop is:
 
 ```python
 for m in raw_mirrors:
-    if not isinstance(m, dict):
+    if not isinstance(m, dict) or "mirrorID" not in m:
+        # Unrecognisable shape with no usable identifier. This
+        # cannot collide with a known local mirror row, so skip
+        # safely. In practice this branch should never fire in
+        # production — if it does, the payload schema has broken.
+        logger.warning(
+            "Skipping unrecognisable mirrors[] element: %r", m
+        )
         continue
+
     try:
         mirrors.append(_parse_mirror(m))
+    except PortfolioParseError:
+        # Nested-position failure or top-level known-mirror failure.
+        # Re-raise unchanged — §2.3.3 requires full sync rollback,
+        # and §2.3.4 soft-close must not silently fire on a
+        # mirrorID that we still see in the payload.
+        raise
     except (KeyError, ValueError, TypeError) as exc:
-        logger.warning("Skipping malformed mirror object: %s", exc)
-        continue
+        # Top-level known-mirror parse failure: mirrorID present
+        # but a required top-level field missing or malformed.
+        # Wrap and raise — this row is a known mirror, soft-close
+        # would silently drop it from AUM, so the sync must abort.
+        raise PortfolioParseError(
+            f"Failed to parse mirror {m.get('mirrorID')!r}: {exc}"
+        ) from exc
 ```
 
-This matches the existing positions-loop pattern and protects the
-sync from a single garbage mirror row in a multi-mirror payload.
-The sync-layer disappearance guard (§2.3.4) still covers the "a
-known mirror is missing" case.
+**Nested-position parse.** `_parse_mirror` recursively normalises
+the nested `positions[]` via `_parse_mirror_position`. Any parse
+failure on a nested position raises `PortfolioParseError` directly
+(not wrapped in `ValueError`) with the mirror_id, position index,
+and the underlying exception. The mirror as a whole fails; no
+partial mirror is ever returned to the sync layer. §2.3.3 enforces
+this as the reason the sync transaction rolls back before eviction
+or soft-close touches the DB.
 
-**Nested-position parse — strict raise.** `_parse_mirror`
-recursively normalises the nested `positions[]` via
-`_parse_mirror_position`. Unlike the old log-and-skip pattern,
-**any** parse failure on a nested position raises
-`PortfolioParseError` (a new exception type) with the mirror_id,
-position index, and the underlying exception. The mirror as a whole
-fails; no partial mirror is ever returned to the sync layer. The
-parse-failure guard (§2.3.3) enforces this as the reason the sync
-transaction rolls back before eviction touches the DB.
+**Why no log-and-skip path survives for rows with a `mirrorID`.**
+The only safe skip is a row the parser cannot match back to a local
+`copy_mirrors` row — i.e. a row with no `mirrorID` to compare
+against. Any row that *could* match a known local row but fails to
+parse must raise, otherwise the combination of "silent skip" +
+"soft-close absent mirrors" = silent data loss. The `mirrorID
+not in m` branch above is the only surviving skip path.
 
-Rationale for the asymmetry:
+Rationale:
 
 - One bad nested position out of 198 is indistinguishable from a
   parser that has drifted against a payload schema change. Silently
   skipping means "delete the valid local row on next eviction and
   pretend nothing happened"; raising means "page the operator, fix
   the parser, re-run the sync."
-- One bad whole-mirror row out of two is a different failure mode:
-  it's usually an entire malformed mirror object (e.g. a string
-  where an int should be), which is exotic enough that we still
-  don't want to block the sync for the *other* mirror while we
-  investigate. The disappearance guard (§2.3.4) catches it on the
-  next sync if the malformed mirror disappears permanently.
+- One bad top-level field on a known `mirrorID` is exactly the same
+  failure mode — it looks like a disappearance to §2.3.4, and
+  §2.3.4 would soft-close the row. Same correctness outcome, same
+  response: raise and stop.
 
 `_parse_mirror` / `_parse_mirror_position` are pure normaliser
 functions alongside `_normalise_open_order_response` (line 519) — no
@@ -598,16 +652,23 @@ raises.**
    recover.
 3. **Partial disappearance (operator un-copy).** If
    `payload_mirror_ids` is non-empty AND `disappeared_ids` is
-   non-empty, run a soft-close:
+   non-empty, run a soft-close using the `now` parameter threaded
+   into `_sync_mirrors` (same value used by the rest of the sync
+   transaction for `updated_at` timestamps — tests can freeze it):
 
    ```sql
    UPDATE copy_mirrors
       SET active = FALSE,
-          closed_at = NOW(),
-          updated_at = NOW()
-    WHERE mirror_id = ANY(%s::bigint[])
+          closed_at = %(now)s,
+          updated_at = %(now)s
+    WHERE mirror_id = ANY(%(disappeared_ids)s::bigint[])
       AND active = TRUE;
    ```
+
+   Parameters are bound with `psycopg.sql.SQL` + a dict payload —
+   never interpolated. Using the injected `now` (not DB `NOW()`)
+   is what makes the disappearance tests below deterministic
+   against a frozen timestamp.
 
    Nested `copy_mirror_positions` rows for the closed mirror are
    **retained** — they are historical fact, and the `active` filter
@@ -894,10 +955,14 @@ does not touch it.
 
 Update: after computing `total_market` and `cash_balance`, run the
 mirror-equity query from §3.4 and add the result to `total_aum`.
-The `PortfolioResponse` dataclass (lines 64-67) adds a new optional
-field `mirror_equity: float | None = None` so the frontend can
-display the breakdown (AUM = positions + cash + mirrors) rather
-than just a lump total. A null value means no mirrors are held.
+The `PortfolioResponse` pydantic `BaseModel`
+([api/portfolio.py:63-67](app/api/portfolio.py#L63-L67)) grows one
+new required-with-default field `mirror_equity: float = 0.0` so the
+frontend can display the breakdown (AUM = positions + cash +
+mirrors) rather than just a lump total. The field is always a
+number: `0.0` when no mirrors are held or all mirrors are
+`active = FALSE`, matching the §3.4 query's `COALESCE(SUM(...), 0)`
+default. See §6.4 for why `0.0` beats `None` here.
 
 ### 6.3 `app/services/portfolio.py` (`run_portfolio_review`, line 752-753)
 
@@ -936,16 +1001,38 @@ later, it lives on a separate ticket and a separate migration.
 
 `GET /api/portfolio/copy-trading` (listing copy traders with
 per-mirror aggregates and nested-position summaries) is deferred to
-a follow-up PR. The existing `PortfolioResponse` dataclass at
-[api/portfolio.py:64-67](app/api/portfolio.py#L64-L67) grows one
-new optional field in this PR:
+a follow-up PR. The existing `PortfolioResponse` pydantic
+`BaseModel` at
+[api/portfolio.py:63-67](app/api/portfolio.py#L63-L67) grows one
+new field in this PR:
 
 ```python
-@dataclass
-class PortfolioResponse:
-    ...existing fields...
-    mirror_equity: float | None = None  # NEW — null if no active mirrors
+class PortfolioResponse(BaseModel):
+    positions: list[PositionItem]
+    position_count: int
+    total_aum: float
+    cash_balance: float | None
+    mirror_equity: float = 0.0  # NEW — 0.0 when no active mirrors
 ```
+
+**Why `float = 0.0` not `float | None = None`** (Codex v3
+finding W). Two call-site contracts were ambiguous:
+
+- §3.4's AUM query is wrapped in `COALESCE(SUM(...), 0)`, so it
+  always returns a number — `0` when the table is empty or every
+  mirror is `active = FALSE`.
+- `cash_balance` is `float | None` because "the cash_ledger is
+  empty" is a genuinely unknown state that the dashboard should
+  render as "—" rather than "£0.00". That reasoning does **not**
+  apply to `mirror_equity`: if no mirrors exist, mirror equity is
+  a *computed* zero, not an unknown. The dashboard should render
+  "£0.00" confidently.
+
+Aligning `mirror_equity` with its query means the frontend never
+has to branch on `null` and can always do
+`total_aum = positions + cash + mirror_equity` unconditionally.
+`cash_balance` keeps the `| None` because its underlying domain is
+genuinely "known unknown vs known zero"; `mirror_equity` does not.
 
 That is the minimum change needed for the dashboard top-line to
 display the AUM breakdown without a new endpoint. Anything
@@ -1012,96 +1099,159 @@ because mirrors never become `positions` rows.
 
 ## 8. Testing strategy
 
-**Unit tests (pure, no DB):**
+### 8.0 Shared fixtures (named)
 
-- `_parse_mirror` / `_parse_mirror_position` against fixtures derived
-  from the real `data/raw/etoro_broker/etoro_portfolio_*.json` payload
-  (trimmed to 2 mirrors × 3 nested positions each for readability, at
-  least one non-USD position to exercise `openConversionRate`).
-- Malformed top-level mirror object (not a dict, missing `mirrorID`)
-  → skipped with warning, other mirrors still parsed. This is the
-  asymmetric outer-loop behaviour from §2.2.
-- Malformed nested position (missing required field, non-numeric
+Codex v3 (finding Y) flagged that several test scenarios share the
+same underlying data shape and should be backed by named fixtures,
+not narrative prose, so test authors cannot silently drift. The
+fixtures below live in `tests/conftest.py` (or a new
+`tests/fixtures/copy_mirrors.py`) and are imported by every test
+that needs them.
+
+- **`two_mirror_payload`** — `BrokerPortfolio` with 2 mirrors × 3
+  nested positions each, derived from the real
+  `data/raw/etoro_broker/etoro_portfolio_*.json` payload (trimmed
+  for readability, at least one non-USD position to exercise
+  `openConversionRate`). This is the canonical "healthy multi-mirror
+  sync" fixture. Every positive-path service-layer test starts
+  here; disappearance tests start here and then remove a mirror.
+- **`two_mirror_seed_rows`** — the same two mirrors pre-inserted
+  into `copy_mirrors` (active = TRUE) and `copy_mirror_positions`,
+  ready for "seed the DB, call sync with a *different* payload"
+  tests. Used by disappearance, re-copy, and parser-abort tests.
+- **`mirror_aum_fixture`** — one `active = TRUE` mirror and one
+  `active = FALSE` mirror (both carrying positions and cash),
+  used by the "closed mirror excluded from AUM" and
+  "three-call-site consistency" tests. Has deterministic numbers
+  so the expected `total_aum` is computable by hand.
+- **`no_quote_mirror_fixture`** — the empirically-reconciled mirror
+  15712187 shape (`available = 2800.33`, positions
+  `amount = 50.00` and `amount = 17039.33`) with no matching quotes
+  rows. Used by the `available + SUM(amount)` identity test.
+- **`mtm_delta_mirror_fixture`** — one long position with
+  `open_rate = 1207.4994`, `units = 6.28927`,
+  `open_conversion_rate = 0.01331`, `amount = 101.08`, plus a
+  matching `quotes.last = 1400.0` row. Used by the MTM-delta +
+  FX test (and its short-side variant, which flips `is_buy`
+  and swaps the quote).
+
+All fixtures pass a frozen `datetime(2026, 4, 11, 5, 30,
+tzinfo=timezone.utc)` as `now` so `closed_at` / `updated_at`
+assertions are deterministic — this is the injected `now`
+parameter §2.3.4 requires.
+
+### 8.1 Parser unit tests (pure, no DB)
+
+- `_parse_mirror` / `_parse_mirror_position` against
+  `two_mirror_payload`: verify the `BrokerMirror` structure,
+  required field presence, and at least one non-USD FX rate round-
+  trip through `_parse_mirror_position`.
+- **Unrecognisable top-level mirror element (no `mirrorID`)** —
+  element is not a dict, or is a dict with no `mirrorID` key →
+  logged warning and skipped, other mirrors still parsed. This is
+  the only surviving log-and-skip path per §2.2.2.
+- **Known-mirror top-level parse failure** — element has
+  `mirrorID` present but a required field (`parentCID`,
+  `parentUsername`, `initialInvestment`, `availableAmount`,
+  `closedPositionsNetProfit`, `startedCopyDate`) missing or
+  malformed → raises `PortfolioParseError` wrapping the underlying
+  exception, message names the mirror_id. No partial result.
+- **Malformed nested position** (missing required field, non-numeric
   `units`, missing `openConversionRate`) → `_parse_mirror` raises
-  `PortfolioParseError` naming the mirror_id and position index. No
-  partial-mirror result is returned. This is the strict inner-loop
-  behaviour from §2.2 and the parser-failure safeguard from §2.3.3.
-- Missing optional fields (stop loss, take profit) → `None` on the
-  dataclass.
+  `PortfolioParseError` naming the mirror_id and position index.
+  No partial-mirror result. This is the strict inner-loop behaviour
+  from §2.2.2 and the parser-failure safeguard from §2.3.3.
+- **`PortfolioParseError` hierarchy test.** Assertions:
+  `issubclass(PortfolioParseError, Exception) is True` AND
+  `issubclass(PortfolioParseError, (ValueError, TypeError,
+  KeyError)) is False`. This protects against a future refactor
+  that accidentally subclasses `ValueError` and defeats the
+  outer-loop re-raise. (Codex v3 finding U.)
+- Missing optional fields (stop loss, take profit) → `None` on
+  the `BrokerMirrorPosition` dataclass.
 - **`openConversionRate` is required in production.** A unit test
   asserts that `_parse_mirror_position` raises when
-  `openConversionRate` is absent. The `Decimal("1")` fallback lives
-  only on the `_mk_position` test helper in
+  `openConversionRate` is absent. The `Decimal("1")` fallback
+  lives only on the `_mk_position` test helper in
   `tests/test_portfolio_sync.py`, and a separate unit test asserts
   that the helper's default is scoped to USD-only fixtures. No
   production code path silently defaults this field.
 
-**Service-layer tests (real test DB, per
-`feedback_test_db_isolation` rule — `ebull_test`, never
-`settings.database_url`):**
+### 8.2 Service-layer tests (real test DB)
 
-- First `sync_portfolio` call with 2 mirrors × 3 positions → rows in
+Real test DB per `feedback_test_db_isolation` rule — `ebull_test`,
+never `settings.database_url`.
+
+- First `sync_portfolio` call with `two_mirror_payload` → rows in
   `copy_traders`, `copy_mirrors` (both `active = TRUE`),
   `copy_mirror_positions`.
-- Second `sync_portfolio` with one nested position removed → that row
-  is DELETEd, siblings untouched, `copy_mirrors.active` unchanged.
+- Second `sync_portfolio` with one nested position removed → that
+  row is DELETEd, siblings untouched, `copy_mirrors.active`
+  unchanged.
 - Re-running the same payload is idempotent (row counts unchanged,
   `updated_at` refreshed, `active` still `TRUE`).
-- Mirror-level metadata changed on second sync → `copy_mirrors` row
-  updated, trader row untouched apart from `updated_at`.
-- Parent username changed on second sync → `copy_traders.parent_username`
-  updated.
+- Mirror-level metadata changed on second sync → `copy_mirrors`
+  row updated, trader row untouched apart from `updated_at`.
+- Parent username changed on second sync →
+  `copy_traders.parent_username` updated.
 
-**Disappearance handling tests (the new behaviour from §2.3.4):**
+### 8.3 Disappearance handling tests (§2.3.4)
 
-- **Empty `mirrors` array with active local mirrors present** →
-  `RuntimeError` raised, transaction rolls back, local rows remain
-  `active = TRUE`. Matches the positions guard's "total disappearance
-  is unsafe" invariant.
-- **Partial mirror disappearance: soft-close.** Seed 2 active local
-  mirrors, call `sync_portfolio` with a payload containing only 1 of
-  them. Assert: the matching mirror stays `active = TRUE,
-  closed_at IS NULL`; the missing mirror flips to `active = FALSE,
-  closed_at = now()`; nested `copy_mirror_positions` rows for the
-  closed mirror **remain** (not CASCADE-deleted); the result's
-  `mirrors_closed = 1`.
-- **Re-copy (same mirror_id reuse).** Seed a soft-closed mirror
-  (`active = FALSE`), call `sync_portfolio` with a payload
-  containing that same `mirror_id`. Assert: the row is back to
+Every test below starts from `two_mirror_seed_rows` and calls
+`sync_portfolio` with a modified payload.
+
+- **Empty `mirrors[]` with active local mirrors present** →
+  `RuntimeError` raised, transaction rolls back, both seed rows
+  remain `active = TRUE`. Matches the positions guard's "total
+  disappearance is unsafe" invariant.
+- **Partial mirror disappearance: soft-close.** Payload contains
+  only 1 of the 2 seed mirrors. Assert: the matching mirror stays
+  `active = TRUE, closed_at IS NULL`; the missing mirror flips to
+  `active = FALSE, closed_at = frozen_now` (exact timestamp
+  match against the injected `now` parameter); nested
+  `copy_mirror_positions` rows for the closed mirror **remain**;
+  the result's `mirrors_closed = 1`.
+- **Re-copy (same `mirror_id` reuse).** Pre-set one seed mirror to
+  `active = FALSE, closed_at = <past>`, then call sync with
+  `two_mirror_payload`. Assert: the row is back to
   `active = TRUE, closed_at = NULL`; `updated_at` advances; nested
   positions are upserted correctly.
-- **Parser-failure abort before eviction.** Seed a mirror with 3
-  local positions. Call `sync_portfolio` with a payload where one
-  of the three nested positions is malformed (e.g. non-numeric
-  `units`). Assert: `PortfolioParseError` propagates, the
-  transaction rolls back, all 3 local rows survive, and no partial
-  upsert or eviction occurred.
+- **Parser-failure abort before eviction.** Call sync with a
+  payload where one nested position in one mirror is malformed.
+  Assert: `PortfolioParseError` propagates, the transaction rolls
+  back, all seed rows survive, no partial upsert or eviction
+  occurred, `copy_mirrors.active` on both seed mirrors is
+  unchanged.
+- **Known-mirror top-level parse failure also aborts.** Call sync
+  with a payload where one mirror has `mirrorID` present but
+  `availableAmount` missing. Assert: `PortfolioParseError`
+  propagates (wrapped from a `KeyError`), both seed rows survive
+  unchanged — this is the regression test for the Codex v3
+  finding V parse-and-soft-close hole.
 
-**AUM identity tests (the core correctness test for §3):**
+### 8.4 AUM identity tests (§3 correctness core)
 
-Fixtures inserted directly into `copy_mirrors` and
-`copy_mirror_positions`:
-
-- **No-quote cost-basis fallback.** One mirror with
-  `available_amount = 2800.33`, two positions with
-  `amount = 50.00` and `amount = 17039.33`, no quotes → the §3.4
-  query returns `2800.33 + 50.00 + 17039.33 = 19889.66`. This is
-  the empirically-reconciled identity on mirror 15712187.
-- **MTM delta with FX.** One mirror, one long position with
-  `open_rate = 1207.4994`, `units = 6.28927`,
-  `open_conversion_rate = 0.01331`, `amount = 101.08`, and a quote
-  `quotes.last = 1400.0` → delta = `1 * 6.28927 * (1400.0 -
-  1207.4994) * 0.01331 ≈ 16.12`, so mirror equity ≈
-  `available + 101.08 + 16.12`. Asserts FX is applied to the delta.
+- **No-quote cost-basis fallback.** Using `no_quote_mirror_fixture`
+  → the §3.4 query returns `2800.33 + 50.00 + 17039.33 =
+  19889.66`. The empirically-reconciled identity on mirror
+  15712187.
+- **MTM delta with FX.** Using `mtm_delta_mirror_fixture` → delta
+  = `1 * 6.28927 * (1400.0 - 1207.4994) * 0.01331 ≈ 16.12`, so
+  mirror equity ≈ `available + 101.08 + 16.12`. Asserts FX is
+  applied to the delta.
 - **Short delta.** Same fixture with `is_buy = false` and
   `quotes.last = 1000.0` (below entry) → delta = `-1 * 6.28927 *
   (1000.0 - 1207.4994) * 0.01331 ≈ +17.37`, equity goes **up**
   because a short is profitable when the price falls.
-- **Closed mirror excluded from AUM.** Fixture with one
-  `active = TRUE` mirror and one `active = FALSE` mirror (both
-  with positions and cash) → §3.4 query returns only the active
-  mirror's equity; closed mirror contributes zero. This is the
-  regression test for the `WHERE m.active` filter.
+- **Closed mirror excluded from AUM.** Using `mirror_aum_fixture`
+  → §3.4 query returns only the active mirror's equity; closed
+  mirror contributes zero. Regression test for the
+  `WHERE m.active` filter.
+- **Empty `copy_mirrors` table → `mirror_equity = 0.0` (not null).**
+  Call `_load_mirror_equity(conn)` against an empty schema and
+  assert the returned value is the float `0.0`, not `None`. This
+  is the regression test for the §6.4 contract change (Codex v3
+  finding W).
 
 **Guard AUM integration test:**
 
@@ -1169,8 +1319,12 @@ Track 2's job is to turn that surface into:
    accumulating instrument X over a window, tilt the ranking engine in
    favour of X.
 4. Verification of the short-position AUM math on live mirrors.
-5. Graceful mirror-closure semantics (`closed_at` column, disappear
-   vs delete vs preserve-history policy).
+
+(The earlier draft had a "graceful mirror-closure semantics
+(`closed_at` column, disappear vs delete vs preserve-history
+policy)" bullet here. That work moved into Track 1 in round 2 —
+§1.2 `active`/`closed_at` columns and §2.3.4 soft-close semantics
+are now shipped in this PR. Removed in round 3.)
 
 Track 2 will introduce its own schema migration(s) for trader
 history, daily-gain series, cohort signals, and whatever
@@ -1183,7 +1337,7 @@ might need is not.
 
 ## 10. Open questions
 
-None at v2 spec-revision time. The load-bearing decisions are all
+None at v3 spec-revision time. The load-bearing decisions are all
 locked:
 
 - Three-table split (`copy_traders`, `copy_mirrors`,
@@ -1195,10 +1349,20 @@ locked:
 - Empty `mirrors[]` with active local rows → raise.
 - Partial disappearance → soft-close via `active` / `closed_at`
   columns; nested positions retained.
-- Any nested-position parse failure → strict raise, full sync
-  rollback, operator investigates.
+- Any parse failure on a row carrying a usable `mirrorID` (top-
+  level or nested) → strict raise `PortfolioParseError`, full sync
+  rollback, operator investigates. Only rows with no `mirrorID` at
+  all are log-and-skipped.
+- `PortfolioParseError` declared in
+  `app.providers.implementations.etoro_broker` as a direct
+  `Exception` subclass (not `ValueError` / `TypeError` / `KeyError`).
 - `openConversionRate` required in production; default only in
   test helpers.
+- `mirror_equity: float = 0.0` (not `float | None`) on
+  `PortfolioResponse`, aligned with §3.4's `COALESCE(SUM, 0)`.
+- `_sync_mirrors` soft-close SQL binds the injected `now`
+  parameter (not DB `NOW()`) so frozen-time tests are
+  deterministic.
 - AUM correction at all three call sites
   (execution_guard / api/portfolio / run_portfolio_review), no
   persisted AUM snapshot.
@@ -1208,7 +1372,7 @@ locked:
   historical gain series, cohort signals) is a separate ticket
   opened when this spec merges.
 
-If a third round of review surfaces new questions they will be
+If a fourth round of review surfaces new questions they will be
 appended here before the writing-plans handoff.
 
 ## Appendix A. Revision log
@@ -1298,8 +1462,83 @@ Findings and resolutions:
   not lock the data contract. Fix: §6.4 / §6.5 explicitly defer
   the new REST endpoint and the copy-trading panel to a Track 1.5
   follow-up PR (Appendix B). This PR ships only the AUM correction
-  and a single additive `mirror_equity: float | None` field on the
-  existing `PortfolioResponse`.
+  and a single additive `mirror_equity` field on the existing
+  `PortfolioResponse`. Round 3 later tightened the field type from
+  `float | None = None` to `float = 0.0` — see finding W.
+
+### Round 3 — Codex review of the round-2 revision
+
+See `.claude/codex-spec-review-v3.log` in the branch history.
+Findings and resolutions:
+
+- **U. `PortfolioParseError` hierarchy unspecified.** Codex v3
+  observed that if the new exception subclasses `ValueError` /
+  `TypeError` / `KeyError`, the existing outer-loop
+  `except (KeyError, ValueError, TypeError)` silently swallows
+  nested-position failures, defeating §2.3.3's strict-raise. Fix:
+  §2.2.1 declares `PortfolioParseError(Exception)` as a direct
+  `Exception` subclass in
+  `app.providers.implementations.etoro_broker`, and §8.1 adds a
+  unit test that asserts the hierarchy to prevent future drift.
+- **V. §2.2 log-and-skip of known mirrors is dangerous under
+  soft-close.** Codex v3 observed that a top-level parse failure
+  on a row with a valid `mirrorID` would be log-skipped by the
+  earlier asymmetric parser contract, then interpreted by §2.3.4
+  as a partial disappearance, then silently soft-closed — dropping
+  a still-live mirror from AUM for exactly the same failure mode
+  §2.3.3 already strict-raises on for nested positions. Fix:
+  §2.2.2 rewrites the parse contract so the only surviving
+  log-and-skip path is a row with **no `mirrorID` at all**; any
+  row with `mirrorID` present and a required top-level field
+  missing or malformed now raises `PortfolioParseError`, which the
+  outer loop catches first and re-raises. §8.3 adds a "known-mirror
+  top-level parse failure also aborts" regression test.
+- **W. `mirror_equity` contract ambiguous (`None` vs `0.0`).**
+  Codex v3 observed that §3.4's query returns `0` for no active
+  mirrors (wrapped in `COALESCE(SUM(...), 0)`) while §6.4 declared
+  the API field as `float | None = None` — an unnecessary
+  difference the frontend would have to branch on. Fix: §6.4
+  changes the field to `mirror_equity: float = 0.0`. `cash_balance`
+  keeps its `float | None` because "empty cash_ledger" is a
+  genuinely unknown domain state, unlike "no mirrors held" which
+  is a computed zero. §8.4 adds a regression test for the empty-
+  table case.
+- **W-bis. `PortfolioResponse` mis-described as `@dataclass`.**
+  While verifying W against the real code, discovered that §6.4
+  called `PortfolioResponse` a `@dataclass` when
+  [api/portfolio.py:63](app/api/portfolio.py#L63) declares it as
+  `class PortfolioResponse(BaseModel)` — a pydantic `BaseModel`.
+  Fix: §6.2 and §6.4 now correctly name the type.
+- **X. §2.3.4 SQL uses DB `NOW()` instead of the injected `now`.**
+  Codex v3 observed that the round-2 SQL sketch called
+  `NOW()` directly, which means tests that freeze time
+  (as the soft-close / re-copy tests need to in order to assert
+  exact `closed_at` / `updated_at` values) would drift from the
+  DB wall clock. Fix: §2.3.4 now binds `%(now)s` from the `now`
+  parameter `_sync_mirrors` already accepts in its signature, and
+  §8.0 fixture contract standardises the frozen timestamp
+  `datetime(2026, 4, 11, 5, 30, tzinfo=timezone.utc)` so every
+  deterministic test asserts against the same value. The manual
+  operator runbook on total-disappearance keeps `NOW()` — it is
+  typed by a human interactively, no injected `now` exists.
+- **Y. §8 test fixtures described narratively, not named.**
+  Codex v3 observed that several tests reference the same
+  underlying shape ("2 mirrors × 3 nested positions", "active +
+  closed mirror AUM") without a named fixture, which invites
+  implementation drift if the test author writes the shape from
+  scratch in each test. Fix: §8.0 names five fixtures —
+  `two_mirror_payload`, `two_mirror_seed_rows`,
+  `mirror_aum_fixture`, `no_quote_mirror_fixture`,
+  `mtm_delta_mirror_fixture` — with explicit shapes and the
+  frozen `now` contract, and every §8.1-8.4 test reads from them.
+- **Z. §9 Track 2 closure bullet stale.** Codex v3 observed that
+  the "graceful mirror-closure semantics (`closed_at` column,
+  disappear vs delete vs preserve-history policy)" bullet still
+  lived in the Track 2 preview even though round 2 moved the
+  work into Track 1 (§1.2 `active`/`closed_at` columns + §2.3.4
+  soft-close). Fix: §9 now explicitly records that the work moved
+  out of Track 2 in round 2 rather than silently deleting the
+  bullet, so future readers understand the migration.
 
 ## Appendix B. Track 1.5 — REST endpoint and frontend panel
 
