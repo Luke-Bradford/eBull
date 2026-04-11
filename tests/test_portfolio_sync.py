@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
@@ -16,8 +15,7 @@ from app.services.portfolio_sync import (
     _aggregate_by_instrument,
     sync_portfolio,
 )
-
-_NOW = datetime(2026, 4, 10, 5, 30, tzinfo=UTC)
+from tests.fixtures.copy_mirrors import _NOW
 
 
 def _is_zero_out_update(sql_arg: Any) -> bool:
