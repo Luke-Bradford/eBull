@@ -1014,10 +1014,19 @@ def _load_mirror_equity(conn: psycopg.Connection[Any]) -> float:
     """Return the summed mirror_equity across all active mirrors.
 
     Runs the §3.4 mirror-equity SQL under the existing connection
-    and returns a non-negative float (0.0 when copy_mirrors is
-    empty or every row is active = FALSE — matches §3.4's
-    COALESCE(SUM(...), 0) contract, see §6.4 for why `0.0` not
-    `None`).
+    and returns a float. The value is `0.0` when `copy_mirrors` is
+    empty or every row is `active = FALSE` — §3.4's
+    `COALESCE(SUM(...), 0)` turns an empty result set into `0.0`,
+    never `NULL`, which is why this function's return type is
+    `float` and not `float | None` (see §6.4 for the contract
+    rationale).
+
+    The value is usually non-negative but is NOT mathematically
+    floored at zero: if a mirror's MTM delta on a leveraged
+    position exceeds `available + SUM(amount)`, the per-mirror
+    term can go negative, and the aggregate can too. Callers treat
+    it as an additive AUM contribution and sum it directly into
+    `total_aum`; they do not assume it is non-negative.
     """
 ```
 
@@ -1034,13 +1043,27 @@ The §8.4 identity tests, the §8.5 guard integration test, and the
 helper — §8.4's "empty `copy_mirrors` → `0.0`" regression test is
 written as `_load_mirror_equity(conn)`, not as an inline query.
 
-### 6.1 `app/services/execution_guard.py` (lines 245-289)
+### 6.1 `app/services/execution_guard.py` — `_load_sector_exposure`
 
-Primary site — the execution guard denominator. Loads positions and
-cash, computes `total_aum`, then applies position-% and sector-% rules
-as ratios. Update: import `_load_mirror_equity` from §6.0 and sum its
-return value into `total_aum`. Sector and per-position aggregates
-are NOT touched, which is what §4 is about.
+Exact site: the private helper
+[`_load_sector_exposure`](app/services/execution_guard.py#L235)
+(lines 229-289), which currently computes `total_aum =
+total_positions + cash` at
+[execution_guard.py:286](app/services/execution_guard.py#L286).
+This function is called from `evaluate_recommendation`
+([execution_guard.py:593](app/services/execution_guard.py#L593))
+and returns the `total_aum` consumed by the concentration rule.
+The public `evaluate_recommendation` entry point is **not**
+modified — the change is surgical, inside the helper.
+
+Update: `_load_sector_exposure` imports `_load_mirror_equity`
+from §6.0 and sums its return value into `total_aum` **after**
+the existing `total_positions + cash` line. Sector numerator
+(`sector_values[sector]`) is NOT touched, which is what §4 is
+about — mirrors inflate the denominator only. `GuardResult` is
+not modified: AUM remains a local variable inside
+`evaluate_recommendation`, as it is today. §8.5 tests this
+function directly.
 
 ### 6.2 `app/api/portfolio.py` (`get_portfolio`, lines 111-175)
 
@@ -1219,13 +1242,61 @@ imported by every test that needs them via
   into `copy_mirrors` (active = TRUE) and `copy_mirror_positions`,
   ready for "seed the DB, call sync with a *different* payload"
   tests. Used by disappearance, re-copy, and parser-abort tests.
-- **`mirror_aum_fixture`** — one `active = TRUE` mirror and one
-  `active = FALSE` mirror (both carrying positions and cash) plus
-  matching quote rows for every position. This is the fixture used
-  by §8.4's "closed mirror excluded from AUM" test, the §8.4 guard
-  integration test ("existing guard baseline + one mirror"), **and**
-  the §8.4 three-call-site consistency test. Has deterministic
-  numbers so the expected `total_aum` is computable by hand.
+- **`mirror_aum_fixture`** — the load-bearing DB fixture for
+  §8.4 AUM identity, §8.5 guard integration, and §8.6 per-call-
+  site delta tests. Codex v5 (finding AH) required it to carry
+  enough state that all three call sites actually reach their
+  AUM blocks. Concretely, it seeds:
+
+  1. **Two mirrors in `copy_mirrors`** — one `active = TRUE`,
+     one `active = FALSE`, both with concrete
+     `available_amount`, `initial_investment`, `deposit_summary`,
+     `withdrawal_summary`, `closed_positions_net_profit`,
+     `started_copy_date` values (numbers small enough to
+     hand-compute the expected `total_aum`).
+  2. **Matching `copy_mirror_positions` rows** for each mirror —
+     at least one long position per mirror, with concrete
+     `units`, `open_rate`, `open_conversion_rate`, `amount`,
+     `is_buy = TRUE`, and distinct `instrument_id` values so the
+     §3.4 LATERAL join has a non-empty result for the active
+     mirror and an equal contribution (which the `WHERE m.active`
+     filter then zeroes out) for the closed one.
+  3. **Matching `quotes` rows** for every mirror position's
+     instrument — so the §3.4 query's `COALESCE(q.last,
+     cmp.open_rate)` fallback is exercised for at least one
+     position (quote present) and at least one position is
+     tested with no quote (quote absent → falls back to
+     cost basis).
+  4. **An `instruments` row for at least one of the mirror
+     instrument IDs** — §8.5's `_load_sector_exposure` call
+     needs a matching instrument in `instruments` to resolve a
+     sector. The fixture picks one mirror-held instrument as
+     the "guard test instrument" and sets its sector to an
+     explicit value so the sector-numerator assertion in §8.5
+     is deterministic.
+  5. **A single `latest_scores` row** for any instrument (does
+     NOT need to be one of the mirror-held IDs) keyed on
+     `model_version = "v1-balanced"` — this is the §8.6 Test 2
+     precondition that prevents `run_portfolio_review` from
+     early-returning at
+     [portfolio.py:733](app/services/portfolio.py#L733) before
+     it reaches the AUM block. Without this row the review
+     path never exercises `_load_mirror_equity`, so the test
+     is silently a no-op.
+  6. **Empty `positions` and `cash_ledger`** — the fixture
+     intentionally carries no eBull-owned positions or cash so
+     the expected `total_aum` in the delta tests is exactly
+     `_load_mirror_equity(conn)` plus `(0 + 0)`. §8.6's
+     "baseline" repeat then flips the active mirror's
+     `active = FALSE` and asserts `total_aum` returns to 0.
+     (A separate dedicated test for the full
+     `positions + cash + mirror_equity` combination lives in
+     §8.4 identity tests, which use this same fixture and add
+     one position + one cash row via `UPDATE`/`INSERT` setup
+     helpers.)
+
+  Has deterministic numbers so the expected `total_aum` is
+  computable by hand from the fixture's declared values.
 - **`no_quote_mirror_fixture`** — the empirically-reconciled mirror
   15712187 shape (`available = 2800.33`, positions
   `amount = 50.00` and `amount = 17039.33`) with no matching quotes
@@ -1237,17 +1308,34 @@ imported by every test that needs them via
   FX test (and its short-side variant, which flips `is_buy`
   and swaps the quote).
 
-**Frozen `now` value.** All fixtures share the module constant
-`_NOW = datetime(2026, 4, 10, 5, 30, tzinfo=UTC)`, reusing the
-exact value already declared at
-[tests/test_portfolio_sync.py:20](tests/test_portfolio_sync.py#L20).
-Picking the existing value rather than a new one means tests that
-sit alongside each other can assert the same timestamp without
-importing two different `_NOW` constants, and it avoids Codex v4's
-drift warning. The new fixture file re-exports `_NOW` (or imports
-from the existing test module) so there is one canonical value.
-This is the `now` parameter §2.3.4 binds as `%(now)s` in the
-soft-close SQL.
+**Frozen `now` value — ownership locked to the fixture file.**
+`tests/fixtures/copy_mirrors.py` **owns** the canonical module
+constant:
+
+```python
+_NOW: datetime = datetime(2026, 4, 10, 5, 30, tzinfo=UTC)
+```
+
+The value is identical to the constant currently declared at
+[tests/test_portfolio_sync.py:20](tests/test_portfolio_sync.py#L20),
+so behaviour is preserved. As part of this PR,
+`tests/test_portfolio_sync.py` is edited to remove its local
+declaration and import the constant from the fixture module
+instead:
+
+```python
+from tests.fixtures.copy_mirrors import _NOW
+```
+
+Codex v5 (finding AI) correctly observed that fixtures importing
+from a test module is backwards coupling — tests depend on
+fixtures, not the other way around. Owning `_NOW` in the fixture
+module fixes the coupling direction in a single file rename +
+import swap, with zero behavioural change.
+
+`_NOW` is the `now` parameter §2.3.4 binds as `%(now)s` in the
+soft-close SQL; §8.3's disappearance tests assert the exact
+value round-trips through the SQL as the stored `closed_at`.
 
 ### 8.1 Parser unit tests (pure, no DB)
 
@@ -1379,38 +1467,115 @@ Every test below starts from `two_mirror_seed_rows` and calls
 
 ### 8.5 Guard AUM integration test
 
-Uses `mirror_aum_fixture` + the existing guard baseline fixture.
+Tests the guard-side integration surgically at the private helper
+level, not via `evaluate_recommendation` end-to-end. Codex v5
+finding AG correctly observed that:
+
+- The existing guard entry point is `evaluate_recommendation`
+  (not `run_execution_guard`), and
+- `GuardResult` has no `total_aum` field (AUM is a local variable
+  inside `evaluate_recommendation`, consumed by the concentration
+  rule and not exposed on the return value).
+
+So the guard integration test targets
+`_load_sector_exposure(conn, instrument_id)`
+([execution_guard.py:235](app/services/execution_guard.py#L235)) —
+the private helper that returns `total_aum` and is the exact
+function §6.1 modifies to add `_load_mirror_equity(conn)` to the
+existing `total_positions + cash` sum.
+
+Fixture: `mirror_aum_fixture` (§8.0) seeded into `ebull_test`,
+plus an `instruments` row for the instrument passed to
+`_load_sector_exposure` (any instrument_id present in the mirror
+positions will do). No `evaluate_recommendation`,
+`trade_recommendations`, `kill_switch`, or `runtime_config` setup
+needed — `_load_sector_exposure` does not touch those tables.
+
 Scenarios:
 
-- Baseline (no active mirrors, all mirror rows soft-closed) →
-  `total_aum` equals the existing guard baseline.
-- Active `mirror_aum_fixture` mirror with its positions and cash →
-  `total_aum` increases by exactly
-  `available_amount + SUM(amount) + SUM(MTM delta)` as computed
-  from the fixture's known values.
-- Sector exposure check on an instrument that is held in the
-  mirror but not in `positions` → sector exposure numerator is 0
-  (mirror is ignored for concentration), AUM denominator is still
-  increased (rule is more permissive, not less).
-- Soft-close the same mirror (flip `active = FALSE` with an
-  `UPDATE` statement at test-setup time) → AUM returns to the
-  baseline.
+- **Empty baseline (no mirrors at all).** `_load_sector_exposure`
+  returns `total_aum == positions_mv + cash`, the pre-PR contract.
+- **Active mirror adds to denominator.** Seed
+  `mirror_aum_fixture`'s active mirror (with positions + available
+  cash + matching quotes). `_load_sector_exposure` now returns
+  `total_aum == positions_mv + cash + _load_mirror_equity(conn)`
+  where `_load_mirror_equity(conn)` is computed once from the
+  same connection as the expected additive contribution.
+- **Closed mirror contributes nothing.** Flip `mirror_aum_fixture`'s
+  active mirror to `active = FALSE` via an `UPDATE` at test
+  setup. `_load_sector_exposure` returns the baseline again —
+  soft-closed mirrors do not inflate the denominator.
+- **Sector numerator unchanged.** With an active mirror holding an
+  instrument NOT in `positions`, `_load_sector_exposure`'s
+  `current_sector_pct` numerator is unaffected. The mirror only
+  expands the denominator; the rule stays more permissive, not
+  less. This is the regression test for §4 "execution guard
+  isolation".
 
-### 8.6 Three-call-site AUM consistency test
+### 8.6 AUM delta tests per call site
 
-Uses `mirror_aum_fixture` — the same DB state is observed through
-all three AUM paths in one test to prove they agree:
+Codex v5 finding AG/AH correctly observed that the earlier
+"three-call-site consistency" framing asserted an equality
+surface (`same mirror_equity component`) that does not exist on
+the `GuardResult` return value, and that `run_portfolio_review`
+early-returns before the AUM block when there are no ranked
+candidates. The rewrite below tests each path independently,
+using `_load_mirror_equity(conn)` computed against the same DB
+state as the **expected additive contribution**, and asserts each
+path's `total_aum` absorbs exactly that value vs. a baseline with
+mirrors soft-closed. Three separate tests, not one mega-test.
+The common thread is that the additive delta is read from
+`_load_mirror_equity(conn)` — if a future PR breaks any one path,
+its test alone fails.
 
-1. Direct `execution_guard` call via `run_execution_guard`
-2. `GET /api/portfolio` via `TestClient`
-3. `run_portfolio_review`
+Shared bootstrap (all three tests): `ebull_test`,
+`mirror_aum_fixture` seeded, plus the per-path extras below.
+`expected_mirror_contribution = _load_mirror_equity(conn)` is
+computed once in each test's setup, before the call site fires.
 
-All three must report the same `total_aum`, and specifically the
-same `mirror_equity` component. This is the regression test for
-§6 — if a future PR updates one AUM path but not the others, this
-test fails. The test does **not** assert anything about persisted
-AUM snapshots, because (per §6.3) no AUM snapshot is persisted
-anywhere in this PR.
+**Test 1 — API path.** `GET /api/portfolio` via `TestClient` with
+`app.dependency_overrides[get_conn]` pointing at the `ebull_test`
+connection. Assertions:
+
+- `response.json()["mirror_equity"] == expected_mirror_contribution`
+- `response.json()["total_aum"] == (positions_market_value + cash + expected_mirror_contribution)`
+
+Baseline repeat with the mirror soft-closed (UPDATE `active =
+FALSE`) → `mirror_equity == 0.0` and `total_aum` returns to
+`positions + cash`.
+
+**Test 2 — `run_portfolio_review` path.** Calls
+`run_portfolio_review(conn)` with the `mirror_aum_fixture`
+**plus at least one `latest_scores` row** (any instrument,
+matching `model_version`) so the early-return at
+[portfolio.py:733](app/services/portfolio.py#L733) is not hit
+and the AUM block actually runs. `latest_scores` setup is part
+of `mirror_aum_fixture` (see §8.0). Assertion:
+
+- `result.total_aum == (positions_market_value + (cash or 0.0) + expected_mirror_contribution)`
+
+Baseline repeat with the mirror soft-closed → `result.total_aum`
+returns to `positions + cash`.
+
+**Test 3 — guard path.** Directly calls
+`_load_sector_exposure(conn, instrument_id)` (same as §8.5) and
+asserts its returned `total_aum` carries the `expected_mirror_
+contribution`. This is the same function and assertion surface
+as §8.5, repeated here under the "delta per call site" framing
+for symmetry — the test is cheap and it keeps the §8.6 block
+self-contained. If §8.5 is implemented, this sub-test is one
+line (`assert sector_exposure_total_aum == positions + cash +
+expected_mirror_contribution`).
+
+**What this test explicitly does NOT assert:**
+
+- Cross-path equality of a `mirror_equity` *field*. Only
+  `PortfolioResponse` exposes a `mirror_equity` field (see §6.2);
+  `PortfolioReviewResult` and `GuardResult` do not. §6 does not
+  add them because the review/guard paths only care about the
+  additive sum, not the component. Asserting a field that
+  doesn't exist would be theatre.
+- Persisted AUM snapshots. Per §6.3, no AUM snapshot is written.
 
 **Smoke gate:** `tests/smoke/test_app_boots.py` remains green (the
 FastAPI lifespan touches nothing new; migration 022 runs during
@@ -1467,7 +1632,7 @@ might need is not.
 
 ## 10. Open questions
 
-None at v4 spec-revision time. The load-bearing decisions are all
+None at v5 spec-revision time. The load-bearing decisions are all
 locked:
 
 - Three-table split (`copy_traders`, `copy_mirrors`,
@@ -1500,10 +1665,29 @@ locked:
   `app/services/portfolio.py` alongside `_load_cash` /
   `_load_positions`, imported by `execution_guard`, `api/portfolio`,
   and `run_portfolio_review` (§6.0).
+- The execution_guard change is surgical: `_load_sector_exposure`
+  at [execution_guard.py:235](app/services/execution_guard.py#L235)
+  adds the mirror-equity contribution to its local `total_aum`
+  return value. `evaluate_recommendation` and `GuardResult` are
+  not touched; AUM remains a local variable inside the guard,
+  consumed by the concentration rule. (§6.1, locked round 5.)
 - Shared copy-trading test fixtures live in a new file
-  `tests/fixtures/copy_mirrors.py` (not `conftest.py`) and reuse
-  the existing `_NOW = datetime(2026, 4, 10, 5, 30, UTC)`
-  constant from `tests/test_portfolio_sync.py:20`.
+  `tests/fixtures/copy_mirrors.py` (not `conftest.py`). The
+  fixture file **owns** the canonical `_NOW = datetime(2026,
+  4, 10, 5, 30, UTC)` constant; `tests/test_portfolio_sync.py`
+  is edited in this PR to import `_NOW` from the fixture
+  module instead of declaring it locally. (§8.0, locked round 5.)
+- `mirror_aum_fixture` seeds two mirrors (one active, one
+  closed) with positions/quotes, **plus** one `instruments` row
+  for the guard sector-exposure assertion, **plus** one
+  `latest_scores` row so `run_portfolio_review` does not early-
+  return before reaching the AUM block. (§8.0, locked round 5.)
+- AUM correction at all three call sites tested via
+  `_load_mirror_equity(conn)` as the expected additive
+  contribution — no cross-path `mirror_equity` field equality
+  assertion, because only `PortfolioResponse` exposes that
+  field; `PortfolioReviewResult` and `GuardResult` do not.
+  (§8.6, locked round 5.)
 - AUM correction at all three call sites
   (execution_guard / api/portfolio / run_portfolio_review), no
   persisted AUM snapshot.
@@ -1513,7 +1697,7 @@ locked:
   historical gain series, cohort signals) is a separate ticket
   opened when this spec merges.
 
-If a fifth round of review surfaces new questions they will be
+If a sixth round of review surfaces new questions they will be
 appended here before the writing-plans handoff.
 
 ## Appendix A. Revision log
@@ -1738,6 +1922,68 @@ Findings and resolutions:
   clock instead of the injected `now`. Fix: §1.2 now says
   "marked `active=false, closed_at=<injected sync timestamp>`"
   with an explicit forward pointer to §2.3.4.
+
+### Round 5 — Codex review of the round-4 revision
+
+See `.claude/codex-spec-review-v5.log` in the branch history.
+Findings and resolutions:
+
+- **AG. §8.6 named a non-existent guard entry point and
+  asserted a non-existent return-value field.** Codex v5
+  observed that the round-4 §8.6 called
+  `run_execution_guard`, which does not exist — the guard's
+  public entry point is
+  [`evaluate_recommendation`](app/services/execution_guard.py#L538)
+  and its return type `GuardResult` has no `total_aum` or
+  `mirror_equity` field. `total_aum` is a local variable
+  inside `evaluate_recommendation`, computed by the private
+  helper `_load_sector_exposure`
+  ([execution_guard.py:235](app/services/execution_guard.py#L235))
+  and consumed by the concentration rule; it is not
+  exposed on any return value. The round-4 "three-call-
+  site consistency" framing therefore asserted equality
+  across a surface that does not exist. Fix: §6.1 is
+  rewritten to name `_load_sector_exposure` as the exact
+  private function being modified; §8.5 tests that function
+  directly; §8.6 is rewritten as three per-call-site delta
+  tests (API / review / guard), each computing
+  `_load_mirror_equity(conn)` once as the expected additive
+  contribution and asserting the path's `total_aum`
+  absorbs that value. No cross-path `mirror_equity` field
+  equality is asserted — only `PortfolioResponse` exposes
+  a `mirror_equity` field, so only the API test asserts
+  it. §8.6's explicit "what this test does NOT assert"
+  block locks this scope in writing.
+- **AH. §8.5/§8.6 fixture shape missing state for the
+  review and guard paths.** Codex v5 observed that
+  `run_portfolio_review` returns early at
+  [portfolio.py:733](app/services/portfolio.py#L733) when
+  there are no ranked candidates and no open positions,
+  before the AUM block ever runs; and that `mirror_aum_
+  fixture` as defined in round 4 did not seed an
+  `instruments` row for the guard path's sector lookup,
+  nor a `latest_scores` row to bypass the review early-
+  return. This meant §8.6 Test 2 (review path) would
+  silently be a no-op. Fix: `mirror_aum_fixture`'s §8.0
+  entry now explicitly enumerates six components: two
+  mirrors, their positions, matching quotes, an
+  `instruments` row for the guard path, a `latest_scores`
+  row for the review path, and empty
+  `positions`/`cash_ledger` so the expected `total_aum`
+  collapses to `_load_mirror_equity(conn)` plus `(0 + 0)`
+  in the delta tests.
+- **AI. §8.0 `_NOW` ownership still hedged as "or".** Codex
+  v5 observed that round 4's fix pinned the fixture path
+  but left `_NOW` ownership open with "re-exports `_NOW`
+  (or imports from the existing test module)". Fix: §8.0
+  now locks `tests/fixtures/copy_mirrors.py` as the
+  canonical owner of `_NOW = datetime(2026, 4, 10, 5, 30,
+  tzinfo=UTC)`. `tests/test_portfolio_sync.py` is edited
+  in this PR to import `_NOW` from the fixture module
+  instead of declaring it locally. The value is
+  bit-identical, so behaviour is preserved; the coupling
+  direction (tests depend on fixtures, not the reverse)
+  is now correct. §10 reflects this as a locked decision.
 
 ## Appendix B. Track 1.5 — REST endpoint and frontend panel
 
