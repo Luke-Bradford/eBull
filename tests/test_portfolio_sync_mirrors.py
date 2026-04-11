@@ -16,9 +16,14 @@ import psycopg.rows
 import psycopg.sql
 import pytest
 
+from app.providers.implementations.etoro_broker import (
+    PortfolioParseError,
+    _parse_mirrors_payload,
+)
 from app.services.portfolio_sync import sync_portfolio
 from tests.fixtures.copy_mirrors import (
     _NOW,
+    parse_failure_payload,
     two_mirror_payload,
     two_mirror_seed_rows,
 )
@@ -279,3 +284,86 @@ def test_sync_mirrors_recopy_resurrects_closed_mirror(
     assert row is not None
     assert row["active"] is True
     assert row["closed_at"] is None
+
+
+def test_sync_mirrors_total_disappearance_raises(
+    conn: psycopg.Connection[Any],
+) -> None:
+    """Spec §2.3.4 asymmetry: if the payload mirrors[] is empty but
+    local active mirrors exist, raise RuntimeError. Rows survive
+    unchanged after the rollback."""
+    two_mirror_seed_rows(conn)
+    conn.commit()
+
+    empty_payload = dataclasses.replace(two_mirror_payload(), mirrors=())
+
+    with pytest.raises(RuntimeError, match="empty mirrors"):
+        sync_portfolio(conn, empty_payload, now=_NOW)
+    conn.rollback()
+
+    # Both rows survive as active=TRUE.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("SELECT active FROM copy_mirrors ORDER BY mirror_id")
+        rows = cur.fetchall()
+    assert len(rows) == 2
+    assert all(r["active"] is True for r in rows)
+
+
+def test_sync_mirrors_parser_failure_aborts_before_eviction(
+    conn: psycopg.Connection[Any],
+) -> None:
+    """Spec §2.3.3: if _parse_mirrors_payload raises
+    PortfolioParseError, the sync transaction is rolled back before
+    any upsert or eviction touches the DB. Seed rows survive
+    unchanged — this is the regression test for the Codex v3
+    finding V parse-and-soft-close hole."""
+    two_mirror_seed_rows(conn)
+    conn.commit()
+    baseline_positions = _count(conn, "copy_mirror_positions")
+    assert baseline_positions == 6
+
+    raw_failure = parse_failure_payload()
+    with pytest.raises(PortfolioParseError):
+        # The failure fires inside the parser — callers of
+        # sync_portfolio parse first, then call sync. In production
+        # this is get_portfolio → sync_portfolio; in tests we
+        # exercise the same ordering explicitly.
+        _ = _parse_mirrors_payload(raw_failure)
+
+    # sync_portfolio is never called — rows untouched.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("SELECT active FROM copy_mirrors ORDER BY mirror_id")
+        rows = cur.fetchall()
+    assert len(rows) == 2
+    assert all(r["active"] is True for r in rows)
+    assert _count(conn, "copy_mirror_positions") == baseline_positions
+
+
+def test_sync_mirrors_known_mirror_top_level_parse_failure_aborts(
+    conn: psycopg.Connection[Any],
+) -> None:
+    """Spec §2.2.2 / §2.3.3: a known mirrorID with a missing
+    required top-level field raises PortfolioParseError, NOT
+    log-and-skip. The outer _parse_mirrors_payload wraps the
+    underlying KeyError. Without this, the sync would interpret
+    the known mirror as disappeared and soft-close it — the hole
+    Codex v3 finding V identified."""
+    two_mirror_seed_rows(conn)
+    conn.commit()
+
+    bad_raw = parse_failure_payload()
+    # Break the top-level field (not the nested one) this time.
+    bad_raw[0]["positions"][0]["units"] = "1.0"  # fix the nested row
+    del bad_raw[0]["availableAmount"]  # break the top-level row
+
+    with pytest.raises(PortfolioParseError) as excinfo:
+        _parse_mirrors_payload(bad_raw)
+    assert "15712187" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, KeyError)
+
+    # Seed rows are untouched — sync_portfolio never reached.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("SELECT active FROM copy_mirrors ORDER BY mirror_id")
+        rows = cur.fetchall()
+    assert len(rows) == 2
+    assert all(r["active"] is True for r in rows)
