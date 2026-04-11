@@ -1064,6 +1064,7 @@ def execute_approved_orders() -> None:
                             decision_id=decision_id,
                             broker=broker,
                         )
+                        conn.commit()
                     if result.outcome == "filled":
                         executed += 1
                         logger.info(
