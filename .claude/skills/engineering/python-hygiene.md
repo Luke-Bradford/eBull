@@ -58,6 +58,15 @@ Within each `from X import a, b, c`: names alphabetically sorted. Blank line bet
 2. third-party
 3. first-party
 
+**All imports at the top of the file.** Never import inside a function or method body. This includes test files — `import pytest` belongs at module level with the other imports, not inside a test case. Ruff does not enforce this by default (`PLC0415` is opt-in), so it is on the author to catch it in pre-flight review.
+
+Exceptions are rare and narrow:
+
+- Avoiding a genuine circular import that cannot be resolved by rearranging modules.
+- Lazy-loading an expensive optional dependency that is only used on a cold path.
+
+Every inline import must have a comment explaining *which* exception applies.
+
 Run `uv run ruff check --select I .` to verify. Any import sort violation fails CI.
 
 ## Error escalation from helpers
