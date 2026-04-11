@@ -554,6 +554,10 @@ class TestRequestBodyShape:
 # get_portfolio
 # ---------------------------------------------------------------------------
 
+# Field names match the real eToro /portfolio endpoint:
+# - `openRate` (not `openPrice`) is the entry price
+# - no current-price field exists in this endpoint — current prices
+#   must be fetched separately from /instruments/rates
 FIXTURE_FULL_PORTFOLIO_RESPONSE = {
     "clientPortfolio": {
         "positions": [
@@ -561,15 +565,13 @@ FIXTURE_FULL_PORTFOLIO_RESPONSE = {
                 "instrumentID": 1001,
                 "positionID": 98765,
                 "units": 5.0,
-                "openPrice": 150.00,
-                "currentPrice": 160.00,
+                "openRate": 150.00,
             },
             {
                 "instrumentID": 1002,
                 "positionID": 98766,
                 "units": 10.0,
-                "openPrice": 50.00,
-                "currentPrice": 48.50,
+                "openRate": 50.00,
             },
         ],
         "credit": 50000.50,
@@ -599,11 +601,17 @@ class TestGetPortfolio:
         assert p1.instrument_id == 1001
         assert p1.units == Decimal("5.0")
         assert p1.open_price == Decimal("150.0")
-        assert p1.current_price == Decimal("160.0")
+        # current_price is a neutral placeholder (= open_price) because the
+        # portfolio endpoint doesn't provide a current price. This makes
+        # sync-time PnL aggregation evaluate to zero instead of producing
+        # bogus negative values.
+        assert p1.current_price == Decimal("150.0")
 
         p2 = result.positions[1]
         assert p2.instrument_id == 1002
         assert p2.units == Decimal("10.0")
+        assert p2.open_price == Decimal("50.0")
+        assert p2.current_price == Decimal("50.0")
 
     def test_empty_portfolio(self, _mock_persist: MagicMock) -> None:
         mock_resp = MagicMock()

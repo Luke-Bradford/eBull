@@ -430,12 +430,25 @@ class EtoroBrokerProvider(BrokerProvider):
             iid = pos.get("instrumentID")
             if iid is None:
                 continue
+            # eToro's /portfolio endpoint returns `openRate` for the entry
+            # price and does NOT include a current price field at all.
+            # Current market price must be fetched separately from
+            # /api/v1/market-data/instruments/rates if needed.
+            #
+            # We set current_price = open_price as a neutral placeholder so
+            # the PnL aggregation `(current_price - open_price) * units`
+            # evaluates to zero instead of `(0 - open_rate) * units` (a
+            # large negative number). The portfolio API computes live
+            # unrealised PnL from the `quotes` table on read, so this
+            # placeholder is only used by sync-time aggregation and is
+            # never surfaced to the dashboard.
+            open_rate = Decimal(str(pos.get("openRate", 0)))
             positions.append(
                 BrokerPosition(
                     instrument_id=int(iid),
                     units=Decimal(str(pos.get("units", 0))),
-                    open_price=Decimal(str(pos.get("openPrice", 0))),
-                    current_price=Decimal(str(pos.get("currentPrice", 0))),
+                    open_price=open_rate,
+                    current_price=open_rate,
                     raw_payload=pos,
                 )
             )

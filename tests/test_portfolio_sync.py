@@ -186,25 +186,34 @@ class TestExternallyOpenedPosition:
 
 
 class TestExternallyClosedPosition:
-    """Local position absent from broker → zero out."""
+    """Local position absent from broker → zero out.
+
+    Tests use a non-empty broker portfolio (containing at least one
+    unrelated position) so the whole-portfolio-empty guard does not
+    fire.  See ``TestEmptyBrokerGuard`` for that path.
+    """
 
     def test_zeros_out_missing_position(self) -> None:
+        # Local has two open positions; broker only reports one of them.
+        # This isolates the close path — no insert side-effect from a
+        # broker-only instrument.
         conn = _mock_conn(
-            local_positions=[(7, Decimal("10"))],
+            local_positions=[(7, Decimal("10")), (8, Decimal("1"))],
             local_cash=Decimal("0"),
         )
-        # Empty broker portfolio — position 7 was closed externally.
-        result = sync_portfolio(conn, _portfolio([]), now=_NOW)
+        broker_pos = _pos(instrument_id=8, units=Decimal("1"))
+        result = sync_portfolio(conn, _portfolio([broker_pos]), now=_NOW)
 
         assert result.positions_closed_externally == 1
-        assert result.positions_updated == 0
+        assert result.positions_opened_externally == 0
 
     def test_sends_zero_units_in_update(self) -> None:
         conn = _mock_conn(
-            local_positions=[(7, Decimal("10"))],
+            local_positions=[(7, Decimal("10")), (8, Decimal("1"))],
             local_cash=Decimal("0"),
         )
-        sync_portfolio(conn, _portfolio([]), now=_NOW)
+        broker_pos = _pos(instrument_id=8, units=Decimal("1"))
+        sync_portfolio(conn, _portfolio([broker_pos]), now=_NOW)
 
         update_calls = [
             c
@@ -213,6 +222,52 @@ class TestExternallyClosedPosition:
         ]
         assert len(update_calls) == 1
         assert update_calls[0].args[1]["iid"] == 7
+
+
+class TestEmptyBrokerGuard:
+    """Empty broker + non-empty local state → refuse to zero out.
+
+    A legitimate "user liquidated everything in one cycle" scenario is
+    indistinguishable from an upstream API failure returning HTTP 200
+    with an empty body.  To prevent silent data loss on the positions
+    table, the sync raises — the tracked-job wrapper records the failure
+    in ``job_runs`` so operators are alerted.
+    """
+
+    def test_raises_when_broker_empty_but_local_has_positions(self) -> None:
+        import pytest
+
+        conn = _mock_conn(
+            local_positions=[(7, Decimal("10"))],
+            local_cash=Decimal("0"),
+        )
+        with pytest.raises(RuntimeError, match="empty positions"):
+            sync_portfolio(conn, _portfolio([]), now=_NOW)
+
+    def test_does_not_zero_any_positions_when_raising(self) -> None:
+        import pytest
+
+        conn = _mock_conn(
+            local_positions=[(7, Decimal("10")), (8, Decimal("5"))],
+            local_cash=Decimal("0"),
+        )
+        with pytest.raises(RuntimeError):
+            sync_portfolio(conn, _portfolio([]), now=_NOW)
+
+        # No zero-out UPDATEs must have been issued.
+        zero_updates = [
+            c for c in conn.execute.call_args_list if isinstance(c.args[0], str) and "current_units  = 0" in c.args[0]
+        ]
+        assert zero_updates == []
+
+    def test_empty_broker_with_empty_local_does_not_raise(self) -> None:
+        """Boundary: fully empty on both sides is a valid no-op."""
+        conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
+        result = sync_portfolio(conn, _portfolio([], Decimal("0")), now=_NOW)
+        assert result.positions_closed_externally == 0
+        assert result.positions_opened_externally == 0
+        assert result.positions_updated == 0
+        assert result.cash_delta == Decimal("0")
 
 
 class TestCashReconciliation:
