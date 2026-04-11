@@ -233,9 +233,14 @@ def _load_sector_exposure(
     the caller must treat this as a hard failure, not a pass.
     current_sector_pct is the fraction of AUM currently in the same sector as
     instrument_id (excluding the instrument itself, since it is unowned for BUY).
-    total_aum = SUM(position mark-to-market) + cash + active mirror equity.
-    Returns 0.0 when unknown. Mirrors expand the denominator only — the sector
-    numerator is untouched (spec §4, #187).
+    total_aum = SUM(position mark-to-market, **excluding the queried
+    instrument**) + cash + active mirror equity. The positions SELECT at
+    line ~269 filters `p.instrument_id != %(iid)s` (added in c006ae6 as a
+    bug fix for #9 — without this, ADD actions on an already-held position
+    would double-count the existing holding). This exclusion therefore
+    applies to the whole total_aum figure the caller sees, not just to the
+    sector numerator. Returns 0.0 when unknown. Mirrors expand the
+    denominator only — the sector numerator is untouched (spec §4, #187).
     """
     # Instrument sector
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
