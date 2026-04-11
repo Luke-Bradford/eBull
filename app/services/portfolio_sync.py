@@ -211,6 +211,22 @@ def sync_portfolio(
             )
 
     # 2. Zero out local positions absent from broker.
+    #
+    # Guard: if the broker returned zero positions but we have local open
+    # positions, treat this as a likely API failure (auth lapse, stale
+    # session, or transient error returning HTTP 200 with an empty body)
+    # rather than a legitimate "user liquidated everything" event.
+    # Raising here marks the job as failed in `job_runs`, alerting the
+    # operator, and prevents silent data loss on the positions table.
+    # Legitimate liquidation is expected to be a per-position event, not
+    # a whole-portfolio wipe in a single cycle.
+    if not broker_positions and local_rows:
+        raise RuntimeError(
+            f"Broker returned empty positions but {len(local_rows)} local "
+            f"position(s) exist — refusing to zero out local state. "
+            f"Likely an upstream API failure (auth, session, or transient)."
+        )
+
     for row in local_rows:
         iid = row["instrument_id"]
         if iid not in broker_positions:

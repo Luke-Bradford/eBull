@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
+
+import pytest
 
 from app.providers.broker import BrokerPortfolio, BrokerPosition
 from app.services.portfolio_sync import (
@@ -15,6 +18,20 @@ from app.services.portfolio_sync import (
 )
 
 _NOW = datetime(2026, 4, 10, 5, 30, tzinfo=UTC)
+
+
+def _is_zero_out_update(sql_arg: Any) -> bool:
+    """True if ``sql_arg`` is the zero-out UPDATE SQL.
+
+    Whitespace-tolerant: the production SQL aligns column names with
+    extra spaces (``current_units  = 0``), but the test must not break
+    if that alignment ever changes.  We normalise runs of whitespace
+    to a single space before substring-matching.
+    """
+    if not isinstance(sql_arg, str):
+        return False
+    normalised = re.sub(r"\s+", " ", sql_arg)
+    return "UPDATE positions SET" in normalised and "current_units = 0" in normalised
 
 
 def _pos(
@@ -186,33 +203,92 @@ class TestExternallyOpenedPosition:
 
 
 class TestExternallyClosedPosition:
-    """Local position absent from broker → zero out."""
+    """Local position absent from broker → zero out.
+
+    Tests use a non-empty broker portfolio (containing at least one
+    unrelated position) so the whole-portfolio-empty guard does not
+    fire.  See ``TestEmptyBrokerGuard`` for that path.
+    """
 
     def test_zeros_out_missing_position(self) -> None:
+        # Local has two open positions; broker only reports one of them.
+        # This isolates the close path — no insert side-effect from a
+        # broker-only instrument.
         conn = _mock_conn(
-            local_positions=[(7, Decimal("10"))],
+            local_positions=[(7, Decimal("10")), (8, Decimal("1"))],
             local_cash=Decimal("0"),
         )
-        # Empty broker portfolio — position 7 was closed externally.
-        result = sync_portfolio(conn, _portfolio([]), now=_NOW)
+        broker_pos = _pos(instrument_id=8, units=Decimal("1"))
+        result = sync_portfolio(conn, _portfolio([broker_pos]), now=_NOW)
 
         assert result.positions_closed_externally == 1
-        assert result.positions_updated == 0
+        assert result.positions_opened_externally == 0
 
     def test_sends_zero_units_in_update(self) -> None:
         conn = _mock_conn(
+            local_positions=[(7, Decimal("10")), (8, Decimal("1"))],
+            local_cash=Decimal("0"),
+        )
+        broker_pos = _pos(instrument_id=8, units=Decimal("1"))
+        sync_portfolio(conn, _portfolio([broker_pos]), now=_NOW)
+
+        update_calls = [c for c in conn.execute.call_args_list if _is_zero_out_update(c.args[0])]
+        assert len(update_calls) == 1
+        assert update_calls[0].args[1]["iid"] == 7
+
+
+class TestEmptyBrokerGuard:
+    """Empty broker + non-empty local state → refuse to zero out.
+
+    A legitimate "user liquidated everything in one cycle" scenario is
+    indistinguishable from an upstream API failure returning HTTP 200
+    with an empty body.  To prevent silent data loss on the positions
+    table, the sync raises — the tracked-job wrapper records the failure
+    in ``job_runs`` so operators are alerted.
+    """
+
+    def test_raises_when_broker_empty_but_local_has_positions(self) -> None:
+        conn = _mock_conn(
             local_positions=[(7, Decimal("10"))],
             local_cash=Decimal("0"),
         )
-        sync_portfolio(conn, _portfolio([]), now=_NOW)
+        # Match on the distinctive "refusing to zero" phrase from the
+        # guard's error message rather than generic substrings, so an
+        # accidental RuntimeError raised elsewhere in the call stack
+        # would not satisfy this assertion.
+        with pytest.raises(RuntimeError, match="refusing to zero"):
+            sync_portfolio(conn, _portfolio([]), now=_NOW)
 
-        update_calls = [
-            c
-            for c in conn.execute.call_args_list
-            if isinstance(c.args[0], str) and "UPDATE positions SET" in c.args[0] and "current_units  = 0" in c.args[0]
-        ]
-        assert len(update_calls) == 1
-        assert update_calls[0].args[1]["iid"] == 7
+    def test_guard_raises_before_any_write(self) -> None:
+        """Strongest form of the guard test: raise happens before any write.
+
+        The production code's ``conn.execute(...)`` path is used only
+        for writes (UPDATE/INSERT); reads go through
+        ``conn.cursor(...)``.  So if the guard fires *before* the
+        zeroing loop, ``conn.execute.call_args_list`` must be empty at
+        the point of raising.  This catches a broken guard that moves
+        to *after* the zeroing loop (or partway through it) because
+        any UPDATE issued before the raise would leave a recorded call.
+        """
+        conn = _mock_conn(
+            local_positions=[(7, Decimal("10")), (8, Decimal("5"))],
+            local_cash=Decimal("0"),
+        )
+        with pytest.raises(RuntimeError):
+            sync_portfolio(conn, _portfolio([]), now=_NOW)
+
+        # Zero writes must have occurred. Stronger than "no zero-out
+        # updates" — catches any write attempted before the raise.
+        assert conn.execute.call_args_list == []
+
+    def test_empty_broker_with_empty_local_does_not_raise(self) -> None:
+        """Boundary: fully empty on both sides is a valid no-op."""
+        conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
+        result = sync_portfolio(conn, _portfolio([], Decimal("0")), now=_NOW)
+        assert result.positions_closed_externally == 0
+        assert result.positions_opened_externally == 0
+        assert result.positions_updated == 0
+        assert result.cash_delta == Decimal("0")
 
 
 class TestCashReconciliation:

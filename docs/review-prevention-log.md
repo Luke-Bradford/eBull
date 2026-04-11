@@ -544,3 +544,21 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: FCF calculation `operating_cf - capex` was incorrect for filers reporting CapEx as a negative number (cash outflow sign convention), inflating FCF.
 - Prevention: When subtracting CapEx from operating CF, use `abs(capex)` to normalise for sign convention differences. Apply to both latest-snapshot and historical-snapshot builders.
 - Enforced in: this prevention log
+
+---
+
+### Guard-ordering in raise-before-write tests
+
+- First seen in: #184
+- Symptom: Test for a guard that is supposed to raise *before* any writes asserted only that a specific write kind (zero-out UPDATEs) was absent from `conn.execute.call_args_list` after the exception. A broken guard that raised *after* one or more real writes could still satisfy the assertion as long as the writes were of a different shape.
+- Prevention: When asserting "guard prevents writes," check that the entire write-channel call list is empty at the point of raising — e.g. `assert conn.execute.call_args_list == []` if the production code routes all writes through `conn.execute` — rather than filtering for the specific write shape the guard is supposed to prevent. The strongest form of the assertion is "zero writes of any kind," not "zero writes of the kind I expected."
+- Enforced in: this prevention log
+
+---
+
+### Fragile SQL string matching in tests breaks silently under whitespace changes
+
+- First seen in: #184
+- Symptom: Test asserted against the exact SQL fragment `"current_units  = 0"` (two spaces, matching column alignment in the production query). Any reformat that changes whitespace would make the substring match return no hits, and the `assert len(matches) == 1` would silently pass or a `not in` assertion would become vacuously true — the test would stop catching regressions without failing.
+- Prevention: When matching raw SQL strings in tests, normalise whitespace first (`re.sub(r"\s+", " ", sql)`) and match the normalised form, or — better — extract a named helper (e.g. `_is_zero_out_update(sql)`) so the fragile concern is isolated. Never embed whitespace-alignment in a test literal.
+- Enforced in: this prevention log
