@@ -15,9 +15,10 @@ from typing import Any
 
 import pytest
 
-from app.providers.broker import BrokerMirrorPosition
+from app.providers.broker import BrokerMirror, BrokerMirrorPosition
 from app.providers.implementations.etoro_broker import (
     PortfolioParseError,
+    _parse_mirror,
     _parse_mirror_position,
 )
 
@@ -116,3 +117,86 @@ def test_parse_mirror_position_optional_fields_present() -> None:
     pos = _parse_mirror_position(payload)
     assert pos.take_profit_rate == Decimal("1500.0")
     assert pos.stop_loss_rate == Decimal("1000.0")
+
+
+def _make_mirror_payload(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "mirrorID": 15712187,
+        "parentCID": 111,
+        "parentUsername": "thomaspj",
+        "initialInvestment": "20000",
+        "depositSummary": "0",
+        "withdrawalSummary": "0",
+        "availableAmount": "2800.33",
+        "closedPositionsNetProfit": "-110.34",
+        "stopLossPercentage": None,
+        "stopLossAmount": None,
+        "mirrorStatusID": None,
+        "mirrorCalculationType": None,
+        "pendingForClosure": False,
+        "startedCopyDate": "2025-01-01T00:00:00Z",
+        "positions": [_make_position_payload(positionID=1001)],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_parse_mirror_happy_path() -> None:
+    payload = _make_mirror_payload()
+    mirror = _parse_mirror(payload)
+    assert isinstance(mirror, BrokerMirror)
+    assert mirror.mirror_id == 15712187
+    assert mirror.parent_cid == 111
+    assert mirror.parent_username == "thomaspj"
+    assert mirror.available_amount == Decimal("2800.33")
+    assert mirror.closed_positions_net_profit == Decimal("-110.34")
+    assert len(mirror.positions) == 1
+    assert mirror.positions[0].position_id == 1001
+    assert mirror.started_copy_date == datetime(2025, 1, 1, tzinfo=UTC)
+    assert mirror.raw_payload is payload
+
+
+def test_parse_mirror_empty_positions_is_valid() -> None:
+    """A mirror with positions == [] is a valid state (holds only cash).
+
+    §2.2.2: raw_positions == [] yields positions=(), which the §3.2
+    AUM formula in Track 1b handles as mirror_equity = available_amount.
+    Nothing raises.
+    """
+    payload = _make_mirror_payload(positions=[])
+    mirror = _parse_mirror(payload)
+    assert mirror.positions == ()
+
+
+def test_parse_mirror_nested_failure_wraps_with_index() -> None:
+    """Spec §2.2.2: inner loop catches (KeyError, ValueError, TypeError,
+    DecimalException) and re-raises as PortfolioParseError with both
+    the mirror_id AND the position index in the message."""
+    bad_pos = _make_position_payload(positionID=9999, units="bogus")
+    payload = _make_mirror_payload(
+        positions=[
+            _make_position_payload(positionID=1001),
+            _make_position_payload(positionID=1002),
+            bad_pos,  # idx 2 — this is the failing one
+        ]
+    )
+    with pytest.raises(PortfolioParseError) as excinfo:
+        _parse_mirror(payload)
+    msg = str(excinfo.value)
+    assert "15712187" in msg
+    assert "position[2]" in msg
+    assert isinstance(excinfo.value.__cause__, decimal.InvalidOperation)
+
+
+def test_parse_mirror_nested_key_error_wraps() -> None:
+    """Missing openConversionRate in a nested position raises
+    KeyError from _parse_mirror_position, which _parse_mirror's
+    inner wrap catches and re-raises as PortfolioParseError."""
+    bad_pos = _make_position_payload(positionID=9999)
+    del bad_pos["openConversionRate"]
+    payload = _make_mirror_payload(positions=[bad_pos])
+    with pytest.raises(PortfolioParseError) as excinfo:
+        _parse_mirror(payload)
+    assert "15712187" in str(excinfo.value)
+    assert "position[0]" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, KeyError)

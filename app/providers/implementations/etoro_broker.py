@@ -11,6 +11,7 @@ Trading endpoints are environment-scoped: /demo/ prefix for demo, no prefix for 
 
 from __future__ import annotations
 
+import decimal
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -22,6 +23,7 @@ import httpx
 
 from app.config import settings
 from app.providers.broker import (
+    BrokerMirror,
     BrokerMirrorPosition,
     BrokerOrderResult,
     BrokerPortfolio,
@@ -612,6 +614,63 @@ def _parse_iso_datetime(value: str) -> datetime:
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     return datetime.fromisoformat(value)
+
+
+def _parse_mirror(payload: dict[str, Any]) -> BrokerMirror:
+    """Parse a top-level copy-trading mirror payload.
+
+    Nested positions are iterated under an inner try/except that
+    wraps (KeyError, ValueError, TypeError, decimal.DecimalException)
+    in PortfolioParseError with mirror_id + position index
+    attribution. See spec §2.2.2 for why the inner wrap is mandatory
+    — without it, a single malformed nested position degrades to a
+    top-level error message that cannot tell the operator *which*
+    row failed.
+
+    Top-level numeric/string extraction may also raise
+    (KeyError / ValueError / TypeError / DecimalException); those
+    propagate up to the outer get_portfolio loop where §2.2.2's
+    fallback wrap catches and re-raises as PortfolioParseError
+    keyed on the mirror_id alone.
+    """
+    raw_positions = payload.get("positions") or []
+    parsed_positions: list[BrokerMirrorPosition] = []
+    for idx, pos in enumerate(raw_positions):
+        try:
+            parsed_positions.append(_parse_mirror_position(pos))
+        except (KeyError, ValueError, TypeError, decimal.DecimalException) as exc:
+            raise PortfolioParseError(f"Mirror {payload.get('mirrorID')!r} position[{idx}]: {exc}") from exc
+
+    def _opt_decimal(key: str) -> Decimal | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        return Decimal(str(value))
+
+    def _opt_int(key: str) -> int | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        return int(value)
+
+    return BrokerMirror(
+        mirror_id=int(payload["mirrorID"]),
+        parent_cid=int(payload["parentCID"]),
+        parent_username=str(payload["parentUsername"]),
+        initial_investment=Decimal(str(payload["initialInvestment"])),
+        deposit_summary=Decimal(str(payload.get("depositSummary", "0"))),
+        withdrawal_summary=Decimal(str(payload.get("withdrawalSummary", "0"))),
+        available_amount=Decimal(str(payload["availableAmount"])),
+        closed_positions_net_profit=Decimal(str(payload["closedPositionsNetProfit"])),
+        stop_loss_percentage=_opt_decimal("stopLossPercentage"),
+        stop_loss_amount=_opt_decimal("stopLossAmount"),
+        mirror_status_id=_opt_int("mirrorStatusID"),
+        mirror_calculation_type=_opt_int("mirrorCalculationType"),
+        pending_for_closure=bool(payload.get("pendingForClosure", False)),
+        started_copy_date=_parse_iso_datetime(payload["startedCopyDate"]),
+        positions=tuple(parsed_positions),
+        raw_payload=payload,
+    )
 
 
 def _build_result(
