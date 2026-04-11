@@ -9,3 +9,11 @@ build/
 .DS_Store
 .claude/settings.local.json
 data/
+
+# Session-local Claude Code scratch / runtime state.
+# Never check these in — they are machine-local and session-scoped.
+.claude/codex-*.log
+.claude/codex-*-prompt.txt
+.claude/codex.pid
+.claude/scheduled_tasks.lock
+.claude/worktrees/
