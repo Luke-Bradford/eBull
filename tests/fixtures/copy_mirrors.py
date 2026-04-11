@@ -550,8 +550,11 @@ def no_quote_mirror_fixture(conn: psycopg.Connection[Any]) -> None:
     with no matching `quotes` rows. Used by §8.4's cost-basis
     fallback identity test.
 
-    Expected _load_mirror_equity(conn) = 2800.33 + 50.00 + 17039.33
-                                       = 19889.66
+    Expected _load_mirror_equity(conn):
+      = available_amount + SUM(per-position contributions)
+      = 2800.33 + (50.00 + 17039.33)
+      = 2800.33 + 17089.33
+      = 19889.66
 
     Caller owns commit / rollback. ebull_test only.
     """

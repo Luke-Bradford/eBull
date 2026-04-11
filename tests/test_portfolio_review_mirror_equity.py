@@ -78,3 +78,32 @@ def test_run_portfolio_review_soft_close_baseline(
 
     result = run_portfolio_review(conn)
     assert result.total_aum == 0.0
+
+
+def test_run_portfolio_review_early_return_reports_mirror_equity(
+    conn: psycopg.Connection[Any],
+) -> None:
+    """§6.3 contract: if there are active mirrors but no scores and no
+    positions, run_portfolio_review hits the early-return path and
+    still reports ``total_aum = mirror_equity + cash``. Loading
+    mirror equity is hoisted above the ``if not all_ids`` guard for
+    exactly this reason — a review run that cannot do any trading
+    work must still report an honest AUM figure to callers.
+    """
+    mirror_aum_fixture(conn)
+    # Delete the scores row the fixture seeds so all_ids is empty
+    # and run_portfolio_review takes the early-return branch.
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM scores")
+    conn.commit()
+
+    expected_mirror = _load_mirror_equity(conn)
+    assert expected_mirror == pytest.approx(1550.0, abs=1e-6)
+
+    result = run_portfolio_review(conn)
+    # No recommendations generated (empty all_ids), but total_aum
+    # still includes mirror equity. Fixture has no cash, so the
+    # expected value is mirror_equity alone.
+    assert result.recommendations == []
+    assert result.active_positions == 0
+    assert result.total_aum == pytest.approx(expected_mirror, abs=1e-6)

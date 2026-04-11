@@ -566,14 +566,19 @@ class TestShouldPersistHold:
 #   1. _load_positions      — cursor: positions JOIN instruments LEFT JOIN quotes
 #   2. _load_cash           — cursor: cash_ledger
 #   3. _load_ranked_scores  — cursor: scores
-#   4. _load_instrument_details — 4 cursors (instruments, theses, prev_thesis, filing_events)
-#   5. _load_prev_scores    — cursor: scores (prev)
-#   6. _load_prior_recommendations — cursor: trade_recommendations
-#   7. _load_mirror_equity  — cursor: CTE over copy_mirrors + copy_mirror_positions + quotes (#187)
+#   4. _load_mirror_equity  — cursor: CTE over copy_mirrors + copy_mirror_positions + quotes (#187)
+#                             NOTE: loaded eagerly (before early-return) so the
+#                             no-work path still reports an honest total_aum.
+#   5. _load_instrument_details — 4 cursors (instruments, theses, prev_thesis, filing_events)
+#   6. _load_prev_scores    — cursor: scores (prev)
+#   7. _load_prior_recommendations — cursor: trade_recommendations
 #   8. conn.transaction() + N×conn.execute(INSERT)
 #
-# _make_conn automatically appends a terminal zero-mirror_equity cursor for
-# step 7, so per-test cursor_sequence lists only need to enumerate steps 1-6.
+# _make_conn automatically injects a zero-mirror_equity cursor at slot 4
+# (index 3, i.e. after _load_ranked_scores) so per-test cursor_sequence
+# lists only need to enumerate the three "load state" cursors (1-3) plus
+# steps 5-7. Tests that need a non-zero mirror_equity must build the
+# sequence manually rather than rely on the pad.
 #
 # We build per-call cursor mocks via side_effect on conn.cursor so each
 # call gets its own MagicMock with the right fetchall/fetchone result.
@@ -597,14 +602,22 @@ def _make_conn(cursor_sequence: list[MagicMock]) -> MagicMock:
     conn.execute() returns a no-op mock (INSERTs only).
     conn.transaction() is a no-op context manager.
 
-    A terminal ``_load_mirror_equity`` cursor yielding
-    ``{"total": 0.0}`` is appended automatically so existing per-test
-    sequences do not need to track the new cursor that run_portfolio_review
-    consumes after _load_prior_recommendations (#187, spec §6.3). Tests
-    that need a non-zero mirror_equity must append their own cursor
-    BEFORE the terminal pad — none currently do.
+    A zero-mirror_equity cursor yielding ``{"total": 0.0}`` is
+    injected at index 3 so per-test sequences can skip the
+    _load_mirror_equity slot. run_portfolio_review calls
+    _load_mirror_equity eagerly (before the early-return guard)
+    so the no-work-to-do path still reports an honest total_aum
+    including mirror equity — see the block comment above for the
+    full call order (#187, spec §6.3).
+
+    Tests that need a non-zero mirror_equity must build the full
+    sequence manually and skip this helper.
     """
-    padded = [*cursor_sequence, _make_cursor([{"total": 0.0}])]
+    padded = [
+        *cursor_sequence[:3],
+        _make_cursor([{"total": 0.0}]),
+        *cursor_sequence[3:],
+    ]
     conn = MagicMock()
     conn.cursor.side_effect = padded
     conn.execute.return_value = MagicMock()
