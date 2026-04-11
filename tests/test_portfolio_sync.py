@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -15,6 +16,20 @@ from app.services.portfolio_sync import (
 )
 
 _NOW = datetime(2026, 4, 10, 5, 30, tzinfo=UTC)
+
+
+def _is_zero_out_update(sql_arg: Any) -> bool:
+    """True if ``sql_arg`` is the zero-out UPDATE SQL.
+
+    Whitespace-tolerant: the production SQL aligns column names with
+    extra spaces (``current_units  = 0``), but the test must not break
+    if that alignment ever changes.  We normalise runs of whitespace
+    to a single space before substring-matching.
+    """
+    if not isinstance(sql_arg, str):
+        return False
+    normalised = re.sub(r"\s+", " ", sql_arg)
+    return "UPDATE positions SET" in normalised and "current_units = 0" in normalised
 
 
 def _pos(
@@ -215,11 +230,7 @@ class TestExternallyClosedPosition:
         broker_pos = _pos(instrument_id=8, units=Decimal("1"))
         sync_portfolio(conn, _portfolio([broker_pos]), now=_NOW)
 
-        update_calls = [
-            c
-            for c in conn.execute.call_args_list
-            if isinstance(c.args[0], str) and "UPDATE positions SET" in c.args[0] and "current_units  = 0" in c.args[0]
-        ]
+        update_calls = [c for c in conn.execute.call_args_list if _is_zero_out_update(c.args[0])]
         assert len(update_calls) == 1
         assert update_calls[0].args[1]["iid"] == 7
 
@@ -255,9 +266,7 @@ class TestEmptyBrokerGuard:
             sync_portfolio(conn, _portfolio([]), now=_NOW)
 
         # No zero-out UPDATEs must have been issued.
-        zero_updates = [
-            c for c in conn.execute.call_args_list if isinstance(c.args[0], str) and "current_units  = 0" in c.args[0]
-        ]
+        zero_updates = [c for c in conn.execute.call_args_list if _is_zero_out_update(c.args[0])]
         assert zero_updates == []
 
     def test_empty_broker_with_empty_local_does_not_raise(self) -> None:
