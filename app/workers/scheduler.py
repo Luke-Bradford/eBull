@@ -39,11 +39,13 @@ from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
 from app.services.coverage import review_coverage, seed_coverage
+from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 from app.services.ops_monitor import check_row_count_spike, record_job_finish, record_job_start
+from app.services.order_client import execute_order
 from app.services.portfolio import run_portfolio_review
 from app.services.portfolio_sync import sync_portfolio
 from app.services.scoring import compute_rankings
@@ -168,6 +170,7 @@ JOB_MORNING_CANDIDATE_REVIEW = "morning_candidate_review"
 JOB_WEEKLY_COVERAGE_REVIEW = "weekly_coverage_review"
 JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
 JOB_DAILY_PORTFOLIO_SYNC = "daily_portfolio_sync"
+JOB_EXECUTE_APPROVED_ORDERS = "execute_approved_orders"
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +212,16 @@ def _has_scores(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM scores)")):
         return (True, "")
     return (False, "no scores rows")
+
+
+def _has_actionable_recommendations(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if at least one proposed or approved recommendation exists."""
+    if _exists(
+        conn,
+        psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM trade_recommendations WHERE status IN ('proposed', 'approved'))"),
+    ):
+        return (True, "")
+    return (False, "no proposed or approved recommendations")
 
 
 def _has_tier1_stale_theses(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
@@ -265,6 +278,15 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         description="Re-score, rank, and generate trade recommendations for Tier 1 candidates.",
         cadence=Cadence.daily(hour=6, minute=0),
         prerequisite=_has_scores,
+    ),
+    ScheduledJob(
+        name=JOB_EXECUTE_APPROVED_ORDERS,
+        description="Guard and execute actionable trade recommendations.",
+        cadence=Cadence.daily(hour=6, minute=30),
+        prerequisite=_has_actionable_recommendations,
+        # Do not fire on cold boot — order execution must only happen at
+        # the scheduled time, not as a surprise catch-up hours later.
+        catch_up_on_boot=False,
     ),
     ScheduledJob(
         name=JOB_WEEKLY_COVERAGE_REVIEW,
@@ -915,6 +937,181 @@ def morning_candidate_review() -> None:
         sum(1 for r in rec_result.recommendations if r.action == "HOLD"),
         sum(1 for r in rec_result.recommendations if r.action == "EXIT"),
         rec_result.total_aum,
+    )
+
+
+def execute_approved_orders() -> None:
+    """Guard and execute actionable trade recommendations.
+
+    Two phases, run sequentially:
+
+    Phase 1 — Guard: query all ``proposed`` recommendations. For each,
+    call ``evaluate_recommendation`` to run the execution guard.  PASS
+    transitions the recommendation to ``approved``; FAIL transitions to
+    ``rejected``.
+
+    Phase 2 — Execute: query all ``approved`` recommendations (includes
+    newly approved from phase 1 plus any pre-existing approved rows).
+    For each, look up the guard's ``decision_id`` from ``decision_audit``
+    and call ``execute_order``.
+
+    Each recommendation gets its own connection so a single failure
+    does not roll back others.  The broker provider is opened once for
+    the entire run (live mode only).
+    """
+    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+
+    with _tracked_job(JOB_EXECUTE_APPROVED_ORDERS) as tracker:
+        # --- Phase 1: guard proposed recommendations ---
+        with psycopg.connect(settings.database_url) as conn:
+            proposed = conn.execute(
+                """
+                SELECT recommendation_id
+                FROM trade_recommendations
+                WHERE status = 'proposed'
+                ORDER BY recommendation_id
+                """,
+            ).fetchall()
+
+        guarded = 0
+        rejected = 0
+        for row in proposed:
+            rec_id = row[0]
+            try:
+                with psycopg.connect(settings.database_url) as conn:
+                    result = evaluate_recommendation(conn, rec_id)
+                    conn.commit()
+                if result.verdict == "PASS":
+                    guarded += 1
+                    logger.info(
+                        "execute_approved_orders: recommendation_id=%d PASS (decision_id=%d)",
+                        rec_id,
+                        result.decision_id,
+                    )
+                else:
+                    rejected += 1
+                    logger.info(
+                        "execute_approved_orders: recommendation_id=%d FAIL rules=%s",
+                        rec_id,
+                        result.failed_rules,
+                    )
+            except Exception:
+                rejected += 1
+                logger.error(
+                    "execute_approved_orders: guard failed for recommendation_id=%d",
+                    rec_id,
+                    exc_info=True,
+                )
+
+        logger.info(
+            "execute_approved_orders: guard phase complete — proposed=%d approved=%d rejected=%d",
+            len(proposed),
+            guarded,
+            rejected,
+        )
+
+        # --- Phase 2: execute approved recommendations ---
+        with psycopg.connect(settings.database_url) as conn:
+            # Use DISTINCT ON to pick the latest PASS decision per
+            # recommendation (in case the guard was run more than once).
+            approved = conn.execute(
+                """
+                SELECT DISTINCT ON (tr.recommendation_id)
+                       tr.recommendation_id, da.decision_id
+                FROM trade_recommendations tr
+                JOIN decision_audit da
+                    ON da.recommendation_id = tr.recommendation_id
+                   AND da.stage = 'execution_guard'
+                   AND da.pass_fail = 'PASS'
+                WHERE tr.status = 'approved'
+                ORDER BY tr.recommendation_id, da.decision_id DESC
+                """,
+            ).fetchall()
+
+        if not approved:
+            logger.info("execute_approved_orders: no approved recommendations to execute")
+            tracker.row_count = guarded + rejected
+            return
+
+        # Open the broker provider once for the entire execution phase.
+        # When credentials are absent broker stays None — execute_order
+        # reads enable_live_trading from runtime_config and generates
+        # synthetic fills when live trading is disabled.
+        creds = _load_etoro_credentials(JOB_EXECUTE_APPROVED_ORDERS)
+        broker: EtoroBrokerProvider | None = None
+        broker_ctx: EtoroBrokerProvider | None = None
+
+        if creds is not None:
+            api_key, user_key = creds
+            broker_ctx = EtoroBrokerProvider(
+                api_key=api_key,
+                user_key=user_key,
+                env=settings.etoro_env,
+            )
+            broker = broker_ctx.__enter__()
+
+        try:
+            executed = 0
+            pending = 0
+            failed = 0
+            for row in approved:
+                rec_id, decision_id = row[0], row[1]
+                try:
+                    with psycopg.connect(settings.database_url) as conn:
+                        result = execute_order(
+                            conn,
+                            recommendation_id=rec_id,
+                            decision_id=decision_id,
+                            broker=broker,
+                        )
+                    if result.outcome == "filled":
+                        executed += 1
+                        logger.info(
+                            "execute_approved_orders: recommendation_id=%d executed order_id=%d ref=%s",
+                            rec_id,
+                            result.order_id,
+                            result.broker_order_ref,
+                        )
+                    elif result.outcome == "pending":
+                        pending += 1
+                        logger.info(
+                            "execute_approved_orders: recommendation_id=%d pending order_id=%d ref=%s",
+                            rec_id,
+                            result.order_id,
+                            result.broker_order_ref,
+                        )
+                    else:
+                        failed += 1
+                        logger.warning(
+                            "execute_approved_orders: recommendation_id=%d failed order_id=%d explanation=%s",
+                            rec_id,
+                            result.order_id,
+                            result.explanation,
+                        )
+                except Exception:
+                    failed += 1
+                    logger.error(
+                        "execute_approved_orders: execution failed for recommendation_id=%d",
+                        rec_id,
+                        exc_info=True,
+                    )
+
+            tracker.row_count = guarded + rejected + executed + pending + failed
+
+        finally:
+            if broker_ctx is not None:
+                broker_ctx.__exit__(None, None, None)
+
+    logger.info(
+        "execute_approved_orders complete: proposed=%d guarded=%d rejected=%d "
+        "approved=%d executed=%d pending=%d failed=%d",
+        len(proposed),
+        guarded,
+        rejected,
+        len(approved),
+        executed,
+        pending,
+        failed,
     )
 
 
