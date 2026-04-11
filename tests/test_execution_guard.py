@@ -27,7 +27,11 @@ Cursor call order inside evaluate_recommendation:
   5. _load_latest_thesis           — fetchone
   6. _load_quote                   — fetchone
   7. _load_cash                    — fetchone
-  8. _load_sector_exposure         — 3 cursors: instruments, positions, cash_ledger
+  8. _load_sector_exposure         — 4 cursors: instruments, positions,
+                                     cash_ledger, mirror_equity
+                                     (the mirror_equity cursor is consumed
+                                     by _load_mirror_equity, wired into
+                                     total_aum by Track 1b / #187).
   9. _write_audit                  — 1 cursor (INSERT RETURNING decision_id)
      + conn.execute (UPDATE status)
 
@@ -164,12 +168,17 @@ def _sector_cursors(
     total_positions: float = 0.0,
     cash: float = 50_000.0,
     instrument_missing: bool = False,
+    mirror_equity: float = 0.0,
 ) -> list[MagicMock]:
     """Return the cursors consumed by _load_sector_exposure.
 
     When instrument_missing=True the instruments cursor returns no rows and
     _load_sector_exposure returns early — only 1 cursor is consumed.
-    Otherwise 3 cursors are returned (instruments, positions, cash_ledger).
+    Otherwise 4 cursors are returned (instruments, positions, cash_ledger,
+    mirror_equity). The mirror_equity cursor is consumed by
+    `_load_mirror_equity`, wired into `total_aum` by Track 1b (#187).
+    Existing mock-driven tests default it to 0.0 so the pre-PR behaviour
+    is preserved bit-identically.
     """
     if instrument_missing:
         return [_make_cursor([])]
@@ -179,7 +188,8 @@ def _sector_cursors(
     else:
         positions_cur = _make_cursor([])
     cash_cur = _make_cursor([{"balance": cash}])
-    return [instrument_cur, positions_cur, cash_cur]
+    mirror_cur = _make_cursor([{"total": mirror_equity}])
+    return [instrument_cur, positions_cur, cash_cur, mirror_cur]
 
 
 def _audit_cursor(decision_id: int = 99) -> MagicMock:

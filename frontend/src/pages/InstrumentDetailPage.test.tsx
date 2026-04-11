@@ -138,6 +138,7 @@ const emptyPortfolio: PortfolioResponse = {
   position_count: 0,
   total_aum: 0,
   cash_balance: null,
+  mirror_equity: 0,
 };
 
 function renderPage(instrumentId = "42") {
@@ -408,6 +409,7 @@ describe("InstrumentDetailPage — position", () => {
       position_count: 1,
       total_aum: 1910,
       cash_balance: 500,
+      mirror_equity: 0,
     });
     renderPage();
     await screen.findByText("AAPL");

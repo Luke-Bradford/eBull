@@ -48,6 +48,7 @@ import psycopg
 import psycopg.rows
 from psycopg.types.json import Jsonb
 
+from app.services.portfolio import _load_mirror_equity
 from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
 
 logger = logging.getLogger(__name__)
@@ -232,7 +233,14 @@ def _load_sector_exposure(
     the caller must treat this as a hard failure, not a pass.
     current_sector_pct is the fraction of AUM currently in the same sector as
     instrument_id (excluding the instrument itself, since it is unowned for BUY).
-    total_aum = SUM(position mark-to-market) + cash.  Returns 0.0 when unknown.
+    total_aum = SUM(position mark-to-market, **excluding the queried
+    instrument**) + cash + active mirror equity. The positions SELECT at
+    line ~269 filters `p.instrument_id != %(iid)s` (added in c006ae6 as a
+    bug fix for #9 — without this, ADD actions on an already-held position
+    would double-count the existing holding). This exclusion therefore
+    applies to the whole total_aum figure the caller sees, not just to the
+    sector numerator. Returns 0.0 when unknown. Mirrors expand the
+    denominator only — the sector numerator is untouched (spec §4, #187).
     """
     # Instrument sector
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -283,7 +291,8 @@ def _load_sector_exposure(
         row = cur.fetchone()
     cash = float(row["balance"]) if row is not None and row["balance"] is not None else 0.0
 
-    total_aum = total_positions + cash
+    mirror_equity = _load_mirror_equity(conn)
+    total_aum = total_positions + cash + mirror_equity
     current_sector_pct = (sector_values.get(sector, 0.0) / total_aum) if total_aum > 0 else 0.0
 
     return True, sector, current_sector_pct, total_aum

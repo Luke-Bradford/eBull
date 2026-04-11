@@ -31,7 +31,7 @@ export async function fetchRankingsMock(): Promise<RankingsListResponse> {
 }
 
 export async function fetchPortfolioMock(): Promise<PortfolioResponse> {
-  return { positions: [], position_count: 0, total_aum: 0, cash_balance: null };
+  return { positions: [], position_count: 0, total_aum: 0, cash_balance: null, mirror_equity: 0 };
 }
 
 export async function fetchConfigMock(): Promise<ConfigResponse> {

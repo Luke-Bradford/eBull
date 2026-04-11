@@ -178,6 +178,67 @@ def _load_positions(conn: psycopg.Connection[Any]) -> dict[int, PositionState]:
     return positions
 
 
+def _load_mirror_equity(conn: psycopg.Connection[Any]) -> float:
+    """Return the summed mirror_equity across all active mirrors.
+
+    Runs the §3.4 mirror-equity CTE against the caller's
+    connection and returns a float. The value is `0.0` when
+    `copy_mirrors` is empty or every row is `active = FALSE` —
+    `COALESCE(SUM(...), 0)` in the SQL turns an empty result set
+    into `0.0`, never `NULL`, so the return type is `float` and
+    not `float | None`. See spec §6.0 and §6.4 for rationale.
+
+    The value is usually non-negative but is NOT mathematically
+    floored at zero: a leveraged position with a large adverse
+    MTM delta could push a per-mirror contribution negative, and
+    the aggregate could go negative too. Callers sum this
+    directly into `total_aum` without assuming positivity.
+
+    This helper does NOT open its own transaction; it reads
+    under the caller's scope, matching `_load_cash` /
+    `_load_positions`.
+    """
+    sql = """
+        WITH mirror_equity AS (
+            SELECT COALESCE(SUM(
+                m.available_amount + COALESCE(p.mv, 0)
+            ), 0) AS total
+            FROM copy_mirrors m
+            LEFT JOIN LATERAL (
+                SELECT SUM(
+                      cmp.amount
+                    + (CASE WHEN cmp.is_buy THEN 1 ELSE -1 END)
+                      * cmp.units
+                      * (COALESCE(q.last, cmp.open_rate) - cmp.open_rate)
+                      * cmp.open_conversion_rate
+                ) AS mv
+                FROM copy_mirror_positions cmp
+                LEFT JOIN LATERAL (
+                    SELECT last
+                    FROM quotes
+                    WHERE instrument_id = cmp.instrument_id
+                    ORDER BY quoted_at DESC
+                    LIMIT 1
+                ) q ON TRUE
+                WHERE cmp.mirror_id = m.mirror_id
+            ) p ON TRUE
+            WHERE m.active
+        )
+        SELECT total FROM mirror_equity
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(sql)
+        row = cur.fetchone()
+    # COALESCE(SUM(...), 0) guarantees exactly one row with a
+    # non-NULL numeric, so row should never be None. Use an
+    # explicit RuntimeError (not `assert`) so the guard survives
+    # `python -O` — see prevention log entry "`assert` as a
+    # runtime guard in service code" (#109).
+    if row is None:  # pragma: no cover — driver/CTE invariant violation
+        raise RuntimeError("_load_mirror_equity: COALESCE(SUM(...), 0) CTE returned no rows; driver invariant violated")
+    return float(row["total"])
+
+
 def _load_ranked_scores(
     conn: psycopg.Connection[Any],
     model_version: str,
@@ -730,12 +791,22 @@ def run_portfolio_review(
         if iid not in score_by_id:
             all_ids.append(iid)
 
+    # Load mirror_equity eagerly so the early-return path below still
+    # reports an honest total_aum (§6.3 contract: total_aum MUST include
+    # mirror_equity at every call site, even when no recommendations run).
+    # Without this hoist, a run with active copy_mirrors but no scores
+    # and no positions would return total_aum=0.0 — factually wrong.
+    mirror_equity = _load_mirror_equity(conn)
+
     if not all_ids:
-        logger.info("run_portfolio_review: no ranked candidates and no open positions")
+        logger.info(
+            "run_portfolio_review: no ranked candidates and no open positions (mirror_equity=%.2f)",
+            mirror_equity,
+        )
         return PortfolioReviewResult(
             recommendations=[],
             run_at=run_at,
-            total_aum=0.0,
+            total_aum=mirror_equity + (cash if cash_known else 0.0),
             cash=cash,
             active_positions=0,
         )
@@ -748,14 +819,17 @@ def run_portfolio_review(
 
     prior_recs = _load_prior_recommendations(conn, all_ids)
 
-    # AUM
+    # AUM — positions + cash + mirror_equity (§6.3).
+    # mirror_equity was loaded above (pre-early-return) so the contract
+    # holds for both the recommendation path and the no-work path.
     total_market_value = sum(p.market_value for p in positions.values())
-    total_aum = total_market_value + (cash if cash_known else 0.0)
+    total_aum = total_market_value + (cash if cash_known else 0.0) + mirror_equity
 
     logger.info(
-        "run_portfolio_review: positions=%d cash=%s aum=%.2f ranked=%d model=%s",
+        "run_portfolio_review: positions=%d cash=%s mirror_equity=%.2f aum=%.2f ranked=%d model=%s",
         len(positions),
         f"{cash:.2f}" if cash_known else "unknown",
+        mirror_equity,
         total_aum,
         len(ranked_ids),
         model_version,

@@ -589,3 +589,30 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `_sync_mirrors()` raised `RuntimeError` on total mirror disappearance inside `sync_portfolio`'s transaction, *after* position and cash writes had already executed in the same transaction. The rollback discarded legitimate position/cash updates that had nothing to do with the mirror state — a broader blast radius than the spec's "operator investigates mirrors" framing implied.
 - Prevention: When adding a `raise` inside a function that is called inside a caller's transaction, explicitly ask: *what other writes have already happened in this transaction when I raise?* If the answer is "writes I did not intend to roll back," hoist the raise to the caller **before** any of those writes run. Document the split scope in the helper's docstring so future callers know the helper no longer owns that guard.
 - Enforced in: `.claude/skills/engineering/pre-flight-review.md` section F
+
+---
+
+### Plan documents drift from the prevention log
+
+- First seen in: #193
+- Symptom: An implementation plan under `docs/superpowers/plans/` contained a code-block showing `assert row is not None` for a DB-contract guard inside `app/services/`. The production code shipped correctly (using `RuntimeError` per prevention #109), but the plan's code block still showed the forbidden `assert` pattern. A future re-run of the plan by a fresh implementation agent would reintroduce the bug directly into production service code — exactly what the prevention-log rule is meant to stop.
+- Prevention: When fixing a prevention-log hit during pre-flight review, grep the committed plan document for the same bad pattern and update it in the same PR. Plan files that appear under `docs/superpowers/plans/` are treated as historical record, but they also serve as a source of truth if the plan is re-run — so any code snippet that contradicts a prevention rule must be corrected in place. Pre-push check: `grep -rn "assert row is not None" docs/superpowers/plans/` should return zero lines touched by the current branch.
+- Enforced in: this prevention log
+
+---
+
+### `INSERT INTO instruments` fixtures must supply `is_tradable`
+
+- First seen in: #193
+- Symptom: `tests/fixtures/copy_mirrors.py::mtm_delta_mirror_fixture` wrote `INSERT INTO instruments (instrument_id, symbol, company_name) VALUES (...)` without `is_tradable`. The `instruments` table schema (`sql/001_init.sql:1-13`) has `is_tradable BOOLEAN DEFAULT TRUE`, so the insert succeeded on the local dev schema — but every other fixture in the same file explicitly supplies `is_tradable=TRUE`, so the omission read as a bug to a reviewer and also risked silently inserting rows with `NULL is_tradable` on any schema migration that removes the column default.
+- Prevention: Every `INSERT INTO instruments` in a test fixture must supply `is_tradable` explicitly, even when the current schema has a default. `is_tradable` is load-bearing for the universe filter (`SELECT ... WHERE is_tradable`), so a `NULL` value silently excludes the row from every production query and corrupts the fixture's contract with whatever test uses it. Pre-push check: `grep -rn "INSERT INTO instruments" tests/fixtures/ | grep -v is_tradable` should return zero lines.
+- Enforced in: this prevention log
+
+---
+
+### `_load_sector_exposure` docstring must name the queried-instrument exclusion
+
+- First seen in: #193 (two rounds of the same misreading)
+- Symptom: The docstring for `app/services/execution_guard.py::_load_sector_exposure` summarised `total_aum` as `SUM(position mark-to-market) + cash + active mirror equity` without naming the fact that the positions SELECT at line ~269 filters `p.instrument_id != %(iid)s`. The "excluding the instrument itself" note was only attached to the `current_sector_pct` parenthetical above, so two rounds of code reviewer (round 1 BLOCKING #4, round 2 single-finding rerun) read the docstring as "total_aum is the full AUM including the queried instrument". Both raised BLOCKING asks to revert `test_sector_numerator_unchanged_by_mirror`'s `aum_hc = 1650` assertion to `1900`. The test was correct — the filter at line 269 excludes the queried instrument from `total_positions` and therefore from `total_aum` — but the ambiguous docstring forced a REBUTTED-with-evidence round-trip each time.
+- Prevention: When a docstring describes a helper whose SQL query filters certain rows, the filter's effect on **every** return value must be stated explicitly in the docstring, not just on the value the filter was originally added for. For `_load_sector_exposure`, the exclusion affects both `current_sector_pct` (intended) and `total_aum` (side effect). If two consecutive reviewers misread the same docstring with the same mistake, treat that as proof the docstring is the bug — not the test. Fix the docstring in place and add a prevention-log entry so the next reviewer reads the correct version. Pre-push check: `grep -rn "total_aum = SUM" app/services/` — every hit should name what is or is not included in the sum.
+- Enforced in: this prevention log; `app/services/execution_guard.py:229-244`
