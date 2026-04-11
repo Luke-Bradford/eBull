@@ -8,7 +8,11 @@ from typing import Any
 from unittest.mock import MagicMock
 
 from app.providers.broker import BrokerPortfolio, BrokerPosition
-from app.services.portfolio_sync import PortfolioSyncResult, sync_portfolio
+from app.services.portfolio_sync import (
+    PortfolioSyncResult,
+    _aggregate_by_instrument,
+    sync_portfolio,
+)
 
 _NOW = datetime(2026, 4, 10, 5, 30, tzinfo=UTC)
 
@@ -109,6 +113,8 @@ class TestExistingPositionUpdate:
         params = update_calls[0].args[1]
         assert params["iid"] == 42
         assert params["units"] == Decimal("5")
+        assert params["avg_cost"] == Decimal("100")
+        assert params["cost_basis"] == Decimal("500")
         # unrealized = (120 - 100) * 5 = 100
         assert params["upnl"] == Decimal("100")
         assert params["now"] == _NOW
@@ -306,3 +312,165 @@ class TestMixedScenario:
         assert result.positions_updated == 1
         assert result.positions_opened_externally == 1
         assert result.positions_closed_externally == 1
+
+
+class TestAggregateByInstrument:
+    """Multiple broker positions for the same instrument are aggregated."""
+
+    def test_single_position_passes_through(self) -> None:
+        bp = _pos(instrument_id=42, units=Decimal("10"), open_price=Decimal("100"), current_price=Decimal("110"))
+        agg = _aggregate_by_instrument([bp])
+        assert 42 in agg
+        assert agg[42].units == Decimal("10")
+        assert agg[42].avg_open_price == Decimal("100")
+        # PnL: (110-100)*10 = 100
+        assert agg[42].unrealized_pnl == Decimal("100")
+
+    def test_two_positions_same_instrument_are_summed(self) -> None:
+        p1 = _pos(
+            instrument_id=42,
+            units=Decimal("10"),
+            open_price=Decimal("100"),
+            current_price=Decimal("120"),
+        )
+        p2 = _pos(
+            instrument_id=42,
+            units=Decimal("5"),
+            open_price=Decimal("80"),
+            current_price=Decimal("120"),
+        )
+        agg = _aggregate_by_instrument([p1, p2])
+
+        assert len(agg) == 1
+        a = agg[42]
+        assert a.units == Decimal("15")
+        # weighted avg: (100*10 + 80*5) / 15 = 1400/15 ≈ 93.333...
+        expected_avg = (Decimal("100") * Decimal("10") + Decimal("80") * Decimal("5")) / Decimal("15")
+        assert a.avg_open_price == expected_avg
+        # PnL: (120-100)*10 + (120-80)*5 = 200 + 200 = 400
+        assert a.unrealized_pnl == Decimal("400")
+        assert len(a.raw_payloads) == 2
+
+    def test_different_instruments_stay_separate(self) -> None:
+        p1 = _pos(instrument_id=1)
+        p2 = _pos(instrument_id=2)
+        agg = _aggregate_by_instrument([p1, p2])
+        assert len(agg) == 2
+        assert 1 in agg
+        assert 2 in agg
+
+    def test_earliest_open_date_is_selected(self) -> None:
+        p1 = BrokerPosition(
+            instrument_id=42,
+            units=Decimal("10"),
+            open_price=Decimal("100"),
+            current_price=Decimal("110"),
+            raw_payload={"openDateTime": "2026-03-20T10:00:00Z"},
+        )
+        p2 = BrokerPosition(
+            instrument_id=42,
+            units=Decimal("5"),
+            open_price=Decimal("80"),
+            current_price=Decimal("110"),
+            raw_payload={"openDateTime": "2026-03-10T08:00:00Z"},
+        )
+        agg = _aggregate_by_instrument([p1, p2])
+
+        # Earliest date should win.
+        assert agg[42].earliest_open_date_raw == "2026-03-10T08:00:00Z"
+
+    def test_zero_units_returns_zero_avg_price(self) -> None:
+        """Guard against division-by-zero from bad broker data."""
+        p = _pos(
+            instrument_id=42,
+            units=Decimal("0"),
+            open_price=Decimal("100"),
+            current_price=Decimal("110"),
+        )
+        agg = _aggregate_by_instrument([p])
+        assert agg[42].avg_open_price == Decimal(0)
+
+
+class TestMultiPositionSync:
+    """End-to-end: multiple broker positions for one instrument sync correctly."""
+
+    def test_duplicate_instrument_updates_once_with_aggregated_values(self) -> None:
+        """Two broker positions for instrument 42 should produce a single UPDATE."""
+        p1 = _pos(
+            instrument_id=42,
+            units=Decimal("10"),
+            open_price=Decimal("100"),
+            current_price=Decimal("120"),
+        )
+        p2 = _pos(
+            instrument_id=42,
+            units=Decimal("5"),
+            open_price=Decimal("80"),
+            current_price=Decimal("120"),
+        )
+        conn = _mock_conn(local_positions=[(42, Decimal("10"))], local_cash=Decimal("0"))
+        result = sync_portfolio(conn, _portfolio([p1, p2]), now=_NOW)
+
+        assert result.positions_updated == 1
+        assert result.positions_opened_externally == 0
+
+        update_calls = [
+            c for c in conn.execute.call_args_list if isinstance(c.args[0], str) and "UPDATE positions SET" in c.args[0]
+        ]
+        assert len(update_calls) == 1
+        params = update_calls[0].args[1]
+        assert params["units"] == Decimal("15")
+        # avg_cost = (100*10 + 80*5) / 15 = 1400/15
+        expected_avg = (Decimal("100") * Decimal("10") + Decimal("80") * Decimal("5")) / Decimal("15")
+        assert params["avg_cost"] == expected_avg
+        assert params["cost_basis"] == expected_avg * Decimal("15")
+        # PnL: (120-100)*10 + (120-80)*5 = 200 + 200 = 400
+        assert params["upnl"] == Decimal("400")
+
+    def test_duplicate_instrument_inserts_once_with_aggregated_values(self) -> None:
+        """Two broker positions for a new instrument should produce a single INSERT."""
+        p1 = _pos(
+            instrument_id=99,
+            units=Decimal("10"),
+            open_price=Decimal("100"),
+            current_price=Decimal("120"),
+        )
+        p2 = _pos(
+            instrument_id=99,
+            units=Decimal("5"),
+            open_price=Decimal("80"),
+            current_price=Decimal("120"),
+        )
+        conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
+        result = sync_portfolio(conn, _portfolio([p1, p2]), now=_NOW)
+
+        assert result.positions_opened_externally == 1
+
+        insert_calls = [
+            c
+            for c in conn.execute.call_args_list
+            if isinstance(c.args[0], str) and "INSERT INTO positions" in c.args[0]
+        ]
+        assert len(insert_calls) == 1
+        params = insert_calls[0].args[1]
+        assert params["units"] == Decimal("15")
+        expected_avg = (Decimal("100") * Decimal("10") + Decimal("80") * Decimal("5")) / Decimal("15")
+        assert params["price"] == expected_avg
+
+
+class TestReopenedPositionOpenDate:
+    """ON CONFLICT should update open_date for reopened positions."""
+
+    def test_upsert_includes_open_date_in_conflict_clause(self) -> None:
+        """Verify the INSERT's ON CONFLICT SET includes open_date."""
+        pos = _pos(instrument_id=99)
+        conn = _mock_conn(local_positions=[], local_cash=Decimal("0"))
+        sync_portfolio(conn, _portfolio([pos]), now=_NOW)
+
+        insert_calls = [
+            c
+            for c in conn.execute.call_args_list
+            if isinstance(c.args[0], str) and "INSERT INTO positions" in c.args[0]
+        ]
+        sql = insert_calls[0].args[0]
+        assert "open_date      = EXCLUDED.open_date" in sql

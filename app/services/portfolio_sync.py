@@ -23,6 +23,7 @@ Reconciliation rules:
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -31,7 +32,7 @@ from typing import Any
 import psycopg
 import psycopg.rows
 
-from app.providers.broker import BrokerPortfolio
+from app.providers.broker import BrokerPortfolio, BrokerPosition
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,63 @@ class PortfolioSyncResult:
     local_cash: Decimal
 
 
+@dataclass
+class _AggregatedPosition:
+    """Broker positions for the same instrument, aggregated."""
+
+    instrument_id: int
+    units: Decimal
+    avg_open_price: Decimal
+    unrealized_pnl: Decimal
+    earliest_open_date_raw: str | None
+    raw_payloads: list[dict[str, Any]]
+
+
+def _aggregate_by_instrument(
+    positions: Sequence[BrokerPosition],
+) -> dict[int, _AggregatedPosition]:
+    """Group broker positions by instrument_id and aggregate.
+
+    eToro can return multiple open positionIDs for the same instrumentID.
+    We sum units, compute weighted-average open price, compute total
+    unrealised PnL from the raw rows, and keep the earliest open date.
+    """
+    from collections import defaultdict
+
+    buckets: dict[int, list[BrokerPosition]] = defaultdict(list)
+    for bp in positions:
+        buckets[bp.instrument_id].append(bp)
+
+    result: dict[int, _AggregatedPosition] = {}
+    for iid, group in buckets.items():
+        _zero = Decimal("0")
+        total_units = sum((bp.units for bp in group), start=_zero)
+        total_cost = sum((bp.open_price * bp.units for bp in group), start=_zero)
+        total_pnl = sum(
+            ((bp.current_price - bp.open_price) * bp.units for bp in group),
+            start=_zero,
+        )
+        avg_price = total_cost / total_units if total_units > 0 else _zero
+
+        # Earliest open date among the raw payloads (if any provide it).
+        open_dates: list[str] = []
+        for bp in group:
+            raw_open = bp.raw_payload.get("openDateTime")
+            if isinstance(raw_open, str):
+                open_dates.append(raw_open)
+        open_dates.sort()
+
+        result[iid] = _AggregatedPosition(
+            instrument_id=iid,
+            units=total_units,
+            avg_open_price=avg_price,
+            unrealized_pnl=total_pnl,
+            earliest_open_date_raw=open_dates[0] if open_dates else None,
+            raw_payloads=[bp.raw_payload for bp in group],
+        )
+    return result
+
+
 def sync_portfolio(
     conn: psycopg.Connection[Any],
     portfolio: BrokerPortfolio,
@@ -68,8 +126,10 @@ def sync_portfolio(
     opened_externally = 0
     closed_externally = 0
 
-    # Build a lookup of broker positions by instrument_id.
-    broker_positions = {bp.instrument_id: bp for bp in portfolio.positions}
+    # Aggregate broker positions by instrument_id.  eToro can return
+    # multiple positionIDs for the same instrument; we must reconcile
+    # against aggregated totals, not individual rows.
+    broker_positions = _aggregate_by_instrument(portfolio.positions)
 
     # Fetch all local positions with units > 0.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -83,37 +143,37 @@ def sync_portfolio(
     local_instrument_ids = {row["instrument_id"] for row in local_rows}
 
     # 1. Upsert broker positions into local state.
-    for bp in portfolio.positions:
-        unrealized = (bp.current_price - bp.open_price) * bp.units
-        if bp.instrument_id in local_instrument_ids:
+    for agg in broker_positions.values():
+        if agg.instrument_id in local_instrument_ids:
             # Existing local position — update from broker.
             conn.execute(
                 """
                 UPDATE positions SET
                     current_units  = %(units)s,
+                    avg_cost       = %(avg_cost)s,
+                    cost_basis     = %(cost_basis)s,
                     unrealized_pnl = %(upnl)s,
                     updated_at     = %(now)s
                 WHERE instrument_id = %(iid)s
                 """,
                 {
-                    "iid": bp.instrument_id,
-                    "units": bp.units,
-                    "upnl": unrealized,
+                    "iid": agg.instrument_id,
+                    "units": agg.units,
+                    "avg_cost": agg.avg_open_price,
+                    "cost_basis": agg.avg_open_price * agg.units,
+                    "upnl": agg.unrealized_pnl,
                     "now": now,
                 },
             )
             updated += 1
         else:
             # New position from broker — opened externally.
-            # Try to extract actual open date from broker raw payload;
-            # fall back to sync time if the broker doesn't provide it.
-            # Known limitation: eToro's OpenAPI spec does not document
-            # an openDateTime field, so this may always fall back.
+            # Use the earliest open date from the aggregated broker
+            # payloads; fall back to sync time if unavailable.
             open_date = now.date()
-            raw_open = bp.raw_payload.get("openDateTime")
-            if isinstance(raw_open, str):
+            if agg.earliest_open_date_raw is not None:
                 try:
-                    open_date = datetime.fromisoformat(raw_open).date()
+                    open_date = datetime.fromisoformat(agg.earliest_open_date_raw).date()
                 except ValueError:
                     pass
             conn.execute(
@@ -129,25 +189,26 @@ def sync_portfolio(
                     avg_cost       = EXCLUDED.avg_cost,
                     cost_basis     = EXCLUDED.cost_basis,
                     unrealized_pnl = EXCLUDED.unrealized_pnl,
+                    open_date      = EXCLUDED.open_date,
                     updated_at     = EXCLUDED.updated_at
                 """,
                 {
-                    "iid": bp.instrument_id,
+                    "iid": agg.instrument_id,
                     "date": open_date,
-                    "price": bp.open_price,
-                    "units": bp.units,
-                    "cost": bp.open_price * bp.units,
-                    "upnl": unrealized,
+                    "price": agg.avg_open_price,
+                    "units": agg.units,
+                    "cost": agg.avg_open_price * agg.units,
+                    "upnl": agg.unrealized_pnl,
                     "now": now,
                 },
             )
             opened_externally += 1
             logger.warning(
                 "Position for instrument %d found on broker but not locally — "
-                "opened externally (units=%.4f, open_price=%.4f)",
-                bp.instrument_id,
-                bp.units,
-                bp.open_price,
+                "opened externally (units=%.4f, avg_open_price=%.4f)",
+                agg.instrument_id,
+                agg.units,
+                agg.avg_open_price,
             )
 
     # 2. Zero out local positions absent from broker.
