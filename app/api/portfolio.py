@@ -17,7 +17,7 @@ Mark-to-market semantics:
 Zero-unit positions: excluded via WHERE filter. A position with current_units = 0
 is fully liquidated and should not appear in the portfolio view.
 
-AUM = SUM(market_value across all positions) + cash_balance.
+AUM = SUM(market_value across all positions) + cash_balance + mirror_equity.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from app.api._helpers import parse_optional_float
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.domain.positions import PositionSource
+from app.services.portfolio import _load_mirror_equity
 
 router = APIRouter(
     prefix="/portfolio",
@@ -65,6 +66,7 @@ class PortfolioResponse(BaseModel):
     position_count: int
     total_aum: float
     cash_balance: float | None
+    mirror_equity: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -122,9 +124,9 @@ def get_portfolio(
 
     Zero-unit positions are excluded (fully liquidated).
 
-    AUM = sum of all position market_values + cash_balance.
+    AUM = sum of all position market_values + cash_balance + mirror_equity.
     If cash_balance is unknown (empty cash_ledger), AUM uses positions only
-    and cash_balance is null.
+    and cash_balance is null. mirror_equity is always a float (default 0.0).
     """
     # -- Positions query ---------------------------------------------------
     # quotes is 1:1 keyed by instrument_id (PRIMARY KEY) — LEFT JOIN is fan-out-safe.
@@ -161,9 +163,10 @@ def get_portfolio(
     positions = [_parse_position(r) for r in pos_rows]
     cash_balance = float(raw_cash) if raw_cash is not None else None  # type: ignore[arg-type]
 
-    # AUM: sum of position market_values + cash (if known).
+    # AUM: sum of position market_values + cash (if known) + mirror_equity.
     total_market = sum(p.market_value for p in positions)
-    total_aum = total_market + (cash_balance if cash_balance is not None else 0.0)
+    mirror_equity = _load_mirror_equity(conn)
+    total_aum = total_market + (cash_balance if cash_balance is not None else 0.0) + mirror_equity
 
     # Re-sort by market_value DESC (computed value, not a DB column) with stable tiebreak.
     positions.sort(key=lambda p: (-p.market_value, p.instrument_id))
@@ -173,4 +176,5 @@ def get_portfolio(
         position_count=len(positions),
         total_aum=total_aum,
         cash_balance=cash_balance,
+        mirror_equity=mirror_equity,
     )

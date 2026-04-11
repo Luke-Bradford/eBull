@@ -208,6 +208,7 @@ export interface PortfolioResponse {
   position_count: number;
   total_aum: number;
   cash_balance: number | null;
+  mirror_equity: number;
 }
 
 // ---------------------------------------------------------------------------

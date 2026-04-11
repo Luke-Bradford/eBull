@@ -84,7 +84,15 @@ def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
 
 
 def _with_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
-    conn = _mock_conn(cursor_results)
+    # The endpoint runs three DB queries: positions, cash, mirror_equity.
+    # Existing callers supply [positions, cash] only — pad with an empty
+    # mirror_equity result so the mock cursor feeder yields 0.0 for the
+    # third execute() (matches `COALESCE(SUM(...), 0)` from the real CTE
+    # at app/services/portfolio.py:201 — see #187 Track 1b Task 4).
+    padded = list(cursor_results)
+    if len(padded) == 2:
+        padded.append([{"total": 0}])
+    conn = _mock_conn(padded)
 
     def _override() -> Iterator[MagicMock]:
         yield conn
