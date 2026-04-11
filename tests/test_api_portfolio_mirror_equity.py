@@ -56,23 +56,22 @@ def conn() -> Iterator[psycopg.Connection[Any]]:
 def client(conn: psycopg.Connection[Any]) -> Iterator[TestClient]:
     """Overrides get_conn to reuse the test fixture connection, so
     assertions read the same DB state the endpoint sees.
+
+    Auth (``require_session_or_service_token``) is already no-op'd
+    globally by ``tests/conftest.py:21`` — do NOT touch that key here.
+    A per-test pop would wipe the global override and poison every
+    subsequent test file (test_api_recommendations, test_api_system,
+    etc.) with 401s.
     """
-    # Also bypass auth — this endpoint is session-protected.
-    from app.api.auth import require_session_or_service_token
 
     def _override_conn() -> Iterator[psycopg.Connection[Any]]:
         yield conn
 
-    def _override_auth() -> None:
-        return None
-
     app.dependency_overrides[get_conn] = _override_conn
-    app.dependency_overrides[require_session_or_service_token] = _override_auth
     try:
         yield TestClient(app)
     finally:
         app.dependency_overrides.pop(get_conn, None)
-        app.dependency_overrides.pop(require_session_or_service_token, None)
 
 
 def _seed_ebull_position_and_cash(
