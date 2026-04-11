@@ -8,6 +8,8 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from app.providers.broker import BrokerPortfolio, BrokerPosition
 from app.services.portfolio_sync import (
     PortfolioSyncResult,
@@ -246,8 +248,6 @@ class TestEmptyBrokerGuard:
     """
 
     def test_raises_when_broker_empty_but_local_has_positions(self) -> None:
-        import pytest
-
         conn = _mock_conn(
             local_positions=[(7, Decimal("10"))],
             local_cash=Decimal("0"),
@@ -256,8 +256,6 @@ class TestEmptyBrokerGuard:
             sync_portfolio(conn, _portfolio([]), now=_NOW)
 
     def test_does_not_zero_any_positions_when_raising(self) -> None:
-        import pytest
-
         conn = _mock_conn(
             local_positions=[(7, Decimal("10")), (8, Decimal("5"))],
             local_cash=Decimal("0"),
