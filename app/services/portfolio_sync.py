@@ -146,12 +146,13 @@ def sync_portfolio(
     for agg in broker_positions.values():
         if agg.instrument_id in local_instrument_ids:
             # Existing local position — update from broker.
+            # Only refresh units and PnL; leave avg_cost/cost_basis
+            # untouched — for eBull-originated positions, the local
+            # cost basis is authoritative for tax-lot and P&L history.
             conn.execute(
                 """
                 UPDATE positions SET
                     current_units  = %(units)s,
-                    avg_cost       = %(avg_cost)s,
-                    cost_basis     = %(cost_basis)s,
                     unrealized_pnl = %(upnl)s,
                     updated_at     = %(now)s
                 WHERE instrument_id = %(iid)s
@@ -159,8 +160,6 @@ def sync_portfolio(
                 {
                     "iid": agg.instrument_id,
                     "units": agg.units,
-                    "avg_cost": agg.avg_open_price,
-                    "cost_basis": agg.avg_open_price * agg.units,
                     "upnl": agg.unrealized_pnl,
                     "now": now,
                 },

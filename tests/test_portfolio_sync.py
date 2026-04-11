@@ -113,11 +113,12 @@ class TestExistingPositionUpdate:
         params = update_calls[0].args[1]
         assert params["iid"] == 42
         assert params["units"] == Decimal("5")
-        assert params["avg_cost"] == Decimal("100")
-        assert params["cost_basis"] == Decimal("500")
         # unrealized = (120 - 100) * 5 = 100
         assert params["upnl"] == Decimal("100")
         assert params["now"] == _NOW
+        # avg_cost/cost_basis must NOT appear — local cost basis is authoritative.
+        assert "avg_cost" not in params
+        assert "cost_basis" not in params
 
 
 class TestExternallyOpenedPosition:
@@ -420,12 +421,10 @@ class TestMultiPositionSync:
         assert len(update_calls) == 1
         params = update_calls[0].args[1]
         assert params["units"] == Decimal("15")
-        # avg_cost = (100*10 + 80*5) / 15 = 1400/15
-        expected_avg = (Decimal("100") * Decimal("10") + Decimal("80") * Decimal("5")) / Decimal("15")
-        assert params["avg_cost"] == expected_avg
-        assert params["cost_basis"] == expected_avg * Decimal("15")
         # PnL: (120-100)*10 + (120-80)*5 = 200 + 200 = 400
         assert params["upnl"] == Decimal("400")
+        # avg_cost/cost_basis must NOT be overwritten from broker data.
+        assert "avg_cost" not in params
 
     def test_duplicate_instrument_inserts_once_with_aggregated_values(self) -> None:
         """Two broker positions for a new instrument should produce a single INSERT."""
