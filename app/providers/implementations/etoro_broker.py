@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import decimal
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -439,6 +440,7 @@ class EtoroBrokerProvider(BrokerProvider):
         portfolio = raw.get("clientPortfolio") or {}
         raw_positions: list[dict[str, Any]] = portfolio.get("positions") or []
         credit = portfolio.get("credit")
+        raw_mirrors: list[Any] = portfolio.get("mirrors") or []
 
         positions: list[BrokerPosition] = []
         for pos in raw_positions:
@@ -474,6 +476,7 @@ class EtoroBrokerProvider(BrokerProvider):
             positions=positions,
             available_cash=Decimal(str(credit)) if credit is not None else Decimal("0"),
             raw_payload=raw,
+            mirrors=tuple(_parse_mirrors_payload(raw_mirrors)),
         )
 
     # ------------------------------------------------------------------
@@ -671,6 +674,45 @@ def _parse_mirror(payload: dict[str, Any]) -> BrokerMirror:
         positions=tuple(parsed_positions),
         raw_payload=payload,
     )
+
+
+def _parse_mirrors_payload(
+    raw_mirrors: Sequence[Any],
+) -> list[BrokerMirror]:
+    """Parse clientPortfolio.mirrors[] into a list of BrokerMirror.
+
+    Implements the outer top-level loop from spec §2.2.2:
+
+    1. Rows that are not dicts, or dicts with no `mirrorID` key, are
+       logged and skipped (the ONLY surviving log-and-skip path —
+       they cannot collide with any known local row, so silent skip
+       is safe).
+    2. Rows with a recognisable `mirrorID` are parsed via
+       `_parse_mirror`. Any failure raises PortfolioParseError —
+       log-and-skip on a known mirror_id would look like a
+       disappearance to §2.3.4's soft-close and silently destroy
+       the local row.
+    3. PortfolioParseError raised by the nested-position wrap inside
+       `_parse_mirror` is re-raised unchanged so the caller sees the
+       `position[idx]` attribution.
+    4. Any other exception escaping `_parse_mirror` (KeyError,
+       ValueError, TypeError, decimal.DecimalException) is
+       fallback-wrapped in PortfolioParseError with mirror_id-only
+       attribution.
+    """
+    mirrors: list[BrokerMirror] = []
+    for m in raw_mirrors:
+        if not isinstance(m, dict) or "mirrorID" not in m:
+            logger.warning("Skipping unrecognisable mirrors[] element: %r", m)
+            continue
+
+        try:
+            mirrors.append(_parse_mirror(m))
+        except PortfolioParseError:
+            raise
+        except (KeyError, ValueError, TypeError, decimal.DecimalException) as exc:
+            raise PortfolioParseError(f"Failed to parse mirror {m.get('mirrorID')!r}: {exc}") from exc
+    return mirrors
 
 
 def _build_result(

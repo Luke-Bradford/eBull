@@ -9,6 +9,7 @@ loop in etoro_broker.get_portfolio's mirrors[] branch.
 from __future__ import annotations
 
 import decimal
+import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -20,6 +21,7 @@ from app.providers.implementations.etoro_broker import (
     PortfolioParseError,
     _parse_mirror,
     _parse_mirror_position,
+    _parse_mirrors_payload,
 )
 
 
@@ -200,3 +202,72 @@ def test_parse_mirror_nested_key_error_wraps() -> None:
     assert "15712187" in str(excinfo.value)
     assert "position[0]" in str(excinfo.value)
     assert isinstance(excinfo.value.__cause__, KeyError)
+
+
+# ---------------------------------------------------------------------------
+# Task 8: _parse_mirrors_payload — outer top-level loop
+# ---------------------------------------------------------------------------
+
+
+def test_parse_mirrors_payload_happy_path_two_mirrors() -> None:
+    raw = [_make_mirror_payload(mirrorID=1), _make_mirror_payload(mirrorID=2)]
+    result = _parse_mirrors_payload(raw)
+    assert len(result) == 2
+    assert result[0].mirror_id == 1
+    assert result[1].mirror_id == 2
+
+
+def test_parse_mirrors_payload_skips_unrecognisable_no_mirror_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Spec §2.2.2: the ONLY surviving log-and-skip path is a row
+    with no usable mirrorID — it cannot collide with any known
+    local row, so it is safe to skip."""
+    raw = [
+        {"not a mirror": True},  # no mirrorID → safe skip
+        "not even a dict",  # not a dict → safe skip
+        _make_mirror_payload(mirrorID=42),  # valid → parsed
+    ]
+    with caplog.at_level(logging.WARNING):
+        result = _parse_mirrors_payload(raw)
+    assert len(result) == 1
+    assert result[0].mirror_id == 42
+    assert any("unrecognisable" in rec.message.lower() for rec in caplog.records)
+
+
+def test_parse_mirrors_payload_known_mirror_top_level_failure_raises() -> None:
+    """Spec §2.2.2: a row with a recognisable mirrorID but a
+    missing/malformed required top-level field raises
+    PortfolioParseError — NOT log-and-skip. Otherwise the sync
+    would then interpret this as a disappearance and soft-close
+    the local row (Codex v3 finding V parse-and-soft-close hole)."""
+    bad = _make_mirror_payload(mirrorID=15712187)
+    del bad["availableAmount"]
+    raw = [bad, _make_mirror_payload(mirrorID=42)]
+    with pytest.raises(PortfolioParseError) as excinfo:
+        _parse_mirrors_payload(raw)
+    assert "15712187" in str(excinfo.value)
+    # The underlying cause is a KeyError on the missing key.
+    assert isinstance(excinfo.value.__cause__, KeyError)
+
+
+def test_parse_mirrors_payload_known_mirror_decimal_failure_raises() -> None:
+    """Non-numeric top-level availableAmount raises
+    decimal.InvalidOperation, which the outer fallback catch wraps
+    as PortfolioParseError with mirror_id attribution."""
+    bad = _make_mirror_payload(mirrorID=15712187, availableAmount="bogus")
+    with pytest.raises(PortfolioParseError) as excinfo:
+        _parse_mirrors_payload([bad])
+    assert "15712187" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, decimal.InvalidOperation)
+
+
+def test_parse_mirrors_payload_nested_failure_propagates_unchanged() -> None:
+    """Spec §2.2.2: the outer loop's `except PortfolioParseError: raise`
+    preserves the inner-loop's position[idx] attribution."""
+    bad_pos = _make_position_payload(positionID=9999, units="bogus")
+    bad_mirror = _make_mirror_payload(mirrorID=15712187, positions=[bad_pos])
+    with pytest.raises(PortfolioParseError) as excinfo:
+        _parse_mirrors_payload([bad_mirror])
+    assert "15712187" in str(excinfo.value)
+    assert "position[0]" in str(excinfo.value)
