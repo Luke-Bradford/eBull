@@ -82,7 +82,7 @@ class EtoroMarketDataProvider(MarketDataProvider):
             min_request_interval_s=_ETORO_READ_INTERVAL_S,
         )
 
-    def __enter__(self) -> "EtoroMarketDataProvider":
+    def __enter__(self) -> EtoroMarketDataProvider:
         return self
 
     def __exit__(
@@ -400,5 +400,5 @@ def _int_or_none(value: object) -> int | None:
     try:
         result = int(float(str(value)))
         return result if result != 0 else None
-    except (ValueError, ArithmeticError):
+    except ValueError, ArithmeticError:
         return None

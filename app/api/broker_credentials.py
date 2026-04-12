@@ -286,7 +286,7 @@ def create(
                         environment=env_norm,
                         plaintext=secret_norm,
                     )
-                except (KeyboardInterrupt, SystemExit):
+                except KeyboardInterrupt, SystemExit:
                     # Signal-driven shutdown: do NOT touch the
                     # file. At signal time it is unknowable
                     # whether the INSERT committed -- the signal

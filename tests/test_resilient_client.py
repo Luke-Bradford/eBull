@@ -55,7 +55,7 @@ def _make_client(
 
 
 @pytest.fixture()
-def _patch_time() -> Generator[MagicMock, None, None]:
+def _patch_time() -> Generator[MagicMock]:
     """Patch time.monotonic and time.sleep on the resilient_client module."""
     mock_time = MagicMock()
     mock_time.monotonic.return_value = 100.0

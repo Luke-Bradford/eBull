@@ -41,11 +41,23 @@ Currently in flight:
 - Copy-trading ingestion (#183 Track 1a), AUM correction (#187
   Track 1b), browsing UX (#188 Track 1.5), discovery (#189 Track 2)
 
+## Prerequisites
+
+| Tool | Minimum version | Notes |
+|------|----------------|-------|
+| Python | 3.14 | `python --version` |
+| uv | 0.11 | Python package manager — `pip install uv` |
+| Node.js | 22 LTS | `node --version` |
+| pnpm | 10 | `npm install -g pnpm` |
+| Docker | 28 | Runs PostgreSQL 17 via `docker-compose.yml` |
+| Git | 2.40+ | |
+
 ## Local setup
 
 ```bash
 cp .env.example .env
 docker compose up -d
+uv sync --group dev
 uv run uvicorn app.main:app --reload
 pnpm --dir frontend install && pnpm --dir frontend dev
 ```

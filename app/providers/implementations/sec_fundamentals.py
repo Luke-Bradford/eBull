@@ -255,7 +255,7 @@ def _latest_annual_value(entries: list[dict[str, Any]]) -> tuple[float | None, d
     best = annual[0]
     try:
         end_date = date.fromisoformat(best["end"])
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None, None
     return best.get("val"), end_date
 
@@ -275,7 +275,7 @@ def _latest_point_in_time(entries: list[dict[str, Any]]) -> tuple[float | None, 
     best = valid[0]
     try:
         end_date = date.fromisoformat(best["end"])
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None, None
     return best["val"], end_date
 
@@ -298,7 +298,7 @@ def _ttm_from_quarters(entries: list[dict[str, Any]]) -> float | None:
         try:
             start = date.fromisoformat(start_str)
             end = date.fromisoformat(end_str)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
         days = (end - start).days
         if 60 <= days <= 120:
@@ -466,7 +466,7 @@ def _build_history_snapshots(
         seen.add(end_str)
         try:
             d = date.fromisoformat(end_str)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
         if from_date <= d <= to_date:
             end_dates.append(d)
@@ -501,7 +501,7 @@ def _get_value_at_date(
             continue
         try:
             end = date.fromisoformat(end_str)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
         if end == target_date:
             return val  # type: ignore[no-any-return]

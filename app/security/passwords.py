@@ -52,5 +52,5 @@ def verify_password(plaintext: str, stored_hash: str) -> bool:
     """
     try:
         return _hasher.verify(stored_hash, plaintext)
-    except (VerifyMismatchError, VerificationError, InvalidHashError):
+    except VerifyMismatchError, VerificationError, InvalidHashError:
         return False

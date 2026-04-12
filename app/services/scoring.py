@@ -153,7 +153,7 @@ def _to_float(val: object) -> float | None:
         return None
     try:
         return float(val)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
