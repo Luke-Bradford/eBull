@@ -21,7 +21,7 @@ import psycopg
 from fastapi import Request
 
 
-def get_conn(request: Request) -> Generator[psycopg.Connection[object], None, None]:
+def get_conn(request: Request) -> Generator[psycopg.Connection[object]]:
     """FastAPI dependency that checks out a connection from the pool.
 
     The connection is returned to the pool when the request completes.

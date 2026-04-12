@@ -109,8 +109,13 @@ jobs:
               )
 
           prompt = (
-              "You are a code reviewer for eBull, a Python/FastAPI investment engine (psycopg v3, PostgreSQL 16, Pydantic v2). "
+              "You are a code reviewer for eBull, a Python 3.14/FastAPI investment engine (psycopg v3, PostgreSQL 17, Pydantic v2). "
               "The code author is Claude Code (an AI agent) — it already knows the stack. Only surface real problems.\n\n"
+              "## Python 3.14 syntax notes\n"
+              "- PEP 758: `except A, B:` without parentheses is valid Python 3.14 syntax for catching multiple exceptions. "
+              "This is NOT the old Python 2 `except ExceptionType, variable:` pattern. Do not flag it.\n"
+              "- PEP 649: deferred evaluation of annotations. Forward-reference quotes on return types are unnecessary.\n"
+              "- `Generator[X]` is valid — send and return type args default to `None` since 3.13.\n\n"
 
               "## Non-negotiables — flag any violation\n"
               "- Every trade path writes `decision_audit` before order placement\n"

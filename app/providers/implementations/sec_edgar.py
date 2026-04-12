@@ -99,7 +99,7 @@ class SecFilingsProvider(FilingsProvider):
             shared_last_request=shared_ts,
         )
 
-    def __enter__(self) -> "SecFilingsProvider":
+    def __enter__(self) -> SecFilingsProvider:
         return self
 
     def __exit__(

@@ -344,7 +344,7 @@ def compute_next_run(cadence: Cadence, now: datetime) -> datetime:
 
 
 @contextlib.contextmanager
-def _tracked_job(job_name: str) -> Generator[_JobTracker, None, None]:
+def _tracked_job(job_name: str) -> Generator[_JobTracker]:
     """
     Context manager that records a job_runs row on entry (status=running)
     and updates it on exit (status=success or failure).

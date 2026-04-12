@@ -445,7 +445,7 @@ def _enforce_tier1_cap(
         if isinstance(created, str):
             try:
                 ts = datetime.fromisoformat(created).timestamp()
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 ts = 0.0
         else:
             ts = 0.0

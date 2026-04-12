@@ -32,7 +32,7 @@ class _FakeTracker:
 
 
 @contextlib.contextmanager
-def _noop_tracked_job(job_name: str) -> Generator[_FakeTracker, None, None]:
+def _noop_tracked_job(job_name: str) -> Generator[_FakeTracker]:
     yield _FakeTracker()
 
 

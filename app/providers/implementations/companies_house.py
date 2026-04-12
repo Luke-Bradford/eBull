@@ -80,7 +80,7 @@ class CompaniesHouseFilingsProvider(FilingsProvider):
             min_request_interval_s=_CH_REQUEST_INTERVAL_S,
         )
 
-    def __enter__(self) -> "CompaniesHouseFilingsProvider":
+    def __enter__(self) -> CompaniesHouseFilingsProvider:
         return self
 
     def __exit__(

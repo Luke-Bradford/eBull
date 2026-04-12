@@ -76,7 +76,7 @@ class FmpFundamentalsProvider(FundamentalsProvider):
             min_request_interval_s=_FMP_REQUEST_INTERVAL_S,
         )
 
-    def __enter__(self) -> "FmpFundamentalsProvider":
+    def __enter__(self) -> FmpFundamentalsProvider:
         return self
 
     def __exit__(
@@ -308,5 +308,5 @@ def _int_or_none(value: object) -> int | None:
             logger.warning("FMP: _int_or_none received zero value (%r) — returning None; verify source data", value)
             return None
         return result
-    except (ValueError, ArithmeticError):
+    except ValueError, ArithmeticError:
         return None

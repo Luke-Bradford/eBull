@@ -1,6 +1,6 @@
 # sql-correctness
 
-Engineering standard for writing correct SQL in this stack (psycopg3 + PostgreSQL 16).
+Engineering standard for writing correct SQL in this stack (psycopg3 + PostgreSQL 17).
 
 ## Atomic versioning — no two-step sequences
 

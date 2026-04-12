@@ -1,6 +1,6 @@
 # python-hygiene
 
-Engineering standard for Python code quality in this stack (Python 3.11+, Pydantic v2, psycopg3).
+Engineering standard for Python code quality in this stack (Python 3.14+, Pydantic v2, psycopg3).
 
 ## Type annotations
 

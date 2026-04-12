@@ -393,7 +393,7 @@ def _upsert_news_event(
     if item.raw_payload is not None:
         try:
             raw_payload = json.loads(item.raw_payload)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             raw_payload = {"raw": item.raw_payload}
 
     conn.execute(
