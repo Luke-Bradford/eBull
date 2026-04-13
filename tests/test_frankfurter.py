@@ -13,11 +13,12 @@ from app.providers.implementations.frankfurter import fetch_latest_rates
 
 class TestFetchLatestRates:
     def test_empty_targets_returns_empty(self) -> None:
-        result = fetch_latest_rates("USD", [])
-        assert result == {}
+        rates, ecb_date = fetch_latest_rates("USD", [])
+        assert rates == {}
+        assert ecb_date is None
 
     @patch("app.providers.implementations.frankfurter.httpx.Client")
-    def test_parses_rates(self, mock_client_cls: MagicMock) -> None:
+    def test_parses_rates_and_date(self, mock_client_cls: MagicMock) -> None:
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "base": "USD",
@@ -31,12 +32,13 @@ class TestFetchLatestRates:
         mock_client.__exit__ = MagicMock(return_value=False)
         mock_client_cls.return_value = mock_client
 
-        result = fetch_latest_rates("USD", ["GBP", "EUR"])
+        rates, ecb_date = fetch_latest_rates("USD", ["GBP", "EUR"])
 
-        assert ("USD", "GBP") in result
-        assert ("USD", "EUR") in result
-        assert result[("USD", "GBP")] == Decimal("0.7812")
-        assert result[("USD", "EUR")] == Decimal("0.9234")
+        assert ("USD", "GBP") in rates
+        assert ("USD", "EUR") in rates
+        assert rates[("USD", "GBP")] == Decimal("0.7812")
+        assert rates[("USD", "EUR")] == Decimal("0.9234")
+        assert ecb_date == "2026-04-13"
 
     @patch("app.providers.implementations.frankfurter.httpx.Client")
     def test_http_error_propagates(self, mock_client_cls: MagicMock) -> None:
@@ -66,8 +68,8 @@ class TestFetchLatestRates:
         mock_client.__exit__ = MagicMock(return_value=False)
         mock_client_cls.return_value = mock_client
 
-        result = fetch_latest_rates("USD", ["GBP", "EUR"])
+        rates, _ecb_date = fetch_latest_rates("USD", ["GBP", "EUR"])
 
         # GBP should still be parsed (Decimal("not_a_number") actually raises)
         # but EUR should succeed
-        assert ("USD", "EUR") in result
+        assert ("USD", "EUR") in rates

@@ -1242,7 +1242,14 @@ def fx_rates_refresh() -> None:
         # Fetch USD → every other supported currency.
         targets = sorted(c for c in SUPPORTED_CURRENCIES if c != "USD")
         try:
-            ecb_rates = fetch_latest_rates("USD", targets)
+            ecb_rates, ecb_date = fetch_latest_rates("USD", targets)
+            # Use the ECB publication date for quoted_at so freshness
+            # checks reflect when the rate was actually set, not when
+            # we fetched it (matters on weekends/holidays).
+            if ecb_date is not None:
+                ecb_quoted_at = datetime.fromisoformat(ecb_date).replace(tzinfo=UTC)
+            else:
+                ecb_quoted_at = datetime.now(UTC)
             with psycopg.connect(settings.database_url) as conn:
                 with conn.transaction():
                     for (from_ccy, to_ccy), rate in ecb_rates.items():
@@ -1251,10 +1258,15 @@ def fx_rates_refresh() -> None:
                             from_currency=from_ccy,
                             to_currency=to_ccy,
                             rate=rate,
-                            quoted_at=datetime.now(UTC),
+                            quoted_at=ecb_quoted_at,
                         )
                         fx_rows_written += 1
-            logger.info("fx_rates_refresh: Frankfurter ECB rates written: %d pairs", fx_rows_written)
+                conn.commit()
+            logger.info(
+                "fx_rates_refresh: Frankfurter ECB rates written: %d pairs (date=%s)",
+                fx_rows_written,
+                ecb_date,
+            )
         except Exception:
             logger.warning("fx_rates_refresh: Frankfurter fetch failed, continuing with eToro fallback", exc_info=True)
 

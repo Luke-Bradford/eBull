@@ -25,16 +25,20 @@ _TIMEOUT_S = 15.0
 def fetch_latest_rates(
     base: str,
     targets: list[str],
-) -> dict[tuple[str, str], Decimal]:
+) -> tuple[dict[tuple[str, str], Decimal], str | None]:
     """Fetch latest ECB rates for base → each target currency.
 
-    Returns a dict keyed by (from_currency, to_currency) → rate.
+    Returns ``(rates, ecb_date)`` where *rates* is keyed by
+    ``(from_currency, to_currency) → rate`` and *ecb_date* is the ISO
+    date string from the API response (e.g. ``"2026-04-11"``).  On
+    weekends/holidays the date reflects the last ECB publication day.
+
     Rate semantics: 1 unit of ``base`` = ``rate`` units of ``target``.
 
     Raises on network/HTTP errors — caller should handle.
     """
     if not targets:
-        return {}
+        return {}, None
 
     # Frankfurter API: GET /v1/latest?base=USD&symbols=GBP,EUR
     symbols = ",".join(targets)
@@ -46,6 +50,7 @@ def fetch_latest_rates(
         response.raise_for_status()
 
     data = response.json()
+    ecb_date: str | None = data.get("date")
     raw_rates: dict[str, object] = data.get("rates", {})
 
     result: dict[tuple[str, str], Decimal] = {}
@@ -56,4 +61,4 @@ def fetch_latest_rates(
             except Exception:
                 logger.warning("Failed to parse Frankfurter rate %s→%s: %s", base, ccy, value)
 
-    return result
+    return result, ecb_date
