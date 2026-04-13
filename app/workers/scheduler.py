@@ -254,9 +254,10 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name=JOB_FX_RATES_REFRESH,
-        description="Refresh live FX rates from eToro conversion rates.",
+        description="Refresh live FX rates (Frankfurter primary, eToro secondary).",
         cadence=Cadence.hourly(minute=0),
-        prerequisite=_has_coverage_tier12,
+        # No prerequisite: Frankfurter FX is independent of instrument coverage.
+        # The eToro quote refresh inside the job self-guards on coverage.
     ),
     ScheduledJob(
         name=JOB_DAILY_RESEARCH_REFRESH,
@@ -451,6 +452,26 @@ def _load_etoro_credentials(job_name: str) -> tuple[str, str] | None:
         logger.error("%s: %s, skipping", job_name, exc)
         return None
     return (api_key, user_key)
+
+
+def _promote_held_to_tier1(conn: psycopg.Connection[Any]) -> int:
+    """Promote instruments with open positions to coverage Tier 1.
+
+    Returns the number of instruments promoted. Idempotent — instruments
+    already at Tier 1 are untouched. Must be called inside an open
+    transaction (the caller commits).
+    """
+    result = conn.execute(
+        """
+        UPDATE coverage
+        SET coverage_tier = 1
+        WHERE instrument_id IN (
+            SELECT instrument_id FROM positions WHERE current_units > 0
+        )
+          AND coverage_tier != 1
+        """
+    )
+    return result.rowcount
 
 
 def nightly_universe_sync() -> None:
@@ -902,7 +923,15 @@ def daily_portfolio_sync() -> None:
 
         with psycopg.connect(settings.database_url) as conn:
             result = sync_portfolio(conn, portfolio)
+
+            # Auto-promote held instruments to Tier 1 so market data,
+            # FX rates, and downstream jobs fire for them. Without this,
+            # newly synced positions stay at Tier 3 and all jobs skip.
+            promoted = _promote_held_to_tier1(conn)
             conn.commit()
+
+        if promoted:
+            logger.info("Portfolio sync: auto-promoted %d held instruments to Tier 1", promoted)
 
         tracker.row_count = (
             result.positions_updated + result.positions_opened_externally + result.positions_closed_externally
@@ -1185,128 +1214,147 @@ def weekly_coverage_review() -> None:
 
 
 def fx_rates_refresh() -> None:
-    """Refresh live FX rates and quotes from eToro conversion rates.
+    """Refresh live FX rates and quotes.
 
-    The eToro rates endpoint returns ``conversionRateAsk``/``conversionRateBid``
-    on every quote response. These represent the instrument's native currency →
-    account currency (USD) conversion rate. This job:
+    Two-source strategy:
 
-    1. Batch-fetches quotes for all covered Tier 1/2 instruments.
-    2. Extracts unique currency → USD conversion rates from the response.
-    3. Upserts each rate pair into ``live_fx_rates`` for display-currency
-       conversion.
-    4. Also upserts the quotes themselves into the ``quotes`` table so
-       quote freshness stays hourly (candle refresh runs daily at 22:00).
+    1. **Frankfurter (primary FX):** Fetch ECB reference rates for all
+       supported display currencies. No API key, no coverage prerequisite.
+       Runs unconditionally.
 
-    Runs hourly at :00. Requires Tier 1/2 coverage rows.
+    2. **eToro quotes (secondary):** Batch-fetch quotes for covered Tier 1/2
+       instruments. Extracts eToro-specific conversion rates as a supplement,
+       and upserts quotes for hourly freshness. Skips gracefully if eToro
+       credentials are missing or the rates endpoint fails.
+
+    Runs hourly at :00.
     """
+    from app.providers.implementations.frankfurter import fetch_latest_rates
     from app.services.fx import upsert_live_fx_rate
     from app.services.market_data import compute_spread_pct
-
-    creds = _load_etoro_credentials("fx_rates_refresh")
-    if creds is None:
-        return
-
-    api_key, user_key = creds
+    from app.services.runtime_config import SUPPORTED_CURRENCIES
 
     with _tracked_job(JOB_FX_RATES_REFRESH) as tracker:
-        with (
-            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
-            psycopg.connect(settings.database_url) as conn,
-        ):
-            rows = conn.execute(
-                """
-                SELECT i.instrument_id, i.symbol, i.currency
-                FROM instruments i
-                JOIN coverage c ON c.instrument_id = i.instrument_id
-                WHERE i.is_tradable = TRUE
-                  AND c.coverage_tier IN (1, 2)
-                ORDER BY i.symbol
-                """
-            ).fetchall()
+        fx_rows_written = 0
+        quotes_updated = 0
 
-            if not rows:
-                logger.info("fx_rates_refresh: no covered instruments found, skipping")
-                tracker.row_count = 0
-                return
-
-            instrument_ids = [row[0] for row in rows]
-            currency_map: dict[int, str | None] = {row[0]: row[2] for row in rows}
-
-            quotes = provider.get_quotes(instrument_ids)
-
-            # --- Extract FX rates from conversion_rate fields ---
-            # Group by currency to get the latest rate per unique pair.
-            # eToro conversion rates are instrument_ccy → USD.
-            fx_pairs: dict[str, tuple[Decimal, datetime]] = {}  # ccy → (rate, ts)
-            for q in quotes:
-                if q.conversion_rate is None:
-                    continue
-                ccy = currency_map.get(q.instrument_id)
-                if ccy is None or ccy == "USD":
-                    continue
-                # Keep the most recent timestamp per currency.
-                existing = fx_pairs.get(ccy)
-                if existing is None or q.timestamp > existing[1]:
-                    fx_pairs[ccy] = (q.conversion_rate, q.timestamp)
-
-            fx_rows_written = 0
-            with conn.transaction():
-                for ccy, (rate, ts) in fx_pairs.items():
-                    # Store the direct pair: ccy → USD
-                    upsert_live_fx_rate(
-                        conn,
-                        from_currency=ccy,
-                        to_currency="USD",
-                        rate=rate,
-                        quoted_at=ts,
-                    )
-                    fx_rows_written += 1
-
-            # --- Upsert quotes for hourly freshness ---
-            max_spread_pct = Decimal("1.0")
-            quotes_updated = 0
-            for q in quotes:
-                try:
-                    spread_pct = compute_spread_pct(q.bid, q.ask)
-                    spread_flag = spread_pct is not None and spread_pct > max_spread_pct
-                    with conn.transaction():
-                        conn.execute(
-                            """
-                            INSERT INTO quotes (
-                                instrument_id, quoted_at, bid, ask, last, spread_pct, spread_flag
-                            )
-                            VALUES (
-                                %(instrument_id)s, %(quoted_at)s, %(bid)s, %(ask)s,
-                                %(last)s, %(spread_pct)s, %(spread_flag)s
-                            )
-                            ON CONFLICT (instrument_id) DO UPDATE SET
-                                quoted_at   = EXCLUDED.quoted_at,
-                                bid         = EXCLUDED.bid,
-                                ask         = EXCLUDED.ask,
-                                last        = EXCLUDED.last,
-                                spread_pct  = EXCLUDED.spread_pct,
-                                spread_flag = EXCLUDED.spread_flag
-                            """,
-                            {
-                                "instrument_id": q.instrument_id,
-                                "quoted_at": q.timestamp,
-                                "bid": q.bid,
-                                "ask": q.ask,
-                                "last": q.last,
-                                "spread_pct": spread_pct,
-                                "spread_flag": spread_flag,
-                            },
+        # --- Phase 1: Frankfurter ECB rates (always runs) ---
+        # Fetch USD → every other supported currency.
+        targets = sorted(c for c in SUPPORTED_CURRENCIES if c != "USD")
+        try:
+            ecb_rates = fetch_latest_rates("USD", targets)
+            with psycopg.connect(settings.database_url) as conn:
+                with conn.transaction():
+                    for (from_ccy, to_ccy), rate in ecb_rates.items():
+                        upsert_live_fx_rate(
+                            conn,
+                            from_currency=from_ccy,
+                            to_currency=to_ccy,
+                            rate=rate,
+                            quoted_at=datetime.now(UTC),
                         )
-                        quotes_updated += 1
-                except Exception:
-                    logger.warning(
-                        "fx_rates_refresh: failed to upsert quote for instrument %d",
-                        q.instrument_id,
-                        exc_info=True,
-                    )
+                        fx_rows_written += 1
+            logger.info("fx_rates_refresh: Frankfurter ECB rates written: %d pairs", fx_rows_written)
+        except Exception:
+            logger.warning("fx_rates_refresh: Frankfurter fetch failed, continuing with eToro fallback", exc_info=True)
 
-            tracker.row_count = fx_rows_written + quotes_updated
+        # --- Phase 2: eToro quotes + conversion rates (best-effort) ---
+        creds = _load_etoro_credentials("fx_rates_refresh")
+        if creds is not None:
+            api_key, user_key = creds
+            try:
+                with (
+                    EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
+                    psycopg.connect(settings.database_url) as conn,
+                ):
+                    rows = conn.execute(
+                        """
+                        SELECT i.instrument_id, i.symbol, i.currency
+                        FROM instruments i
+                        JOIN coverage c ON c.instrument_id = i.instrument_id
+                        WHERE i.is_tradable = TRUE
+                          AND c.coverage_tier IN (1, 2)
+                        ORDER BY i.symbol
+                        """
+                    ).fetchall()
+
+                    if rows:
+                        instrument_ids = [row[0] for row in rows]
+                        currency_map: dict[int, str | None] = {row[0]: row[2] for row in rows}
+
+                        quotes = provider.get_quotes(instrument_ids)
+
+                        # Extract eToro-specific conversion rates as a supplement.
+                        fx_pairs: dict[str, tuple[Decimal, datetime]] = {}
+                        for q in quotes:
+                            if q.conversion_rate is None:
+                                continue
+                            ccy = currency_map.get(q.instrument_id)
+                            if ccy is None or ccy == "USD":
+                                continue
+                            existing = fx_pairs.get(ccy)
+                            if existing is None or q.timestamp > existing[1]:
+                                fx_pairs[ccy] = (q.conversion_rate, q.timestamp)
+
+                        with conn.transaction():
+                            for ccy, (rate, ts) in fx_pairs.items():
+                                upsert_live_fx_rate(
+                                    conn,
+                                    from_currency=ccy,
+                                    to_currency="USD",
+                                    rate=rate,
+                                    quoted_at=ts,
+                                )
+                                fx_rows_written += 1
+
+                        # Upsert quotes for hourly freshness.
+                        max_spread_pct = Decimal("1.0")
+                        for q in quotes:
+                            try:
+                                spread_pct = compute_spread_pct(q.bid, q.ask)
+                                spread_flag = spread_pct is not None and spread_pct > max_spread_pct
+                                with conn.transaction():
+                                    conn.execute(
+                                        """
+                                        INSERT INTO quotes (
+                                            instrument_id, quoted_at, bid, ask, last,
+                                            spread_pct, spread_flag
+                                        )
+                                        VALUES (
+                                            %(instrument_id)s, %(quoted_at)s, %(bid)s, %(ask)s,
+                                            %(last)s, %(spread_pct)s, %(spread_flag)s
+                                        )
+                                        ON CONFLICT (instrument_id) DO UPDATE SET
+                                            quoted_at   = EXCLUDED.quoted_at,
+                                            bid         = EXCLUDED.bid,
+                                            ask         = EXCLUDED.ask,
+                                            last        = EXCLUDED.last,
+                                            spread_pct  = EXCLUDED.spread_pct,
+                                            spread_flag = EXCLUDED.spread_flag
+                                        """,
+                                        {
+                                            "instrument_id": q.instrument_id,
+                                            "quoted_at": q.timestamp,
+                                            "bid": q.bid,
+                                            "ask": q.ask,
+                                            "last": q.last,
+                                            "spread_pct": spread_pct,
+                                            "spread_flag": spread_flag,
+                                        },
+                                    )
+                                    quotes_updated += 1
+                            except Exception:
+                                logger.warning(
+                                    "fx_rates_refresh: failed to upsert quote for instrument %d",
+                                    q.instrument_id,
+                                    exc_info=True,
+                                )
+                    else:
+                        logger.info("fx_rates_refresh: no covered instruments for eToro quotes")
+            except Exception:
+                logger.warning("fx_rates_refresh: eToro quote fetch failed", exc_info=True)
+
+        tracker.row_count = fx_rows_written + quotes_updated
 
     logger.info(
         "fx_rates_refresh complete: fx_pairs=%d quotes=%d",

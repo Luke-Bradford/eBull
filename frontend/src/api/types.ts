@@ -201,6 +201,8 @@ export interface PositionItem {
   cost_basis: number;
   market_value: number;
   unrealized_pnl: number;
+  valuation_source: "quote" | "daily_close" | "cost_basis";
+  source: string;
   updated_at: string;
 }
 
