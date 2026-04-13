@@ -171,6 +171,7 @@ JOB_WEEKLY_COVERAGE_REVIEW = "weekly_coverage_review"
 JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
 JOB_DAILY_PORTFOLIO_SYNC = "daily_portfolio_sync"
 JOB_EXECUTE_APPROVED_ORDERS = "execute_approved_orders"
+JOB_FX_RATES_REFRESH = "fx_rates_refresh"
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +249,12 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         name=JOB_HOURLY_MARKET_REFRESH,
         description="Refresh quotes and candles for all active Tier 1/2 instruments.",
         cadence=Cadence.hourly(minute=5),
+        prerequisite=_has_coverage_tier12,
+    ),
+    ScheduledJob(
+        name=JOB_FX_RATES_REFRESH,
+        description="Refresh live FX rates from eToro conversion rates.",
+        cadence=Cadence.hourly(minute=0),
         prerequisite=_has_coverage_tier12,
     ),
     ScheduledJob(
@@ -1146,6 +1153,22 @@ def weekly_coverage_review() -> None:
         len(result.blocked),
         result.unchanged,
     )
+
+
+def fx_rates_refresh() -> None:
+    """Refresh live FX rates from eToro conversion rates.
+
+    Calls upsert_live_fx_rate for USD→GBP and GBP→USD.
+    For now logs a warning because EtoroMarketDataProvider does not yet
+    expose a conversion rate endpoint. The job registration and DB writer
+    (upsert_live_fx_rate) are in place so the implementation can be wired
+    once the eToro rates API endpoint is identified.
+    """
+    from app.services.fx import upsert_live_fx_rate  # noqa: F401 — imported for future use
+
+    with _tracked_job(JOB_FX_RATES_REFRESH) as tracker:
+        logger.warning("fx_rates_refresh: FX rate provider not yet implemented — skipping fetch")
+        tracker.row_count = 0
 
 
 def daily_tax_reconciliation() -> None:

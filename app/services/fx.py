@@ -10,6 +10,7 @@ FX invariant: rate = units of to_currency per 1 unit of from_currency.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -63,3 +64,29 @@ def load_live_fx_rates_with_metadata(
         "SELECT from_currency, to_currency, rate, quoted_at FROM live_fx_rates",
     ).fetchall()
     return {(r[0], r[1]): {"rate": r[2], "quoted_at": r[3]} for r in rows}
+
+
+def upsert_live_fx_rate(
+    conn: psycopg.Connection[Any],
+    *,
+    from_currency: str,
+    to_currency: str,
+    rate: Decimal,
+    quoted_at: datetime,
+) -> None:
+    """Insert or update a single live FX rate row."""
+    conn.execute(
+        """
+        INSERT INTO live_fx_rates (from_currency, to_currency, rate, quoted_at)
+        VALUES (%(from_currency)s, %(to_currency)s, %(rate)s, %(quoted_at)s)
+        ON CONFLICT (from_currency, to_currency) DO UPDATE SET
+            rate = EXCLUDED.rate,
+            quoted_at = EXCLUDED.quoted_at
+        """,
+        {
+            "from_currency": from_currency,
+            "to_currency": to_currency,
+            "rate": rate,
+            "quoted_at": quoted_at,
+        },
+    )

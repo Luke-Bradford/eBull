@@ -60,6 +60,7 @@ from app.workers.scheduler import (
     JOB_DAILY_TAX_RECONCILIATION,
     JOB_DAILY_THESIS_REFRESH,
     JOB_EXECUTE_APPROVED_ORDERS,
+    JOB_FX_RATES_REFRESH,
     JOB_HOURLY_MARKET_REFRESH,
     JOB_MORNING_CANDIDATE_REVIEW,
     JOB_NIGHTLY_UNIVERSE_SYNC,
@@ -75,6 +76,7 @@ from app.workers.scheduler import (
     daily_tax_reconciliation,
     daily_thesis_refresh,
     execute_approved_orders,
+    fx_rates_refresh,
     hourly_market_refresh,
     morning_candidate_review,
     nightly_universe_sync,
@@ -107,6 +109,7 @@ logger = logging.getLogger(__name__)
 _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_NIGHTLY_UNIVERSE_SYNC: nightly_universe_sync,
     JOB_HOURLY_MARKET_REFRESH: hourly_market_refresh,
+    JOB_FX_RATES_REFRESH: fx_rates_refresh,
     JOB_DAILY_CIK_REFRESH: daily_cik_refresh,
     JOB_DAILY_RESEARCH_REFRESH: daily_research_refresh,
     JOB_DAILY_NEWS_REFRESH: daily_news_refresh,
