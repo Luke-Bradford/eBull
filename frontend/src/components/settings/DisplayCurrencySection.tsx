@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { apiFetch } from "@/api/client";
 
 const SUPPORTED_CURRENCIES = ["GBP", "USD", "EUR"] as const;
@@ -10,6 +10,11 @@ interface Props {
 
 export function DisplayCurrencySection({ currentCurrency, onChanged }: Props) {
   const [selected, setSelected] = useState(currentCurrency);
+
+  // Sync local state when prop updates (e.g. after save + reload).
+  useEffect(() => {
+    setSelected(currentCurrency);
+  }, [currentCurrency]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

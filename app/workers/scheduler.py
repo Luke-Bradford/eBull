@@ -24,6 +24,7 @@ import logging
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Literal
 
 import anthropic
@@ -52,7 +53,7 @@ from app.services.scoring import compute_rankings
 from app.services.sentiment import ClaudeSentimentScorer
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
 from app.services.thesis import find_stale_instruments, generate_thesis
-from app.services.universe import sync_universe
+from app.services.universe import enrich_instrument_currencies, sync_universe
 
 logger = logging.getLogger(__name__)
 
@@ -505,6 +506,26 @@ def nightly_universe_sync() -> None:
                     seed_result.seeded,
                     seed_result.already_populated,
                 )
+
+            # Enrich instrument currencies from FMP for instruments that
+            # are missing currency data or haven't been enriched in 90 days.
+            # Separate transaction so a FMP failure doesn't roll back
+            # the universe sync or coverage seeding.
+            if settings.fmp_api_key:
+                try:
+                    with FmpFundamentalsProvider(api_key=settings.fmp_api_key) as fmp_provider:
+                        with conn.transaction():
+                            enriched = enrich_instrument_currencies(fmp_provider, conn)
+                            row_count += enriched
+                            tracker.row_count = row_count
+                            logger.info("Currency enrichment: enriched=%d", enriched)
+                except Exception:
+                    logger.warning(
+                        "Currency enrichment failed; universe sync and coverage still committed",
+                        exc_info=True,
+                    )
+            else:
+                logger.info("Currency enrichment skipped: FMP API key not configured")
 
             tracker.row_count = row_count
 
@@ -1158,19 +1179,134 @@ def weekly_coverage_review() -> None:
 
 
 def fx_rates_refresh() -> None:
-    """Refresh live FX rates from eToro conversion rates.
+    """Refresh live FX rates and quotes from eToro conversion rates.
 
-    Calls upsert_live_fx_rate for USD→GBP and GBP→USD.
-    For now logs a warning because EtoroMarketDataProvider does not yet
-    expose a conversion rate endpoint. The job registration and DB writer
-    (upsert_live_fx_rate) are in place so the implementation can be wired
-    once the eToro rates API endpoint is identified.
+    The eToro rates endpoint returns ``conversionRateAsk``/``conversionRateBid``
+    on every quote response. These represent the instrument's native currency →
+    account currency (USD) conversion rate. This job:
+
+    1. Batch-fetches quotes for all covered Tier 1/2 instruments.
+    2. Extracts unique currency → USD conversion rates from the response.
+    3. Upserts each rate pair into ``live_fx_rates`` for display-currency
+       conversion.
+    4. Also upserts the quotes themselves into the ``quotes`` table so
+       quote freshness stays hourly (candle refresh runs daily at 22:00).
+
+    Runs hourly at :00. Requires Tier 1/2 coverage rows.
     """
-    from app.services.fx import upsert_live_fx_rate  # noqa: F401 — imported for future use
+    from app.services.fx import upsert_live_fx_rate
+    from app.services.market_data import compute_spread_pct
+
+    creds = _load_etoro_credentials("fx_rates_refresh")
+    if creds is None:
+        return
+
+    api_key, user_key = creds
 
     with _tracked_job(JOB_FX_RATES_REFRESH) as tracker:
-        logger.warning("fx_rates_refresh: FX rate provider not yet implemented — skipping fetch")
-        tracker.row_count = 0
+        with (
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            rows = conn.execute(
+                """
+                SELECT i.instrument_id, i.symbol, i.currency
+                FROM instruments i
+                JOIN coverage c ON c.instrument_id = i.instrument_id
+                WHERE i.is_tradable = TRUE
+                  AND c.coverage_tier IN (1, 2)
+                ORDER BY i.symbol
+                """
+            ).fetchall()
+
+            if not rows:
+                logger.info("fx_rates_refresh: no covered instruments found, skipping")
+                tracker.row_count = 0
+                return
+
+            instrument_ids = [row[0] for row in rows]
+            currency_map: dict[int, str | None] = {row[0]: row[2] for row in rows}
+
+            quotes = provider.get_quotes(instrument_ids)
+
+            # --- Extract FX rates from conversion_rate fields ---
+            # Group by currency to get the latest rate per unique pair.
+            # eToro conversion rates are instrument_ccy → USD.
+            fx_pairs: dict[str, tuple[Decimal, datetime]] = {}  # ccy → (rate, ts)
+            for q in quotes:
+                if q.conversion_rate is None:
+                    continue
+                ccy = currency_map.get(q.instrument_id)
+                if ccy is None or ccy == "USD":
+                    continue
+                # Keep the most recent timestamp per currency.
+                existing = fx_pairs.get(ccy)
+                if existing is None or q.timestamp > existing[1]:
+                    fx_pairs[ccy] = (q.conversion_rate, q.timestamp)
+
+            fx_rows_written = 0
+            with conn.transaction():
+                for ccy, (rate, ts) in fx_pairs.items():
+                    # Store the direct pair: ccy → USD
+                    upsert_live_fx_rate(
+                        conn,
+                        from_currency=ccy,
+                        to_currency="USD",
+                        rate=rate,
+                        quoted_at=ts,
+                    )
+                    fx_rows_written += 1
+
+            # --- Upsert quotes for hourly freshness ---
+            max_spread_pct = Decimal("1.0")
+            quotes_updated = 0
+            for q in quotes:
+                try:
+                    spread_pct = compute_spread_pct(q.bid, q.ask)
+                    spread_flag = spread_pct is not None and spread_pct > max_spread_pct
+                    with conn.transaction():
+                        conn.execute(
+                            """
+                            INSERT INTO quotes (
+                                instrument_id, quoted_at, bid, ask, last, spread_pct, spread_flag
+                            )
+                            VALUES (
+                                %(instrument_id)s, %(quoted_at)s, %(bid)s, %(ask)s,
+                                %(last)s, %(spread_pct)s, %(spread_flag)s
+                            )
+                            ON CONFLICT (instrument_id) DO UPDATE SET
+                                quoted_at   = EXCLUDED.quoted_at,
+                                bid         = EXCLUDED.bid,
+                                ask         = EXCLUDED.ask,
+                                last        = EXCLUDED.last,
+                                spread_pct  = EXCLUDED.spread_pct,
+                                spread_flag = EXCLUDED.spread_flag
+                            """,
+                            {
+                                "instrument_id": q.instrument_id,
+                                "quoted_at": q.timestamp,
+                                "bid": q.bid,
+                                "ask": q.ask,
+                                "last": q.last,
+                                "spread_pct": spread_pct,
+                                "spread_flag": spread_flag,
+                            },
+                        )
+                        quotes_updated += 1
+                except Exception:
+                    logger.warning(
+                        "fx_rates_refresh: failed to upsert quote for instrument %d",
+                        q.instrument_id,
+                        exc_info=True,
+                    )
+
+            tracker.row_count = fx_rows_written + quotes_updated
+
+    logger.info(
+        "fx_rates_refresh complete: fx_pairs=%d quotes=%d",
+        fx_rows_written,
+        quotes_updated,
+    )
 
 
 def daily_tax_reconciliation() -> None:

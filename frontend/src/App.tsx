@@ -2,6 +2,7 @@ import { Route, Routes } from "react-router-dom";
 import { AppShell } from "@/layout/AppShell";
 import { ErrorBoundary } from "@/components/states/ErrorBoundary";
 import { RequireAuth } from "@/components/RequireAuth";
+import { DisplayCurrencyProvider } from "@/lib/DisplayCurrencyContext";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { RankingsPage } from "@/pages/RankingsPage";
 import { InstrumentDetailPage } from "@/pages/InstrumentDetailPage";
@@ -25,7 +26,9 @@ export function App() {
         <Route
           element={
             <RequireAuth>
-              <AppShell />
+              <DisplayCurrencyProvider>
+                <AppShell />
+              </DisplayCurrencyProvider>
             </RequireAuth>
           }
         >

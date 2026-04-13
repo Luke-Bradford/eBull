@@ -205,9 +205,11 @@ class FmpFundamentalsProvider(FundamentalsProvider):
             logger.warning("FMP profile fetch failed for %s: %s", symbol, resp.status_code)
             return None
         data = resp.json()
-        if not data:
+        if not isinstance(data, list) or not data:
             return None
         item = data[0]
+        if not isinstance(item, dict):
+            return None
         raw_currency = str(item.get("currency", ""))
         # FMP returns "GBp" (pence) for LSE stocks — normalise to "GBP"
         currency = raw_currency.upper() if raw_currency else None

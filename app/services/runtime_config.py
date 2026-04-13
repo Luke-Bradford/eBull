@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 AuditField = Literal["enable_auto_trading", "enable_live_trading", "kill_switch", "display_currency"]
 
+# Validated currency codes for display_currency. Must match the frontend
+# SUPPORTED_CURRENCIES list in DisplayCurrencySection.tsx.
+SUPPORTED_CURRENCIES: frozenset[str] = frozenset({"GBP", "USD", "EUR"})
+
 
 class RuntimeConfigCorrupt(RuntimeError):
     """Raised when the runtime_config singleton row is missing.
@@ -131,6 +135,9 @@ def update_runtime_config(
     """
     if enable_auto_trading is None and enable_live_trading is None and display_currency is None:
         raise ValueError("update_runtime_config: at least one field must be provided")
+
+    if display_currency is not None and display_currency not in SUPPORTED_CURRENCIES:
+        raise ValueError(f"display_currency must be one of {sorted(SUPPORTED_CURRENCIES)}, got {display_currency!r}")
 
     now = now or _utcnow()
 

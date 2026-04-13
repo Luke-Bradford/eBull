@@ -377,12 +377,28 @@ def _normalise_rate(item: Mapping[str, object]) -> Quote | None:
 
     raw_last = item.get("lastExecution")
 
+    # Extract instrument-currency → account-currency conversion rate.
+    # eToro returns conversionRateAsk / conversionRateBid on every rate dict;
+    # the mid gives a usable FX rate for display-currency conversion.
+    conversion_rate: Decimal | None = None
+    raw_conv_ask = item.get("conversionRateAsk")
+    raw_conv_bid = item.get("conversionRateBid")
+    if raw_conv_ask is not None and raw_conv_bid is not None:
+        try:
+            conv_ask = Decimal(str(raw_conv_ask))
+            conv_bid = Decimal(str(raw_conv_bid))
+            if conv_ask > 0 and conv_bid > 0:
+                conversion_rate = (conv_ask + conv_bid) / 2
+        except Exception:
+            logger.debug("Failed to parse conversion rate for instrument %s", instrument_id)
+
     return Quote(
         instrument_id=int(str(instrument_id)),
         timestamp=quoted_at,
         bid=bid,
         ask=ask,
         last=Decimal(str(raw_last)) if raw_last is not None else None,
+        conversion_rate=conversion_rate,
     )
 
 

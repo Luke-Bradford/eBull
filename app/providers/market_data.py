@@ -47,6 +47,10 @@ class Quote:
     bid: Decimal
     ask: Decimal
     last: Decimal | None
+    # Instrument-currency → account-currency conversion rate (mid of bid/ask).
+    # Populated by providers that embed FX data in quote responses (e.g. eToro).
+    # None when the provider does not supply conversion data.
+    conversion_rate: Decimal | None = None
 
 
 class MarketDataProvider(ABC):

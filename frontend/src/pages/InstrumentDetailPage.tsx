@@ -219,7 +219,7 @@ function InstrumentDetailContent({ instrumentId }: { instrumentId: number }) {
             <SectionError onRetry={thesis.refetch} />
           )
         ) : thesis.data ? (
-          <ThesisContent thesis={thesis.data} />
+          <ThesisContent thesis={thesis.data} instrumentCurrency={instrument.data?.currency ?? "USD"} />
         ) : null}
       </Section>
 
@@ -308,7 +308,6 @@ function HeaderSection({
 }: {
   instrument: { data: InstrumentDetail | null; loading: boolean; error: unknown; refetch: () => void };
 }) {
-  const currency = useDisplayCurrency();
   if (instrument.loading) {
     return (
       <div className="animate-pulse space-y-2">
@@ -324,6 +323,8 @@ function HeaderSection({
   if (!d) return null;
 
   const q = d.latest_quote;
+  // Quotes are in the instrument's native currency — not the display currency.
+  const quoteCcy = d.currency ?? "USD";
   return (
     <div>
       <div className="flex items-center gap-3">
@@ -341,7 +342,7 @@ function HeaderSection({
       </p>
       {q && (
         <p className="mt-1 text-sm tabular-nums text-slate-700">
-          Bid {formatMoney(q.bid, currency)} · Ask {formatMoney(q.ask, currency)}
+          Bid {formatMoney(q.bid, quoteCcy)} · Ask {formatMoney(q.ask, quoteCcy)}
           {q.spread_pct !== null && <> · Spread {formatPct(q.spread_pct)}</>}
           <span className="ml-2 text-xs text-slate-400">as of {formatDateTime(q.quoted_at)}</span>
         </p>
@@ -385,8 +386,9 @@ function PositionSection({ position }: { position: PositionItem }) {
   );
 }
 
-function ThesisContent({ thesis }: { thesis: ThesisDetail }) {
-  const currency = useDisplayCurrency();
+function ThesisContent({ thesis, instrumentCurrency }: { thesis: ThesisDetail; instrumentCurrency: string }) {
+  // Thesis valuations are denominated in the instrument's native currency.
+  const currency = instrumentCurrency;
   const t = thesis;
   return (
     <div className="space-y-3">
