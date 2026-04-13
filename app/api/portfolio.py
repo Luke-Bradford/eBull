@@ -36,7 +36,7 @@ from app.api._helpers import parse_optional_float
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.domain.positions import PositionSource
-from app.services.fx import FxRateNotFound, convert, load_live_fx_rates, load_live_fx_rates_with_metadata
+from app.services.fx import FxRateNotFound, convert, load_live_fx_rates_with_metadata
 from app.services.portfolio import _load_mirror_equity
 from app.services.runtime_config import get_runtime_config
 
@@ -120,13 +120,23 @@ def _parse_position(
 
     # Convert monetary values to display currency.
     if native_currency != display_currency:
-        market_value = _convert_value(market_value, native_currency, display_currency, rates)
-        cost_basis = _convert_value(cost_basis, native_currency, display_currency, rates)
-        unrealized_pnl = _convert_value(unrealized_pnl, native_currency, display_currency, rates)
+        try:
+            market_value = float(convert(Decimal(str(market_value)), native_currency, display_currency, rates))
+            cost_basis = float(convert(Decimal(str(cost_basis)), native_currency, display_currency, rates))
+            unrealized_pnl = float(convert(Decimal(str(unrealized_pnl)), native_currency, display_currency, rates))
+        except FxRateNotFound:
+            logger.warning(
+                "FX rate %s→%s not found; skipping conversion for position",
+                native_currency,
+                display_currency,
+            )
 
     avg_cost = parse_optional_float(row, "avg_cost")
     if avg_cost is not None and native_currency != display_currency:
-        avg_cost = _convert_value(avg_cost, native_currency, display_currency, rates)
+        try:
+            avg_cost = float(convert(Decimal(str(avg_cost)), native_currency, display_currency, rates))
+        except FxRateNotFound:
+            pass  # warning already logged above
 
     return PositionItem(
         instrument_id=row["instrument_id"],  # type: ignore[arg-type]
@@ -145,7 +155,7 @@ def _parse_position(
 
 def _build_fx_rates_used(
     pos_rows: list[dict[str, Any]],
-    cash_balance: float | None,
+    has_cash: bool,
     mirror_equity: float,
     display_currency: str,
     rates_meta: dict[tuple[str, str], dict[str, Any]],
@@ -163,7 +173,7 @@ def _build_fx_rates_used(
             source_currencies.add(native)
 
     # Cash and mirror_equity are always USD for eToro.
-    if cash_balance is not None and "USD" != display_currency:
+    if has_cash and "USD" != display_currency:
         source_currencies.add("USD")
     # mirror_equity is always USD; only include USD when mirror_equity is non-zero.
     if mirror_equity != 0.0 and "USD" != display_currency:
@@ -219,8 +229,8 @@ def get_portfolio(
     # -- Load display currency and FX rates ----------------------------------
     config = get_runtime_config(conn)
     display_currency = config.display_currency
-    rates = load_live_fx_rates(conn)
     rates_meta = load_live_fx_rates_with_metadata(conn)
+    rates: dict[tuple[str, str], Decimal] = {k: v["rate"] for k, v in rates_meta.items()}
 
     # -- Positions query ---------------------------------------------------
     # quotes is 1:1 keyed by instrument_id (PRIMARY KEY) — LEFT JOIN is fan-out-safe.
@@ -275,7 +285,9 @@ def get_portfolio(
     positions.sort(key=lambda p: (-p.market_value, p.instrument_id))
 
     # Build fx_rates_used from source currencies actually consumed.
-    fx_rates_used = _build_fx_rates_used(pos_rows, cash_balance, raw_mirror_equity, display_currency, rates_meta)
+    fx_rates_used = _build_fx_rates_used(
+        pos_rows, raw_cash is not None, raw_mirror_equity, display_currency, rates_meta
+    )
 
     return PortfolioResponse(
         positions=positions,

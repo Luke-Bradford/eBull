@@ -143,21 +143,15 @@ class TestGetPortfolio:
             "app.api.portfolio.get_runtime_config",
             return_value=_DEFAULT_CONFIG,
         )
-        self._patch_fx = patch(
-            "app.api.portfolio.load_live_fx_rates",
-            return_value={},
-        )
         self._patch_fx_meta = patch(
             "app.api.portfolio.load_live_fx_rates_with_metadata",
             return_value={},
         )
         self._patch_config.start()
-        self._patch_fx.start()
         self._patch_fx_meta.start()
 
     def teardown_method(self) -> None:
         self._patch_config.stop()
-        self._patch_fx.stop()
         self._patch_fx_meta.stop()
         _cleanup()
 
@@ -388,10 +382,6 @@ class TestPortfolioFxConversion:
             "app.api.portfolio.get_runtime_config",
             return_value=gbp_config,
         )
-        self._patch_fx = patch(
-            "app.api.portfolio.load_live_fx_rates",
-            return_value={("USD", "GBP"): Decimal("0.78")},
-        )
         self._patch_fx_meta = patch(
             "app.api.portfolio.load_live_fx_rates_with_metadata",
             return_value={
@@ -402,12 +392,10 @@ class TestPortfolioFxConversion:
             },
         )
         self._patch_config.start()
-        self._patch_fx.start()
         self._patch_fx_meta.start()
 
     def teardown_method(self) -> None:
         self._patch_config.stop()
-        self._patch_fx.stop()
         self._patch_fx_meta.stop()
         _cleanup()
 
