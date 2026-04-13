@@ -1318,6 +1318,7 @@ def fx_rates_refresh() -> None:
                                     quoted_at=ts,
                                 )
                                 fx_rows_written += 1
+                        conn.commit()
 
                         # Upsert quotes for hourly freshness.
                         max_spread_pct = Decimal("1.0")
