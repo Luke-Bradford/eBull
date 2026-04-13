@@ -619,6 +619,24 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ---
 
+### `conn.transaction()` without `conn.commit()` silently rolls back in psycopg v3
+
+- First seen in: #216 (Frankfurter ECB rates never persisted)
+- Symptom: `fx_rates_refresh` Phase 1 opened `psycopg.connect()`, wrote FX rates inside `conn.transaction()`, but never called `conn.commit()`. In psycopg v3, `conn.transaction()` creates a savepoint — it does NOT commit the outer implicit transaction. When the `with psycopg.connect()` context exits, the connection closes and PostgreSQL rolls back the uncommitted transaction. Every hourly run wrote rates successfully but silently discarded them.
+- Prevention: Any `psycopg.connect()` block that writes data must include an explicit `conn.commit()` after the `conn.transaction()` savepoint exits. Pre-push check: `grep -Pzo 'with psycopg\.connect.*\n(?:.*\n)*?.*conn\.transaction' app/` — every match must have a corresponding `conn.commit()` before the connection's `with` block ends. This is the inverse of the "Mid-transaction `conn.commit()` in service functions" entry: service functions that *accept* a connection must NOT commit; code that *owns* the connection MUST commit.
+- Enforced in: `docs/review-prevention-log.md`; `app/workers/scheduler.py` (fx_rates_refresh)
+
+---
+
+### External API timestamps must derive from the API response, not `datetime.now()`
+
+- First seen in: #216 (Frankfurter `quoted_at` used `datetime.now(UTC)`)
+- Symptom: `fx_rates_refresh` used `datetime.now(UTC)` as the `quoted_at` timestamp for ECB rates, but the Frankfurter API returns a `date` field reflecting the actual ECB publication date. On weekends/holidays this would record today's timestamp against a rate that was 1–3 days stale, misleading any freshness check on `live_fx_rates`.
+- Prevention: When writing timestamps that represent "when was this data produced", always use the timestamp from the external source's response. `datetime.now()` is only appropriate for "when did we fetch this" — and even then, prefer the source's own timestamp. Pre-push check: `grep -n "datetime.now" app/workers/scheduler.py` — every hit must be justified in a comment or use a provider-supplied timestamp instead.
+- Enforced in: `docs/review-prevention-log.md`; `app/providers/implementations/frankfurter.py` (returns `ecb_date`); `app/workers/scheduler.py` (fx_rates_refresh)
+
+---
+
 ### Quote write ownership must be exclusive to one job
 
 - First seen in: #211 (daily_candle_refresh shadowed hourly quotes)

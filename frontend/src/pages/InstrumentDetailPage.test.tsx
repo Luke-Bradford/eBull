@@ -405,6 +405,8 @@ describe("InstrumentDetailPage — position", () => {
           cost_basis: 1850,
           market_value: 1910,
           unrealized_pnl: 60,
+          valuation_source: "quote" as const,
+          source: "broker_sync",
           updated_at: "2024-06-01T00:00:00Z",
         },
       ],

@@ -64,6 +64,7 @@ class PositionItem(BaseModel):
     cost_basis: float
     market_value: float
     unrealized_pnl: float
+    valuation_source: str  # "quote", "daily_close", or "cost_basis"
     source: PositionSource
     updated_at: datetime
 
@@ -108,15 +109,23 @@ def _parse_position(
     current_units = float(row["current_units"])  # type: ignore[arg-type]
     native_currency: str = str(row.get("currency") or "USD")  # fallback for un-enriched
 
-    # Mark-to-market: use quote last price when available, else fall back to cost_basis.
+    # Mark-to-market hierarchy: quote.last → price_daily.close → cost_basis.
+    # valuation_source tells the dashboard which tier produced the value.
     last_price = parse_optional_float(row, "last")
+    daily_close = parse_optional_float(row, "daily_close")
+
     if last_price is not None:
         market_value = current_units * last_price
         unrealized_pnl = market_value - cost_basis
+        valuation_source = "quote"
+    elif daily_close is not None:
+        market_value = current_units * daily_close
+        unrealized_pnl = market_value - cost_basis
+        valuation_source = "daily_close"
     else:
-        # No quote — fall back to cost_basis; no P&L signal.
         market_value = cost_basis
         unrealized_pnl = 0.0
+        valuation_source = "cost_basis"
 
     # Convert monetary values to display currency.
     if native_currency != display_currency:
@@ -148,6 +157,7 @@ def _parse_position(
         cost_basis=cost_basis,
         market_value=market_value,
         unrealized_pnl=unrealized_pnl,
+        valuation_source=valuation_source,
         source=row["source"],  # type: ignore[arg-type]
         updated_at=row["updated_at"],  # type: ignore[arg-type]
     )
@@ -236,14 +246,25 @@ def get_portfolio(
     # Zero-unit positions are excluded: fully liquidated positions should not
     # appear in the portfolio view or inflate AUM.
     # i.currency: the instrument's native currency for FX conversion.
+    # LEFT JOIN quotes (1:1 by PK) and latest price_daily (DISTINCT ON
+    # avoids fan-out — one row per instrument, most recent date).
     positions_sql = """
         SELECT p.instrument_id, i.symbol, i.company_name, i.currency,
                p.open_date, p.avg_cost, p.current_units, p.cost_basis,
                p.source, p.updated_at,
-               q.last
+               q.last,
+               pd.close AS daily_close
         FROM positions p
         JOIN instruments i USING (instrument_id)
         LEFT JOIN quotes q USING (instrument_id)
+        LEFT JOIN LATERAL (
+            SELECT close
+            FROM price_daily
+            WHERE instrument_id = p.instrument_id
+              AND close IS NOT NULL
+            ORDER BY price_date DESC
+            LIMIT 1
+        ) pd ON true
         WHERE p.current_units > 0
         ORDER BY p.cost_basis DESC, p.instrument_id ASC
     """
