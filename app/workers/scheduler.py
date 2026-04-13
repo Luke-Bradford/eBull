@@ -1361,6 +1361,7 @@ def fx_rates_refresh() -> None:
                                     q.instrument_id,
                                     exc_info=True,
                                 )
+                        conn.commit()
                     else:
                         logger.info("fx_rates_refresh: no covered instruments for eToro quotes")
             except Exception:
