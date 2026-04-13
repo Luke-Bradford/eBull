@@ -131,7 +131,9 @@ def _parse_position(
         unrealized_pnl = 0.0
         valuation_source = "cost_basis"
 
-    # Convert monetary values to display currency.
+    # Convert all monetary values to display currency in a single block
+    # so they either all convert or all stay in native currency.
+    avg_cost = parse_optional_float(row, "avg_cost")
     if native_currency != display_currency:
         try:
             market_value = float(convert(Decimal(str(market_value)), native_currency, display_currency, rates))
@@ -139,19 +141,14 @@ def _parse_position(
             unrealized_pnl = float(convert(Decimal(str(unrealized_pnl)), native_currency, display_currency, rates))
             if current_price is not None:
                 current_price = float(convert(Decimal(str(current_price)), native_currency, display_currency, rates))
+            if avg_cost is not None:
+                avg_cost = float(convert(Decimal(str(avg_cost)), native_currency, display_currency, rates))
         except FxRateNotFound:
             logger.warning(
                 "FX rate %s→%s not found; skipping conversion for position",
                 native_currency,
                 display_currency,
             )
-
-    avg_cost = parse_optional_float(row, "avg_cost")
-    if avg_cost is not None and native_currency != display_currency:
-        try:
-            avg_cost = float(convert(Decimal(str(avg_cost)), native_currency, display_currency, rates))
-        except FxRateNotFound:
-            pass  # warning already logged above
 
     return PositionItem(
         instrument_id=row["instrument_id"],  # type: ignore[arg-type]
