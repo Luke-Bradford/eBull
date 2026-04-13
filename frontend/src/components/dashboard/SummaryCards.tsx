@@ -1,4 +1,5 @@
 import type { PortfolioResponse } from "@/api/types";
+import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatMoney, formatPct, pnlPct } from "@/lib/format";
 import { SectionSkeleton } from "@/components/dashboard/Section";
 
@@ -16,6 +17,7 @@ import { SectionSkeleton } from "@/components/dashboard/Section";
  * percentages.
  */
 export function SummaryCards({ data }: { data: PortfolioResponse | null }) {
+  const currency = useDisplayCurrency();
   if (data === null) {
     return (
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -38,15 +40,15 @@ export function SummaryCards({ data }: { data: PortfolioResponse | null }) {
 
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-      <Card label="Total AUM" value={formatMoney(data.total_aum)} />
+      <Card label="Total AUM" value={formatMoney(data.total_aum, currency)} />
       <Card
         label="Cash balance"
-        value={formatMoney(data.cash_balance)}
+        value={formatMoney(data.cash_balance, currency)}
         hint={data.cash_balance === null ? "unknown" : undefined}
       />
       <Card
         label="Unrealized P&L"
-        value={formatMoney(totalPnl)}
+        value={formatMoney(totalPnl, currency)}
         hint={pnlFraction === null ? undefined : formatPct(pnlFraction)}
         tone={totalPnl >= 0 ? "positive" : "negative"}
       />

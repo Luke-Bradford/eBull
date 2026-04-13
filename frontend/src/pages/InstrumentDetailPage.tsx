@@ -42,6 +42,7 @@ import {
 } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { ErrorBanner } from "@/components/states/ErrorBanner";
+import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import {
   formatDateTime,
   formatMoney,
@@ -307,6 +308,7 @@ function HeaderSection({
 }: {
   instrument: { data: InstrumentDetail | null; loading: boolean; error: unknown; refetch: () => void };
 }) {
+  const currency = useDisplayCurrency();
   if (instrument.loading) {
     return (
       <div className="animate-pulse space-y-2">
@@ -339,7 +341,7 @@ function HeaderSection({
       </p>
       {q && (
         <p className="mt-1 text-sm tabular-nums text-slate-700">
-          Bid {formatMoney(q.bid)} · Ask {formatMoney(q.ask)}
+          Bid {formatMoney(q.bid, currency)} · Ask {formatMoney(q.ask, currency)}
           {q.spread_pct !== null && <> · Spread {formatPct(q.spread_pct)}</>}
           <span className="ml-2 text-xs text-slate-400">as of {formatDateTime(q.quoted_at)}</span>
         </p>
@@ -349,6 +351,7 @@ function HeaderSection({
 }
 
 function PositionSection({ position }: { position: PositionItem }) {
+  const currency = useDisplayCurrency();
   const p = position;
   const pnlColor = p.unrealized_pnl >= 0 ? "text-emerald-700" : "text-red-700";
   return (
@@ -360,16 +363,16 @@ function PositionSection({ position }: { position: PositionItem }) {
         </div>
         <div>
           <span className="text-xs text-slate-500">Cost basis</span>
-          <p className="tabular-nums">{formatMoney(p.cost_basis)}</p>
+          <p className="tabular-nums">{formatMoney(p.cost_basis, currency)}</p>
         </div>
         <div>
           <span className="text-xs text-slate-500">Market value</span>
-          <p className="tabular-nums">{formatMoney(p.market_value)}</p>
+          <p className="tabular-nums">{formatMoney(p.market_value, currency)}</p>
         </div>
         <div>
           <span className="text-xs text-slate-500">Unrealized P&L</span>
           <p className={`tabular-nums ${pnlColor}`}>
-            {formatMoney(p.unrealized_pnl)}
+            {formatMoney(p.unrealized_pnl, currency)}
             {p.cost_basis > 0 && (
               <span className="ml-1 text-xs">
                 ({formatPct(p.unrealized_pnl / p.cost_basis)})
@@ -383,6 +386,7 @@ function PositionSection({ position }: { position: PositionItem }) {
 }
 
 function ThesisContent({ thesis }: { thesis: ThesisDetail }) {
+  const currency = useDisplayCurrency();
   const t = thesis;
   return (
     <div className="space-y-3">
@@ -404,16 +408,16 @@ function ThesisContent({ thesis }: { thesis: ThesisDetail }) {
       {/* Valuation range */}
       {(t.base_value !== null || t.bull_value !== null || t.bear_value !== null) && (
         <div className="flex gap-4 text-xs text-slate-600">
-          {t.bear_value !== null && <span>Bear: {formatMoney(t.bear_value)}</span>}
-          {t.base_value !== null && <span>Base: {formatMoney(t.base_value)}</span>}
-          {t.bull_value !== null && <span>Bull: {formatMoney(t.bull_value)}</span>}
+          {t.bear_value !== null && <span>Bear: {formatMoney(t.bear_value, currency)}</span>}
+          {t.base_value !== null && <span>Base: {formatMoney(t.base_value, currency)}</span>}
+          {t.bull_value !== null && <span>Bull: {formatMoney(t.bull_value, currency)}</span>}
         </div>
       )}
 
       {/* Buy zone */}
       {(t.buy_zone_low !== null || t.buy_zone_high !== null) && (
         <p className="text-xs text-slate-500">
-          Buy zone: {formatMoney(t.buy_zone_low)} – {formatMoney(t.buy_zone_high)}
+          Buy zone: {formatMoney(t.buy_zone_low, currency)} – {formatMoney(t.buy_zone_high, currency)}
         </p>
       )}
 
