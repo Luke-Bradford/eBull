@@ -137,6 +137,8 @@ def _parse_position(
             market_value = float(convert(Decimal(str(market_value)), native_currency, display_currency, rates))
             cost_basis = float(convert(Decimal(str(cost_basis)), native_currency, display_currency, rates))
             unrealized_pnl = float(convert(Decimal(str(unrealized_pnl)), native_currency, display_currency, rates))
+            if current_price is not None:
+                current_price = float(convert(Decimal(str(current_price)), native_currency, display_currency, rates))
         except FxRateNotFound:
             logger.warning(
                 "FX rate %s→%s not found; skipping conversion for position",
@@ -145,17 +147,11 @@ def _parse_position(
             )
 
     avg_cost = parse_optional_float(row, "avg_cost")
-    if native_currency != display_currency:
-        if avg_cost is not None:
-            try:
-                avg_cost = float(convert(Decimal(str(avg_cost)), native_currency, display_currency, rates))
-            except FxRateNotFound:
-                pass  # warning already logged above
-        if current_price is not None:
-            try:
-                current_price = float(convert(Decimal(str(current_price)), native_currency, display_currency, rates))
-            except FxRateNotFound:
-                pass
+    if avg_cost is not None and native_currency != display_currency:
+        try:
+            avg_cost = float(convert(Decimal(str(avg_cost)), native_currency, display_currency, rates))
+        except FxRateNotFound:
+            pass  # warning already logged above
 
     return PositionItem(
         instrument_id=row["instrument_id"],  # type: ignore[arg-type]
