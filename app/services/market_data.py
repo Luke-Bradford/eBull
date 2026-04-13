@@ -8,7 +8,7 @@ computes rolling return and volatility features, and flags wide spreads.
 import logging
 import math
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import psycopg
@@ -127,20 +127,34 @@ def refresh_market_data(
     )
 
 
+def _most_recent_trading_day(today: date) -> date:
+    """Return the most recent weekday (Mon-Fri) on or before today.
+
+    Candles for the current trading day are not yet posted (they appear
+    after market close), so the freshest candle we can expect is for the
+    previous trading day.  Weekends roll back to Friday.
+
+    No holiday calendar — if a holiday causes a gap, the next fetch
+    fills it. Holidays don't cause false staleness because the candle
+    endpoint simply returns nothing new.
+    """
+    weekday = today.weekday()  # 0=Mon, 6=Sun
+    if weekday == 5:  # Saturday → Friday
+        return today - timedelta(days=1)
+    if weekday == 6:  # Sunday → Friday
+        return today - timedelta(days=2)
+    if weekday == 0:  # Monday → previous Friday
+        return today - timedelta(days=3)
+    # Tue-Fri: candle for yesterday is the most recent available
+    return today - timedelta(days=1)
+
+
 def _candles_are_fresh(
     conn: psycopg.Connection,  # type: ignore[type-arg]
     instrument_id: int,
     today: date,
 ) -> bool:
-    """Return True if price_daily already has a row recent enough to skip.
-
-    Daily candles don't change intraday, so re-fetching is pure waste
-    when a row for the current trading day already exists.
-
-    The 3-day window covers weekends: Friday's candle is fresh until
-    Monday (gap = 3 calendar days).  On a normal weekday the gap is 0
-    or 1 (pre-market before today's candle posts).
-    """
+    """Return True if price_daily already has the most recent trading day's candle."""
     row = conn.execute(
         """
         SELECT MAX(price_date)
@@ -149,12 +163,10 @@ def _candles_are_fresh(
         """,
         {"instrument_id": instrument_id},
     ).fetchone()
-    # Aggregate always returns one row; the column value is None when empty.
     if row is None or row[0] is None:
         return False
     latest_date: date = row[0]
-    # Fresh if latest candle is within 3 calendar days (covers weekends).
-    return (today - latest_date).days <= 3
+    return latest_date >= _most_recent_trading_day(today)
 
 
 def _upsert_candles(

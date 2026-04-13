@@ -25,6 +25,7 @@ from app.services.market_data import (
     _candles_are_fresh,
     _compute_rolling_returns,
     _compute_volatility_30d,
+    _most_recent_trading_day,
     compute_spread_pct,
 )
 
@@ -556,3 +557,37 @@ class TestCandlesAreFresh:
         today = date(2026, 4, 10)
         conn = _mock_conn_with_latest_date(None)
         assert _candles_are_fresh(conn, 1, today) is False
+
+
+# ---------------------------------------------------------------------------
+# Weekday-aware candle freshness
+# ---------------------------------------------------------------------------
+
+
+def _candles_are_fresh_standalone(latest_date: date, today: date) -> bool:
+    return latest_date >= _most_recent_trading_day(today)
+
+
+class TestCandleFreshness:
+    """Tests for the weekday-aware candle freshness check."""
+
+    def test_friday_candle_fresh_on_saturday(self) -> None:
+        assert _candles_are_fresh_standalone(date(2026, 4, 10), date(2026, 4, 11))  # Fri, Sat
+
+    def test_friday_candle_fresh_on_sunday(self) -> None:
+        assert _candles_are_fresh_standalone(date(2026, 4, 10), date(2026, 4, 12))  # Fri, Sun
+
+    def test_friday_candle_fresh_on_monday(self) -> None:
+        assert _candles_are_fresh_standalone(date(2026, 4, 10), date(2026, 4, 13))  # Fri, Mon
+
+    def test_wednesday_candle_stale_on_friday(self) -> None:
+        assert not _candles_are_fresh_standalone(date(2026, 4, 8), date(2026, 4, 10))
+
+    def test_thursday_candle_fresh_on_friday(self) -> None:
+        assert _candles_are_fresh_standalone(date(2026, 4, 9), date(2026, 4, 10))
+
+    def test_monday_candle_stale_on_wednesday(self) -> None:
+        assert not _candles_are_fresh_standalone(date(2026, 4, 6), date(2026, 4, 8))
+
+    def test_same_day(self) -> None:
+        assert _candles_are_fresh_standalone(date(2026, 4, 13), date(2026, 4, 13))
