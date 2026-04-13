@@ -120,11 +120,11 @@ class TestNormaliseInstrument:
         assert rec.sector == "42"
         assert rec.is_tradable is True
 
-    def test_currency_is_placeholder(self) -> None:
-        """currency defaults to 'USD' as a placeholder — not from the API."""
+    def test_currency_is_none_without_enrichment(self) -> None:
+        """currency is None — eToro instruments endpoint does not expose it."""
         rec = _normalise_instrument(FIXTURE_INSTRUMENT)
         assert rec is not None
-        assert rec.currency == "USD"
+        assert rec.currency is None
 
     def test_internal_instrument_skipped(self) -> None:
         assert _normalise_instrument(FIXTURE_INSTRUMENT_INTERNAL) is None

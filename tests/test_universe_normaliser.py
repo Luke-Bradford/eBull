@@ -62,13 +62,12 @@ class TestNormaliseInstrument:
         assert record.sector == "42"
         assert record.is_tradable is True
 
-    def test_currency_is_placeholder_not_from_api(self) -> None:
-        """currency defaults to 'USD' as a placeholder — the instruments
-        endpoint does not expose a currency field. priceSource is an
-        exchange name, not a currency."""
+    def test_currency_is_none_without_enrichment(self) -> None:
+        """currency is None — eToro instruments endpoint does not expose
+        a currency field. Enrichment (FMP profile) fills the real value."""
         record = _normalise_instrument(FIXTURE_INSTRUMENT)
         assert record is not None
-        assert record.currency == "USD"
+        assert record.currency is None
 
     def test_missing_instrument_id_returns_none(self) -> None:
         item = {k: v for k, v in FIXTURE_INSTRUMENT.items() if k != "instrumentID"}

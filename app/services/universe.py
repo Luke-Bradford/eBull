@@ -72,7 +72,7 @@ def sync_universe(
                     symbol       = EXCLUDED.symbol,
                     company_name = EXCLUDED.company_name,
                     exchange     = EXCLUDED.exchange,
-                    currency     = EXCLUDED.currency,
+                    currency     = COALESCE(EXCLUDED.currency, instruments.currency),
                     sector       = EXCLUDED.sector,
                     industry     = EXCLUDED.industry,
                     country      = EXCLUDED.country,
@@ -82,7 +82,8 @@ def sync_universe(
                     instruments.symbol        IS DISTINCT FROM EXCLUDED.symbol        OR
                     instruments.company_name  IS DISTINCT FROM EXCLUDED.company_name  OR
                     instruments.exchange      IS DISTINCT FROM EXCLUDED.exchange      OR
-                    instruments.currency      IS DISTINCT FROM EXCLUDED.currency      OR
+                    (EXCLUDED.currency IS NOT NULL AND
+                     instruments.currency IS DISTINCT FROM EXCLUDED.currency)         OR
                     instruments.sector        IS DISTINCT FROM EXCLUDED.sector        OR
                     instruments.industry      IS DISTINCT FROM EXCLUDED.industry      OR
                     instruments.country       IS DISTINCT FROM EXCLUDED.country       OR

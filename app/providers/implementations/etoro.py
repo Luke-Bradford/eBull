@@ -251,11 +251,10 @@ def _normalise_instrument(item: Mapping[str, object]) -> InstrumentRecord | None
         symbol=str(symbol),
         company_name=str(item.get("instrumentDisplayName") or symbol),
         exchange=_str_or_none(item.get("exchangeID")),
-        # Placeholder: the instruments endpoint does not expose a currency
-        # field. priceSource is an exchange name (e.g. "Nasdaq"), not a
-        # currency. Default to "USD" until a reliable currency source is
-        # confirmed from real API responses. Do not treat as authoritative.
-        currency="USD",
+        # eToro instruments endpoint does not expose currency.
+        # Return None so enrichment (FMP profile) fills the real value.
+        # COALESCE upsert in universe.py preserves enriched currency.
+        currency=None,
         sector=_str_or_none(item.get("stocksIndustryId")),
         industry=None,  # secondary lookup deferred
         country=None,  # not available in instruments endpoint

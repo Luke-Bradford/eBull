@@ -19,7 +19,7 @@ class InstrumentRecord:
     symbol: str
     company_name: str
     exchange: str | None
-    currency: str
+    currency: str | None
     sector: str | None
     industry: str | None
     country: str | None
