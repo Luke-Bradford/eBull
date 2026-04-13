@@ -12,6 +12,7 @@ No writes. No schema changes.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -182,6 +183,7 @@ def _convert_usd(
     try:
         return float(convert(Decimal(str(value)), "USD", display_currency, rates))
     except FxRateNotFound:
+        logger.warning("FX rate USD→%s not found; returning unconverted value", display_currency)
         return value
 
 
@@ -254,10 +256,9 @@ def get_copy_trading(
         position_rows = cur.fetchall()
 
     # -- Group positions by mirror_id --------------------------------------
-    positions_by_mirror: dict[int, list[dict[str, Any]]] = {}
+    positions_by_mirror: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in position_rows:
-        mid = row["mirror_id"]
-        positions_by_mirror.setdefault(mid, []).append(row)
+        positions_by_mirror[row["mirror_id"]].append(row)
 
     # -- Assemble per-trader summaries -------------------------------------
     traders_map: dict[int, CopyTraderSummary] = {}
