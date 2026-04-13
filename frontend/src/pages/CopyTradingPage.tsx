@@ -27,9 +27,7 @@ export function CopyTradingPage() {
         <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
           <SectionError onRetry={ct.refetch} />
         </div>
-      ) : ct.loading ? (
-        <SectionSkeleton rows={6} />
-      ) : ct.data === null ? (
+      ) : ct.loading || ct.data === null ? (
         <SectionSkeleton rows={6} />
       ) : ct.data.traders.length === 0 ? (
         <EmptyState
