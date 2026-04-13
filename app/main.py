@@ -18,6 +18,7 @@ from app.api.auth_setup import router as auth_setup_router
 from app.api.broker_credentials import router as broker_credentials_router
 from app.api.config import KillSwitchRequest, KillSwitchResponse, post_kill_switch
 from app.api.config import router as config_router
+from app.api.copy_trading import router as copy_trading_router
 from app.api.filings import router as filings_router
 from app.api.instruments import router as instruments_router
 from app.api.jobs import router as jobs_router
@@ -119,6 +120,7 @@ app.include_router(operators_router)
 app.include_router(audit_router)
 app.include_router(broker_credentials_router)
 app.include_router(config_router)
+app.include_router(copy_trading_router)
 app.include_router(filings_router)
 app.include_router(instruments_router)
 app.include_router(jobs_router)
