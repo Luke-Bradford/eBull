@@ -146,6 +146,7 @@ def _parse_position(
 def _build_fx_rates_used(
     pos_rows: list[dict[str, Any]],
     cash_balance: float | None,
+    mirror_equity: float,
     display_currency: str,
     rates_meta: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, dict[str, object]]:
@@ -164,8 +165,8 @@ def _build_fx_rates_used(
     # Cash and mirror_equity are always USD for eToro.
     if cash_balance is not None and "USD" != display_currency:
         source_currencies.add("USD")
-    # mirror_equity is always present (default 0.0), so always add USD if needed.
-    if "USD" != display_currency:
+    # mirror_equity is always USD; only include USD when mirror_equity is non-zero.
+    if mirror_equity != 0.0 and "USD" != display_currency:
         source_currencies.add("USD")
 
     result: dict[str, dict[str, object]] = {}
@@ -263,10 +264,10 @@ def get_portfolio(
 
     # AUM: sum of position market_values + cash (if known) + mirror_equity.
     total_market = sum(p.market_value for p in positions)
-    mirror_equity = _load_mirror_equity(conn)
+    raw_mirror_equity = _load_mirror_equity(conn)
 
     # Convert mirror_equity — always USD for eToro.
-    mirror_equity = _convert_value(mirror_equity, "USD", display_currency, rates)
+    mirror_equity = _convert_value(raw_mirror_equity, "USD", display_currency, rates)
 
     total_aum = total_market + (cash_balance if cash_balance is not None else 0.0) + mirror_equity
 
@@ -274,7 +275,7 @@ def get_portfolio(
     positions.sort(key=lambda p: (-p.market_value, p.instrument_id))
 
     # Build fx_rates_used from source currencies actually consumed.
-    fx_rates_used = _build_fx_rates_used(pos_rows, cash_balance, display_currency, rates_meta)
+    fx_rates_used = _build_fx_rates_used(pos_rows, cash_balance, raw_mirror_equity, display_currency, rates_meta)
 
     return PortfolioResponse(
         positions=positions,

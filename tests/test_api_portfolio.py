@@ -534,3 +534,40 @@ class TestPortfolioFxConversion:
         # cost_basis fallback: 1800 * 0.78 = 1404
         assert item["market_value"] == 1404.0
         assert item["unrealized_pnl"] == 0.0
+
+    def test_missing_fx_rate_returns_unconverted(self) -> None:
+        """FxRateNotFound: position values returned unconverted, endpoint does not crash."""
+        pos = _make_position_row(
+            currency="EUR",
+            current_units=5.0,
+            cost_basis=500.0,
+            avg_cost=100.0,
+            last=120.0,
+        )
+        # No EUR→GBP rate in the mock — only USD→GBP exists.
+        _with_conn([[pos], [_make_cash_row(None)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        item = body["positions"][0]
+        # No EUR→GBP rate → values stay in EUR (unconverted).
+        assert item["market_value"] == 600.0  # 5 * 120
+        assert item["cost_basis"] == 500.0
+        assert item["unrealized_pnl"] == 100.0  # 600 - 500
+        assert item["avg_cost"] == 100.0
+        assert body["display_currency"] == "GBP"
+
+    def test_fx_rates_used_no_spurious_usd_when_mirror_zero(self) -> None:
+        """fx_rates_used omits USD when mirror_equity is 0 and no USD positions exist."""
+        pos = _make_position_row(currency="GBP", current_units=10.0, cost_basis=1000.0, last=100.0)
+        # No cash, mirror_equity = 0 (default third cursor result).
+        _with_conn([[pos], [_make_cash_row(None)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        # No USD positions, no cash, mirror_equity = 0 → USD should not appear.
+        assert "USD" not in body["fx_rates_used"]
