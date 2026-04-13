@@ -509,16 +509,19 @@ def nightly_universe_sync() -> None:
 
             # Enrich instrument currencies from FMP for instruments that
             # are missing currency data or haven't been enriched in 90 days.
-            # Separate transaction so a FMP failure doesn't roll back
-            # the universe sync or coverage seeding.
+            # Uses a separate autocommit connection so each per-instrument
+            # UPDATE commits independently, and HTTP I/O (FMP API calls)
+            # does not hold a transaction open.
             if settings.fmp_api_key:
                 try:
-                    with FmpFundamentalsProvider(api_key=settings.fmp_api_key) as fmp_provider:
-                        with conn.transaction():
-                            enriched = enrich_instrument_currencies(fmp_provider, conn)
-                            row_count += enriched
-                            tracker.row_count = row_count
-                            logger.info("Currency enrichment: enriched=%d", enriched)
+                    with (
+                        FmpFundamentalsProvider(api_key=settings.fmp_api_key) as fmp_provider,
+                        psycopg.connect(settings.database_url, autocommit=True) as enrich_conn,
+                    ):
+                        enriched = enrich_instrument_currencies(fmp_provider, enrich_conn)
+                        row_count += enriched
+                        tracker.row_count = row_count
+                        logger.info("Currency enrichment: enriched=%d", enriched)
                 except Exception:
                     logger.warning(
                         "Currency enrichment failed; universe sync and coverage still committed",
@@ -566,8 +569,11 @@ def daily_candle_refresh() -> None:
                 return
 
             instruments = [(row[0], row[1]) for row in rows]
-            summary = refresh_market_data(provider, conn, instruments)
-        tracker.row_count = summary.candle_rows_upserted + summary.quotes_updated
+            # skip_quotes=True: quote freshness is owned by the hourly
+            # fx_rates_refresh job; daily candle job must not shadow
+            # those fresher values with stale end-of-day data.
+            summary = refresh_market_data(provider, conn, instruments, skip_quotes=True)
+        tracker.row_count = summary.candle_rows_upserted
 
     logger.info(
         "Market refresh complete: instruments=%d candles=%d features=%d quotes=%d quotes_skipped=%d spread_flags=%d",

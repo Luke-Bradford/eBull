@@ -173,10 +173,9 @@ def _build_fx_rates_used(
             source_currencies.add(native)
 
     # Cash and mirror_equity are always USD for eToro.
-    if has_cash and "USD" != display_currency:
-        source_currencies.add("USD")
-    # mirror_equity is always USD; only include USD when mirror_equity is non-zero.
-    if mirror_equity != 0.0 and "USD" != display_currency:
+    # Include USD when we have cash OR non-trivial mirror equity.
+    has_usd_component = has_cash or abs(mirror_equity) > 1e-9
+    if has_usd_component and "USD" != display_currency:
         source_currencies.add("USD")
 
     result: dict[str, dict[str, object]] = {}

@@ -50,10 +50,17 @@ def refresh_market_data(
     instruments: list[tuple[int, str]],  # [(instrument_id, symbol), ...]
     lookback_days: int = 400,
     max_spread_pct: Decimal = DEFAULT_MAX_SPREAD_PCT,
+    *,
+    skip_quotes: bool = False,
 ) -> MarketRefreshSummary:
     """
     For each instrument: fetch candles, upsert to price_daily, compute
-    features, then batch-fetch quotes and upsert with spread flag.
+    features, then (unless skip_quotes=True) batch-fetch quotes and
+    upsert with spread flag.
+
+    When skip_quotes is True, quote fetching and upserting are skipped
+    entirely. Use this when a separate hourly job owns quote freshness
+    (e.g. fx_rates_refresh).
 
     instruments is a list of (instrument_id, symbol) tuples — instrument_id
     must already exist in the instruments table. symbol is used for logging.
@@ -89,33 +96,42 @@ def refresh_market_data(
         logger.info("Candle freshness skip: %d/%d instruments already fresh", candles_skipped, len(instruments))
 
     # --- Quotes: batch fetch, then per-instrument upsert ---
-    all_ids = [iid for iid, _ in instruments]
-    batch_failed = False
-    try:
-        quotes = provider.get_quotes(all_ids)
-    except Exception:
-        logger.warning("Failed to batch-fetch quotes, skipping all quote updates", exc_info=True)
-        quotes = []
-        quotes_skipped = len(instruments)
-        batch_failed = True
+    # When skip_quotes is True, quote freshness is owned by the hourly
+    # fx_rates_refresh job — the daily candle job must not shadow those
+    # fresher values with stale end-of-day data.
+    if not skip_quotes:
+        all_ids = [iid for iid, _ in instruments]
+        batch_failed = False
+        try:
+            quotes = provider.get_quotes(all_ids)
+        except Exception:
+            logger.warning("Failed to batch-fetch quotes, skipping all quote updates", exc_info=True)
+            quotes = []
+            quotes_skipped = len(instruments)
+            batch_failed = True
 
-    if not batch_failed:
-        quote_map: dict[int, Quote] = {q.instrument_id: q for q in quotes}
+        if not batch_failed:
+            quote_map: dict[int, Quote] = {q.instrument_id: q for q in quotes}
 
-        for instrument_id, symbol in instruments:
-            quote = quote_map.get(instrument_id)
-            if quote is None:
-                logger.debug("No quote returned for %s (id=%d), skipping quote upsert", symbol, instrument_id)
-                quotes_skipped += 1
-                continue
-            try:
-                with conn.transaction():
-                    flagged = _upsert_quote(conn, instrument_id, quote, max_spread_pct)
-                    quotes_updated += 1
-                    if flagged:
-                        spread_flags_set += 1
-            except Exception:
-                logger.warning("Failed to upsert quote for %s (id=%d), skipping", symbol, instrument_id, exc_info=True)
+            for instrument_id, symbol in instruments:
+                quote = quote_map.get(instrument_id)
+                if quote is None:
+                    logger.debug("No quote returned for %s (id=%d), skipping quote upsert", symbol, instrument_id)
+                    quotes_skipped += 1
+                    continue
+                try:
+                    with conn.transaction():
+                        flagged = _upsert_quote(conn, instrument_id, quote, max_spread_pct)
+                        quotes_updated += 1
+                        if flagged:
+                            spread_flags_set += 1
+                except Exception:
+                    logger.warning(
+                        "Failed to upsert quote for %s (id=%d), skipping",
+                        symbol,
+                        instrument_id,
+                        exc_info=True,
+                    )
 
     return MarketRefreshSummary(
         instruments_refreshed=len(instruments),
@@ -130,9 +146,11 @@ def refresh_market_data(
 def _most_recent_trading_day(today: date) -> date:
     """Return the most recent weekday (Mon-Fri) on or before today.
 
-    Candles for the current trading day are not yet posted (they appear
-    after market close), so the freshest candle we can expect is for the
-    previous trading day.  Weekends roll back to Friday.
+    On weekdays (Mon-Fri), today's candle is available after market
+    close — the daily candle job runs at 22:00 UTC, well after the
+    US close (~21:00 UTC). So the freshness target is today itself.
+
+    Weekends roll back to Friday (no candles for Sat/Sun).
 
     No holiday calendar — if a holiday causes a gap, the next fetch
     fills it. Holidays don't cause false staleness because the candle
@@ -143,10 +161,8 @@ def _most_recent_trading_day(today: date) -> date:
         return today - timedelta(days=1)
     if weekday == 6:  # Sunday → Friday
         return today - timedelta(days=2)
-    if weekday == 0:  # Monday → previous Friday
-        return today - timedelta(days=3)
-    # Tue-Fri: candle for yesterday is the most recent available
-    return today - timedelta(days=1)
+    # Mon-Fri: today's candle is the freshness target
+    return today
 
 
 def _candles_are_fresh(
