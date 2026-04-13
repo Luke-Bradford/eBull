@@ -38,6 +38,7 @@ export function PositionsTable({ positions }: { positions: PositionItem[] }) {
             <Th>Company</Th>
             <Th align="right">Units</Th>
             <Th align="right">Avg cost</Th>
+            <Th align="right">Price</Th>
             <Th align="right">Market value</Th>
             <Th align="right">Unrealized P&L</Th>
           </tr>
@@ -61,6 +62,9 @@ export function PositionsTable({ positions }: { positions: PositionItem[] }) {
                 </Td>
                 <Td align="right">{formatNumber(p.current_units)}</Td>
                 <Td align="right">{formatMoney(p.avg_cost, currency)}</Td>
+                <Td align="right">
+                  {p.current_price != null ? formatMoney(p.current_price, currency) : "—"}
+                </Td>
                 <Td align="right">{formatMoney(p.market_value, currency)}</Td>
                 <Td align="right">
                   <span className={positive ? "text-emerald-600" : "text-red-600"}>
