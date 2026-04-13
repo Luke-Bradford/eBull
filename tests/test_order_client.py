@@ -60,6 +60,7 @@ _NOW = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
 _RUNTIME_DEMO = RuntimeConfig(
     enable_auto_trading=True,
     enable_live_trading=False,
+    display_currency="USD",
     updated_at=_NOW,
     updated_by="test",
     reason="test",
@@ -68,6 +69,7 @@ _RUNTIME_DEMO = RuntimeConfig(
 _RUNTIME_LIVE = RuntimeConfig(
     enable_auto_trading=True,
     enable_live_trading=True,
+    display_currency="USD",
     updated_at=_NOW,
     updated_by="test",
     reason="test",

@@ -31,7 +31,15 @@ export async function fetchRankingsMock(): Promise<RankingsListResponse> {
 }
 
 export async function fetchPortfolioMock(): Promise<PortfolioResponse> {
-  return { positions: [], position_count: 0, total_aum: 0, cash_balance: null, mirror_equity: 0 };
+  return {
+    positions: [],
+    position_count: 0,
+    total_aum: 0,
+    cash_balance: null,
+    mirror_equity: 0,
+    display_currency: "USD",
+    fx_rates_used: {},
+  };
 }
 
 export async function fetchConfigMock(): Promise<ConfigResponse> {
@@ -41,6 +49,7 @@ export async function fetchConfigMock(): Promise<ConfigResponse> {
     runtime: {
       enable_auto_trading: false,
       enable_live_trading: false,
+      display_currency: "USD",
       updated_at: new Date(0).toISOString(),
       updated_by: "",
       reason: "",

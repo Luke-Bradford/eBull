@@ -125,6 +125,7 @@ def _runtime_cursor(
             {
                 "enable_auto_trading": enable_auto_trading,
                 "enable_live_trading": enable_live_trading,
+                "display_currency": "USD",
                 "updated_at": _NOW,
                 "updated_by": "test",
                 "reason": "test",

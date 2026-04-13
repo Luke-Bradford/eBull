@@ -35,7 +35,7 @@ import psycopg.rows
 
 logger = logging.getLogger(__name__)
 
-AuditField = Literal["enable_auto_trading", "enable_live_trading", "kill_switch"]
+AuditField = Literal["enable_auto_trading", "enable_live_trading", "kill_switch", "display_currency"]
 
 
 class RuntimeConfigCorrupt(RuntimeError):
@@ -59,6 +59,7 @@ class RuntimeConfigNoOp(ValueError):
 class RuntimeConfig:
     enable_auto_trading: bool
     enable_live_trading: bool
+    display_currency: str
     updated_at: datetime
     updated_by: str
     reason: str
@@ -79,6 +80,7 @@ def get_runtime_config(conn: psycopg.Connection[Any]) -> RuntimeConfig:
             """
             SELECT enable_auto_trading,
                    enable_live_trading,
+                   display_currency,
                    updated_at,
                    updated_by,
                    reason
@@ -94,6 +96,7 @@ def get_runtime_config(conn: psycopg.Connection[Any]) -> RuntimeConfig:
     return RuntimeConfig(
         enable_auto_trading=bool(row["enable_auto_trading"]),
         enable_live_trading=bool(row["enable_live_trading"]),
+        display_currency=str(row["display_currency"]),
         updated_at=row["updated_at"],
         updated_by=str(row["updated_by"]),
         reason=str(row["reason"]),
@@ -107,6 +110,7 @@ def update_runtime_config(
     reason: str,
     enable_auto_trading: bool | None = None,
     enable_live_trading: bool | None = None,
+    display_currency: str | None = None,
     now: datetime | None = None,
 ) -> RuntimeConfig:
     """Atomically update the runtime_config singleton.
@@ -122,11 +126,11 @@ def update_runtime_config(
     auto-recreates, since silently restoring a corrupted config would mask
     the problem.
 
-    Raises ValueError if both flag arguments are None (caller passed an
+    Raises ValueError if all field arguments are None (caller passed an
     empty patch).
     """
-    if enable_auto_trading is None and enable_live_trading is None:
-        raise ValueError("update_runtime_config: at least one flag must be provided")
+    if enable_auto_trading is None and enable_live_trading is None and display_currency is None:
+        raise ValueError("update_runtime_config: at least one field must be provided")
 
     now = now or _utcnow()
 
@@ -134,7 +138,7 @@ def update_runtime_config(
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 """
-                SELECT enable_auto_trading, enable_live_trading
+                SELECT enable_auto_trading, enable_live_trading, display_currency
                 FROM runtime_config
                 WHERE id = TRUE
                 FOR UPDATE
@@ -148,16 +152,18 @@ def update_runtime_config(
 
         new_auto = enable_auto_trading if enable_auto_trading is not None else bool(current["enable_auto_trading"])
         new_live = enable_live_trading if enable_live_trading is not None else bool(current["enable_live_trading"])
+        new_currency = display_currency if display_currency is not None else str(current["display_currency"])
 
-        # No-op patch detection: if every provided flag already matches the
+        # No-op patch detection: if every provided field already matches the
         # current row, refuse the patch.  Otherwise the UPDATE would silently
         # rewrite updated_at/updated_by/reason on the singleton with no audit
         # row to record the attribution change, leaving config provenance
         # diverged from the audit table.
         auto_changed = enable_auto_trading is not None and bool(current["enable_auto_trading"]) != new_auto
         live_changed = enable_live_trading is not None and bool(current["enable_live_trading"]) != new_live
-        if not auto_changed and not live_changed:
-            raise RuntimeConfigNoOp("patch would not change any flag value")
+        currency_changed = display_currency is not None and str(current["display_currency"]) != new_currency
+        if not auto_changed and not live_changed and not currency_changed:
+            raise RuntimeConfigNoOp("patch would not change any field value")
 
         # RETURNING updated_at so the caller carries the DB-committed value
         # rather than the application-side `now`, eliminating any clock-skew
@@ -168,6 +174,7 @@ def update_runtime_config(
                 UPDATE runtime_config
                 SET enable_auto_trading = %(auto)s,
                     enable_live_trading = %(live)s,
+                    display_currency    = %(currency)s,
                     updated_at          = %(at)s,
                     updated_by          = %(by)s,
                     reason              = %(reason)s
@@ -177,6 +184,7 @@ def update_runtime_config(
                 {
                     "auto": new_auto,
                     "live": new_live,
+                    "currency": new_currency,
                     "at": now,
                     "by": updated_by,
                     "reason": reason,
@@ -191,7 +199,7 @@ def update_runtime_config(
         # One audit row per *changed* field.  Unchanged fields produce no row
         # so the audit table is queryable as "history of changes" not "history
         # of patches".
-        if enable_auto_trading is not None and bool(current["enable_auto_trading"]) != new_auto:
+        if auto_changed:
             _insert_audit_row(
                 conn,
                 changed_at=now,
@@ -201,7 +209,7 @@ def update_runtime_config(
                 old_value=str(bool(current["enable_auto_trading"])).lower(),
                 new_value=str(new_auto).lower(),
             )
-        if enable_live_trading is not None and bool(current["enable_live_trading"]) != new_live:
+        if live_changed:
             _insert_audit_row(
                 conn,
                 changed_at=now,
@@ -211,18 +219,30 @@ def update_runtime_config(
                 old_value=str(bool(current["enable_live_trading"])).lower(),
                 new_value=str(new_live).lower(),
             )
+        if currency_changed:
+            _insert_audit_row(
+                conn,
+                changed_at=now,
+                changed_by=updated_by,
+                reason=reason,
+                field="display_currency",
+                old_value=str(current["display_currency"]),
+                new_value=new_currency,
+            )
 
     logger.info(
-        "runtime_config updated by=%s reason=%s auto=%s live=%s",
+        "runtime_config updated by=%s reason=%s auto=%s live=%s currency=%s",
         updated_by,
         reason,
         new_auto,
         new_live,
+        new_currency,
     )
 
     return RuntimeConfig(
         enable_auto_trading=new_auto,
         enable_live_trading=new_live,
+        display_currency=new_currency,
         updated_at=committed_updated_at,
         updated_by=updated_by,
         reason=reason,

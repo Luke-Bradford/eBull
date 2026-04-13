@@ -51,10 +51,11 @@ def _make_conn(cursors: list[MagicMock]) -> MagicMock:
     return conn
 
 
-def _row(auto: bool = False, live: bool = False) -> dict[str, Any]:
+def _row(auto: bool = False, live: bool = False, currency: str = "USD") -> dict[str, Any]:
     return {
         "enable_auto_trading": auto,
         "enable_live_trading": live,
+        "display_currency": currency,
         "updated_at": _NOW,
         "updated_by": "seed",
         "reason": "seed",
@@ -73,7 +74,13 @@ class TestGetRuntimeConfig:
         assert isinstance(rc, RuntimeConfig)
         assert rc.enable_auto_trading is True
         assert rc.enable_live_trading is False
+        assert rc.display_currency == "USD"
         assert rc.updated_by == "seed"
+
+    def test_returns_display_currency(self) -> None:
+        conn = _make_conn([_make_cursor([_row(currency="GBP")])])
+        rc = get_runtime_config(conn)
+        assert rc.display_currency == "GBP"
 
     def test_missing_row_raises_corrupt(self) -> None:
         conn = _make_conn([_make_cursor([])])
@@ -89,7 +96,7 @@ class TestGetRuntimeConfig:
 class TestUpdateRuntimeConfig:
     def test_empty_patch_raises_value_error(self) -> None:
         conn = _make_conn([])
-        with pytest.raises(ValueError, match="at least one flag"):
+        with pytest.raises(ValueError, match="at least one field"):
             update_runtime_config(conn, updated_by="op", reason="r")
 
     def test_missing_row_raises_corrupt(self) -> None:
@@ -166,6 +173,43 @@ class TestUpdateRuntimeConfig:
             )
         # No UPDATE issued
         assert conn.execute.call_count == 0
+
+    def test_display_currency_update_writes_audit_row(self) -> None:
+        conn = _make_conn(
+            [
+                _make_cursor([_row(auto=False, live=False, currency="USD")]),
+                _make_cursor([{"updated_at": _NOW}]),
+            ]
+        )
+        updated = update_runtime_config(
+            conn,
+            updated_by="op",
+            reason="switch to GBP",
+            display_currency="GBP",
+            now=_NOW,
+        )
+        assert updated.display_currency == "GBP"
+        assert updated.enable_auto_trading is False
+        assert updated.enable_live_trading is False
+
+        # 1 audit row for display_currency
+        assert conn.execute.call_count == 1
+        audit_call = conn.execute.call_args_list[0]
+        assert "runtime_config_audit" in audit_call[0][0]
+        assert audit_call[0][1]["field"] == "display_currency"
+        assert audit_call[0][1]["old"] == "USD"
+        assert audit_call[0][1]["new"] == "GBP"
+
+    def test_display_currency_noop_raises(self) -> None:
+        conn = _make_conn([_make_cursor([_row(currency="USD")])])
+        with pytest.raises(RuntimeConfigNoOp, match="not change"):
+            update_runtime_config(
+                conn,
+                updated_by="op",
+                reason="noop",
+                display_currency="USD",
+                now=_NOW,
+            )
 
     def test_atomic_via_transaction(self) -> None:
         conn = _make_conn(

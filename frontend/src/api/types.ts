@@ -24,6 +24,7 @@
 export interface RuntimeFlagsResponse {
   enable_auto_trading: boolean;
   enable_live_trading: boolean;
+  display_currency: string;
   updated_at: string;
   updated_by: string;
   reason: string;
@@ -203,12 +204,19 @@ export interface PositionItem {
   updated_at: string;
 }
 
+export interface FxRateUsed {
+  rate: number;
+  quoted_at: string;
+}
+
 export interface PortfolioResponse {
   positions: PositionItem[];
   position_count: number;
   total_aum: number;
   cash_balance: number | null;
   mirror_equity: number;
+  display_currency: string;
+  fx_rates_used: Record<string, FxRateUsed>;
 }
 
 // ---------------------------------------------------------------------------

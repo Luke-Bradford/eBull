@@ -40,10 +40,11 @@ def _clear_conn_override() -> None:
     app.dependency_overrides.pop(get_conn, None)
 
 
-def _runtime(auto: bool = False, live: bool = False) -> RuntimeConfig:
+def _runtime(auto: bool = False, live: bool = False, currency: str = "USD") -> RuntimeConfig:
     return RuntimeConfig(
         enable_auto_trading=auto,
         enable_live_trading=live,
+        display_currency=currency,
         updated_at=_NOW,
         updated_by="seed",
         reason="seed",
@@ -83,6 +84,7 @@ class TestGetConfig:
         body = resp.json()
         assert body["runtime"]["enable_auto_trading"] is True
         assert body["runtime"]["enable_live_trading"] is False
+        assert body["runtime"]["display_currency"] == "USD"
         assert body["kill_switch"]["active"] is False
         assert "app_env" in body
         assert "etoro_env" in body
@@ -131,6 +133,28 @@ class TestPatchConfig:
         assert kwargs["updated_by"] == "op"
         assert kwargs["reason"] == "enable auto"
         assert kwargs["enable_auto_trading"] is True
+        assert kwargs["enable_live_trading"] is None
+
+    def test_patch_display_currency_only_succeeds(self) -> None:
+        _override_conn(_mock_conn())
+
+        with patch(
+            "app.api.config.update_runtime_config",
+            return_value=_runtime(currency="GBP"),
+        ) as mock_update:
+            resp = client.patch(
+                "/config",
+                json={"updated_by": "op", "reason": "switch to GBP", "display_currency": "GBP"},
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["display_currency"] == "GBP"
+
+        mock_update.assert_called_once()
+        kwargs = mock_update.call_args.kwargs
+        assert kwargs["display_currency"] == "GBP"
+        assert kwargs["enable_auto_trading"] is None
         assert kwargs["enable_live_trading"] is None
 
     def test_empty_patch_returns_422(self) -> None:
