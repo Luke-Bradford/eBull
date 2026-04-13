@@ -274,7 +274,7 @@ class TestGetNextRunTimes:
 
     def test_excludes_unwired_scheduled_jobs(self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch) -> None:
         """SCHEDULED_JOBS entries not in the invoker map are excluded."""
-        from app.workers.scheduler import JOB_DAILY_CIK_REFRESH, JOB_HOURLY_MARKET_REFRESH
+        from app.workers.scheduler import JOB_DAILY_CANDLE_REFRESH, JOB_DAILY_CIK_REFRESH
 
         # Wire only one of two scheduled jobs — the other should be absent.
         rt = _make_runtime({JOB_DAILY_CIK_REFRESH: lambda: None})
@@ -282,7 +282,7 @@ class TestGetNextRunTimes:
 
         result = rt.get_next_run_times()
         assert JOB_DAILY_CIK_REFRESH in result
-        assert JOB_HOURLY_MARKET_REFRESH not in result
+        assert JOB_DAILY_CANDLE_REFRESH not in result
 
 
 class TestProductionInvokerRegistry:

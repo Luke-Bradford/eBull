@@ -161,7 +161,7 @@ class ScheduledJob:
 # Job-name constants. Every ``_tracked_job(...)`` call site below references
 # one of these so the literal cannot drift from the registry / job_runs row.
 JOB_NIGHTLY_UNIVERSE_SYNC = "nightly_universe_sync"
-JOB_HOURLY_MARKET_REFRESH = "hourly_market_refresh"
+JOB_DAILY_CANDLE_REFRESH = "daily_candle_refresh"
 JOB_DAILY_CIK_REFRESH = "daily_cik_refresh"
 JOB_DAILY_RESEARCH_REFRESH = "daily_research_refresh"
 JOB_DAILY_NEWS_REFRESH = "daily_news_refresh"
@@ -246,9 +246,9 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     # -- Pipeline: skip when upstream data is absent ---------------------
     ScheduledJob(
-        name=JOB_HOURLY_MARKET_REFRESH,
-        description="Refresh quotes and candles for all active Tier 1/2 instruments.",
-        cadence=Cadence.hourly(minute=5),
+        name=JOB_DAILY_CANDLE_REFRESH,
+        description="Fetch daily candles for all active Tier 1/2 instruments after US market close.",
+        cadence=Cadence.daily(hour=22, minute=0),
         prerequisite=_has_coverage_tier12,
     ),
     ScheduledJob(
@@ -509,19 +509,21 @@ def nightly_universe_sync() -> None:
             tracker.row_count = row_count
 
 
-def hourly_market_refresh() -> None:
+def daily_candle_refresh() -> None:
     """
     Refresh quotes and candles for all active Tier 1/2 instruments.
 
     Fetches up to 400 daily candles (enough for 1y return + buffer)
     and the current quote for each covered instrument.
+
+    Runs daily at 22:00 UTC, after US market close.
     """
-    creds = _load_etoro_credentials("hourly_market_refresh")
+    creds = _load_etoro_credentials("daily_candle_refresh")
     if creds is None:
         return
     api_key, user_key = creds
 
-    with _tracked_job(JOB_HOURLY_MARKET_REFRESH) as tracker:
+    with _tracked_job(JOB_DAILY_CANDLE_REFRESH) as tracker:
         with (
             EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
             psycopg.connect(settings.database_url) as conn,
@@ -538,7 +540,7 @@ def hourly_market_refresh() -> None:
             ).fetchall()
 
             if not rows:
-                logger.info("hourly_market_refresh: no covered instruments found, skipping")
+                logger.info("daily_candle_refresh: no covered instruments found, skipping")
                 tracker.row_count = 0
                 return
 
