@@ -60,6 +60,7 @@ class PositionItem(BaseModel):
     company_name: str
     open_date: date | None
     avg_cost: float | None
+    current_price: float | None
     current_units: float
     cost_basis: float
     market_value: float
@@ -115,24 +116,33 @@ def _parse_position(
     daily_close = parse_optional_float(row, "daily_close")
 
     if last_price is not None:
+        current_price: float | None = last_price
         market_value = current_units * last_price
         unrealized_pnl = market_value - cost_basis
         valuation_source = "quote"
     elif daily_close is not None:
+        current_price = daily_close
         market_value = current_units * daily_close
         unrealized_pnl = market_value - cost_basis
         valuation_source = "daily_close"
     else:
+        current_price = None
         market_value = cost_basis
         unrealized_pnl = 0.0
         valuation_source = "cost_basis"
 
-    # Convert monetary values to display currency.
+    # Convert all monetary values to display currency in a single block
+    # so they either all convert or all stay in native currency.
+    avg_cost = parse_optional_float(row, "avg_cost")
     if native_currency != display_currency:
         try:
             market_value = float(convert(Decimal(str(market_value)), native_currency, display_currency, rates))
             cost_basis = float(convert(Decimal(str(cost_basis)), native_currency, display_currency, rates))
             unrealized_pnl = float(convert(Decimal(str(unrealized_pnl)), native_currency, display_currency, rates))
+            if current_price is not None:
+                current_price = float(convert(Decimal(str(current_price)), native_currency, display_currency, rates))
+            if avg_cost is not None:
+                avg_cost = float(convert(Decimal(str(avg_cost)), native_currency, display_currency, rates))
         except FxRateNotFound:
             logger.warning(
                 "FX rate %s→%s not found; skipping conversion for position",
@@ -140,19 +150,13 @@ def _parse_position(
                 display_currency,
             )
 
-    avg_cost = parse_optional_float(row, "avg_cost")
-    if avg_cost is not None and native_currency != display_currency:
-        try:
-            avg_cost = float(convert(Decimal(str(avg_cost)), native_currency, display_currency, rates))
-        except FxRateNotFound:
-            pass  # warning already logged above
-
     return PositionItem(
         instrument_id=row["instrument_id"],  # type: ignore[arg-type]
         symbol=row["symbol"],  # type: ignore[arg-type]
         company_name=row["company_name"],  # type: ignore[arg-type]
         open_date=row["open_date"],  # type: ignore[arg-type]
         avg_cost=avg_cost,
+        current_price=current_price,
         current_units=current_units,
         cost_basis=cost_basis,
         market_value=market_value,

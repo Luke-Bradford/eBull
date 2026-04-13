@@ -197,6 +197,7 @@ export interface PositionItem {
   company_name: string;
   open_date: string | null;
   avg_cost: number | null;
+  current_price: number | null;
   current_units: number;
   cost_basis: number;
   market_value: number;
