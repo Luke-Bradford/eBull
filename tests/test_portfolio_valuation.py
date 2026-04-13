@@ -49,6 +49,7 @@ class TestValuationHierarchy:
         pos = _parse_position(row, "USD", rates)
 
         assert pos.valuation_source == "quote"
+        assert pos.current_price == 160.0
         assert pos.market_value == 10.0 * 160.0
         assert pos.unrealized_pnl == (10.0 * 160.0) - 1500.0
 
@@ -59,6 +60,7 @@ class TestValuationHierarchy:
         pos = _parse_position(row, "USD", rates)
 
         assert pos.valuation_source == "daily_close"
+        assert pos.current_price == 155.0
         assert pos.market_value == 10.0 * 155.0
         assert pos.unrealized_pnl == (10.0 * 155.0) - 1500.0
 
@@ -69,6 +71,7 @@ class TestValuationHierarchy:
         pos = _parse_position(row, "USD", rates)
 
         assert pos.valuation_source == "cost_basis"
+        assert pos.current_price is None
         assert pos.market_value == 1500.0
         assert pos.unrealized_pnl == 0.0
 
@@ -79,6 +82,9 @@ class TestValuationHierarchy:
         pos = _parse_position(row, "GBP", rates)
 
         assert pos.valuation_source == "daily_close"
+        # current_price = 155 * 0.78 = 120.9
+        expected_price = float(Decimal("155.0") * Decimal("0.78"))
+        assert abs(pos.current_price - expected_price) < 0.01  # type: ignore[operator]
         # market_value = 10 * 155 * 0.78 = 1209.0
         expected_mv = float(Decimal("1550.0") * Decimal("0.78"))
         assert abs(pos.market_value - expected_mv) < 0.01

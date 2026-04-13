@@ -401,6 +401,7 @@ describe("InstrumentDetailPage — position", () => {
           company_name: "Apple Inc.",
           open_date: "2024-03-01",
           avg_cost: 185,
+          current_price: 191,
           current_units: 10,
           cost_basis: 1850,
           market_value: 1910,
