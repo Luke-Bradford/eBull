@@ -71,6 +71,7 @@ router = APIRouter(
 class RuntimeFlagsResponse(BaseModel):
     enable_auto_trading: bool
     enable_live_trading: bool
+    display_currency: str
     updated_at: datetime
     updated_by: str
     reason: str
@@ -112,12 +113,15 @@ class ConfigPatchRequest(BaseModel):
     reason: str = Field(min_length=1)
     enable_auto_trading: bool | None = None
     enable_live_trading: bool | None = None
+    display_currency: str | None = None
     confirm_live_enable: bool = False
 
     @model_validator(mode="after")
     def _validate_patch(self) -> ConfigPatchRequest:
-        if self.enable_auto_trading is None and self.enable_live_trading is None:
-            raise ValueError("at least one of enable_auto_trading / enable_live_trading must be provided")
+        if self.enable_auto_trading is None and self.enable_live_trading is None and self.display_currency is None:
+            raise ValueError(
+                "at least one of enable_auto_trading / enable_live_trading / display_currency must be provided"
+            )
         if self.enable_live_trading is True and not self.confirm_live_enable:
             raise ValueError("enable_live_trading=true requires confirm_live_enable=true")
         return self
@@ -173,6 +177,7 @@ def get_config(
         runtime=RuntimeFlagsResponse(
             enable_auto_trading=runtime.enable_auto_trading,
             enable_live_trading=runtime.enable_live_trading,
+            display_currency=runtime.display_currency,
             updated_at=runtime.updated_at,
             updated_by=runtime.updated_by,
             reason=runtime.reason,
@@ -198,6 +203,7 @@ def patch_config(
             reason=body.reason,
             enable_auto_trading=body.enable_auto_trading,
             enable_live_trading=body.enable_live_trading,
+            display_currency=body.display_currency,
         )
     except RuntimeConfigCorrupt as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -213,6 +219,7 @@ def patch_config(
     return RuntimeFlagsResponse(
         enable_auto_trading=updated.enable_auto_trading,
         enable_live_trading=updated.enable_live_trading,
+        display_currency=updated.display_currency,
         updated_at=updated.updated_at,
         updated_by=updated.updated_by,
         reason=updated.reason,

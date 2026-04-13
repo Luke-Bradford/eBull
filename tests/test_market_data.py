@@ -25,6 +25,7 @@ from app.services.market_data import (
     _candles_are_fresh,
     _compute_rolling_returns,
     _compute_volatility_30d,
+    _most_recent_trading_day,
     compute_spread_pct,
 )
 
@@ -120,11 +121,11 @@ class TestNormaliseInstrument:
         assert rec.sector == "42"
         assert rec.is_tradable is True
 
-    def test_currency_is_placeholder(self) -> None:
-        """currency defaults to 'USD' as a placeholder — not from the API."""
+    def test_currency_is_none_without_enrichment(self) -> None:
+        """currency is None — eToro instruments endpoint does not expose it."""
         rec = _normalise_instrument(FIXTURE_INSTRUMENT)
         assert rec is not None
-        assert rec.currency == "USD"
+        assert rec.currency is None
 
     def test_internal_instrument_skipped(self) -> None:
         assert _normalise_instrument(FIXTURE_INSTRUMENT_INTERNAL) is None
@@ -535,17 +536,25 @@ class TestCandlesAreFresh:
         conn = _mock_conn_with_latest_date(today)
         assert _candles_are_fresh(conn, 1, today) is True
 
-    def test_fresh_when_latest_is_yesterday(self) -> None:
-        today = date(2026, 4, 10)
-        conn = _mock_conn_with_latest_date(date(2026, 4, 9))
-        assert _candles_are_fresh(conn, 1, today) is True
+    def test_stale_when_latest_is_yesterday_weekday(self) -> None:
+        """On Friday, yesterday (Thursday) is stale — today's candle is the target."""
+        today = date(2026, 4, 10)  # Friday
+        conn = _mock_conn_with_latest_date(date(2026, 4, 9))  # Thursday
+        assert _candles_are_fresh(conn, 1, today) is False
 
     def test_fresh_over_weekend(self) -> None:
-        """Friday candle is fresh on Monday (3-day gap covers weekends)."""
-        monday = date(2026, 4, 13)  # Monday
-        friday = date(2026, 4, 10)  # previous Friday
+        """Friday candle is fresh on Saturday/Sunday (weekends target Friday)."""
+        saturday = date(2026, 4, 11)
+        friday = date(2026, 4, 10)
         conn = _mock_conn_with_latest_date(friday)
-        assert _candles_are_fresh(conn, 1, monday) is True
+        assert _candles_are_fresh(conn, 1, saturday) is True
+
+    def test_stale_friday_candle_on_monday(self) -> None:
+        """Friday candle is stale on Monday — Monday's candle is the target."""
+        monday = date(2026, 4, 13)
+        friday = date(2026, 4, 10)
+        conn = _mock_conn_with_latest_date(friday)
+        assert _candles_are_fresh(conn, 1, monday) is False
 
     def test_stale_when_latest_is_four_days_ago(self) -> None:
         today = date(2026, 4, 10)
@@ -556,3 +565,47 @@ class TestCandlesAreFresh:
         today = date(2026, 4, 10)
         conn = _mock_conn_with_latest_date(None)
         assert _candles_are_fresh(conn, 1, today) is False
+
+
+# ---------------------------------------------------------------------------
+# Weekday-aware candle freshness
+# ---------------------------------------------------------------------------
+
+
+def _candles_are_fresh_standalone(latest_date: date, today: date) -> bool:
+    return latest_date >= _most_recent_trading_day(today)
+
+
+class TestCandleFreshness:
+    """Tests for the weekday-aware candle freshness check."""
+
+    def test_friday_candle_fresh_on_saturday(self) -> None:
+        assert _candles_are_fresh_standalone(date(2026, 4, 10), date(2026, 4, 11))  # Fri, Sat
+
+    def test_friday_candle_fresh_on_sunday(self) -> None:
+        assert _candles_are_fresh_standalone(date(2026, 4, 10), date(2026, 4, 12))  # Fri, Sun
+
+    def test_friday_candle_stale_on_monday(self) -> None:
+        # Monday's target is Monday itself; Friday's candle is stale.
+        assert not _candles_are_fresh_standalone(date(2026, 4, 10), date(2026, 4, 13))  # Fri, Mon
+
+    def test_monday_candle_fresh_on_monday(self) -> None:
+        # Monday's target is Monday itself; Monday's candle is fresh.
+        assert _candles_are_fresh_standalone(date(2026, 4, 13), date(2026, 4, 13))  # Mon, Mon
+
+    def test_wednesday_candle_stale_on_friday(self) -> None:
+        assert not _candles_are_fresh_standalone(date(2026, 4, 8), date(2026, 4, 10))
+
+    def test_thursday_candle_stale_on_friday(self) -> None:
+        # Friday's target is Friday itself; Thursday's candle is stale.
+        assert not _candles_are_fresh_standalone(date(2026, 4, 9), date(2026, 4, 10))
+
+    def test_friday_candle_fresh_on_friday(self) -> None:
+        # Friday's target is Friday itself; Friday's candle is fresh.
+        assert _candles_are_fresh_standalone(date(2026, 4, 10), date(2026, 4, 10))
+
+    def test_monday_candle_stale_on_wednesday(self) -> None:
+        assert not _candles_are_fresh_standalone(date(2026, 4, 6), date(2026, 4, 8))
+
+    def test_same_day_weekday(self) -> None:
+        assert _candles_are_fresh_standalone(date(2026, 4, 13), date(2026, 4, 13))

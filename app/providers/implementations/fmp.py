@@ -24,6 +24,7 @@ Raw responses are persisted before normalisation.
 import json
 import logging
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -53,6 +54,17 @@ def _persist_raw(tag: str, payload: object) -> None:
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except Exception:
         logger.warning("Failed to persist raw FMP payload for tag=%s", tag, exc_info=True)
+
+
+@dataclass(frozen=True)
+class InstrumentProfile:
+    """Currency and exchange info from FMP /profile endpoint."""
+
+    symbol: str
+    currency: str
+    exchange: str | None
+    sector: str | None
+    industry: str | None
 
 
 class FmpFundamentalsProvider(FundamentalsProvider):
@@ -178,6 +190,36 @@ class FmpFundamentalsProvider(FundamentalsProvider):
         # Return oldest-first
         snapshots.sort(key=lambda s: s.as_of_date)
         return snapshots
+
+    def get_instrument_profile(self, symbol: str) -> InstrumentProfile | None:
+        """Fetch instrument profile for currency enrichment.
+
+        Uses GET /api/v3/profile/{symbol}.
+        Returns None if the symbol is not found in FMP.
+        """
+        resp = self._http.get(
+            f"/v3/profile/{symbol}",
+            params={"apikey": self._api_key},
+        )
+        if resp.status_code != 200:
+            logger.warning("FMP profile fetch failed for %s: %s", symbol, resp.status_code)
+            return None
+        data = resp.json()
+        if not isinstance(data, list) or not data:
+            return None
+        item = data[0]
+        if not isinstance(item, dict):
+            return None
+        raw_currency = str(item.get("currency", ""))
+        # FMP returns "GBp" (pence) for LSE stocks — normalise to "GBP"
+        currency = raw_currency.upper() if raw_currency else None
+        return InstrumentProfile(
+            symbol=symbol,
+            currency=currency or "USD",
+            exchange=item.get("exchangeShortName"),
+            sector=item.get("sector"),
+            industry=item.get("industry"),
+        )
 
     # ------------------------------------------------------------------
     # Private HTTP helpers

@@ -14,6 +14,8 @@ class Settings(BaseSettings):
 
     app_env: str = "dev"
     database_url: str = "postgresql://postgres:postgres@localhost:5432/ebull"
+    # Redis (IPC layer for live pricing — follow-up plan)
+    redis_url: str = "redis://localhost:6379/0"
 
     # eToro API credentials are now stored in the encrypted broker_credentials
     # table (issue #99) and loaded via load_credential_for_provider_use().

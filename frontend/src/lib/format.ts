@@ -2,17 +2,26 @@
  * Display formatters for money, percentages, and dates.
  *
  * The backend already serialises numbers as plain JSON numbers and dates as
- * ISO 8601 strings, so these helpers only handle presentation. Currency is
- * intentionally hard-coded to GBP for v1 — eToro's reporting currency for
- * this operator is GBP and there is no multi-currency requirement yet.
- * Revisit when a non-GBP account is added.
+ * ISO 8601 strings, so these helpers only handle presentation. The display
+ * currency is provided by DisplayCurrencyContext and passed to formatMoney
+ * by each call site; it defaults to GBP when the context is unavailable.
  */
 
-const GBP = new Intl.NumberFormat("en-GB", {
-  style: "currency",
-  currency: "GBP",
-  maximumFractionDigits: 2,
-});
+/**
+ * Cached Intl.NumberFormat instances keyed by currency code.
+ * Avoids creating a new formatter on every call.
+ */
+const formatters: Record<string, Intl.NumberFormat> = {};
+function getFormatter(currency: string): Intl.NumberFormat {
+  if (!formatters[currency]) {
+    formatters[currency] = new Intl.NumberFormat("en-GB", {
+      style: "currency",
+      currency,
+      maximumFractionDigits: 2,
+    });
+  }
+  return formatters[currency];
+}
 
 const PCT = new Intl.NumberFormat("en-GB", {
   style: "percent",
@@ -29,9 +38,12 @@ const DATE = new Intl.DateTimeFormat("en-GB", {
   minute: "2-digit",
 });
 
-export function formatMoney(value: number | null | undefined): string {
+export function formatMoney(
+  value: number | null | undefined,
+  currency = "GBP",
+): string {
   if (value === null || value === undefined) return "—";
-  return GBP.format(value);
+  return getFormatter(currency).format(value);
 }
 
 /** Format a fraction (0.0123 → "+1.23%"). Pass `null` for "—". */

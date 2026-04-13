@@ -20,8 +20,8 @@ import type { InstrumentListItem } from "@/api/types";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { Pagination } from "@/components/ui/Pagination";
-import { useAsync } from "@/lib/useAsync";
 import { formatMoney } from "@/lib/format";
+import { useAsync } from "@/lib/useAsync";
 
 // ---------------------------------------------------------------------------
 // Filter state
@@ -412,7 +412,7 @@ function InstrumentsTable({
               </td>
               <td className="py-2 pr-0 text-right text-xs tabular-nums text-slate-600">
                 {item.latest_quote?.last != null
-                  ? formatMoney(item.latest_quote.last)
+                  ? formatMoney(item.latest_quote.last, item.currency ?? "USD")
                   : "—"}
               </td>
             </tr>

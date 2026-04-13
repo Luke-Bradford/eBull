@@ -33,7 +33,7 @@ function deriveStage(system: SystemStatusResponse): BootstrapStage {
 
   // Check job states to determine what stage we're in.
   const universeJob = jobs.find((j) => j.name === "nightly_universe_sync");
-  const marketJob = jobs.find((j) => j.name === "hourly_market_refresh");
+  const marketJob = jobs.find((j) => j.name === "daily_candle_refresh");
 
   // If universe sync is currently running, we're syncing.
   if (universeJob?.last_status === "running") return "syncing";

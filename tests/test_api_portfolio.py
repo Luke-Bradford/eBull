@@ -15,13 +15,15 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 from app.db import get_conn
 from app.main import app
+from app.services.runtime_config import RuntimeConfig
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -34,6 +36,7 @@ def _make_position_row(
     instrument_id: int = 1,
     symbol: str = "AAPL",
     company_name: str = "Apple Inc",
+    currency: str | None = "USD",
     open_date: date | None = date(2026, 1, 15),
     avg_cost: float | None = 180.00,
     current_units: float = 10.0,
@@ -47,6 +50,7 @@ def _make_position_row(
         "instrument_id": instrument_id,
         "symbol": symbol,
         "company_name": company_name,
+        "currency": currency,
         "open_date": open_date,
         "avg_cost": avg_cost,
         "current_units": current_units,
@@ -113,6 +117,17 @@ app.dependency_overrides.setdefault(get_conn, _fallback_conn)
 
 client = TestClient(app)
 
+# Default RuntimeConfig for tests: display_currency="USD" means no conversion
+# is applied, so existing test values pass through unchanged.
+_DEFAULT_CONFIG = RuntimeConfig(
+    enable_auto_trading=False,
+    enable_live_trading=False,
+    display_currency="USD",
+    updated_at=_NOW,
+    updated_by="test",
+    reason="test",
+)
+
 
 # ---------------------------------------------------------------------------
 # TestGetPortfolio
@@ -122,7 +137,22 @@ client = TestClient(app)
 class TestGetPortfolio:
     """GET /portfolio — current positions with mark-to-market valuation."""
 
+    def setup_method(self) -> None:
+        # Patch FX/config service functions so existing tests (all USD) pass unchanged.
+        self._patch_config = patch(
+            "app.api.portfolio.get_runtime_config",
+            return_value=_DEFAULT_CONFIG,
+        )
+        self._patch_fx_meta = patch(
+            "app.api.portfolio.load_live_fx_rates_with_metadata",
+            return_value={},
+        )
+        self._patch_config.start()
+        self._patch_fx_meta.start()
+
     def teardown_method(self) -> None:
+        self._patch_config.stop()
+        self._patch_fx_meta.stop()
         _cleanup()
 
     def test_happy_path_with_quote(self) -> None:
@@ -309,3 +339,223 @@ class TestGetPortfolio:
         cur = conn.cursor.return_value
         positions_sql: str = cur.execute.call_args_list[0][0][0]
         assert "current_units > 0" in positions_sql
+
+    def test_display_currency_in_response(self) -> None:
+        """Response includes display_currency field from runtime_config."""
+        _with_conn([[], [_make_cash_row(0.0)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        assert resp.json()["display_currency"] == "USD"
+
+    def test_fx_rates_used_empty_when_same_currency(self) -> None:
+        """No FX rates reported when display_currency matches all positions."""
+        pos = _make_position_row(currency="USD")
+        _with_conn([[pos], [_make_cash_row(5000.0)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        assert resp.json()["fx_rates_used"] == {}
+
+
+# ---------------------------------------------------------------------------
+# TestPortfolioFxConversion
+# ---------------------------------------------------------------------------
+
+
+_FX_QUOTED_AT = datetime(2026, 4, 13, 12, 0, 0, tzinfo=UTC)
+
+
+class TestPortfolioFxConversion:
+    """GET /portfolio — FX conversion to display_currency."""
+
+    def setup_method(self) -> None:
+        gbp_config = RuntimeConfig(
+            enable_auto_trading=False,
+            enable_live_trading=False,
+            display_currency="GBP",
+            updated_at=_NOW,
+            updated_by="test",
+            reason="test",
+        )
+        self._patch_config = patch(
+            "app.api.portfolio.get_runtime_config",
+            return_value=gbp_config,
+        )
+        self._patch_fx_meta = patch(
+            "app.api.portfolio.load_live_fx_rates_with_metadata",
+            return_value={
+                ("USD", "GBP"): {
+                    "rate": Decimal("0.78"),
+                    "quoted_at": _FX_QUOTED_AT,
+                },
+            },
+        )
+        self._patch_config.start()
+        self._patch_fx_meta.start()
+
+    def teardown_method(self) -> None:
+        self._patch_config.stop()
+        self._patch_fx_meta.stop()
+        _cleanup()
+
+    def test_position_values_converted_to_gbp(self) -> None:
+        """USD instrument with quote: market_value/cost_basis/pnl converted at 0.78."""
+        pos = _make_position_row(
+            currency="USD",
+            current_units=10.0,
+            cost_basis=1000.0,
+            avg_cost=100.0,
+            last=100.0,
+        )
+        _with_conn([[pos], [_make_cash_row(None)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        item = body["positions"][0]
+        # market_value: 10 * 100 = 1000 USD -> 780 GBP
+        assert item["market_value"] == 780.0
+        # cost_basis: 1000 USD -> 780 GBP
+        assert item["cost_basis"] == 780.0
+        # unrealized_pnl: (1000 - 1000) = 0 USD -> 0 GBP
+        assert item["unrealized_pnl"] == 0.0
+        # avg_cost: 100 USD -> 78 GBP
+        assert item["avg_cost"] == 78.0
+
+    def test_cash_balance_converted_to_gbp(self) -> None:
+        """Cash balance (always USD for eToro) converted to display currency."""
+        _with_conn([[], [_make_cash_row(5000.0)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        # 5000 USD * 0.78 = 3900 GBP
+        assert body["cash_balance"] == 3900.0
+
+    def test_mirror_equity_converted_to_gbp(self) -> None:
+        """Mirror equity (always USD for eToro) converted to display currency."""
+        # Provide non-zero mirror_equity via the third cursor result.
+        _with_conn([[], [_make_cash_row(None)], [{"total": 2000}]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        # 2000 USD * 0.78 = 1560 GBP
+        assert body["mirror_equity"] == 1560.0
+
+    def test_aum_computed_in_display_currency(self) -> None:
+        """AUM is the sum of converted positions + converted cash + converted mirror."""
+        pos = _make_position_row(
+            currency="USD",
+            current_units=10.0,
+            cost_basis=1000.0,
+            last=100.0,
+        )
+        _with_conn([[pos], [_make_cash_row(5000.0)], [{"total": 2000}]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        # market_value: 1000 * 0.78 = 780
+        # cash: 5000 * 0.78 = 3900
+        # mirror: 2000 * 0.78 = 1560
+        # AUM = 780 + 3900 + 1560 = 6240
+        assert body["total_aum"] == 6240.0
+
+    def test_display_currency_in_response_gbp(self) -> None:
+        """Response includes display_currency = GBP."""
+        _with_conn([[], [_make_cash_row(0.0)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        assert resp.json()["display_currency"] == "GBP"
+
+    def test_fx_rates_used_metadata(self) -> None:
+        """fx_rates_used includes the USD rate and quoted_at when converting."""
+        pos = _make_position_row(currency="USD")
+        _with_conn([[pos], [_make_cash_row(0.0)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert "USD" in body["fx_rates_used"]
+        assert body["fx_rates_used"]["USD"]["rate"] == 0.78
+        assert body["fx_rates_used"]["USD"]["quoted_at"] == "2026-04-13T12:00:00+00:00"
+
+    def test_null_currency_falls_back_to_usd(self) -> None:
+        """Instrument with NULL currency treated as USD (eToro default)."""
+        pos = _make_position_row(
+            currency=None,
+            current_units=10.0,
+            cost_basis=1000.0,
+            last=100.0,
+        )
+        _with_conn([[pos], [_make_cash_row(None)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        item = resp.json()["positions"][0]
+
+        # Falls back to USD, converted at 0.78: 1000 * 0.78 = 780
+        assert item["market_value"] == 780.0
+
+    def test_no_quote_converted_correctly(self) -> None:
+        """Position without a quote: cost_basis fallback is also converted."""
+        pos = _make_position_row(
+            currency="USD",
+            current_units=10.0,
+            cost_basis=1800.0,
+            last=None,
+        )
+        _with_conn([[pos], [_make_cash_row(None)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        item = resp.json()["positions"][0]
+
+        # cost_basis fallback: 1800 * 0.78 = 1404
+        assert item["market_value"] == 1404.0
+        assert item["unrealized_pnl"] == 0.0
+
+    def test_missing_fx_rate_returns_unconverted(self) -> None:
+        """FxRateNotFound: position values returned unconverted, endpoint does not crash."""
+        pos = _make_position_row(
+            currency="EUR",
+            current_units=5.0,
+            cost_basis=500.0,
+            avg_cost=100.0,
+            last=120.0,
+        )
+        # No EUR→GBP rate in the mock — only USD→GBP exists.
+        _with_conn([[pos], [_make_cash_row(None)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        item = body["positions"][0]
+        # No EUR→GBP rate → values stay in EUR (unconverted).
+        assert item["market_value"] == 600.0  # 5 * 120
+        assert item["cost_basis"] == 500.0
+        assert item["unrealized_pnl"] == 100.0  # 600 - 500
+        assert item["avg_cost"] == 100.0
+        assert body["display_currency"] == "GBP"
+
+    def test_fx_rates_used_no_spurious_usd_when_mirror_zero(self) -> None:
+        """fx_rates_used omits USD when mirror_equity is 0 and no USD positions exist."""
+        pos = _make_position_row(currency="GBP", current_units=10.0, cost_basis=1000.0, last=100.0)
+        # No cash, mirror_equity = 0 (default third cursor result).
+        _with_conn([[pos], [_make_cash_row(None)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        # No USD positions, no cash, mirror_equity = 0 → USD should not appear.
+        assert "USD" not in body["fx_rates_used"]

@@ -5,11 +5,15 @@ Syncs the eToro tradable instrument list to the local `instruments` table.
 Detects new instruments, removed instruments, and changed metadata.
 """
 
+from __future__ import annotations
+
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import psycopg
 
+from app.providers.implementations.fmp import FmpFundamentalsProvider
 from app.providers.market_data import InstrumentRecord, MarketDataProvider
 
 logger = logging.getLogger(__name__)
@@ -72,7 +76,7 @@ def sync_universe(
                     symbol       = EXCLUDED.symbol,
                     company_name = EXCLUDED.company_name,
                     exchange     = EXCLUDED.exchange,
-                    currency     = EXCLUDED.currency,
+                    currency     = COALESCE(EXCLUDED.currency, instruments.currency),
                     sector       = EXCLUDED.sector,
                     industry     = EXCLUDED.industry,
                     country      = EXCLUDED.country,
@@ -82,7 +86,8 @@ def sync_universe(
                     instruments.symbol        IS DISTINCT FROM EXCLUDED.symbol        OR
                     instruments.company_name  IS DISTINCT FROM EXCLUDED.company_name  OR
                     instruments.exchange      IS DISTINCT FROM EXCLUDED.exchange      OR
-                    instruments.currency      IS DISTINCT FROM EXCLUDED.currency      OR
+                    (EXCLUDED.currency IS NOT NULL AND
+                     instruments.currency IS DISTINCT FROM EXCLUDED.currency)         OR
                     instruments.sector        IS DISTINCT FROM EXCLUDED.sector        OR
                     instruments.industry      IS DISTINCT FROM EXCLUDED.industry      OR
                     instruments.country       IS DISTINCT FROM EXCLUDED.country       OR
@@ -152,3 +157,48 @@ def _count_changes(
     if row is None:
         return 0, 0
     return int(row[0]), int(row[1])
+
+
+def enrich_instrument_currencies(
+    fmp_provider: FmpFundamentalsProvider,
+    conn: psycopg.Connection[Any],
+) -> int:
+    """Enrich instrument currencies from FMP profile endpoint.
+
+    Fetches currency information for tradable instruments that either have
+    no currency set, have never been enriched, or were last enriched more
+    than 90 days ago.
+
+    Returns the number of instruments enriched.
+    """
+    rows = conn.execute(
+        """
+        SELECT instrument_id, symbol
+        FROM instruments
+        WHERE is_tradable = TRUE
+          AND (currency IS NULL
+               OR currency_enriched_at IS NULL
+               OR currency_enriched_at < NOW() - INTERVAL '90 days')
+        ORDER BY instrument_id
+        """,
+    ).fetchall()
+
+    enriched = 0
+    for row in rows:
+        instrument_id, symbol = row[0], row[1]
+        profile = fmp_provider.get_instrument_profile(symbol)
+        if profile is None:
+            logger.warning("FMP profile not found for %s (id=%s)", symbol, instrument_id)
+            continue
+        conn.execute(
+            """
+            UPDATE instruments
+            SET currency = %(currency)s,
+                currency_enriched_at = NOW()
+            WHERE instrument_id = %(instrument_id)s
+            """,
+            {"currency": profile.currency, "instrument_id": instrument_id},
+        )
+        enriched += 1
+        logger.info("Enriched currency for %s: %s", symbol, profile.currency)
+    return enriched

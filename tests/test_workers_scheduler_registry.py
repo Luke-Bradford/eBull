@@ -54,6 +54,23 @@ class TestRegistryShape:
 
 
 # ---------------------------------------------------------------------------
+# Daily candle job registration
+# ---------------------------------------------------------------------------
+
+
+class TestDailyCandleJob:
+    def test_daily_candle_job_registered(self) -> None:
+        names = [job.name for job in SCHEDULED_JOBS]
+        assert "daily_candle_refresh" in names
+
+    def test_daily_candle_job_cadence(self) -> None:
+        job = next(j for j in SCHEDULED_JOBS if j.name == "daily_candle_refresh")
+        assert job.cadence.kind == "daily"
+        assert job.cadence.hour == 22
+        assert job.cadence.minute == 0
+
+
+# ---------------------------------------------------------------------------
 # Cadence validators
 # ---------------------------------------------------------------------------
 

@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import type { PositionItem } from "@/api/types";
+import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatMoney, formatNumber, formatPct, pnlPct } from "@/lib/format";
 import { EmptyState } from "@/components/states/EmptyState";
 
@@ -15,6 +16,7 @@ import { EmptyState } from "@/components/states/EmptyState";
  * when #62 lands.
  */
 export function PositionsTable({ positions }: { positions: PositionItem[] }) {
+  const currency = useDisplayCurrency();
   if (positions.length === 0) {
     return (
       <EmptyState
@@ -58,11 +60,11 @@ export function PositionsTable({ positions }: { positions: PositionItem[] }) {
                   <span className="text-slate-700">{p.company_name}</span>
                 </Td>
                 <Td align="right">{formatNumber(p.current_units)}</Td>
-                <Td align="right">{formatMoney(p.avg_cost)}</Td>
-                <Td align="right">{formatMoney(p.market_value)}</Td>
+                <Td align="right">{formatMoney(p.avg_cost, currency)}</Td>
+                <Td align="right">{formatMoney(p.market_value, currency)}</Td>
                 <Td align="right">
                   <span className={positive ? "text-emerald-600" : "text-red-600"}>
-                    {formatMoney(p.unrealized_pnl)}
+                    {formatMoney(p.unrealized_pnl, currency)}
                     {pct === null ? "" : ` (${formatPct(pct)})`}
                   </span>
                 </Td>

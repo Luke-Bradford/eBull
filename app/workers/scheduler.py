@@ -24,6 +24,7 @@ import logging
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Literal
 
 import anthropic
@@ -52,7 +53,7 @@ from app.services.scoring import compute_rankings
 from app.services.sentiment import ClaudeSentimentScorer
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
 from app.services.thesis import find_stale_instruments, generate_thesis
-from app.services.universe import sync_universe
+from app.services.universe import enrich_instrument_currencies, sync_universe
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +162,7 @@ class ScheduledJob:
 # Job-name constants. Every ``_tracked_job(...)`` call site below references
 # one of these so the literal cannot drift from the registry / job_runs row.
 JOB_NIGHTLY_UNIVERSE_SYNC = "nightly_universe_sync"
-JOB_HOURLY_MARKET_REFRESH = "hourly_market_refresh"
+JOB_DAILY_CANDLE_REFRESH = "daily_candle_refresh"
 JOB_DAILY_CIK_REFRESH = "daily_cik_refresh"
 JOB_DAILY_RESEARCH_REFRESH = "daily_research_refresh"
 JOB_DAILY_NEWS_REFRESH = "daily_news_refresh"
@@ -171,6 +172,7 @@ JOB_WEEKLY_COVERAGE_REVIEW = "weekly_coverage_review"
 JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
 JOB_DAILY_PORTFOLIO_SYNC = "daily_portfolio_sync"
 JOB_EXECUTE_APPROVED_ORDERS = "execute_approved_orders"
+JOB_FX_RATES_REFRESH = "fx_rates_refresh"
 
 
 # ---------------------------------------------------------------------------
@@ -245,9 +247,15 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ),
     # -- Pipeline: skip when upstream data is absent ---------------------
     ScheduledJob(
-        name=JOB_HOURLY_MARKET_REFRESH,
-        description="Refresh quotes and candles for all active Tier 1/2 instruments.",
-        cadence=Cadence.hourly(minute=5),
+        name=JOB_DAILY_CANDLE_REFRESH,
+        description="Fetch daily candles for all active Tier 1/2 instruments after US market close.",
+        cadence=Cadence.daily(hour=22, minute=0),
+        prerequisite=_has_coverage_tier12,
+    ),
+    ScheduledJob(
+        name=JOB_FX_RATES_REFRESH,
+        description="Refresh live FX rates from eToro conversion rates.",
+        cadence=Cadence.hourly(minute=0),
         prerequisite=_has_coverage_tier12,
     ),
     ScheduledJob(
@@ -499,22 +507,47 @@ def nightly_universe_sync() -> None:
                     seed_result.already_populated,
                 )
 
+            # Enrich instrument currencies from FMP for instruments that
+            # are missing currency data or haven't been enriched in 90 days.
+            # Uses a separate autocommit connection so each per-instrument
+            # UPDATE commits independently, and HTTP I/O (FMP API calls)
+            # does not hold a transaction open.
+            if settings.fmp_api_key:
+                try:
+                    with (
+                        FmpFundamentalsProvider(api_key=settings.fmp_api_key) as fmp_provider,
+                        psycopg.connect(settings.database_url, autocommit=True) as enrich_conn,
+                    ):
+                        enriched = enrich_instrument_currencies(fmp_provider, enrich_conn)
+                        row_count += enriched
+                        tracker.row_count = row_count
+                        logger.info("Currency enrichment: enriched=%d", enriched)
+                except Exception:
+                    logger.warning(
+                        "Currency enrichment failed; universe sync and coverage still committed",
+                        exc_info=True,
+                    )
+            else:
+                logger.info("Currency enrichment skipped: FMP API key not configured")
+
             tracker.row_count = row_count
 
 
-def hourly_market_refresh() -> None:
+def daily_candle_refresh() -> None:
     """
     Refresh quotes and candles for all active Tier 1/2 instruments.
 
     Fetches up to 400 daily candles (enough for 1y return + buffer)
     and the current quote for each covered instrument.
+
+    Runs daily at 22:00 UTC, after US market close.
     """
-    creds = _load_etoro_credentials("hourly_market_refresh")
+    creds = _load_etoro_credentials("daily_candle_refresh")
     if creds is None:
         return
     api_key, user_key = creds
 
-    with _tracked_job(JOB_HOURLY_MARKET_REFRESH) as tracker:
+    with _tracked_job(JOB_DAILY_CANDLE_REFRESH) as tracker:
         with (
             EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
             psycopg.connect(settings.database_url) as conn,
@@ -531,13 +564,16 @@ def hourly_market_refresh() -> None:
             ).fetchall()
 
             if not rows:
-                logger.info("hourly_market_refresh: no covered instruments found, skipping")
+                logger.info("daily_candle_refresh: no covered instruments found, skipping")
                 tracker.row_count = 0
                 return
 
             instruments = [(row[0], row[1]) for row in rows]
-            summary = refresh_market_data(provider, conn, instruments)
-        tracker.row_count = summary.candle_rows_upserted + summary.quotes_updated
+            # skip_quotes=True: quote freshness is owned by the hourly
+            # fx_rates_refresh job; daily candle job must not shadow
+            # those fresher values with stale end-of-day data.
+            summary = refresh_market_data(provider, conn, instruments, skip_quotes=True)
+        tracker.row_count = summary.candle_rows_upserted
 
     logger.info(
         "Market refresh complete: instruments=%d candles=%d features=%d quotes=%d quotes_skipped=%d spread_flags=%d",
@@ -1145,6 +1181,137 @@ def weekly_coverage_review() -> None:
         len(result.demotions),
         len(result.blocked),
         result.unchanged,
+    )
+
+
+def fx_rates_refresh() -> None:
+    """Refresh live FX rates and quotes from eToro conversion rates.
+
+    The eToro rates endpoint returns ``conversionRateAsk``/``conversionRateBid``
+    on every quote response. These represent the instrument's native currency →
+    account currency (USD) conversion rate. This job:
+
+    1. Batch-fetches quotes for all covered Tier 1/2 instruments.
+    2. Extracts unique currency → USD conversion rates from the response.
+    3. Upserts each rate pair into ``live_fx_rates`` for display-currency
+       conversion.
+    4. Also upserts the quotes themselves into the ``quotes`` table so
+       quote freshness stays hourly (candle refresh runs daily at 22:00).
+
+    Runs hourly at :00. Requires Tier 1/2 coverage rows.
+    """
+    from app.services.fx import upsert_live_fx_rate
+    from app.services.market_data import compute_spread_pct
+
+    creds = _load_etoro_credentials("fx_rates_refresh")
+    if creds is None:
+        return
+
+    api_key, user_key = creds
+
+    with _tracked_job(JOB_FX_RATES_REFRESH) as tracker:
+        with (
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            rows = conn.execute(
+                """
+                SELECT i.instrument_id, i.symbol, i.currency
+                FROM instruments i
+                JOIN coverage c ON c.instrument_id = i.instrument_id
+                WHERE i.is_tradable = TRUE
+                  AND c.coverage_tier IN (1, 2)
+                ORDER BY i.symbol
+                """
+            ).fetchall()
+
+            if not rows:
+                logger.info("fx_rates_refresh: no covered instruments found, skipping")
+                tracker.row_count = 0
+                return
+
+            instrument_ids = [row[0] for row in rows]
+            currency_map: dict[int, str | None] = {row[0]: row[2] for row in rows}
+
+            quotes = provider.get_quotes(instrument_ids)
+
+            # --- Extract FX rates from conversion_rate fields ---
+            # Group by currency to get the latest rate per unique pair.
+            # eToro conversion rates are instrument_ccy → USD.
+            fx_pairs: dict[str, tuple[Decimal, datetime]] = {}  # ccy → (rate, ts)
+            for q in quotes:
+                if q.conversion_rate is None:
+                    continue
+                ccy = currency_map.get(q.instrument_id)
+                if ccy is None or ccy == "USD":
+                    continue
+                # Keep the most recent timestamp per currency.
+                existing = fx_pairs.get(ccy)
+                if existing is None or q.timestamp > existing[1]:
+                    fx_pairs[ccy] = (q.conversion_rate, q.timestamp)
+
+            fx_rows_written = 0
+            with conn.transaction():
+                for ccy, (rate, ts) in fx_pairs.items():
+                    # Store the direct pair: ccy → USD
+                    upsert_live_fx_rate(
+                        conn,
+                        from_currency=ccy,
+                        to_currency="USD",
+                        rate=rate,
+                        quoted_at=ts,
+                    )
+                    fx_rows_written += 1
+
+            # --- Upsert quotes for hourly freshness ---
+            max_spread_pct = Decimal("1.0")
+            quotes_updated = 0
+            for q in quotes:
+                try:
+                    spread_pct = compute_spread_pct(q.bid, q.ask)
+                    spread_flag = spread_pct is not None and spread_pct > max_spread_pct
+                    with conn.transaction():
+                        conn.execute(
+                            """
+                            INSERT INTO quotes (
+                                instrument_id, quoted_at, bid, ask, last, spread_pct, spread_flag
+                            )
+                            VALUES (
+                                %(instrument_id)s, %(quoted_at)s, %(bid)s, %(ask)s,
+                                %(last)s, %(spread_pct)s, %(spread_flag)s
+                            )
+                            ON CONFLICT (instrument_id) DO UPDATE SET
+                                quoted_at   = EXCLUDED.quoted_at,
+                                bid         = EXCLUDED.bid,
+                                ask         = EXCLUDED.ask,
+                                last        = EXCLUDED.last,
+                                spread_pct  = EXCLUDED.spread_pct,
+                                spread_flag = EXCLUDED.spread_flag
+                            """,
+                            {
+                                "instrument_id": q.instrument_id,
+                                "quoted_at": q.timestamp,
+                                "bid": q.bid,
+                                "ask": q.ask,
+                                "last": q.last,
+                                "spread_pct": spread_pct,
+                                "spread_flag": spread_flag,
+                            },
+                        )
+                        quotes_updated += 1
+                except Exception:
+                    logger.warning(
+                        "fx_rates_refresh: failed to upsert quote for instrument %d",
+                        q.instrument_id,
+                        exc_info=True,
+                    )
+
+            tracker.row_count = fx_rows_written + quotes_updated
+
+    logger.info(
+        "fx_rates_refresh complete: fx_pairs=%d quotes=%d",
+        fx_rows_written,
+        quotes_updated,
     )
 
 

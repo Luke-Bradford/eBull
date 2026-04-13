@@ -30,7 +30,9 @@ import {
 import { runJob } from "@/api/jobs";
 import { ValidationResultDisplay } from "@/components/broker/ValidationResultDisplay";
 import { useRecoveryPhraseModal } from "@/components/security/RecoveryPhraseModal";
+import { DisplayCurrencySection } from "@/components/settings/DisplayCurrencySection";
 import { deriveCredentialSetMode, ENVIRONMENT } from "@/lib/credentialSetMode";
+import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 
 const MIN_SECRET_LEN = 4;
 
@@ -38,9 +40,14 @@ const MIN_SECRET_LEN = 4;
 type ManageAction = "idle" | "edit-api_key" | "edit-user_key" | "replace";
 
 export function SettingsPage(): JSX.Element {
+  const displayCurrency = useDisplayCurrency();
   return (
     <div className="space-y-6">
       <h1 className="text-xl font-semibold">Settings</h1>
+      <DisplayCurrencySection
+        currentCurrency={displayCurrency}
+        onChanged={() => window.location.reload()}
+      />
       <BrokerCredentialsSection />
     </div>
   );
