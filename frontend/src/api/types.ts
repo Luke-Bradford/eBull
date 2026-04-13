@@ -455,3 +455,51 @@ export interface NewsListResponse {
   offset: number;
   limit: number;
 }
+
+// ---------------------------------------------------------------------------
+// /portfolio/copy-trading (app/api/copy_trading.py)
+// ---------------------------------------------------------------------------
+
+export interface MirrorPositionItem {
+  position_id: number;
+  instrument_id: number;
+  symbol: string | null;
+  company_name: string | null;
+  is_buy: boolean;
+  units: number;
+  amount: number;
+  open_rate: number;
+  open_conversion_rate: number;
+  open_date_time: string;
+  current_price: number | null;
+  market_value: number;
+  unrealized_pnl: number;
+}
+
+export interface MirrorSummary {
+  mirror_id: number;
+  active: boolean;
+  initial_investment: number;
+  deposit_summary: number;
+  withdrawal_summary: number;
+  available_amount: number;
+  closed_positions_net_profit: number;
+  mirror_equity: number;
+  position_count: number;
+  positions: MirrorPositionItem[];
+  started_copy_date: string;
+  closed_at: string | null;
+}
+
+export interface CopyTraderSummary {
+  parent_cid: number;
+  parent_username: string;
+  mirrors: MirrorSummary[];
+  total_equity: number;
+}
+
+export interface CopyTradingResponse {
+  traders: CopyTraderSummary[];
+  total_mirror_equity: number;
+  display_currency: string;
+}

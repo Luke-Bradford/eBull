@@ -14,6 +14,7 @@ import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
 import { RecoverPage } from "@/pages/RecoverPage";
 import { OperatorsPage } from "@/pages/OperatorsPage";
+import { CopyTradingPage } from "@/pages/CopyTradingPage";
 import { InstrumentsPage } from "@/pages/InstrumentsPage";
 
 export function App() {
@@ -36,6 +37,7 @@ export function App() {
           <Route path="rankings" element={<RankingsPage />} />
           <Route path="instruments" element={<InstrumentsPage />} />
           <Route path="instruments/:instrumentId" element={<InstrumentDetailPage />} />
+          <Route path="copy-trading" element={<CopyTradingPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />
           <Route path="admin" element={<AdminPage />} />
           <Route path="operators" element={<OperatorsPage />} />
