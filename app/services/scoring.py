@@ -295,40 +295,161 @@ def _momentum_score(
     return_1m: float | None,
     return_3m: float | None,
     return_6m: float | None,
+    *,
+    ta_indicators: dict[str, float | None] | None = None,
 ) -> tuple[float, list[str]]:
     """
-    Blended return score.  3m return is dominant (50% weight).
+    Blended momentum score combining return-based signals with TA indicators.
 
-    Returns (score, missing_components).
+    When ta_indicators is None or empty, falls back to pure return scoring
+    (backward compatible).
+
+    TA blending (when available):
+      Return-based:      40%
+      Trend confirmation: 25% (price vs SMA200, MACD histogram)
+      Momentum quality:  20% (RSI regime, Stochastic position)
+      Volatility regime: 15% (Bollinger position, ATR context)
+
+    Returns (score, notes_about_missing_components).
     """
     notes: list[str] = []
-    components: list[tuple[float, float]] = []  # (score, weight)
+
+    # --- Return-based component (original logic) ---
+    return_components: list[tuple[float, float]] = []
 
     if return_1m is not None:
         s1m = _clip((return_1m + 0.10) / 0.30)
-        components.append((s1m, 0.20))
+        return_components.append((s1m, 0.20))
     else:
         notes.append("return_1m missing")
 
     if return_3m is not None:
         s3m = _clip((return_3m + 0.15) / 0.45)
-        components.append((s3m, 0.50))
+        return_components.append((s3m, 0.50))
     else:
         notes.append("return_3m missing")
 
     if return_6m is not None:
         s6m = _clip((return_6m + 0.20) / 0.60)
-        components.append((s6m, 0.30))
+        return_components.append((s6m, 0.30))
     else:
         notes.append("return_6m missing")
 
-    if not components:
-        return 0.5, notes  # no momentum data — neutral-by-absence
+    if not return_components:
+        return_score: float | None = None
+    else:
+        total_w = sum(w for _, w in return_components)
+        return_score = sum(s * w / total_w for s, w in return_components)
 
-    # Re-normalise weights across available components
-    total_weight = sum(w for _, w in components)
-    score = sum(s * w / total_weight for s, w in components)
-    return _clip(score), notes
+    # --- If no TA data, fall back to return-only scoring ---
+    if not ta_indicators or not any(
+        ta_indicators.get(k) is not None
+        for k in ("sma_200", "macd_histogram", "rsi_14", "stoch_k", "bb_upper", "atr_14")
+    ):
+        if return_score is None:
+            return 0.5, notes
+        return _clip(return_score), notes
+
+    current_close = ta_indicators.get("current_close")
+
+    # --- Trend confirmation (25%): SMA200 + MACD histogram ---
+    trend_parts: list[tuple[float, float]] = []
+
+    sma_200 = ta_indicators.get("sma_200")
+    if sma_200 is not None and current_close is not None and sma_200 != 0:
+        pct_from_sma = (current_close - sma_200) / sma_200
+        trend_parts.append((_clip(0.5 + pct_from_sma * 2.5), 0.60))
+    else:
+        notes.append("TA: sma_200 unavailable")
+
+    macd_hist = ta_indicators.get("macd_histogram")
+    if macd_hist is not None:
+        trend_parts.append((_clip(0.5 + macd_hist / 10.0), 0.40))
+    else:
+        notes.append("TA: macd_histogram unavailable")
+
+    trend_score: float | None = None
+    if trend_parts:
+        tw = sum(w for _, w in trend_parts)
+        trend_score = sum(s * w / tw for s, w in trend_parts)
+
+    # --- Momentum quality (20%): RSI + Stochastic ---
+    mq_parts: list[tuple[float, float]] = []
+
+    rsi_val = ta_indicators.get("rsi_14")
+    if rsi_val is not None:
+        # RSI sweet spot: 50-65 (healthy uptrend momentum).
+        # Oversold (<30) and overbought (>70) are warning zones.
+        if rsi_val < 30:
+            rsi_score = rsi_val / 60.0
+        elif rsi_val <= 70:
+            rsi_score = 0.5 + (rsi_val - 30) / 80.0
+        else:
+            rsi_score = max(0.0, 1.0 - (rsi_val - 70) / 30.0)
+        mq_parts.append((_clip(rsi_score), 0.60))
+    else:
+        notes.append("TA: rsi_14 unavailable")
+
+    stoch_k = ta_indicators.get("stoch_k")
+    if stoch_k is not None:
+        if stoch_k < 20:
+            stoch_score = stoch_k / 40.0
+        elif stoch_k <= 80:
+            stoch_score = 0.5 + (stoch_k - 20) / 120.0
+        else:
+            stoch_score = max(0.0, 1.0 - (stoch_k - 80) / 20.0)
+        mq_parts.append((_clip(stoch_score), 0.40))
+    else:
+        notes.append("TA: stoch_k unavailable")
+
+    mq_score: float | None = None
+    if mq_parts:
+        mw = sum(w for _, w in mq_parts)
+        mq_score = sum(s * w / mw for s, w in mq_parts)
+
+    # --- Volatility regime (15%): Bollinger position + ATR ---
+    vol_parts: list[tuple[float, float]] = []
+
+    bb_upper = ta_indicators.get("bb_upper")
+    bb_lower = ta_indicators.get("bb_lower")
+    if bb_upper is not None and bb_lower is not None and current_close is not None:
+        bb_width = bb_upper - bb_lower
+        if bb_width > 0:
+            vol_parts.append((_clip((current_close - bb_lower) / bb_width), 0.60))
+        else:
+            vol_parts.append((0.5, 0.60))
+    else:
+        notes.append("TA: bollinger unavailable")
+
+    atr_val = ta_indicators.get("atr_14")
+    if atr_val is not None and current_close is not None and current_close > 0:
+        atr_pct = atr_val / current_close
+        vol_parts.append((_clip(1.0 - atr_pct * 10.0), 0.40))
+    else:
+        notes.append("TA: atr_14 unavailable")
+
+    vol_score: float | None = None
+    if vol_parts:
+        vw = sum(w for _, w in vol_parts)
+        vol_score = sum(s * w / vw for s, w in vol_parts)
+
+    # --- Final blend ---
+    final_parts: list[tuple[float, float]] = []
+    if return_score is not None:
+        final_parts.append((return_score, 0.40))
+    if trend_score is not None:
+        final_parts.append((trend_score, 0.25))
+    if mq_score is not None:
+        final_parts.append((mq_score, 0.20))
+    if vol_score is not None:
+        final_parts.append((vol_score, 0.15))
+
+    if not final_parts:
+        return 0.5, notes
+
+    total_w = sum(w for _, w in final_parts)
+    blended = sum(s * w / total_w for s, w in final_parts)
+    return _clip(blended), notes
 
 
 def _sentiment_score(
@@ -555,7 +676,10 @@ def _load_instrument_data(
         # Latest price features
         cur.execute(
             """
-            SELECT return_1m, return_3m, return_6m, close
+            SELECT return_1m, return_3m, return_6m, close,
+                   sma_200, macd_histogram, rsi_14,
+                   stoch_k, stoch_d,
+                   bb_upper, bb_lower, atr_14
             FROM price_daily
             WHERE instrument_id = %(id)s
               AND close IS NOT NULL
@@ -802,7 +926,30 @@ def compute_score(
     if v_notes:
         explanation_parts.append("value: " + "; ".join(v_notes))
 
-    m_score, m_notes = _momentum_score(return_1m, return_3m, return_6m)
+    # Build TA indicators dict for momentum score
+    ta_indicators: dict[str, float | None] | None = None
+    if price_row is not None:
+        ta_keys = [
+            "sma_200",
+            "macd_histogram",
+            "rsi_14",
+            "stoch_k",
+            "stoch_d",
+            "bb_upper",
+            "bb_lower",
+            "atr_14",
+        ]
+        ta_raw = {k: _to_float(price_row.get(k)) for k in ta_keys}
+        if any(v is not None for v in ta_raw.values()):
+            ta_indicators = ta_raw
+            ta_indicators["current_close"] = current_price
+
+    m_score, m_notes = _momentum_score(
+        return_1m,
+        return_3m,
+        return_6m,
+        ta_indicators=ta_indicators,
+    )
     if m_notes:
         explanation_parts.append("momentum: " + "; ".join(m_notes))
 
