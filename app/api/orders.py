@@ -315,6 +315,7 @@ def _persist_order_and_fill(
                                          + (%(price)s - COALESCE(avg_cost, 0)) * %(units)s,
                         updated_at     = %(now)s
                     WHERE instrument_id = %(iid)s
+                      AND current_units >= %(units)s
                     """,
                     {
                         "iid": instrument_id,
