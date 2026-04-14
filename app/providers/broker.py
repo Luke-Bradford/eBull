@@ -34,6 +34,20 @@ class BrokerOrderResult:
 
 
 @dataclass(frozen=True)
+class OrderParams:
+    """Optional parameters for order placement.
+
+    All fields are optional — omitting them preserves the current
+    behaviour (no SL, no TP, leverage 1).
+    """
+
+    stop_loss_rate: Decimal | None = None
+    take_profit_rate: Decimal | None = None
+    is_tsl_enabled: bool = False
+    leverage: int = 1
+
+
+@dataclass(frozen=True)
 class BrokerPosition:
     """A single open position as reported by the broker.
 
@@ -142,19 +156,26 @@ class BrokerProvider(ABC):
         action: str,
         amount: Decimal | None,
         units: Decimal | None,
+        params: OrderParams | None = None,
     ) -> BrokerOrderResult:
         """
         Place an order with the broker.
 
         Exactly one of amount or units should be provided.
+        params: optional SL/TP and leverage settings. None = broker defaults.
         Returns the broker's response, including fill details if immediately filled.
         """
 
     @abstractmethod
-    def close_position(self, instrument_id: int) -> BrokerOrderResult:
+    def close_position(
+        self,
+        position_id: int,
+        units_to_deduct: Decimal | None = None,
+    ) -> BrokerOrderResult:
         """
-        Close an existing position for the given instrument.
+        Close an existing position by broker position ID.
 
+        units_to_deduct: if provided, partial close. None = close entire position.
         Returns the broker's response with fill details.
         """
 

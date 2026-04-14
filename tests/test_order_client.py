@@ -461,6 +461,8 @@ class TestExecuteOrderLiveMode:
         cursors = [
             _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
             _position_cursor(current_units=5.0),
+            # _load_position_id_for_exit resolves instrument_id → position_id
+            _make_cursor([{"position_id": 98765}]),
             # broker called (no cursor)
             _order_returning_cursor(order_id=11),
             _fill_returning_cursor(fill_id=7),
@@ -473,7 +475,29 @@ class TestExecuteOrderLiveMode:
             broker=broker,
         )
         assert result.outcome == "filled"
-        broker.close_position.assert_called_once_with(1)
+        broker.close_position.assert_called_once_with(98765)
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_live_exit_no_broker_positions_row_fails(self, _mock_now: MagicMock) -> None:
+        """EXIT with no broker_positions row returns failed (pre-024 positions)."""
+        broker = MagicMock()
+        cursors = [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            _position_cursor(current_units=5.0),
+            # _load_position_id_for_exit returns None — no broker_positions row
+            _make_cursor([]),
+            # broker NOT called — broker_result is constructed inline as failed
+            _order_returning_cursor(order_id=12),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+            broker=broker,
+        )
+        assert result.outcome == "failed"
+        broker.close_position.assert_not_called()
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_live_mode_no_broker_raises(self, _mock_now: MagicMock) -> None:

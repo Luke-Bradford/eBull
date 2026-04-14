@@ -30,6 +30,7 @@ from app.providers.broker import (
     BrokerPortfolio,
     BrokerPosition,
     BrokerProvider,
+    OrderParams,
     OrderStatus,
 )
 from app.providers.resilient_client import ResilientClient
@@ -93,6 +94,24 @@ class PortfolioParseError(Exception):
     See spec §2.2.1 for the hierarchy rationale and §2.3.3 for the
     strict-raise sync contract that depends on it.
     """
+
+
+def _order_body_common(
+    instrument_id: int,
+    params: OrderParams | None,
+) -> dict[str, Any]:
+    """Build the common fields for an eToro open-order request body."""
+    p = params or OrderParams()
+    return {
+        "InstrumentID": instrument_id,
+        "IsBuy": True,  # v1 is long-only
+        "Leverage": p.leverage,
+        "StopLossRate": float(p.stop_loss_rate) if p.stop_loss_rate is not None else None,
+        "TakeProfitRate": float(p.take_profit_rate) if p.take_profit_rate is not None else None,
+        "IsTslEnabled": p.is_tsl_enabled,
+        "IsNoStopLoss": p.stop_loss_rate is None,
+        "IsNoTakeProfit": p.take_profit_rate is None,
+    }
 
 
 class EtoroBrokerProvider(BrokerProvider):
@@ -172,6 +191,7 @@ class EtoroBrokerProvider(BrokerProvider):
         action: str,
         amount: Decimal | None,
         units: Decimal | None,
+        params: OrderParams | None = None,
     ) -> BrokerOrderResult:
         # Reject unrecognised actions before any HTTP call.
         if action not in _ALLOWED_PLACE_ORDER_ACTIONS:
@@ -224,15 +244,8 @@ class EtoroBrokerProvider(BrokerProvider):
         if units is not None:
             endpoint = f"{self._exec_prefix}/market-open-orders/by-units"
             body: dict[str, Any] = {
-                "InstrumentID": instrument_id,
-                "IsBuy": True,  # v1 is long-only
-                "Leverage": 1,  # v1 is no-leverage
+                **_order_body_common(instrument_id, params),
                 "AmountInUnits": float(units),
-                "StopLossRate": None,
-                "TakeProfitRate": None,
-                "IsTslEnabled": False,
-                "IsNoStopLoss": True,
-                "IsNoTakeProfit": True,
             }
         else:
             # units is None, and the guard above rejects both-None,
@@ -241,15 +254,8 @@ class EtoroBrokerProvider(BrokerProvider):
                 raise RuntimeError("amount must be non-None when units is None")
             endpoint = f"{self._exec_prefix}/market-open-orders/by-amount"
             body = {
-                "InstrumentID": instrument_id,
-                "IsBuy": True,
-                "Leverage": 1,
+                **_order_body_common(instrument_id, params),
                 "Amount": float(amount),
-                "StopLossRate": None,
-                "TakeProfitRate": None,
-                "IsTslEnabled": False,
-                "IsNoStopLoss": True,
-                "IsNoTakeProfit": True,
             }
 
         try:
@@ -301,25 +307,13 @@ class EtoroBrokerProvider(BrokerProvider):
         raw["_ebull_action"] = action
         return _normalise_open_order_response(raw)
 
-    def close_position(self, instrument_id: int) -> BrokerOrderResult:
-        # Step 1: Resolve instrument_id → positionId via portfolio lookup.
-        # The eToro close endpoint requires a positionId, not an instrumentId.
-        # clientPortfolio.positions[] has both instrumentID and positionID.
-        position_id, failure_reason = self._resolve_position_id(instrument_id)
-        if position_id is None:
-            return BrokerOrderResult(
-                broker_order_ref=None,
-                status="failed",
-                filled_price=None,
-                filled_units=None,
-                fees=Decimal("0"),
-                raw_payload={"error": failure_reason},
-            )
-
-        # Step 2: Close the position.
+    def close_position(
+        self,
+        position_id: int,
+        units_to_deduct: Decimal | None = None,
+    ) -> BrokerOrderResult:
         body: dict[str, Any] = {
-            "InstrumentID": instrument_id,
-            "UnitsToDeduct": None,  # close entire position
+            "UnitsToDeduct": float(units_to_deduct) if units_to_deduct is not None else None,
         }
 
         try:

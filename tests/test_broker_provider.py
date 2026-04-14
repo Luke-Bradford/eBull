@@ -19,6 +19,7 @@ from app.providers.broker import (
     BrokerMirror,
     BrokerMirrorPosition,
     BrokerPortfolio,
+    OrderParams,
 )
 from app.providers.implementations.etoro_broker import (
     EtoroBrokerProvider,
@@ -239,78 +240,120 @@ class TestPlaceOrderRealEnv:
 
 
 # ---------------------------------------------------------------------------
+# place_order — SL/TP params
+# ---------------------------------------------------------------------------
+
+
+class TestPlaceOrderParams:
+    def test_place_order_passes_sl_tp_to_request_body(self) -> None:
+        """SL/TP params appear in the eToro request body."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = FIXTURE_OPEN_ORDER_RESPONSE
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
+
+            params = OrderParams(
+                stop_loss_rate=Decimal("140.00"),
+                take_profit_rate=Decimal("200.00"),
+                is_tsl_enabled=True,
+                leverage=2,
+            )
+            broker.place_order(
+                instrument_id=1,
+                action="BUY",
+                amount=Decimal("100"),
+                units=None,
+                params=params,
+            )
+
+            body = broker._http_write.post.call_args.kwargs["json"]
+            assert body["StopLossRate"] == 140.00
+            assert body["TakeProfitRate"] == 200.00
+            assert body["IsTslEnabled"] is True
+            assert body["Leverage"] == 2
+            assert body["IsNoStopLoss"] is False
+            assert body["IsNoTakeProfit"] is False
+
+    def test_place_order_none_params_uses_defaults(self) -> None:
+        """None params preserves current behaviour: no SL, no TP, leverage 1."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = FIXTURE_OPEN_ORDER_RESPONSE
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
+
+            broker.place_order(
+                instrument_id=1,
+                action="BUY",
+                amount=Decimal("100"),
+                units=None,
+                params=None,
+            )
+
+            body = broker._http_write.post.call_args.kwargs["json"]
+            assert body["StopLossRate"] is None
+            assert body["TakeProfitRate"] is None
+            assert body["IsTslEnabled"] is False
+            assert body["Leverage"] == 1
+            assert body["IsNoStopLoss"] is True
+            assert body["IsNoTakeProfit"] is True
+
+
+# ---------------------------------------------------------------------------
 # close_position
 # ---------------------------------------------------------------------------
 
 
 class TestClosePosition:
-    def test_portfolio_lookup_then_close(self) -> None:
-        """Verifies two-step flow: GET portfolio → POST close."""
-        portfolio_resp = MagicMock()
-        portfolio_resp.json.return_value = FIXTURE_PORTFOLIO_RESPONSE
-
+    def test_close_position_posts_to_correct_endpoint(self) -> None:
+        """close_position takes a position_id directly — no portfolio lookup."""
         close_resp = MagicMock()
         close_resp.json.return_value = FIXTURE_CLOSE_ORDER_RESPONSE
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._http_read = MagicMock()
             broker._http_write = MagicMock()
-            # First call: portfolio GET; second call: close POST
-            broker._http_read.get.return_value = portfolio_resp
             broker._http_write.post.return_value = close_resp
 
-            result = broker.close_position(1001)
+            result = broker.close_position(98765)
 
-            # Portfolio lookup
-            broker._http_read.get.assert_called_once()
-            get_endpoint = broker._http_read.get.call_args.args[0]
-            assert get_endpoint == "/api/v1/trading/info/demo/portfolio"
-
-            # Close call uses resolved positionId
             broker._http_write.post.assert_called_once()
             post_endpoint = broker._http_write.post.call_args.args[0]
             assert post_endpoint == "/api/v1/trading/execution/demo/market-close-orders/positions/98765"
 
-            # Close body
             body = broker._http_write.post.call_args.kwargs["json"]
-            assert body["InstrumentID"] == 1001
             assert body["UnitsToDeduct"] is None
+            assert "InstrumentID" not in body
 
             assert result.status == "filled"
             assert result.broker_order_ref == "12346"
 
-    def test_no_open_position_returns_failed(self) -> None:
-        portfolio_resp = MagicMock()
-        portfolio_resp.json.return_value = {
-            "clientPortfolio": {"positions": []},
-        }
+    def test_close_position_partial_close(self) -> None:
+        """units_to_deduct is passed through when provided."""
+        close_resp = MagicMock()
+        close_resp.json.return_value = FIXTURE_CLOSE_ORDER_RESPONSE
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._http_read = MagicMock()
             broker._http_write = MagicMock()
-            broker._http_read.get.return_value = portfolio_resp
+            broker._http_write.post.return_value = close_resp
 
-            result = broker.close_position(9999)
+            broker.close_position(98765, units_to_deduct=Decimal("2.5"))
 
-            assert result.status == "failed"
-            assert "No open position" in result.raw_payload["error"]
-            # No close POST should have been attempted
-            broker._http_write.post.assert_not_called()
+            body = broker._http_write.post.call_args.kwargs["json"]
+            assert body["UnitsToDeduct"] == 2.5
 
-    def test_portfolio_network_error_returns_failed_with_lookup_error(self) -> None:
-        """Network error during portfolio lookup produces a distinct error
-        message from 'no open position', so the audit payload is unambiguous."""
+    def test_close_position_network_error_returns_failed(self) -> None:
+        """Network error during close POST returns a failed result."""
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._http_read = MagicMock()
             broker._http_write = MagicMock()
-            broker._http_read.get.side_effect = httpx.ConnectError("connection refused")
+            broker._http_write.post.side_effect = httpx.ConnectError("connection refused")
 
-            result = broker.close_position(1001)
+            result = broker.close_position(98765)
 
             assert result.status == "failed"
-            # Assert the provider-controlled prefix, not the exception string
-            assert "Portfolio lookup failed" in result.raw_payload["error"]
-            broker._http_write.post.assert_not_called()
+            assert "Network error" in result.raw_payload["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -538,21 +581,17 @@ class TestRequestBodyShape:
             assert "Amount" not in body
 
     def test_close_body_has_required_fields(self) -> None:
-        portfolio_resp = MagicMock()
-        portfolio_resp.json.return_value = FIXTURE_PORTFOLIO_RESPONSE
         close_resp = MagicMock()
         close_resp.json.return_value = FIXTURE_CLOSE_ORDER_RESPONSE
 
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._http_read = MagicMock()
             broker._http_write = MagicMock()
-            broker._http_read.get.return_value = portfolio_resp
             broker._http_write.post.return_value = close_resp
 
-            broker.close_position(1001)
+            broker.close_position(98765)
 
             body = broker._http_write.post.call_args.kwargs["json"]
-            assert body["InstrumentID"] == 1001
+            assert "InstrumentID" not in body
             assert body["UnitsToDeduct"] is None
 
 

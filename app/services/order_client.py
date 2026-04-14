@@ -140,6 +140,31 @@ def _load_position_units(
     return Decimal(str(row["current_units"]))
 
 
+def _load_position_id_for_exit(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+) -> int | None:
+    """Return the broker position_id for an instrument, or None if not found.
+
+    For EXIT via recommendation, the instrument may have multiple broker_positions.
+    We close the oldest (earliest open_date_time) — this matches FIFO semantics.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT position_id FROM broker_positions
+            WHERE instrument_id = %(iid)s AND units > 0
+            ORDER BY open_date_time ASC
+            LIMIT 1
+            """,
+            {"iid": instrument_id},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return int(row["position_id"])
+
+
 def _load_cash(conn: psycopg.Connection[Any]) -> Decimal | None:
     """Return current cash balance, or None if the ledger is empty."""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -511,7 +536,23 @@ def execute_order(
         if broker is None:
             raise ValueError("enable_live_trading is True but no broker provider supplied")
         if action == "EXIT":
-            broker_result = broker.close_position(instrument_id)
+            exit_pos_id = _load_position_id_for_exit(conn, instrument_id)
+            if exit_pos_id is None:
+                # Pre-024 position without broker_positions row.
+                logger.error(
+                    "EXIT for instrument_id=%d: no broker_positions row found",
+                    instrument_id,
+                )
+                broker_result = BrokerOrderResult(
+                    broker_order_ref=None,
+                    status="failed",
+                    filled_price=None,
+                    filled_units=None,
+                    fees=Decimal("0"),
+                    raw_payload={"error": f"No broker_positions row for instrument {instrument_id}"},
+                )
+            else:
+                broker_result = broker.close_position(exit_pos_id)
         else:
             broker_result = broker.place_order(
                 instrument_id=instrument_id,
