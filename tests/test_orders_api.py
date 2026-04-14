@@ -185,6 +185,17 @@ class TestPlaceOrder:
         assert resp.status_code == 403
         assert "kill switch" in resp.json()["detail"].lower()
 
+    def test_amount_buy_rejects_when_no_quote(self) -> None:
+        """Amount-based BUY with no quote fails closed (422)."""
+        no_quote: list[dict[str, Any]] = []
+        _with_conn([_KILL_SWITCH_OFF, no_quote])
+        resp = client.post(
+            "/portfolio/orders",
+            json={"instrument_id": 999, "action": "BUY", "amount": 500},
+        )
+        assert resp.status_code == 422
+        assert "no quote" in resp.json()["detail"].lower()
+
     def test_buy_fill_writes_to_broker_positions(self) -> None:
         """Verify that a BUY fill includes an INSERT into broker_positions."""
         order_row = [{"order_id": 99}]
@@ -258,6 +269,17 @@ class TestClosePosition:
         assert body["status"] == "filled"
         assert body["filled_units"] == 10.0
         assert body["filled_price"] == 150.0
+
+    def test_partial_close_rejects_excess_units(self) -> None:
+        """400 when units_to_deduct exceeds position units."""
+        pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
+        _with_conn([_KILL_SWITCH_OFF, pos_row])
+        resp = client.post(
+            "/portfolio/positions/500/close",
+            json={"units_to_deduct": 999.0},
+        )
+        assert resp.status_code == 400
+        assert "exceeds" in resp.json()["detail"]
 
     def test_close_updates_broker_positions_units(self) -> None:
         """Closing a position should UPDATE broker_positions to deduct units."""

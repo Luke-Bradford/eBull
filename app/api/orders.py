@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 import psycopg.rows
@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.providers.broker import BrokerOrderResult
+from app.services.ops_monitor import get_kill_switch_status
 from app.services.runtime_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ router = APIRouter(
 
 class PlaceOrderRequest(BaseModel):
     instrument_id: int
-    action: str  # "BUY" or "ADD"
+    action: Literal["BUY", "ADD"]
     amount: float | None = None
     units: float | None = None
     stop_loss_rate: float | None = None
@@ -85,14 +86,18 @@ def _utcnow() -> datetime:
 
 
 def _check_kill_switch(conn: psycopg.Connection[Any]) -> None:
-    """Fail-closed kill-switch check.  Must be called before any order/close."""
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute("SELECT is_active, reason FROM kill_switch ORDER BY id DESC LIMIT 1")
-        row = cur.fetchone()
-    if row is None:
-        raise HTTPException(status_code=503, detail="Kill switch not configured")
-    if row["is_active"]:
-        raise HTTPException(status_code=403, detail=f"Kill switch is active: {row['reason']}")
+    """Fail-closed kill-switch check.  Must be called before any order/close.
+
+    Delegates to the shared ``get_kill_switch_status`` service so the
+    kill-switch query logic lives in one place.
+    """
+    ks = get_kill_switch_status(conn)
+    if ks["is_active"]:
+        reason = ks.get("reason", "")
+        raise HTTPException(
+            status_code=403,
+            detail=f"Kill switch is active: {reason}",
+        )
 
 
 def _synthetic_fill(
@@ -390,8 +395,6 @@ def place_order(
     config = get_runtime_config(conn)
 
     # Validation
-    if body.action not in ("BUY", "ADD"):
-        raise HTTPException(status_code=400, detail="action must be BUY or ADD")
     if body.amount is not None and body.units is not None:
         raise HTTPException(status_code=400, detail="Provide amount or units, not both")
     if body.amount is None and body.units is None:
@@ -404,6 +407,14 @@ def place_order(
     amount_d = Decimal(str(body.amount)) if body.amount is not None else None
     units_d = Decimal(str(body.units)) if body.units is not None else None
     quote_price = _load_latest_quote_price(conn, body.instrument_id)
+
+    # Fail closed: amount-based orders need a quote to compute units.
+    if amount_d is not None and quote_price is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"No quote available for instrument {body.instrument_id} — cannot compute units from amount.",
+        )
+
     broker_result = _synthetic_fill(
         instrument_id=body.instrument_id,
         action=body.action,
@@ -460,9 +471,15 @@ def close_position(
         raise HTTPException(status_code=404, detail=f"Position {position_id} not found or already closed.")
 
     instrument_id: int = int(pos_row["instrument_id"])
-    close_units = Decimal(str(pos_row["units"]))
+    position_units = Decimal(str(pos_row["units"]))
+    close_units = position_units
     if body is not None and body.units_to_deduct is not None:
         close_units = Decimal(str(body.units_to_deduct))
+        if close_units > position_units:
+            raise HTTPException(
+                status_code=400,
+                detail=f"units_to_deduct ({close_units}) exceeds position units ({position_units})",
+            )
 
     open_rate = Decimal(str(pos_row["open_rate"]))
 

@@ -455,57 +455,6 @@ class EtoroBrokerProvider(BrokerProvider):
             mirrors=tuple(_parse_mirrors_payload(raw_mirrors)),
         )
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _resolve_position_id(self, instrument_id: int) -> tuple[int | None, str]:
-        """Look up the open positionID for an instrument via the portfolio endpoint.
-
-        Returns (position_id, "") on success, or (None, reason) on failure.
-        The reason distinguishes network/HTTP errors from missing positions.
-        """
-        try:
-            response = self._http_read.get(
-                f"{self._info_prefix}/portfolio",
-                headers=self._request_headers(),
-            )
-            response.raise_for_status()
-            raw = response.json()
-        except httpx.HTTPStatusError as exc:
-            raw_body = _safe_json(exc.response)
-            logger.error(
-                "eToro portfolio lookup failed: status=%d body=%s",
-                exc.response.status_code,
-                raw_body,
-            )
-            return None, f"Portfolio lookup failed: HTTP {exc.response.status_code}"
-        except httpx.HTTPError as exc:
-            logger.error("eToro portfolio lookup network error: %s", exc)
-            return None, f"Portfolio lookup failed: {exc}"
-        except ValueError as exc:
-            logger.error("eToro portfolio non-JSON response: %s", exc)
-            return None, "Portfolio lookup failed: non-JSON response"
-
-        # Response shape: { clientPortfolio: { positions: [...] } }
-        portfolio = raw.get("clientPortfolio") or {}
-        positions: list[dict[str, Any]] = portfolio.get("positions") or []
-
-        for pos in positions:
-            if not isinstance(pos, dict):
-                continue
-            if pos.get("instrumentID") == instrument_id:
-                pos_id = pos.get("positionID")
-                if pos_id is not None:
-                    return int(pos_id), ""
-
-        logger.warning(
-            "No open position found for instrument %d in portfolio (%d positions checked)",
-            instrument_id,
-            len(positions),
-        )
-        return None, f"No open position found for instrument {instrument_id}"
-
 
 # ------------------------------------------------------------------
 # Normalisers — pure functions, no I/O
