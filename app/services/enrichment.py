@@ -63,19 +63,24 @@ def refresh_enrichment(
     for symbol, instrument_id in symbols:
         try:
             profile = provider.get_profile_enrichment(symbol)
-            if profile is not None:
-                _upsert_profile(conn, instrument_id, profile, now)
-                profiles_upserted += 1
-
             events = provider.get_earnings_calendar(symbol)
-            if events:
-                _upsert_earnings_events(conn, instrument_id, events)
-                earnings_upserted += len(events)
-
             est = provider.get_analyst_estimates(symbol)
-            if est is not None:
-                _upsert_analyst_estimates(conn, instrument_id, est)
-                estimates_upserted += 1
+
+            # Wrap all DB writes for this symbol in a savepoint so a
+            # constraint violation or transient error doesn't abort the
+            # outer transaction and silently drop prior symbols' writes.
+            with conn.transaction():
+                if profile is not None:
+                    _upsert_profile(conn, instrument_id, profile, now)
+                    profiles_upserted += 1
+
+                if events:
+                    _upsert_earnings_events(conn, instrument_id, events)
+                    earnings_upserted += len(events)
+
+                if est is not None:
+                    _upsert_analyst_estimates(conn, instrument_id, est)
+                    estimates_upserted += 1
 
         except Exception:
             logger.warning(
@@ -245,6 +250,19 @@ def _upsert_analyst_estimates(
             price_target_high = EXCLUDED.price_target_high,
             price_target_low  = EXCLUDED.price_target_low,
             fetched_at        = NOW()
+        WHERE (
+            analyst_estimates.consensus_eps_fq  IS DISTINCT FROM EXCLUDED.consensus_eps_fq OR
+            analyst_estimates.consensus_eps_fy  IS DISTINCT FROM EXCLUDED.consensus_eps_fy OR
+            analyst_estimates.consensus_rev_fq  IS DISTINCT FROM EXCLUDED.consensus_rev_fq OR
+            analyst_estimates.consensus_rev_fy  IS DISTINCT FROM EXCLUDED.consensus_rev_fy OR
+            analyst_estimates.analyst_count     IS DISTINCT FROM EXCLUDED.analyst_count OR
+            analyst_estimates.buy_count         IS DISTINCT FROM EXCLUDED.buy_count OR
+            analyst_estimates.hold_count        IS DISTINCT FROM EXCLUDED.hold_count OR
+            analyst_estimates.sell_count        IS DISTINCT FROM EXCLUDED.sell_count OR
+            analyst_estimates.price_target_mean IS DISTINCT FROM EXCLUDED.price_target_mean OR
+            analyst_estimates.price_target_high IS DISTINCT FROM EXCLUDED.price_target_high OR
+            analyst_estimates.price_target_low  IS DISTINCT FROM EXCLUDED.price_target_low
+        )
         """,
         {
             "instrument_id": instrument_id,

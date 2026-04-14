@@ -627,31 +627,40 @@ def _load_instrument_data(
         )
         rf_row: dict[str, Any] | None = cur.fetchone()
 
-        # Valuation multiples from view (enrichment)
-        cur.execute(
-            """
-            SELECT pe_ratio, pb_ratio, p_fcf_ratio, fcf_yield,
-                   debt_equity_ratio, market_cap_live, current_price
-            FROM instrument_valuation
-            WHERE instrument_id = %(id)s
-            """,
-            {"id": instrument_id},
-        )
-        valuation_row: dict[str, Any] | None = cur.fetchone()
+        # Valuation multiples from view (enrichment).
+        # Degrade gracefully if the view or table does not exist yet
+        # (pre-migration environment, partial test setup).
+        # Wrapped in a savepoint so UndefinedTable only rolls back
+        # the enrichment queries, not the entire transaction.
+        valuation_row: dict[str, Any] | None = None
+        estimates_row: dict[str, Any] | None = None
+        try:
+            with conn.transaction():
+                cur.execute(
+                    """
+                    SELECT pe_ratio, pb_ratio, p_fcf_ratio, fcf_yield,
+                           debt_equity_ratio, market_cap_live, current_price
+                    FROM instrument_valuation
+                    WHERE instrument_id = %(id)s
+                    """,
+                    {"id": instrument_id},
+                )
+                valuation_row = cur.fetchone()
 
-        # Analyst estimates (latest)
-        cur.execute(
-            """
-            SELECT price_target_mean, price_target_high, price_target_low,
-                   analyst_count, buy_count, hold_count, sell_count
-            FROM analyst_estimates
-            WHERE instrument_id = %(id)s
-            ORDER BY as_of_date DESC
-            LIMIT 1
-            """,
-            {"id": instrument_id},
-        )
-        estimates_row: dict[str, Any] | None = cur.fetchone()
+                cur.execute(
+                    """
+                    SELECT price_target_mean, price_target_high, price_target_low,
+                           analyst_count, buy_count, hold_count, sell_count
+                    FROM analyst_estimates
+                    WHERE instrument_id = %(id)s
+                    ORDER BY as_of_date DESC
+                    LIMIT 1
+                    """,
+                    {"id": instrument_id},
+                )
+                estimates_row = cur.fetchone()
+        except psycopg.errors.UndefinedTable:
+            pass  # savepoint already rolled back; prior queries intact
 
     return {
         "fund_rows": fund_rows,

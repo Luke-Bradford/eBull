@@ -155,6 +155,19 @@ class TestBuildEarningsEvent:
         assert event.reporting_date is None
         assert event.fiscal_date_ending == date(2025, 3, 29)
 
+    def test_build_earnings_event_no_fiscal_or_date(self) -> None:
+        """Row with neither fiscalDateEnding nor date raises ValueError."""
+        with pytest.raises(ValueError, match="neither fiscalDateEnding nor date"):
+            _build_earnings_event("BAD", {})
+
+    def test_build_earnings_event_fallback_to_date(self) -> None:
+        """When only 'date' is present, it becomes fiscal_date_ending."""
+        row = {"date": "2025-06-30", "eps": "1.20"}
+        event = _build_earnings_event("OLD", row)
+
+        assert event.fiscal_date_ending == date(2025, 6, 30)
+        assert event.reporting_date is None
+
 
 # ---------------------------------------------------------------------------
 # _build_analyst_estimates

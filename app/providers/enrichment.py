@@ -50,7 +50,7 @@ class EarningsEvent:
     eps_actual: Decimal | None
     revenue_estimate: Decimal | None
     revenue_actual: Decimal | None
-    surprise_pct: Decimal | None  # (actual - estimate) / |estimate|, as a ratio
+    surprise_pct: Decimal | None  # (actual - estimate) / |estimate| * 100, percentage
 
 
 @dataclass(frozen=True)
@@ -99,7 +99,7 @@ class EnrichmentProvider(ABC):
         limit: int = 8,
     ) -> list[EarningsEvent]:
         """
-        Return upcoming and recent earnings events for a symbol, most recent first,
+        Return upcoming and recent earnings events for a symbol, oldest-first,
         up to limit entries.
 
         limit defaults to 8 (approximately two years of quarterly results).

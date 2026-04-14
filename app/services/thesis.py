@@ -76,7 +76,6 @@ _MAX_PRIOR_THESES = 1
 _MAX_FILING_EVENTS = 3
 _MAX_FUNDAMENTALS_SNAPSHOTS = 5  # latest + 4 prior
 _MAX_EARNINGS_EVENTS = 4  # 1 year of quarterly history (confirmed only)
-_MAX_ANALYST_ESTIMATES = 1  # latest snapshot only
 _MAX_NEWS_EVENTS = 10
 _NEWS_LOOKBACK_DAYS = 30
 
@@ -364,9 +363,9 @@ def _assemble_context(
         FROM analyst_estimates
         WHERE instrument_id = %(id)s
         ORDER BY as_of_date DESC
-        LIMIT %(limit)s
+        LIMIT 1
         """,
-        {"id": instrument_id, "limit": _MAX_ANALYST_ESTIMATES},
+        {"id": instrument_id},
     ).fetchone()
     analyst_estimates: dict[str, object] | None = None
     if estimates_row is not None:

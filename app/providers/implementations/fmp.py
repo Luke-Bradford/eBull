@@ -492,19 +492,27 @@ def _build_earnings_event(
 
     Pure function — no I/O.
     FMP fields: 'fiscalDateEnding' = fiscal period end, 'date' = announcement date.
-    Raises ValueError if 'fiscalDateEnding' cannot be parsed.
+    Raises ValueError if neither field yields a parseable date.
     """
-    # FMP 'fiscalDateEnding' is the fiscal quarter end; 'date' is announcement date
-    raw_fiscal = row.get("fiscalDateEnding") or row.get("date")
-    fiscal_date_ending = date.fromisoformat(str(raw_fiscal)[:10])
-
-    reporting_date: date | None = None
-    raw_reported = row.get("date")  # announcement/reporting date
-    if raw_reported is not None:
-        try:
-            reporting_date = date.fromisoformat(str(raw_reported)[:10])
-        except ValueError:
-            reporting_date = None
+    raw_fiscal = row.get("fiscalDateEnding")
+    if raw_fiscal is not None:
+        # Normal path: fiscalDateEnding is fiscal period end, date is announcement
+        fiscal_date_ending = date.fromisoformat(str(raw_fiscal)[:10])
+        reporting_date: date | None = None
+        raw_announced = row.get("date")
+        if raw_announced is not None:
+            try:
+                reporting_date = date.fromisoformat(str(raw_announced)[:10])
+            except ValueError:
+                reporting_date = None
+    else:
+        # Fallback: only 'date' present — use as fiscal period end, no reporting date
+        raw_date = row.get("date")
+        if raw_date is None:
+            msg = f"Earnings row for {symbol} has neither fiscalDateEnding nor date"
+            raise ValueError(msg)
+        fiscal_date_ending = date.fromisoformat(str(raw_date)[:10])
+        reporting_date = None
 
     eps_estimate = _decimal_or_none(row.get("epsEstimated"))
     eps_actual = _decimal_or_none(row.get("eps"))
