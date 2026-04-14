@@ -5,6 +5,8 @@ Ingests daily OHLCV candles and current quotes for covered instruments,
 computes rolling return and volatility features, and flags wide spreads.
 """
 
+from __future__ import annotations
+
 import logging
 import math
 from dataclasses import dataclass
@@ -14,6 +16,7 @@ from decimal import Decimal
 import psycopg
 
 from app.providers.market_data import MarketDataProvider, OHLCVBar, Quote
+from app.services.technical_analysis import OHLCVRow, compute_indicators
 
 logger = logging.getLogger(__name__)
 
@@ -270,15 +273,70 @@ def _compute_and_store_features(
     returns = _compute_rolling_returns(prices)
     volatility = _compute_volatility_30d(prices)
 
+    # --- TA indicators (full OHLCV needed, not just close) ---
+    ohlcv_rows = conn.execute(
+        """
+        SELECT open, high, low, close, volume
+        FROM price_daily
+        WHERE instrument_id = %(instrument_id)s
+          AND close IS NOT NULL
+        ORDER BY price_date DESC
+        LIMIT 400
+        """,
+        {"instrument_id": instrument_id},
+    ).fetchall()
+
+    _TA_COLUMNS = [
+        "sma_20",
+        "sma_50",
+        "sma_200",
+        "ema_12",
+        "ema_26",
+        "macd_line",
+        "macd_signal",
+        "macd_histogram",
+        "rsi_14",
+        "stoch_k",
+        "stoch_d",
+        "bb_upper",
+        "bb_lower",
+        "atr_14",
+    ]
+    ta_params: dict[str, Decimal | None] = {k: None for k in _TA_COLUMNS}
+
+    if ohlcv_rows:
+        bars: list[OHLCVRow] = [
+            OHLCVRow(open=r[0], high=r[1], low=r[2], close=r[3], volume=r[4]) for r in reversed(ohlcv_rows)
+        ]
+        ta_result = compute_indicators(bars)
+        if ta_result is not None:
+            for k, v in ta_result.items():
+                if k in ta_params and isinstance(v, float):
+                    ta_params[k] = Decimal(str(round(v, 6)))
+
     conn.execute(
         """
         UPDATE price_daily SET
-            return_1w     = %(return_1w)s,
-            return_1m     = %(return_1m)s,
-            return_3m     = %(return_3m)s,
-            return_6m     = %(return_6m)s,
-            return_1y     = %(return_1y)s,
-            volatility_30d = %(volatility_30d)s
+            return_1w      = %(return_1w)s,
+            return_1m      = %(return_1m)s,
+            return_3m      = %(return_3m)s,
+            return_6m      = %(return_6m)s,
+            return_1y      = %(return_1y)s,
+            volatility_30d = %(volatility_30d)s,
+            sma_20         = %(sma_20)s,
+            sma_50         = %(sma_50)s,
+            sma_200        = %(sma_200)s,
+            ema_12         = %(ema_12)s,
+            ema_26         = %(ema_26)s,
+            macd_line      = %(macd_line)s,
+            macd_signal    = %(macd_signal)s,
+            macd_histogram = %(macd_histogram)s,
+            rsi_14         = %(rsi_14)s,
+            stoch_k        = %(stoch_k)s,
+            stoch_d        = %(stoch_d)s,
+            bb_upper       = %(bb_upper)s,
+            bb_lower       = %(bb_lower)s,
+            atr_14         = %(atr_14)s
         WHERE instrument_id = %(instrument_id)s
           AND price_date = %(price_date)s
         """,
@@ -291,6 +349,7 @@ def _compute_and_store_features(
             "return_6m": returns.get("return_6m"),
             "return_1y": returns.get("return_1y"),
             "volatility_30d": volatility,
+            **ta_params,
         },
     )
     return 1
