@@ -53,6 +53,57 @@
       "problemMatcher": []
     },
     {
+      "label": "restart: all (backend + frontend)",
+      "type": "shell",
+      "command": "./stack-restart.ps1",
+      "options": {
+        "shell": {
+          "executable": "pwsh",
+          "args": ["-NoProfile", "-Command"]
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "restart: backend only",
+      "type": "shell",
+      "command": "./stack-restart.ps1 -Backend",
+      "options": {
+        "shell": {
+          "executable": "pwsh",
+          "args": ["-NoProfile", "-Command"]
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "restart: frontend only",
+      "type": "shell",
+      "command": "./stack-restart.ps1 -Frontend",
+      "options": {
+        "shell": {
+          "executable": "pwsh",
+          "args": ["-NoProfile", "-Command"]
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
       "label": "dev: start stack",
       "dependsOn": [
         "stack: prepare (postgres + migrate)",

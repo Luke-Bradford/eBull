@@ -1,8 +1,11 @@
-# eToro API reference
+# eToro API Reference
 
 Source of truth for how eBull integrates with eToro. Derived from the
 official OpenAPI spec at `https://api-portal.etoro.com/api-reference/openapi.json`
-(fetched 2026-04-09).
+(v1.158.0, 57 paths, 128 schemas — last verified 2026-04-14).
+
+Portal: `https://api-portal.etoro.com/`
+LLM index: `https://api-portal.etoro.com/llms.txt`
 
 ---
 
@@ -12,7 +15,9 @@ official OpenAPI spec at `https://api-portal.etoro.com/api-reference/openapi.jso
 https://public-api.etoro.com
 ```
 
-NOT `https://api.etoro.com` (the speculative URL we had before).
+WebSocket: `wss://ws.etoro.com/ws`
+
+NOT `https://api.etoro.com` (speculative URL from early development).
 
 ---
 
@@ -40,110 +45,202 @@ Every request requires **three headers**:
 
 Each key operates in exactly one environment. If you need both demo and
 real, create separate keys. The trading endpoints have explicit `/demo/`
-or no prefix in the path for real.
+prefix for demo, or no prefix for real.
+
+### Optional security
+
+- IP whitelisting
+- Key expiration dates
 
 ### Credential storage in eBull
 
-eBull stores **two** values per eToro environment:
+eBull stores **two** values per eToro environment in `broker_credentials`:
 
 | eBull label | eToro field | Purpose |
 |-------------|-------------|---------|
 | `api_key` | Public API Key (`x-api-key`) | Application-level auth |
 | `user_key` | User Key (`x-user-key`) | Account-level auth |
 
-Both are stored in `broker_credentials` with provider=`etoro`.
+Both stored with `provider='etoro'`, `environment='demo'|'real'`.
+Loading: `load_credential_for_provider_use()` in `app/services/broker_credentials.py`.
 
 ---
 
-## Endpoints used by eBull
+## Rate limits
+
+Two-tier system, tracked per user key over a **1-minute rolling window**:
+
+| Tier | Limit | Applies to |
+|------|-------|------------|
+| **Standard** | **60 req/min** | All GET requests: market data, portfolio info, social reads, watchlist reads |
+| **Heavy** | **20 req/min** | All POST/PUT/DELETE: trade execution, watchlist writes, social writes |
+
+Exceeding returns **429 Too Many Requests**:
+```json
+{"errorCode": "TooManyRequests", "errorMessage": "Too many requests"}
+```
+
+### eBull throttle implementation
+
+Configured in `ResilientClient` (`app/providers/resilient_client.py`):
+
+| Operation | Inter-request interval | Effective rate | Headroom |
+|-----------|----------------------|----------------|----------|
+| GET (market data) | 1.1s | ~55/min | ~8% |
+| GET (broker info) | 1.1s | ~55/min | ~8% |
+| POST (trading) | 3.5s | ~17/min | ~15% |
+
+Both read and write clients share `_last_request_at` so combined
+GET+POST requests cannot exceed the API limit.
+
+### Retry logic
+
+- Max 3 retries (4 total attempts)
+- Backoff schedule: 1s, 2s, 4s (exponential)
+- 429: respects `Retry-After` header if present, otherwise backoff
+- 5xx (500, 502, 503, 504): same exponential backoff
+- Final attempt: raises `HTTPStatusError`
+
+### Best practices
+
+- Cache static data locally (instrument IDs are immutable)
+- Batch rate requests (max 100 IDs per call; eBull uses 50 for safety)
+- Sequence per-instrument calls with throttle delay
+- Persist raw responses to `data/raw/etoro/` before normalisation
+
+---
+
+## All endpoints (57 paths)
 
 ### Identity
 
-```
-GET /api/v1/me
-```
+| Method | Path | Description | eBull status |
+|--------|------|-------------|-------------|
+| GET | `/api/v1/me` | Returns `{gcid, realCid, demoCid}` | Not used (credential validation done via portfolio call) |
 
-Returns `{ gcid, realCid, demoCid }`. Useful for verifying credentials
-are valid and identifying which CID to use for trading endpoints.
+### Market data
 
-### Instruments (universe sync)
+| Method | Path | Description | eBull status |
+|--------|------|-------------|-------------|
+| GET | `/api/v1/market-data/instruments` | Instrument metadata by filters | **Active** — universe sync |
+| GET | `/api/v1/market-data/instruments/rates` | Live bid/ask/last for up to 100 IDs | **Active** — quote refresh |
+| GET | `/api/v1/market-data/instruments/{id}/history/candles/{dir}/{interval}/{count}` | OHLCV candles (max 1000) | **Active** — daily candles |
+| GET | `/api/v1/market-data/instruments/history/closing-price` | Bulk closing prices (daily/weekly/monthly) | Not used — candles preferred |
+| GET | `/api/v1/market-data/search` | Search instruments with field projection | Not used — full universe synced |
+| GET | `/api/v1/market-data/exchanges` | Exchange ID → name mapping | Not used — IDs stored raw |
+| GET | `/api/v1/market-data/instrument-types` | Asset class ID → name mapping | Not used — IDs stored raw |
+| GET | `/api/v1/market-data/stocks-industries` | Industry ID → name mapping | Not used — IDs stored raw |
 
-```
-GET /api/v1/market-data/instruments
-    ?instrumentIds=1,2,3           (optional, comma-separated)
-    &exchangeIds=1,2               (optional)
-    &instrumentTypeIds=1,2         (optional)
-    &stocksIndustryIds=1,2         (optional)
-```
+### Trading — Real
 
-Returns `{ instrumentDisplayDatas: [...] }` with fields:
+| Method | Path | Description | eBull status |
+|--------|------|-------------|-------------|
+| POST | `/api/v1/trading/execution/market-open-orders/by-amount` | Open position by USD amount | **Active** |
+| POST | `/api/v1/trading/execution/market-open-orders/by-units` | Open position by unit count | **Active** |
+| DELETE | `/api/v1/trading/execution/market-open-orders/{orderId}` | Cancel pending open order | Not used (v1) |
+| POST | `/api/v1/trading/execution/market-close-orders/positions/{positionId}` | Close position | **Active** |
+| DELETE | `/api/v1/trading/execution/market-close-orders/{orderId}` | Cancel pending close order | Not used (v1) |
+| POST | `/api/v1/trading/execution/limit-orders` | Limit/MIT order | Not used (v1 is market-only) |
+| DELETE | `/api/v1/trading/execution/limit-orders/{orderId}` | Cancel limit order | Not used (v1) |
+| GET | `/api/v1/trading/info/portfolio` | Full portfolio: positions, orders, mirrors, credit | **Active** — portfolio sync |
+| GET | `/api/v1/trading/info/real/pnl` | Portfolio with P&L details | Not used — computed locally |
+| GET | `/api/v1/trading/info/real/orders/{orderId}` | Single order status | **Active** — order polling |
+| GET | `/api/v1/trading/info/trade/history` | Trade history (`minDate` required) | Not used (v1) |
+
+### Trading — Demo
+
+Same operations as Real, all prefixed with `/demo/` (e.g., `/api/v1/trading/execution/demo/market-open-orders/by-amount`).
+
+### Agent portfolios (copy-trading management)
+
+| Method | Path | Description | eBull status |
+|--------|------|-------------|-------------|
+| GET | `/api/v1/agent-portfolios` | List agent-portfolios | Not used — mirrors read from /portfolio |
+| POST | `/api/v1/agent-portfolios` | Create agent-portfolio (deducts funds to copy-trade) | Not used (v1 read-only) |
+| DELETE | `/api/v1/agent-portfolios/{id}` | Delete agent-portfolio | Not used |
+| POST | `/api/v1/agent-portfolios/{id}/user-tokens` | Create user token | Not used |
+| DELETE | `/api/v1/agent-portfolios/{id}/user-tokens/{tokenId}` | Delete user token | Not used |
+| PATCH | `/api/v1/agent-portfolios/{id}/user-tokens/{tokenId}` | Update user token | Not used |
+
+### Users info (trader discovery)
+
+| Method | Path | Description | eBull status |
+|--------|------|-------------|-------------|
+| GET | `/api/v1/user-info/people` | User profiles by `usernames[]` or `cidList[]` | **Planned** (Track 2) |
+| GET | `/api/v1/user-info/people/search` | Advanced user search with filters | **Planned** (Track 2) |
+| GET | `/api/v1/user-info/people/{username}/daily-gain` | Daily gain data | **Planned** (Track 2) |
+| GET | `/api/v1/user-info/people/{username}/gain` | Monthly/yearly gain history | **Planned** (Track 2) |
+| GET | `/api/v1/user-info/people/{username}/portfolio/live` | User's live portfolio | **Planned** (Track 2) |
+| GET | `/api/v1/user-info/people/{username}/tradeinfo` | User trade info | **Planned** (Track 2) |
+
+**Search filter params**: `popularInvestor`, `gainMax`, `maxDailyRiskScoreMin/Max`, `maxMonthlyRiskScoreMin/Max`, `weeksSinceRegistrationMin`, `countryId`, `instrumentId`, `instrumentPctMin/Max`, `isTestAccount`, `sort`, `page`, `pageSize`
+
+**Search periods**: `CurrMonth`, `CurrQuarter`, `CurrYear`, `LastYear`, `LastTwoYears`, `OneMonthAgo`, `TwoMonthsAgo`, `ThreeMonthsAgo`, `SixMonthsAgo`, `OneYearAgo`
+
+### PI data
+
+| Method | Path | Description | eBull status |
+|--------|------|-------------|-------------|
+| GET | `/api/v1/pi-data/copiers` | Public copier info | Not used |
+
+### Social (feeds & comments)
+
+| Method | Path | Description | eBull status |
+|--------|------|-------------|-------------|
+| GET | `/api/v1/feeds/instrument/{marketId}` | Instrument feed posts | Not used — out of scope |
+| GET | `/api/v1/feeds/user/{userId}` | User feed posts | Not used |
+| POST | `/api/v1/feeds/post` | Create discussion post | Not used |
+| POST | `/api/v1/reactions/{postId}/comment` | Comment on a post | Not used |
+
+### Watchlists
+
+| Method | Path | Description | eBull status |
+|--------|------|-------------|-------------|
+| GET | `/api/v1/watchlists` | List user watchlists | Not used — out of scope |
+| POST | `/api/v1/watchlists` | Create watchlist | Not used |
+| GET | `/api/v1/watchlists/{id}` | Get single watchlist | Not used |
+| PUT | `/api/v1/watchlists/{id}` | Rename watchlist | Not used |
+| DELETE | `/api/v1/watchlists/{id}` | Delete watchlist | Not used |
+| POST | `/api/v1/watchlists/{id}/items` | Add instrument IDs | Not used |
+| PUT | `/api/v1/watchlists/{id}/items` | Update items | Not used |
+| DELETE | `/api/v1/watchlists/{id}/items` | Remove items | Not used |
+| PUT | `/api/v1/watchlists/rank/{id}` | Change rank | Not used |
+| PUT | `/api/v1/watchlists/setUserSelectedUserDefault/{id}` | Set default | Not used |
+| POST | `/api/v1/watchlists/default-watchlist/selected-items` | Create default with items | Not used |
+| GET | `/api/v1/watchlists/default-watchlists/items` | Get default items | Not used |
+| POST | `/api/v1/watchlists/newasdefault-watchlist` | Create and set as default | Not used |
+| GET | `/api/v1/watchlists/public/{userId}` | Public watchlists | Not used |
+| GET | `/api/v1/watchlists/public/{userId}/{id}` | Single public watchlist | Not used |
+| GET | `/api/v1/curated-lists` | Curated lists | Not used |
+| GET | `/api/v1/market-recommendations/{itemsCount}` | Market recommendations | Not used |
+
+---
+
+## Key schemas
+
+### Instrument (from `/market-data/instruments`)
+
+50+ fields. Key ones:
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `instrumentID` | int | eToro's unique instrument ID (our external identifier) |
-| `instrumentDisplayName` | string | e.g. "Apple" |
-| `symbolFull` | string | e.g. "AAPL" |
-| `instrumentTypeID` | int | Maps to instrument-types endpoint |
-| `exchangeID` | int | Maps to exchanges endpoint |
+| `instrumentID` | int | Immutable — cache permanently |
+| `instrumentDisplayName` | string | e.g., "Apple" |
+| `symbolFull` | string | e.g., "AAPL" |
+| `instrumentTypeID` | int | Maps to instrument-types |
+| `exchangeID` | int | Maps to exchanges |
 | `stocksIndustryId` | int | Sector/industry |
-| `priceSource` | string | e.g. "Nasdaq", "LSE" |
-| `isInternalInstrument` | bool | If true, restricted from public access |
+| `priceSource` | string | e.g., "Nasdaq", "LSE" |
+| `isInternalInstrument` | bool | If true, restricted from access |
 | `hasExpirationDate` | bool | Futures/options flag |
+| `isDelisted` | bool | Available via search endpoint |
+| `isOpen` | bool | Market currently open |
+| `isCurrentlyTradable` | bool | Can be traded right now |
+| `isBuyEnabled` | bool | Buy orders accepted |
+| `currentRate` | float | Available via search |
+| `dailyPriceChange` | float | Available via search |
 
-**Pagination**: not documented in the spec. Likely returns all instruments
-in a single response. Confirm empirically.
-
-### Instrument search (alternative universe discovery)
-
-```
-GET /api/v1/market-data/search
-    ?searchText=Apple               (optional)
-    &fields=<comma-separated>       (required)
-    &pageSize=100                   (optional)
-    &pageNumber=1                   (optional)
-    &sort=popularityUniques7Day desc (optional)
-```
-
-Returns `{ page, pageSize, totalItems, items: [...] }` with richer data
-per instrument (including `isDelisted`, `isOpen`, `dailyPriceChange`, etc).
-
-The `fields` parameter controls which fields are returned. Example:
-`fields=instrumentId,displayname,symbol,exchangeID,instrumentTypeID`
-
-### Instrument types
-
-```
-GET /api/v1/market-data/instrument-types
-    ?instrumentTypeIds=1,2          (optional)
-```
-
-Maps `instrumentTypeID` to human-readable names (Stocks, ETFs, Crypto, etc).
-
-### Exchanges
-
-```
-GET /api/v1/market-data/exchanges
-    ?exchangeIds=1,2                (optional)
-```
-
-Maps `exchangeID` to exchange names and metadata.
-
-### Industries
-
-```
-GET /api/v1/market-data/stocks-industries
-```
-
-Maps `stocksIndustryId` to industry names.
-
-### Live rates (quotes)
-
-```
-GET /api/v1/market-data/instruments/rates
-    ?instrumentIds=1,2,3            (required, comma-separated)
-```
-
-Returns `{ rates: [...] }` with:
+### Live rates (from `/market-data/instruments/rates`)
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -151,164 +248,303 @@ Returns `{ rates: [...] }` with:
 | `ask` | float | Buy price |
 | `bid` | float | Sell price |
 | `lastExecution` | float | Last trade price |
-| `conversionRateAsk` | float | Instrument currency to USD |
-| `conversionRateBid` | float | Instrument currency to USD |
+| `conversionRateAsk` | float | Instrument currency → USD |
+| `conversionRateBid` | float | Instrument currency → USD |
 | `date` | datetime | Price timestamp |
 
-**Spread** = `ask - bid`. This is what we need for spread checks.
+**Spread** = `ask - bid`. eBull computes spread_pct = `(ask - bid) / mid`.
 
-### Historical candles
-
-```
-GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}
-```
+### Candles (from `/market-data/instruments/{id}/history/candles`)
 
 Path parameters:
 
 | Param | Values |
 |-------|--------|
 | `instrumentId` | eToro instrument ID (integer) |
-| `direction` | `asc` or `desc` |
+| `direction` | `asc` (oldest first) or `desc` (newest first) |
 | `interval` | `OneMinute`, `FiveMinutes`, `TenMinutes`, `FifteenMinutes`, `ThirtyMinutes`, `OneHour`, `FourHours`, `OneDay`, `OneWeek` |
-| `candlesCount` | 1-1000 |
+| `candlesCount` | 1–1000 |
 
-Returns `{ interval, candles: [{ instrumentId, candles: [{ instrumentID, fromDate, open, high, low, close, volume }, ...] }] }`.
+Response: `{ candles: [{ instrumentId, candles: [{ fromDate, open, high, low, close, volume }] }] }`
 
-**Key difference from our speculative API**: candles are fetched by count
-and direction, not by date range. To get 400 days of daily candles, use
-`direction=desc&interval=OneDay&candlesCount=400`.
+**Critical**: candles are fetched by count and direction, NOT by date range.
+To get 400 days of daily candles: `direction=asc&interval=OneDay&candlesCount=400`.
 
-### Historical closing prices
+### Position (from `/trading/info/portfolio`)
 
-```
-GET /api/v1/market-data/instruments/history/closing-price
-```
+30+ fields. Key ones:
 
-Returns closing prices for **all** instruments at daily, weekly, monthly,
-and yearly intervals. Useful for bulk price snapshots.
+| Field | Type | Notes |
+|-------|------|-------|
+| `positionID` | int | |
+| `CID` | int | Account CID |
+| `instrumentID` | int | |
+| `mirrorID` | int | 0 = manual position; >0 = copy-trading |
+| `parentPositionID` | int | Parent trader's position ID |
+| `isBuy` | bool | |
+| `leverage` | int | |
+| `amount` | float | USD, includes collateral |
+| `units` | float | |
+| `openRate` | float | Entry price |
+| `openDateTime` | datetime | |
+| `initialAmountInDollars` | float | Original investment |
+| `initialUnits` | float | |
+| `takeProfitRate` | float | |
+| `stopLossRate` | float | |
+| `isTslEnabled` | bool | Trailing stop loss |
+| `totalFees` | float | Overnight + dividends |
+| `totalExternalFees` | float | |
+| `totalExternalTaxes` | float | |
+| `settlementTypeID` | int | 0=CFD, 1=Real Asset, 2=SWAP, 3=Crypto MarginTrade, 4=Future Contract |
+| `isPartiallyAltered` | bool | |
+
+### Mirror (from `/trading/info/portfolio`)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `mirrorID` | int | |
+| `parentCID` | int | Copied trader's CID |
+| `parentUsername` | string | |
+| `isPaused` | bool | |
+| `availableAmount` | float | Uninvested cash in mirror (USD) |
+| `initialInvestment` | float | Original allocation (USD) |
+| `depositSummary` | float | Additional deposits (USD) |
+| `withdrawalSummary` | float | Withdrawals (USD) |
+| `closedPositionsNetProfit` | float | Realised P&L from closed positions (USD) |
+| `stopLossPercentage` | float | |
+| `stopLossAmount` | float | |
+| `mirrorStatusID` | int | 0=Active, 1=Paused, 2=Pending Closure, 3=In Alignment |
+| `positions[]` | array | Nested position objects (same schema as Position above) |
+| `startedCopyDate` | datetime | |
+
+### Order request (`createOrderRequest`)
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `instrumentId` | int | Yes | |
+| `isBuy` | bool | Yes | Always `true` in eBull v1 |
+| `leverage` | int | Yes | Always `1` in eBull v1 |
+| `investment` | number | Conditional | For by-amount |
+| `units` | number | Conditional | For by-units |
+| `orderType` | string | No | `"MKT"` or `"LMT"` |
+| `executionType` | string | No | `"GTC"` or `"IOC"` |
+| `stopLossRate` | number | No | |
+| `stopLossPct` | number | No | |
+| `takeProfitRate` | number | No | |
+| `takeProfitPct` | number | No | |
+| `limitRate` | number | No | For limit orders |
+| `isTrailingStopLoss` | bool | No | |
+
+Response: `{"token": "..."}` — unique operation identifier.
+
+### Close request (`createExitOrderRequest`)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `instrumentId` | int | |
+| `units` | number | `null` = close entire position |
+| `executionType` | string | |
+| `positionId` | int | |
 
 ---
 
-## Trading endpoints
+## Portfolio calculations
 
-All trading endpoints require Write permission on the API key.
+eToro's official formulae (from portal guides):
 
-### Demo trading
+### Available cash
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| POST | `/api/v1/trading/execution/demo/market-open-orders/by-amount` | Open position by cash amount |
-| POST | `/api/v1/trading/execution/demo/market-open-orders/by-units` | Open position by unit count |
-| DELETE | `/api/v1/trading/execution/demo/market-open-orders/{orderId}` | Cancel pending open order |
-| POST | `/api/v1/trading/execution/demo/market-close-orders/positions/{positionId}` | Close position (full or partial) |
-| DELETE | `/api/v1/trading/execution/demo/market-close-orders/{orderId}` | Cancel pending close order |
-| POST | `/api/v1/trading/execution/demo/limit-orders` | Limit/MIT order |
-| DELETE | `/api/v1/trading/execution/demo/limit-orders/{orderId}` | Cancel limit order |
+```
+credit
+  - SUM(ordersForOpen[i].amount WHERE mirrorID=0)
+  - SUM(orders[i].amount)
+```
 
-### Real trading
+Only manual positions (mirrorID=0). Always in USD.
 
-Same paths without the `/demo/` segment.
+### Total invested
 
-### Open order request body
+```
+SUM(positions.amount)
+  + SUM(mirrors.positions.amount)
+  + SUM(mirrors.availableAmount - mirrors.closedPositionsNetProfit)
+  + SUM(ordersForOpen.amount WHERE mirrorID=0)
+  + SUM(orders.amount)
+  + SUM(ordersForOpen.totalExternalCosts WHERE mirrorID=0)
+```
+
+### Unrealised P&L
+
+```
+SUM(positions.unrealizedPnL.pnL)
+  + SUM(mirrors.positions.unrealizedPnL.pnL)
+  + SUM(mirrors.closedPositionsNetProfit)
+```
+
+### Equity
+
+```
+Available Cash + Total Invested + Unrealised P&L
+```
+
+---
+
+## WebSocket API
+
+### Connection
+
+```
+wss://ws.etoro.com/ws
+```
+
+### Authentication
 
 ```json
 {
-  "InstrumentID": 1,
-  "IsBuy": true,
-  "Leverage": 1,
-  "Amount": 100.0,
-  "StopLossRate": null,
-  "TakeProfitRate": null,
-  "IsTslEnabled": false,
-  "IsNoStopLoss": true,
-  "IsNoTakeProfit": true
+  "id": "<uuid>",
+  "operation": "Authenticate",
+  "data": {"userKey": "...", "apiKey": "..."}
 }
 ```
 
-Required: `InstrumentID`, `IsBuy`, `Leverage`, `Amount`.
+Response: `{"success": true/false, "errorCode": "...", "errorMessage": "..."}`
 
-**eBull constraints**: `IsBuy` is always `true` (long only in v1),
-`Leverage` is always `1` (no leverage in v1).
-
-### Close order request body
+### Subscribe to instrument rates
 
 ```json
 {
-  "InstrumentID": 1,
-  "UnitsToDeduct": null
+  "id": "<uuid>",
+  "operation": "Subscribe",
+  "data": {"topics": ["instrument:<instrumentId>"], "snapshot": true}
 }
 ```
 
-`UnitsToDeduct` null = close entire position.
+Rate message fields: `Ask`, `Bid`, `LastExecution`, `Date` (ISO 8601), `PriceRateID`
 
-### Portfolio
+### Subscribe to private channel (order/position updates)
 
-```
-GET /api/v1/trading/info/demo/portfolio
-GET /api/v1/trading/info/portfolio       (real)
-```
-
-Returns positions, orders, mirrors, and `credit` (available cash in USD).
-
-### PnL
-
-```
-GET /api/v1/trading/info/demo/pnl
-GET /api/v1/trading/info/real/pnl
+```json
+{
+  "id": "<uuid>",
+  "operation": "Subscribe",
+  "data": {"topics": ["private"], "snapshot": true}
+}
 ```
 
-### Order status
+Private channel message types include: `Trading.OrderForCloseMultiple.Update`
+with fields: `OrderID`, `StatusID`, `InstrumentID`, `ExecutedUnits`,
+`EndRate`, `NetProfit`, `CloseReason`, etc.
 
-```
-GET /api/v1/trading/info/demo/orders/{orderId}
-GET /api/v1/trading/info/real/orders/{orderId}
-```
+### WebSocket error codes
 
-### Trade history
+`SessionAlreadyAuthenticated`, `DataRequired`, `ApiKeyRequired`,
+`UserKeyRequired`, `TooManyRequests`, `Forbidden`,
+`UnhandledException`, `InvalidKey`, `Unauthorized`
 
-```
-GET /api/v1/trading/info/trade/history
-```
+### eBull WebSocket status
+
+Not yet implemented. Planned for live price streaming (alternative to polling
+`/instruments/rates`). Would eliminate the 1.1s throttle overhead for
+real-time dashboard updates.
 
 ---
 
-## What eBull does NOT use
+## Error responses
 
-These endpoints exist but are out of scope:
+Standard shape:
+```json
+{"errorCode": "...", "errorMessage": "..."}
+```
 
-- Agent portfolios (`/api/v1/agent-portfolios`) — copy trading management
-- Social feeds (`/api/v1/feeds/`) — discussion posts
-- Watchlists (`/api/v1/watchlists/`) — eToro UI watchlists
-- User info (`/api/v1/user-info/`) — social/people search
-- Market recommendations (`/api/v1/market-recommendations/`) — eToro's own recs
-- Curated lists (`/api/v1/curated-lists`) — eToro editorial
+| Code | HTTP | Meaning |
+|------|------|---------|
+| `Unauthorized` | 401 | Invalid or missing API/user key |
+| `TooManyRequests` | 429 | Rate limit exceeded |
+| `UnhandledException` | 500 | Server error |
 
 ---
 
-## Key differences from our speculative provider
+## eBull data pipeline summary
 
-| What | We had | Real API |
-|------|--------|----------|
-| Base URL | `https://api.etoro.com` | `https://public-api.etoro.com` |
-| Auth | `Authorization: Bearer <key>` | `x-api-key` + `x-user-key` + `x-request-id` |
-| Instruments | `GET /v1/instruments` | `GET /api/v1/market-data/instruments` |
-| Candles | `GET /v1/candles/day?symbol=X&from=...&to=...` | `GET /api/v1/market-data/instruments/{id}/history/candles/{dir}/{interval}/{count}` |
-| Quotes | `GET /v1/quotes?symbol=X` | `GET /api/v1/market-data/instruments/rates?instrumentIds=1,2` |
-| Instrument ID | symbol-based lookups | integer `instrumentID` throughout |
-| Credentials | single API key | two keys: `x-api-key` (app) + `x-user-key` (account) |
+### What runs and when
 
-### Critical: instrument ID is an integer, not a symbol
+| Job | Schedule | Endpoint(s) | Purpose |
+|-----|----------|-------------|---------|
+| `nightly_universe_sync` | 22:00 UTC | `GET /market-data/instruments` | Sync tradable instrument universe |
+| `daily_candle_refresh` | 22:15 UTC | `GET /market-data/instruments/{id}/history/candles/...` (per-instrument) | Historical OHLCV bars |
+| `daily_portfolio_sync` | 22:30 UTC | `GET /trading/info/{env}/portfolio` | Positions, cash, mirrors |
+| `hourly_fx_rates_refresh` | Every hour | `GET /market-data/instruments/rates` (batch) | Current quotes for all held instruments |
+| `execute_approved_orders` | Every 5 min | `POST /trading/execution/{env}/...` | Execute approved buy/sell orders |
 
-The eToro API uses integer `instrumentID` everywhere — candles, rates,
-trading. Symbols exist (`symbolFull`) but are metadata, not lookup keys.
-Our `instruments.symbol` must be mapped to `instrumentID` before any API call.
+### Data flow
 
-### Critical: candles are by count, not date range
+```
+eToro API call
+  -> Raw JSON persisted to data/raw/etoro/ (timestamped)
+  -> Normalisation (pure functions, unit-testable)
+  -> Database UPSERT
+  -> Feature computation (price_features, etc.)
+```
 
-No `from`/`to` date parameters. Instead: `direction` + `interval` + `candlesCount`.
-To get historical data from a specific date, compute the count needed.
+### Key implementation files
 
-### Critical: two credentials per environment
+| Component | File |
+|-----------|------|
+| Market data provider | `app/providers/implementations/etoro.py` |
+| Broker provider | `app/providers/implementations/etoro_broker.py` |
+| Resilient HTTP client | `app/providers/resilient_client.py` |
+| Universe sync service | `app/services/universe.py` |
+| Market data service | `app/services/market_data.py` |
+| Portfolio sync service | `app/services/portfolio_sync.py` |
+| Credentials service | `app/services/broker_credentials.py` |
+| Scheduled jobs | `app/workers/scheduler.py` |
+| Configuration | `app/config.py` |
 
-The provider constructor must accept both `api_key` and `user_key`, not a
-single `api_key`. Both are stored in `broker_credentials`.
+---
+
+## Critical integration notes
+
+### Instrument ID is an integer, not a symbol
+
+The eToro API uses integer `instrumentID` everywhere. Symbols exist
+(`symbolFull`) but are metadata, not lookup keys. Instrument IDs are
+**immutable** — cache them permanently.
+
+### Candles are by count, not date range
+
+No `from`/`to` date parameters. Use `direction` + `interval` +
+`candlesCount`. To get historical data from a specific date, compute
+the count needed.
+
+### Two credentials per environment
+
+The provider constructor accepts both `api_key` and `user_key`. Both
+are required for every request.
+
+### Portfolio returns everything in one call
+
+The `/trading/info/{env}/portfolio` endpoint returns positions, orders,
+mirrors (copy-trading), and credit (cash) in a single response. This
+is the sole source for copy-trading data — there is no separate
+"get mirrors" endpoint.
+
+### Copy-trading position lifecycle
+
+- Active mirrors appear in `/portfolio` response with nested positions
+- When a mirror is closed on eToro, it disappears from the next `/portfolio` response
+- eBull soft-closes missing mirrors: `active=FALSE`, `closed_at=sync_timestamp`
+- Positions are never deleted (preserved for audit trail)
+- Guard: if broker returns empty mirrors but local active mirrors exist, sync raises RuntimeError
+
+### All monetary values from eToro are in USD
+
+Positions, mirrors, cash — all denominated in USD. Currency conversion
+to display currency (e.g., GBP) is done by eBull using FX rates from
+the `quotes` table.
+
+### `open_conversion_rate` on mirror positions
+
+This is the FX rate at entry time (instrument native currency -> USD).
+Critical for non-USD instruments. Without it, P&L calculations for GBP,
+JPY, ILS, EUR instruments would be nonsensical. Track 2 defers
+current-rate recalculation.
