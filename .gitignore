@@ -17,3 +17,7 @@ data/
 .claude/codex.pid
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+
+# Dev server PID tracking
+.dev-pids
+.playwright-mcp/

@@ -8,12 +8,8 @@ import { EmptyState } from "@/components/states/EmptyState";
  * Positions table — unified view of direct positions and copy-trading mirrors.
  *
  * Mirror rows appear alongside position rows, sorted together by market value
- * descending. Mirrors show the trader username with a "Copy" badge, position
- * count, funded amount, mirror equity, and P&L.
- *
- * Sector column intentionally omitted: PositionItem on the backend does not
- * expose `sector`. Adding it would require widening the API in the same PR
- * and is tracked as a follow-up — see PR description.
+ * descending. Mirrors render with an eToro-style initials avatar and show
+ * invested / equity / P&L in the existing financial columns.
  *
  * Each position row links to the instrument detail page (#62).
  * Each mirror row links to /copy-trading/:mirrorId for drill-down.
@@ -60,13 +56,13 @@ export function PositionsTable({
       <table className="w-full text-left text-sm">
         <thead className="text-xs uppercase text-slate-500">
           <tr>
-            <Th>Symbol</Th>
-            <Th>Company</Th>
+            <Th>Name</Th>
+            <Th className="hidden sm:table-cell" />
             <Th align="right">Units</Th>
-            <Th align="right">Avg cost</Th>
+            <Th align="right">Invested</Th>
             <Th align="right">Price</Th>
-            <Th align="right">Market value</Th>
-            <Th align="right">Unrealized P&L</Th>
+            <Th align="right">Value</Th>
+            <Th align="right">P&L</Th>
           </tr>
         </thead>
         <tbody>
@@ -96,11 +92,11 @@ function PositionRow({ p, currency }: { p: PositionItem; currency: string }) {
           {p.symbol}
         </Link>
       </Td>
-      <Td>
+      <Td className="hidden sm:table-cell">
         <span className="text-slate-700">{p.company_name}</span>
       </Td>
       <Td align="right">{formatNumber(p.current_units)}</Td>
-      <Td align="right">{formatMoney(p.avg_cost, currency)}</Td>
+      <Td align="right">{formatMoney(p.cost_basis, currency)}</Td>
       <Td align="right">
         {p.current_price != null ? formatMoney(p.current_price, currency) : "—"}
       </Td>
@@ -115,30 +111,54 @@ function PositionRow({ p, currency }: { p: PositionItem; currency: string }) {
   );
 }
 
+/** eToro-style colour derived from the username string. */
+const AVATAR_TONES = [
+  "bg-blue-600",
+  "bg-emerald-600",
+  "bg-amber-600",
+  "bg-rose-600",
+  "bg-violet-600",
+  "bg-cyan-600",
+] as const;
+
+function avatarTone(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
+  return AVATAR_TONES[Math.abs(hash) % AVATAR_TONES.length] ?? "bg-blue-600";
+}
+
 function MirrorRow({ m, currency }: { m: PortfolioMirrorItem; currency: string }) {
   const pct = pnlPct(m.unrealized_pnl, m.funded);
   const positive = m.unrealized_pnl >= 0;
   return (
-    <tr className="border-t border-slate-100 bg-slate-50/50">
+    <tr className="border-t border-slate-100">
       <Td>
         <Link
           to={`/copy-trading/${m.mirror_id}`}
-          className="font-medium text-blue-600 hover:underline"
+          className="group flex items-center gap-2 hover:no-underline"
         >
-          {m.parent_username}
+          <span
+            className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white ${avatarTone(m.parent_username)}`}
+          >
+            {m.parent_username.charAt(0).toUpperCase()}
+          </span>
+          <span className="font-medium text-blue-600 group-hover:underline">
+            {m.parent_username}
+          </span>
         </Link>
-        <span className="ml-1.5 inline-block rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700">
-          Copy
-        </span>
       </Td>
-      <Td>
+      <Td className="hidden sm:table-cell">
         <span className="text-slate-500">
           {m.position_count} position{m.position_count !== 1 ? "s" : ""}
         </span>
       </Td>
-      <Td align="right">—</Td>
+      <Td align="right">
+        <span className="text-slate-400">—</span>
+      </Td>
       <Td align="right">{formatMoney(m.funded, currency)}</Td>
-      <Td align="right">—</Td>
+      <Td align="right">
+        <span className="text-slate-400">—</span>
+      </Td>
       <Td align="right">{formatMoney(m.mirror_equity, currency)}</Td>
       <Td align="right">
         <span className={positive ? "text-emerald-600" : "text-red-600"}>
@@ -150,15 +170,35 @@ function MirrorRow({ m, currency }: { m: PortfolioMirrorItem; currency: string }
   );
 }
 
-function Th({ children, align = "left" }: { children: React.ReactNode; align?: "left" | "right" }) {
+function Th({
+  children,
+  align = "left",
+  className = "",
+}: {
+  children?: React.ReactNode;
+  align?: "left" | "right";
+  className?: string;
+}) {
   return (
-    <th className={`px-2 py-2 ${align === "right" ? "text-right" : "text-left"}`}>{children}</th>
+    <th className={`px-2 py-2 ${align === "right" ? "text-right" : "text-left"} ${className}`}>
+      {children}
+    </th>
   );
 }
 
-function Td({ children, align = "left" }: { children: React.ReactNode; align?: "left" | "right" }) {
+function Td({
+  children,
+  align = "left",
+  className = "",
+}: {
+  children?: React.ReactNode;
+  align?: "left" | "right";
+  className?: string;
+}) {
   return (
-    <td className={`px-2 py-2 ${align === "right" ? "text-right tabular-nums" : "text-left"}`}>
+    <td
+      className={`px-2 py-2 ${align === "right" ? "text-right tabular-nums" : "text-left"} ${className}`}
+    >
       {children}
     </td>
   );

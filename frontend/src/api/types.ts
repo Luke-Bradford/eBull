@@ -191,6 +191,23 @@ export interface InstrumentDetail {
 // /portfolio (app/api/portfolio.py)
 // ---------------------------------------------------------------------------
 
+export interface BrokerPositionItem {
+  position_id: number;
+  is_buy: boolean;
+  units: number;
+  amount: number;
+  open_rate: number;
+  open_date_time: string;
+  current_price: number | null;
+  market_value: number;
+  unrealized_pnl: number;
+  stop_loss_rate: number | null;
+  take_profit_rate: number | null;
+  is_tsl_enabled: boolean;
+  leverage: number;
+  total_fees: number;
+}
+
 export interface PositionItem {
   instrument_id: number;
   symbol: string;
@@ -205,6 +222,7 @@ export interface PositionItem {
   valuation_source: "quote" | "daily_close" | "cost_basis";
   source: string;
   updated_at: string;
+  trades: BrokerPositionItem[];
 }
 
 export interface FxRateUsed {

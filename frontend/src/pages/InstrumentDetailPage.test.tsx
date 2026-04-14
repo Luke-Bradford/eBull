@@ -410,6 +410,7 @@ describe("InstrumentDetailPage — position", () => {
           valuation_source: "quote" as const,
           source: "broker_sync",
           updated_at: "2024-06-01T00:00:00Z",
+          trades: [],
         },
       ],
       mirrors: [],

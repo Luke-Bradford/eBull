@@ -115,11 +115,12 @@ def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
 
 
 def _with_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
-    # The endpoint runs three DB queries: positions, cash, mirror_breakdowns.
-    # Existing callers supply [positions, cash] only — pad with an empty
-    # mirror_breakdowns result so load_mirror_breakdowns returns [].
+    # The endpoint runs four DB queries in order:
+    #   1. positions  2. cash  3. broker_positions  4. mirror_breakdowns
+    # Existing callers supply [positions, cash] only — pad with empty
+    # broker_positions and mirror_breakdowns results.
     padded = list(cursor_results)
-    if len(padded) == 2:
+    while len(padded) < 4:
         padded.append([])
     conn = _mock_conn(padded)
 
@@ -464,7 +465,7 @@ class TestPortfolioFxConversion:
         """Mirror equity (always USD for eToro) converted to display currency."""
         # available_amount=500 + positions_mv=1500 → mirror_equity=2000 USD.
         mirror = _make_mirror_row(available_amount=500.0, positions_mv=1500.0)
-        _with_conn([[], [_make_cash_row(None)], [mirror]])
+        _with_conn([[], [_make_cash_row(None)], [], [mirror]])
 
         resp = client.get("/portfolio")
         assert resp.status_code == 200
@@ -483,7 +484,7 @@ class TestPortfolioFxConversion:
         )
         # available_amount=500 + positions_mv=1500 → mirror_equity=2000 USD.
         mirror = _make_mirror_row(available_amount=500.0, positions_mv=1500.0)
-        _with_conn([[pos], [_make_cash_row(5000.0)], [mirror]])
+        _with_conn([[pos], [_make_cash_row(5000.0)], [], [mirror]])
 
         resp = client.get("/portfolio")
         assert resp.status_code == 200
@@ -637,7 +638,7 @@ class TestPortfolioMirrors:
             positions_mv=12000.0,
             position_count=42,
         )
-        _with_conn([[], [_make_cash_row(None)], [mirror]])
+        _with_conn([[], [_make_cash_row(None)], [], [mirror]])
 
         resp = client.get("/portfolio")
         assert resp.status_code == 200
@@ -669,7 +670,7 @@ class TestPortfolioMirrors:
             available_amount=300.0,
             positions_mv=700.0,
         )
-        _with_conn([[], [_make_cash_row(None)], [m1, m2]])
+        _with_conn([[], [_make_cash_row(None)], [], [m1, m2]])
 
         resp = client.get("/portfolio")
         assert resp.status_code == 200
