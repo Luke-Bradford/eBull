@@ -40,6 +40,7 @@ from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
 from app.services.coverage import review_coverage, seed_coverage
+from app.services.enrichment import refresh_enrichment
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
@@ -725,6 +726,27 @@ def daily_research_refresh() -> None:
                 "FMP_API_KEY not set; %d non-US instruments will have no fundamentals",
                 len(fmp_symbols),
             )
+
+        # Enrichment — profile, earnings, analyst estimates (FMP)
+        if settings.fmp_api_key:
+            try:
+                with (
+                    FmpFundamentalsProvider(api_key=settings.fmp_api_key) as fmp,
+                    psycopg.connect(settings.database_url) as conn,
+                ):
+                    enrich_summary = refresh_enrichment(fmp, conn, symbols)
+                    conn.commit()
+                total_rows += enrich_summary.profiles_upserted + enrich_summary.earnings_upserted
+                logger.info(
+                    "Enrichment refresh: attempted=%d profiles=%d earnings=%d estimates=%d skipped=%d",
+                    enrich_summary.symbols_attempted,
+                    enrich_summary.profiles_upserted,
+                    enrich_summary.earnings_upserted,
+                    enrich_summary.estimates_upserted,
+                    enrich_summary.symbols_skipped,
+                )
+            except Exception:
+                logger.warning("Enrichment refresh failed", exc_info=True)
 
         # Filings — SEC EDGAR
         with (
