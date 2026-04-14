@@ -339,6 +339,7 @@ def _persist_order_and_fill(
                             units      = units - %(units)s,
                             updated_at = %(now)s
                         WHERE position_id = %(pid)s
+                          AND units >= %(units)s
                         """,
                         {
                             "units": fu,
@@ -494,19 +495,22 @@ def close_position(
     close_units = position_units
     if body is not None and body.units_to_deduct is not None:
         close_units = Decimal(str(body.units_to_deduct))
+        if close_units <= 0:
+            raise HTTPException(status_code=400, detail="units_to_deduct must be positive")
         if close_units > position_units:
             raise HTTPException(
                 status_code=400,
                 detail=f"units_to_deduct ({close_units}) exceeds position units ({position_units})",
             )
 
-    open_rate = Decimal(str(pos_row["open_rate"]))
+    # Use current quote for realistic P&L; fall back to open_rate if unavailable.
+    quote_price = _load_latest_quote_price(conn, instrument_id)
+    fill_price = quote_price if quote_price is not None else Decimal(str(pos_row["open_rate"]))
 
-    # Demo mode: synthetic fill at the open_rate (no live quote needed for close)
     broker_result = _synthetic_fill(
         instrument_id=instrument_id,
         action="EXIT",
-        quote_price=open_rate,
+        quote_price=fill_price,
         amount=None,
         units=close_units,
     )

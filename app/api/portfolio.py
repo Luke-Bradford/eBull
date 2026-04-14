@@ -397,7 +397,9 @@ def get_portfolio(
 
         if cp_raw is not None:
             if is_buy:
-                mv_native = units * cp_raw
+                # Long: invested capital + leveraged price delta.
+                # Equivalent to units * cp_raw only when leverage == 1.
+                mv_native = amount + units * (cp_raw - open_rate_raw)
                 pnl_native = mv_native - amount
             else:
                 # Short: profit when price drops below open_rate.
@@ -566,6 +568,7 @@ def get_instrument_positions(
     total_invested = 0.0
     total_value = 0.0
     total_pnl = 0.0
+    weighted_open_rate = 0.0  # sum(units * open_rate) for avg entry
 
     for tr in trade_rows:
         units = float(tr["units"])
@@ -575,7 +578,8 @@ def get_instrument_positions(
 
         if current_price is not None:
             if is_buy:
-                mv = units * current_price
+                # Long: invested capital + leveraged price delta.
+                mv = amount + units * (current_price - open_rate)
                 pnl = mv - amount
             else:
                 # Short: profit when price drops below open_rate.
@@ -589,6 +593,7 @@ def get_instrument_positions(
         total_invested += amount
         total_value += mv
         total_pnl += pnl
+        weighted_open_rate += units * open_rate
 
         trades.append(
             NativeTradeItem(
@@ -609,7 +614,7 @@ def get_instrument_positions(
             )
         )
 
-    avg_entry = total_invested / total_units if total_units > 0 else None
+    avg_entry = weighted_open_rate / total_units if total_units > 0 else None
 
     return InstrumentPositionDetail(
         instrument_id=instrument_id,

@@ -282,16 +282,18 @@ class TestClosePosition:
         assert "9999" in resp.json()["detail"]
 
     def test_demo_close_returns_filled(self) -> None:
-        """200 — demo close returns a filled synthetic response with correct units."""
+        """200 — demo close fills at current quote, not open_rate."""
         pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
+        close_quote = [{"last": 160.0}]
         order_row = [{"order_id": 77}]
         fill_row = [{"fill_id": 15}]
         # Cursor calls:
         #   1. kill switch check
         #   2. broker_positions lookup
-        #   3. INSERT orders RETURNING order_id
-        #   4. INSERT fills RETURNING fill_id
-        _with_conn([_KILL_SWITCH_OFF, pos_row, order_row, fill_row])
+        #   3. quote price lookup
+        #   4. INSERT orders RETURNING order_id
+        #   5. INSERT fills RETURNING fill_id
+        _with_conn([_KILL_SWITCH_OFF, pos_row, close_quote, order_row, fill_row])
 
         resp = client.post("/portfolio/positions/500/close")
         assert resp.status_code == 200
@@ -299,7 +301,20 @@ class TestClosePosition:
         assert body["order_id"] == 77
         assert body["status"] == "filled"
         assert body["filled_units"] == 10.0
-        assert body["filled_price"] == 150.0
+        assert body["filled_price"] == 160.0  # current quote, not open_rate
+
+    def test_demo_close_falls_back_to_open_rate_when_no_quote(self) -> None:
+        """200 — when no quote available, falls back to open_rate."""
+        pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
+        order_row = [{"order_id": 80}]
+        fill_row = [{"fill_id": 18}]
+        # Cursor calls: kill switch, broker_positions, quote (empty), order, fill
+        _with_conn([_KILL_SWITCH_OFF, pos_row, _NO_ROWS, order_row, fill_row])
+
+        resp = client.post("/portfolio/positions/500/close")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["filled_price"] == 150.0  # fallback to open_rate
 
     def test_partial_close_rejects_excess_units(self) -> None:
         """400 when units_to_deduct exceeds position units."""
@@ -312,12 +327,34 @@ class TestClosePosition:
         assert resp.status_code == 400
         assert "exceeds" in resp.json()["detail"]
 
+    def test_partial_close_rejects_zero_units(self) -> None:
+        """400 when units_to_deduct is zero."""
+        pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
+        _with_conn([_KILL_SWITCH_OFF, pos_row])
+        resp = client.post(
+            "/portfolio/positions/500/close",
+            json={"units_to_deduct": 0},
+        )
+        assert resp.status_code == 400
+        assert "positive" in resp.json()["detail"]
+
+    def test_partial_close_rejects_negative_units(self) -> None:
+        """400 when units_to_deduct is negative."""
+        pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
+        _with_conn([_KILL_SWITCH_OFF, pos_row])
+        resp = client.post(
+            "/portfolio/positions/500/close",
+            json={"units_to_deduct": -3.0},
+        )
+        assert resp.status_code == 400
+        assert "positive" in resp.json()["detail"]
+
     def test_close_updates_broker_positions_units(self) -> None:
         """Closing a position should UPDATE broker_positions to deduct units."""
         pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
         order_row = [{"order_id": 78}]
         fill_row = [{"fill_id": 16}]
-        conn = _with_conn([_KILL_SWITCH_OFF, pos_row, order_row, fill_row])
+        conn = _with_conn([_KILL_SWITCH_OFF, pos_row, _QUOTE_ROW, order_row, fill_row])
 
         resp = client.post("/portfolio/positions/500/close")
         assert resp.status_code == 200
