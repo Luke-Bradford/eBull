@@ -16,6 +16,8 @@ import { RecoverPage } from "@/pages/RecoverPage";
 import { OperatorsPage } from "@/pages/OperatorsPage";
 import { CopyTradingPage } from "@/pages/CopyTradingPage";
 import { InstrumentsPage } from "@/pages/InstrumentsPage";
+import { PortfolioPage } from "@/pages/PortfolioPage";
+import { PositionDetailPage } from "@/pages/PositionDetailPage";
 
 export function App() {
   return (
@@ -34,10 +36,12 @@ export function App() {
           }
         >
           <Route index element={<DashboardPage />} />
+          <Route path="portfolio" element={<PortfolioPage />} />
+          <Route path="portfolio/:instrumentId" element={<PositionDetailPage />} />
           <Route path="rankings" element={<RankingsPage />} />
           <Route path="instruments" element={<InstrumentsPage />} />
           <Route path="instruments/:instrumentId" element={<InstrumentDetailPage />} />
-          <Route path="copy-trading" element={<CopyTradingPage />} />
+          <Route path="copy-trading/:mirrorId" element={<CopyTradingPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />
           <Route path="admin" element={<AdminPage />} />
           <Route path="operators" element={<OperatorsPage />} />

@@ -24,6 +24,7 @@ from app.api.instruments import router as instruments_router
 from app.api.jobs import router as jobs_router
 from app.api.news import router as news_router
 from app.api.operators import router as operators_router
+from app.api.orders import router as orders_router
 from app.api.portfolio import router as portfolio_router
 from app.api.recommendations import router as recommendations_router
 from app.api.scores import router as scores_router
@@ -125,6 +126,7 @@ app.include_router(filings_router)
 app.include_router(instruments_router)
 app.include_router(jobs_router)
 app.include_router(news_router)
+app.include_router(orders_router)
 app.include_router(portfolio_router)
 app.include_router(recommendations_router)
 app.include_router(scores_router)

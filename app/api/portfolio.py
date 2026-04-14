@@ -23,13 +23,14 @@ AUM = SUM(market_value across all positions) + cash_balance + mirror_equity.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
 import psycopg
 import psycopg.rows
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.api._helpers import parse_optional_float
@@ -37,7 +38,7 @@ from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.domain.positions import PositionSource
 from app.services.fx import FxRateNotFound, convert, load_live_fx_rates_with_metadata
-from app.services.portfolio import _load_mirror_equity
+from app.services.portfolio import load_mirror_breakdowns
 from app.services.runtime_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,25 @@ router = APIRouter(
 # ---------------------------------------------------------------------------
 
 
+class BrokerPositionItem(BaseModel):
+    """Individual eToro position (one trade) within a stock holding."""
+
+    position_id: int
+    is_buy: bool
+    units: float
+    amount: float
+    open_rate: float
+    open_date_time: datetime
+    current_price: float | None
+    market_value: float
+    unrealized_pnl: float
+    stop_loss_rate: float | None
+    take_profit_rate: float | None
+    is_tsl_enabled: bool
+    leverage: int
+    total_fees: float
+
+
 class PositionItem(BaseModel):
     instrument_id: int
     symbol: str
@@ -68,16 +88,64 @@ class PositionItem(BaseModel):
     valuation_source: str  # "quote", "daily_close", or "cost_basis"
     source: PositionSource
     updated_at: datetime
+    trades: list[BrokerPositionItem] = []
+
+
+class PortfolioMirrorItem(BaseModel):
+    mirror_id: int
+    parent_username: str
+    active: bool
+    funded: float  # initial_investment + deposits - withdrawals (display currency)
+    mirror_equity: float  # available_amount + sum(position market values) (display currency)
+    unrealized_pnl: float  # mirror_equity - funded (display currency)
+    position_count: int
+    started_copy_date: datetime
 
 
 class PortfolioResponse(BaseModel):
     positions: list[PositionItem]
+    mirrors: list[PortfolioMirrorItem] = []
     position_count: int
     total_aum: float
     cash_balance: float | None
     mirror_equity: float = 0.0
     display_currency: str = "GBP"
     fx_rates_used: dict[str, dict[str, object]] = {}
+
+
+class NativeTradeItem(BaseModel):
+    """Individual trade in the instrument's native currency."""
+
+    position_id: int
+    is_buy: bool
+    units: float
+    amount: float  # invested — native currency
+    open_rate: float  # entry price — native currency
+    open_date_time: datetime
+    current_price: float | None  # native currency
+    market_value: float  # native currency
+    unrealized_pnl: float  # native currency
+    stop_loss_rate: float | None  # native currency
+    take_profit_rate: float | None  # native currency
+    is_tsl_enabled: bool
+    leverage: int
+    total_fees: float
+
+
+class InstrumentPositionDetail(BaseModel):
+    """Drill-through view for one instrument — all values in native currency."""
+
+    instrument_id: int
+    symbol: str
+    company_name: str
+    currency: str  # native currency code (e.g. "USD")
+    current_price: float | None
+    total_units: float
+    avg_entry: float | None
+    total_invested: float
+    total_value: float
+    total_pnl: float
+    trades: list[NativeTradeItem]
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +357,106 @@ def get_portfolio(
         # SUM() always returns exactly one row; the value is None when the table is empty.
         raw_cash = cash_row["cash_balance"] if cash_row else None  # type: ignore[index]
 
+    # -- Broker positions (individual trades per instrument) ----------------
+    broker_sql = """
+        SELECT bp.position_id, bp.instrument_id, bp.is_buy,
+               bp.units, bp.amount, bp.open_rate,
+               bp.open_date_time,
+               bp.stop_loss_rate, bp.take_profit_rate,
+               bp.is_tsl_enabled, bp.leverage, bp.total_fees,
+               i.currency
+        FROM broker_positions bp
+        JOIN instruments i USING (instrument_id)
+        WHERE bp.units > 0
+        ORDER BY bp.instrument_id, bp.amount DESC
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(broker_sql)
+        broker_rows = cur.fetchall()
+
+    # Build instrument_id → current_price lookup from the positions query so
+    # each individual trade can compute its own market_value / pnl.
+    price_by_instrument: dict[int, tuple[float | None, str]] = {}
+    for r in pos_rows:
+        iid = r["instrument_id"]
+        last_p = parse_optional_float(r, "last")
+        daily_c = parse_optional_float(r, "daily_close")
+        price_by_instrument[iid] = (last_p if last_p is not None else daily_c, str(r.get("currency") or "USD"))
+
+    # Group broker positions by instrument_id.
+    trades_by_instrument: dict[int, list[BrokerPositionItem]] = defaultdict(list)
+    for br in broker_rows:
+        iid = br["instrument_id"]
+        native_ccy = str(br.get("currency") or "USD")
+        cp_raw, _ = price_by_instrument.get(iid, (None, native_ccy))
+        units = float(br["units"])
+        amount = float(br["amount"])
+
+        is_buy = br["is_buy"]
+        open_rate_raw = float(br["open_rate"])
+
+        if cp_raw is not None:
+            if is_buy:
+                # Long: invested capital + leveraged price delta.
+                # Equivalent to units * cp_raw only when leverage == 1.
+                mv_native = amount + units * (cp_raw - open_rate_raw)
+                pnl_native = mv_native - amount
+            else:
+                # Short: profit when price drops below open_rate.
+                mv_native = amount + units * (open_rate_raw - cp_raw)
+                pnl_native = mv_native - amount
+        else:
+            mv_native = amount
+            pnl_native = 0.0
+
+        # Convert to display currency.
+        cp_display = cp_raw
+        mv_display = mv_native
+        pnl_display = pnl_native
+        amount_display = amount
+        sl = parse_optional_float(br, "stop_loss_rate")
+        tp = parse_optional_float(br, "take_profit_rate")
+        open_rate = open_rate_raw
+        if native_ccy != display_currency:
+            try:
+                mv_display = float(convert(Decimal(str(mv_native)), native_ccy, display_currency, rates))
+                pnl_display = float(convert(Decimal(str(pnl_native)), native_ccy, display_currency, rates))
+                amount_display = float(convert(Decimal(str(amount)), native_ccy, display_currency, rates))
+                if cp_display is not None:
+                    cp_display = float(convert(Decimal(str(cp_display)), native_ccy, display_currency, rates))
+                open_rate = float(convert(Decimal(str(open_rate)), native_ccy, display_currency, rates))
+                if sl is not None:
+                    sl = float(convert(Decimal(str(sl)), native_ccy, display_currency, rates))
+                if tp is not None:
+                    tp = float(convert(Decimal(str(tp)), native_ccy, display_currency, rates))
+            except FxRateNotFound:
+                pass
+
+        trades_by_instrument[iid].append(
+            BrokerPositionItem(
+                position_id=br["position_id"],
+                is_buy=br["is_buy"],
+                units=units,
+                amount=amount_display,
+                open_rate=open_rate,
+                open_date_time=br["open_date_time"],
+                current_price=cp_display,
+                market_value=mv_display,
+                unrealized_pnl=pnl_display,
+                stop_loss_rate=sl,
+                take_profit_rate=tp,
+                is_tsl_enabled=br["is_tsl_enabled"],
+                leverage=br["leverage"],
+                total_fees=float(br["total_fees"]),
+            )
+        )
+
     positions = [_parse_position(r, display_currency, rates) for r in pos_rows]
+
+    # Attach individual trades to their parent position.
+    for pos in positions:
+        pos.trades = trades_by_instrument.get(pos.instrument_id, [])
+
     cash_balance = float(raw_cash) if raw_cash is not None else None  # type: ignore[arg-type]
 
     # Convert cash_balance — always USD for eToro.
@@ -298,9 +465,29 @@ def get_portfolio(
 
     # AUM: sum of position market_values + cash (if known) + mirror_equity.
     total_market = sum(p.market_value for p in positions)
-    raw_mirror_equity = _load_mirror_equity(conn)
 
-    # Convert mirror_equity — always USD for eToro.
+    # Per-mirror breakdowns — derive total mirror_equity from these so we
+    # load mirror data once instead of running two separate queries.
+    mirror_breakdowns = load_mirror_breakdowns(conn)
+    raw_mirror_equity = sum(mb.mirror_equity_usd for mb in mirror_breakdowns)
+
+    # Convert each mirror's monetary values from USD to display currency.
+    mirrors: list[PortfolioMirrorItem] = []
+    for mb in mirror_breakdowns:
+        mirrors.append(
+            PortfolioMirrorItem(
+                mirror_id=mb.mirror_id,
+                parent_username=mb.parent_username,
+                active=mb.active,
+                funded=_convert_value(mb.funded_usd, "USD", display_currency, rates),
+                mirror_equity=_convert_value(mb.mirror_equity_usd, "USD", display_currency, rates),
+                unrealized_pnl=_convert_value(mb.unrealized_pnl_usd, "USD", display_currency, rates),
+                position_count=mb.position_count,
+                started_copy_date=mb.started_copy_date,
+            )
+        )
+
+    # Convert total mirror_equity — always USD for eToro.
     mirror_equity = _convert_value(raw_mirror_equity, "USD", display_currency, rates)
 
     total_aum = total_market + (cash_balance if cash_balance is not None else 0.0) + mirror_equity
@@ -315,10 +502,130 @@ def get_portfolio(
 
     return PortfolioResponse(
         positions=positions,
+        mirrors=mirrors,
         position_count=len(positions),
         total_aum=total_aum,
         cash_balance=cash_balance,
         mirror_equity=mirror_equity,
         display_currency=display_currency,
         fx_rates_used=fx_rates_used,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Instrument position detail — native currency
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/instruments/{instrument_id}",
+    response_model=InstrumentPositionDetail,
+)
+def get_instrument_positions(
+    instrument_id: int,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InstrumentPositionDetail:
+    """Drill-through: all broker positions for one instrument in native currency."""
+    instrument_sql = """
+        SELECT i.instrument_id, i.symbol, i.company_name, i.currency,
+               q.last AS quote_last,
+               pd.close AS daily_close
+        FROM instruments i
+        LEFT JOIN quotes q USING (instrument_id)
+        LEFT JOIN LATERAL (
+            SELECT close FROM price_daily
+            WHERE instrument_id = i.instrument_id AND close IS NOT NULL
+            ORDER BY price_date DESC LIMIT 1
+        ) pd ON TRUE
+        WHERE i.instrument_id = %(iid)s
+    """
+    trades_sql = """
+        SELECT bp.position_id, bp.is_buy, bp.units, bp.amount,
+               bp.open_rate, bp.open_date_time,
+               bp.stop_loss_rate, bp.take_profit_rate,
+               bp.is_tsl_enabled, bp.leverage, bp.total_fees
+        FROM broker_positions bp
+        WHERE bp.instrument_id = %(iid)s AND bp.units > 0
+        ORDER BY bp.amount DESC
+    """
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(instrument_sql, {"iid": instrument_id})
+        inst = cur.fetchone()
+        if inst is None:
+            raise HTTPException(status_code=404, detail=f"Instrument {instrument_id} not found")
+        cur.execute(trades_sql, {"iid": instrument_id})
+        trade_rows = cur.fetchall()
+
+    # Current price in native currency (no FX conversion)
+    quote_last = parse_optional_float(inst, "quote_last")
+    daily_close = parse_optional_float(inst, "daily_close")
+    current_price = quote_last if quote_last is not None else daily_close
+    native_ccy = str(inst.get("currency") or "USD")
+
+    trades: list[NativeTradeItem] = []
+    total_units = 0.0
+    total_invested = 0.0
+    total_value = 0.0
+    total_pnl = 0.0
+    weighted_open_rate = 0.0  # sum(units * open_rate) for avg entry
+
+    for tr in trade_rows:
+        units = float(tr["units"])
+        amount = float(tr["amount"])
+        open_rate = float(tr["open_rate"])
+        is_buy = tr["is_buy"]
+
+        if current_price is not None:
+            if is_buy:
+                # Long: invested capital + leveraged price delta.
+                mv = amount + units * (current_price - open_rate)
+                pnl = mv - amount
+            else:
+                # Short: profit when price drops below open_rate.
+                mv = amount + units * (open_rate - current_price)
+                pnl = mv - amount
+        else:
+            mv = amount
+            pnl = 0.0
+
+        total_units += units
+        total_invested += amount
+        total_value += mv
+        total_pnl += pnl
+        weighted_open_rate += units * open_rate
+
+        trades.append(
+            NativeTradeItem(
+                position_id=tr["position_id"],
+                is_buy=tr["is_buy"],
+                units=units,
+                amount=amount,
+                open_rate=open_rate,
+                open_date_time=tr["open_date_time"],
+                current_price=current_price,
+                market_value=mv,
+                unrealized_pnl=pnl,
+                stop_loss_rate=parse_optional_float(tr, "stop_loss_rate"),
+                take_profit_rate=parse_optional_float(tr, "take_profit_rate"),
+                is_tsl_enabled=tr["is_tsl_enabled"],
+                leverage=tr["leverage"],
+                total_fees=float(tr["total_fees"]),
+            )
+        )
+
+    avg_entry = weighted_open_rate / total_units if total_units > 0 else None
+
+    return InstrumentPositionDetail(
+        instrument_id=instrument_id,
+        symbol=str(inst["symbol"]),
+        company_name=str(inst["company_name"]),
+        currency=native_ccy,
+        current_price=current_price,
+        total_units=total_units,
+        avg_entry=avg_entry,
+        total_invested=total_invested,
+        total_value=total_value,
+        total_pnl=total_pnl,
+        trades=trades,
     )

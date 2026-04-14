@@ -19,7 +19,7 @@ from typing import Any
 
 import psycopg
 import psycopg.rows
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.api._helpers import parse_optional_float
@@ -83,6 +83,12 @@ class CopyTraderSummary(BaseModel):
 class CopyTradingResponse(BaseModel):
     traders: list[CopyTraderSummary]
     total_mirror_equity: float
+    display_currency: str
+
+
+class MirrorDetailResponse(BaseModel):
+    parent_username: str
+    mirror: MirrorSummary
     display_currency: str
 
 
@@ -311,5 +317,100 @@ def get_copy_trading(
     return CopyTradingResponse(
         traders=traders,
         total_mirror_equity=total_mirror_equity,
+        display_currency=display_currency,
+    )
+
+
+@router.get("/{mirror_id}", response_model=MirrorDetailResponse)
+def get_mirror_detail(
+    mirror_id: int,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> MirrorDetailResponse:
+    """Single-mirror detail: stats and component positions.
+
+    Returns the mirror's metadata, financial summary, and all
+    component positions with MTM valuation — the drill-down from
+    a mirror row in the dashboard positions table.
+    """
+    config = get_runtime_config(conn)
+    display_currency = config.display_currency
+    rates_meta = load_live_fx_rates_with_metadata(conn)
+    rates: dict[tuple[str, str], Decimal] = {k: v["rate"] for k, v in rates_meta.items()}
+
+    # -- Load mirror + positions in a single transaction for snapshot
+    # consistency (review #222 — autocommit mode makes separate cursors
+    # read from different snapshots).
+    mirror_sql = """
+        SELECT ct.parent_username,
+               cm.mirror_id, cm.active,
+               cm.initial_investment, cm.deposit_summary,
+               cm.withdrawal_summary, cm.available_amount,
+               cm.closed_positions_net_profit,
+               cm.started_copy_date, cm.closed_at
+        FROM copy_mirrors cm
+        JOIN copy_traders ct USING (parent_cid)
+        WHERE cm.mirror_id = %(mirror_id)s
+    """
+
+    positions_sql = """
+        SELECT cmp.mirror_id, cmp.position_id, cmp.instrument_id,
+               i.symbol, i.company_name,
+               cmp.is_buy, cmp.units, cmp.amount,
+               cmp.open_rate, cmp.open_conversion_rate,
+               cmp.open_date_time,
+               q.last AS quote_last,
+               pd.close AS daily_close
+        FROM copy_mirror_positions cmp
+        LEFT JOIN instruments i ON i.instrument_id = cmp.instrument_id
+        LEFT JOIN quotes q ON q.instrument_id = cmp.instrument_id
+        LEFT JOIN LATERAL (
+            SELECT close
+            FROM price_daily
+            WHERE instrument_id = cmp.instrument_id
+              AND close IS NOT NULL
+            ORDER BY price_date DESC
+            LIMIT 1
+        ) pd ON TRUE
+        WHERE cmp.mirror_id = %(mirror_id)s
+        ORDER BY cmp.amount DESC
+    """
+
+    with conn.transaction():
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(mirror_sql, {"mirror_id": mirror_id})
+            mr = cur.fetchone()
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(positions_sql, {"mirror_id": mirror_id})
+            position_rows = cur.fetchall()
+
+    if mr is None:
+        raise HTTPException(status_code=404, detail=f"Mirror {mirror_id} not found")
+
+    position_items = [_compute_position_mtm(p, display_currency, rates) for p in position_rows]
+
+    # Per-mirror equity = available_amount + sum(position market values)
+    available_usd = float(mr["available_amount"])
+    positions_mv_display = sum(p.market_value for p in position_items)
+    available_display = _convert_usd(available_usd, display_currency, rates)
+    mirror_equity = available_display + positions_mv_display
+
+    mirror_summary = MirrorSummary(
+        mirror_id=mr["mirror_id"],
+        active=mr["active"],
+        initial_investment=_convert_usd(float(mr["initial_investment"]), display_currency, rates),
+        deposit_summary=_convert_usd(float(mr["deposit_summary"]), display_currency, rates),
+        withdrawal_summary=_convert_usd(float(mr["withdrawal_summary"]), display_currency, rates),
+        available_amount=available_display,
+        closed_positions_net_profit=_convert_usd(float(mr["closed_positions_net_profit"]), display_currency, rates),
+        mirror_equity=mirror_equity,
+        position_count=len(position_items),
+        positions=position_items,
+        started_copy_date=mr["started_copy_date"],
+        closed_at=mr["closed_at"],
+    )
+
+    return MirrorDetailResponse(
+        parent_username=mr["parent_username"],
+        mirror=mirror_summary,
         display_currency=display_currency,
     )

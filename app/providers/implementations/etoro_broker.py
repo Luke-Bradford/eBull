@@ -30,6 +30,7 @@ from app.providers.broker import (
     BrokerPortfolio,
     BrokerPosition,
     BrokerProvider,
+    OrderParams,
     OrderStatus,
 )
 from app.providers.resilient_client import ResilientClient
@@ -93,6 +94,24 @@ class PortfolioParseError(Exception):
     See spec §2.2.1 for the hierarchy rationale and §2.3.3 for the
     strict-raise sync contract that depends on it.
     """
+
+
+def _order_body_common(
+    instrument_id: int,
+    params: OrderParams | None,
+) -> dict[str, Any]:
+    """Build the common fields for an eToro open-order request body."""
+    p = params or OrderParams()
+    return {
+        "InstrumentID": instrument_id,
+        "IsBuy": True,  # v1 is long-only
+        "Leverage": p.leverage,
+        "StopLossRate": float(p.stop_loss_rate) if p.stop_loss_rate is not None else None,
+        "TakeProfitRate": float(p.take_profit_rate) if p.take_profit_rate is not None else None,
+        "IsTslEnabled": p.is_tsl_enabled,
+        "IsNoStopLoss": p.stop_loss_rate is None,
+        "IsNoTakeProfit": p.take_profit_rate is None,
+    }
 
 
 class EtoroBrokerProvider(BrokerProvider):
@@ -172,6 +191,7 @@ class EtoroBrokerProvider(BrokerProvider):
         action: str,
         amount: Decimal | None,
         units: Decimal | None,
+        params: OrderParams | None = None,
     ) -> BrokerOrderResult:
         # Reject unrecognised actions before any HTTP call.
         if action not in _ALLOWED_PLACE_ORDER_ACTIONS:
@@ -224,15 +244,8 @@ class EtoroBrokerProvider(BrokerProvider):
         if units is not None:
             endpoint = f"{self._exec_prefix}/market-open-orders/by-units"
             body: dict[str, Any] = {
-                "InstrumentID": instrument_id,
-                "IsBuy": True,  # v1 is long-only
-                "Leverage": 1,  # v1 is no-leverage
+                **_order_body_common(instrument_id, params),
                 "AmountInUnits": float(units),
-                "StopLossRate": None,
-                "TakeProfitRate": None,
-                "IsTslEnabled": False,
-                "IsNoStopLoss": True,
-                "IsNoTakeProfit": True,
             }
         else:
             # units is None, and the guard above rejects both-None,
@@ -241,15 +254,8 @@ class EtoroBrokerProvider(BrokerProvider):
                 raise RuntimeError("amount must be non-None when units is None")
             endpoint = f"{self._exec_prefix}/market-open-orders/by-amount"
             body = {
-                "InstrumentID": instrument_id,
-                "IsBuy": True,
-                "Leverage": 1,
+                **_order_body_common(instrument_id, params),
                 "Amount": float(amount),
-                "StopLossRate": None,
-                "TakeProfitRate": None,
-                "IsTslEnabled": False,
-                "IsNoStopLoss": True,
-                "IsNoTakeProfit": True,
             }
 
         try:
@@ -301,25 +307,13 @@ class EtoroBrokerProvider(BrokerProvider):
         raw["_ebull_action"] = action
         return _normalise_open_order_response(raw)
 
-    def close_position(self, instrument_id: int) -> BrokerOrderResult:
-        # Step 1: Resolve instrument_id → positionId via portfolio lookup.
-        # The eToro close endpoint requires a positionId, not an instrumentId.
-        # clientPortfolio.positions[] has both instrumentID and positionID.
-        position_id, failure_reason = self._resolve_position_id(instrument_id)
-        if position_id is None:
-            return BrokerOrderResult(
-                broker_order_ref=None,
-                status="failed",
-                filled_price=None,
-                filled_units=None,
-                fees=Decimal("0"),
-                raw_payload={"error": failure_reason},
-            )
-
-        # Step 2: Close the position.
+    def close_position(
+        self,
+        position_id: int,
+        units_to_deduct: Decimal | None = None,
+    ) -> BrokerOrderResult:
         body: dict[str, Any] = {
-            "InstrumentID": instrument_id,
-            "UnitsToDeduct": None,  # close entire position
+            "UnitsToDeduct": float(units_to_deduct) if units_to_deduct is not None else None,
         }
 
         try:
@@ -443,34 +437,16 @@ class EtoroBrokerProvider(BrokerProvider):
         raw_mirrors: list[Any] = portfolio.get("mirrors") or []
 
         positions: list[BrokerPosition] = []
-        for pos in raw_positions:
+        for idx, pos in enumerate(raw_positions):
             if not isinstance(pos, dict):
                 continue
             iid = pos.get("instrumentID")
             if iid is None:
                 continue
-            # eToro's /portfolio endpoint returns `openRate` for the entry
-            # price and does NOT include a current price field at all.
-            # Current market price must be fetched separately from
-            # /api/v1/market-data/instruments/rates if needed.
-            #
-            # We set current_price = open_price as a neutral placeholder so
-            # the PnL aggregation `(current_price - open_price) * units`
-            # evaluates to zero instead of `(0 - open_rate) * units` (a
-            # large negative number). The portfolio API computes live
-            # unrealised PnL from the `quotes` table on read, so this
-            # placeholder is only used by sync-time aggregation and is
-            # never surfaced to the dashboard.
-            open_rate = Decimal(str(pos.get("openRate", 0)))
-            positions.append(
-                BrokerPosition(
-                    instrument_id=int(iid),
-                    units=Decimal(str(pos.get("units", 0))),
-                    open_price=open_rate,
-                    current_price=open_rate,
-                    raw_payload=pos,
-                )
-            )
+            try:
+                positions.append(_parse_direct_position(pos))
+            except (KeyError, ValueError, TypeError, decimal.DecimalException) as exc:
+                raise PortfolioParseError(f"Failed to parse position[{idx}] (instrument {iid}): {exc}") from exc
 
         return BrokerPortfolio(
             positions=positions,
@@ -478,57 +454,6 @@ class EtoroBrokerProvider(BrokerProvider):
             raw_payload=raw,
             mirrors=tuple(_parse_mirrors_payload(raw_mirrors)),
         )
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _resolve_position_id(self, instrument_id: int) -> tuple[int | None, str]:
-        """Look up the open positionID for an instrument via the portfolio endpoint.
-
-        Returns (position_id, "") on success, or (None, reason) on failure.
-        The reason distinguishes network/HTTP errors from missing positions.
-        """
-        try:
-            response = self._http_read.get(
-                f"{self._info_prefix}/portfolio",
-                headers=self._request_headers(),
-            )
-            response.raise_for_status()
-            raw = response.json()
-        except httpx.HTTPStatusError as exc:
-            raw_body = _safe_json(exc.response)
-            logger.error(
-                "eToro portfolio lookup failed: status=%d body=%s",
-                exc.response.status_code,
-                raw_body,
-            )
-            return None, f"Portfolio lookup failed: HTTP {exc.response.status_code}"
-        except httpx.HTTPError as exc:
-            logger.error("eToro portfolio lookup network error: %s", exc)
-            return None, f"Portfolio lookup failed: {exc}"
-        except ValueError as exc:
-            logger.error("eToro portfolio non-JSON response: %s", exc)
-            return None, "Portfolio lookup failed: non-JSON response"
-
-        # Response shape: { clientPortfolio: { positions: [...] } }
-        portfolio = raw.get("clientPortfolio") or {}
-        positions: list[dict[str, Any]] = portfolio.get("positions") or []
-
-        for pos in positions:
-            if not isinstance(pos, dict):
-                continue
-            if pos.get("instrumentID") == instrument_id:
-                pos_id = pos.get("positionID")
-                if pos_id is not None:
-                    return int(pos_id), ""
-
-        logger.warning(
-            "No open position found for instrument %d in portfolio (%d positions checked)",
-            instrument_id,
-            len(positions),
-        )
-        return None, f"No open position found for instrument {instrument_id}"
 
 
 # ------------------------------------------------------------------
@@ -566,6 +491,61 @@ def _normalise_order_info_response(
     ``amount``, ``units``, and ``positions[]`` with ``positionID``.
     """
     return _build_result(raw, raw, fallback_ref=broker_order_ref)
+
+
+def _parse_direct_position(payload: dict[str, Any]) -> BrokerPosition:
+    """Parse a top-level portfolio position payload into BrokerPosition.
+
+    Pure normaliser — no I/O, no instance state.  Follows the same
+    pattern as ``_parse_mirror_position`` but for direct holdings.
+
+    eToro's /portfolio endpoint returns ``openRate`` for the entry price
+    and does NOT include a current price field.  We set current_price =
+    open_price as a neutral placeholder so the PnL aggregation
+    ``(current_price - open_price) * units`` evaluates to zero.  The
+    portfolio API computes live unrealised PnL from the ``quotes`` table
+    on read, so this placeholder is never surfaced to the dashboard.
+    """
+
+    def _opt_decimal(key: str) -> Decimal | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        return Decimal(str(value))
+
+    open_rate = Decimal(str(payload["openRate"]))
+    units = Decimal(str(payload["units"]))
+
+    # initialAmountInDollars may be absent on very old positions;
+    # fall back to amount, then to units * open_rate.
+    raw_initial = payload.get("initialAmountInDollars")
+    if raw_initial is not None:
+        initial_amount = Decimal(str(raw_initial))
+    else:
+        raw_amount = payload.get("amount")
+        initial_amount = Decimal(str(raw_amount)) if raw_amount is not None else units * open_rate
+
+    return BrokerPosition(
+        instrument_id=int(payload["instrumentID"]),
+        units=units,
+        open_price=open_rate,
+        current_price=open_rate,
+        raw_payload=payload,
+        position_id=int(payload["positionID"]),
+        is_buy=bool(payload.get("isBuy", True)),
+        amount=Decimal(str(payload.get("amount", 0))),
+        initial_amount_in_dollars=initial_amount,
+        open_conversion_rate=Decimal(str(payload.get("openConversionRate", 1))),
+        open_date_time=_parse_iso_datetime(payload["openDateTime"]) if "openDateTime" in payload else None,
+        initial_units=_opt_decimal("initialUnits"),
+        stop_loss_rate=_opt_decimal("stopLossRate"),
+        take_profit_rate=_opt_decimal("takeProfitRate"),
+        is_no_stop_loss=bool(payload.get("isNoStopLoss", True)),
+        is_no_take_profit=bool(payload.get("isNoTakeProfit", True)),
+        leverage=int(payload.get("leverage", 1)),
+        is_tsl_enabled=bool(payload.get("isTslEnabled", False)),
+        total_fees=Decimal(str(payload.get("totalFees", 0))),
+    )
 
 
 def _parse_mirror_position(payload: dict[str, Any]) -> BrokerMirrorPosition:

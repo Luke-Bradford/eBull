@@ -34,14 +34,52 @@ class BrokerOrderResult:
 
 
 @dataclass(frozen=True)
+class OrderParams:
+    """Optional parameters for order placement.
+
+    All fields are optional — omitting them preserves the current
+    behaviour (no SL, no TP, leverage 1).
+    """
+
+    stop_loss_rate: Decimal | None = None
+    take_profit_rate: Decimal | None = None
+    is_tsl_enabled: bool = False
+    leverage: int = 1
+
+
+@dataclass(frozen=True)
 class BrokerPosition:
-    """A single open position as reported by the broker."""
+    """A single open position as reported by the broker.
+
+    After the broker_positions migration (024), the sync writes one row
+    per BrokerPosition into the ``broker_positions`` table and derives the
+    per-instrument ``positions`` summary from it.
+
+    Fields with defaults are optional for backwards-compat with existing
+    test code that constructs BrokerPosition with only the original fields.
+    """
 
     instrument_id: int
     units: Decimal
     open_price: Decimal
     current_price: Decimal
     raw_payload: dict[str, Any]
+
+    # --- Per-position fields (populated from eToro payload) ---
+    position_id: int | None = None
+    is_buy: bool = True
+    amount: Decimal = Decimal("0")
+    initial_amount_in_dollars: Decimal = Decimal("0")
+    open_conversion_rate: Decimal = Decimal("1")
+    open_date_time: datetime | None = None
+    initial_units: Decimal | None = None
+    stop_loss_rate: Decimal | None = None
+    take_profit_rate: Decimal | None = None
+    is_no_stop_loss: bool = True
+    is_no_take_profit: bool = True
+    leverage: int = 1
+    is_tsl_enabled: bool = False
+    total_fees: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -118,19 +156,26 @@ class BrokerProvider(ABC):
         action: str,
         amount: Decimal | None,
         units: Decimal | None,
+        params: OrderParams | None = None,
     ) -> BrokerOrderResult:
         """
         Place an order with the broker.
 
         Exactly one of amount or units should be provided.
+        params: optional SL/TP and leverage settings. None = broker defaults.
         Returns the broker's response, including fill details if immediately filled.
         """
 
     @abstractmethod
-    def close_position(self, instrument_id: int) -> BrokerOrderResult:
+    def close_position(
+        self,
+        position_id: int,
+        units_to_deduct: Decimal | None = None,
+    ) -> BrokerOrderResult:
         """
-        Close an existing position for the given instrument.
+        Close an existing position by broker position ID.
 
+        units_to_deduct: if provided, partial close. None = close entire position.
         Returns the broker's response with fill details.
         """
 

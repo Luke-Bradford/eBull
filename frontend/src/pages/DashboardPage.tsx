@@ -6,7 +6,6 @@ import { useAsync } from "@/lib/useAsync";
 import { ErrorBanner } from "@/components/states/ErrorBanner";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { SummaryCards } from "@/components/dashboard/SummaryCards";
-import { PositionsTable } from "@/components/dashboard/PositionsTable";
 import { RecentRecommendations } from "@/components/dashboard/RecentRecommendations";
 import { SystemStatusPanel } from "@/components/dashboard/SystemStatusPanel";
 import { BootstrapProgress, isBootstrapping } from "@/components/dashboard/BootstrapProgress";
@@ -59,10 +58,7 @@ export function DashboardPage() {
         <BootstrapProgress system={system.data} />
       ) : null}
 
-      {/* Portfolio block: summary cards + positions table share one
-          /portfolio fetch and therefore share one error surface. Rendering
-          a SectionError in both slots would show two widgets for a single
-          failed endpoint with two redundant retry buttons. */}
+      {/* Portfolio summary cards share a single /portfolio fetch. */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <div className="space-y-6 xl:col-span-2">
           {portfolio.error !== null ? (
@@ -70,16 +66,7 @@ export function DashboardPage() {
               <SectionError onRetry={portfolio.refetch} />
             </div>
           ) : (
-            <>
-              <SummaryCards data={portfolio.loading ? null : portfolio.data} />
-              <Section title="Positions">
-                {portfolio.loading ? (
-                  <SectionSkeleton rows={4} />
-                ) : (
-                  <PositionsTable positions={portfolio.data?.positions ?? []} />
-                )}
-              </Section>
-            </>
+            <SummaryCards data={portfolio.loading ? null : portfolio.data} />
           )}
         </div>
 

@@ -2,9 +2,9 @@ import { NavLink } from "react-router-dom";
 
 const NAV_ITEMS: { to: string; label: string; end?: boolean }[] = [
   { to: "/", label: "Dashboard", end: true },
+  { to: "/portfolio", label: "Portfolio" },
   { to: "/instruments", label: "Instruments" },
   { to: "/rankings", label: "Rankings" },
-  { to: "/copy-trading", label: "Copy Trading" },
   { to: "/recommendations", label: "Recommendations" },
   { to: "/admin", label: "Admin" },
   { to: "/operators", label: "Operators" },

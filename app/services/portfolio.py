@@ -178,6 +178,108 @@ def _load_positions(conn: psycopg.Connection[Any]) -> dict[int, PositionState]:
     return positions
 
 
+# ---------------------------------------------------------------------------
+# Mirror breakdown types
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MirrorBreakdown:
+    """Per-mirror aggregate for the portfolio endpoint.
+
+    All monetary values are in USD (eToro copy-trading native currency).
+    Callers convert to display currency.
+    """
+
+    mirror_id: int
+    parent_username: str
+    active: bool
+    funded_usd: float  # initial_investment + deposits - withdrawals
+    mirror_equity_usd: float  # available_amount + sum(position market values)
+    unrealized_pnl_usd: float  # mirror_equity - funded
+    position_count: int
+    started_copy_date: datetime
+
+
+def load_mirror_breakdowns(conn: psycopg.Connection[Any]) -> list[MirrorBreakdown]:
+    """Return per-mirror equity breakdowns for active mirrors.
+
+    Uses the same three-tier MTM pricing hierarchy as
+    ``_compute_position_mtm``: quote.last → price_daily.close →
+    open_rate fallback.  Returns one row per active mirror.
+
+    Values are in USD — the caller converts to display currency.
+    """
+    sql = """
+        SELECT ct.parent_username,
+               m.mirror_id, m.active,
+               m.initial_investment, m.deposit_summary,
+               m.withdrawal_summary, m.available_amount,
+               m.closed_positions_net_profit,
+               m.started_copy_date,
+               COALESCE(p.mv, 0) AS positions_mv,
+               COALESCE(p.pos_count, 0) AS position_count
+        FROM copy_mirrors m
+        JOIN copy_traders ct USING (parent_cid)
+        LEFT JOIN LATERAL (
+            SELECT SUM(
+                      cmp.amount
+                    + (CASE WHEN cmp.is_buy THEN 1 ELSE -1 END)
+                      * cmp.units
+                      * (COALESCE(q.last, pd.close, cmp.open_rate) - cmp.open_rate)
+                      * cmp.open_conversion_rate
+                   ) AS mv,
+                   COUNT(*) AS pos_count
+            FROM copy_mirror_positions cmp
+            LEFT JOIN LATERAL (
+                SELECT last
+                FROM quotes
+                WHERE instrument_id = cmp.instrument_id
+                ORDER BY quoted_at DESC
+                LIMIT 1
+            ) q ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT close
+                FROM price_daily
+                WHERE instrument_id = cmp.instrument_id
+                  AND close IS NOT NULL
+                ORDER BY price_date DESC
+                LIMIT 1
+            ) pd ON TRUE
+            WHERE cmp.mirror_id = m.mirror_id
+        ) p ON TRUE
+        WHERE m.active
+        ORDER BY m.mirror_id
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(sql)
+        rows = cur.fetchall()
+
+    breakdowns: list[MirrorBreakdown] = []
+    for r in rows:
+        available = float(r["available_amount"])
+        positions_mv = float(r["positions_mv"])
+        mirror_equity = available + positions_mv
+
+        funded = float(r["initial_investment"]) + float(r["deposit_summary"]) - float(r["withdrawal_summary"])
+        realised = float(r["closed_positions_net_profit"])
+
+        breakdowns.append(
+            MirrorBreakdown(
+                mirror_id=r["mirror_id"],
+                parent_username=r["parent_username"],
+                active=r["active"],
+                funded_usd=funded,
+                mirror_equity_usd=mirror_equity,
+                # Isolate unrealised: total_return - realised closed-position gains.
+                unrealized_pnl_usd=mirror_equity - funded - realised,
+                position_count=int(r["position_count"]),
+                started_copy_date=r["started_copy_date"],
+            )
+        )
+    return breakdowns
+
+
 def _load_mirror_equity(conn: psycopg.Connection[Any]) -> float:
     """Return the summed mirror_equity across all active mirrors.
 

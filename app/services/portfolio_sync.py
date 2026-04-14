@@ -23,6 +23,7 @@ Reconciliation rules:
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -58,6 +59,8 @@ class PortfolioSyncResult:
     mirrors_upserted: int = 0
     mirrors_closed: int = 0
     mirror_positions_upserted: int = 0
+    broker_positions_upserted: int = 0
+    broker_positions_deleted: int = 0
 
 
 @dataclass
@@ -81,8 +84,6 @@ def _aggregate_by_instrument(
     We sum units, compute weighted-average open price, compute total
     unrealised PnL from the raw rows, and keep the earliest open date.
     """
-    from collections import defaultdict
-
     buckets: dict[int, list[BrokerPosition]] = defaultdict(list)
     for bp in positions:
         buckets[bp.instrument_id].append(bp)
@@ -115,6 +116,132 @@ def _aggregate_by_instrument(
             raw_payloads=[bp.raw_payload for bp in group],
         )
     return result
+
+
+def _upsert_broker_positions(
+    conn: psycopg.Connection[Any],
+    broker_positions: Sequence[BrokerPosition],
+    now: datetime,
+) -> tuple[int, int]:
+    """Upsert individual broker positions into the ``broker_positions`` table.
+
+    Writes one row per eToro positionID — preserving per-position SL/TP,
+    leverage, fees, and the full raw payload.  Positions that disappeared
+    from the broker payload are deleted.
+
+    Returns (upserted, deleted).
+
+    Safety: if the broker returned zero positions but local rows exist,
+    the caller's guard (in ``sync_portfolio``) will have already raised
+    before this function is called.
+    """
+    upserted = 0
+
+    # Collect position_ids from the broker payload.  Skip positions
+    # without a position_id (backwards-compat with test fixtures).
+    broker_position_ids: list[int] = []
+    for bp in broker_positions:
+        if bp.position_id is None:
+            continue
+        broker_position_ids.append(bp.position_id)
+
+        conn.execute(
+            """
+            INSERT INTO broker_positions (
+                position_id, instrument_id, is_buy, units, initial_units,
+                amount, initial_amount_in_dollars, open_rate,
+                open_conversion_rate, open_date_time,
+                stop_loss_rate, take_profit_rate,
+                is_no_stop_loss, is_no_take_profit,
+                leverage, is_tsl_enabled, total_fees,
+                source, raw_payload, updated_at
+            )
+            VALUES (
+                %(position_id)s, %(instrument_id)s, %(is_buy)s, %(units)s,
+                %(initial_units)s, %(amount)s, %(initial_amount_in_dollars)s,
+                %(open_rate)s, %(open_conversion_rate)s, %(open_date_time)s,
+                %(stop_loss_rate)s, %(take_profit_rate)s,
+                %(is_no_stop_loss)s, %(is_no_take_profit)s,
+                %(leverage)s, %(is_tsl_enabled)s, %(total_fees)s,
+                %(source)s, %(raw_payload)s, %(now)s
+            )
+            ON CONFLICT (position_id) DO UPDATE SET
+                units                    = EXCLUDED.units,
+                initial_units            = EXCLUDED.initial_units,
+                amount                   = EXCLUDED.amount,
+                stop_loss_rate           = EXCLUDED.stop_loss_rate,
+                take_profit_rate         = EXCLUDED.take_profit_rate,
+                is_no_stop_loss          = EXCLUDED.is_no_stop_loss,
+                is_no_take_profit        = EXCLUDED.is_no_take_profit,
+                leverage                 = EXCLUDED.leverage,
+                is_tsl_enabled           = EXCLUDED.is_tsl_enabled,
+                total_fees               = EXCLUDED.total_fees,
+                -- Preserve source: if position was created by eBull, keep
+                -- 'ebull' even when sync refreshes it.
+                source                   = CASE
+                    WHEN broker_positions.source = 'ebull'
+                        THEN broker_positions.source
+                    ELSE EXCLUDED.source
+                END,
+                raw_payload              = EXCLUDED.raw_payload,
+                updated_at               = EXCLUDED.updated_at
+            """,
+            {
+                "position_id": bp.position_id,
+                "instrument_id": bp.instrument_id,
+                "is_buy": bp.is_buy,
+                "units": bp.units,
+                "initial_units": bp.initial_units,
+                "amount": bp.amount,
+                "initial_amount_in_dollars": bp.initial_amount_in_dollars,
+                "open_rate": bp.open_price,
+                "open_conversion_rate": bp.open_conversion_rate,
+                "open_date_time": bp.open_date_time or now,
+                "stop_loss_rate": bp.stop_loss_rate,
+                "take_profit_rate": bp.take_profit_rate,
+                "is_no_stop_loss": bp.is_no_stop_loss,
+                "is_no_take_profit": bp.is_no_take_profit,
+                "leverage": bp.leverage,
+                "is_tsl_enabled": bp.is_tsl_enabled,
+                "total_fees": bp.total_fees,
+                "source": "broker_sync",
+                "raw_payload": psycopg.types.json.Jsonb(bp.raw_payload),
+                "now": now,
+            },
+        )
+        upserted += 1
+
+    # Delete positions that disappeared from the broker payload.
+    # These were closed externally (eToro UI, SL/TP trigger, manual).
+    # eBull did not initiate the close — we are observing reality.
+    #
+    # When broker_position_ids is empty (all positions lacked
+    # position_id, or no positions at all), we still run the delete
+    # to clean up any stale rows from a previous sync cycle.  The
+    # `!= ALL('{}'::bigint[])` predicate matches all rows, which is
+    # the correct behaviour: if the broker reports nothing, nothing
+    # should remain in broker_positions.
+    deleted = 0
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            DELETE FROM broker_positions
+            WHERE position_id != ALL(%(ids)s::bigint[])
+            RETURNING position_id, instrument_id
+            """,
+            {"ids": broker_position_ids},
+        )
+        for row in cur:
+            deleted += 1
+            logger.info(
+                "broker_positions: position %d (instrument %d) disappeared "
+                "from broker — deleted (closed externally: eToro UI, SL/TP "
+                "trigger, or manual)",
+                row["position_id"],
+                row["instrument_id"],
+            )
+
+    return upserted, deleted
 
 
 def _sync_mirrors(
@@ -511,6 +638,15 @@ def sync_portfolio(
             f"Likely an upstream API failure (auth, session, or transient)."
         )
 
+    # Upsert individual broker positions into broker_positions table.
+    # Placed AFTER both guards (mirror + position) so that a suspicious
+    # broker payload raises before any writes are committed.
+    broker_positions_upserted, broker_positions_deleted = _upsert_broker_positions(
+        conn,
+        portfolio.positions,
+        now,
+    )
+
     for row in local_rows:
         iid = row["instrument_id"]
         if iid not in broker_positions:
@@ -569,4 +705,6 @@ def sync_portfolio(
         mirrors_upserted=mirrors_upserted,
         mirrors_closed=mirrors_closed,
         mirror_positions_upserted=mirror_positions_upserted,
+        broker_positions_upserted=broker_positions_upserted,
+        broker_positions_deleted=broker_positions_deleted,
     )
