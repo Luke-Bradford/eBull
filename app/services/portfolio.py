@@ -204,8 +204,9 @@ class MirrorBreakdown:
 def load_mirror_breakdowns(conn: psycopg.Connection[Any]) -> list[MirrorBreakdown]:
     """Return per-mirror equity breakdowns for active mirrors.
 
-    Uses the same MTM pricing hierarchy as ``_load_mirror_equity``:
-    quote.last → open_rate fallback.  Returns one row per active mirror.
+    Uses the same three-tier MTM pricing hierarchy as
+    ``_compute_position_mtm``: quote.last → price_daily.close →
+    open_rate fallback.  Returns one row per active mirror.
 
     Values are in USD — the caller converts to display currency.
     """
@@ -224,7 +225,7 @@ def load_mirror_breakdowns(conn: psycopg.Connection[Any]) -> list[MirrorBreakdow
                       cmp.amount
                     + (CASE WHEN cmp.is_buy THEN 1 ELSE -1 END)
                       * cmp.units
-                      * (COALESCE(q.last, cmp.open_rate) - cmp.open_rate)
+                      * (COALESCE(q.last, pd.close, cmp.open_rate) - cmp.open_rate)
                       * cmp.open_conversion_rate
                    ) AS mv,
                    COUNT(*) AS pos_count
@@ -236,6 +237,14 @@ def load_mirror_breakdowns(conn: psycopg.Connection[Any]) -> list[MirrorBreakdow
                 ORDER BY quoted_at DESC
                 LIMIT 1
             ) q ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT close
+                FROM price_daily
+                WHERE instrument_id = cmp.instrument_id
+                  AND close IS NOT NULL
+                ORDER BY price_date DESC
+                LIMIT 1
+            ) pd ON TRUE
             WHERE cmp.mirror_id = m.mirror_id
         ) p ON TRUE
         WHERE m.active

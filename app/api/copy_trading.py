@@ -337,7 +337,9 @@ def get_mirror_detail(
     rates_meta = load_live_fx_rates_with_metadata(conn)
     rates: dict[tuple[str, str], Decimal] = {k: v["rate"] for k, v in rates_meta.items()}
 
-    # -- Load the single mirror + trader metadata -------------------------
+    # -- Load mirror + positions in a single transaction for snapshot
+    # consistency (review #222 — autocommit mode makes separate cursors
+    # read from different snapshots).
     mirror_sql = """
         SELECT ct.parent_username,
                cm.mirror_id, cm.active,
@@ -350,14 +352,6 @@ def get_mirror_detail(
         WHERE cm.mirror_id = %(mirror_id)s
     """
 
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(mirror_sql, {"mirror_id": mirror_id})
-        mr = cur.fetchone()
-
-    if mr is None:
-        raise HTTPException(status_code=404, detail=f"Mirror {mirror_id} not found")
-
-    # -- Load positions for this mirror -----------------------------------
     positions_sql = """
         SELECT cmp.mirror_id, cmp.position_id, cmp.instrument_id,
                i.symbol, i.company_name,
@@ -381,9 +375,17 @@ def get_mirror_detail(
         ORDER BY cmp.amount DESC
     """
 
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(positions_sql, {"mirror_id": mirror_id})
-        position_rows = cur.fetchall()
+    with conn.transaction():
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(mirror_sql, {"mirror_id": mirror_id})
+            mr = cur.fetchone()
+
+        if mr is None:
+            raise HTTPException(status_code=404, detail=f"Mirror {mirror_id} not found")
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(positions_sql, {"mirror_id": mirror_id})
+            position_rows = cur.fetchall()
 
     position_items = [_compute_position_mtm(p, display_currency, rates) for p in position_rows]
 
