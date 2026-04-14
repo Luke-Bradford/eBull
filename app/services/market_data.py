@@ -274,11 +274,16 @@ def _compute_and_store_features(
     volatility = _compute_volatility_30d(prices)
 
     # --- TA indicators (full OHLCV needed, not just close) ---
+    # Require all four price columns non-null; the schema permits partial
+    # rows (close-only) which would crash float() in stochastic/ATR.
     ohlcv_rows = conn.execute(
         """
         SELECT open, high, low, close, volume
         FROM price_daily
         WHERE instrument_id = %(instrument_id)s
+          AND open IS NOT NULL
+          AND high IS NOT NULL
+          AND low IS NOT NULL
           AND close IS NOT NULL
         ORDER BY price_date DESC
         LIMIT 400
