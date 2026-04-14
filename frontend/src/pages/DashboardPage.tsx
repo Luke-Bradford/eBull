@@ -6,6 +6,7 @@ import { useAsync } from "@/lib/useAsync";
 import { ErrorBanner } from "@/components/states/ErrorBanner";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { SummaryCards } from "@/components/dashboard/SummaryCards";
+import { PositionsTable } from "@/components/dashboard/PositionsTable";
 import { RecentRecommendations } from "@/components/dashboard/RecentRecommendations";
 import { SystemStatusPanel } from "@/components/dashboard/SystemStatusPanel";
 import { BootstrapProgress, isBootstrapping } from "@/components/dashboard/BootstrapProgress";
@@ -66,7 +67,19 @@ export function DashboardPage() {
               <SectionError onRetry={portfolio.refetch} />
             </div>
           ) : (
-            <SummaryCards data={portfolio.loading ? null : portfolio.data} />
+            <>
+              <SummaryCards data={portfolio.loading ? null : portfolio.data} />
+              <Section title="Positions">
+                {portfolio.loading ? (
+                  <SectionSkeleton rows={4} />
+                ) : (
+                  <PositionsTable
+                    positions={portfolio.data?.positions ?? []}
+                    mirrors={portfolio.data?.mirrors ?? []}
+                  />
+                )}
+              </Section>
+            </>
           )}
         </div>
 
