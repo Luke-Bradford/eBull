@@ -542,16 +542,10 @@ def get_instrument_positions(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(instrument_sql, {"iid": instrument_id})
         inst = cur.fetchone()
-
-    if inst is None:
-        raise HTTPException(status_code=404, detail=f"Instrument {instrument_id} not found")
-
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        if inst is None:
+            raise HTTPException(status_code=404, detail=f"Instrument {instrument_id} not found")
         cur.execute(trades_sql, {"iid": instrument_id})
         trade_rows = cur.fetchall()
-
-    if not trade_rows:
-        raise HTTPException(status_code=404, detail=f"No open positions for instrument {instrument_id}")
 
     # Current price in native currency (no FX conversion)
     quote_last = parse_optional_float(inst, "quote_last")
