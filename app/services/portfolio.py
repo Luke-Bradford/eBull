@@ -215,6 +215,7 @@ def load_mirror_breakdowns(conn: psycopg.Connection[Any]) -> list[MirrorBreakdow
                m.mirror_id, m.active,
                m.initial_investment, m.deposit_summary,
                m.withdrawal_summary, m.available_amount,
+               m.closed_positions_net_profit,
                m.started_copy_date,
                COALESCE(p.mv, 0) AS positions_mv,
                COALESCE(p.pos_count, 0) AS position_count
@@ -261,6 +262,7 @@ def load_mirror_breakdowns(conn: psycopg.Connection[Any]) -> list[MirrorBreakdow
         mirror_equity = available + positions_mv
 
         funded = float(r["initial_investment"]) + float(r["deposit_summary"]) - float(r["withdrawal_summary"])
+        realised = float(r["closed_positions_net_profit"])
 
         breakdowns.append(
             MirrorBreakdown(
@@ -269,7 +271,8 @@ def load_mirror_breakdowns(conn: psycopg.Connection[Any]) -> list[MirrorBreakdow
                 active=r["active"],
                 funded_usd=funded,
                 mirror_equity_usd=mirror_equity,
-                unrealized_pnl_usd=mirror_equity - funded,
+                # Isolate unrealised: total_return - realised closed-position gains.
+                unrealized_pnl_usd=mirror_equity - funded - realised,
                 position_count=int(r["position_count"]),
                 started_copy_date=r["started_copy_date"],
             )

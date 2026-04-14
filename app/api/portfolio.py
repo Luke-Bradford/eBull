@@ -392,9 +392,17 @@ def get_portfolio(
         units = float(br["units"])
         amount = float(br["amount"])
 
+        is_buy = br["is_buy"]
+        open_rate_raw = float(br["open_rate"])
+
         if cp_raw is not None:
-            mv_native = units * cp_raw
-            pnl_native = mv_native - amount
+            if is_buy:
+                mv_native = units * cp_raw
+                pnl_native = mv_native - amount
+            else:
+                # Short: profit when price drops below open_rate.
+                mv_native = amount + units * (open_rate_raw - cp_raw)
+                pnl_native = mv_native - amount
         else:
             mv_native = amount
             pnl_native = 0.0
@@ -406,7 +414,7 @@ def get_portfolio(
         amount_display = amount
         sl = parse_optional_float(br, "stop_loss_rate")
         tp = parse_optional_float(br, "take_profit_rate")
-        open_rate = float(br["open_rate"])
+        open_rate = open_rate_raw
         if native_ccy != display_currency:
             try:
                 mv_display = float(convert(Decimal(str(mv_native)), native_ccy, display_currency, rates))
@@ -563,10 +571,16 @@ def get_instrument_positions(
         units = float(tr["units"])
         amount = float(tr["amount"])
         open_rate = float(tr["open_rate"])
+        is_buy = tr["is_buy"]
 
         if current_price is not None:
-            mv = units * current_price
-            pnl = mv - amount
+            if is_buy:
+                mv = units * current_price
+                pnl = mv - amount
+            else:
+                # Short: profit when price drops below open_rate.
+                mv = amount + units * (open_rate - current_price)
+                pnl = mv - amount
         else:
             mv = amount
             pnl = 0.0

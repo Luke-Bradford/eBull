@@ -73,6 +73,7 @@ def _make_mirror_row(
     deposit_summary: float = 0.0,
     withdrawal_summary: float = 0.0,
     available_amount: float = 500.0,
+    closed_positions_net_profit: float = 0.0,
     positions_mv: float = 0.0,
     position_count: int = 0,
     started_copy_date: datetime = _NOW,
@@ -86,6 +87,7 @@ def _make_mirror_row(
         "deposit_summary": deposit_summary,
         "withdrawal_summary": withdrawal_summary,
         "available_amount": available_amount,
+        "closed_positions_net_profit": closed_positions_net_profit,
         "positions_mv": positions_mv,
         "position_count": position_count,
         "started_copy_date": started_copy_date,
@@ -679,3 +681,23 @@ class TestPortfolioMirrors:
         assert len(body["mirrors"]) == 2
         sum_equity = sum(m["mirror_equity"] for m in body["mirrors"])
         assert body["mirror_equity"] == sum_equity
+
+    def test_unrealized_pnl_excludes_realised_profits(self) -> None:
+        """unrealized_pnl subtracts closed_positions_net_profit (#226)."""
+        mirror = _make_mirror_row(
+            initial_investment=10000.0,
+            available_amount=3500.0,  # includes $500 realised profit + $3000 undeployed
+            closed_positions_net_profit=500.0,
+            positions_mv=7000.0,  # open positions at market value
+        )
+        _with_conn([[], [_make_cash_row(None)], [], [mirror]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        m = resp.json()["mirrors"][0]
+
+        # funded = 10000, equity = 3500 + 7000 = 10500
+        assert m["mirror_equity"] == 10500.0
+        assert m["funded"] == 10000.0
+        # unrealized = total_return - realised = (10500 - 10000) - 500 = 0
+        assert m["unrealized_pnl"] == 0.0
