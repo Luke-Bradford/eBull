@@ -379,13 +379,12 @@ def get_mirror_detail(
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(mirror_sql, {"mirror_id": mirror_id})
             mr = cur.fetchone()
-
-        if mr is None:
-            raise HTTPException(status_code=404, detail=f"Mirror {mirror_id} not found")
-
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(positions_sql, {"mirror_id": mirror_id})
             position_rows = cur.fetchall()
+
+    if mr is None:
+        raise HTTPException(status_code=404, detail=f"Mirror {mirror_id} not found")
 
     position_items = [_compute_position_mtm(p, display_currency, rates) for p in position_rows]
 

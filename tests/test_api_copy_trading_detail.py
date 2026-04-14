@@ -187,7 +187,7 @@ class TestMirrorDetail:
 
     def test_404_for_unknown_mirror(self) -> None:
         """Returns 404 when mirror_id does not exist."""
-        _with_conn([[]])  # empty result for mirror query
+        _with_conn([[], []])  # empty mirror + positions (both run before 404 guard)
 
         resp = client.get("/portfolio/copy-trading/9999")
         assert resp.status_code == 404
