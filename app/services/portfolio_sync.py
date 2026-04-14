@@ -196,7 +196,7 @@ def _upsert_broker_positions(
                 "initial_amount_in_dollars": bp.initial_amount_in_dollars,
                 "open_rate": bp.open_price,
                 "open_conversion_rate": bp.open_conversion_rate,
-                "open_date_time": bp.open_date_time,
+                "open_date_time": bp.open_date_time or now,
                 "stop_loss_rate": bp.stop_loss_rate,
                 "take_profit_rate": bp.take_profit_rate,
                 "is_no_stop_loss": bp.is_no_stop_loss,
@@ -214,26 +214,32 @@ def _upsert_broker_positions(
     # Delete positions that disappeared from the broker payload.
     # These were closed externally (eToro UI, SL/TP trigger, manual).
     # eBull did not initiate the close — we are observing reality.
+    #
+    # When broker_position_ids is empty (all positions lacked
+    # position_id, or no positions at all), we still run the delete
+    # to clean up any stale rows from a previous sync cycle.  The
+    # `!= ALL('{}'::bigint[])` predicate matches all rows, which is
+    # the correct behaviour: if the broker reports nothing, nothing
+    # should remain in broker_positions.
     deleted = 0
-    if broker_position_ids:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(
-                """
-                DELETE FROM broker_positions
-                WHERE position_id != ALL(%(ids)s)
-                RETURNING position_id, instrument_id
-                """,
-                {"ids": broker_position_ids},
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            DELETE FROM broker_positions
+            WHERE position_id != ALL(%(ids)s)
+            RETURNING position_id, instrument_id
+            """,
+            {"ids": broker_position_ids},
+        )
+        for row in cur:
+            deleted += 1
+            logger.info(
+                "broker_positions: position %d (instrument %d) disappeared "
+                "from broker — deleted (closed externally: eToro UI, SL/TP "
+                "trigger, or manual)",
+                row["position_id"],
+                row["instrument_id"],
             )
-            for row in cur:
-                deleted += 1
-                logger.info(
-                    "broker_positions: position %d (instrument %d) disappeared "
-                    "from broker — deleted (closed externally: eToro UI, SL/TP "
-                    "trigger, or manual)",
-                    row["position_id"],
-                    row["instrument_id"],
-                )
 
     return upserted, deleted
 
@@ -501,17 +507,6 @@ def sync_portfolio(
         ).fetchall()
     local_instrument_ids = {row["instrument_id"] for row in local_rows}
 
-    # 0. Upsert individual broker positions into broker_positions table.
-    #    This preserves per-position granularity (SL/TP, leverage, fees)
-    #    alongside the per-instrument aggregation in `positions`.
-    #    The broker_positions table is additive — it does not affect
-    #    existing positions-table logic below.
-    broker_positions_upserted, broker_positions_deleted = _upsert_broker_positions(
-        conn,
-        portfolio.positions,
-        now,
-    )
-
     # Pre-write mirror guard (§2.3.4).
     #
     # Symmetric with the position guard below, but hoisted above
@@ -642,6 +637,15 @@ def sync_portfolio(
             f"position(s) exist — refusing to zero out local state. "
             f"Likely an upstream API failure (auth, session, or transient)."
         )
+
+    # Upsert individual broker positions into broker_positions table.
+    # Placed AFTER both guards (mirror + position) so that a suspicious
+    # broker payload raises before any writes are committed.
+    broker_positions_upserted, broker_positions_deleted = _upsert_broker_positions(
+        conn,
+        portfolio.positions,
+        now,
+    )
 
     for row in local_rows:
         iid = row["instrument_id"]

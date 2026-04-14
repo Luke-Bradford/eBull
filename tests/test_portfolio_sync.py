@@ -713,8 +713,12 @@ class TestUpsertBrokerPositions:
 
     def test_upserts_position_with_id(self) -> None:
         conn = MagicMock()
-        # DELETE returns no rows (no disappeared positions)
-        conn.execute.return_value = iter([])
+        # DELETE path uses conn.cursor() — returns no rows
+        mock_cursor = MagicMock()
+        mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_cursor.__exit__ = MagicMock(return_value=False)
+        mock_cursor.__iter__ = MagicMock(return_value=iter([]))
+        conn.cursor.return_value = mock_cursor
 
         bp = _detailed_pos(position_id=5001, instrument_id=42)
         upserted, deleted = _upsert_broker_positions(conn, [bp], _NOW)
@@ -727,20 +731,57 @@ class TestUpsertBrokerPositions:
         assert params["position_id"] == 5001
         assert params["instrument_id"] == 42
 
-    def test_skips_position_without_id(self) -> None:
-        """Legacy BrokerPosition fixtures (position_id=None) are skipped."""
+    def test_open_date_time_falls_back_to_now(self) -> None:
+        """open_date_time=None falls back to `now` to avoid NOT NULL violation."""
         conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_cursor.__exit__ = MagicMock(return_value=False)
+        mock_cursor.__iter__ = MagicMock(return_value=iter([]))
+        conn.cursor.return_value = mock_cursor
+
+        bp = _detailed_pos(position_id=5001, instrument_id=42)
+        # open_date_time defaults to None on BrokerPosition
+        assert bp.open_date_time is None
+        _upsert_broker_positions(conn, [bp], _NOW)
+
+        upsert_calls = [c for c in conn.execute.call_args_list if _is_broker_positions_upsert(c.args[0])]
+        params = upsert_calls[0].args[1]
+        # Must fall back to `now`, not pass None (which would violate NOT NULL)
+        assert params["open_date_time"] == _NOW
+
+    def test_skips_position_without_id(self) -> None:
+        """Legacy BrokerPosition fixtures (position_id=None) are skipped.
+
+        No UPSERT is issued, but the DELETE still runs (with an empty
+        exclusion list) to clean up any stale rows.
+        """
+        conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_cursor.__exit__ = MagicMock(return_value=False)
+        mock_cursor.__iter__ = MagicMock(return_value=iter([]))
+        conn.cursor.return_value = mock_cursor
+
         bp = _pos(instrument_id=42)  # uses the old helper — no position_id
         upserted, deleted = _upsert_broker_positions(conn, [bp], _NOW)
 
         assert upserted == 0
         assert deleted == 0
-        # No SQL should have been issued at all
+        # No UPSERT should have been issued
         assert conn.execute.call_args_list == []
+        # DELETE was still issued (via cursor) with empty exclusion list
+        assert mock_cursor.execute.call_count == 1
+        sql = mock_cursor.execute.call_args.args[0]
+        assert "DELETE FROM broker_positions" in sql
 
     def test_multiple_positions_upserted_individually(self) -> None:
         conn = MagicMock()
-        conn.execute.return_value = iter([])
+        mock_cursor = MagicMock()
+        mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_cursor.__exit__ = MagicMock(return_value=False)
+        mock_cursor.__iter__ = MagicMock(return_value=iter([]))
+        conn.cursor.return_value = mock_cursor
 
         positions = [
             _detailed_pos(position_id=5001, instrument_id=42),
@@ -755,7 +796,11 @@ class TestUpsertBrokerPositions:
 
     def test_sl_tp_passed_to_upsert(self) -> None:
         conn = MagicMock()
-        conn.execute.return_value = iter([])
+        mock_cursor = MagicMock()
+        mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_cursor.__exit__ = MagicMock(return_value=False)
+        mock_cursor.__iter__ = MagicMock(return_value=iter([]))
+        conn.cursor.return_value = mock_cursor
 
         bp = _detailed_pos(
             position_id=5001,
@@ -790,7 +835,11 @@ class TestUpsertBrokerPositions:
     def test_source_preserved_for_ebull_positions(self) -> None:
         """ON CONFLICT preserves source='ebull' — SQL shape check."""
         conn = MagicMock()
-        conn.execute.return_value = iter([])
+        mock_cursor = MagicMock()
+        mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_cursor.__exit__ = MagicMock(return_value=False)
+        mock_cursor.__iter__ = MagicMock(return_value=iter([]))
+        conn.cursor.return_value = mock_cursor
 
         bp = _detailed_pos(position_id=5001)
         _upsert_broker_positions(conn, [bp], _NOW)
@@ -801,6 +850,27 @@ class TestUpsertBrokerPositions:
         # Must preserve 'ebull' source on conflict
         assert "broker_positions.source = 'ebull'" in normalised
         assert "broker_positions.source" in normalised
+
+    def test_empty_list_still_deletes_stale_rows(self) -> None:
+        """When no positions have position_id, DELETE still runs to
+        clean up stale rows from previous sync cycles."""
+        conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_cursor.__exit__ = MagicMock(return_value=False)
+        mock_cursor.__iter__ = MagicMock(return_value=iter([{"position_id": 8888, "instrument_id": 77}]))
+        conn.cursor.return_value = mock_cursor
+
+        # Empty list — no positions at all
+        upserted, deleted = _upsert_broker_positions(conn, [], _NOW)
+
+        assert upserted == 0
+        assert deleted == 1
+        # DELETE was issued with empty exclusion list
+        sql = mock_cursor.execute.call_args.args[0]
+        assert "DELETE FROM broker_positions" in sql
+        params = mock_cursor.execute.call_args.args[1]
+        assert params["ids"] == []
 
 
 class TestBrokerPositionsInSyncPortfolio:
