@@ -102,40 +102,51 @@ CREATE INDEX IF NOT EXISTS idx_analyst_estimates_instrument
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE VIEW instrument_valuation AS
+WITH priced AS (
+    -- Best available price: last if positive, else bid/ask midpoint.
+    -- Matches the scorer's fallback logic in _load_instrument_data.
+    SELECT instrument_id,
+           COALESCE(
+               NULLIF(GREATEST(last, 0), 0),
+               CASE WHEN bid > 0 AND ask > 0 THEN (bid + ask) / 2 END
+           )                       AS price,
+           quoted_at
+    FROM quotes
+)
 SELECT
     fs.instrument_id,
-    q.last                                                          AS current_price,
-    q.quoted_at                                                     AS price_as_of,
+    p.price                                                         AS current_price,
+    p.quoted_at                                                     AS price_as_of,
     fs.as_of_date                                                   AS fundamentals_as_of,
 
     -- Live market cap: price × shares (both must be positive)
     CASE
-        WHEN q.last > 0 AND fs.shares_outstanding > 0
-        THEN q.last * fs.shares_outstanding
+        WHEN p.price > 0 AND fs.shares_outstanding > 0
+        THEN p.price * fs.shares_outstanding
     END                                                             AS market_cap_live,
 
     -- Price / Earnings
     CASE
-        WHEN q.last > 0 AND fs.eps > 0
-        THEN q.last / fs.eps
+        WHEN p.price > 0 AND fs.eps > 0
+        THEN p.price / fs.eps
     END                                                             AS pe_ratio,
 
     -- Price / Book
     CASE
-        WHEN q.last > 0 AND fs.book_value > 0
-        THEN q.last / fs.book_value
+        WHEN p.price > 0 AND fs.book_value > 0
+        THEN p.price / fs.book_value
     END                                                             AS pb_ratio,
 
     -- Price / Free Cash Flow  (market cap / total FCF)
     CASE
-        WHEN q.last > 0 AND fs.shares_outstanding > 0 AND fs.fcf > 0
-        THEN (q.last * fs.shares_outstanding) / fs.fcf
+        WHEN p.price > 0 AND fs.shares_outstanding > 0 AND fs.fcf > 0
+        THEN (p.price * fs.shares_outstanding) / fs.fcf
     END                                                             AS p_fcf_ratio,
 
     -- FCF Yield  (total FCF / market cap)
     CASE
-        WHEN q.last > 0 AND fs.shares_outstanding > 0
-        THEN fs.fcf / (q.last * fs.shares_outstanding)
+        WHEN p.price > 0 AND fs.shares_outstanding > 0
+        THEN fs.fcf / (p.price * fs.shares_outstanding)
     END                                                             AS fcf_yield,
 
     -- Debt / Equity  (total debt / (book value per share × shares))
@@ -157,4 +168,4 @@ FROM (
     FROM fundamentals_snapshot
     ORDER BY instrument_id, as_of_date DESC
 ) fs
-JOIN quotes q USING (instrument_id);
+JOIN priced p USING (instrument_id);

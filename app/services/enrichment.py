@@ -186,9 +186,12 @@ def _upsert_earnings_events(
                 surprise_pct     = EXCLUDED.surprise_pct,
                 fetched_at       = NOW()
             WHERE (
-                earnings_events.eps_actual     IS DISTINCT FROM EXCLUDED.eps_actual OR
-                earnings_events.revenue_actual IS DISTINCT FROM EXCLUDED.revenue_actual OR
-                earnings_events.surprise_pct   IS DISTINCT FROM EXCLUDED.surprise_pct
+                earnings_events.reporting_date   IS DISTINCT FROM EXCLUDED.reporting_date OR
+                earnings_events.eps_estimate     IS DISTINCT FROM EXCLUDED.eps_estimate OR
+                earnings_events.eps_actual       IS DISTINCT FROM EXCLUDED.eps_actual OR
+                earnings_events.revenue_estimate IS DISTINCT FROM EXCLUDED.revenue_estimate OR
+                earnings_events.revenue_actual   IS DISTINCT FROM EXCLUDED.revenue_actual OR
+                earnings_events.surprise_pct     IS DISTINCT FROM EXCLUDED.surprise_pct
             )
             """,
             {

@@ -87,8 +87,8 @@ class TestBuildEarningsEvent:
     def test_build_earnings_event_full(self) -> None:
         """Full FMP row including EPS, revenue, and surprise calculation."""
         row = {
-            "date": "2024-09-28",
-            "reportedDate": "2024-10-31",
+            "fiscalDateEnding": "2024-09-28",
+            "date": "2024-10-31",
             "epsEstimated": "1.50",
             "eps": "1.64",
             "revenueEstimated": "94_000_000_000",
@@ -110,8 +110,8 @@ class TestBuildEarningsEvent:
     def test_build_earnings_event_missing_eps(self) -> None:
         """When EPS fields are absent, surprise should be None."""
         row = {
-            "date": "2024-06-29",
-            "reportedDate": "2024-07-30",
+            "fiscalDateEnding": "2024-06-29",
+            "date": "2024-07-30",
             "revenueEstimated": "85_000_000_000",
             "revenue": "85_777_000_000",
         }
@@ -126,7 +126,8 @@ class TestBuildEarningsEvent:
     def test_build_earnings_event_zero_eps_estimate(self) -> None:
         """eps_estimate == 0 must not cause a division by zero — surprise should be None."""
         row = {
-            "date": "2023-12-30",
+            "fiscalDateEnding": "2023-12-30",
+            "date": "2024-01-25",
             "epsEstimated": "0",
             "eps": "0.05",
         }
@@ -139,19 +140,20 @@ class TestBuildEarningsEvent:
         assert event.surprise_pct is None
 
     def test_build_earnings_event_missing_reported_date(self) -> None:
-        """reportedDate absent should give reporting_date=None."""
-        row = {"date": "2025-03-29"}
+        """When 'date' (announcement) is absent, reporting_date should be None."""
+        row = {"fiscalDateEnding": "2025-03-29"}
         event = _build_earnings_event("NVDA", row)
 
         assert event.reporting_date is None
         assert event.fiscal_date_ending == date(2025, 3, 29)
 
     def test_build_earnings_event_invalid_reported_date(self) -> None:
-        """Unparseable reportedDate yields None, not an exception."""
-        row = {"date": "2025-03-29", "reportedDate": "TBD"}
+        """Unparseable 'date' (announcement) yields reporting_date=None."""
+        row = {"fiscalDateEnding": "2025-03-29", "date": "TBD"}
         event = _build_earnings_event("NVDA", row)
 
         assert event.reporting_date is None
+        assert event.fiscal_date_ending == date(2025, 3, 29)
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +178,7 @@ class TestBuildAnalystEstimates:
             "sell": 3,
         }
         price_target: dict[str, object] = {
-            "targetMean": "215.50",
+            "targetConsensus": "215.50",
             "targetHigh": "260.00",
             "targetLow": "170.00",
             "numberOfAnalysts": 40,
@@ -252,7 +254,7 @@ class TestBuildAnalystEstimates:
             }
         ]
         price_target: dict[str, object] = {
-            "targetMean": "100.00",
+            "targetConsensus": "100.00",
             # numberOfAnalysts absent
         }
 

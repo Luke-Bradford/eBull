@@ -491,12 +491,15 @@ def _build_earnings_event(
     Build an EarningsEvent from a single FMP earnings calendar response row.
 
     Pure function — no I/O.
-    Raises ValueError if the required 'date' field cannot be parsed.
+    FMP fields: 'fiscalDateEnding' = fiscal period end, 'date' = announcement date.
+    Raises ValueError if 'fiscalDateEnding' cannot be parsed.
     """
-    fiscal_date_ending = date.fromisoformat(str(row["date"])[:10])
+    # FMP 'fiscalDateEnding' is the fiscal quarter end; 'date' is announcement date
+    raw_fiscal = row.get("fiscalDateEnding") or row.get("date")
+    fiscal_date_ending = date.fromisoformat(str(raw_fiscal)[:10])
 
     reporting_date: date | None = None
-    raw_reported = row.get("reportedDate")
+    raw_reported = row.get("date")  # announcement/reporting date
     if raw_reported is not None:
         try:
             reporting_date = date.fromisoformat(str(raw_reported)[:10])
@@ -575,7 +578,7 @@ def _build_analyst_estimates(
     analyst_count: int | None = analyst_count_from_est
 
     if price_target is not None:
-        price_target_mean = _decimal_or_none(price_target.get("targetMean"))
+        price_target_mean = _decimal_or_none(price_target.get("targetConsensus") or price_target.get("targetMean"))
         price_target_high = _decimal_or_none(price_target.get("targetHigh"))
         price_target_low = _decimal_or_none(price_target.get("targetLow"))
         pt_analyst_count = _int_or_none(price_target.get("numberOfAnalysts"))
