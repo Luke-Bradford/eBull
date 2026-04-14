@@ -1,20 +1,21 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { fetchPortfolio } from "@/api/portfolio";
+import { fetchMirrorDetail } from "@/api/copyTrading";
 import { useAsync } from "@/lib/useAsync";
 import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatMoney, formatNumber, formatPct, formatDateTime, pnlPct } from "@/lib/format";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
-import type { PositionItem, PortfolioMirrorItem, BrokerPositionItem } from "@/api/types";
+import type { PositionItem, PortfolioMirrorItem, BrokerPositionItem, MirrorPositionItem } from "@/api/types";
 
 /**
  * Portfolio page — the operator's main working view.
  *
- * Dense, financial-tool aesthetic. Compact summary bar at the top,
- * unified positions+mirrors table with search, accordion-expand to
- * individual trades with SL/TP. Mirrors sort alongside direct holdings
- * by value and link through to their detail page.
+ * Dense, financial-tool aesthetic. Unified positions+mirrors table with
+ * search. Positions expand to individual trades with SL/TP. Mirrors expand
+ * to show instrument groups (lazy-fetched). Both row types sort together
+ * by value for a single ranked view of the entire portfolio.
  */
 export function PortfolioPage() {
   const portfolio = useAsync(fetchPortfolio, []);
@@ -57,14 +58,14 @@ export function PortfolioPage() {
 }
 
 // ---------------------------------------------------------------------------
-// Summary bar — compact inline stats
+// Summary bar
 // ---------------------------------------------------------------------------
 
 function SummaryBar({
   data,
   currency,
 }: {
-  data: { total_aum: number; cash_balance: number | null; positions: PositionItem[]; mirrors: PortfolioMirrorItem[] };
+  data: { total_aum: number; cash_balance: number | null; positions: PositionItem[]; mirrors?: PortfolioMirrorItem[] };
   currency: string;
 }) {
   let totalPnl = 0;
@@ -79,7 +80,7 @@ function SummaryBar({
   }
   const pct = pnlPct(totalPnl, totalCost);
   const posCount = data.positions.reduce((n, p) => n + ((p.trades?.length) || 1), 0);
-  const mirrorCount = data.mirrors?.length ?? 0;
+  const mirrorCount = (data.mirrors ?? []).length;
 
   return (
     <div className="flex flex-wrap items-center gap-x-6 gap-y-1 rounded-md border border-slate-200 bg-white px-4 py-2.5 text-sm shadow-sm">
@@ -121,7 +122,7 @@ function Stat({
 }
 
 // ---------------------------------------------------------------------------
-// Unified table — positions + mirrors, sorted by value
+// Unified table
 // ---------------------------------------------------------------------------
 
 type RowItem =
@@ -140,14 +141,9 @@ function matchesSearch(row: RowItem, q: string): boolean {
   return row.data.parent_username.toLowerCase().includes(lower);
 }
 
-// Avatar colour derived from username string.
 const AVATAR_TONES = [
-  "bg-blue-600",
-  "bg-emerald-600",
-  "bg-amber-600",
-  "bg-rose-600",
-  "bg-violet-600",
-  "bg-cyan-600",
+  "bg-blue-600", "bg-emerald-600", "bg-amber-600",
+  "bg-rose-600", "bg-violet-600", "bg-cyan-600",
 ] as const;
 
 function avatarTone(name: string): string {
@@ -164,7 +160,7 @@ function PortfolioTable({
   onSearchChange,
 }: {
   positions: PositionItem[];
-  mirrors: PortfolioMirrorItem[];
+  mirrors?: PortfolioMirrorItem[];
   currency: string;
   search: string;
   onSearchChange: (v: string) => void;
@@ -196,7 +192,6 @@ function PortfolioTable({
 
   return (
     <div className="rounded-md border border-slate-200 bg-white shadow-sm">
-      {/* Search bar */}
       <div className="border-b border-slate-100 px-4 py-2">
         <input
           type="text"
@@ -207,7 +202,6 @@ function PortfolioTable({
         />
       </div>
 
-      {/* Table */}
       <div className="overflow-x-auto">
         <table className="w-full text-left text-sm">
           <thead>
@@ -215,7 +209,9 @@ function PortfolioTable({
               <th className="px-4 py-2 text-left font-medium">Instrument</th>
               <th className="px-2 py-2 text-right font-medium">Trades</th>
               <th className="px-2 py-2 text-right font-medium">Units</th>
+              <th className="px-2 py-2 text-right font-medium">Avg Entry</th>
               <th className="px-2 py-2 text-right font-medium">Price</th>
+              <th className="px-2 py-2 text-right font-medium">Invested</th>
               <th className="px-2 py-2 text-right font-medium">Value</th>
               <th className="px-2 py-2 text-right font-medium">P&L</th>
               <th className="px-2 py-2 text-right font-medium">%</th>
@@ -224,24 +220,16 @@ function PortfolioTable({
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-400">
+                <td colSpan={9} className="px-4 py-8 text-center text-sm text-slate-400">
                   No matches for &ldquo;{search}&rdquo;
                 </td>
               </tr>
             ) : (
               filtered.map((row) =>
                 row.kind === "position" ? (
-                  <PositionRow
-                    key={`pos-${row.data.instrument_id}`}
-                    p={row.data}
-                    currency={currency}
-                  />
+                  <PositionRow key={`pos-${row.data.instrument_id}`} p={row.data} currency={currency} />
                 ) : (
-                  <MirrorRow
-                    key={`mir-${row.data.mirror_id}`}
-                    m={row.data}
-                    currency={currency}
-                  />
+                  <MirrorRow key={`mir-${row.data.mirror_id}`} m={row.data} currency={currency} />
                 ),
               )
             )}
@@ -273,7 +261,13 @@ function PositionRow({ p, currency }: { p: PositionItem; currency: string }) {
         onClick={() => setExpanded((v) => !v)}
       >
         <td className="px-4 py-2 text-left">
-          <span className="font-medium text-slate-800">{p.symbol}</span>
+          <Link
+            to={`/instruments/${p.instrument_id}`}
+            className="font-medium text-slate-800 hover:text-blue-600 hover:underline"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {p.symbol}
+          </Link>
           <span className="ml-1.5 text-xs text-slate-500">{p.company_name}</span>
           {tradeCount > 0 ? (
             <span className="ml-1.5 text-[10px] text-slate-400">
@@ -281,12 +275,16 @@ function PositionRow({ p, currency }: { p: PositionItem; currency: string }) {
             </span>
           ) : null}
         </td>
-        <td className="px-2 py-2 text-right tabular-nums text-slate-600">
-          {tradeCount || "—"}
-        </td>
+        <td className="px-2 py-2 text-right tabular-nums text-slate-600">{tradeCount || "—"}</td>
         <td className="px-2 py-2 text-right tabular-nums">{formatNumber(p.current_units)}</td>
+        <td className="px-2 py-2 text-right tabular-nums text-slate-500">
+          {p.avg_cost != null ? formatMoney(p.avg_cost, currency) : "—"}
+        </td>
         <td className="px-2 py-2 text-right tabular-nums">
           {p.current_price != null ? formatMoney(p.current_price, currency) : "—"}
+        </td>
+        <td className="px-2 py-2 text-right tabular-nums text-slate-600">
+          {formatMoney(p.cost_basis, currency)}
         </td>
         <td className="px-2 py-2 text-right tabular-nums">{formatMoney(p.market_value, currency)}</td>
         <td className="px-2 py-2 text-right tabular-nums">
@@ -302,13 +300,13 @@ function PositionRow({ p, currency }: { p: PositionItem; currency: string }) {
       </tr>
       {expanded && tradeCount > 0 ? (
         <>
-          {/* Sub-header for trade columns when multiple trades */}
           {hasMultiple ? (
             <tr className="border-t border-slate-100 bg-slate-50/60 text-[10px] uppercase tracking-wide text-slate-400">
               <td className="py-1 pl-8 pr-2">Entry</td>
               <td className="px-2 py-1 text-right">Open</td>
               <td className="px-2 py-1 text-right">Units</td>
-              <td className="px-2 py-1 text-right">SL / TP</td>
+              <td className="px-2 py-1 text-right" colSpan={2}>SL / TP</td>
+              <td className="px-2 py-1 text-right">Invested</td>
               <td className="px-2 py-1 text-right">Value</td>
               <td className="px-2 py-1 text-right">P&L</td>
               <td className="px-2 py-1 text-right">%</td>
@@ -317,17 +315,6 @@ function PositionRow({ p, currency }: { p: PositionItem; currency: string }) {
           {trades.map((t) => (
             <TradeRow key={t.position_id} t={t} currency={currency} />
           ))}
-          {/* Instrument link row */}
-          <tr className="border-t border-slate-100 bg-slate-50/40">
-            <td colSpan={7} className="px-4 py-1.5">
-              <Link
-                to={`/instruments/${p.instrument_id}`}
-                className="text-xs font-medium text-blue-600 hover:underline"
-              >
-                View instrument →
-              </Link>
-            </td>
-          </tr>
         </>
       ) : null}
     </>
@@ -335,7 +322,7 @@ function PositionRow({ p, currency }: { p: PositionItem; currency: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// Individual trade row — one eToro position
+// Individual trade row
 // ---------------------------------------------------------------------------
 
 function TradeRow({ t, currency }: { t: BrokerPositionItem; currency: string }) {
@@ -365,10 +352,13 @@ function TradeRow({ t, currency }: { t: BrokerPositionItem; currency: string }) 
         {formatDateTime(t.open_date_time).split(",")[0]}
       </td>
       <td className="px-2 py-1.5 text-right tabular-nums">{formatNumber(t.units)}</td>
-      <td className="px-2 py-1.5 text-right tabular-nums">
+      <td className="px-2 py-1.5 text-right tabular-nums" colSpan={2}>
         <span className="text-red-400">{t.stop_loss_rate != null ? formatMoney(t.stop_loss_rate, currency) : "—"}</span>
         <span className="mx-0.5 text-slate-300">/</span>
         <span className="text-emerald-500">{t.take_profit_rate != null ? formatMoney(t.take_profit_rate, currency) : "—"}</span>
+      </td>
+      <td className="px-2 py-1.5 text-right tabular-nums text-slate-500">
+        {formatMoney(t.amount, currency)}
       </td>
       <td className="px-2 py-1.5 text-right tabular-nums">
         {formatMoney(t.market_value, currency)}
@@ -388,41 +378,231 @@ function TradeRow({ t, currency }: { t: BrokerPositionItem; currency: string }) 
 }
 
 // ---------------------------------------------------------------------------
-// Mirror row — links through to copy-trading detail page
+// Mirror row — expandable inline, lazy-fetches positions
 // ---------------------------------------------------------------------------
 
 function MirrorRow({ m, currency }: { m: PortfolioMirrorItem; currency: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [mirrorPositions, setMirrorPositions] = useState<MirrorPositionItem[] | null>(null);
+  const [loading, setLoading] = useState(false);
   const pct = pnlPct(m.unrealized_pnl, m.funded);
   const positive = m.unrealized_pnl >= 0;
+
+  const handleToggle = () => {
+    if (!expanded && mirrorPositions === null && !loading) {
+      setLoading(true);
+      fetchMirrorDetail(m.mirror_id)
+        .then((detail) => {
+          setMirrorPositions(detail.mirror.positions);
+          setLoading(false);
+          setExpanded(true);
+        })
+        .catch(() => setLoading(false));
+    } else {
+      setExpanded((v) => !v);
+    }
+  };
+
+  // Group positions by instrument for inline display
+  const groups = mirrorPositions ? groupByInstrument(mirrorPositions) : [];
+
   return (
-    <tr className="border-t border-slate-100 hover:bg-slate-50/70">
-      <td className="px-4 py-2 text-left">
-        <Link
-          to={`/copy-trading/${m.mirror_id}`}
-          className="group inline-flex items-center gap-2 hover:no-underline"
+    <>
+      <tr
+        className={`cursor-pointer border-t border-slate-100 transition-colors ${
+          expanded ? "bg-blue-50/50" : "hover:bg-slate-50/70"
+        }`}
+        onClick={handleToggle}
+      >
+        <td className="px-4 py-2 text-left">
+          <span className="inline-flex items-center gap-2">
+            <span
+              className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white ${avatarTone(m.parent_username)}`}
+            >
+              {m.parent_username.charAt(0).toUpperCase()}
+            </span>
+            <span className="font-medium text-slate-800">{m.parent_username}</span>
+            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
+              COPY
+            </span>
+            <span className="text-[10px] text-slate-400">
+              {loading ? "…" : expanded ? "▾" : "▸"}
+            </span>
+          </span>
+        </td>
+        <td className="px-2 py-2 text-right tabular-nums text-slate-600">{m.position_count}</td>
+        <td className="px-2 py-2 text-right tabular-nums text-slate-300">—</td>
+        <td className="px-2 py-2 text-right tabular-nums text-slate-300">—</td>
+        <td className="px-2 py-2 text-right tabular-nums text-slate-300">—</td>
+        <td className="px-2 py-2 text-right tabular-nums text-slate-600">
+          {formatMoney(m.funded, currency)}
+        </td>
+        <td className="px-2 py-2 text-right tabular-nums">{formatMoney(m.mirror_equity, currency)}</td>
+        <td className="px-2 py-2 text-right tabular-nums">
+          <span className={positive ? "text-emerald-600" : "text-red-600"}>
+            {formatMoney(m.unrealized_pnl, currency)}
+          </span>
+        </td>
+        <td className="px-2 py-2 text-right tabular-nums">
+          <span className={positive ? "text-emerald-600" : "text-red-600"}>
+            {pct === null ? "—" : formatPct(pct)}
+          </span>
+        </td>
+      </tr>
+      {expanded && mirrorPositions !== null ? (
+        <>
+          {groups.map((g) => (
+            <MirrorInstrumentRow key={g.instrument_id} group={g} currency={currency} />
+          ))}
+          <tr className="border-t border-slate-100 bg-slate-50/40">
+            <td colSpan={9} className="px-4 py-1.5">
+              <Link
+                to={`/copy-trading/${m.mirror_id}`}
+                className="text-xs font-medium text-blue-600 hover:underline"
+              >
+                View full detail →
+              </Link>
+            </td>
+          </tr>
+        </>
+      ) : null}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Mirror instrument group — one row per instrument within an expanded mirror
+// ---------------------------------------------------------------------------
+
+interface InstrumentGroup {
+  instrument_id: number;
+  symbol: string | null;
+  company_name: string | null;
+  total_units: number;
+  total_market_value: number;
+  total_pnl: number;
+  total_invested: number;
+  current_price: number | null;
+  positions: MirrorPositionItem[];
+}
+
+function groupByInstrument(positions: MirrorPositionItem[]): InstrumentGroup[] {
+  const map = new Map<number, MirrorPositionItem[]>();
+  for (const p of positions) {
+    const existing = map.get(p.instrument_id);
+    if (existing) existing.push(p);
+    else map.set(p.instrument_id, [p]);
+  }
+
+  const groups: InstrumentGroup[] = [];
+  for (const [instrument_id, items] of map) {
+    const first = items[0];
+    if (!first) continue;
+    groups.push({
+      instrument_id,
+      symbol: first.symbol,
+      company_name: first.company_name,
+      total_units: items.reduce((s, p) => s + p.units, 0),
+      total_market_value: items.reduce((s, p) => s + p.market_value, 0),
+      total_pnl: items.reduce((s, p) => s + p.unrealized_pnl, 0),
+      total_invested: items.reduce((s, p) => s + p.amount, 0),
+      current_price: items.find((p) => p.current_price != null)?.current_price ?? null,
+      positions: items,
+    });
+  }
+
+  groups.sort((a, b) => b.total_market_value - a.total_market_value);
+  return groups;
+}
+
+function MirrorInstrumentRow({ group, currency }: { group: InstrumentGroup; currency: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const positive = group.total_pnl >= 0;
+  const pct = pnlPct(group.total_pnl, group.total_invested);
+  const hasMultiple = group.positions.length > 1;
+
+  return (
+    <>
+      <tr
+        className={`border-t border-slate-50 bg-slate-50/60 text-xs text-slate-600 ${hasMultiple ? "cursor-pointer hover:bg-slate-100/60" : ""}`}
+        onClick={hasMultiple ? () => setExpanded((v) => !v) : undefined}
+      >
+        <td className="py-1.5 pl-8 pr-2 text-left">
+          <span className="font-medium text-slate-700">
+            {group.symbol ?? `#${group.instrument_id}`}
+          </span>
+          {group.company_name ? (
+            <span className="ml-1.5 text-[10px] text-slate-400">{group.company_name}</span>
+          ) : null}
+          {hasMultiple ? (
+            <span className="ml-1 text-[10px] text-slate-400">{expanded ? "▾" : "▸"}</span>
+          ) : null}
+        </td>
+        <td className="px-2 py-1.5 text-right tabular-nums">{group.positions.length}</td>
+        <td className="px-2 py-1.5 text-right tabular-nums">{formatNumber(group.total_units)}</td>
+        <td className="px-2 py-1.5 text-right tabular-nums text-slate-300" colSpan={2}>
+          {group.current_price != null ? formatMoney(group.current_price, currency) : "—"}
+        </td>
+        <td className="px-2 py-1.5 text-right tabular-nums">
+          {formatMoney(group.total_invested, currency)}
+        </td>
+        <td className="px-2 py-1.5 text-right tabular-nums">
+          {formatMoney(group.total_market_value, currency)}
+        </td>
+        <td className="px-2 py-1.5 text-right tabular-nums">
+          <span className={positive ? "text-emerald-600" : "text-red-600"}>
+            {formatMoney(group.total_pnl, currency)}
+          </span>
+        </td>
+        <td className="px-2 py-1.5 text-right tabular-nums">
+          <span className={positive ? "text-emerald-600" : "text-red-600"}>
+            {pct === null ? "—" : formatPct(pct)}
+          </span>
+        </td>
+      </tr>
+      {expanded
+        ? group.positions.map((p) => (
+            <MirrorSubPositionRow key={p.position_id} position={p} currency={currency} />
+          ))
+        : null}
+    </>
+  );
+}
+
+function MirrorSubPositionRow({ position, currency }: { position: MirrorPositionItem; currency: string }) {
+  const positive = position.unrealized_pnl >= 0;
+  const pct = pnlPct(position.unrealized_pnl, position.amount);
+  return (
+    <tr className="border-t border-slate-50 bg-slate-100/40 text-[11px] text-slate-500">
+      <td className="py-1 pl-12 pr-2 text-left">
+        <span
+          className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${
+            position.is_buy ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"
+          }`}
         >
-          <span
-            className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white ${avatarTone(m.parent_username)}`}
-          >
-            {m.parent_username.charAt(0).toUpperCase()}
-          </span>
-          <span className="font-medium text-blue-600 group-hover:underline">
-            {m.parent_username}
-          </span>
-        </Link>
-      </td>
-      <td className="px-2 py-2 text-right tabular-nums text-slate-400">
-        {m.position_count}
-      </td>
-      <td className="px-2 py-2 text-right tabular-nums text-slate-300">—</td>
-      <td className="px-2 py-2 text-right tabular-nums text-slate-300">—</td>
-      <td className="px-2 py-2 text-right tabular-nums">{formatMoney(m.mirror_equity, currency)}</td>
-      <td className="px-2 py-2 text-right tabular-nums">
-        <span className={positive ? "text-emerald-600" : "text-red-600"}>
-          {formatMoney(m.unrealized_pnl, currency)}
+          {position.is_buy ? "LONG" : "SHORT"}
+        </span>
+        <span className="ml-2 tabular-nums text-slate-400">
+          entry {formatNumber(position.open_rate, 2)}
         </span>
       </td>
-      <td className="px-2 py-2 text-right tabular-nums">
+      <td className="px-2 py-1 text-right" />
+      <td className="px-2 py-1 text-right tabular-nums">{formatNumber(position.units)}</td>
+      <td className="px-2 py-1 text-right tabular-nums text-slate-300" colSpan={2}>
+        {position.current_price != null ? formatMoney(position.current_price, currency) : "—"}
+      </td>
+      <td className="px-2 py-1 text-right tabular-nums">
+        {formatMoney(position.amount, currency)}
+      </td>
+      <td className="px-2 py-1 text-right tabular-nums">
+        {formatMoney(position.market_value, currency)}
+      </td>
+      <td className="px-2 py-1 text-right tabular-nums">
+        <span className={positive ? "text-emerald-600" : "text-red-600"}>
+          {formatMoney(position.unrealized_pnl, currency)}
+        </span>
+      </td>
+      <td className="px-2 py-1 text-right tabular-nums">
         <span className={positive ? "text-emerald-600" : "text-red-600"}>
           {pct === null ? "—" : formatPct(pct)}
         </span>
