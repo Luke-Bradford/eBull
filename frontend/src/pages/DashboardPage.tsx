@@ -76,7 +76,10 @@ export function DashboardPage() {
                 {portfolio.loading ? (
                   <SectionSkeleton rows={4} />
                 ) : (
-                  <PositionsTable positions={portfolio.data?.positions ?? []} />
+                  <PositionsTable
+                    positions={portfolio.data?.positions ?? []}
+                    mirrors={portfolio.data?.mirrors ?? []}
+                  />
                 )}
               </Section>
             </>

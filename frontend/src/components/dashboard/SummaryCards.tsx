@@ -36,6 +36,12 @@ export function SummaryCards({ data }: { data: PortfolioResponse | null }) {
     totalPnl += p.unrealized_pnl;
     totalCost += p.cost_basis;
   }
+  // Include mirror P&L in the total: mirrors contribute both to the
+  // unrealized total and to the cost basis denominator (via funded amount).
+  for (const m of data.mirrors ?? []) {
+    totalPnl += m.unrealized_pnl;
+    totalCost += m.funded;
+  }
   const pnlFraction = pnlPct(totalPnl, totalCost);
 
   return (

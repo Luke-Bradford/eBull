@@ -135,6 +135,7 @@ const emptyRecs: RecommendationsListResponse = {
 };
 const emptyPortfolio: PortfolioResponse = {
   positions: [],
+  mirrors: [],
   position_count: 0,
   total_aum: 0,
   cash_balance: null,
@@ -411,6 +412,7 @@ describe("InstrumentDetailPage — position", () => {
           updated_at: "2024-06-01T00:00:00Z",
         },
       ],
+      mirrors: [],
       position_count: 1,
       total_aum: 1910,
       cash_balance: 500,

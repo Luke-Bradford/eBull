@@ -1,48 +1,61 @@
-import { useState } from "react";
-import { fetchCopyTrading } from "@/api/copyTrading";
+import { useParams, Link } from "react-router-dom";
+import { fetchMirrorDetail } from "@/api/copyTrading";
 import { useAsync } from "@/lib/useAsync";
 import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatMoney, formatNumber, formatDateTime } from "@/lib/format";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
-import type { CopyTraderSummary, MirrorSummary, MirrorPositionItem } from "@/api/types";
+import type { MirrorSummary, MirrorPositionItem } from "@/api/types";
 
 /**
- * Copy-trading browsing page (#188 — Track 1.5).
+ * Mirror detail page (#221 — mirrors as positions).
  *
- * Shows per-trader cards with mirror-level aggregates and an expandable
- * nested-position drill-down. Closed mirrors are shown in a separate
- * history section at the bottom.
+ * Drill-down from a mirror row in the dashboard positions table.
+ * Shows per-mirror stats and the component positions held by the
+ * copied trader. Replaces the standalone CopyTradingPage (#188).
  */
 export function CopyTradingPage() {
+  const { mirrorId } = useParams<{ mirrorId: string }>();
   const currency = useDisplayCurrency();
-  // useAsync captures fn via a ref — fresh arrow per render is fine.
-  const ct = useAsync(fetchCopyTrading, []);
+  const parsedId = Number(mirrorId);
+  const detail = useAsync(() => fetchMirrorDetail(parsedId), [parsedId]);
+
+  if (!mirrorId || Number.isNaN(parsedId)) {
+    return (
+      <EmptyState
+        title="Invalid mirror"
+        description="No mirror ID was provided in the URL."
+      >
+        <Link to="/" className="text-sm font-medium text-blue-600 hover:underline">
+          Back to dashboard
+        </Link>
+      </EmptyState>
+    );
+  }
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-semibold text-slate-800">Copy Trading</h1>
+      <div className="flex items-center gap-3">
+        <Link to="/" className="text-sm text-slate-500 hover:text-slate-700">
+          ← Dashboard
+        </Link>
+        <h1 className="text-xl font-semibold text-slate-800">
+          {detail.data ? `Copy: ${detail.data.parent_username}` : "Mirror detail"}
+        </h1>
+      </div>
 
-      {ct.error !== null ? (
+      {detail.error !== null ? (
         <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-          <SectionError onRetry={ct.refetch} />
+          <SectionError onRetry={detail.refetch} />
         </div>
-      ) : ct.loading || ct.data === null ? (
+      ) : detail.loading || detail.data === null ? (
         <SectionSkeleton rows={6} />
-      ) : ct.data.traders.length === 0 ? (
-        <EmptyState
-          title="No copy traders"
-          description="Mirror positions will appear here once a copy-trading relationship is synced from eToro."
-        />
       ) : (
         <>
-          <MirrorEquitySummary
-            totalMirrorEquity={ct.data.total_mirror_equity}
-            currency={currency}
-            traderCount={ct.data.traders.length}
-          />
-          <ActiveTraders traders={ct.data.traders} currency={currency} />
-          <ClosedMirrors traders={ct.data.traders} currency={currency} />
+          <MirrorStats mirror={detail.data.mirror} currency={currency} />
+          <Section title="Positions">
+            <MirrorPositionsTable positions={detail.data.mirror.positions} currency={currency} />
+          </Section>
         </>
       )}
     </div>
@@ -50,130 +63,12 @@ export function CopyTradingPage() {
 }
 
 // ---------------------------------------------------------------------------
-// Summary
+// Mirror stats (reused from the original CopyTradingPage)
 // ---------------------------------------------------------------------------
-
-function MirrorEquitySummary({
-  totalMirrorEquity,
-  currency,
-  traderCount,
-}: {
-  totalMirrorEquity: number;
-  currency: string;
-  traderCount: number;
-}) {
-  return (
-    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-      <StatCard label="Mirror equity" value={formatMoney(totalMirrorEquity, currency)} />
-      <StatCard label="Copied traders" value={String(traderCount)} />
-    </div>
-  );
-}
-
-function StatCard({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</div>
-      <div className="mt-1 text-lg font-semibold text-slate-800">{value}</div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Active traders
-// ---------------------------------------------------------------------------
-
-function ActiveTraders({
-  traders,
-  currency,
-}: {
-  traders: CopyTraderSummary[];
-  currency: string;
-}) {
-  const activeMirrors = traders.flatMap((t) =>
-    t.mirrors.filter((m) => m.active).map((m) => ({ trader: t, mirror: m })),
-  );
-
-  if (activeMirrors.length === 0) return null;
-
-  return (
-    <Section title="Active mirrors">
-      <div className="space-y-4">
-        {activeMirrors.map(({ trader, mirror }) => (
-          <TraderMirrorCard
-            key={mirror.mirror_id}
-            trader={trader}
-            mirror={mirror}
-            currency={currency}
-          />
-        ))}
-      </div>
-    </Section>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Trader card
-// ---------------------------------------------------------------------------
-
-function TraderMirrorCard({
-  trader,
-  mirror,
-  currency,
-}: {
-  trader: CopyTraderSummary;
-  mirror: MirrorSummary;
-  currency: string;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const funded = mirror.initial_investment + mirror.deposit_summary - mirror.withdrawal_summary;
-  const pnl = mirror.mirror_equity - funded;
-
-  return (
-    <div className="rounded-md border border-slate-200 bg-white">
-      <button
-        type="button"
-        className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-slate-50"
-        onClick={() => setExpanded(!expanded)}
-      >
-        <div>
-          <span className="text-sm font-semibold text-slate-800">{trader.parent_username}</span>
-          <span className="ml-2 text-xs text-slate-500">
-            {mirror.position_count} position{mirror.position_count !== 1 ? "s" : ""}
-          </span>
-        </div>
-        <div className="flex items-center gap-4">
-          <div className="text-right">
-            <div className="text-xs text-slate-500">Equity</div>
-            <div className="text-sm font-medium tabular-nums text-slate-800">
-              {formatMoney(mirror.mirror_equity, currency)}
-            </div>
-          </div>
-          <div className="text-right">
-            <div className="text-xs text-slate-500">P&L</div>
-            <div
-              className={`text-sm font-medium tabular-nums ${pnl >= 0 ? "text-emerald-600" : "text-red-600"}`}
-            >
-              {formatMoney(pnl, currency)}
-            </div>
-          </div>
-          <span className="text-slate-400">{expanded ? "▲" : "▼"}</span>
-        </div>
-      </button>
-
-      {expanded && (
-        <div className="border-t border-slate-100 px-4 py-3">
-          <MirrorStats mirror={mirror} currency={currency} />
-          <MirrorPositionsTable positions={mirror.positions} currency={currency} />
-        </div>
-      )}
-    </div>
-  );
-}
 
 function MirrorStats({ mirror, currency }: { mirror: MirrorSummary; currency: string }) {
   return (
-    <div className="mb-3 grid grid-cols-2 gap-x-6 gap-y-1 text-xs sm:grid-cols-4">
+    <div className="grid grid-cols-2 gap-x-6 gap-y-2 rounded-md border border-slate-200 bg-white p-4 text-sm shadow-sm sm:grid-cols-3">
       <LabelValue label="Initial investment" value={formatMoney(mirror.initial_investment, currency)} />
       <LabelValue label="Deposits" value={formatMoney(mirror.deposit_summary, currency)} />
       <LabelValue label="Withdrawals" value={formatMoney(mirror.withdrawal_summary, currency)} />
@@ -187,14 +82,14 @@ function MirrorStats({ mirror, currency }: { mirror: MirrorSummary; currency: st
 function LabelValue({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <span className="text-slate-500">{label}: </span>
+      <span className="text-xs text-slate-500">{label}: </span>
       <span className="font-medium tabular-nums text-slate-700">{value}</span>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Mirror positions table
+// Mirror positions table (reused from the original CopyTradingPage)
 // ---------------------------------------------------------------------------
 
 function MirrorPositionsTable({
@@ -272,38 +167,5 @@ function MirrorPositionRow({
         </span>
       </td>
     </tr>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Closed mirrors
-// ---------------------------------------------------------------------------
-
-function ClosedMirrors({
-  traders,
-  currency,
-}: {
-  traders: CopyTraderSummary[];
-  currency: string;
-}) {
-  const closedMirrors = traders.flatMap((t) =>
-    t.mirrors.filter((m) => !m.active).map((m) => ({ trader: t, mirror: m })),
-  );
-
-  if (closedMirrors.length === 0) return null;
-
-  return (
-    <Section title="Closed mirrors">
-      <div className="space-y-4">
-        {closedMirrors.map(({ trader, mirror }) => (
-          <TraderMirrorCard
-            key={mirror.mirror_id}
-            trader={trader}
-            mirror={mirror}
-            currency={currency}
-          />
-        ))}
-      </div>
-    </Section>
   );
 }

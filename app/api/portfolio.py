@@ -37,7 +37,7 @@ from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.domain.positions import PositionSource
 from app.services.fx import FxRateNotFound, convert, load_live_fx_rates_with_metadata
-from app.services.portfolio import _load_mirror_equity
+from app.services.portfolio import load_mirror_breakdowns
 from app.services.runtime_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
@@ -70,8 +70,20 @@ class PositionItem(BaseModel):
     updated_at: datetime
 
 
+class PortfolioMirrorItem(BaseModel):
+    mirror_id: int
+    parent_username: str
+    active: bool
+    funded: float  # initial_investment + deposits - withdrawals (display currency)
+    mirror_equity: float  # available_amount + sum(position market values) (display currency)
+    unrealized_pnl: float  # mirror_equity - funded (display currency)
+    position_count: int
+    started_copy_date: datetime
+
+
 class PortfolioResponse(BaseModel):
     positions: list[PositionItem]
+    mirrors: list[PortfolioMirrorItem] = []
     position_count: int
     total_aum: float
     cash_balance: float | None
@@ -298,9 +310,29 @@ def get_portfolio(
 
     # AUM: sum of position market_values + cash (if known) + mirror_equity.
     total_market = sum(p.market_value for p in positions)
-    raw_mirror_equity = _load_mirror_equity(conn)
 
-    # Convert mirror_equity — always USD for eToro.
+    # Per-mirror breakdowns — derive total mirror_equity from these so we
+    # load mirror data once instead of running two separate queries.
+    mirror_breakdowns = load_mirror_breakdowns(conn)
+    raw_mirror_equity = sum(mb.mirror_equity_usd for mb in mirror_breakdowns)
+
+    # Convert each mirror's monetary values from USD to display currency.
+    mirrors: list[PortfolioMirrorItem] = []
+    for mb in mirror_breakdowns:
+        mirrors.append(
+            PortfolioMirrorItem(
+                mirror_id=mb.mirror_id,
+                parent_username=mb.parent_username,
+                active=mb.active,
+                funded=_convert_value(mb.funded_usd, "USD", display_currency, rates),
+                mirror_equity=_convert_value(mb.mirror_equity_usd, "USD", display_currency, rates),
+                unrealized_pnl=_convert_value(mb.unrealized_pnl_usd, "USD", display_currency, rates),
+                position_count=mb.position_count,
+                started_copy_date=mb.started_copy_date,
+            )
+        )
+
+    # Convert total mirror_equity — always USD for eToro.
     mirror_equity = _convert_value(raw_mirror_equity, "USD", display_currency, rates)
 
     total_aum = total_market + (cash_balance if cash_balance is not None else 0.0) + mirror_equity
@@ -315,6 +347,7 @@ def get_portfolio(
 
     return PortfolioResponse(
         positions=positions,
+        mirrors=mirrors,
         position_count=len(positions),
         total_aum=total_aum,
         cash_balance=cash_balance,

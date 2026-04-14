@@ -65,6 +65,33 @@ def _make_cash_row(cash_balance: float | None = 5000.00) -> dict[str, Any]:
     return {"cash_balance": cash_balance}
 
 
+def _make_mirror_row(
+    mirror_id: int = 1001,
+    parent_username: str = "thomaspj",
+    active: bool = True,
+    initial_investment: float = 10000.0,
+    deposit_summary: float = 0.0,
+    withdrawal_summary: float = 0.0,
+    available_amount: float = 500.0,
+    positions_mv: float = 0.0,
+    position_count: int = 0,
+    started_copy_date: datetime = _NOW,
+) -> dict[str, Any]:
+    """Build a dict matching the load_mirror_breakdowns query shape."""
+    return {
+        "mirror_id": mirror_id,
+        "parent_username": parent_username,
+        "active": active,
+        "initial_investment": initial_investment,
+        "deposit_summary": deposit_summary,
+        "withdrawal_summary": withdrawal_summary,
+        "available_amount": available_amount,
+        "positions_mv": positions_mv,
+        "position_count": position_count,
+        "started_copy_date": started_copy_date,
+    }
+
+
 def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
     """Build a mock psycopg.Connection.
 
@@ -88,14 +115,12 @@ def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
 
 
 def _with_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
-    # The endpoint runs three DB queries: positions, cash, mirror_equity.
+    # The endpoint runs three DB queries: positions, cash, mirror_breakdowns.
     # Existing callers supply [positions, cash] only — pad with an empty
-    # mirror_equity result so the mock cursor feeder yields 0.0 for the
-    # third execute() (matches `COALESCE(SUM(...), 0)` from the real CTE
-    # at app/services/portfolio.py:201 — see #187 Track 1b Task 4).
+    # mirror_breakdowns result so load_mirror_breakdowns returns [].
     padded = list(cursor_results)
     if len(padded) == 2:
-        padded.append([{"total": 0}])
+        padded.append([])
     conn = _mock_conn(padded)
 
     def _override() -> Iterator[MagicMock]:
@@ -437,8 +462,9 @@ class TestPortfolioFxConversion:
 
     def test_mirror_equity_converted_to_gbp(self) -> None:
         """Mirror equity (always USD for eToro) converted to display currency."""
-        # Provide non-zero mirror_equity via the third cursor result.
-        _with_conn([[], [_make_cash_row(None)], [{"total": 2000}]])
+        # available_amount=500 + positions_mv=1500 → mirror_equity=2000 USD.
+        mirror = _make_mirror_row(available_amount=500.0, positions_mv=1500.0)
+        _with_conn([[], [_make_cash_row(None)], [mirror]])
 
         resp = client.get("/portfolio")
         assert resp.status_code == 200
@@ -455,7 +481,9 @@ class TestPortfolioFxConversion:
             cost_basis=1000.0,
             last=100.0,
         )
-        _with_conn([[pos], [_make_cash_row(5000.0)], [{"total": 2000}]])
+        # available_amount=500 + positions_mv=1500 → mirror_equity=2000 USD.
+        mirror = _make_mirror_row(available_amount=500.0, positions_mv=1500.0)
+        _with_conn([[pos], [_make_cash_row(5000.0)], [mirror]])
 
         resp = client.get("/portfolio")
         assert resp.status_code == 200
@@ -559,3 +587,94 @@ class TestPortfolioFxConversion:
 
         # No USD positions, no cash, mirror_equity = 0 → USD should not appear.
         assert "USD" not in body["fx_rates_used"]
+
+
+# ---------------------------------------------------------------------------
+# TestPortfolioMirrors — mirrors field in portfolio response (#221)
+# ---------------------------------------------------------------------------
+
+
+class TestPortfolioMirrors:
+    """GET /portfolio — mirrors list populated from load_mirror_breakdowns."""
+
+    def setup_method(self) -> None:
+        self._patch_config = patch(
+            "app.api.portfolio.get_runtime_config",
+            return_value=_DEFAULT_CONFIG,
+        )
+        self._patch_fx_meta = patch(
+            "app.api.portfolio.load_live_fx_rates_with_metadata",
+            return_value={},
+        )
+        self._patch_config.start()
+        self._patch_fx_meta.start()
+
+    def teardown_method(self) -> None:
+        self._patch_config.stop()
+        self._patch_fx_meta.stop()
+        _cleanup()
+
+    def test_mirrors_empty_when_no_mirrors(self) -> None:
+        """No mirrors → mirrors list is empty, mirror_equity = 0."""
+        _with_conn([[], [_make_cash_row(1000.0)]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert body["mirrors"] == []
+        assert body["mirror_equity"] == 0.0
+
+    def test_mirrors_populated_with_breakdown(self) -> None:
+        """Mirror breakdown appears in the mirrors list with correct fields."""
+        mirror = _make_mirror_row(
+            mirror_id=1001,
+            parent_username="thomaspj",
+            initial_investment=10000.0,
+            deposit_summary=2000.0,
+            withdrawal_summary=500.0,
+            available_amount=1000.0,
+            positions_mv=12000.0,
+            position_count=42,
+        )
+        _with_conn([[], [_make_cash_row(None)], [mirror]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert len(body["mirrors"]) == 1
+        m = body["mirrors"][0]
+        assert m["mirror_id"] == 1001
+        assert m["parent_username"] == "thomaspj"
+        assert m["active"] is True
+        # funded = 10000 + 2000 - 500 = 11500
+        assert m["funded"] == 11500.0
+        # mirror_equity = 1000 + 12000 = 13000
+        assert m["mirror_equity"] == 13000.0
+        # unrealized_pnl = 13000 - 11500 = 1500
+        assert m["unrealized_pnl"] == 1500.0
+        assert m["position_count"] == 42
+
+    def test_mirror_equity_equals_sum_of_mirrors(self) -> None:
+        """Total mirror_equity = sum of individual mirror equities."""
+        m1 = _make_mirror_row(
+            mirror_id=1001,
+            available_amount=500.0,
+            positions_mv=1500.0,
+        )
+        m2 = _make_mirror_row(
+            mirror_id=1002,
+            parent_username="other",
+            available_amount=300.0,
+            positions_mv=700.0,
+        )
+        _with_conn([[], [_make_cash_row(None)], [m1, m2]])
+
+        resp = client.get("/portfolio")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert len(body["mirrors"]) == 2
+        sum_equity = sum(m["mirror_equity"] for m in body["mirrors"])
+        assert body["mirror_equity"] == sum_equity

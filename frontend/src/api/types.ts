@@ -212,8 +212,20 @@ export interface FxRateUsed {
   quoted_at: string;
 }
 
+export interface PortfolioMirrorItem {
+  mirror_id: number;
+  parent_username: string;
+  active: boolean;
+  funded: number;
+  mirror_equity: number;
+  unrealized_pnl: number;
+  position_count: number;
+  started_copy_date: string;
+}
+
 export interface PortfolioResponse {
   positions: PositionItem[];
+  mirrors: PortfolioMirrorItem[];
   position_count: number;
   total_aum: number;
   cash_balance: number | null;
@@ -501,5 +513,11 @@ export interface CopyTraderSummary {
 export interface CopyTradingResponse {
   traders: CopyTraderSummary[];
   total_mirror_equity: number;
+  display_currency: string;
+}
+
+export interface MirrorDetailResponse {
+  parent_username: string;
+  mirror: MirrorSummary;
   display_currency: string;
 }
