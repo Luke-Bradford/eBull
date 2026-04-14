@@ -252,6 +252,38 @@ export interface PortfolioResponse {
   fx_rates_used: Record<string, FxRateUsed>;
 }
 
+// /portfolio/instruments/:instrumentId — native currency drill-through
+export interface NativeTradeItem {
+  position_id: number;
+  is_buy: boolean;
+  units: number;
+  amount: number;
+  open_rate: number;
+  open_date_time: string;
+  current_price: number | null;
+  market_value: number;
+  unrealized_pnl: number;
+  stop_loss_rate: number | null;
+  take_profit_rate: number | null;
+  is_tsl_enabled: boolean;
+  leverage: number;
+  total_fees: number;
+}
+
+export interface InstrumentPositionDetail {
+  instrument_id: number;
+  symbol: string;
+  company_name: string;
+  currency: string;
+  current_price: number | null;
+  total_units: number;
+  avg_entry: number | null;
+  total_invested: number;
+  total_value: number;
+  total_pnl: number;
+  trades: NativeTradeItem[];
+}
+
 // ---------------------------------------------------------------------------
 // /recommendations (app/api/recommendations.py)
 // ---------------------------------------------------------------------------
