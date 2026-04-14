@@ -226,7 +226,7 @@ def _upsert_broker_positions(
         cur.execute(
             """
             DELETE FROM broker_positions
-            WHERE position_id != ALL(%(ids)s)
+            WHERE position_id != ALL(%(ids)s::bigint[])
             RETURNING position_id, instrument_id
             """,
             {"ids": broker_position_ids},

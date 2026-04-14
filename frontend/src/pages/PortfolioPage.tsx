@@ -390,7 +390,8 @@ function MirrorRow({ m, currency }: { m: PortfolioMirrorItem; currency: string }
   const positive = m.unrealized_pnl >= 0;
 
   const handleToggle = () => {
-    if (!expanded && mirrorPositions === null && !loading) {
+    if (loading) return;
+    if (!expanded && mirrorPositions === null) {
       setLoading(true);
       setFetchError(null);
       fetchMirrorDetail(m.mirror_id)
