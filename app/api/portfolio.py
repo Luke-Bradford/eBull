@@ -102,17 +102,6 @@ class PortfolioMirrorItem(BaseModel):
     started_copy_date: datetime
 
 
-class PortfolioMirrorItem(BaseModel):
-    mirror_id: int
-    parent_username: str
-    active: bool
-    funded: float  # initial_investment + deposits - withdrawals (display currency)
-    mirror_equity: float  # available_amount + sum(position market values) (display currency)
-    unrealized_pnl: float  # mirror_equity - funded (display currency)
-    position_count: int
-    started_copy_date: datetime
-
-
 class PortfolioResponse(BaseModel):
     positions: list[PositionItem]
     mirrors: list[PortfolioMirrorItem] = []
