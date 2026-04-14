@@ -385,19 +385,24 @@ function MirrorRow({ m, currency }: { m: PortfolioMirrorItem; currency: string }
   const [expanded, setExpanded] = useState(false);
   const [mirrorPositions, setMirrorPositions] = useState<MirrorPositionItem[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const pct = pnlPct(m.unrealized_pnl, m.funded);
   const positive = m.unrealized_pnl >= 0;
 
   const handleToggle = () => {
     if (!expanded && mirrorPositions === null && !loading) {
       setLoading(true);
+      setFetchError(null);
       fetchMirrorDetail(m.mirror_id)
         .then((detail) => {
           setMirrorPositions(detail.mirror.positions);
           setLoading(false);
           setExpanded(true);
         })
-        .catch(() => setLoading(false));
+        .catch((err: unknown) => {
+          setLoading(false);
+          setFetchError(err instanceof Error ? err.message : "Failed to load positions");
+        });
     } else {
       setExpanded((v) => !v);
     }
@@ -449,6 +454,13 @@ function MirrorRow({ m, currency }: { m: PortfolioMirrorItem; currency: string }
           </span>
         </td>
       </tr>
+      {fetchError ? (
+        <tr className="border-t border-slate-100 bg-red-50/50">
+          <td colSpan={9} className="px-4 py-2 text-xs text-red-600">
+            {fetchError}
+          </td>
+        </tr>
+      ) : null}
       {expanded && mirrorPositions !== null ? (
         <>
           {groups.map((g) => (
