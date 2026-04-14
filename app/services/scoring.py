@@ -23,7 +23,7 @@ Versioning contract:
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -296,7 +296,7 @@ def _momentum_score(
     return_3m: float | None,
     return_6m: float | None,
     *,
-    ta_indicators: dict[str, float | None] | None = None,
+    ta_indicators: Mapping[str, float | None] | None = None,
 ) -> tuple[float, list[str]]:
     """
     Blended momentum score combining return-based signals with TA indicators.

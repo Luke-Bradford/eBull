@@ -6,8 +6,10 @@ No network calls, no database — all tests use in-memory fixtures.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -636,7 +638,7 @@ _TA_COLUMN_NAMES = [
 ]
 
 
-def _make_mock_execute(results_queue: list[list[tuple[object, ...]]]) -> object:
+def _make_mock_execute(results_queue: Sequence[Sequence[Any]]) -> object:
     """Return a side_effect callable that pops from a pre-built results queue.
 
     Each call to conn.execute() returns a MagicMock whose .fetchall()
