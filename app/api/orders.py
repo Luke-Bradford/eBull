@@ -300,10 +300,16 @@ def _persist_order_and_fill(
                 )
 
             elif action == "EXIT":
-                # Update positions for EXIT
+                # Update positions for EXIT — prorate cost_basis so partial
+                # closes don't leave the full basis on fewer units.
                 conn.execute(
                     """
                     UPDATE positions SET
+                        cost_basis     = CASE
+                            WHEN current_units > 0
+                            THEN cost_basis * (1 - %(units)s / current_units)
+                            ELSE 0
+                        END,
                         current_units  = current_units - %(units)s,
                         realized_pnl   = realized_pnl
                                          + (%(price)s - COALESCE(avg_cost, 0)) * %(units)s,
@@ -318,11 +324,17 @@ def _persist_order_and_fill(
                     },
                 )
 
-                # Zero out the broker_positions row so it can't be closed again.
+                # Deduct units (and prorate amount) from the broker_positions
+                # row so it can't be double-closed.
                 if close_position_id is not None:
                     conn.execute(
                         """
                         UPDATE broker_positions SET
+                            amount     = CASE
+                                WHEN units > 0
+                                THEN amount * (1 - %(units)s / units)
+                                ELSE 0
+                            END,
                             units      = units - %(units)s,
                             updated_at = %(now)s
                         WHERE position_id = %(pid)s
@@ -399,6 +411,10 @@ def place_order(
         raise HTTPException(status_code=400, detail="Provide amount or units, not both")
     if body.amount is None and body.units is None:
         raise HTTPException(status_code=400, detail="Provide amount or units")
+    if body.amount is not None and body.amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be positive")
+    if body.units is not None and body.units <= 0:
+        raise HTTPException(status_code=400, detail="units must be positive")
 
     if config.enable_live_trading:
         raise HTTPException(status_code=501, detail="Live trading not yet wired — use demo mode.")
@@ -408,11 +424,13 @@ def place_order(
     units_d = Decimal(str(body.units)) if body.units is not None else None
     quote_price = _load_latest_quote_price(conn, body.instrument_id)
 
-    # Fail closed: amount-based orders need a quote to compute units.
-    if amount_d is not None and quote_price is None:
+    # Fail closed: demo orders need a usable quote to set a fill price.
+    # Without a quote, amount-based orders can't compute units and
+    # units-based orders would fill at price=0 (creating free holdings).
+    if quote_price is None:
         raise HTTPException(
             status_code=422,
-            detail=f"No quote available for instrument {body.instrument_id} — cannot compute units from amount.",
+            detail=f"No quote available for instrument {body.instrument_id} — cannot fill without a price.",
         )
 
     broker_result = _synthetic_fill(

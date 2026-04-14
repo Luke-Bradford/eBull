@@ -150,6 +150,26 @@ class TestPlaceOrder:
         assert resp.status_code == 400
         assert "amount or units" in resp.json()["detail"]
 
+    def test_rejects_non_positive_amount(self) -> None:
+        """400 when amount is zero or negative."""
+        _with_conn([_KILL_SWITCH_OFF])
+        resp = client.post(
+            "/portfolio/orders",
+            json={"instrument_id": 1, "action": "BUY", "amount": 0},
+        )
+        assert resp.status_code == 400
+        assert "positive" in resp.json()["detail"]
+
+    def test_rejects_negative_units(self) -> None:
+        """400 when units is negative."""
+        _with_conn([_KILL_SWITCH_OFF])
+        resp = client.post(
+            "/portfolio/orders",
+            json={"instrument_id": 1, "action": "BUY", "units": -5},
+        )
+        assert resp.status_code == 400
+        assert "positive" in resp.json()["detail"]
+
     def test_demo_buy_order_returns_synthetic_fill(self) -> None:
         """200 — demo BUY with amount returns a synthetic fill."""
         # Cursor calls:
@@ -192,6 +212,17 @@ class TestPlaceOrder:
         resp = client.post(
             "/portfolio/orders",
             json={"instrument_id": 999, "action": "BUY", "amount": 500},
+        )
+        assert resp.status_code == 422
+        assert "no quote" in resp.json()["detail"].lower()
+
+    def test_units_buy_rejects_when_no_quote(self) -> None:
+        """Units-based BUY with no quote also fails closed (422)."""
+        no_quote: list[dict[str, Any]] = []
+        _with_conn([_KILL_SWITCH_OFF, no_quote])
+        resp = client.post(
+            "/portfolio/orders",
+            json={"instrument_id": 999, "action": "BUY", "units": 10},
         )
         assert resp.status_code == 422
         assert "no quote" in resp.json()["detail"].lower()
