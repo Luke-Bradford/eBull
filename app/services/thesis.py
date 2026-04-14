@@ -331,10 +331,9 @@ def _assemble_context(
         }
 
     # Earnings history and analyst estimates from enrichment tables.
-    # Wrapped in a savepoint so UndefinedTable (pre-migration) degrades
-    # gracefully instead of aborting thesis generation.
+    # Each query gets its own savepoint so a missing analyst_estimates
+    # table doesn't discard successfully-fetched earnings history.
     earnings_history: list[dict[str, object]] = []
-    analyst_estimates: dict[str, object] | None = None
     try:
         with conn.transaction():
             earnings_rows = conn.execute(
@@ -360,7 +359,12 @@ def _assemble_context(
                 }
                 for r in earnings_rows
             ]
+    except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
+        pass  # pre-migration: degrade gracefully
 
+    analyst_estimates: dict[str, object] | None = None
+    try:
+        with conn.transaction():
             estimates_row = conn.execute(
                 """
                 SELECT consensus_eps_fq, analyst_count, buy_count, hold_count,
@@ -384,7 +388,7 @@ def _assemble_context(
                     "price_target_low": _to_float(estimates_row[7]),
                 }
     except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
-        pass  # pre-migration: degrade gracefully, thesis proceeds without enrichment
+        pass  # pre-migration: degrade gracefully
 
     return {
         "instrument": instrument,
