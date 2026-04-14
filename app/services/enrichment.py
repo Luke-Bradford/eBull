@@ -60,35 +60,39 @@ def refresh_enrichment(
     skipped = 0
     now = datetime.now(tz=UTC)
 
-    for symbol, instrument_id in symbols:
-        try:
-            profile = provider.get_profile_enrichment(symbol)
-            events = provider.get_earnings_calendar(symbol)
-            est = provider.get_analyst_estimates(symbol)
+    # Explicit outer transaction ensures the per-symbol conn.transaction()
+    # calls always create SAVEPOINTs (not full transactions).  A failure
+    # on symbol N rolls back only its savepoint; prior symbols' writes
+    # survive and are committed when the outer block exits.
+    with conn.transaction():
+        for symbol, instrument_id in symbols:
+            try:
+                profile = provider.get_profile_enrichment(symbol)
+                events = provider.get_earnings_calendar(symbol)
+                est = provider.get_analyst_estimates(symbol)
 
-            # Wrap all DB writes for this symbol in a savepoint so a
-            # constraint violation or transient error doesn't abort the
-            # outer transaction and silently drop prior symbols' writes.
-            with conn.transaction():
-                if profile is not None:
-                    _upsert_profile(conn, instrument_id, profile, now)
-                    profiles_upserted += 1
+                # Per-symbol savepoint — constraint violation or transient
+                # error rolls back only this symbol's writes.
+                with conn.transaction():
+                    if profile is not None:
+                        _upsert_profile(conn, instrument_id, profile, now)
+                        profiles_upserted += 1
 
-                if events:
-                    _upsert_earnings_events(conn, instrument_id, events)
-                    earnings_upserted += len(events)
+                    if events:
+                        _upsert_earnings_events(conn, instrument_id, events)
+                        earnings_upserted += len(events)
 
-                if est is not None:
-                    _upsert_analyst_estimates(conn, instrument_id, est)
-                    estimates_upserted += 1
+                    if est is not None:
+                        _upsert_analyst_estimates(conn, instrument_id, est)
+                        estimates_upserted += 1
 
-        except Exception:
-            logger.warning(
-                "Enrichment: failed to refresh %s, skipping",
-                symbol,
-                exc_info=True,
-            )
-            skipped += 1
+            except Exception:
+                logger.warning(
+                    "Enrichment: failed to refresh %s, skipping",
+                    symbol,
+                    exc_info=True,
+                )
+                skipped += 1
 
     return EnrichmentRefreshSummary(
         symbols_attempted=len(symbols),

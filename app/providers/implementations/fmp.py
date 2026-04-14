@@ -252,7 +252,14 @@ class FmpFundamentalsProvider(FundamentalsProvider, EnrichmentProvider):
         _persist_raw(f"fmp_earnings_{symbol}", raw)
         if not isinstance(raw, list):
             return []
-        events = [_build_earnings_event(symbol, row) for row in raw if isinstance(row, dict)]
+        events: list[EarningsEvent] = []
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            try:
+                events.append(_build_earnings_event(symbol, row))
+            except ValueError, KeyError:
+                logger.warning("FMP: skipping malformed earnings row for %s", symbol)
         events.sort(key=lambda e: e.fiscal_date_ending)
         return events
 

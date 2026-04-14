@@ -330,55 +330,61 @@ def _assemble_context(
             "currency": inst_row[5],
         }
 
-    # Earnings history: latest 4 confirmed quarters
-    earnings_rows = conn.execute(
-        """
-        SELECT fiscal_date_ending, reporting_date,
-               eps_estimate, eps_actual, revenue_estimate, revenue_actual,
-               surprise_pct
-        FROM earnings_events
-        WHERE instrument_id = %(id)s
-          AND eps_actual IS NOT NULL
-        ORDER BY fiscal_date_ending DESC
-        LIMIT %(limit)s
-        """,
-        {"id": instrument_id, "limit": _MAX_EARNINGS_EVENTS},
-    ).fetchall()
-    earnings_history = [
-        {
-            "fiscal_date": str(r[0]),
-            "eps_estimate": _to_float(r[2]),
-            "eps_actual": _to_float(r[3]),
-            "revenue_actual": _to_float(r[5]),
-            "surprise_pct": _to_float(r[6]),
-        }
-        for r in earnings_rows
-    ]
-
-    # Analyst estimates: latest snapshot
-    estimates_row = conn.execute(
-        """
-        SELECT consensus_eps_fq, analyst_count, buy_count, hold_count,
-               sell_count, price_target_mean, price_target_high, price_target_low
-        FROM analyst_estimates
-        WHERE instrument_id = %(id)s
-        ORDER BY as_of_date DESC
-        LIMIT 1
-        """,
-        {"id": instrument_id},
-    ).fetchone()
+    # Earnings history and analyst estimates from enrichment tables.
+    # Wrapped in a savepoint so UndefinedTable (pre-migration) degrades
+    # gracefully instead of aborting thesis generation.
+    earnings_history: list[dict[str, object]] = []
     analyst_estimates: dict[str, object] | None = None
-    if estimates_row is not None:
-        analyst_estimates = {
-            "consensus_eps": _to_float(estimates_row[0]),
-            "analyst_count": estimates_row[1],
-            "buy_count": estimates_row[2],
-            "hold_count": estimates_row[3],
-            "sell_count": estimates_row[4],
-            "price_target_mean": _to_float(estimates_row[5]),
-            "price_target_high": _to_float(estimates_row[6]),
-            "price_target_low": _to_float(estimates_row[7]),
-        }
+    try:
+        with conn.transaction():
+            earnings_rows = conn.execute(
+                """
+                SELECT fiscal_date_ending, reporting_date,
+                       eps_estimate, eps_actual, revenue_estimate, revenue_actual,
+                       surprise_pct
+                FROM earnings_events
+                WHERE instrument_id = %(id)s
+                  AND eps_actual IS NOT NULL
+                ORDER BY fiscal_date_ending DESC
+                LIMIT %(limit)s
+                """,
+                {"id": instrument_id, "limit": _MAX_EARNINGS_EVENTS},
+            ).fetchall()
+            earnings_history = [
+                {
+                    "fiscal_date": str(r[0]),
+                    "eps_estimate": _to_float(r[2]),
+                    "eps_actual": _to_float(r[3]),
+                    "revenue_actual": _to_float(r[5]),
+                    "surprise_pct": _to_float(r[6]),
+                }
+                for r in earnings_rows
+            ]
+
+            estimates_row = conn.execute(
+                """
+                SELECT consensus_eps_fq, analyst_count, buy_count, hold_count,
+                       sell_count, price_target_mean, price_target_high, price_target_low
+                FROM analyst_estimates
+                WHERE instrument_id = %(id)s
+                ORDER BY as_of_date DESC
+                LIMIT 1
+                """,
+                {"id": instrument_id},
+            ).fetchone()
+            if estimates_row is not None:
+                analyst_estimates = {
+                    "consensus_eps": _to_float(estimates_row[0]),
+                    "analyst_count": estimates_row[1],
+                    "buy_count": estimates_row[2],
+                    "hold_count": estimates_row[3],
+                    "sell_count": estimates_row[4],
+                    "price_target_mean": _to_float(estimates_row[5]),
+                    "price_target_high": _to_float(estimates_row[6]),
+                    "price_target_low": _to_float(estimates_row[7]),
+                }
+    except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
+        pass  # pre-migration: degrade gracefully, thesis proceeds without enrichment
 
     return {
         "instrument": instrument,

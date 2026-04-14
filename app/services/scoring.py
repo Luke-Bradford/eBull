@@ -659,7 +659,7 @@ def _load_instrument_data(
                     {"id": instrument_id},
                 )
                 estimates_row = cur.fetchone()
-        except psycopg.errors.UndefinedTable:
+        except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
             pass  # savepoint already rolled back; prior queries intact
 
     return {
