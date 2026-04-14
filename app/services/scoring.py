@@ -210,38 +210,84 @@ def _value_score(
     base_value: float | None,
     bear_value: float | None,
     current_price: float | None,
+    *,
+    pe_ratio: float | None = None,
+    fcf_yield: float | None = None,
+    price_target_mean: float | None = None,
 ) -> tuple[float, list[str]]:
     """
     Thesis valuation upside as the primary value proxy.
 
-    upside_to_base  = (base_value - current_price) / current_price
-    downside_to_bear = (current_price - bear_value) / current_price
+    Primary path (thesis-based): when base_value is available.
+      upside_to_base  = (base_value - current_price) / current_price
+      downside_to_bear = (current_price - bear_value) / current_price
+
+    Fallback path (fundamentals-derived): when base_value is None.
+      Blends up to three signals — P/E attractiveness (35%), FCF yield (35%),
+      and price-target upside (30%) — re-normalised across available components.
 
     Returns (score, missing_components).
     """
     notes: list[str] = []
 
-    if base_value is None:
-        notes.append("base_value missing")
-    if bear_value is None:
-        notes.append("bear_value missing")
     if current_price is None or current_price <= 0:
         notes.append("current_price missing or zero")
 
-    if base_value is None or current_price is None or current_price <= 0:
+    if base_value is not None:
+        # ------------------------------------------------------------------
+        # Primary path: thesis-based
+        # ------------------------------------------------------------------
+        if bear_value is None:
+            notes.append("bear_value missing")
+
+        if current_price is None or current_price <= 0:
+            return 0.5, notes  # neutral-by-absence
+
+        upside_to_base = (base_value - current_price) / current_price
+        upside_score = _clip(upside_to_base / 0.50)  # 50% upside => 1.0
+
+        if bear_value is not None:
+            downside_to_bear = (current_price - bear_value) / current_price
+            downside_penalty = _clip(downside_to_bear / 0.50)
+        else:
+            downside_penalty = 0.5  # unknown downside — assume moderate risk
+            notes.append("bear_value missing; assuming 0.5 downside penalty")
+
+        score = 0.75 * upside_score + 0.25 * (1.0 - downside_penalty)
+        return _clip(score), notes
+
+    # ----------------------------------------------------------------------
+    # Fallback path: fundamentals-derived (no thesis)
+    # ----------------------------------------------------------------------
+    notes.append("base_value missing")
+    if bear_value is None:
+        notes.append("bear_value missing")
+
+    if current_price is None or current_price <= 0:
         return 0.5, notes  # neutral-by-absence
 
-    upside_to_base = (base_value - current_price) / current_price
-    upside_score = _clip(upside_to_base / 0.50)  # 50% upside => 1.0
+    components: list[tuple[float, float]] = []  # (score, weight)
 
-    if bear_value is not None:
-        downside_to_bear = (current_price - bear_value) / current_price
-        downside_penalty = _clip(downside_to_bear / 0.50)
-    else:
-        downside_penalty = 0.5  # unknown downside — assume moderate risk
-        notes.append("bear_value missing; assuming 0.5 downside penalty")
+    if pe_ratio is not None and pe_ratio > 0:
+        pe_score = _clip(1.0 - (pe_ratio - 10.0) / 40.0)
+        components.append((pe_score, 0.35))
 
-    score = 0.75 * upside_score + 0.25 * (1.0 - downside_penalty)
+    if fcf_yield is not None:
+        fy_score = _clip(fcf_yield / 0.08)
+        components.append((fy_score, 0.35))
+
+    if price_target_mean is not None:
+        pt_upside = (price_target_mean - current_price) / current_price
+        pt_score = _clip(pt_upside / 0.50)
+        components.append((pt_score, 0.30))
+
+    if not components:
+        notes.append("fundamentals fallback (no thesis)")
+        return 0.5, notes
+
+    total_weight = sum(w for _, w in components)
+    score = sum(s * w / total_weight for s, w in components)
+    notes.append("fundamentals fallback (no thesis)")
     return _clip(score), notes
 
 
@@ -581,6 +627,32 @@ def _load_instrument_data(
         )
         rf_row: dict[str, Any] | None = cur.fetchone()
 
+        # Valuation multiples from view (enrichment)
+        cur.execute(
+            """
+            SELECT pe_ratio, pb_ratio, p_fcf_ratio, fcf_yield,
+                   debt_equity_ratio, market_cap_live, current_price
+            FROM instrument_valuation
+            WHERE instrument_id = %(id)s
+            """,
+            {"id": instrument_id},
+        )
+        valuation_row: dict[str, Any] | None = cur.fetchone()
+
+        # Analyst estimates (latest)
+        cur.execute(
+            """
+            SELECT price_target_mean, price_target_high, price_target_low,
+                   analyst_count, buy_count, hold_count, sell_count
+            FROM analyst_estimates
+            WHERE instrument_id = %(id)s
+            ORDER BY as_of_date DESC
+            LIMIT 1
+            """,
+            {"id": instrument_id},
+        )
+        estimates_row: dict[str, Any] | None = cur.fetchone()
+
     return {
         "fund_rows": fund_rows,
         "price_row": price_row,
@@ -590,6 +662,8 @@ def _load_instrument_data(
         # AVG() always returns one row, even when no matching rows exist (returns NULL).
         # rf_row is therefore never None; avg_red_flag may be None if no filings matched.
         "avg_red_flag_score": _to_float(rf_row["avg_red_flag"]) if rf_row is not None else None,
+        "valuation_row": valuation_row,
+        "estimates_row": estimates_row,
     }
 
 
@@ -680,11 +754,9 @@ def compute_score(
     # Thesis
     if thesis_row:
         thesis_confidence = _to_float(thesis_row["confidence_score"])
-        base_value = _to_float(thesis_row["base_value"])
-        bear_value = _to_float(thesis_row["bear_value"])
         thesis_created_at: datetime | None = thesis_row["created_at"]
     else:
-        thesis_confidence = base_value = bear_value = None
+        thesis_confidence = None
         thesis_created_at = None
 
     # News sentiment rows: [(sentiment_score, importance_score), ...]
@@ -707,7 +779,17 @@ def compute_score(
     if q_notes:
         explanation_parts.append("quality: " + "; ".join(q_notes))
 
-    v_score, v_notes = _value_score(base_value, bear_value, current_price)
+    val_row = data.get("valuation_row")
+    est_row = data.get("estimates_row")
+
+    v_score, v_notes = _value_score(
+        base_value=_to_float(thesis_row["base_value"]) if thesis_row else None,
+        bear_value=_to_float(thesis_row["bear_value"]) if thesis_row else None,
+        current_price=current_price,
+        pe_ratio=_to_float(val_row["pe_ratio"]) if val_row else None,
+        fcf_yield=_to_float(val_row["fcf_yield"]) if val_row else None,
+        price_target_mean=_to_float(est_row["price_target_mean"]) if est_row else None,
+    )
     if v_notes:
         explanation_parts.append("value: " + "; ".join(v_notes))
 
