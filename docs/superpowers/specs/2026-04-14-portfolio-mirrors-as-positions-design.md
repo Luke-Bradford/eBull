@@ -140,7 +140,6 @@ The existing `GET /portfolio/copy-trading` endpoint can be narrowed to serve a s
 
 - `GET /portfolio/copy-trading` endpoint — still useful, now also serves the dashboard's mirror data
 - `MirrorPositionsTable`, `MirrorPositionRow`, `MirrorStats` components — reused in the detail view
-- `TraderMirrorCard` — removed (replaced by table rows)
 - All backend MTM computation logic — unchanged
 - All test coverage for MTM computation — unchanged
 
