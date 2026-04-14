@@ -572,12 +572,33 @@ FIXTURE_FULL_PORTFOLIO_RESPONSE = {
                 "positionID": 98765,
                 "units": 5.0,
                 "openRate": 150.00,
+                "openDateTime": "2026-03-15T10:30:00Z",
+                "openConversionRate": 1.0,
+                "amount": 750.00,
+                "initialAmountInDollars": 750.00,
+                "isBuy": True,
+                "leverage": 1,
+                "stopLossRate": 130.00,
+                "takeProfitRate": 200.00,
+                "isNoStopLoss": False,
+                "isNoTakeProfit": False,
+                "isTslEnabled": False,
+                "totalFees": 2.50,
             },
             {
                 "instrumentID": 1002,
                 "positionID": 98766,
                 "units": 10.0,
                 "openRate": 50.00,
+                "openDateTime": "2026-03-10T08:00:00Z",
+                "openConversionRate": 0.78,
+                "amount": 500.00,
+                "initialAmountInDollars": 500.00,
+                "isBuy": True,
+                "leverage": 1,
+                "isNoStopLoss": True,
+                "isNoTakeProfit": True,
+                "totalFees": 0.0,
             },
         ],
         "credit": 50000.50,
@@ -612,12 +633,27 @@ class TestGetPortfolio:
         # sync-time PnL aggregation evaluate to zero instead of producing
         # bogus negative values.
         assert p1.current_price == Decimal("150.0")
+        # Per-position fields (migration 024)
+        assert p1.position_id == 98765
+        assert p1.is_buy is True
+        assert p1.stop_loss_rate == Decimal("130.0")
+        assert p1.take_profit_rate == Decimal("200.0")
+        assert p1.is_no_stop_loss is False
+        assert p1.is_no_take_profit is False
+        assert p1.total_fees == Decimal("2.5")
+        assert p1.leverage == 1
 
         p2 = result.positions[1]
         assert p2.instrument_id == 1002
         assert p2.units == Decimal("10.0")
         assert p2.open_price == Decimal("50.0")
         assert p2.current_price == Decimal("50.0")
+        # Per-position fields — no SL/TP set
+        assert p2.position_id == 98766
+        assert p2.is_no_stop_loss is True
+        assert p2.is_no_take_profit is True
+        assert p2.stop_loss_rate is None
+        assert p2.take_profit_rate is None
 
     def test_empty_portfolio(self, _mock_persist: MagicMock) -> None:
         mock_resp = MagicMock()

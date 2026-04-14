@@ -13,6 +13,7 @@ from app.providers.broker import BrokerPortfolio, BrokerPosition
 from app.services.portfolio_sync import (
     PortfolioSyncResult,
     _aggregate_by_instrument,
+    _upsert_broker_positions,
     sync_portfolio,
 )
 from tests.fixtures.copy_mirrors import _NOW
@@ -643,3 +644,185 @@ def test_portfolio_sync_result_has_mirror_counters() -> None:
     assert result.mirrors_upserted == 2
     assert result.mirrors_closed == 1
     assert result.mirror_positions_upserted == 6
+
+
+def test_portfolio_sync_result_has_broker_position_counters() -> None:
+    """Migration 024 extension — broker_positions_upserted and
+    broker_positions_deleted are part of the return contract."""
+    result = PortfolioSyncResult(
+        positions_updated=0,
+        positions_opened_externally=0,
+        positions_closed_externally=0,
+        cash_delta=Decimal("0"),
+        broker_cash=Decimal("0"),
+        local_cash=Decimal("0"),
+        broker_positions_upserted=5,
+        broker_positions_deleted=2,
+    )
+    assert result.broker_positions_upserted == 5
+    assert result.broker_positions_deleted == 2
+
+
+# ---------------------------------------------------------------------------
+# broker_positions (migration 024) — per-position tracking
+# ---------------------------------------------------------------------------
+
+
+def _detailed_pos(
+    position_id: int = 5001,
+    instrument_id: int = 42,
+    units: Decimal = Decimal("10"),
+    open_price: Decimal = Decimal("100"),
+    current_price: Decimal = Decimal("110"),
+    stop_loss_rate: Decimal | None = None,
+    take_profit_rate: Decimal | None = None,
+) -> BrokerPosition:
+    """BrokerPosition with per-position fields populated (for broker_positions tests)."""
+    return BrokerPosition(
+        instrument_id=instrument_id,
+        units=units,
+        open_price=open_price,
+        current_price=current_price,
+        raw_payload={"positionID": position_id, "instrumentID": instrument_id},
+        position_id=position_id,
+        is_buy=True,
+        amount=open_price * units,
+        initial_amount_in_dollars=open_price * units,
+        stop_loss_rate=stop_loss_rate,
+        take_profit_rate=take_profit_rate,
+    )
+
+
+def _is_broker_positions_upsert(sql_arg: Any) -> bool:
+    if not isinstance(sql_arg, str):
+        return False
+    normalised = re.sub(r"\s+", " ", sql_arg)
+    return "INSERT INTO broker_positions" in normalised
+
+
+def _is_broker_positions_delete(sql_arg: Any) -> bool:
+    if not isinstance(sql_arg, str):
+        return False
+    normalised = re.sub(r"\s+", " ", sql_arg)
+    return "DELETE FROM broker_positions" in normalised
+
+
+class TestUpsertBrokerPositions:
+    """_upsert_broker_positions writes individual eToro positions to
+    the broker_positions table (migration 024)."""
+
+    def test_upserts_position_with_id(self) -> None:
+        conn = MagicMock()
+        # DELETE returns no rows (no disappeared positions)
+        conn.execute.return_value = iter([])
+
+        bp = _detailed_pos(position_id=5001, instrument_id=42)
+        upserted, deleted = _upsert_broker_positions(conn, [bp], _NOW)
+
+        assert upserted == 1
+        assert deleted == 0
+        upsert_calls = [c for c in conn.execute.call_args_list if _is_broker_positions_upsert(c.args[0])]
+        assert len(upsert_calls) == 1
+        params = upsert_calls[0].args[1]
+        assert params["position_id"] == 5001
+        assert params["instrument_id"] == 42
+
+    def test_skips_position_without_id(self) -> None:
+        """Legacy BrokerPosition fixtures (position_id=None) are skipped."""
+        conn = MagicMock()
+        bp = _pos(instrument_id=42)  # uses the old helper — no position_id
+        upserted, deleted = _upsert_broker_positions(conn, [bp], _NOW)
+
+        assert upserted == 0
+        assert deleted == 0
+        # No SQL should have been issued at all
+        assert conn.execute.call_args_list == []
+
+    def test_multiple_positions_upserted_individually(self) -> None:
+        conn = MagicMock()
+        conn.execute.return_value = iter([])
+
+        positions = [
+            _detailed_pos(position_id=5001, instrument_id=42),
+            _detailed_pos(position_id=5002, instrument_id=42),
+            _detailed_pos(position_id=5003, instrument_id=99),
+        ]
+        upserted, deleted = _upsert_broker_positions(conn, positions, _NOW)
+
+        assert upserted == 3
+        upsert_calls = [c for c in conn.execute.call_args_list if _is_broker_positions_upsert(c.args[0])]
+        assert len(upsert_calls) == 3
+
+    def test_sl_tp_passed_to_upsert(self) -> None:
+        conn = MagicMock()
+        conn.execute.return_value = iter([])
+
+        bp = _detailed_pos(
+            position_id=5001,
+            stop_loss_rate=Decimal("90.00"),
+            take_profit_rate=Decimal("150.00"),
+        )
+        _upsert_broker_positions(conn, [bp], _NOW)
+
+        upsert_calls = [c for c in conn.execute.call_args_list if _is_broker_positions_upsert(c.args[0])]
+        params = upsert_calls[0].args[1]
+        assert params["stop_loss_rate"] == Decimal("90.00")
+        assert params["take_profit_rate"] == Decimal("150.00")
+
+    def test_delete_returns_disappeared_count(self) -> None:
+        """Positions not in broker payload are deleted from broker_positions."""
+        conn = MagicMock()
+
+        # The DELETE path uses conn.cursor(row_factory=...) as a context
+        # manager, then iterates over the cursor for RETURNING rows.
+        mock_delete_cursor = MagicMock()
+        mock_delete_cursor.__enter__ = MagicMock(return_value=mock_delete_cursor)
+        mock_delete_cursor.__exit__ = MagicMock(return_value=False)
+        mock_delete_cursor.__iter__ = MagicMock(return_value=iter([{"position_id": 9999, "instrument_id": 42}]))
+        conn.cursor.return_value = mock_delete_cursor
+
+        bp = _detailed_pos(position_id=5001, instrument_id=42)
+        upserted, deleted = _upsert_broker_positions(conn, [bp], _NOW)
+
+        assert upserted == 1
+        assert deleted == 1
+
+    def test_source_preserved_for_ebull_positions(self) -> None:
+        """ON CONFLICT preserves source='ebull' — SQL shape check."""
+        conn = MagicMock()
+        conn.execute.return_value = iter([])
+
+        bp = _detailed_pos(position_id=5001)
+        _upsert_broker_positions(conn, [bp], _NOW)
+
+        upsert_calls = [c for c in conn.execute.call_args_list if _is_broker_positions_upsert(c.args[0])]
+        sql = upsert_calls[0].args[0]
+        normalised = re.sub(r"\s+", " ", sql)
+        # Must preserve 'ebull' source on conflict
+        assert "broker_positions.source = 'ebull'" in normalised
+        assert "broker_positions.source" in normalised
+
+
+class TestBrokerPositionsInSyncPortfolio:
+    """Integration: sync_portfolio calls _upsert_broker_positions alongside
+    the existing positions reconciliation."""
+
+    def test_sync_reports_broker_positions_upserted(self) -> None:
+        bp = _detailed_pos(position_id=5001, instrument_id=42)
+        conn = _mock_conn(local_positions=[(42, Decimal("10"))], local_cash=Decimal("0"))
+        result = sync_portfolio(conn, _portfolio([bp]), now=_NOW)
+
+        assert result.broker_positions_upserted == 1
+        # Existing positions-table update still works
+        assert result.positions_updated == 1
+
+    def test_legacy_positions_without_id_still_sync(self) -> None:
+        """Backwards-compat: BrokerPosition without position_id still
+        updates the positions table (broker_positions upsert is skipped)."""
+        bp = _pos(instrument_id=42)
+        conn = _mock_conn(local_positions=[(42, Decimal("10"))], local_cash=Decimal("0"))
+        result = sync_portfolio(conn, _portfolio([bp]), now=_NOW)
+
+        assert result.positions_updated == 1
+        assert result.broker_positions_upserted == 0
+        assert result.broker_positions_deleted == 0

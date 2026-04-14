@@ -443,34 +443,16 @@ class EtoroBrokerProvider(BrokerProvider):
         raw_mirrors: list[Any] = portfolio.get("mirrors") or []
 
         positions: list[BrokerPosition] = []
-        for pos in raw_positions:
+        for idx, pos in enumerate(raw_positions):
             if not isinstance(pos, dict):
                 continue
             iid = pos.get("instrumentID")
             if iid is None:
                 continue
-            # eToro's /portfolio endpoint returns `openRate` for the entry
-            # price and does NOT include a current price field at all.
-            # Current market price must be fetched separately from
-            # /api/v1/market-data/instruments/rates if needed.
-            #
-            # We set current_price = open_price as a neutral placeholder so
-            # the PnL aggregation `(current_price - open_price) * units`
-            # evaluates to zero instead of `(0 - open_rate) * units` (a
-            # large negative number). The portfolio API computes live
-            # unrealised PnL from the `quotes` table on read, so this
-            # placeholder is only used by sync-time aggregation and is
-            # never surfaced to the dashboard.
-            open_rate = Decimal(str(pos.get("openRate", 0)))
-            positions.append(
-                BrokerPosition(
-                    instrument_id=int(iid),
-                    units=Decimal(str(pos.get("units", 0))),
-                    open_price=open_rate,
-                    current_price=open_rate,
-                    raw_payload=pos,
-                )
-            )
+            try:
+                positions.append(_parse_direct_position(pos))
+            except (KeyError, ValueError, TypeError, decimal.DecimalException) as exc:
+                raise PortfolioParseError(f"Failed to parse position[{idx}] (instrument {iid}): {exc}") from exc
 
         return BrokerPortfolio(
             positions=positions,
@@ -566,6 +548,61 @@ def _normalise_order_info_response(
     ``amount``, ``units``, and ``positions[]`` with ``positionID``.
     """
     return _build_result(raw, raw, fallback_ref=broker_order_ref)
+
+
+def _parse_direct_position(payload: dict[str, Any]) -> BrokerPosition:
+    """Parse a top-level portfolio position payload into BrokerPosition.
+
+    Pure normaliser — no I/O, no instance state.  Follows the same
+    pattern as ``_parse_mirror_position`` but for direct holdings.
+
+    eToro's /portfolio endpoint returns ``openRate`` for the entry price
+    and does NOT include a current price field.  We set current_price =
+    open_price as a neutral placeholder so the PnL aggregation
+    ``(current_price - open_price) * units`` evaluates to zero.  The
+    portfolio API computes live unrealised PnL from the ``quotes`` table
+    on read, so this placeholder is never surfaced to the dashboard.
+    """
+
+    def _opt_decimal(key: str) -> Decimal | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        return Decimal(str(value))
+
+    open_rate = Decimal(str(payload["openRate"]))
+    units = Decimal(str(payload["units"]))
+
+    # initialAmountInDollars may be absent on very old positions;
+    # fall back to amount, then to units * open_rate.
+    raw_initial = payload.get("initialAmountInDollars")
+    if raw_initial is not None:
+        initial_amount = Decimal(str(raw_initial))
+    else:
+        raw_amount = payload.get("amount")
+        initial_amount = Decimal(str(raw_amount)) if raw_amount is not None else units * open_rate
+
+    return BrokerPosition(
+        instrument_id=int(payload["instrumentID"]),
+        units=units,
+        open_price=open_rate,
+        current_price=open_rate,
+        raw_payload=payload,
+        position_id=int(payload["positionID"]),
+        is_buy=bool(payload.get("isBuy", True)),
+        amount=Decimal(str(payload.get("amount", 0))),
+        initial_amount_in_dollars=initial_amount,
+        open_conversion_rate=Decimal(str(payload.get("openConversionRate", 1))),
+        open_date_time=_parse_iso_datetime(payload["openDateTime"]) if "openDateTime" in payload else None,
+        initial_units=_opt_decimal("initialUnits"),
+        stop_loss_rate=_opt_decimal("stopLossRate"),
+        take_profit_rate=_opt_decimal("takeProfitRate"),
+        is_no_stop_loss=bool(payload.get("isNoStopLoss", True)),
+        is_no_take_profit=bool(payload.get("isNoTakeProfit", True)),
+        leverage=int(payload.get("leverage", 1)),
+        is_tsl_enabled=bool(payload.get("isTslEnabled", False)),
+        total_fees=Decimal(str(payload.get("totalFees", 0))),
+    )
 
 
 def _parse_mirror_position(payload: dict[str, Any]) -> BrokerMirrorPosition:

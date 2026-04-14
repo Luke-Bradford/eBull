@@ -35,13 +35,37 @@ class BrokerOrderResult:
 
 @dataclass(frozen=True)
 class BrokerPosition:
-    """A single open position as reported by the broker."""
+    """A single open position as reported by the broker.
+
+    After the broker_positions migration (024), the sync writes one row
+    per BrokerPosition into the ``broker_positions`` table and derives the
+    per-instrument ``positions`` summary from it.
+
+    Fields with defaults are optional for backwards-compat with existing
+    test code that constructs BrokerPosition with only the original fields.
+    """
 
     instrument_id: int
     units: Decimal
     open_price: Decimal
     current_price: Decimal
     raw_payload: dict[str, Any]
+
+    # --- Per-position fields (populated from eToro payload) ---
+    position_id: int | None = None
+    is_buy: bool = True
+    amount: Decimal = Decimal("0")
+    initial_amount_in_dollars: Decimal = Decimal("0")
+    open_conversion_rate: Decimal = Decimal("1")
+    open_date_time: datetime | None = None
+    initial_units: Decimal | None = None
+    stop_loss_rate: Decimal | None = None
+    take_profit_rate: Decimal | None = None
+    is_no_stop_loss: bool = True
+    is_no_take_profit: bool = True
+    leverage: int = 1
+    is_tsl_enabled: bool = False
+    total_fees: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
