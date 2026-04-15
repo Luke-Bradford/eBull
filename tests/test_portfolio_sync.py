@@ -924,9 +924,9 @@ class TestValidateMirrorEquity:
         rows = [
             {
                 "mirror_id": 42,
-                "available_amount": 5000.0,
-                "funded": 1000.0,
-                "positions_total": 3000.0,
+                "available_amount": Decimal("5000"),
+                "funded": Decimal("1000"),
+                "positions_total": Decimal("3000"),
             },
         ]
         conn = self._make_conn(rows)
@@ -942,9 +942,9 @@ class TestValidateMirrorEquity:
         rows = [
             {
                 "mirror_id": 1,
-                "available_amount": 300.0,
-                "funded": 1000.0,
-                "positions_total": 700.0,
+                "available_amount": Decimal("300"),
+                "funded": Decimal("1000"),
+                "positions_total": Decimal("700"),
             },
         ]
         conn = self._make_conn(rows)
@@ -959,9 +959,9 @@ class TestValidateMirrorEquity:
         rows = [
             {
                 "mirror_id": 99,
-                "available_amount": 100.0,
-                "funded": 0.0,
-                "positions_total": 0.0,
+                "available_amount": Decimal("100"),
+                "funded": Decimal("0"),
+                "positions_total": Decimal("0"),
             },
         ]
         conn = self._make_conn(rows)

@@ -501,18 +501,20 @@ def _validate_mirror_equity(conn: psycopg.Connection[Any]) -> None:
         rows = cur.fetchall()
 
     for r in rows:
-        equity = float(r["available_amount"]) + float(r["positions_total"])
-        funded = float(r["funded"])
+        available = Decimal(str(r["available_amount"]))
+        positions = Decimal(str(r["positions_total"]))
+        funded = Decimal(str(r["funded"]))
+        equity = available + positions
         if funded > 0 and equity > 2 * funded:
             logger.warning(
-                "Mirror %s equity (%.2f) > 2× funded (%.2f) — "
+                "Mirror %s equity (%s) > 2× funded (%s) — "
                 "possible double-count in available_amount; "
-                "equity=available(%.2f)+positions(%.2f)",
+                "equity=available(%s)+positions(%s)",
                 r["mirror_id"],
                 equity,
                 funded,
-                float(r["available_amount"]),
-                float(r["positions_total"]),
+                available,
+                positions,
             )
 
 
