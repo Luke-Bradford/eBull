@@ -979,7 +979,7 @@ def morning_candidate_review() -> None:
     Re-score, rank, and generate trade recommendations for Tier 1 candidates.
 
     Steps (run sequentially on the same connection for each phase):
-      1. Score all eligible Tier 1 instruments (v1-balanced).
+      1. Score all eligible Tier 1 instruments (default model version).
       2. Run portfolio review to produce BUY/ADD/HOLD/EXIT recommendations.
 
     Each phase opens its own connection so a failure in recommendations

@@ -184,7 +184,7 @@ Use capped context in v1:
 
 ### Model versioning
 - `model_version` includes the scoring mode
-- default scoring mode is `v1-balanced`
+- default scoring mode is `v1.1-balanced` (v1.1 = TA-enhanced momentum)
 
 ### Rank delta comparison
 - compare rank delta only against the most recent prior run using the same model version / mode

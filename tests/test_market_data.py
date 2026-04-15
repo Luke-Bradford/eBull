@@ -4,8 +4,12 @@ Unit tests for market data normalisation, feature computation, and spread checks
 No network calls, no database — all tests use in-memory fixtures.
 """
 
+from __future__ import annotations
+
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -23,6 +27,7 @@ from app.providers.market_data import OHLCVBar, Quote
 from app.services.market_data import (
     DEFAULT_MAX_SPREAD_PCT,
     _candles_are_fresh,
+    _compute_and_store_features,
     _compute_rolling_returns,
     _compute_volatility_30d,
     _most_recent_trading_day,
@@ -609,3 +614,215 @@ class TestCandleFreshness:
 
     def test_same_day_weekday(self) -> None:
         assert _candles_are_fresh_standalone(date(2026, 4, 13), date(2026, 4, 13))
+
+
+# ---------------------------------------------------------------------------
+# TA integration in _compute_and_store_features
+# ---------------------------------------------------------------------------
+
+_TA_COLUMN_NAMES = [
+    "sma_20",
+    "sma_50",
+    "sma_200",
+    "ema_12",
+    "ema_26",
+    "macd_line",
+    "macd_signal",
+    "macd_histogram",
+    "rsi_14",
+    "stoch_k",
+    "stoch_d",
+    "bb_upper",
+    "bb_lower",
+    "atr_14",
+]
+
+
+def _make_mock_execute(results_queue: Sequence[Sequence[Any]]) -> object:
+    """Return a side_effect callable that pops from a pre-built results queue.
+
+    Each call to conn.execute() returns a MagicMock whose .fetchall()
+    yields the next list from the queue.  Calls beyond the queue length
+    return empty results (for the UPDATE).
+    """
+    queue = list(results_queue)
+    idx = [0]
+
+    def _side_effect(*args: object, **kwargs: object) -> MagicMock:
+        mock = MagicMock()
+        if idx[0] < len(queue):
+            mock.fetchall.return_value = queue[idx[0]]
+            mock.fetchone.return_value = queue[idx[0]][0] if queue[idx[0]] else None
+        else:
+            mock.fetchall.return_value = []
+            mock.fetchone.return_value = None
+        idx[0] += 1
+        return mock
+
+    return _side_effect
+
+
+def _generate_price_rows(n: int) -> list[tuple[date, Decimal]]:
+    """Generate n rows of (price_date, close) with a gentle uptrend."""
+    base = date(2025, 1, 1)
+    return [(date.fromordinal(base.toordinal() + i), Decimal(str(100 + i * 0.5))) for i in range(n)]
+
+
+def _generate_ohlcv_rows(n: int) -> list[tuple[date, Decimal, Decimal, Decimal, Decimal, int]]:
+    """Generate n OHLCV tuples (price_date, open, high, low, close, volume).
+
+    Dates match _generate_price_rows so the TA date-alignment check passes.
+    """
+    base = date(2025, 1, 1)
+    return [
+        (
+            date.fromordinal(base.toordinal() + i),  # price_date
+            Decimal(str(100 + i * 0.5)),  # open
+            Decimal(str(101 + i * 0.5)),  # high
+            Decimal(str(99 + i * 0.5)),  # low
+            Decimal(str(100 + i * 0.5)),  # close
+            1000000,  # volume
+        )
+        for i in range(n)
+    ]
+
+
+class TestComputeAndStoreFeaturesTA:
+    """Tests for TA indicator integration in _compute_and_store_features."""
+
+    def test_ta_columns_in_update_sql(self) -> None:
+        """With 250+ rows, the UPDATE SQL contains all TA columns and params."""
+        n = 250
+        price_rows = _generate_price_rows(n)
+        # DB returns newest-first; function reverses internally
+        close_rows = list(reversed(price_rows))
+        ohlcv_rows = list(reversed(_generate_ohlcv_rows(n)))
+
+        conn = MagicMock()
+        conn.execute.side_effect = _make_mock_execute([close_rows, ohlcv_rows])
+
+        result = _compute_and_store_features(conn, instrument_id=42)
+        assert result == 1
+
+        # The third conn.execute call is the UPDATE
+        assert conn.execute.call_count == 3
+        update_call = conn.execute.call_args_list[2]
+        sql = update_call[0][0]
+        params = update_call[0][1]
+
+        # Verify every TA column appears in both the SQL and params dict
+        for col in _TA_COLUMN_NAMES:
+            assert f"%({col})s" in sql, f"Missing placeholder for {col}"
+            assert col in params, f"Missing param key for {col}"
+
+        # With 250 bars, at least RSI and SMA-20 should be non-None
+        assert params["rsi_14"] is not None
+        assert params["sma_20"] is not None
+        # Values should be Decimal (not float)
+        assert isinstance(params["rsi_14"], Decimal)
+        assert isinstance(params["sma_20"], Decimal)
+
+    def test_ta_none_with_insufficient_data(self) -> None:
+        """With only 10 rows, long-window indicators (sma_200) are None."""
+        n = 10
+        price_rows = _generate_price_rows(n)
+        close_rows = list(reversed(price_rows))
+        ohlcv_rows = list(reversed(_generate_ohlcv_rows(n)))
+
+        conn = MagicMock()
+        conn.execute.side_effect = _make_mock_execute([close_rows, ohlcv_rows])
+
+        result = _compute_and_store_features(conn, instrument_id=42)
+        assert result == 1
+
+        update_call = conn.execute.call_args_list[2]
+        params = update_call[0][1]
+
+        # sma_200 needs 200 bars — with 10 rows it must be None
+        assert params["sma_200"] is None
+        # sma_50 needs 50 bars — with 10 rows it must be None
+        assert params["sma_50"] is None
+        # All TA keys must still be present (even if None)
+        for col in _TA_COLUMN_NAMES:
+            assert col in params
+
+    def test_ta_skipped_when_no_rows(self) -> None:
+        """When there are no price rows, function returns 0 with no crash."""
+        conn = MagicMock()
+        conn.execute.side_effect = _make_mock_execute([[]])
+
+        result = _compute_and_store_features(conn, instrument_id=42)
+        assert result == 0
+        # Only the initial close-prices SELECT was executed; no OHLCV or UPDATE
+        assert conn.execute.call_count == 1
+
+    def test_ta_values_are_rounded_decimals(self) -> None:
+        """TA float values are converted to Decimal with 6dp precision."""
+        n = 250
+        price_rows = _generate_price_rows(n)
+        close_rows = list(reversed(price_rows))
+        ohlcv_rows = list(reversed(_generate_ohlcv_rows(n)))
+
+        conn = MagicMock()
+        conn.execute.side_effect = _make_mock_execute([close_rows, ohlcv_rows])
+
+        _compute_and_store_features(conn, instrument_id=42)
+
+        update_call = conn.execute.call_args_list[2]
+        params = update_call[0][1]
+
+        for col in _TA_COLUMN_NAMES:
+            val = params[col]
+            if val is not None:
+                assert isinstance(val, Decimal), f"{col} should be Decimal, got {type(val)}"
+                # Verify at most 6 decimal places
+                _, _, exponent = val.as_tuple()
+                assert isinstance(exponent, int)
+                assert abs(exponent) <= 6, f"{col} has more than 6dp: {val}"
+
+    def test_ta_skipped_when_dates_misaligned(self) -> None:
+        """When latest OHLCV date != latest close date, all TA params are None.
+
+        This tests the stale-TA guard: if the latest candle has close but
+        incomplete OHLC, the OHLCV query returns the prior complete bar,
+        creating a date mismatch that should suppress TA computation.
+        """
+        n = 250
+        price_rows = _generate_price_rows(n)
+        close_rows = list(reversed(price_rows))
+
+        # OHLCV rows end one day earlier than close rows — simulates a
+        # partial candle where close is set but OHLC is still NULL.
+        ohlcv_rows = list(reversed(_generate_ohlcv_rows(n - 1)))
+
+        conn = MagicMock()
+        conn.execute.side_effect = _make_mock_execute([close_rows, ohlcv_rows])
+
+        result = _compute_and_store_features(conn, instrument_id=42)
+        assert result == 1
+
+        update_call = conn.execute.call_args_list[2]
+        params = update_call[0][1]
+
+        # Every TA column must be None due to date mismatch
+        for col in _TA_COLUMN_NAMES:
+            assert params[col] is None, f"{col} should be None when dates misalign"
+
+    def test_string_indicators_excluded_from_ta_params(self) -> None:
+        """compute_indicators returns price_vs_sma200 and trend_sma_cross as
+        strings — these must NOT appear in the numeric ta_params dict."""
+        n = 250
+        price_rows = _generate_price_rows(n)
+        close_rows = list(reversed(price_rows))
+        ohlcv_rows = list(reversed(_generate_ohlcv_rows(n)))
+
+        conn = MagicMock()
+        conn.execute.side_effect = _make_mock_execute([close_rows, ohlcv_rows])
+
+        _compute_and_store_features(conn, instrument_id=42)
+
+        update_call = conn.execute.call_args_list[2]
+        params = update_call[0][1]
+
+        assert "price_vs_sma200" not in params
+        assert "trend_sma_cross" not in params

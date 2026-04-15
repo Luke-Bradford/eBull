@@ -208,6 +208,136 @@ class TestMomentumScore:
 
 
 # ---------------------------------------------------------------------------
+# _momentum_score with TA indicators
+# ---------------------------------------------------------------------------
+
+
+class TestEnhancedMomentumScore:
+    """Tests for _momentum_score with TA inputs."""
+
+    def test_backward_compatible_no_ta(self) -> None:
+        """When ta_indicators is not passed, matches original behavior."""
+        score_old, _ = _momentum_score(0.10, 0.20, 0.30)
+        score_new, _ = _momentum_score(0.10, 0.20, 0.30, ta_indicators=None)
+        assert score_new == _approx(score_old)
+
+    def test_strong_bullish_ta_boosts(self) -> None:
+        """Bullish TA (above SMA200, positive MACD, healthy RSI) with positive returns."""
+        ta = {
+            "sma_200": 90.0,
+            "macd_histogram": 2.5,
+            "rsi_14": 60.0,
+            "stoch_k": 70.0,
+            "stoch_d": 65.0,
+            "bb_upper": 120.0,
+            "bb_lower": 80.0,
+            "atr_14": 3.0,
+            "current_close": 110.0,
+        }
+        score, notes = _momentum_score(0.10, 0.20, 0.30, ta_indicators=ta)
+        assert score > 0.7
+        # No "unavailable" notes for provided indicators
+        assert not any("unavailable" in n for n in notes)
+
+    def test_bearish_ta_drags_down(self) -> None:
+        """Bearish TA (below SMA200, negative MACD, overbought RSI) drags score below pure returns."""
+        ta = {
+            "sma_200": 130.0,
+            "macd_histogram": -3.0,
+            "rsi_14": 82.0,
+            "stoch_k": 90.0,
+            "stoch_d": 85.0,
+            "bb_upper": 115.0,
+            "bb_lower": 105.0,
+            "atr_14": 6.0,
+            "current_close": 100.0,
+        }
+        score_no_ta, _ = _momentum_score(0.10, 0.20, 0.30)
+        score_with_ta, _ = _momentum_score(0.10, 0.20, 0.30, ta_indicators=ta)
+        assert score_with_ta < score_no_ta
+
+    def test_partial_ta_uses_available(self) -> None:
+        """When some TA values are None, available ones still contribute."""
+        ta = {
+            "sma_200": None,
+            "macd_histogram": 1.5,
+            "rsi_14": 55.0,
+            "stoch_k": None,
+            "stoch_d": None,
+            "bb_upper": None,
+            "bb_lower": None,
+            "atr_14": None,
+            "current_close": 100.0,
+        }
+        score, notes = _momentum_score(0.10, 0.20, 0.30, ta_indicators=ta)
+        assert 0.0 <= score <= 1.0
+        assert any("sma_200" in n for n in notes)
+
+    def test_all_missing_returns_and_no_ta_neutral(self) -> None:
+        """No returns + no TA = neutral 0.5."""
+        score, notes = _momentum_score(None, None, None, ta_indicators=None)
+        assert score == _approx(0.5)
+        assert len(notes) == 3  # 3 missing return notes
+
+    def test_rsi_overbought_penalty(self) -> None:
+        """RSI > 70 should reduce momentum quality score."""
+        ta_healthy = {
+            "sma_200": 90.0,
+            "macd_histogram": 1.0,
+            "rsi_14": 55.0,
+            "stoch_k": 50.0,
+            "stoch_d": 50.0,
+            "bb_upper": 120.0,
+            "bb_lower": 80.0,
+            "atr_14": 2.0,
+            "current_close": 100.0,
+        }
+        ta_overbought = {**ta_healthy, "rsi_14": 85.0}
+        score_healthy, _ = _momentum_score(0.10, 0.20, 0.30, ta_indicators=ta_healthy)
+        score_overbought, _ = _momentum_score(0.10, 0.20, 0.30, ta_indicators=ta_overbought)
+        assert score_overbought < score_healthy
+
+    def test_ta_with_no_returns_still_produces_score(self) -> None:
+        """When all returns are None but TA is available, TA alone drives the score."""
+        ta = {
+            "sma_200": 90.0,
+            "macd_histogram": 2.0,
+            "rsi_14": 60.0,
+            "stoch_k": 65.0,
+            "stoch_d": 60.0,
+            "bb_upper": 120.0,
+            "bb_lower": 80.0,
+            "atr_14": 2.5,
+            "current_close": 110.0,
+        }
+        score, notes = _momentum_score(None, None, None, ta_indicators=ta)
+        assert score > 0.5  # bullish TA should push above neutral
+        assert score <= 1.0
+
+    def test_zero_close_guards_division(self) -> None:
+        """current_close = 0 should not cause ZeroDivisionError.
+
+        MACD and ATR sub-components divide by current_close; the guards
+        must suppress them gracefully and emit unavailable notes.
+        """
+        ta = {
+            "sma_200": 90.0,
+            "macd_histogram": 2.0,
+            "rsi_14": 55.0,
+            "stoch_k": 50.0,
+            "stoch_d": 50.0,
+            "bb_upper": 120.0,
+            "bb_lower": 80.0,
+            "atr_14": 3.0,
+            "current_close": 0.0,
+        }
+        score, notes = _momentum_score(0.10, 0.20, 0.30, ta_indicators=ta)
+        assert 0.0 <= score <= 1.0
+        # MACD should be suppressed (division by zero guard)
+        assert any("macd_histogram" in n for n in notes)
+
+
+# ---------------------------------------------------------------------------
 # _sentiment_score
 # ---------------------------------------------------------------------------
 

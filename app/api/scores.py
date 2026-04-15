@@ -34,7 +34,7 @@ MAX_PAGE_LIMIT = 200
 
 Stance = Literal["buy", "hold", "watch", "avoid"]
 
-_DEFAULT_MODEL_VERSION = "v1-balanced"
+_DEFAULT_MODEL_VERSION = "v1.1-balanced"
 
 # ---------------------------------------------------------------------------
 # Response models
