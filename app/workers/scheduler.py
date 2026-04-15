@@ -1859,9 +1859,7 @@ def attribution_summary_job() -> None:
             total_positions = 0
             for window in SUMMARY_WINDOWS:
                 summary = compute_attribution_summary(conn, window)
-                with conn.transaction():
-                    persist_attribution_summary(conn, summary)
-                conn.commit()
+                persist_attribution_summary(conn, summary)
                 total_positions = max(total_positions, summary.positions_attributed)
                 logger.info(
                     "attribution_summary: window=%dd positions=%d avg_alpha=%.4f",
@@ -1869,4 +1867,5 @@ def attribution_summary_job() -> None:
                     summary.positions_attributed,
                     float(summary.avg_model_alpha_pct or 0),
                 )
+            conn.commit()
             tracker.row_count = total_positions

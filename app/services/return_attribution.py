@@ -70,7 +70,7 @@ class AttributionResult:
     score_at_entry: Decimal | None
     score_components: dict[str, Any] | None
     entry_fill_id: int | None
-    exit_fill_id: int | None
+    exit_fill_id: int
     recommendation_id: int | None
 
 
@@ -434,7 +434,7 @@ def compute_attribution(
 
     # fill_id references: first entry fill and last exit fill
     entry_fill_id = int(entry_fills[0]["fill_id"]) if entry_fills else None
-    exit_fill_id = int(exit_fills[-1]["fill_id"]) if exit_fills else None
+    exit_fill_id = int(exit_fills[-1]["fill_id"])  # guaranteed non-empty (early return above)
 
     return AttributionResult(
         instrument_id=instrument_id,
