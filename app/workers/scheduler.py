@@ -88,7 +88,7 @@ logger = logging.getLogger(__name__)
 # next-fire-time from APScheduler; ``compute_next_run`` is retained as
 # a pure utility for catch-up-on-boot and tests.
 
-CadenceKind = Literal["hourly", "daily", "weekly"]
+CadenceKind = Literal["hourly", "daily", "weekly", "monthly"]
 
 
 @dataclass(frozen=True)
@@ -104,6 +104,7 @@ class Cadence:
     minute: int = 0
     hour: int = 0
     weekday: int = 0  # 0=Mon (matches datetime.weekday())
+    day: int = 0  # 1..28 for monthly cadence
 
     @classmethod
     def hourly(cls, *, minute: int = 0) -> Cadence:
@@ -129,6 +130,16 @@ class Cadence:
             raise ValueError(f"weekly minute must be 0..59, got {minute}")
         return cls(kind="weekly", weekday=weekday, hour=hour, minute=minute)
 
+    @classmethod
+    def monthly(cls, *, day: int, hour: int, minute: int = 0) -> Cadence:
+        if not 1 <= day <= 28:
+            raise ValueError(f"monthly day must be 1..28, got {day}")
+        if not 0 <= hour <= 23:
+            raise ValueError(f"monthly hour must be 0..23, got {hour}")
+        if not 0 <= minute <= 59:
+            raise ValueError(f"monthly minute must be 0..59, got {minute}")
+        return cls(kind="monthly", day=day, hour=hour, minute=minute)
+
     @property
     def label(self) -> str:
         """Human-readable label for API responses."""
@@ -136,8 +147,11 @@ class Cadence:
             return f"hourly at :{self.minute:02d} UTC"
         if self.kind == "daily":
             return f"daily at {self.hour:02d}:{self.minute:02d} UTC"
-        weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        return f"weekly on {weekday_names[self.weekday]} at {self.hour:02d}:{self.minute:02d} UTC"
+        if self.kind == "weekly":
+            weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            return f"weekly on {weekday_names[self.weekday]} at {self.hour:02d}:{self.minute:02d} UTC"
+        # monthly
+        return f"monthly on day {self.day} at {self.hour:02d}:{self.minute:02d} UTC"
 
 
 PrerequisiteResult = tuple[bool, str]
@@ -186,6 +200,8 @@ JOB_FX_RATES_REFRESH = "fx_rates_refresh"
 JOB_RETRY_DEFERRED = "retry_deferred_recommendations"
 JOB_MONITOR_POSITIONS = "monitor_positions"
 JOB_ATTRIBUTION_SUMMARY = "attribution_summary"
+JOB_WEEKLY_REPORT = "weekly_report"
+JOB_MONTHLY_REPORT = "monthly_report"
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +290,18 @@ def _has_attributions(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM return_attribution)")):
         return (True, "")
     return (False, "no attributed positions yet")
+
+
+def _has_positions_or_attributions(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if there are open positions or any attributed positions."""
+    if _exists(
+        conn,
+        psycopg.sql.SQL(
+            "SELECT EXISTS(SELECT 1 FROM positions WHERE current_units > 0) OR EXISTS(SELECT 1 FROM return_attribution)"
+        ),
+    ):
+        return (True, "")
+    return (False, "no positions or attributions to report on")
 
 
 # Declared schedule. Hours/minutes are deliberate-but-arbitrary placeholders
@@ -367,6 +395,19 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         prerequisite=_has_attributions,
         catch_up_on_boot=False,
     ),
+    # -- Reporting: generate periodic reports when there's data to report on --
+    ScheduledJob(
+        name=JOB_WEEKLY_REPORT,
+        description="Generate weekly performance report snapshot.",
+        cadence=Cadence.weekly(weekday=5, hour=7, minute=0),  # Saturday 07:00
+        prerequisite=_has_positions_or_attributions,
+    ),
+    ScheduledJob(
+        name=JOB_MONTHLY_REPORT,
+        description="Generate monthly performance report snapshot.",
+        cadence=Cadence.monthly(day=1, hour=7, minute=0),  # 1st of month 07:00
+        prerequisite=_has_positions_or_attributions,
+    ),
     # -- On-demand jobs are NOT listed here.  They stay in _INVOKERS
     # (runtime.py) so "Run now" in the Admin UI works, but they are
     # not registered with APScheduler and do not participate in
@@ -402,12 +443,22 @@ def compute_next_run(cadence: Cadence, now: datetime) -> datetime:
             candidate += timedelta(days=1)
         return candidate
 
-    # weekly
-    candidate = now_utc.replace(hour=cadence.hour, minute=cadence.minute, second=0, microsecond=0)
-    days_ahead = (cadence.weekday - candidate.weekday()) % 7
-    candidate += timedelta(days=days_ahead)
+    if cadence.kind == "weekly":
+        candidate = now_utc.replace(hour=cadence.hour, minute=cadence.minute, second=0, microsecond=0)
+        days_ahead = (cadence.weekday - candidate.weekday()) % 7
+        candidate += timedelta(days=days_ahead)
+        if candidate <= now_utc:
+            candidate += timedelta(days=7)
+        return candidate
+
+    # monthly
+    candidate = now_utc.replace(day=cadence.day, hour=cadence.hour, minute=cadence.minute, second=0, microsecond=0)
     if candidate <= now_utc:
-        candidate += timedelta(days=7)
+        # Advance to next month
+        if candidate.month == 12:
+            candidate = candidate.replace(year=candidate.year + 1, month=1)
+        else:
+            candidate = candidate.replace(month=candidate.month + 1)
     return candidate
 
 
@@ -1869,3 +1920,50 @@ def attribution_summary_job() -> None:
                 )
             conn.commit()
             tracker.row_count = total_positions
+
+
+def weekly_report() -> None:
+    """Generate and persist the weekly performance report."""
+    from app.services.reporting import generate_weekly_report, persist_report_snapshot
+
+    with _tracked_job(JOB_WEEKLY_REPORT) as tracker:
+        # Period: previous Monday through Sunday
+        today = datetime.now(tz=UTC).date()
+        # Saturday run → report covers Mon–Sun of the week just ended
+        period_end = today - timedelta(days=(today.weekday() + 1) % 7)  # last Sunday
+        period_start = period_end - timedelta(days=6)  # Monday of that week
+
+        with psycopg.connect(settings.database_url) as conn:
+            report = generate_weekly_report(conn, period_start, period_end)
+            persist_report_snapshot(
+                conn,
+                report_type="weekly",
+                period_start=period_start,
+                period_end=period_end,
+                snapshot=report,
+            )
+            conn.commit()
+        tracker.row_count = 1
+
+
+def monthly_report() -> None:
+    """Generate and persist the monthly performance report."""
+    from app.services.reporting import generate_monthly_report, persist_report_snapshot
+
+    with _tracked_job(JOB_MONTHLY_REPORT) as tracker:
+        # Period: previous full calendar month
+        today = datetime.now(tz=UTC).date()
+        period_end = today.replace(day=1) - timedelta(days=1)  # last day of prev month
+        period_start = period_end.replace(day=1)  # first day of prev month
+
+        with psycopg.connect(settings.database_url) as conn:
+            report = generate_monthly_report(conn, period_start, period_end)
+            persist_report_snapshot(
+                conn,
+                report_type="monthly",
+                period_start=period_start,
+                period_end=period_end,
+                snapshot=report,
+            )
+            conn.commit()
+        tracker.row_count = 1

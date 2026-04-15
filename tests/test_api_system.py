@@ -379,7 +379,7 @@ class TestSystemJobs:
         # Each entry carries the declared cadence + computed next_run_time.
         for job in body["jobs"]:
             assert job["cadence"]
-            assert job["cadence_kind"] in ("hourly", "daily", "weekly")
+            assert job["cadence_kind"] in ("hourly", "daily", "weekly", "monthly")
             assert job["next_run_time"]
             assert job["next_run_time_source"] == "declared"
             assert job["description"]

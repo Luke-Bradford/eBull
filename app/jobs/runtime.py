@@ -64,10 +64,12 @@ from app.workers.scheduler import (
     JOB_EXECUTE_APPROVED_ORDERS,
     JOB_FX_RATES_REFRESH,
     JOB_MONITOR_POSITIONS,
+    JOB_MONTHLY_REPORT,
     JOB_MORNING_CANDIDATE_REVIEW,
     JOB_NIGHTLY_UNIVERSE_SYNC,
     JOB_RETRY_DEFERRED,
     JOB_WEEKLY_COVERAGE_REVIEW,
+    JOB_WEEKLY_REPORT,
     SCHEDULED_JOBS,
     Cadence,
     ScheduledJob,
@@ -83,10 +85,12 @@ from app.workers.scheduler import (
     execute_approved_orders,
     fx_rates_refresh,
     monitor_positions_job,
+    monthly_report,
     morning_candidate_review,
     nightly_universe_sync,
     retry_deferred_recommendations_job,
     weekly_coverage_review,
+    weekly_report,
 )
 
 logger = logging.getLogger(__name__)
@@ -128,6 +132,8 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_RETRY_DEFERRED: retry_deferred_recommendations_job,
     JOB_MONITOR_POSITIONS: monitor_positions_job,
     JOB_ATTRIBUTION_SUMMARY: attribution_summary_job,
+    JOB_WEEKLY_REPORT: weekly_report,
+    JOB_MONTHLY_REPORT: monthly_report,
 }
 
 
@@ -160,6 +166,13 @@ def _trigger_for(cadence: Cadence) -> CronTrigger:
         weekday_names = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
         return CronTrigger(
             day_of_week=weekday_names[cadence.weekday],
+            hour=cadence.hour,
+            minute=cadence.minute,
+            timezone="UTC",
+        )
+    if cadence.kind == "monthly":
+        return CronTrigger(
+            day=cadence.day,
             hour=cadence.hour,
             minute=cadence.minute,
             timezone="UTC",
