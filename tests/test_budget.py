@@ -487,8 +487,7 @@ class TestComputeBudgetState:
 
         # Tax: total_gains=3500, net_gain=3500, ANNUAL_EXEMPT=3000
         # taxable_net = 3500 - 3000 = 500
-        # scale = 500 / 3500
-        # higher_est = 3500 * 0.24 * (500/3500) = 120.00 (quantized)
+        # higher_est = 500 * 0.24 = 120.00
         assert state.estimated_tax_gbp == Decimal("120.00")
         # tax_usd = 120.00 * 1.25 = 150.0000
         assert state.estimated_tax_usd == Decimal("150.0000")
@@ -541,8 +540,7 @@ class TestComputeBudgetState:
         # cash=100, deployed=50000, mirrors=0, gains=50000, net=50000
         # working_budget = 100 + 50000 + 0 = 50100
         # taxable_net = 50000 - 3000 = 47000
-        # scale = 47000 / 50000
-        # higher_est = 50000 * 0.24 * (47000/50000) = 11280
+        # higher_est = 47000 * 0.24 = 11280
         # tax_usd = 11280 * 1.25 = 14100
         # buffer = 50100 * 0.05 = 2505
         # available = 100 - 14100 - 2505 = -16505
@@ -574,7 +572,7 @@ class TestComputeBudgetState:
             state = compute_budget_state(conn)
 
         assert state.cgt_scenario == "basic"
-        # basic_est = 3500 * 0.18 * (500/3500) = 90.00 (quantized)
+        # basic_est = 500 * 0.18 = 90.00
         assert state.estimated_tax_gbp == Decimal("90.00")
 
 

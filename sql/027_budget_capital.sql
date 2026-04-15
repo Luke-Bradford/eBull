@@ -38,6 +38,12 @@ BEGIN
         CHECK (amount > 0);
 
     ALTER TABLE capital_events
+        DROP CONSTRAINT IF EXISTS chk_capital_events_currency;
+    ALTER TABLE capital_events
+        ADD CONSTRAINT chk_capital_events_currency
+        CHECK (currency IN ('USD', 'GBP'));
+
+    ALTER TABLE capital_events
         DROP CONSTRAINT IF EXISTS chk_capital_events_source;
     ALTER TABLE capital_events
         ADD CONSTRAINT chk_capital_events_source

@@ -652,3 +652,22 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `with conn.transaction():` on a `psycopg.connect()`-opened connection (autocommit=False) creates a savepoint. The savepoint is released when the block exits, but the outer implicit transaction is not committed. If `conn.commit()` is omitted after the block, writes are silently rolled back when the connection closes.
 - Prevention: After any `with conn.transaction():` block on a non-autocommit connection, verify that `conn.commit()` is called before the connection closes. Alternatively, avoid `conn.transaction()` and use a plain `conn.commit()` when savepoint semantics are not needed. Grep `with conn\.transaction\(\):` and verify each is followed by `conn.commit()` within the same `with psycopg.connect(...)` scope.
 - Enforced in: this prevention log
+
+
+---
+
+### psycopg3 cursors are independent — mock cursor sequences are not
+
+- First seen in: #232 (review BLOCKING 2)
+- Symptom: Reviewer flagged a "cursor desync" when `BudgetConfigCorrupt` is raised mid-sequence in `compute_budget_state`, claiming it corrupts the cursor position for `_load_sector_exposure`. In production, each `conn.cursor()` creates an independent server cursor — there is no shared iterator to desync. The issue exists only in the test mock pattern where `conn.cursor` returns cursors via `side_effect` from a list.
+- Prevention: When a test helper builds a cursor sequence (`_buy_cursors`, `_exit_cursors`, etc.) and includes an exception path that consumes fewer cursors than the happy path, the helper must emit the correct number of cursors for each path. See `_budget_cursors_list(budget_corrupt=True)` which returns 1 cursor instead of 6. Always count the cursors consumed by each branch.
+- Enforced in: `tests/test_execution_guard.py` (`_budget_cursors_list` with `budget_corrupt` parameter)
+
+---
+
+### New TEXT columns in migrations need CHECK constraints or Literal types
+
+- First seen in: #232 (review WARNING 1)
+- Symptom: `capital_events.currency` was a free-text TEXT column with no CHECK constraint. While SQL injection is blocked by parameterized queries, arbitrary strings persisting in domain columns violate the enum-style semantics.
+- Prevention: Before merge, `grep 'TEXT NOT NULL' sql/0*.sql` on new migrations and confirm each user-supplied column has either a CHECK constraint or an enum type. On the API model side, use `Literal["a", "b"]` instead of `str` for columns with constrained values.
+- Enforced in: `sql/027_budget_capital.sql` (`chk_capital_events_currency`); `app/api/budget.py` (`Literal["USD", "GBP"]`)

@@ -437,7 +437,7 @@ def _load_mirror_equity(conn: psycopg.Connection[Any]) -> Decimal:
         cur.execute(
             """
             SELECT COALESCE(
-                (SELECT SUM(cm.available_amount)
+                (SELECT COALESCE(SUM(cm.available_amount), 0)
                  FROM copy_mirrors cm
                  WHERE cm.status = 'active')
                 +
@@ -492,12 +492,9 @@ def _load_tax_estimates(
     basic_rate = Decimal("0.18")
     higher_rate = Decimal("0.24")
 
-    # scale = proportion of total gains that is taxable after exempt amount
-    # units: taxable_net (GBP) / total_gains (GBP) = dimensionless ratio
-    scale = taxable_net / total_gains
     _TWO_DP = Decimal("0.01")
-    basic_est = (total_gains * basic_rate * scale).quantize(_TWO_DP)
-    higher_est = (total_gains * higher_rate * scale).quantize(_TWO_DP)
+    basic_est = (taxable_net * basic_rate).quantize(_TWO_DP)
+    higher_est = (taxable_net * higher_rate).quantize(_TWO_DP)
     return (basic_est, higher_est)
 
 
@@ -559,7 +556,10 @@ def compute_budget_state(conn: psycopg.Connection[Any]) -> BudgetState:
             )
         estimated_tax_usd = _ZERO
 
-    # Cash buffer reserve
+    # Cash buffer reserve — intentionally % of total AUM (working_budget),
+    # not % of cash_balance.  Using cash as the base would create a feedback
+    # loop: deploying more cash shrinks the buffer, enabling even more
+    # deployment.  AUM-based reserve scales with portfolio size.
     if working_budget is not None:
         cash_buffer_reserve = working_budget * config.cash_buffer_pct
     else:

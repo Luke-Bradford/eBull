@@ -97,7 +97,7 @@ class BudgetConfigResponse(BaseModel):
 class CreateCapitalEventRequest(BaseModel):
     event_type: Literal["injection", "withdrawal"]
     amount: float = Field(gt=0)
-    currency: str = "USD"
+    currency: Literal["USD", "GBP"] = "USD"
     note: str | None = None
 
 
