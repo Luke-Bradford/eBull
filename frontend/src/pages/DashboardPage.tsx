@@ -1,3 +1,4 @@
+import { fetchBudget } from "@/api/budget";
 import { fetchPortfolio } from "@/api/portfolio";
 import { fetchRecommendations } from "@/api/recommendations";
 import { fetchSystemStatus } from "@/api/system";
@@ -34,12 +35,14 @@ export function DashboardPage() {
   );
   const system = useAsync(fetchSystemStatus, []);
   const config = useAsync(fetchConfig, []);
+  const budget = useAsync(fetchBudget, []);
 
   const allFailed =
     portfolio.error !== null &&
     recs.error !== null &&
     system.error !== null &&
-    config.error !== null;
+    config.error !== null &&
+    budget.error !== null;
 
   return (
     <div className="space-y-6">
@@ -68,7 +71,10 @@ export function DashboardPage() {
             </div>
           ) : (
             <>
-              <SummaryCards data={portfolio.loading ? null : portfolio.data} />
+              <SummaryCards
+                data={portfolio.loading ? null : portfolio.data}
+                budgetData={budget.loading || budget.error !== null ? null : budget.data}
+              />
               <Section title="Positions">
                 {portfolio.loading ? (
                   <SectionSkeleton rows={4} />
