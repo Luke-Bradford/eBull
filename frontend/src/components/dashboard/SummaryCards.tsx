@@ -1,4 +1,4 @@
-import type { PortfolioResponse } from "@/api/types";
+import type { BudgetStateResponse, PortfolioResponse } from "@/api/types";
 import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatMoney, formatPct, pnlPct } from "@/lib/format";
 import { SectionSkeleton } from "@/components/dashboard/Section";
@@ -16,12 +16,20 @@ import { SectionSkeleton } from "@/components/dashboard/Section";
  * sum-of-cost-basis (capital-weighted), not an average of per-position
  * percentages.
  */
-export function SummaryCards({ data }: { data: PortfolioResponse | null }) {
+export function SummaryCards({
+  data,
+  budgetData,
+  budgetError,
+}: {
+  data: PortfolioResponse | null;
+  budgetData: BudgetStateResponse | null;
+  budgetError?: boolean;
+}) {
   const currency = useDisplayCurrency();
   if (data === null) {
     return (
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        {[0, 1, 2].map((i) => (
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {[0, 1, 2, 3].map((i) => (
           <div key={i} className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
             <SectionSkeleton rows={2} />
           </div>
@@ -45,7 +53,7 @@ export function SummaryCards({ data }: { data: PortfolioResponse | null }) {
   const pnlFraction = pnlPct(totalPnl, totalCost);
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
       <Card label="Total AUM" value={formatMoney(data.total_aum, currency)} />
       <Card
         label="Cash balance"
@@ -58,7 +66,54 @@ export function SummaryCards({ data }: { data: PortfolioResponse | null }) {
         hint={pnlFraction === null ? undefined : formatPct(pnlFraction)}
         tone={totalPnl >= 0 ? "positive" : "negative"}
       />
+      <DeploymentCard budget={budgetData} budgetError={budgetError} currency={currency} />
     </div>
+  );
+}
+
+function DeploymentCard({
+  budget,
+  budgetError,
+  currency,
+}: {
+  budget: BudgetStateResponse | null;
+  budgetError?: boolean;
+  currency: string;
+}) {
+  if (budget === null) {
+    // Distinguish "still loading" (skeleton) from "failed" (dash + hint).
+    if (budgetError) {
+      return <Card label="Available for deployment" value="—" hint="Budget unavailable" />;
+    }
+    return (
+      <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+        <SectionSkeleton rows={2} />
+      </div>
+    );
+  }
+
+  const available = budget.available_for_deployment;
+  const isNull = available === null;
+  const isLow =
+    !isNull &&
+    budget.working_budget !== null &&
+    budget.working_budget > 0 &&
+    available / budget.working_budget < 0.05;
+  const isNegative = !isNull && available < 0;
+
+  const tone: "positive" | "negative" | undefined = isNull
+    ? undefined
+    : isNegative || isLow
+      ? "negative"
+      : "positive";
+
+  return (
+    <Card
+      label="Available for deployment"
+      value={isNull ? "—" : formatMoney(available, currency)}
+      hint={isNull ? "Cash unknown" : isLow ? "Low deployment capital" : undefined}
+      tone={tone}
+    />
   );
 }
 

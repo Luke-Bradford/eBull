@@ -1,3 +1,4 @@
+import { fetchBudget } from "@/api/budget";
 import { fetchPortfolio } from "@/api/portfolio";
 import { fetchRecommendations } from "@/api/recommendations";
 import { fetchSystemStatus } from "@/api/system";
@@ -8,6 +9,7 @@ import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/S
 import { SummaryCards } from "@/components/dashboard/SummaryCards";
 import { PositionsTable } from "@/components/dashboard/PositionsTable";
 import { RecentRecommendations } from "@/components/dashboard/RecentRecommendations";
+import { BudgetOverviewPanel } from "@/components/dashboard/BudgetOverviewPanel";
 import { SystemStatusPanel } from "@/components/dashboard/SystemStatusPanel";
 import { BootstrapProgress, isBootstrapping } from "@/components/dashboard/BootstrapProgress";
 
@@ -34,12 +36,14 @@ export function DashboardPage() {
   );
   const system = useAsync(fetchSystemStatus, []);
   const config = useAsync(fetchConfig, []);
+  const budget = useAsync(fetchBudget, []);
 
   const allFailed =
     portfolio.error !== null &&
     recs.error !== null &&
     system.error !== null &&
-    config.error !== null;
+    config.error !== null &&
+    budget.error !== null;
 
   return (
     <div className="space-y-6">
@@ -68,7 +72,11 @@ export function DashboardPage() {
             </div>
           ) : (
             <>
-              <SummaryCards data={portfolio.loading ? null : portfolio.data} />
+              <SummaryCards
+                data={portfolio.loading ? null : portfolio.data}
+                budgetData={budget.loading || budget.error !== null ? null : budget.data}
+                budgetError={budget.error !== null}
+              />
               <Section title="Positions">
                 {portfolio.loading ? (
                   <SectionSkeleton rows={4} />
@@ -83,24 +91,35 @@ export function DashboardPage() {
           )}
         </div>
 
-        <Section title="System status">
-          {/* No combined loading gate: each endpoint's loading / error /
-              data state must drive its own render branch so a slow or
-              retrying endpoint cannot hide the already-resolved side.
-              See docs/review-prevention-log.md "Duplicate error widgets…"
-              and the related round-3 PR-#89 finding on shared loading
-              gates. */}
-          <SystemStatusPanel
-            system={system.error !== null ? null : system.data}
-            config={config.error !== null ? null : config.data}
-            systemLoading={system.loading}
-            configLoading={config.loading}
-            systemError={system.error !== null}
-            configError={config.error !== null}
-            onRetrySystem={system.refetch}
-            onRetryConfig={config.refetch}
-          />
-        </Section>
+        <div className="space-y-6">
+          <Section title="System status">
+            {/* No combined loading gate: each endpoint's loading / error /
+                data state must drive its own render branch so a slow or
+                retrying endpoint cannot hide the already-resolved side.
+                See docs/review-prevention-log.md "Duplicate error widgets…"
+                and the related round-3 PR-#89 finding on shared loading
+                gates. */}
+            <SystemStatusPanel
+              system={system.error !== null ? null : system.data}
+              config={config.error !== null ? null : config.data}
+              systemLoading={system.loading}
+              configLoading={config.loading}
+              systemError={system.error !== null}
+              configError={config.error !== null}
+              onRetrySystem={system.refetch}
+              onRetryConfig={config.refetch}
+            />
+          </Section>
+
+          <Section title="Budget">
+            <BudgetOverviewPanel
+              budget={budget.error !== null ? null : budget.data}
+              loading={budget.loading}
+              hasError={budget.error !== null}
+              onRetry={budget.refetch}
+            />
+          </Section>
+        </div>
       </div>
 
       <Section title="Recent recommendations">

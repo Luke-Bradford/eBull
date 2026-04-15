@@ -39,6 +39,22 @@ vi.mock("@/api/brokerCredentials", () => ({
   validateStoredCredentials: vi.fn(),
 }));
 
+// Budget API mock — prevents BudgetConfigSection from making real fetch
+// calls, which would produce extra role="alert" elements and break the
+// broker-credential test assertions that use getByRole("alert").
+vi.mock("@/api/budget", () => ({
+  fetchBudgetConfig: vi.fn().mockResolvedValue({
+    cash_buffer_pct: 0.05,
+    cgt_scenario: "higher",
+    updated_at: "2026-04-15T00:00:00Z",
+    updated_by: "system",
+    reason: "initial seed",
+  }),
+  fetchCapitalEvents: vi.fn().mockResolvedValue([]),
+  updateBudgetConfig: vi.fn(),
+  createCapitalEvent: vi.fn(),
+}));
+
 const mockedList = vi.mocked(listBrokerCredentials);
 const mockedCreate = vi.mocked(createBrokerCredential);
 const mockedRevoke = vi.mocked(revokeBrokerCredential);

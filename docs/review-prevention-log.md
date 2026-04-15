@@ -680,3 +680,21 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: Smoke test saved a `dependency_overrides` entry with `pop(key, None)`, then only restored it when `saved is not None`. If the override was explicitly set to `None` (a valid FastAPI override value), the restore was skipped, permanently deleting the entry for subsequent tests.
 - Prevention: When saving and restoring `app.dependency_overrides` entries, track presence separately (`had_key = key in overrides`) and restore unconditionally when the key was present. Do not use the value itself as a presence sentinel.
 - Enforced in: `tests/smoke/test_app_boots.py` (`had_get_conn` / `saved_get_conn` pattern)
+
+---
+
+### Loose `string` on API response fields that mirror backend `Literal` types
+
+- First seen in: #236 (review WARNING 3)
+- Symptom: `types.ts` used `string` for `cgt_scenario`, `event_type`, `currency`, and `source` fields instead of literal unions. This erodes exhaustiveness checks — callers that destructure the response lose compile-time validation of discriminated values.
+- Prevention: When adding a new interface to `types.ts`, if the backend Pydantic model uses `Literal["a", "b"]` for a field, use the matching union type in the TS interface. Grep `types.ts` for bare `string` on fields that correspond to constrained columns.
+- Enforced in: `frontend/src/api/types.ts` (`BudgetStateResponse`, `CapitalEventResponse`, `BudgetConfigResponse`)
+
+---
+
+### Infinity/out-of-range numeric inputs bypass `Number.isNaN` guards
+
+- First seen in: #236 (review WARNING 4)
+- Symptom: `"1e308"` → `Number("1e308")` → `Infinity`; `Infinity` is not `NaN`, so `Number.isNaN(Infinity)` returns `false`, passing the guard and sending `amount: Infinity` to the backend.
+- Prevention: Use `Number.isFinite(v)` instead of `!Number.isNaN(v)` for numeric input validation before API submission. `isFinite` rejects both `NaN` and `±Infinity`.
+- Enforced in: `frontend/src/components/settings/BudgetConfigSection.tsx` (event amount guard)
