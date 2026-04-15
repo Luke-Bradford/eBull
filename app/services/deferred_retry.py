@@ -269,8 +269,7 @@ def retry_deferred_recommendations(conn: psycopg.Connection[Any]) -> RetryResult
                 )
             else:
                 reason = (
-                    f"deferred_retry: expired — retry_count={retry_count} "
-                    f">= MAX_RETRY_ATTEMPTS={MAX_RETRY_ATTEMPTS}"
+                    f"deferred_retry: expired — retry_count={retry_count} >= MAX_RETRY_ATTEMPTS={MAX_RETRY_ATTEMPTS}"
                 )
             try:
                 with conn.transaction():
