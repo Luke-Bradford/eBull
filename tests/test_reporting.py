@@ -363,8 +363,11 @@ class TestBottomPerformersEdge:
         conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
         cursor.fetchall.return_value = [
             {
-                "instrument_id": 1, "symbol": "AAPL", "company_name": "Apple",
-                "unrealized_pnl": Decimal("100"), "current_units": Decimal("5"),
+                "instrument_id": 1,
+                "symbol": "AAPL",
+                "company_name": "Apple",
+                "unrealized_pnl": Decimal("100"),
+                "current_units": Decimal("5"),
                 "avg_cost": Decimal("150"),
             },
         ]
@@ -377,10 +380,12 @@ class TestBottomPerformersEdge:
 class TestDecHelper:
     def test_none_returns_none(self) -> None:
         from app.services.reporting import _dec
+
         assert _dec(None) is None
 
     def test_decimal_returns_string(self) -> None:
         from app.services.reporting import _dec
+
         assert _dec(Decimal("1.23")) == "1.23"
 
 
@@ -422,9 +427,12 @@ class TestJsonSerializability:
         conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
         cursor.fetchall.return_value = []
         cursor.fetchone.return_value = {
-            "realized": Decimal("0"), "unrealized": Decimal("0"),
-            "positions_attributed": 0, "avg_gross": None,
-            "avg_market": None, "avg_alpha": None,
+            "realized": Decimal("0"),
+            "unrealized": Decimal("0"),
+            "positions_attributed": 0,
+            "avg_gross": None,
+            "avg_market": None,
+            "avg_alpha": None,
         }
 
         with patch(f"{_REPORTING}.compute_budget_state") as mock_budget:
