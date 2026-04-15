@@ -186,7 +186,7 @@ def _budget_deployed_cursor(deployed: float = 0.0) -> MagicMock:
 
 
 def _budget_mirror_cursor(equity: float = 0.0) -> MagicMock:
-    return _make_cursor([{"mirror_equity": Decimal(str(equity))}])
+    return _make_cursor([{"total": equity}])
 
 
 def _budget_tax_cursor() -> MagicMock:
@@ -240,8 +240,15 @@ def _budget_cursors_list(
 
     When budget_corrupt=True, budget_config returns no rows which
     triggers BudgetConfigCorrupt.  Otherwise 6 cursors are returned:
-    budget_config, cash_balance, deployed_capital, mirror_equity,
-    tax_estimates, gbp_usd_rate.
+      0: budget_config (get_budget_config)
+      1: cash_balance (_load_cash_balance)
+      2: deployed_capital (_load_deployed_capital)
+      3: mirror_equity (consumed by portfolio._load_mirror_equity call-through)
+      4: tax_estimates (_load_tax_estimates)
+      5: gbp_usd_rate (_load_gbp_usd_rate)
+
+    Note: test_budget.py patches _load_mirror_equity directly (5 cursors),
+    so its _budget_conn() helper omits cursor 3.
     """
     if budget_corrupt:
         return [_make_cursor([])]  # empty budget_config -> BudgetConfigCorrupt
