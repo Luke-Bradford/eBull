@@ -280,8 +280,9 @@ def retry_deferred_recommendations(conn: psycopg.Connection[Any]) -> RetryResult
         count_expired = retry_count >= MAX_RETRY_ATTEMPTS
 
         if age_expired or count_expired:
-            if age_expired:
-                assert deferred_at is not None  # narrowed by age_expired
+            # age_expired guarantees deferred_at is not None, but pyright
+            # can't narrow through a bool variable — re-check explicitly.
+            if age_expired and deferred_at is not None:
                 reason = (
                     f"deferred_retry: expired — deferred_at={deferred_at.isoformat()} "
                     f"older than {RETRY_EXPIRY_HOURS}h cutoff"
@@ -359,7 +360,9 @@ def retry_deferred_recommendations(conn: psycopg.Connection[Any]) -> RetryResult
             )
             # The exception may have left the connection in an error state
             # (InFailedSqlTransaction). Roll back so subsequent operations
-            # on the same connection can proceed.
+            # on the same connection can proceed. This only discards the
+            # failed evaluate_entry_conditions work — prior iterations
+            # committed immediately, so no committed data is lost.
             conn.rollback()
             # Best-effort: increment retry count + write audit row so the
             # error attempt is visible in the audit trail.
