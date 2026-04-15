@@ -16,6 +16,7 @@ from app.api.auth_bootstrap import router as auth_bootstrap_router
 from app.api.auth_session import router as auth_session_router
 from app.api.auth_setup import router as auth_setup_router
 from app.api.broker_credentials import router as broker_credentials_router
+from app.api.budget import router as budget_router
 from app.api.config import KillSwitchRequest, KillSwitchResponse, post_kill_switch
 from app.api.config import router as config_router
 from app.api.copy_trading import router as copy_trading_router
@@ -119,6 +120,7 @@ app.include_router(auth_bootstrap_router)
 app.include_router(auth_session_router)
 app.include_router(operators_router)
 app.include_router(audit_router)
+app.include_router(budget_router)
 app.include_router(broker_credentials_router)
 app.include_router(config_router)
 app.include_router(copy_trading_router)
