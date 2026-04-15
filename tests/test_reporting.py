@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -309,3 +310,138 @@ class TestReportsAPI:
 
         paths = [r.path for r in router.routes if hasattr(r, "path")]  # type: ignore[union-attr]
         assert "/api/reports/latest" in paths
+
+
+# ---------------------------------------------------------------------------
+# Edge case tests
+# ---------------------------------------------------------------------------
+
+
+class TestWinRateEdgeCases:
+    def test_no_closed_positions_returns_none(self) -> None:
+        """Win rate should be None when no positions closed in the period."""
+        from app.services.reporting import _win_rate_and_holding
+
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = []
+
+        result = _win_rate_and_holding(conn, date(2026, 4, 1), date(2026, 4, 30))
+        assert result["total_closed"] == 0
+        assert result["win_rate_pct"] is None
+        assert result["avg_holding_days"] is None
+
+    def test_all_winners(self) -> None:
+        """100% win rate when all positions were profitable."""
+        from app.services.reporting import _win_rate_and_holding
+
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = [
+            {"gross_return_pct": Decimal("0.10"), "hold_days": 30},
+            {"gross_return_pct": Decimal("0.05"), "hold_days": 45},
+        ]
+
+        result = _win_rate_and_holding(conn, date(2026, 4, 1), date(2026, 4, 30))
+        assert result["total_closed"] == 2
+        assert result["win_rate_pct"] == "100.00"
+        assert result["avg_holding_days"] == 37.5
+
+
+class TestBottomPerformersEdge:
+    def test_fewer_than_n_positions(self) -> None:
+        """With fewer positions than N, bottom list should not duplicate top."""
+        from app.services.reporting import _top_bottom_performers
+
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = [
+            {
+                "instrument_id": 1, "symbol": "AAPL", "company_name": "Apple",
+                "unrealized_pnl": Decimal("100"), "current_units": Decimal("5"),
+                "avg_cost": Decimal("150"),
+            },
+        ]
+
+        top, bottom = _top_bottom_performers(conn, n=3)
+        assert len(top) == 1
+        assert len(bottom) == 0
+
+
+class TestDecHelper:
+    def test_none_returns_none(self) -> None:
+        from app.services.reporting import _dec
+        assert _dec(None) is None
+
+    def test_decimal_returns_string(self) -> None:
+        from app.services.reporting import _dec
+        assert _dec(Decimal("1.23")) == "1.23"
+
+
+class TestJsonSerializability:
+    """Codex-requested: verify reports can be serialized to JSON."""
+
+    def test_weekly_report_is_json_serializable(self) -> None:
+        """The weekly report dict must survive json.dumps without error."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = []
+        cursor.fetchone.return_value = {"realized": Decimal("0"), "unrealized": Decimal("0")}
+
+        with patch(f"{_REPORTING}.compute_budget_state") as mock_budget:
+            mock_budget.return_value = MagicMock(
+                cash_balance=Decimal("10000"),
+                deployed_capital=Decimal("5000"),
+                estimated_tax_usd=Decimal("200"),
+                available_for_deployment=Decimal("4800"),
+            )
+            report = generate_weekly_report(
+                conn,
+                period_start=date(2026, 4, 6),
+                period_end=date(2026, 4, 12),
+            )
+
+        # Must not raise
+        serialized = json.dumps(report)
+        assert isinstance(serialized, str)
+        assert "weekly" in serialized
+
+    def test_monthly_report_is_json_serializable(self) -> None:
+        """The monthly report dict must survive json.dumps without error."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = []
+        cursor.fetchone.return_value = {
+            "realized": Decimal("0"), "unrealized": Decimal("0"),
+            "positions_attributed": 0, "avg_gross": None,
+            "avg_market": None, "avg_alpha": None,
+        }
+
+        with patch(f"{_REPORTING}.compute_budget_state") as mock_budget:
+            mock_budget.return_value = MagicMock(
+                cash_balance=Decimal("10000"),
+                deployed_capital=Decimal("5000"),
+                estimated_tax_usd=Decimal("200"),
+                estimated_tax_gbp=Decimal("160"),
+                available_for_deployment=Decimal("4800"),
+                tax_year="2025/26",
+            )
+            report = generate_monthly_report(
+                conn,
+                period_start=date(2026, 3, 1),
+                period_end=date(2026, 3, 31),
+            )
+
+        serialized = json.dumps(report)
+        assert isinstance(serialized, str)
+        assert "monthly" in serialized
