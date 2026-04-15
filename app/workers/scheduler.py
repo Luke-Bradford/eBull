@@ -41,6 +41,7 @@ from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
 from app.services.coverage import review_coverage, seed_coverage
+from app.services.deferred_retry import retry_deferred_recommendations
 from app.services.enrichment import refresh_enrichment
 from app.services.entry_timing import evaluate_entry_conditions
 from app.services.execution_guard import evaluate_recommendation
@@ -52,6 +53,7 @@ from app.services.ops_monitor import check_row_count_spike, record_job_finish, r
 from app.services.order_client import execute_order
 from app.services.portfolio import run_portfolio_review
 from app.services.portfolio_sync import sync_portfolio
+from app.services.position_monitor import check_position_health
 from app.services.scoring import compute_rankings
 from app.services.sentiment import ClaudeSentimentScorer
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
@@ -176,6 +178,8 @@ JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
 JOB_DAILY_PORTFOLIO_SYNC = "daily_portfolio_sync"
 JOB_EXECUTE_APPROVED_ORDERS = "execute_approved_orders"
 JOB_FX_RATES_REFRESH = "fx_rates_refresh"
+JOB_RETRY_DEFERRED = "retry_deferred_recommendations"
+JOB_MONITOR_POSITIONS = "monitor_positions"
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +231,29 @@ def _has_actionable_recommendations(conn: psycopg.Connection[Any]) -> Prerequisi
     ):
         return (True, "")
     return (False, "no proposed or approved recommendations")
+
+
+def _has_deferred_recommendations(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if at least one timing_deferred BUY/ADD recommendation exists."""
+    if _exists(
+        conn,
+        psycopg.sql.SQL(
+            "SELECT EXISTS(SELECT 1 FROM trade_recommendations "
+            "WHERE status = 'timing_deferred' AND action IN ('BUY', 'ADD'))"
+        ),
+    ):
+        return (True, "")
+    return (False, "no timing_deferred BUY/ADD recommendations")
+
+
+def _has_open_positions(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if at least one open position exists."""
+    if _exists(
+        conn,
+        psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM positions WHERE current_units > 0)"),
+    ):
+        return (True, "")
+    return (False, "no open positions")
 
 
 def _has_tier1_stale_theses(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
@@ -298,6 +325,20 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         prerequisite=_has_actionable_recommendations,
         # Do not fire on cold boot — order execution must only happen at
         # the scheduled time, not as a surprise catch-up hours later.
+        catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_RETRY_DEFERRED,
+        description="Re-evaluate timing_deferred recommendations with fresh TA data.",
+        cadence=Cadence.hourly(minute=30),
+        prerequisite=_has_deferred_recommendations,
+        catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_MONITOR_POSITIONS,
+        description="Check open positions for SL/TP breaches and thesis breaks.",
+        cadence=Cadence.hourly(minute=15),
+        prerequisite=_has_open_positions,
         catch_up_on_boot=False,
     ),
     ScheduledJob(
@@ -1032,6 +1073,21 @@ def morning_candidate_review() -> None:
         rec_result.total_aum,
     )
 
+    # --- Pipeline trigger: if recs were generated, run the execution pipeline ---
+    actionable_count = sum(1 for r in rec_result.recommendations if r.action in ("BUY", "ADD", "EXIT"))
+    if actionable_count > 0:
+        logger.info(
+            "morning_candidate_review: %d actionable recs → triggering execute_approved_orders",
+            actionable_count,
+        )
+        try:
+            execute_approved_orders()
+        except Exception:
+            logger.error(
+                "morning_candidate_review: pipeline trigger to execute_approved_orders failed",
+                exc_info=True,
+            )
+
 
 def _timing_error_defer(
     rec_id: int,
@@ -1063,7 +1119,8 @@ def _timing_error_defer(
                 UPDATE trade_recommendations
                 SET status = 'timing_deferred',
                     timing_verdict = 'error',
-                    timing_rationale = %(rationale)s
+                    timing_rationale = %(rationale)s,
+                    timing_deferred_at = COALESCE(timing_deferred_at, NOW())
                 WHERE recommendation_id = %(rid)s
                 """,
                 {"rid": rec_id, "rationale": explanation},
@@ -1185,7 +1242,8 @@ def execute_approved_orders() -> None:
                                         stop_loss_rate = %(sl)s,
                                         take_profit_rate = %(tp)s,
                                         timing_verdict = %(verdict)s,
-                                        timing_rationale = %(rationale)s
+                                        timing_rationale = %(rationale)s,
+                                        timing_deferred_at = COALESCE(timing_deferred_at, NOW())
                                     WHERE recommendation_id = %(rid)s
                                     """,
                                     update_params,
@@ -1428,6 +1486,92 @@ def execute_approved_orders() -> None:
         pending,
         failed,
     )
+
+
+def retry_deferred_recommendations_job() -> None:
+    """Re-evaluate timing_deferred recommendations hourly.
+
+    Checks kill switch and auto-trading flag before proceeding.
+    Deferred recs that now pass timing are transitioned to 'proposed'
+    so they enter the next execute_approved_orders cycle.
+    """
+    from app.services.ops_monitor import get_kill_switch_status
+    from app.services.runtime_config import get_runtime_config
+
+    with _tracked_job(JOB_RETRY_DEFERRED) as tracker:
+        # Safety gate: kill switch + auto-trading check
+        try:
+            with psycopg.connect(settings.database_url) as conn:
+                ks = get_kill_switch_status(conn)
+                config = get_runtime_config(conn)
+        except Exception:
+            logger.error("retry_deferred: failed to load runtime config", exc_info=True)
+            tracker.row_count = 0
+            return
+
+        if ks.get("is_active"):
+            logger.warning("retry_deferred: kill switch active, skipping")
+            tracker.row_count = 0
+            return
+
+        if not config.enable_auto_trading:
+            logger.info("retry_deferred: auto_trading disabled, skipping")
+            tracker.row_count = 0
+            return
+
+        try:
+            with psycopg.connect(settings.database_url) as conn:
+                result = retry_deferred_recommendations(conn)
+        except Exception:
+            logger.error("retry_deferred: service call failed", exc_info=True)
+            tracker.row_count = 0
+            return
+
+        tracker.row_count = result.retried + result.expired + result.errors
+        logger.info(
+            "retry_deferred: retried=%d re_proposed=%d re_deferred=%d expired=%d errors=%d",
+            result.retried,
+            result.re_proposed,
+            result.re_deferred,
+            result.expired,
+            result.errors,
+        )
+
+
+def monitor_positions_job() -> None:
+    """Hourly position health check.
+
+    Detects SL/TP breaches and thesis breaks between daily sync cycles.
+    Alerts are logged for now; future work may trigger out-of-cycle
+    EXIT recommendations or operator notifications.
+
+    Read-only — does not place orders or modify positions.
+    """
+    with _tracked_job(JOB_MONITOR_POSITIONS) as tracker:
+        try:
+            with psycopg.connect(settings.database_url) as conn:
+                result = check_position_health(conn)
+        except Exception:
+            logger.error("monitor_positions: health check failed", exc_info=True)
+            tracker.row_count = 0
+            return
+
+        tracker.row_count = result.positions_checked
+
+        if result.alerts:
+            for alert in result.alerts:
+                logger.warning(
+                    "monitor_positions: ALERT %s on %s (instrument_id=%d): %s",
+                    alert.alert_type,
+                    alert.symbol,
+                    alert.instrument_id,
+                    alert.detail,
+                )
+        else:
+            logger.info(
+                "monitor_positions: %d positions checked, no alerts",
+                result.positions_checked,
+            )
 
 
 def weekly_coverage_review() -> None:
