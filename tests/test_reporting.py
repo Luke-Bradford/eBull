@@ -231,3 +231,47 @@ class TestLoadReportSnapshots:
         result = load_report_snapshots(conn, report_type="weekly", limit=10)
         assert result == []
         cursor.execute.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Scheduler job registration tests
+# ---------------------------------------------------------------------------
+
+
+class TestReportSchedulerJobs:
+    def test_weekly_report_job_registered(self) -> None:
+        """weekly_report job should be in SCHEDULED_JOBS."""
+        from app.workers.scheduler import SCHEDULED_JOBS
+
+        names = [j.name for j in SCHEDULED_JOBS]
+        assert "weekly_report" in names
+
+    def test_monthly_report_job_registered(self) -> None:
+        """monthly_report job should be in SCHEDULED_JOBS."""
+        from app.workers.scheduler import SCHEDULED_JOBS
+
+        names = [j.name for j in SCHEDULED_JOBS]
+        assert "monthly_report" in names
+
+    def test_weekly_report_cadence(self) -> None:
+        """weekly_report should run Saturday morning."""
+        from app.workers.scheduler import SCHEDULED_JOBS
+
+        job = next(j for j in SCHEDULED_JOBS if j.name == "weekly_report")
+        assert job.cadence.kind == "weekly"
+        assert job.cadence.weekday == 5  # Saturday
+
+    def test_monthly_report_cadence(self) -> None:
+        """monthly_report should run on the 1st of each month."""
+        from app.workers.scheduler import SCHEDULED_JOBS
+
+        job = next(j for j in SCHEDULED_JOBS if j.name == "monthly_report")
+        assert job.cadence.kind == "monthly"
+        assert job.cadence.day == 1
+
+    def test_drift_guard_invokers_match(self) -> None:
+        """Both new jobs must have entries in _INVOKERS."""
+        from app.jobs.runtime import _INVOKERS
+
+        assert "weekly_report" in _INVOKERS
+        assert "monthly_report" in _INVOKERS

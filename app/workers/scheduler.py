@@ -200,6 +200,8 @@ JOB_FX_RATES_REFRESH = "fx_rates_refresh"
 JOB_RETRY_DEFERRED = "retry_deferred_recommendations"
 JOB_MONITOR_POSITIONS = "monitor_positions"
 JOB_ATTRIBUTION_SUMMARY = "attribution_summary"
+JOB_WEEKLY_REPORT = "weekly_report"
+JOB_MONTHLY_REPORT = "monthly_report"
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +290,22 @@ def _has_attributions(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM return_attribution)")):
         return (True, "")
     return (False, "no attributed positions yet")
+
+
+def _has_positions_or_attributions(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if there are open positions or any attributed positions."""
+    if _exists(
+        conn,
+        psycopg.sql.SQL(
+            "SELECT EXISTS("
+            "SELECT 1 FROM positions WHERE current_units > 0 "
+            "UNION ALL "
+            "SELECT 1 FROM return_attribution LIMIT 1"
+            ")"
+        ),
+    ):
+        return (True, "")
+    return (False, "no positions or attributions to report on")
 
 
 # Declared schedule. Hours/minutes are deliberate-but-arbitrary placeholders
@@ -380,6 +398,19 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.weekly(weekday=6, hour=6, minute=0),
         prerequisite=_has_attributions,
         catch_up_on_boot=False,
+    ),
+    # -- Reporting: generate periodic reports when there's data to report on --
+    ScheduledJob(
+        name=JOB_WEEKLY_REPORT,
+        description="Generate weekly performance report snapshot.",
+        cadence=Cadence.weekly(weekday=5, hour=7, minute=0),  # Saturday 07:00
+        prerequisite=_has_positions_or_attributions,
+    ),
+    ScheduledJob(
+        name=JOB_MONTHLY_REPORT,
+        description="Generate monthly performance report snapshot.",
+        cadence=Cadence.monthly(day=1, hour=7, minute=0),  # 1st of month 07:00
+        prerequisite=_has_positions_or_attributions,
     ),
     # -- On-demand jobs are NOT listed here.  They stay in _INVOKERS
     # (runtime.py) so "Run now" in the Admin UI works, but they are
@@ -1893,3 +1924,50 @@ def attribution_summary_job() -> None:
                 )
             conn.commit()
             tracker.row_count = total_positions
+
+
+def weekly_report() -> None:
+    """Generate and persist the weekly performance report."""
+    from app.services.reporting import generate_weekly_report, persist_report_snapshot
+
+    with _tracked_job(JOB_WEEKLY_REPORT) as tracker:
+        # Period: previous Monday through Sunday
+        today = datetime.now(tz=UTC).date()
+        # Saturday run → report covers Mon–Sun of the week just ended
+        period_end = today - timedelta(days=(today.weekday() + 1) % 7)  # last Sunday
+        period_start = period_end - timedelta(days=6)  # Monday of that week
+
+        with psycopg.connect(settings.database_url) as conn:
+            report = generate_weekly_report(conn, period_start, period_end)
+            persist_report_snapshot(
+                conn,
+                report_type="weekly",
+                period_start=period_start,
+                period_end=period_end,
+                snapshot=report,
+            )
+            conn.commit()
+        tracker.row_count = 1
+
+
+def monthly_report() -> None:
+    """Generate and persist the monthly performance report."""
+    from app.services.reporting import generate_monthly_report, persist_report_snapshot
+
+    with _tracked_job(JOB_MONTHLY_REPORT) as tracker:
+        # Period: previous full calendar month
+        today = datetime.now(tz=UTC).date()
+        period_end = today.replace(day=1) - timedelta(days=1)  # last day of prev month
+        period_start = period_end.replace(day=1)  # first day of prev month
+
+        with psycopg.connect(settings.database_url) as conn:
+            report = generate_monthly_report(conn, period_start, period_end)
+            persist_report_snapshot(
+                conn,
+                report_type="monthly",
+                period_start=period_start,
+                period_end=period_end,
+                snapshot=report,
+            )
+            conn.commit()
+        tracker.row_count = 1
