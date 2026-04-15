@@ -35,6 +35,8 @@ CREATE INDEX IF NOT EXISTS idx_return_attribution_instrument
     ON return_attribution(instrument_id);
 CREATE INDEX IF NOT EXISTS idx_return_attribution_computed
     ON return_attribution(computed_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_return_attribution_instrument_exit
+    ON return_attribution(instrument_id, exit_fill_id);
 
 CREATE TABLE IF NOT EXISTS return_attribution_summary (
     summary_id           BIGSERIAL PRIMARY KEY,

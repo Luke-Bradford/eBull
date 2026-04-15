@@ -392,9 +392,11 @@ def compute_attribution(
     model_alpha = gross_return - sector_return
     timing_alpha = ZERO  # v1 placeholder
 
-    # Residual: arithmetic closure so components sum to gross_return
-    # gross = market + (sector - market) + model_alpha + timing_alpha + cost_drag + residual
-    # Simplifies to: residual = gross - (sector + model_alpha + timing_alpha + cost_drag)
+    # Residual: arithmetic closure so components sum to gross_return.
+    # Since model_alpha = gross - sector, the market term cancels and
+    # residual = -(timing_alpha + cost_drag).  In v1 (timing_alpha=0)
+    # this is simply -cost_drag.  The residual gains independent meaning
+    # once timing_alpha is computed in v2.
     residual = gross_return - (sector_return + model_alpha + timing_alpha + cost_drag)
 
     # Score snapshot at entry
@@ -426,7 +428,7 @@ def compute_attribution(
             score_components = {}
             for k in numeric_keys:
                 if k in snap:
-                    score_components[k] = float(snap[k]) if snap[k] is not None else None
+                    score_components[k] = str(snap[k]) if snap[k] is not None else None
             if "model_version" in snap:
                 score_components["model_version"] = snap["model_version"]
 
@@ -549,7 +551,7 @@ def compute_attribution_summary(
                 AVG(timing_alpha_pct)  AS avg_timing_alpha_pct,
                 AVG(cost_drag_pct)     AS avg_cost_drag_pct
             FROM return_attribution
-            WHERE computed_at >= NOW() - (%(window_days)s || ' days')::INTERVAL
+            WHERE computed_at >= NOW() - make_interval(days => %(window_days)s)
             """,
             {"window_days": window_days},
         )

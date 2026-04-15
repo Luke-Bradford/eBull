@@ -39,7 +39,7 @@ class TestMaybeTriggerAttribution:
             cost_drag_pct=Decimal("0.004"),
             residual_pct=Decimal("-0.004"),
             score_at_entry=Decimal("0.75"),
-            score_components={"quality_score": 0.8},
+            score_components={"quality_score": "0.80"},
             entry_fill_id=1,
             exit_fill_id=2,
             recommendation_id=50,

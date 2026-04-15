@@ -610,7 +610,7 @@ class TestPersistAttribution:
             "cost_drag_pct": _D("0.002"),
             "residual_pct": _D("0.078"),
             "score_at_entry": _D("0.75"),
-            "score_components": {"quality_score": 0.8},
+            "score_components": {"quality_score": "0.80"},
             "entry_fill_id": 1,
             "exit_fill_id": 2,
             "recommendation_id": 7,
@@ -651,7 +651,7 @@ class TestPersistAttribution:
 
         cur = _make_cursor([])
         conn = _make_conn([cur])
-        result = self._make_result(score_components={"quality_score": 0.8})
+        result = self._make_result(score_components={"quality_score": "0.80"})
         persist_attribution(conn, result)
         params = cur.execute.call_args[0][1]
         assert isinstance(params["score_components"], Jsonb)

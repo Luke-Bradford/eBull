@@ -6,7 +6,7 @@ from typing import Any
 
 import psycopg
 import psycopg.rows
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.api.auth import require_session_or_service_token
 from app.config import settings
@@ -20,7 +20,7 @@ router = APIRouter(
 
 @router.get("")
 def list_attributions(
-    limit: int = 50,
+    limit: int = Query(default=50, le=1000),
 ) -> list[dict[str, Any]]:
     """Return the most recent attribution rows."""
     with psycopg.connect(settings.database_url) as conn:
@@ -40,7 +40,7 @@ def list_attributions(
 
 @router.get("/summary")
 def list_summaries(
-    limit: int = 10,
+    limit: int = Query(default=10, le=1000),
 ) -> list[dict[str, Any]]:
     """Return the most recent attribution summaries."""
     with psycopg.connect(settings.database_url) as conn:
