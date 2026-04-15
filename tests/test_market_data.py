@@ -332,7 +332,7 @@ class TestGetQuotesChunking:
 
     @patch("app.providers.implementations.etoro._persist_raw")
     def test_single_batch_params(self, _mock_persist: MagicMock) -> None:
-        """instrumentIds param is comma-separated ints."""
+        """instrumentIds are inlined in the URL with raw commas (not percent-encoded)."""
         from app.providers.implementations.etoro import EtoroMarketDataProvider
 
         mock_resp = MagicMock()
@@ -346,8 +346,8 @@ class TestGetQuotesChunking:
             provider.get_quotes([1001, 1002, 1003])
 
             provider._http.get.assert_called_once()
-            call_kwargs = provider._http.get.call_args
-            assert call_kwargs.kwargs["params"]["instrumentIds"] == "1001,1002,1003"
+            url_arg = provider._http.get.call_args.args[0]
+            assert "instrumentIds=1001,1002,1003" in url_arg
 
     @patch("app.providers.implementations.etoro._persist_raw")
     def test_chunking_at_51_ids(self, _mock_persist: MagicMock) -> None:
@@ -366,12 +366,14 @@ class TestGetQuotesChunking:
             provider.get_quotes(ids)
 
             assert provider._http.get.call_count == 2
-            # First call: 50 IDs
-            first_params = provider._http.get.call_args_list[0].kwargs["params"]["instrumentIds"]
-            assert len(first_params.split(",")) == 50
+            # First call: 50 IDs inlined in URL
+            first_url = provider._http.get.call_args_list[0].args[0]
+            first_ids = first_url.split("instrumentIds=")[1].split("&")[0]
+            assert len(first_ids.split(",")) == 50
             # Second call: 1 ID
-            second_params = provider._http.get.call_args_list[1].kwargs["params"]["instrumentIds"]
-            assert len(second_params.split(",")) == 1
+            second_url = provider._http.get.call_args_list[1].args[0]
+            second_ids = second_url.split("instrumentIds=")[1].split("&")[0]
+            assert len(second_ids.split(",")) == 1
 
     @patch("app.providers.implementations.etoro._persist_raw")
     def test_failed_chunk_does_not_poison_others(self, _mock_persist: MagicMock) -> None:

@@ -1608,6 +1608,13 @@ def fx_rates_refresh() -> None:
                                     exc_info=True,
                                 )
                         conn.commit()
+
+                        if quotes_updated == 0:
+                            logger.warning(
+                                "fx_rates_refresh: 0 quotes written for %d covered instruments"
+                                " — quote staleness will degrade mark-to-market valuations",
+                                len(instrument_ids),
+                            )
                     else:
                         logger.info("fx_rates_refresh: no covered instruments for eToro quotes")
             except Exception:
