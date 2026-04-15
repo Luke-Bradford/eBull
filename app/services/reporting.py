@@ -50,16 +50,17 @@ def _dec(v: Decimal | None) -> str | None:
 def _pnl_snapshot(conn: psycopg.Connection[Any]) -> dict[str, Any]:
     """Current realised + unrealised P&L totals from the positions table.
 
-    This is a current-state snapshot, not a period delta.  Both realized_pnl
-    and unrealized_pnl are the running totals on open positions.
+    This is a current-state snapshot, not a period delta.  Realized P&L spans
+    all positions (open and closed); unrealized P&L only applies to positions
+    that still hold units.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT COALESCE(SUM(realized_pnl), 0)   AS realized,
-                   COALESCE(SUM(unrealized_pnl), 0) AS unrealized
+            SELECT COALESCE(SUM(realized_pnl), 0) AS realized,
+                   COALESCE(SUM(unrealized_pnl) FILTER (WHERE current_units > 0), 0)
+                       AS unrealized
             FROM positions
-            WHERE current_units > 0
             """
         )
         row = cur.fetchone()
@@ -458,7 +459,7 @@ def _thesis_accuracy(
                 SELECT base_value, bull_value, bear_value, stance, confidence_score
                 FROM theses
                 WHERE instrument_id = ra.instrument_id
-                  AND created_at <= (ra.hold_start::timestamptz)
+                  AND created_at < (ra.hold_start::timestamptz + interval '1 day')
                 ORDER BY created_at DESC
                 LIMIT 1
             ) t ON true
