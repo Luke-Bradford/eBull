@@ -135,6 +135,20 @@ def test_app_lifespan_boots_and_state_is_coherent() -> None:
         if hasattr(app.state, flag):
             delattr(app.state, flag)
 
+    # Other test modules register mock dependency_overrides at import
+    # time (the ``setdefault(get_conn, _fallback_conn)`` pattern used
+    # by every test_api_*.py file).  When pytest collects those modules
+    # before this smoke test, the mock replaces the real ``get_conn``
+    # dependency — and endpoint requests inside the TestClient hit the
+    # mock's empty result iterator instead of the real DB.  Remove the
+    # ``get_conn`` override for the duration of this test so endpoint
+    # requests use the real connection pool opened by the lifespan.
+    # The auth no-op override (installed by conftest.py) must remain.
+    from app.db import get_conn
+
+    had_get_conn = get_conn in app.dependency_overrides
+    saved_get_conn = app.dependency_overrides.pop(get_conn, None)
+
     try:
         with TestClient(app) as client:
             # Lifespan must have populated every flag the rest of the
@@ -192,6 +206,11 @@ def test_app_lifespan_boots_and_state_is_coherent() -> None:
         # test had not run. On the failure path (lifespan crashed
         # mid-startup) restoration is the whole point: subsequent
         # tests should not inherit a half-deleted state.
+        # Restore the get_conn override so subsequent tests that rely on
+        # the module-level ``setdefault`` pattern still see their mock.
+        if had_get_conn and saved_get_conn is not None:
+            app.dependency_overrides[get_conn] = saved_get_conn
+
         for flag, value in snapshot.items():
             if value is _SENTINEL:
                 if hasattr(app.state, flag):
