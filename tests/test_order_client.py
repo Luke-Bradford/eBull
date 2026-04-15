@@ -318,8 +318,9 @@ class TestExecuteOrderDemoMode:
         # conn.execute: position upsert, broker_positions, cash_ledger, rec status, audit = 5
         assert conn.execute.call_count == 5
 
+    @patch("app.services.order_client._maybe_trigger_attribution")
     @patch("app.services.order_client._utcnow", return_value=_NOW)
-    def test_demo_exit_produces_fill(self, _mock_now: MagicMock) -> None:
+    def test_demo_exit_produces_fill(self, _mock_now: MagicMock, _mock_attr: MagicMock) -> None:
         """Demo EXIT: loads position units, synthetic fill at quote price."""
         cursors = [
             _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
@@ -328,6 +329,8 @@ class TestExecuteOrderDemoMode:
             # Inside transaction:
             _order_returning_cursor(order_id=8),
             _fill_returning_cursor(fill_id=4),
+            # Post-fill: read current_units for attribution check
+            _make_cursor([{"current_units": 0}]),
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -419,8 +422,9 @@ class TestExecuteOrderDemoMode:
         assert params["no_sl"] is False
         assert params["no_tp"] is False
 
+    @patch("app.services.order_client._maybe_trigger_attribution")
     @patch("app.services.order_client._utcnow", return_value=_NOW)
-    def test_demo_exit_does_not_write_broker_positions(self, _mock_now: MagicMock) -> None:
+    def test_demo_exit_does_not_write_broker_positions(self, _mock_now: MagicMock, _mock_attr: MagicMock) -> None:
         """EXIT fills must NOT insert into broker_positions (the row already exists)."""
         cursors = [
             _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
@@ -428,6 +432,8 @@ class TestExecuteOrderDemoMode:
             _quote_cursor(last=200.0),
             _order_returning_cursor(order_id=8),
             _fill_returning_cursor(fill_id=4),
+            # Post-fill: read current_units for attribution check
+            _make_cursor([{"current_units": 0}]),
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -503,8 +509,9 @@ class TestExecuteOrderLiveMode:
         assert result.broker_order_ref == "ORD-123"
         broker.place_order.assert_called_once()
 
+    @patch("app.services.order_client._maybe_trigger_attribution")
     @patch("app.services.order_client._utcnow", return_value=_NOW)
-    def test_live_exit_calls_broker_close_position(self, _mock_now: MagicMock) -> None:
+    def test_live_exit_calls_broker_close_position(self, _mock_now: MagicMock, _mock_attr: MagicMock) -> None:
         broker = MagicMock()
         broker.close_position.return_value = BrokerOrderResult(
             broker_order_ref="ORD-456",
@@ -522,6 +529,8 @@ class TestExecuteOrderLiveMode:
             # broker called (no cursor)
             _order_returning_cursor(order_id=11),
             _fill_returning_cursor(fill_id=7),
+            # Post-fill: read current_units for attribution check
+            _make_cursor([{"current_units": 0}]),
         ]
         conn = _make_conn(cursors)
         result = execute_order(
