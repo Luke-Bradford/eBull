@@ -164,6 +164,13 @@ def _trigger_for(cadence: Cadence) -> CronTrigger:
             minute=cadence.minute,
             timezone="UTC",
         )
+    if cadence.kind == "monthly":
+        return CronTrigger(
+            day=cadence.day,
+            hour=cadence.hour,
+            minute=cadence.minute,
+            timezone="UTC",
+        )
     raise ValueError(f"unsupported cadence kind: {cadence.kind!r}")
 
 

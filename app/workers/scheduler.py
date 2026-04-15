@@ -88,7 +88,7 @@ logger = logging.getLogger(__name__)
 # next-fire-time from APScheduler; ``compute_next_run`` is retained as
 # a pure utility for catch-up-on-boot and tests.
 
-CadenceKind = Literal["hourly", "daily", "weekly"]
+CadenceKind = Literal["hourly", "daily", "weekly", "monthly"]
 
 
 @dataclass(frozen=True)
@@ -104,6 +104,7 @@ class Cadence:
     minute: int = 0
     hour: int = 0
     weekday: int = 0  # 0=Mon (matches datetime.weekday())
+    day: int = 0  # 1..28 for monthly cadence
 
     @classmethod
     def hourly(cls, *, minute: int = 0) -> Cadence:
@@ -129,6 +130,16 @@ class Cadence:
             raise ValueError(f"weekly minute must be 0..59, got {minute}")
         return cls(kind="weekly", weekday=weekday, hour=hour, minute=minute)
 
+    @classmethod
+    def monthly(cls, *, day: int, hour: int, minute: int = 0) -> Cadence:
+        if not 1 <= day <= 28:
+            raise ValueError(f"monthly day must be 1..28, got {day}")
+        if not 0 <= hour <= 23:
+            raise ValueError(f"monthly hour must be 0..23, got {hour}")
+        if not 0 <= minute <= 59:
+            raise ValueError(f"monthly minute must be 0..59, got {minute}")
+        return cls(kind="monthly", day=day, hour=hour, minute=minute)
+
     @property
     def label(self) -> str:
         """Human-readable label for API responses."""
@@ -136,8 +147,11 @@ class Cadence:
             return f"hourly at :{self.minute:02d} UTC"
         if self.kind == "daily":
             return f"daily at {self.hour:02d}:{self.minute:02d} UTC"
-        weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        return f"weekly on {weekday_names[self.weekday]} at {self.hour:02d}:{self.minute:02d} UTC"
+        if self.kind == "weekly":
+            weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            return f"weekly on {weekday_names[self.weekday]} at {self.hour:02d}:{self.minute:02d} UTC"
+        # monthly
+        return f"monthly on day {self.day} at {self.hour:02d}:{self.minute:02d} UTC"
 
 
 PrerequisiteResult = tuple[bool, str]
@@ -402,12 +416,22 @@ def compute_next_run(cadence: Cadence, now: datetime) -> datetime:
             candidate += timedelta(days=1)
         return candidate
 
-    # weekly
-    candidate = now_utc.replace(hour=cadence.hour, minute=cadence.minute, second=0, microsecond=0)
-    days_ahead = (cadence.weekday - candidate.weekday()) % 7
-    candidate += timedelta(days=days_ahead)
+    if cadence.kind == "weekly":
+        candidate = now_utc.replace(hour=cadence.hour, minute=cadence.minute, second=0, microsecond=0)
+        days_ahead = (cadence.weekday - candidate.weekday()) % 7
+        candidate += timedelta(days=days_ahead)
+        if candidate <= now_utc:
+            candidate += timedelta(days=7)
+        return candidate
+
+    # monthly
+    candidate = now_utc.replace(day=cadence.day, hour=cadence.hour, minute=cadence.minute, second=0, microsecond=0)
     if candidate <= now_utc:
-        candidate += timedelta(days=7)
+        # Advance to next month
+        if candidate.month == 12:
+            candidate = candidate.replace(year=candidate.year + 1, month=1)
+        else:
+            candidate = candidate.replace(month=candidate.month + 1)
     return candidate
 
 
