@@ -208,8 +208,8 @@ def test_app_lifespan_boots_and_state_is_coherent() -> None:
         # tests should not inherit a half-deleted state.
         # Restore the get_conn override so subsequent tests that rely on
         # the module-level ``setdefault`` pattern still see their mock.
-        if had_get_conn and saved_get_conn is not None:
-            app.dependency_overrides[get_conn] = saved_get_conn
+        if had_get_conn:
+            app.dependency_overrides[get_conn] = saved_get_conn  # type: ignore[assignment]
 
         for flag, value in snapshot.items():
             if value is _SENTINEL:
