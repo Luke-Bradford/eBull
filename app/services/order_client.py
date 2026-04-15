@@ -32,7 +32,7 @@ import psycopg
 import psycopg.rows
 from psycopg.types.json import Jsonb
 
-from app.providers.broker import BrokerOrderResult, BrokerProvider
+from app.providers.broker import BrokerOrderResult, BrokerProvider, OrderParams
 from app.services.runtime_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,8 @@ def _load_approved_recommendation(
         cur.execute(
             """
             SELECT recommendation_id, instrument_id, action,
-                   target_entry, suggested_size_pct, model_version, status
+                   target_entry, suggested_size_pct, model_version, status,
+                   stop_loss_rate, take_profit_rate
             FROM trade_recommendations
             WHERE recommendation_id = %(rid)s
             """,
@@ -186,6 +187,7 @@ def _synthetic_fill(
     quote_price: Decimal | None,
     requested_amount: Decimal | None,
     requested_units: Decimal | None,
+    params: OrderParams | None = None,
 ) -> BrokerOrderResult:
     """
     Build a synthetic BrokerOrderResult for demo mode.
@@ -203,21 +205,30 @@ def _synthetic_fill(
     else:
         units = Decimal("0")
 
+    payload: dict[str, Any] = {
+        "demo": True,
+        "instrument_id": instrument_id,
+        "action": action,
+        "price": str(price),
+        "units": str(units),
+        "note": "synthetic fill — no real API call"
+        + ("" if quote_price is not None else "; no quote available, price=0"),
+    }
+    # Record intended SL/TP in raw_payload for audit completeness
+    # (demo mode has no broker to enforce these, but they should be visible).
+    if params is not None:
+        if params.stop_loss_rate is not None:
+            payload["stop_loss_rate"] = str(params.stop_loss_rate)
+        if params.take_profit_rate is not None:
+            payload["take_profit_rate"] = str(params.take_profit_rate)
+
     return BrokerOrderResult(
         broker_order_ref=f"DEMO-{instrument_id}-{action}",
         status="filled",
         filled_price=price,
         filled_units=units,
         fees=Decimal("0"),
-        raw_payload={
-            "demo": True,
-            "instrument_id": instrument_id,
-            "action": action,
-            "price": str(price),
-            "units": str(units),
-            "note": "synthetic fill — no real API call"
-            + ("" if quote_price is not None else "; no quote available, price=0"),
-        },
+        raw_payload=payload,
     )
 
 
@@ -523,6 +534,18 @@ def execute_order(
         if cash is not None and cash > 0:
             requested_amount = cash * Decimal(str(rec["suggested_size_pct"]))
 
+    # --- Step 2b: build OrderParams from recommendation SL/TP ---
+    # SL/TP are set by the entry timing service (Phase 2) for BUY/ADD recs.
+    # For EXIT recs, both are NULL — no SL/TP on a close-position order.
+    order_params: OrderParams | None = None
+    sl_raw = rec.get("stop_loss_rate")
+    tp_raw = rec.get("take_profit_rate")
+    if sl_raw is not None or tp_raw is not None:
+        order_params = OrderParams(
+            stop_loss_rate=Decimal(str(sl_raw)) if sl_raw is not None else None,
+            take_profit_rate=Decimal(str(tp_raw)) if tp_raw is not None else None,
+        )
+
     # --- Step 3: call broker or demo mode ---
     # Read live-mode flag from runtime_config (DB-backed source of truth).
     # Any RuntimeConfigCorrupt propagates: we will NOT default to demo mode
@@ -559,6 +582,7 @@ def execute_order(
                 action=action,
                 amount=requested_amount,
                 units=requested_units,
+                params=order_params,
             )
     else:
         quote_price = _load_latest_quote_price(conn, instrument_id)
@@ -568,6 +592,7 @@ def execute_order(
             quote_price=quote_price,
             requested_amount=requested_amount,
             requested_units=requested_units,
+            params=order_params,
         )
         logger.info(
             "demo mode: instrument_id=%d action=%s price=%s units=%s",

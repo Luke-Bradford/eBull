@@ -41,6 +41,7 @@ from app.providers.implementations.sec_fundamentals import SecFundamentalsProvid
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
 from app.services.coverage import review_coverage, seed_coverage
 from app.services.enrichment import refresh_enrichment
+from app.services.entry_timing import evaluate_entry_conditions
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
@@ -1034,11 +1035,17 @@ def morning_candidate_review() -> None:
 def execute_approved_orders() -> None:
     """Guard and execute actionable trade recommendations.
 
-    Two phases, run sequentially:
+    Three phases, run sequentially:
 
-    Phase 1 — Guard: query all ``proposed`` recommendations. For each,
-    call ``evaluate_recommendation`` to run the execution guard.  PASS
-    transitions the recommendation to ``approved``; FAIL transitions to
+    Phase 0 — Entry timing: evaluate TA conditions for BUY/ADD recs.
+    If conditions are unfavorable, set status='timing_deferred' and
+    write SL/TP + rationale.  If favorable, write SL/TP and leave as
+    'proposed'.  EXIT/HOLD recs are untouched.  Inline (not a separate
+    scheduled job) to guarantee ordering and eliminate scheduler race.
+
+    Phase 1 — Guard: query all remaining ``proposed`` recommendations.
+    For each, call ``evaluate_recommendation`` to run the execution
+    guard.  PASS transitions to ``approved``; FAIL transitions to
     ``rejected``.
 
     Phase 2 — Execute: query all ``approved`` recommendations (includes
@@ -1053,7 +1060,106 @@ def execute_approved_orders() -> None:
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
 
     with _tracked_job(JOB_EXECUTE_APPROVED_ORDERS) as tracker:
+        # --- Phase 0: entry timing — evaluate TA conditions for BUY/ADD ---
+        # Inline timing check (not a separate scheduled job) guarantees
+        # ordering: timing → guard → execute. Eliminates scheduler race.
+        with psycopg.connect(settings.database_url) as conn:
+            timing_candidates = conn.execute(
+                """
+                SELECT recommendation_id, action
+                FROM trade_recommendations
+                WHERE status = 'proposed'
+                ORDER BY recommendation_id
+                """,
+            ).fetchall()
+
+        timing_passed = 0
+        timing_deferred = 0
+        timing_skipped = 0
+        for row in timing_candidates:
+            rec_id, action = row[0], row[1]
+            # EXIT/HOLD recs skip timing evaluation entirely.
+            if action in ("EXIT", "HOLD"):
+                timing_skipped += 1
+                continue
+            try:
+                with psycopg.connect(settings.database_url) as conn:
+                    evaluation = evaluate_entry_conditions(conn, rec_id)
+                    if evaluation.verdict == "defer":
+                        conn.execute(
+                            """
+                            UPDATE trade_recommendations
+                            SET status = 'timing_deferred',
+                                stop_loss_rate = %(sl)s,
+                                take_profit_rate = %(tp)s,
+                                timing_verdict = %(verdict)s,
+                                timing_rationale = %(rationale)s
+                            WHERE recommendation_id = %(rid)s
+                            """,
+                            {
+                                "sl": evaluation.stop_loss_rate,
+                                "tp": evaluation.take_profit_rate,
+                                "verdict": evaluation.verdict,
+                                "rationale": evaluation.rationale,
+                                "rid": rec_id,
+                            },
+                        )
+                        conn.commit()
+                        timing_deferred += 1
+                        logger.info(
+                            "execute_approved_orders: timing DEFER rec=%d rationale=%s",
+                            rec_id,
+                            evaluation.rationale,
+                        )
+                    elif evaluation.verdict == "pass":
+                        conn.execute(
+                            """
+                            UPDATE trade_recommendations
+                            SET stop_loss_rate = %(sl)s,
+                                take_profit_rate = %(tp)s,
+                                timing_verdict = %(verdict)s,
+                                timing_rationale = %(rationale)s
+                            WHERE recommendation_id = %(rid)s
+                            """,
+                            {
+                                "sl": evaluation.stop_loss_rate,
+                                "tp": evaluation.take_profit_rate,
+                                "verdict": evaluation.verdict,
+                                "rationale": evaluation.rationale,
+                                "rid": rec_id,
+                            },
+                        )
+                        conn.commit()
+                        timing_passed += 1
+                        logger.info(
+                            "execute_approved_orders: timing PASS rec=%d rationale=%s",
+                            rec_id,
+                            evaluation.rationale,
+                        )
+                    else:
+                        # verdict == "skip" — should not happen for BUY/ADD
+                        # but handle gracefully.
+                        timing_skipped += 1
+            except Exception:
+                # Don't let a timing failure block the entire run.
+                # Leave the rec as 'proposed' — the guard can still evaluate it.
+                timing_skipped += 1
+                logger.error(
+                    "execute_approved_orders: timing evaluation failed for rec=%d",
+                    rec_id,
+                    exc_info=True,
+                )
+
+        logger.info(
+            "execute_approved_orders: timing phase — candidates=%d passed=%d deferred=%d skipped=%d",
+            len(timing_candidates),
+            timing_passed,
+            timing_deferred,
+            timing_skipped,
+        )
+
         # --- Phase 1: guard proposed recommendations ---
+        # Re-query proposed recs (timing_deferred ones are now excluded).
         with psycopg.connect(settings.database_url) as conn:
             proposed = conn.execute(
                 """
@@ -1188,15 +1294,22 @@ def execute_approved_orders() -> None:
                         exc_info=True,
                     )
 
-            tracker.row_count = guarded + rejected + executed + pending + failed
+            tracker.row_count = (
+                timing_passed + timing_deferred + timing_skipped + guarded + rejected + executed + pending + failed
+            )
 
         finally:
             if broker_ctx is not None:
                 broker_ctx.__exit__(None, None, None)
 
     logger.info(
-        "execute_approved_orders complete: proposed=%d guarded=%d rejected=%d "
-        "approved=%d executed=%d pending=%d failed=%d",
+        "execute_approved_orders complete: "
+        "timing(passed=%d deferred=%d skipped=%d) "
+        "guard(proposed=%d approved=%d rejected=%d) "
+        "exec(approved=%d executed=%d pending=%d failed=%d)",
+        timing_passed,
+        timing_deferred,
+        timing_skipped,
         len(proposed),
         guarded,
         rejected,
