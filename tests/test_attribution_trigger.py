@@ -109,7 +109,9 @@ class TestMaybeTriggerAttribution:
         conn = MagicMock()
 
         _maybe_trigger_attribution(
-            conn, instrument_id=42, current_units_after=Decimal("-0.001"),
+            conn,
+            instrument_id=42,
+            current_units_after=Decimal("-0.001"),
         )
 
         mock_compute.assert_called_once_with(conn, 42)

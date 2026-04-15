@@ -497,8 +497,7 @@ def _maybe_trigger_attribution(
         if result is not None:
             persist_attribution(conn, result)
             logger.info(
-                "execute_order: attribution computed for instrument_id=%d "
-                "gross=%.4f alpha=%.4f",
+                "execute_order: attribution computed for instrument_id=%d gross=%.4f alpha=%.4f",
                 instrument_id,
                 result.gross_return_pct,
                 result.model_alpha_pct,

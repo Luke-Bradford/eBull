@@ -53,6 +53,7 @@ from app.config import settings
 from app.jobs.locks import JobAlreadyRunning, JobLock
 from app.services.ops_monitor import fetch_latest_successful_runs, record_job_skip
 from app.workers.scheduler import (
+    JOB_ATTRIBUTION_SUMMARY,
     JOB_DAILY_CANDLE_REFRESH,
     JOB_DAILY_CIK_REFRESH,
     JOB_DAILY_NEWS_REFRESH,
@@ -70,6 +71,7 @@ from app.workers.scheduler import (
     SCHEDULED_JOBS,
     Cadence,
     ScheduledJob,
+    attribution_summary_job,
     compute_next_run,
     daily_candle_refresh,
     daily_cik_refresh,
@@ -125,6 +127,7 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_DAILY_TAX_RECONCILIATION: daily_tax_reconciliation,
     JOB_RETRY_DEFERRED: retry_deferred_recommendations_job,
     JOB_MONITOR_POSITIONS: monitor_positions_job,
+    JOB_ATTRIBUTION_SUMMARY: attribution_summary_job,
 }
 
 

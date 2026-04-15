@@ -54,6 +54,11 @@ from app.services.order_client import execute_order
 from app.services.portfolio import run_portfolio_review
 from app.services.portfolio_sync import sync_portfolio
 from app.services.position_monitor import check_position_health
+from app.services.return_attribution import (
+    SUMMARY_WINDOWS,
+    compute_attribution_summary,
+    persist_attribution_summary,
+)
 from app.services.scoring import compute_rankings
 from app.services.sentiment import ClaudeSentimentScorer
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
@@ -180,6 +185,7 @@ JOB_EXECUTE_APPROVED_ORDERS = "execute_approved_orders"
 JOB_FX_RATES_REFRESH = "fx_rates_refresh"
 JOB_RETRY_DEFERRED = "retry_deferred_recommendations"
 JOB_MONITOR_POSITIONS = "monitor_positions"
+JOB_ATTRIBUTION_SUMMARY = "attribution_summary"
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +267,13 @@ def _has_tier1_stale_theses(conn: psycopg.Connection[Any]) -> PrerequisiteResult
     if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM coverage WHERE coverage_tier = 1)")):
         return (True, "")
     return (False, "no Tier 1 instruments")
+
+
+def _has_attributions(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if at least one attributed position exists."""
+    if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM return_attribution)")):
+        return (True, "")
+    return (False, "no attributed positions yet")
 
 
 # Declared schedule. Hours/minutes are deliberate-but-arbitrary placeholders
@@ -346,6 +359,13 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         description="Review coverage tier assignments; promote/demote instruments.",
         cadence=Cadence.weekly(weekday=0, hour=5, minute=0),
         prerequisite=_has_any_coverage,
+    ),
+    ScheduledJob(
+        name=JOB_ATTRIBUTION_SUMMARY,
+        description="Compute and persist rolling attribution summaries (30d, 90d, 365d).",
+        cadence=Cadence.weekly(weekday=6, hour=6, minute=0),
+        prerequisite=_has_attributions,
+        catch_up_on_boot=False,
     ),
     # -- On-demand jobs are NOT listed here.  They stay in _INVOKERS
     # (runtime.py) so "Run now" in the Admin UI works, but they are
@@ -1830,3 +1850,23 @@ def daily_tax_reconciliation() -> None:
         matching.total_gain_gbp,
         matching.total_loss_gbp,
     )
+
+
+def attribution_summary_job() -> None:
+    """Compute and persist attribution summaries for all configured windows."""
+    with _tracked_job(JOB_ATTRIBUTION_SUMMARY) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            total_positions = 0
+            for window in SUMMARY_WINDOWS:
+                summary = compute_attribution_summary(conn, window)
+                with conn.transaction():
+                    persist_attribution_summary(conn, summary)
+                conn.commit()
+                total_positions = max(total_positions, summary.positions_attributed)
+                logger.info(
+                    "attribution_summary: window=%dd positions=%d avg_alpha=%.4f",
+                    window,
+                    summary.positions_attributed,
+                    float(summary.avg_model_alpha_pct or 0),
+                )
+            tracker.row_count = total_positions
