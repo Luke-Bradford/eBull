@@ -29,6 +29,7 @@ from app.api.operators import router as operators_router
 from app.api.orders import router as orders_router
 from app.api.portfolio import router as portfolio_router
 from app.api.recommendations import router as recommendations_router
+from app.api.reports import router as reports_router
 from app.api.scores import router as scores_router
 from app.api.system import router as system_router
 from app.api.theses import router as theses_router
@@ -133,6 +134,7 @@ app.include_router(news_router)
 app.include_router(orders_router)
 app.include_router(portfolio_router)
 app.include_router(recommendations_router)
+app.include_router(reports_router)
 app.include_router(scores_router)
 app.include_router(system_router)
 app.include_router(theses_router)

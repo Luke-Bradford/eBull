@@ -275,3 +275,37 @@ class TestReportSchedulerJobs:
 
         assert "weekly_report" in _INVOKERS
         assert "monthly_report" in _INVOKERS
+
+
+# ---------------------------------------------------------------------------
+# Reports API tests
+# ---------------------------------------------------------------------------
+
+
+class TestReportsAPI:
+    def test_reports_router_exists(self) -> None:
+        """The reports router should have the correct prefix."""
+        from app.api.reports import router
+
+        assert router.prefix == "/api/reports"
+
+    def test_list_weekly_endpoint_exists(self) -> None:
+        """GET /api/reports/weekly should be a registered route."""
+        from app.api.reports import router
+
+        paths = [r.path for r in router.routes if hasattr(r, "path")]  # type: ignore[union-attr]
+        assert "/api/reports/weekly" in paths
+
+    def test_list_monthly_endpoint_exists(self) -> None:
+        """GET /api/reports/monthly should be a registered route."""
+        from app.api.reports import router
+
+        paths = [r.path for r in router.routes if hasattr(r, "path")]  # type: ignore[union-attr]
+        assert "/api/reports/monthly" in paths
+
+    def test_latest_endpoint_exists(self) -> None:
+        """GET /api/reports/latest should be a registered route."""
+        from app.api.reports import router
+
+        paths = [r.path for r in router.routes if hasattr(r, "path")]  # type: ignore[union-attr]
+        assert "/api/reports/latest" in paths
