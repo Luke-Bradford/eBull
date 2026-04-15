@@ -280,7 +280,8 @@ def retry_deferred_recommendations(conn: psycopg.Connection[Any]) -> RetryResult
         count_expired = retry_count >= MAX_RETRY_ATTEMPTS
 
         if age_expired or count_expired:
-            if age_expired and deferred_at is not None:
+            if age_expired:
+                assert deferred_at is not None  # narrowed by age_expired
                 reason = (
                     f"deferred_retry: expired — deferred_at={deferred_at.isoformat()} "
                     f"older than {RETRY_EXPIRY_HOURS}h cutoff"

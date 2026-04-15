@@ -13,7 +13,7 @@ Design choices:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -53,7 +53,7 @@ class MonitorResult:
     """Aggregate result returned by check_position_health."""
 
     positions_checked: int
-    alerts: list[MonitorAlert] = field(default_factory=list)
+    alerts: tuple[MonitorAlert, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -170,4 +170,4 @@ def check_position_health(conn: psycopg.Connection[Any]) -> MonitorResult:
                 )
             )
 
-    return MonitorResult(positions_checked=len(rows), alerts=alerts)
+    return MonitorResult(positions_checked=len(rows), alerts=tuple(alerts))

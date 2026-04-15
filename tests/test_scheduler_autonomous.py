@@ -176,7 +176,7 @@ class TestMonitorPositionsJob:
         """monitor_positions_job must call check_position_health and set row_count."""
         from app.services.position_monitor import MonitorResult
 
-        fake_result = MonitorResult(positions_checked=3, alerts=[])
+        fake_result = MonitorResult(positions_checked=3, alerts=())
         mock_health.return_value = fake_result
 
         conn_ctx = MagicMock()
@@ -210,7 +210,7 @@ class TestMonitorPositionsJob:
             alert_type="sl_breach",
             detail="bid=100 < stop_loss=110",
         )
-        fake_result = MonitorResult(positions_checked=5, alerts=[alert])
+        fake_result = MonitorResult(positions_checked=5, alerts=(alert,))
         mock_health.return_value = fake_result
 
         conn_ctx = MagicMock()

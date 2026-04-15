@@ -72,7 +72,7 @@ class TestCheckPositionHealth:
         conn = _make_conn([_make_cursor([])])
         result = check_position_health(conn)
         assert result.positions_checked == 0
-        assert result.alerts == []
+        assert result.alerts == ()
 
     def test_position_below_stop_loss_generates_alert(self) -> None:
         """bid < sl → sl_breach alert."""
@@ -145,7 +145,7 @@ class TestCheckPositionHealth:
         conn = _make_conn([_make_cursor([row])])
         result = check_position_health(conn)
         assert result.positions_checked == 1
-        assert result.alerts == []
+        assert result.alerts == ()
 
     def test_null_sl_tp_does_not_crash(self) -> None:
         """NULL SL/TP/red_flag → no alerts, no crash."""
@@ -158,7 +158,7 @@ class TestCheckPositionHealth:
         conn = _make_conn([_make_cursor([row])])
         result = check_position_health(conn)
         assert result.positions_checked == 1
-        assert result.alerts == []
+        assert result.alerts == ()
 
     def test_null_bid_skips_sl_and_tp_checks(self) -> None:
         """NULL bid → sl_breach and tp_breach checks skipped; no alerts."""
@@ -171,7 +171,7 @@ class TestCheckPositionHealth:
         conn = _make_conn([_make_cursor([row])])
         result = check_position_health(conn)
         # red_flag is 0.10 < threshold so no thesis_break either
-        assert result.alerts == []
+        assert result.alerts == ()
 
     def test_multiple_positions_counted_correctly(self) -> None:
         """Multiple positions → positions_checked equals the row count."""
