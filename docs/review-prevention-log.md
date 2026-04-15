@@ -716,3 +716,21 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `ON CONFLICT DO UPDATE SET units, amount, updated_at` omitted `total_fees`, `open_rate`, and `open_conversion_rate`. On a race, the losing writer's fee and rate values were silently discarded.
 - Prevention: Before pushing any `ON CONFLICT DO UPDATE` on a financial table (`broker_positions`, `copy_mirror_positions`), verify the SET clause covers all columns where the eBull-originated values should be authoritative — especially fees and rates. If a column should intentionally NOT be updated on conflict, add a SQL comment explaining why.
 - Enforced in: `app/services/order_client.py`, `app/api/orders.py`
+
+---
+
+### conn.rollback() needed after caught exception on a shared connection
+
+- First seen in: #238
+- Symptom: `evaluate_entry_conditions(conn, rec_id)` raises mid-cursor, leaving the connection in `InFailedSqlTransaction` state. Every subsequent `with conn.transaction()` on the same connection fails silently — the rest of the batch is dead.
+- Prevention: When a service function calls I/O that may raise on a **shared connection** (one used for multiple sequential operations), wrap the call in `try/except` and call `conn.rollback()` in the except path before attempting any further DB work on that connection. This clears the error state.
+- Enforced in: `app/services/deferred_retry.py` (retry_deferred_recommendations error path)
+
+---
+
+### Kill-switch + auto_trading gate at pipeline call sites
+
+- First seen in: #238
+- Symptom: `morning_candidate_review()` called `execute_approved_orders()` directly without checking the kill switch or `enable_auto_trading` flag. The guards *inside* `execute_approved_orders` would catch it, but the non-negotiable rule is that AI-generated trade actions must never reach the execution path without an explicit gate at the call site.
+- Prevention: Any code path that invokes `execute_approved_orders()` (or any future order-execution function) must check both `get_kill_switch_status(conn)["is_active"]` and `get_runtime_config(conn).enable_auto_trading` before the call. The callee's internal guard is a second line of defence, not the primary one.
+- Enforced in: `app/workers/scheduler.py` (morning_candidate_review pipeline trigger)

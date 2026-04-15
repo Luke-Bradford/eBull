@@ -6,6 +6,7 @@ Structure:
 
 from __future__ import annotations
 
+import dataclasses
 from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
@@ -213,8 +214,6 @@ class TestCheckPositionHealth:
         """MonitorResult and MonitorAlert are frozen (immutable)."""
         conn = _make_conn([_make_cursor([])])
         result = check_position_health(conn)
-        import dataclasses
-
         assert dataclasses.is_dataclass(result)
         # Frozen: assigning to a field raises FrozenInstanceError
         try:
