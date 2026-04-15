@@ -276,9 +276,12 @@ def _compute_and_store_features(
     # --- TA indicators (full OHLCV needed, not just close) ---
     # Require all four price columns non-null; the schema permits partial
     # rows (close-only) which would crash float() in stochastic/ATR.
+    # Include price_date so we can verify the latest complete OHLCV bar
+    # matches the row we're updating — avoids writing stale TA values
+    # when the newest candle has close but incomplete OHLC.
     ohlcv_rows = conn.execute(
         """
-        SELECT open, high, low, close, volume
+        SELECT price_date, open, high, low, close, volume
         FROM price_daily
         WHERE instrument_id = %(instrument_id)s
           AND open IS NOT NULL
@@ -310,14 +313,18 @@ def _compute_and_store_features(
     ta_params: dict[str, Decimal | None] = {k: None for k in _TA_COLUMNS}
 
     if ohlcv_rows:
-        bars: list[OHLCVRow] = [
-            OHLCVRow(open=r[0], high=r[1], low=r[2], close=r[3], volume=r[4]) for r in reversed(ohlcv_rows)
-        ]
-        ta_result = compute_indicators(bars)
-        if ta_result is not None:
-            for k, v in ta_result.items():
-                if k in ta_params and isinstance(v, float):
-                    ta_params[k] = Decimal(str(round(v, 6)))
+        # Only compute TA if the latest complete OHLCV bar matches the row
+        # we're updating; otherwise the indicators would be stale-by-one-day.
+        ohlcv_latest_date: date = ohlcv_rows[0][0]  # newest first
+        if ohlcv_latest_date == latest_date:
+            bars: list[OHLCVRow] = [
+                OHLCVRow(open=r[1], high=r[2], low=r[3], close=r[4], volume=r[5]) for r in reversed(ohlcv_rows)
+            ]
+            ta_result = compute_indicators(bars)
+            if ta_result is not None:
+                for k, v in ta_result.items():
+                    if k in ta_params and isinstance(v, float):
+                        ta_params[k] = Decimal(str(round(v, 6)))
 
     conn.execute(
         """

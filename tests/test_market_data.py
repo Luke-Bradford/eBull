@@ -668,10 +668,15 @@ def _generate_price_rows(n: int) -> list[tuple[date, Decimal]]:
     return [(date.fromordinal(base.toordinal() + i), Decimal(str(100 + i * 0.5))) for i in range(n)]
 
 
-def _generate_ohlcv_rows(n: int) -> list[tuple[Decimal, Decimal, Decimal, Decimal, int]]:
-    """Generate n OHLCV tuples (open, high, low, close, volume)."""
+def _generate_ohlcv_rows(n: int) -> list[tuple[date, Decimal, Decimal, Decimal, Decimal, int]]:
+    """Generate n OHLCV tuples (price_date, open, high, low, close, volume).
+
+    Dates match _generate_price_rows so the TA date-alignment check passes.
+    """
+    base = date(2025, 1, 1)
     return [
         (
+            date.fromordinal(base.toordinal() + i),  # price_date
             Decimal(str(100 + i * 0.5)),  # open
             Decimal(str(101 + i * 0.5)),  # high
             Decimal(str(99 + i * 0.5)),  # low
