@@ -177,3 +177,57 @@ class TestGenerateMonthlyReport:
         assert "attribution_summary" in report
         assert "thesis_accuracy" in report
         assert "tax_provision" in report
+
+
+# ---------------------------------------------------------------------------
+# Persistence layer tests
+# ---------------------------------------------------------------------------
+
+
+class TestPersistReportSnapshot:
+    def test_persist_executes_upsert(self) -> None:
+        """persist_report_snapshot should execute an INSERT with ON CONFLICT DO UPDATE."""
+        from app.services.reporting import persist_report_snapshot
+
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        report = {
+            "report_type": "weekly",
+            "period_start": "2026-04-06",
+            "period_end": "2026-04-12",
+            "pnl": {"realized_pnl": "100", "unrealized_pnl": "200"},
+        }
+
+        persist_report_snapshot(
+            conn,
+            report_type="weekly",
+            period_start=date(2026, 4, 6),
+            period_end=date(2026, 4, 12),
+            snapshot=report,
+        )
+
+        cursor.execute.assert_called_once()
+        sql = cursor.execute.call_args[0][0]
+        params = cursor.execute.call_args[0][1]
+        assert "ON CONFLICT" in sql
+        assert params["report_type"] == "weekly"
+        assert params["period_start"] == date(2026, 4, 6)
+
+
+class TestLoadReportSnapshots:
+    def test_load_returns_list(self) -> None:
+        """load_report_snapshots should query by report_type."""
+        from app.services.reporting import load_report_snapshots
+
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = []
+
+        result = load_report_snapshots(conn, report_type="weekly", limit=10)
+        assert result == []
+        cursor.execute.assert_called_once()

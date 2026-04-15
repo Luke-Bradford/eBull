@@ -19,6 +19,7 @@ from typing import Any
 
 import psycopg
 import psycopg.rows
+from psycopg.types.json import Jsonb
 
 from app.services.budget import compute_budget_state
 
@@ -513,6 +514,65 @@ def _tax_provision_snapshot(conn: psycopg.Connection[Any]) -> dict[str, Any]:
         "estimated_tax_usd": _dec(budget.estimated_tax_usd),
         "tax_year": budget.tax_year,
     }
+
+
+# ---------------------------------------------------------------------------
+# Persistence layer
+# ---------------------------------------------------------------------------
+
+
+def persist_report_snapshot(
+    conn: psycopg.Connection[Any],
+    *,
+    report_type: str,
+    period_start: date,
+    period_end: date,
+    snapshot: dict[str, Any],
+) -> None:
+    """Upsert a report snapshot into report_snapshots.
+
+    Idempotent: ON CONFLICT replaces the snapshot for the same
+    (report_type, period_start) pair. The caller owns the commit.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO report_snapshots (report_type, period_start, period_end, snapshot_json)
+            VALUES (%(report_type)s, %(period_start)s, %(period_end)s, %(snapshot)s)
+            ON CONFLICT (report_type, period_start) DO UPDATE
+            SET period_end   = EXCLUDED.period_end,
+                snapshot_json = EXCLUDED.snapshot_json,
+                computed_at  = NOW()
+            """,
+            {
+                "report_type": report_type,
+                "period_start": period_start,
+                "period_end": period_end,
+                "snapshot": Jsonb(snapshot),
+            },
+        )
+
+
+def load_report_snapshots(
+    conn: psycopg.Connection[Any],
+    *,
+    report_type: str,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Load the most recent report snapshots of a given type."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT snapshot_id, report_type, period_start, period_end,
+                   snapshot_json, computed_at
+            FROM report_snapshots
+            WHERE report_type = %(report_type)s
+            ORDER BY period_start DESC
+            LIMIT %(limit)s
+            """,
+            {"report_type": report_type, "limit": limit},
+        )
+        return cur.fetchall()
 
 
 # ---------------------------------------------------------------------------
