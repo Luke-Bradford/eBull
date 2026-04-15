@@ -121,6 +121,8 @@ def _rec_cursor(
     suggested_size_pct: float | None = 0.05,
     model_version: str | None = "v1-balanced",
     status: str = "approved",
+    stop_loss_rate: float | None = None,
+    take_profit_rate: float | None = None,
 ) -> MagicMock:
     return _make_cursor(
         [
@@ -132,6 +134,8 @@ def _rec_cursor(
                 "suggested_size_pct": suggested_size_pct,
                 "model_version": model_version,
                 "status": status,
+                "stop_loss_rate": stop_loss_rate,
+                "take_profit_rate": take_profit_rate,
             }
         ]
     )

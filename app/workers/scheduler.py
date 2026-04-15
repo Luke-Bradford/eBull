@@ -31,6 +31,7 @@ import anthropic
 import psycopg
 import psycopg.rows
 import psycopg.sql
+from psycopg.types.json import Jsonb
 
 from app.config import settings
 from app.providers.implementations.companies_house import CompaniesHouseFilingsProvider
@@ -41,6 +42,7 @@ from app.providers.implementations.sec_fundamentals import SecFundamentalsProvid
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
 from app.services.coverage import review_coverage, seed_coverage
 from app.services.enrichment import refresh_enrichment
+from app.services.entry_timing import evaluate_entry_conditions
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
@@ -1031,14 +1033,66 @@ def morning_candidate_review() -> None:
     )
 
 
+def _timing_error_defer(
+    rec_id: int,
+    instrument_id: int,
+    explanation: str,
+) -> bool:
+    """Atomically defer a rec that could not be timing-evaluated.
+
+    Writes a decision_audit row + sets status='timing_deferred' with
+    timing_verdict='error' in one transaction.  Returns True if the
+    commit succeeded, False if the fallback itself failed (rec left as
+    'proposed' — logged by caller).
+    """
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            conn.execute(
+                """
+                INSERT INTO decision_audit
+                    (decision_time, instrument_id, recommendation_id,
+                     stage, pass_fail, explanation)
+                VALUES
+                    (NOW(), %(iid)s, %(rid)s,
+                     'entry_timing', 'FAIL', %(expl)s)
+                """,
+                {"iid": instrument_id, "rid": rec_id, "expl": explanation},
+            )
+            conn.execute(
+                """
+                UPDATE trade_recommendations
+                SET status = 'timing_deferred',
+                    timing_verdict = 'error',
+                    timing_rationale = %(rationale)s
+                WHERE recommendation_id = %(rid)s
+                """,
+                {"rid": rec_id, "rationale": explanation},
+            )
+            conn.commit()
+        return True
+    except Exception:
+        logger.error(
+            "execute_approved_orders: failed to defer rec=%d after timing error",
+            rec_id,
+            exc_info=True,
+        )
+        return False
+
+
 def execute_approved_orders() -> None:
     """Guard and execute actionable trade recommendations.
 
-    Two phases, run sequentially:
+    Three phases, run sequentially:
 
-    Phase 1 — Guard: query all ``proposed`` recommendations. For each,
-    call ``evaluate_recommendation`` to run the execution guard.  PASS
-    transitions the recommendation to ``approved``; FAIL transitions to
+    Phase 0 — Entry timing: evaluate TA conditions for BUY/ADD recs.
+    If conditions are unfavorable, set status='timing_deferred' and
+    write SL/TP + rationale.  If favorable, write SL/TP and leave as
+    'proposed'.  EXIT/HOLD recs are untouched.  Inline (not a separate
+    scheduled job) to guarantee ordering and eliminate scheduler race.
+
+    Phase 1 — Guard: query all remaining ``proposed`` recommendations.
+    For each, call ``evaluate_recommendation`` to run the execution
+    guard.  PASS transitions to ``approved``; FAIL transitions to
     ``rejected``.
 
     Phase 2 — Execute: query all ``approved`` recommendations (includes
@@ -1053,7 +1107,169 @@ def execute_approved_orders() -> None:
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
 
     with _tracked_job(JOB_EXECUTE_APPROVED_ORDERS) as tracker:
+        # --- Phase 0: entry timing — evaluate TA conditions for BUY/ADD ---
+        # Inline timing check (not a separate scheduled job) guarantees
+        # ordering: timing → guard → execute. Eliminates scheduler race.
+        timing_passed = 0
+        timing_deferred = 0
+        timing_skipped = 0
+        timing_candidates: list[tuple[Any, ...]] = []
+
+        try:
+            with psycopg.connect(settings.database_url) as conn:
+                timing_candidates = conn.execute(
+                    """
+                    SELECT recommendation_id, action, instrument_id
+                    FROM trade_recommendations
+                    WHERE status = 'proposed'
+                    ORDER BY recommendation_id
+                    """,
+                ).fetchall()
+        except Exception:
+            # DB failure fetching timing candidates must not kill Phase 1/2.
+            logger.error(
+                "execute_approved_orders: timing candidate fetch failed",
+                exc_info=True,
+            )
+
+        for row in timing_candidates:
+            rec_id, action, instrument_id = row[0], row[1], row[2]
+            # EXIT/HOLD recs skip timing — never gate protective exits
+            # (settled decision). The inner evaluate_entry_conditions also
+            # handles this, but skipping here avoids opening a per-rec DB
+            # connection for actions that are guaranteed to be skipped.
+            if action in ("EXIT", "HOLD"):
+                timing_skipped += 1
+                continue
+            try:
+                with psycopg.connect(settings.database_url) as conn:
+                    evaluation = evaluate_entry_conditions(conn, rec_id)
+
+                    pass_fail = "DEFER" if evaluation.verdict == "defer" else "PASS"
+                    new_status = "timing_deferred" if evaluation.verdict == "defer" else None
+
+                    if evaluation.verdict in ("pass", "defer"):
+                        # Atomic: audit row + rec update in one transaction.
+                        # If either statement fails, both roll back and the
+                        # outer except catches it → _timing_error_defer.
+                        with conn.transaction():
+                            conn.execute(
+                                """
+                                INSERT INTO decision_audit
+                                    (decision_time, instrument_id, recommendation_id,
+                                     stage, pass_fail, explanation, evidence_json)
+                                VALUES
+                                    (NOW(), %(iid)s, %(rid)s,
+                                     'entry_timing', %(pf)s, %(expl)s, %(ev)s)
+                                """,
+                                {
+                                    "iid": instrument_id,
+                                    "rid": rec_id,
+                                    "pf": pass_fail,
+                                    "expl": evaluation.rationale,
+                                    "ev": Jsonb(evaluation.condition_details),
+                                },
+                            )
+                            update_params: dict[str, Any] = {
+                                "sl": evaluation.stop_loss_rate,
+                                "tp": evaluation.take_profit_rate,
+                                "verdict": evaluation.verdict,
+                                "rationale": evaluation.rationale,
+                                "rid": rec_id,
+                            }
+                            if new_status is not None:
+                                conn.execute(
+                                    """
+                                    UPDATE trade_recommendations
+                                    SET status = 'timing_deferred',
+                                        stop_loss_rate = %(sl)s,
+                                        take_profit_rate = %(tp)s,
+                                        timing_verdict = %(verdict)s,
+                                        timing_rationale = %(rationale)s
+                                    WHERE recommendation_id = %(rid)s
+                                    """,
+                                    update_params,
+                                )
+                            else:
+                                conn.execute(
+                                    """
+                                    UPDATE trade_recommendations
+                                    SET stop_loss_rate = %(sl)s,
+                                        take_profit_rate = %(tp)s,
+                                        timing_verdict = %(verdict)s,
+                                        timing_rationale = %(rationale)s
+                                    WHERE recommendation_id = %(rid)s
+                                    """,
+                                    update_params,
+                                )
+
+                        # Commit the transaction (savepoint released above,
+                        # but the outer implicit txn needs an explicit commit).
+                        conn.commit()
+
+                        # Counter increment AFTER commit (reached only if
+                        # both writes succeeded).
+                        if new_status is not None:
+                            timing_deferred += 1
+                        else:
+                            timing_passed += 1
+
+                        logger.info(
+                            "execute_approved_orders: timing %s rec=%d rationale=%s",
+                            pass_fail,
+                            rec_id,
+                            evaluation.rationale,
+                        )
+                    else:
+                        # verdict == "skip" for a BUY/ADD rec — should not
+                        # happen, but must not let an uninspected rec reach
+                        # the guard. Defer it as a safety measure.
+                        skip_ok = _timing_error_defer(
+                            rec_id,
+                            instrument_id,
+                            "evaluate_entry_conditions returned 'skip' for BUY/ADD rec — deferred as safety fallback",
+                        )
+                        if skip_ok:
+                            timing_deferred += 1
+                        else:
+                            # Defer failed — rec stays proposed. Log at
+                            # CRITICAL: this is the last safety path before
+                            # the execution guard (which is the final gate).
+                            logger.critical(
+                                "execute_approved_orders: rec=%d could not be deferred after skip verdict; "
+                                "rec remains proposed — execution guard is the final safety net",
+                                rec_id,
+                            )
+                            timing_skipped += 1
+            except Exception:
+                # Timing failure must not let an uninspected BUY/ADD rec
+                # reach the guard without SL/TP. Mark as timing_deferred
+                # so Phase 1 excludes it.
+                logger.error(
+                    "execute_approved_orders: timing evaluation failed for rec=%d, deferring",
+                    rec_id,
+                    exc_info=True,
+                )
+                deferred_ok = _timing_error_defer(
+                    rec_id,
+                    instrument_id,
+                    "timing evaluation raised an exception; deferred to prevent SL/TP-absent execution",
+                )
+                if deferred_ok:
+                    timing_deferred += 1
+                else:
+                    timing_skipped += 1
+
+        logger.info(
+            "execute_approved_orders: timing phase — candidates=%d passed=%d deferred=%d skipped=%d",
+            len(timing_candidates),
+            timing_passed,
+            timing_deferred,
+            timing_skipped,
+        )
+
         # --- Phase 1: guard proposed recommendations ---
+        # Re-query proposed recs (timing_deferred ones are now excluded).
         with psycopg.connect(settings.database_url) as conn:
             proposed = conn.execute(
                 """
@@ -1188,15 +1404,22 @@ def execute_approved_orders() -> None:
                         exc_info=True,
                     )
 
-            tracker.row_count = guarded + rejected + executed + pending + failed
+            tracker.row_count = (
+                timing_passed + timing_deferred + timing_skipped + guarded + rejected + executed + pending + failed
+            )
 
         finally:
             if broker_ctx is not None:
                 broker_ctx.__exit__(None, None, None)
 
     logger.info(
-        "execute_approved_orders complete: proposed=%d guarded=%d rejected=%d "
-        "approved=%d executed=%d pending=%d failed=%d",
+        "execute_approved_orders complete: "
+        "timing(passed=%d deferred=%d skipped=%d) "
+        "guard(proposed=%d approved=%d rejected=%d) "
+        "exec(approved=%d executed=%d pending=%d failed=%d)",
+        timing_passed,
+        timing_deferred,
+        timing_skipped,
         len(proposed),
         guarded,
         rejected,

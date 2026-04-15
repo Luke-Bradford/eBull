@@ -1,7 +1,8 @@
 """Tests for the execute_approved_orders scheduled job.
 
-The job orchestrates two existing services — execution_guard and order_client —
-so tests mock both services and verify the orchestration logic:
+The job orchestrates three phases — entry_timing, execution_guard, order_client —
+so tests mock all three services and verify the orchestration logic:
+- Phase 0: entry timing evaluates TA conditions for BUY/ADD recs
 - Phase 1: proposed recommendations are guarded (PASS → approved, FAIL → rejected)
 - Phase 2: approved recommendations are executed
 - Isolation: one failure does not block others
@@ -9,6 +10,14 @@ so tests mock both services and verify the orchestration logic:
 Mock approach: patch ``_tracked_job`` with a no-op context manager so
 the job tracking infrastructure (which also uses psycopg.connect) does
 not interfere with the connection mocking for the business logic.
+
+Connection order (Phase 0 → Phase 1 → Phase 2):
+  0. timing_conn    — SELECT proposed recs for timing evaluation
+  0a. per-rec conn  — one per BUY/ADD candidate (evaluate + UPDATE)
+  1. proposed_conn  — SELECT remaining proposed recs for guard
+  1a. per-rec conn  — one per proposed rec (guard + UPDATE)
+  2. approved_conn  — SELECT approved recs for execution
+  2a. per-rec conn  — one per approved rec (execute_order)
 """
 
 from __future__ import annotations
@@ -106,12 +115,14 @@ class TestGuardPhase:
         _creds: MagicMock,
     ) -> None:
         """Two proposed recs: one PASS, one FAIL."""
+        timing_conn = _mock_conn_with_rows([])  # Phase 0: no timing candidates
         proposed_conn = _mock_conn_with_rows([(1,), (2,)])
         guard_conn1 = _mock_conn_with_rows([])
         guard_conn2 = _mock_conn_with_rows([])
         approved_conn = _mock_conn_with_rows([])
 
         mock_connect.side_effect = [
+            timing_conn,
             proposed_conn,
             guard_conn1,
             guard_conn2,
@@ -137,12 +148,14 @@ class TestGuardPhase:
         _creds: MagicMock,
     ) -> None:
         """If guard raises for rec 1, rec 2 is still guarded."""
+        timing_conn = _mock_conn_with_rows([])  # Phase 0: no timing candidates
         proposed_conn = _mock_conn_with_rows([(1,), (2,)])
         guard_conn1 = _mock_conn_with_rows([])
         guard_conn2 = _mock_conn_with_rows([])
         approved_conn = _mock_conn_with_rows([])
 
         mock_connect.side_effect = [
+            timing_conn,
             proposed_conn,
             guard_conn1,
             guard_conn2,
@@ -176,12 +189,14 @@ class TestExecutePhase:
         _creds: MagicMock,
     ) -> None:
         """One proposed rec passes guard, then is executed."""
+        timing_conn = _mock_conn_with_rows([])  # Phase 0: no timing candidates
         proposed_conn = _mock_conn_with_rows([(1,)])
         guard_conn = _mock_conn_with_rows([])
         approved_conn = _mock_conn_with_rows([(1, 100)])
         exec_conn = _mock_conn_with_rows([])
 
         mock_connect.side_effect = [
+            timing_conn,
             proposed_conn,
             guard_conn,
             approved_conn,
@@ -210,12 +225,14 @@ class TestExecutePhase:
         _creds: MagicMock,
     ) -> None:
         """If execution raises for rec 1, rec 2 is still executed."""
+        timing_conn = _mock_conn_with_rows([])  # Phase 0: no timing candidates
         proposed_conn = _mock_conn_with_rows([])
         approved_conn = _mock_conn_with_rows([(1, 100), (2, 200)])
         exec_conn1 = _mock_conn_with_rows([])
         exec_conn2 = _mock_conn_with_rows([])
 
         mock_connect.side_effect = [
+            timing_conn,
             proposed_conn,
             approved_conn,
             exec_conn1,
@@ -243,11 +260,12 @@ class TestExecutePhase:
         _creds: MagicMock,
     ) -> None:
         """A non-filled outcome is logged as failed."""
+        timing_conn = _mock_conn_with_rows([])  # Phase 0: no timing candidates
         proposed_conn = _mock_conn_with_rows([])
         approved_conn = _mock_conn_with_rows([(1, 100)])
         exec_conn = _mock_conn_with_rows([])
 
-        mock_connect.side_effect = [proposed_conn, approved_conn, exec_conn]
+        mock_connect.side_effect = [timing_conn, proposed_conn, approved_conn, exec_conn]
         mock_exec.return_value = _exec_failed(1, 500)
 
         from app.workers.scheduler import execute_approved_orders
@@ -273,10 +291,11 @@ class TestNoWork:
         _creds: MagicMock,
     ) -> None:
         """No proposed or approved recs → guard and execute never called."""
+        timing_conn = _mock_conn_with_rows([])  # Phase 0: no timing candidates
         proposed_conn = _mock_conn_with_rows([])
         approved_conn = _mock_conn_with_rows([])
 
-        mock_connect.side_effect = [proposed_conn, approved_conn]
+        mock_connect.side_effect = [timing_conn, proposed_conn, approved_conn]
 
         from app.workers.scheduler import execute_approved_orders
 

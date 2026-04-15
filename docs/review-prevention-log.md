@@ -643,3 +643,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `daily_candle_refresh` called `refresh_market_data` which upserted quotes, overwriting fresher hourly values from `fx_rates_refresh` with stale end-of-day data whenever the daily job ran after the hourly one.
 - Prevention: When adding a new scheduled job that writes to a table, grep for all other jobs that also write to that table. If ownership is split, add `skip_*` flags so only one job is responsible. `daily_candle_refresh` must pass `skip_quotes=True`. Check: `grep -rn "_upsert_quote\|INSERT INTO quotes" app/` — only `fx_rates_refresh` and `refresh_market_data(skip_quotes=False)` should write quotes.
 - Enforced in: `app/workers/scheduler.py` (`skip_quotes=True` in daily_candle_refresh); `app/services/market_data.py` (`skip_quotes` parameter)
+
+---
+
+### `conn.transaction()` savepoint release does not commit the outer transaction
+
+- First seen in: #231
+- Symptom: `with conn.transaction():` on a `psycopg.connect()`-opened connection (autocommit=False) creates a savepoint. The savepoint is released when the block exits, but the outer implicit transaction is not committed. If `conn.commit()` is omitted after the block, writes are silently rolled back when the connection closes.
+- Prevention: After any `with conn.transaction():` block on a non-autocommit connection, verify that `conn.commit()` is called before the connection closes. Alternatively, avoid `conn.transaction()` and use a plain `conn.commit()` when savepoint semantics are not needed. Grep `with conn\.transaction\(\):` and verify each is followed by `conn.commit()` within the same `with psycopg.connect(...)` scope.
+- Enforced in: this prevention log
