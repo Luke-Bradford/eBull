@@ -780,6 +780,34 @@ class TestComputeAndStoreFeaturesTA:
                 assert isinstance(exponent, int)
                 assert abs(exponent) <= 6, f"{col} has more than 6dp: {val}"
 
+    def test_ta_skipped_when_dates_misaligned(self) -> None:
+        """When latest OHLCV date != latest close date, all TA params are None.
+
+        This tests the stale-TA guard: if the latest candle has close but
+        incomplete OHLC, the OHLCV query returns the prior complete bar,
+        creating a date mismatch that should suppress TA computation.
+        """
+        n = 250
+        price_rows = _generate_price_rows(n)
+        close_rows = list(reversed(price_rows))
+
+        # OHLCV rows end one day earlier than close rows — simulates a
+        # partial candle where close is set but OHLC is still NULL.
+        ohlcv_rows = list(reversed(_generate_ohlcv_rows(n - 1)))
+
+        conn = MagicMock()
+        conn.execute.side_effect = _make_mock_execute([close_rows, ohlcv_rows])
+
+        result = _compute_and_store_features(conn, instrument_id=42)
+        assert result == 1
+
+        update_call = conn.execute.call_args_list[2]
+        params = update_call[0][1]
+
+        # Every TA column must be None due to date mismatch
+        for col in _TA_COLUMN_NAMES:
+            assert params[col] is None, f"{col} should be None when dates misalign"
+
     def test_string_indicators_excluded_from_ta_params(self) -> None:
         """compute_indicators returns price_vs_sma200 and trend_sma_cross as
         strings — these must NOT appear in the numeric ta_params dict."""

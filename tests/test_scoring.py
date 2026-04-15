@@ -314,6 +314,28 @@ class TestEnhancedMomentumScore:
         assert score > 0.5  # bullish TA should push above neutral
         assert score <= 1.0
 
+    def test_zero_close_guards_division(self) -> None:
+        """current_close = 0 should not cause ZeroDivisionError.
+
+        MACD and ATR sub-components divide by current_close; the guards
+        must suppress them gracefully and emit unavailable notes.
+        """
+        ta = {
+            "sma_200": 90.0,
+            "macd_histogram": 2.0,
+            "rsi_14": 55.0,
+            "stoch_k": 50.0,
+            "stoch_d": 50.0,
+            "bb_upper": 120.0,
+            "bb_lower": 80.0,
+            "atr_14": 3.0,
+            "current_close": 0.0,
+        }
+        score, notes = _momentum_score(0.10, 0.20, 0.30, ta_indicators=ta)
+        assert 0.0 <= score <= 1.0
+        # MACD should be suppressed (division by zero guard)
+        assert any("macd_histogram" in n for n in notes)
+
 
 # ---------------------------------------------------------------------------
 # _sentiment_score

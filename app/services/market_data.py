@@ -323,7 +323,7 @@ def _compute_and_store_features(
             ta_result = compute_indicators(bars)
             if ta_result is not None:
                 for k, v in ta_result.items():
-                    if k in ta_params and isinstance(v, float):
+                    if k in ta_params and isinstance(v, float) and math.isfinite(v):
                         ta_params[k] = Decimal(str(round(v, 6)))
 
     conn.execute(

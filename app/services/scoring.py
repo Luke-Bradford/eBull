@@ -410,7 +410,7 @@ def _momentum_score(
 
     rsi_val = ta_indicators.get("rsi_14")
     if rsi_val is not None:
-        # RSI sweet spot: 50-65 (healthy uptrend momentum).
+        # RSI ramp: 30→50 is recovery, 50→70 is healthy uptrend.
         # Oversold (<30) and overbought (>70) are warning zones.
         if rsi_val < 30:
             rsi_score = rsi_val / 60.0
@@ -447,6 +447,9 @@ def _momentum_score(
     if bb_upper is not None and bb_lower is not None and current_close is not None:
         bb_width = bb_upper - bb_lower
         if bb_width > 0:
+            # Position within band measures trend strength (high = strong
+            # uptrend), intentionally opposite to RSI/stoch overbought
+            # treatment which measures exhaustion risk.
             vol_parts.append((_clip((current_close - bb_lower) / bb_width), 0.60))
         else:
             vol_parts.append((0.5, 0.60))
