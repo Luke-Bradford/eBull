@@ -734,3 +734,21 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `morning_candidate_review()` called `execute_approved_orders()` directly without checking the kill switch or `enable_auto_trading` flag. The guards *inside* `execute_approved_orders` would catch it, but the non-negotiable rule is that AI-generated trade actions must never reach the execution path without an explicit gate at the call site.
 - Prevention: Any code path that invokes `execute_approved_orders()` (or any future order-execution function) must check both `get_kill_switch_status(conn)["is_active"]` and `get_runtime_config(conn).enable_auto_trading` before the call. The callee's internal guard is a second line of defence, not the primary one.
 - Enforced in: `app/workers/scheduler.py` (morning_candidate_review pipeline trigger)
+
+---
+
+### Interval construction via string concatenation in SQL
+
+- First seen in: #239
+- Symptom: `(%(window_days)s || ' days')::INTERVAL` relies on driver-level string concatenation to build an interval value. Safe only when the parameter is always an integer, but fragile — a code change at the call site could introduce injection.
+- Prevention: Use `make_interval(days => %(window_days)s)` instead of string concatenation for interval construction. Grep for `|| ' days'` or `|| ' hours'` in SQL strings before pushing.
+- Enforced in: this prevention log
+
+---
+
+### Unbounded API limit parameters
+
+- First seen in: #239
+- Symptom: `limit: int = 50` with no upper bound allows callers to pass `limit=10000000`, holding a DB connection open for the full scan with no timeout.
+- Prevention: Use `Query(default=N, le=1000)` (or appropriate upper bound) for all `limit` parameters in FastAPI routes. Grep for `limit: int =` in router files before pushing.
+- Enforced in: this prevention log

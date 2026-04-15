@@ -33,6 +33,7 @@ import psycopg.rows
 from psycopg.types.json import Jsonb
 
 from app.providers.broker import BrokerOrderResult, BrokerProvider, OrderParams
+from app.services.return_attribution import compute_attribution, persist_attribution
 from app.services.runtime_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
@@ -474,6 +475,45 @@ def _update_position_exit(
     )
 
 
+def _maybe_trigger_attribution(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+    current_units_after: Decimal,
+) -> None:
+    """Compute and persist return attribution if the position is fully closed.
+
+    Called after an EXIT fill updates the position. If current_units_after is
+    zero (or negative due to rounding), the position is closed and attribution
+    is computed.
+
+    Errors are logged and swallowed — attribution is best-effort and must
+    never abort the order execution path.
+    """
+    if current_units_after > Decimal("0"):
+        return
+
+    try:
+        # Savepoint isolates attribution from the outer transaction.
+        # If a DB error occurs inside, the savepoint rolls back and the
+        # outer transaction stays healthy for cash_ledger / rec status writes.
+        with conn.transaction():
+            result = compute_attribution(conn, instrument_id)
+            if result is not None:
+                persist_attribution(conn, result)
+                logger.info(
+                    "execute_order: attribution computed for instrument_id=%d gross=%.4f alpha=%.4f",
+                    instrument_id,
+                    result.gross_return_pct,
+                    result.model_alpha_pct,
+                )
+    except Exception:
+        logger.error(
+            "execute_order: attribution failed for instrument_id=%d",
+            instrument_id,
+            exc_info=True,
+        )
+
+
 def _record_cash_ledger(
     conn: psycopg.Connection[Any],
     action: str,
@@ -737,6 +777,15 @@ def execute_order(
                     filled_units=fu,
                     now=now,
                 )
+                # Check if position is fully closed → trigger attribution
+                with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                    cur.execute(
+                        "SELECT current_units FROM positions WHERE instrument_id = %(iid)s",
+                        {"iid": instrument_id},
+                    )
+                    pos_row = cur.fetchone()
+                units_after = Decimal(str(pos_row["current_units"])) if pos_row else Decimal("0")
+                _maybe_trigger_attribution(conn, instrument_id, units_after)
 
             gross_amount = fp * fu
             _record_cash_ledger(conn, action, gross_amount, broker_result.fees, now)
