@@ -368,11 +368,11 @@ class TestGetQuotesChunking:
             assert provider._http.get.call_count == 2
             # First call: 50 IDs inlined in URL
             first_url = provider._http.get.call_args_list[0].args[0]
-            first_ids = first_url.split("instrumentIds=")[1]
+            first_ids = first_url.split("instrumentIds=")[1].split("&")[0]
             assert len(first_ids.split(",")) == 50
             # Second call: 1 ID
             second_url = provider._http.get.call_args_list[1].args[0]
-            second_ids = second_url.split("instrumentIds=")[1]
+            second_ids = second_url.split("instrumentIds=")[1].split("&")[0]
             assert len(second_ids.split(",")) == 1
 
     @patch("app.providers.implementations.etoro._persist_raw")
