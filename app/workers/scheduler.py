@@ -1203,8 +1203,12 @@ def execute_approved_orders() -> None:
                                     update_params,
                                 )
 
-                        # Counter increment AFTER transaction commit (reached
-                        # only if both writes succeeded).
+                        # Commit the transaction (savepoint released above,
+                        # but the outer implicit txn needs an explicit commit).
+                        conn.commit()
+
+                        # Counter increment AFTER commit (reached only if
+                        # both writes succeeded).
                         if new_status is not None:
                             timing_deferred += 1
                         else:
