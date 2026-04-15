@@ -297,11 +297,7 @@ def _has_positions_or_attributions(conn: psycopg.Connection[Any]) -> Prerequisit
     if _exists(
         conn,
         psycopg.sql.SQL(
-            "SELECT EXISTS("
-            "SELECT 1 FROM positions WHERE current_units > 0 "
-            "UNION ALL "
-            "SELECT 1 FROM return_attribution LIMIT 1"
-            ")"
+            "SELECT EXISTS(SELECT 1 FROM positions WHERE current_units > 0) OR EXISTS(SELECT 1 FROM return_attribution)"
         ),
     ):
         return (True, "")

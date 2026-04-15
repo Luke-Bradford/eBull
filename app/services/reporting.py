@@ -113,7 +113,7 @@ def _top_bottom_performers(
     total = len(rows)
     top = [_row_to_dict(r) for r in rows[:n]]
     # Avoid duplicates: if there are n or fewer positions, bottom is empty.
-    bottom = [_row_to_dict(r) for r in rows[max(n, total - n) :]] if total > n else []
+    bottom = [_row_to_dict(r) for r in rows[total - n :]] if total > n else []
     return top, bottom
 
 
