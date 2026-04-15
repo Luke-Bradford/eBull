@@ -493,15 +493,19 @@ def _maybe_trigger_attribution(
         return
 
     try:
-        result = compute_attribution(conn, instrument_id)
-        if result is not None:
-            persist_attribution(conn, result)
-            logger.info(
-                "execute_order: attribution computed for instrument_id=%d gross=%.4f alpha=%.4f",
-                instrument_id,
-                result.gross_return_pct,
-                result.model_alpha_pct,
-            )
+        # Savepoint isolates attribution from the outer transaction.
+        # If a DB error occurs inside, the savepoint rolls back and the
+        # outer transaction stays healthy for cash_ledger / rec status writes.
+        with conn.transaction():
+            result = compute_attribution(conn, instrument_id)
+            if result is not None:
+                persist_attribution(conn, result)
+                logger.info(
+                    "execute_order: attribution computed for instrument_id=%d gross=%.4f alpha=%.4f",
+                    instrument_id,
+                    result.gross_return_pct,
+                    result.model_alpha_pct,
+                )
     except Exception:
         logger.error(
             "execute_order: attribution failed for instrument_id=%d",
