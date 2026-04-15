@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS return_attribution (
     score_components     JSONB,
     -- Computation metadata
     entry_fill_id        BIGINT REFERENCES fills(fill_id),
-    exit_fill_id         BIGINT REFERENCES fills(fill_id),
+    exit_fill_id         BIGINT NOT NULL REFERENCES fills(fill_id),
     recommendation_id    BIGINT REFERENCES trade_recommendations(recommendation_id),
     attribution_method   TEXT NOT NULL DEFAULT 'sector_relative_v1',
     computed_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
