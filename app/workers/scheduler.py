@@ -1033,6 +1033,52 @@ def morning_candidate_review() -> None:
     )
 
 
+def _timing_error_defer(
+    rec_id: int,
+    instrument_id: int,
+    explanation: str,
+) -> bool:
+    """Atomically defer a rec that could not be timing-evaluated.
+
+    Writes a decision_audit row + sets status='timing_deferred' with
+    timing_verdict='error' in one transaction.  Returns True if the
+    commit succeeded, False if the fallback itself failed (rec left as
+    'proposed' — logged by caller).
+    """
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            conn.execute(
+                """
+                INSERT INTO decision_audit
+                    (decision_time, instrument_id, recommendation_id,
+                     stage, pass_fail, explanation)
+                VALUES
+                    (NOW(), %(iid)s, %(rid)s,
+                     'entry_timing', 'FAIL', %(expl)s)
+                """,
+                {"iid": instrument_id, "rid": rec_id, "expl": explanation},
+            )
+            conn.execute(
+                """
+                UPDATE trade_recommendations
+                SET status = 'timing_deferred',
+                    timing_verdict = 'error',
+                    timing_rationale = %(rationale)s
+                WHERE recommendation_id = %(rid)s
+                """,
+                {"rid": rec_id, "rationale": explanation},
+            )
+            conn.commit()
+        return True
+    except Exception:
+        logger.error(
+            "execute_approved_orders: failed to defer rec=%d after timing error",
+            rec_id,
+            exc_info=True,
+        )
+        return False
+
+
 def execute_approved_orders() -> None:
     """Guard and execute actionable trade recommendations.
 
@@ -1166,9 +1212,15 @@ def execute_approved_orders() -> None:
                             evaluation.rationale,
                         )
                     else:
-                        # verdict == "skip" — should not happen for BUY/ADD
-                        # but handle gracefully.
-                        timing_skipped += 1
+                        # verdict == "skip" for a BUY/ADD rec — should not
+                        # happen, but must not let an uninspected rec reach
+                        # the guard. Defer it as a safety measure.
+                        _timing_error_defer(
+                            rec_id,
+                            instrument_id,
+                            "evaluate_entry_conditions returned 'skip' for BUY/ADD rec — deferred as safety fallback",
+                        )
+                        timing_deferred += 1
             except Exception:
                 # Timing failure must not let an uninspected BUY/ADD rec
                 # reach the guard without SL/TP. Mark as timing_deferred
@@ -1178,38 +1230,15 @@ def execute_approved_orders() -> None:
                     rec_id,
                     exc_info=True,
                 )
-                try:
-                    with psycopg.connect(settings.database_url) as err_conn:
-                        err_conn.execute(
-                            """
-                            INSERT INTO decision_audit
-                                (decision_time, instrument_id, recommendation_id,
-                                 stage, pass_fail, explanation)
-                            VALUES
-                                (NOW(), %(iid)s, %(rid)s,
-                                 'entry_timing', 'FAIL',
-                                 'timing evaluation raised an exception; deferred to prevent SL/TP-absent execution')
-                            """,
-                            {"iid": instrument_id, "rid": rec_id},
-                        )
-                        err_conn.execute(
-                            """
-                            UPDATE trade_recommendations
-                            SET status = 'timing_deferred',
-                                timing_verdict = 'defer',
-                                timing_rationale = 'timing evaluation failed — deferred as safety fallback'
-                            WHERE recommendation_id = %(rid)s
-                            """,
-                            {"rid": rec_id},
-                        )
-                        err_conn.commit()
-                except Exception:
-                    logger.error(
-                        "execute_approved_orders: failed to defer rec=%d after timing error",
-                        rec_id,
-                        exc_info=True,
-                    )
-                timing_deferred += 1
+                deferred_ok = _timing_error_defer(
+                    rec_id,
+                    instrument_id,
+                    "timing evaluation raised an exception; deferred to prevent SL/TP-absent execution",
+                )
+                if deferred_ok:
+                    timing_deferred += 1
+                else:
+                    timing_skipped += 1
 
         logger.info(
             "execute_approved_orders: timing phase — candidates=%d passed=%d deferred=%d skipped=%d",

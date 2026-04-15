@@ -49,7 +49,7 @@ RSI_OVERBOUGHT = 75.0
 # band range (upper - lower), consider overextended and defer.
 BB_OVEREXTENDED_PCT = 0.95
 
-TimingVerdict = Literal["pass", "defer", "skip"]
+TimingVerdict = Literal["pass", "defer", "skip", "error"]
 
 
 # ---------------------------------------------------------------------------
