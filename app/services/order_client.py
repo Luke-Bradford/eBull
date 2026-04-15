@@ -378,6 +378,72 @@ def _update_position_buy(
     )
 
 
+def _persist_broker_position(
+    conn: psycopg.Connection[Any],
+    order_id: int,
+    instrument_id: int,
+    filled_price: Decimal,
+    filled_units: Decimal,
+    fees: Decimal,
+    order_params: OrderParams | None,
+    raw_payload: dict[str, Any],
+    now: datetime,
+) -> None:
+    """Insert a broker_positions row for an eBull-originated BUY/ADD fill.
+
+    Uses ``order_id`` as the synthetic ``position_id`` — the same convention
+    as ``app/api/orders._persist_order_and_fill``.  The row is immediately
+    visible to ``_load_position_id_for_exit`` so a subsequent EXIT
+    recommendation does not have to wait for the next broker sync cycle.
+
+    ON CONFLICT: if a broker sync backfills the same ``position_id`` before
+    this runs (unlikely but safe), update units/amount/updated_at.
+    """
+    gross = filled_price * filled_units
+    conn.execute(
+        """
+        INSERT INTO broker_positions
+            (position_id, instrument_id, is_buy, units, amount,
+             initial_amount_in_dollars, open_rate, open_conversion_rate,
+             open_date_time, stop_loss_rate, take_profit_rate,
+             is_no_stop_loss, is_no_take_profit,
+             leverage, is_tsl_enabled, total_fees,
+             source, raw_payload, updated_at)
+        VALUES
+            (%(pid)s, %(iid)s, TRUE, %(units)s, %(amount)s,
+             %(amount)s, %(price)s, 1,
+             %(now)s, %(sl)s, %(tp)s,
+             %(no_sl)s, %(no_tp)s,
+             %(leverage)s, %(tsl)s, %(fees)s,
+             'ebull', %(payload)s, %(now)s)
+        ON CONFLICT (position_id) DO UPDATE SET
+            units = EXCLUDED.units,
+            amount = EXCLUDED.amount,
+            open_rate = EXCLUDED.open_rate,
+            open_conversion_rate = EXCLUDED.open_conversion_rate,
+            total_fees = EXCLUDED.total_fees,
+            raw_payload = EXCLUDED.raw_payload,
+            updated_at = EXCLUDED.updated_at
+        """,
+        {
+            "pid": order_id,
+            "iid": instrument_id,
+            "units": filled_units,
+            "amount": gross,
+            "price": filled_price,
+            "now": now,
+            "sl": order_params.stop_loss_rate if order_params else None,
+            "tp": order_params.take_profit_rate if order_params else None,
+            "no_sl": order_params is None or order_params.stop_loss_rate is None,
+            "no_tp": order_params is None or order_params.take_profit_rate is None,
+            "leverage": order_params.leverage if order_params else 1,
+            "tsl": order_params.is_tsl_enabled if order_params else False,
+            "fees": fees,
+            "payload": Jsonb(raw_payload),
+        },
+    )
+
+
 def _update_position_exit(
     conn: psycopg.Connection[Any],
     instrument_id: int,
@@ -650,6 +716,17 @@ def execute_order(
                     instrument_id=instrument_id,
                     filled_price=fp,
                     filled_units=fu,
+                    now=now,
+                )
+                _persist_broker_position(
+                    conn,
+                    order_id=order_id,
+                    instrument_id=instrument_id,
+                    filled_price=fp,
+                    filled_units=fu,
+                    fees=broker_result.fees,
+                    order_params=order_params,
+                    raw_payload=broker_result.raw_payload,
                     now=now,
                 )
             elif action == "EXIT":

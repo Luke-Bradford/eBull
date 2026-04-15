@@ -279,6 +279,10 @@ def _persist_order_and_fill(
                     ON CONFLICT (position_id) DO UPDATE SET
                         units = EXCLUDED.units,
                         amount = EXCLUDED.amount,
+                        open_rate = EXCLUDED.open_rate,
+                        open_conversion_rate = EXCLUDED.open_conversion_rate,
+                        total_fees = EXCLUDED.total_fees,
+                        raw_payload = EXCLUDED.raw_payload,
                         updated_at = EXCLUDED.updated_at
                     """,
                     {

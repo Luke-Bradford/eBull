@@ -19,7 +19,7 @@ Cursor call order inside execute_order (demo BUY with suggested_size_pct):
   3. _load_latest_quote_price       — fetchone
   4. _persist_order                 — fetchone (INSERT RETURNING)
   5. _persist_fill                  — fetchone (INSERT RETURNING)
-  6. conn.execute x4                — position upsert, cash_ledger, rec status, audit
+  6. conn.execute x5                — position upsert, broker_positions, cash_ledger, rec status, audit
 
 Cursor call order inside execute_order (demo EXIT):
   1. _load_approved_recommendation  — fetchone
@@ -40,11 +40,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.providers.broker import BrokerOrderResult
+from app.providers.broker import BrokerOrderResult, OrderParams
 from app.services.order_client import (
     _load_approved_recommendation,
     _load_latest_quote_price,
     _load_position_units,
+    _persist_broker_position,
     _synthetic_fill,
     _update_position_buy,
     execute_order,
@@ -314,8 +315,8 @@ class TestExecuteOrderDemoMode:
         assert result.broker_order_ref == "DEMO-1-BUY"
         assert "order filled" in result.explanation
 
-        # conn.execute: position upsert, cash_ledger, rec status, audit = 4
-        assert conn.execute.call_count == 4
+        # conn.execute: position upsert, broker_positions, cash_ledger, rec status, audit = 5
+        assert conn.execute.call_count == 5
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_demo_exit_produces_fill(self, _mock_now: MagicMock) -> None:
@@ -386,6 +387,57 @@ class TestExecuteOrderDemoMode:
         broker.place_order.assert_not_called()
         broker.close_position.assert_not_called()
         broker.get_order_status.assert_not_called()
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_buy_writes_broker_positions_row(self, _mock_now: MagicMock) -> None:
+        """BUY/ADD fills must INSERT into broker_positions so EXIT can resolve."""
+        cursors = [
+            _rec_cursor(action="BUY", stop_loss_rate=90.0, take_profit_rate=120.0),
+            _cash_cursor(balance=10_000.0),
+            _quote_cursor(last=100.0),
+            _order_returning_cursor(order_id=7),
+            _fill_returning_cursor(fill_id=3),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+        )
+        assert result.outcome == "filled"
+
+        # Find the broker_positions INSERT among conn.execute calls
+        bp_calls = [c for c in conn.execute.call_args_list if "broker_positions" in str(c)]
+        assert len(bp_calls) == 1, f"Expected 1 broker_positions INSERT, got {len(bp_calls)}"
+
+        # Verify params passed through execute_order (not just SQL shape)
+        params = bp_calls[0].args[1]
+        assert params["pid"] == 7  # position_id = order_id
+        assert params["iid"] == 1  # instrument_id from rec
+        assert params["sl"] == Decimal("90")
+        assert params["tp"] == Decimal("120")
+        assert params["no_sl"] is False
+        assert params["no_tp"] is False
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_exit_does_not_write_broker_positions(self, _mock_now: MagicMock) -> None:
+        """EXIT fills must NOT insert into broker_positions (the row already exists)."""
+        cursors = [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            _position_cursor(current_units=5.0),
+            _quote_cursor(last=200.0),
+            _order_returning_cursor(order_id=8),
+            _fill_returning_cursor(fill_id=4),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+        )
+        assert result.outcome == "filled"
+        bp_calls = [c for c in conn.execute.call_args_list if "broker_positions" in str(c)]
+        assert len(bp_calls) == 0
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_demo_buy_writes_execution_audit(self, _mock_now: MagicMock) -> None:
@@ -755,3 +807,69 @@ class TestUpdatePositionBuySource:
         assert "positions.current_units <= 0" in normalised
         assert "EXCLUDED.source" in normalised
         assert "ELSE positions.source" in normalised
+
+
+# ---------------------------------------------------------------------------
+# TestPersistBrokerPosition
+# ---------------------------------------------------------------------------
+
+
+class TestPersistBrokerPosition:
+    """Verify _persist_broker_position emits the correct INSERT."""
+
+    def test_inserts_with_source_ebull_and_sl_tp(self) -> None:
+        conn = _make_conn([])
+        _persist_broker_position(
+            conn,
+            order_id=7,
+            instrument_id=42,
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            fees=Decimal("1.50"),
+            order_params=OrderParams(
+                stop_loss_rate=Decimal("90"),
+                take_profit_rate=Decimal("120"),
+            ),
+            raw_payload={"demo": True},
+            now=_NOW,
+        )
+        assert conn.execute.call_count == 1
+        sql = conn.execute.call_args_list[0].args[0]
+        normalised = re.sub(r"\s+", " ", sql)
+        assert "INSERT INTO broker_positions" in normalised
+        assert "'ebull'" in normalised
+        assert "ON CONFLICT (position_id) DO UPDATE" in normalised
+        # ON CONFLICT must update raw_payload to prevent silent payload loss
+        assert "raw_payload = EXCLUDED.raw_payload" in normalised
+
+        params = conn.execute.call_args_list[0].args[1]
+        assert params["pid"] == 7
+        assert params["iid"] == 42
+        assert params["units"] == Decimal("5")
+        # amount = price * units = 500
+        assert params["amount"] == Decimal("500")
+        assert params["sl"] == Decimal("90")
+        assert params["tp"] == Decimal("120")
+        assert params["no_sl"] is False
+        assert params["no_tp"] is False
+
+    def test_inserts_without_order_params(self) -> None:
+        conn = _make_conn([])
+        _persist_broker_position(
+            conn,
+            order_id=8,
+            instrument_id=99,
+            filled_price=Decimal("50"),
+            filled_units=Decimal("10"),
+            fees=Decimal("0"),
+            order_params=None,
+            raw_payload={"demo": True},
+            now=_NOW,
+        )
+        params = conn.execute.call_args_list[0].args[1]
+        assert params["sl"] is None
+        assert params["tp"] is None
+        assert params["no_sl"] is True
+        assert params["no_tp"] is True
+        assert params["leverage"] == 1
+        assert params["tsl"] is False
