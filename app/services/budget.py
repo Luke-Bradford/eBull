@@ -22,13 +22,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
 import psycopg
 import psycopg.rows
 from psycopg import sql
+
+from app.services.tax_ledger import ANNUAL_EXEMPT
 
 logger = logging.getLogger(__name__)
 
@@ -361,3 +363,225 @@ def list_capital_events(
         )
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Budget state computation
+# ---------------------------------------------------------------------------
+
+
+def _current_uk_tax_year() -> str:
+    """Return the current UK tax year as ``"YYYY/YY"``.
+
+    The UK tax year runs 6 April to 5 April.
+    E.g. on 2026-04-15 the tax year is ``"2026/27"`` (past 6 April);
+    on 2025-04-05 the tax year is ``"2024/25"`` (on or before 5 April).
+    """
+    now = datetime.now(tz=UTC)
+    # Tax year starts on 6 April. Dates up to and including 5 April
+    # belong to the tax year that started the previous calendar year.
+    if now.month < 4 or (now.month == 4 and now.day <= 5):
+        start_year = now.year - 1
+    else:
+        start_year = now.year
+    end_year_short = str(start_year + 1)[-2:]
+    return f"{start_year}/{end_year_short}"
+
+
+def _load_cash_balance(conn: psycopg.Connection[Any]) -> Decimal | None:
+    """Load total cash balance from ``cash_ledger``.
+
+    Aggregate always returns one row; the column is NULL when the table
+    is empty (prevention: dead-code None-guard on aggregate fetchone).
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("SELECT SUM(amount) AS balance FROM cash_ledger")
+        row = cur.fetchone()
+
+    # prevention: aggregate fetchone always returns a row; None-check is
+    # on the column value, not the row itself.
+    if row is None or row["balance"] is None:
+        return None
+    return Decimal(str(row["balance"]))
+
+
+def _load_deployed_capital(conn: psycopg.Connection[Any]) -> Decimal:
+    """Load total deployed capital from open positions.
+
+    CRITICAL: ``WHERE current_units > 0`` — prevention log says
+    zero-unit positions inflate AUM via cost_basis fallback.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(cost_basis), 0) AS deployed
+            FROM positions
+            WHERE current_units > 0
+            """
+        )
+        row = cur.fetchone()
+
+    # Aggregate with COALESCE always returns a non-None value.
+    if row is None:
+        return _ZERO  # defensive; should never happen
+    return Decimal(str(row["deployed"]))
+
+
+def _load_mirror_equity(conn: psycopg.Connection[Any]) -> Decimal:
+    """Load total equity held in active copy mirrors.
+
+    Mirror equity = active mirrors' available_amount + their positions'
+    current_value.  Returns ``Decimal("0")`` if no mirrors exist.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT COALESCE(
+                (SELECT SUM(cm.available_amount)
+                 FROM copy_mirrors cm
+                 WHERE cm.status = 'active')
+                +
+                (SELECT COALESCE(SUM(cmp.current_value), 0)
+                 FROM copy_mirror_positions cmp
+                 JOIN copy_mirrors cm2 ON cm2.mirror_id = cmp.mirror_id
+                 WHERE cm2.status = 'active'),
+                0
+            ) AS mirror_equity
+            """
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return _ZERO  # defensive; should never happen
+    return Decimal(str(row["mirror_equity"]))
+
+
+def _load_tax_estimates(
+    conn: psycopg.Connection[Any],
+    tax_year: str,
+) -> tuple[Decimal, Decimal]:
+    """Return ``(basic_estimate_gbp, higher_estimate_gbp)`` for ``tax_year``.
+
+    Reads ``disposal_matches`` and applies current-year CGT rates
+    (basic=18%, higher=24%) after the annual exempt amount.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN gain_or_loss_gbp > 0
+                                  THEN gain_or_loss_gbp ELSE 0 END), 0) AS total_gains,
+                COALESCE(SUM(gain_or_loss_gbp), 0) AS net_gain
+            FROM disposal_matches
+            WHERE tax_year = %(ty)s
+            """,
+            {"ty": tax_year},
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return (_ZERO, _ZERO)  # defensive
+
+    total_gains = Decimal(str(row["total_gains"]))
+    net_gain = Decimal(str(row["net_gain"]))
+
+    taxable_net = max(net_gain - ANNUAL_EXEMPT, _ZERO)
+    if total_gains <= _ZERO or taxable_net <= _ZERO:
+        return (_ZERO, _ZERO)
+
+    basic_rate = Decimal("0.18")
+    higher_rate = Decimal("0.24")
+
+    # scale = proportion of total gains that is taxable after exempt amount
+    # units: taxable_net (GBP) / total_gains (GBP) = dimensionless ratio
+    scale = taxable_net / total_gains
+    _TWO_DP = Decimal("0.01")
+    basic_est = (total_gains * basic_rate * scale).quantize(_TWO_DP)
+    higher_est = (total_gains * higher_rate * scale).quantize(_TWO_DP)
+    return (basic_est, higher_est)
+
+
+def _load_gbp_usd_rate(conn: psycopg.Connection[Any]) -> Decimal | None:
+    """Load the GBP -> USD exchange rate from ``live_fx_rates``.
+
+    Returns None if no rate is found.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT rate
+            FROM live_fx_rates
+            WHERE from_currency = 'GBP' AND to_currency = 'USD'
+            """
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return None
+    return Decimal(str(row["rate"]))
+
+
+def compute_budget_state(conn: psycopg.Connection[Any]) -> BudgetState:
+    """Compute a full budget state snapshot from current DB state.
+
+    Reads from budget_config, cash_ledger, positions, copy_mirrors,
+    copy_mirror_positions, disposal_matches, and live_fx_rates.
+    """
+    config = get_budget_config(conn)
+    tax_year = _current_uk_tax_year()
+
+    cash_balance = _load_cash_balance(conn)
+    deployed_capital = _load_deployed_capital(conn)
+    mirror_equity = _load_mirror_equity(conn)
+
+    # working_budget = cash + deployed + mirrors (None if cash is unknown)
+    if cash_balance is not None:
+        working_budget = cash_balance + deployed_capital + mirror_equity
+    else:
+        working_budget = None
+
+    # Tax estimates
+    basic_est, higher_est = _load_tax_estimates(conn, tax_year)
+    if config.cgt_scenario == "basic":
+        estimated_tax_gbp = basic_est
+    else:
+        estimated_tax_gbp = higher_est
+
+    # FX conversion
+    gbp_usd_rate = _load_gbp_usd_rate(conn)
+    if gbp_usd_rate is not None:
+        estimated_tax_usd = estimated_tax_gbp * gbp_usd_rate
+    else:
+        if estimated_tax_gbp > _ZERO:
+            logger.warning(
+                "No GBP->USD rate available; using 0 for tax_usd (tax_gbp=%s)",
+                estimated_tax_gbp,
+            )
+        estimated_tax_usd = _ZERO
+
+    # Cash buffer reserve
+    if working_budget is not None:
+        cash_buffer_reserve = working_budget * config.cash_buffer_pct
+    else:
+        cash_buffer_reserve = _ZERO
+
+    # Available for deployment
+    if cash_balance is not None:
+        available_for_deployment = cash_balance - estimated_tax_usd - cash_buffer_reserve
+    else:
+        available_for_deployment = None
+
+    return BudgetState(
+        cash_balance=cash_balance,
+        deployed_capital=deployed_capital,
+        mirror_equity=mirror_equity,
+        working_budget=working_budget,
+        estimated_tax_gbp=estimated_tax_gbp,
+        estimated_tax_usd=estimated_tax_usd,
+        gbp_usd_rate=gbp_usd_rate,
+        cash_buffer_reserve=cash_buffer_reserve,
+        available_for_deployment=available_for_deployment,
+        cash_buffer_pct=config.cash_buffer_pct,
+        cgt_scenario=config.cgt_scenario,
+        tax_year=tax_year,
+    )
