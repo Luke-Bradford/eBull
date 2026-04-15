@@ -954,9 +954,11 @@ def compute_score(
     if v_notes:
         explanation_parts.append("value: " + "; ".join(v_notes))
 
-    # Build TA indicators dict for momentum score
+    # Build TA indicators dict for momentum score.
+    # Only v1.1+ models use TA-enhanced momentum; v1 models preserve
+    # the original return-only formula for score history compatibility.
     ta_indicators: dict[str, float | None] | None = None
-    if price_row is not None:
+    if price_row is not None and model_version.startswith("v1.1"):
         ta_keys = [
             "sma_200",
             "macd_histogram",
