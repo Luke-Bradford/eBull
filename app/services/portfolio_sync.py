@@ -474,6 +474,48 @@ def _sync_mirrors(
     return mirrors_upserted, mirror_positions_upserted, mirrors_closed
 
 
+def _validate_mirror_equity(conn: psycopg.Connection[Any]) -> None:
+    """Log a warning if any mirror's equity looks inconsistent.
+
+    For each active mirror, compare:
+      funded = initial_investment + deposit_summary - withdrawal_summary
+      equity = available_amount + sum(position amounts)
+
+    If equity > 2× funded for any mirror, something is likely wrong
+    (double-counting, stale data, or missing quote coverage).
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("""
+            SELECT m.mirror_id, m.available_amount,
+                   m.initial_investment + m.deposit_summary
+                     - m.withdrawal_summary AS funded,
+                   COALESCE(p.total_amount, 0) AS positions_total
+            FROM copy_mirrors m
+            LEFT JOIN (
+                SELECT mirror_id, SUM(amount) AS total_amount
+                FROM copy_mirror_positions
+                GROUP BY mirror_id
+            ) p USING (mirror_id)
+            WHERE m.active
+        """)
+        rows = cur.fetchall()
+
+    for r in rows:
+        equity = float(r["available_amount"]) + float(r["positions_total"])
+        funded = float(r["funded"])
+        if funded > 0 and equity > 2 * funded:
+            logger.warning(
+                "Mirror %s equity (%.2f) > 2× funded (%.2f) — "
+                "possible double-count in available_amount; "
+                "equity=available(%.2f)+positions(%.2f)",
+                r["mirror_id"],
+                equity,
+                funded,
+                float(r["available_amount"]),
+                float(r["positions_total"]),
+            )
+
+
 def sync_portfolio(
     conn: psycopg.Connection[Any],
     portfolio: BrokerPortfolio,
@@ -694,6 +736,8 @@ def sync_portfolio(
 
     # 4. Reconcile copy-trading mirrors (spec §2.3).
     mirrors_upserted, mirror_positions_upserted, mirrors_closed = _sync_mirrors(conn, portfolio.mirrors, now)
+
+    _validate_mirror_equity(conn)
 
     return PortfolioSyncResult(
         positions_updated=updated,
