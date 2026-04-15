@@ -410,9 +410,14 @@ class TestExecuteOrderDemoMode:
         bp_calls = [c for c in conn.execute.call_args_list if "broker_positions" in str(c)]
         assert len(bp_calls) == 1, f"Expected 1 broker_positions INSERT, got {len(bp_calls)}"
 
-        # Verify key params: position_id = order_id, source = 'ebull'
-        sql_str = str(bp_calls[0])
-        assert "'ebull'" in sql_str
+        # Verify params passed through execute_order (not just SQL shape)
+        params = bp_calls[0].args[1]
+        assert params["pid"] == 7  # position_id = order_id
+        assert params["iid"] == 1  # instrument_id from rec
+        assert params["sl"] == Decimal("90")
+        assert params["tp"] == Decimal("120")
+        assert params["no_sl"] is False
+        assert params["no_tp"] is False
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_demo_exit_does_not_write_broker_positions(self, _mock_now: MagicMock) -> None:
@@ -834,6 +839,8 @@ class TestPersistBrokerPosition:
         assert "INSERT INTO broker_positions" in normalised
         assert "'ebull'" in normalised
         assert "ON CONFLICT (position_id) DO UPDATE" in normalised
+        # ON CONFLICT must update raw_payload to prevent silent payload loss
+        assert "raw_payload = EXCLUDED.raw_payload" in normalised
 
         params = conn.execute.call_args_list[0].args[1]
         assert params["pid"] == 7

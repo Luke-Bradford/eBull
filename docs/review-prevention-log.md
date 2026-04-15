@@ -698,3 +698,21 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `"1e308"` → `Number("1e308")` → `Infinity`; `Infinity` is not `NaN`, so `Number.isNaN(Infinity)` returns `false`, passing the guard and sending `amount: Infinity` to the backend.
 - Prevention: Use `Number.isFinite(v)` instead of `!Number.isNaN(v)` for numeric input validation before API submission. `isFinite` rejects both `NaN` and `±Infinity`.
 - Enforced in: `frontend/src/components/settings/BudgetConfigSection.tsx` (event amount guard)
+
+---
+
+### ON CONFLICT DO UPDATE on raw_payload tables must include raw_payload in SET clause
+
+- First seen in: #237
+- Symptom: `INSERT INTO broker_positions ... ON CONFLICT (position_id) DO UPDATE SET units, amount, updated_at` omitted `raw_payload` from the update list. If a broker sync race won the INSERT first, the subsequent eBull upsert preserved the sync's payload and silently dropped the eBull raw payload. Same pattern existed in `app/api/orders.py`.
+- Prevention: Before pushing any `ON CONFLICT DO UPDATE` on a table with a `raw_payload` column, verify the SET clause includes `raw_payload = EXCLUDED.raw_payload`. Grep `ON CONFLICT.*DO UPDATE` in files that touch `broker_positions`, `copy_mirror_positions`, or any table with `raw_payload`, and confirm each includes the column. If payload should NOT be overwritten, document why in a SQL comment.
+- Enforced in: `app/services/order_client.py`, `app/api/orders.py`
+
+---
+
+### ON CONFLICT DO UPDATE must cover all financial columns, not just units/amount
+
+- First seen in: #237
+- Symptom: `ON CONFLICT DO UPDATE SET units, amount, updated_at` omitted `total_fees`, `open_rate`, and `open_conversion_rate`. On a race, the losing writer's fee and rate values were silently discarded.
+- Prevention: Before pushing any `ON CONFLICT DO UPDATE` on a financial table (`broker_positions`, `copy_mirror_positions`), verify the SET clause covers all columns where the eBull-originated values should be authoritative — especially fees and rates. If a column should intentionally NOT be updated on conflict, add a SQL comment explaining why.
+- Enforced in: `app/services/order_client.py`, `app/api/orders.py`
