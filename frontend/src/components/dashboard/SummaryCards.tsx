@@ -19,9 +19,11 @@ import { SectionSkeleton } from "@/components/dashboard/Section";
 export function SummaryCards({
   data,
   budgetData,
+  budgetError,
 }: {
   data: PortfolioResponse | null;
   budgetData: BudgetStateResponse | null;
+  budgetError?: boolean;
 }) {
   const currency = useDisplayCurrency();
   if (data === null) {
@@ -64,19 +66,25 @@ export function SummaryCards({
         hint={pnlFraction === null ? undefined : formatPct(pnlFraction)}
         tone={totalPnl >= 0 ? "positive" : "negative"}
       />
-      <DeploymentCard budget={budgetData} currency={currency} />
+      <DeploymentCard budget={budgetData} budgetError={budgetError} currency={currency} />
     </div>
   );
 }
 
 function DeploymentCard({
   budget,
+  budgetError,
   currency,
 }: {
   budget: BudgetStateResponse | null;
+  budgetError?: boolean;
   currency: string;
 }) {
   if (budget === null) {
+    // Distinguish "still loading" (skeleton) from "failed" (dash + hint).
+    if (budgetError) {
+      return <Card label="Available for deployment" value="—" hint="Budget unavailable" />;
+    }
     return (
       <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
         <SectionSkeleton rows={2} />

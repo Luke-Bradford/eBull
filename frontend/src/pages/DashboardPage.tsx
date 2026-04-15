@@ -75,6 +75,7 @@ export function DashboardPage() {
               <SummaryCards
                 data={portfolio.loading ? null : portfolio.data}
                 budgetData={budget.loading || budget.error !== null ? null : budget.data}
+                budgetError={budget.error !== null}
               />
               <Section title="Positions">
                 {portfolio.loading ? (

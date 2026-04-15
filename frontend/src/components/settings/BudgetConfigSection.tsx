@@ -154,7 +154,7 @@ export function BudgetConfigSection() {
                     step={1}
                     value={displayedBufferPct}
                     onChange={(e) => {
-                      const val = Number(e.target.value);
+                      const val = Math.min(50, Math.max(0, Number(e.target.value)));
                       setCashBufferPct(val === serverBufferPct ? null : val);
                     }}
                     disabled={configSaving}
