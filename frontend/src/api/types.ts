@@ -571,3 +571,41 @@ export interface MirrorDetailResponse {
   mirror: MirrorSummary;
   display_currency: string;
 }
+
+// ---------------------------------------------------------------------------
+// Budget (mirrors app/api/budget.py)
+// ---------------------------------------------------------------------------
+
+export interface BudgetStateResponse {
+  cash_balance: number | null;
+  deployed_capital: number;
+  mirror_equity: number;
+  working_budget: number | null;
+  estimated_tax_gbp: number;
+  estimated_tax_usd: number;
+  gbp_usd_rate: number | null;
+  cash_buffer_reserve: number;
+  available_for_deployment: number | null;
+  cash_buffer_pct: number;
+  cgt_scenario: string;
+  tax_year: string;
+}
+
+export interface CapitalEventResponse {
+  event_id: number;
+  event_time: string;
+  event_type: string;
+  amount: number;
+  currency: string;
+  source: string;
+  note: string | null;
+  created_by: string | null;
+}
+
+export interface BudgetConfigResponse {
+  cash_buffer_pct: number;
+  cgt_scenario: string;
+  updated_at: string;
+  updated_by: string;
+  reason: string;
+}
