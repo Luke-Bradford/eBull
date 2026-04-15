@@ -170,18 +170,4 @@ def check_position_health(conn: psycopg.Connection[Any]) -> MonitorResult:
                 )
             )
 
-        if alerts:
-            logger.info(
-                "position_monitor: %d alert(s) for instrument_id=%d symbol=%s",
-                sum(1 for a in alerts if a.instrument_id == instrument_id),
-                instrument_id,
-                symbol,
-            )
-
-    logger.info(
-        "position_monitor: checked=%d alerts=%d",
-        len(rows),
-        len(alerts),
-    )
-
     return MonitorResult(positions_checked=len(rows), alerts=alerts)

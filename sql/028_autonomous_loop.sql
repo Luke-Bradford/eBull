@@ -20,6 +20,9 @@ ALTER TABLE trade_recommendations
 -- Add timing_expired to the status vocabulary.
 -- No existing CHECK constraint on status (001_init.sql uses bare TEXT),
 -- so we add one now for the expanded set used by the autonomous loop.
+-- Use NOT VALID to avoid a full-table scan on ADD, then VALIDATE in a
+-- separate statement so existing out-of-vocabulary rows (if any) surface
+-- as a clear error rather than rolling back the entire migration.
 -- Wrapped in DO $$ for idempotency.
 DO $$
 BEGIN
@@ -31,5 +34,11 @@ BEGIN
             'proposed', 'approved', 'rejected', 'executed',
             'execution_failed', 'timing_deferred', 'timing_expired',
             'cancelled'
-        ));
+        ))
+        NOT VALID;
 END $$;
+
+-- Validate separately — this does a sequential scan but will not hold
+-- an ACCESS EXCLUSIVE lock (only SHARE UPDATE EXCLUSIVE), and will fail
+-- cleanly if any legacy rows violate the constraint.
+ALTER TABLE trade_recommendations VALIDATE CONSTRAINT chk_recommendation_status;

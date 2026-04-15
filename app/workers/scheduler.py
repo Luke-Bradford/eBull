@@ -1074,14 +1074,29 @@ def morning_candidate_review() -> None:
     )
 
     # --- Pipeline trigger: if recs were generated, run the execution pipeline ---
+    # Gate on kill switch and auto-trading flag before invoking the execution
+    # path — the guard inside execute_approved_orders is a second line of
+    # defence, not a substitute for checking at the call site.
     actionable_count = sum(1 for r in rec_result.recommendations if r.action in ("BUY", "ADD", "EXIT"))
     if actionable_count > 0:
-        logger.info(
-            "morning_candidate_review: %d actionable recs → triggering execute_approved_orders",
-            actionable_count,
-        )
         try:
-            execute_approved_orders()
+            from app.services.ops_monitor import get_kill_switch_status
+            from app.services.runtime_config import get_runtime_config
+
+            with psycopg.connect(settings.database_url) as conn:
+                ks = get_kill_switch_status(conn)
+                config = get_runtime_config(conn)
+
+            if ks.get("is_active"):
+                logger.warning("morning_candidate_review: kill switch active, skipping pipeline trigger")
+            elif not config.enable_auto_trading:
+                logger.info("morning_candidate_review: auto_trading disabled, skipping pipeline trigger")
+            else:
+                logger.info(
+                    "morning_candidate_review: %d actionable recs → triggering execute_approved_orders",
+                    actionable_count,
+                )
+                execute_approved_orders()
         except Exception:
             logger.error(
                 "morning_candidate_review: pipeline trigger to execute_approved_orders failed",
@@ -1499,28 +1514,24 @@ def retry_deferred_recommendations_job() -> None:
     from app.services.runtime_config import get_runtime_config
 
     with _tracked_job(JOB_RETRY_DEFERRED) as tracker:
-        # Safety gate: kill switch + auto-trading check
+        # Single connection for config check + service call so the kill
+        # switch state cannot change between the gate and the work.
         try:
             with psycopg.connect(settings.database_url) as conn:
+                # Safety gate: kill switch + auto-trading check
                 ks = get_kill_switch_status(conn)
                 config = get_runtime_config(conn)
-        except Exception:
-            logger.error("retry_deferred: failed to load runtime config", exc_info=True)
-            tracker.row_count = 0
-            return
 
-        if ks.get("is_active"):
-            logger.warning("retry_deferred: kill switch active, skipping")
-            tracker.row_count = 0
-            return
+                if ks.get("is_active"):
+                    logger.warning("retry_deferred: kill switch active, skipping")
+                    tracker.row_count = 0
+                    return
 
-        if not config.enable_auto_trading:
-            logger.info("retry_deferred: auto_trading disabled, skipping")
-            tracker.row_count = 0
-            return
+                if not config.enable_auto_trading:
+                    logger.info("retry_deferred: auto_trading disabled, skipping")
+                    tracker.row_count = 0
+                    return
 
-        try:
-            with psycopg.connect(settings.database_url) as conn:
                 result = retry_deferred_recommendations(conn)
         except Exception:
             logger.error("retry_deferred: service call failed", exc_info=True)

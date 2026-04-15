@@ -183,18 +183,36 @@ def _write_retry_defer(
     )
 
 
-def _increment_retry_count_only(
+def _write_retry_error(
     conn: psycopg.Connection[Any],
     rec: dict[str, Any],
 ) -> None:
-    """Increment retry_count without changing status (error path).
+    """Increment retry_count and write audit row on the error path.
 
-    No audit row: the caller logs the exception.  The rec stays in
-    timing_deferred so the next cycle can retry it again.
+    The rec stays in timing_deferred so the next cycle can retry it.
+    The audit row captures that a retry attempt was consumed by an error,
+    so the trail is complete when the rec is eventually expired.
     """
     rec_id: int = rec["recommendation_id"]
+    instrument_id: int = rec["instrument_id"]
     new_retry_count: int = rec["timing_retry_count"] + 1
 
+    conn.execute(
+        """
+        INSERT INTO decision_audit
+            (decision_time, instrument_id, recommendation_id,
+             stage, pass_fail, explanation)
+        VALUES
+            (NOW(), %(iid)s, %(rid)s,
+             'deferred_retry', 'FAIL',
+             %(expl)s)
+        """,
+        {
+            "iid": instrument_id,
+            "rid": rec_id,
+            "expl": f"evaluation raised an exception (retry_count={new_retry_count})",
+        },
+    )
     conn.execute(
         """
         UPDATE trade_recommendations
@@ -328,7 +346,7 @@ def retry_deferred_recommendations(conn: psycopg.Connection[Any]) -> RetryResult
                     rec_id,
                 )
                 with conn.transaction():
-                    _increment_retry_count_only(conn, rec)
+                    _write_retry_error(conn, rec)
                 conn.commit()
                 errors += 1
 
@@ -338,16 +356,19 @@ def retry_deferred_recommendations(conn: psycopg.Connection[Any]) -> RetryResult
                 rec_id,
                 exc_info=True,
             )
-            # Best-effort: increment retry count so the rec is not stuck
-            # at retry_count=0 forever.  If this also fails, we leave it
-            # unchanged (the next cycle will retry).
+            # The exception may have left the connection in an error state
+            # (InFailedSqlTransaction). Roll back so subsequent operations
+            # on the same connection can proceed.
+            conn.rollback()
+            # Best-effort: increment retry count + write audit row so the
+            # error attempt is visible in the audit trail.
             try:
                 with conn.transaction():
-                    _increment_retry_count_only(conn, rec)
+                    _write_retry_error(conn, rec)
                 conn.commit()
             except Exception:
                 logger.error(
-                    "deferred_retry: could not increment retry_count for rec=%d",
+                    "deferred_retry: could not write error audit for rec=%d",
                     rec_id,
                     exc_info=True,
                 )
