@@ -75,3 +75,53 @@ class TestTriggerForMonthly:
         trigger = _trigger_for(c)
         # CronTrigger fields — verify the trigger was created without error
         assert trigger is not None
+
+
+# ---------------------------------------------------------------------------
+# Weekly report generator tests
+# ---------------------------------------------------------------------------
+
+from datetime import date  # noqa: E402
+from decimal import Decimal  # noqa: E402
+from unittest.mock import MagicMock, patch  # noqa: E402
+
+from app.services.reporting import generate_weekly_report  # noqa: E402
+
+_REPORTING = "app.services.reporting"
+
+
+class TestGenerateWeeklyReport:
+    def test_returns_weekly_report_structure(self) -> None:
+        """Weekly report should contain all expected sections."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = []
+        cursor.fetchone.return_value = {"realized": Decimal("0"), "unrealized": Decimal("0")}
+
+        with patch(f"{_REPORTING}.compute_budget_state") as mock_budget:
+            mock_budget.return_value = MagicMock(
+                cash_balance=Decimal("10000"),
+                deployed_capital=Decimal("5000"),
+                estimated_tax_usd=Decimal("200"),
+                available_for_deployment=Decimal("4800"),
+            )
+            report = generate_weekly_report(
+                conn,
+                period_start=date(2026, 4, 6),
+                period_end=date(2026, 4, 12),
+            )
+
+        assert report["report_type"] == "weekly"
+        assert report["period_start"] == "2026-04-06"
+        assert report["period_end"] == "2026-04-12"
+        assert "pnl" in report
+        assert report["pnl"]["note"] == "current-state snapshot, not period delta"
+        assert "top_performers" in report
+        assert "bottom_performers" in report
+        assert "positions_opened" in report
+        assert "positions_closed" in report
+        assert "upcoming_earnings" in report
+        assert "score_changes" in report
+        assert "budget" in report
