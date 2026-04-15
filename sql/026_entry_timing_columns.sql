@@ -22,3 +22,14 @@ ALTER TABLE trade_recommendations
     ADD COLUMN IF NOT EXISTS take_profit_rate  NUMERIC(18,6),
     ADD COLUMN IF NOT EXISTS timing_verdict    TEXT,
     ADD COLUMN IF NOT EXISTS timing_rationale  TEXT;
+
+-- Constrain timing_verdict to known values.  NULL is allowed for
+-- pre-migration rows.
+DO $$
+BEGIN
+    ALTER TABLE trade_recommendations
+        ADD CONSTRAINT chk_timing_verdict
+        CHECK (timing_verdict IN ('pass', 'defer', 'skip'));
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END $$;

@@ -318,18 +318,20 @@ def evaluate_entry_conditions(
     sma_200_f = float(sma_200_raw) if sma_200_raw is not None else None
     atr_dec = Decimal(str(atr_raw)) if atr_raw is not None else None
 
-    # Evaluate each condition
+    # Evaluate each condition independently.  RSI and MACD handle NULL
+    # inputs as neutral.  Bollinger and trend need a close price, so they
+    # are neutral when close is NULL.  This preserves the distinction
+    # between "no price row" (ta is None, caught above) and "price row
+    # with NULL indicators" in the condition log.
     conditions: list[tuple[str, bool]] = []
-
+    conditions.append(_eval_rsi(rsi_f))
+    conditions.append(_eval_macd(macd_f))
     if close_f is not None:
-        conditions.append(_eval_rsi(rsi_f))
-        conditions.append(_eval_macd(macd_f))
         conditions.append(_eval_bollinger(close_f, bb_upper_f, bb_lower_f))
         conditions.append(_eval_trend(close_f, sma_200_f))
     else:
-        # No close price at all — can't evaluate anything. Pass through
-        # (don't block on missing data).
-        conditions.append(("no close price available (neutral)", True))
+        conditions.append(("bollinger: close NULL (neutral)", True))
+        conditions.append(("trend: close NULL (neutral)", True))
 
     # Count unfavorable conditions
     unfavorable = [desc for desc, ok in conditions if not ok]

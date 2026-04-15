@@ -535,15 +535,22 @@ def execute_order(
             requested_amount = cash * Decimal(str(rec["suggested_size_pct"]))
 
     # --- Step 2b: build OrderParams from recommendation SL/TP ---
-    # SL/TP are set by the entry timing service (Phase 2) for BUY/ADD recs.
+    # SL/TP are set by the entry timing service (Phase 0) for BUY/ADD recs.
     # For EXIT recs, both are NULL — no SL/TP on a close-position order.
+    # Explicit key access: crash loudly if columns are missing from the query
+    # (would indicate a code bug, not a data issue).
     order_params: OrderParams | None = None
-    sl_raw = rec.get("stop_loss_rate")
-    tp_raw = rec.get("take_profit_rate")
+    sl_raw = rec["stop_loss_rate"]
+    tp_raw = rec["take_profit_rate"]
     if sl_raw is not None or tp_raw is not None:
         order_params = OrderParams(
             stop_loss_rate=Decimal(str(sl_raw)) if sl_raw is not None else None,
             take_profit_rate=Decimal(str(tp_raw)) if tp_raw is not None else None,
+        )
+    if action in ("BUY", "ADD") and order_params is None:
+        logger.warning(
+            "execute_order: BUY/ADD rec=%d has no SL/TP — timing may not have run",
+            recommendation_id,
         )
 
     # --- Step 3: call broker or demo mode ---
