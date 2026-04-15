@@ -8,13 +8,10 @@ import {
 } from "@/api/budget";
 import type { CapitalEventResponse } from "@/api/types";
 import { SectionSkeleton, SectionError } from "@/components/dashboard/Section";
-import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatDateTime, formatMoney } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
 
 export function BudgetConfigSection() {
-  const displayCurrency = useDisplayCurrency();
-
   // ---- Config state ----
   const config = useAsync(fetchBudgetConfig, []);
   const [cashBufferPct, setCashBufferPct] = useState<number | null>(null);
@@ -57,11 +54,13 @@ export function BudgetConfigSection() {
         updated_by: "operator",
         reason: configReason,
       });
-      config.refetch();
       setCashBufferPct(null);
       setCgtScenario(null);
       setConfigReason("");
       setConfigSuccess(true);
+      // Refetch after local state resets so the re-render from refetch
+      // completion sees null overrides → uses new server values cleanly.
+      config.refetch();
     } catch (err: unknown) {
       console.error("Failed to update budget config", err);
       setConfigError(true);
@@ -87,7 +86,7 @@ export function BudgetConfigSection() {
   async function handleEventSubmit(e: FormEvent) {
     e.preventDefault();
     const parsed = Number(eventAmount);
-    if (Number.isNaN(parsed) || parsed <= 0) return;
+    if (!Number.isFinite(parsed) || parsed <= 0) return;
     setEventSaving(true);
     setEventError(false);
     setEventSuccess(false);
@@ -114,8 +113,9 @@ export function BudgetConfigSection() {
 
   const configReasonMissing = configReason.trim().length === 0;
   const configNothingChanged = cashBufferPct === null && cgtScenario === null;
+  const parsedEventAmount = Number(eventAmount);
   const eventAmountInvalid =
-    eventAmount === "" || Number.isNaN(Number(eventAmount)) || Number(eventAmount) <= 0;
+    eventAmount === "" || !Number.isFinite(parsedEventAmount) || parsedEventAmount <= 0;
 
   return (
     <section className="rounded-md border border-slate-200 bg-white shadow-sm">
@@ -153,7 +153,10 @@ export function BudgetConfigSection() {
                     max={50}
                     step={1}
                     value={displayedBufferPct}
-                    onChange={(e) => setCashBufferPct(Number(e.target.value))}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      setCashBufferPct(val === serverBufferPct ? null : val);
+                    }}
                     disabled={configSaving}
                     className="mt-1 block w-24 rounded border border-slate-300 px-2 py-1.5 text-sm"
                   />
@@ -163,9 +166,14 @@ export function BudgetConfigSection() {
                   <span className="text-xs text-slate-500">CGT scenario</span>
                   <select
                     value={displayedCgtScenario}
-                    onChange={(e) =>
-                      setCgtScenario(e.target.value as "basic" | "higher")
-                    }
+                    onChange={(e) => {
+                      const val = e.target.value as "basic" | "higher";
+                      const serverScenario =
+                        config.data?.cgt_scenario === "higher"
+                          ? "higher"
+                          : "basic";
+                      setCgtScenario(val === serverScenario ? null : val);
+                    }}
                     disabled={configSaving}
                     className="mt-1 block rounded border border-slate-300 px-2 py-1.5 text-sm"
                   >
@@ -342,7 +350,7 @@ export function BudgetConfigSection() {
                         </td>
                         <td className="py-1.5">{ev.event_type}</td>
                         <td className="py-1.5">
-                          {formatMoney(ev.amount, ev.currency || displayCurrency)}
+                          {formatMoney(ev.amount, ev.currency)}
                         </td>
                         <td className="py-1.5">{ev.currency}</td>
                         <td className="py-1.5 text-slate-500">

@@ -587,24 +587,24 @@ export interface BudgetStateResponse {
   cash_buffer_reserve: number;
   available_for_deployment: number | null;
   cash_buffer_pct: number;
-  cgt_scenario: string;
+  cgt_scenario: "basic" | "higher";
   tax_year: string;
 }
 
 export interface CapitalEventResponse {
   event_id: number;
   event_time: string;
-  event_type: string;
+  event_type: "injection" | "withdrawal" | "tax_provision" | "tax_release";
   amount: number;
-  currency: string;
-  source: string;
+  currency: "USD" | "GBP";
+  source: "operator" | "system" | "broker_sync";
   note: string | null;
   created_by: string | null;
 }
 
 export interface BudgetConfigResponse {
   cash_buffer_pct: number;
-  cgt_scenario: string;
+  cgt_scenario: "basic" | "higher";
   updated_at: string;
   updated_by: string;
   reason: string;
