@@ -25,7 +25,7 @@ Rule application by action:
     - no_thesis             — no thesis row exists
     - spread_wide           — quotes.spread_flag is TRUE
     - spread_unavailable    — no quotes row or spread_flag is NULL
-    - cash_unknown          — cash_ledger is empty (cannot verify affordability)
+    - budget_available      — budget exhausted or unknown (accounts for tax + buffer)
     - concentration_breach  — post-action sector exposure would exceed 25% AUM
 
   EXIT:
@@ -48,6 +48,7 @@ import psycopg
 import psycopg.rows
 from psycopg.types.json import Jsonb
 
+from app.services.budget import BudgetConfigCorrupt, BudgetState, compute_budget_state
 from app.services.portfolio import _load_mirror_equity
 from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
 
@@ -88,7 +89,7 @@ RuleName = Literal[
     "no_thesis",
     "spread_wide",
     "spread_unavailable",
-    "cash_unknown",
+    "budget_available",
     "instrument_missing",
     "sector_missing",
     "concentration_breach",
@@ -410,20 +411,34 @@ def _check_spread(quote: dict[str, Any] | None) -> RuleResult:
     return RuleResult(rule="spread_wide", passed=True)
 
 
-def _check_cash(cash: float | None) -> RuleResult:
-    if cash is None:
+def _check_budget(budget: BudgetState) -> RuleResult:
+    """Check budget availability for BUY/ADD orders.
+
+    Replaces the raw cash > 0 check with budget-aware logic that accounts
+    for tax provisions and cash buffer reserve.
+    """
+    if budget.available_for_deployment is None:
         return RuleResult(
-            rule="cash_unknown",
+            rule="budget_available",
             passed=False,
-            detail="cash_ledger is empty; cannot verify affordability",
+            detail="cash_ledger is empty; cannot verify budget availability",
         )
-    if cash <= 0:
+    if budget.available_for_deployment <= 0:
         return RuleResult(
-            rule="cash_unknown",
+            rule="budget_available",
             passed=False,
-            detail=f"cash_balance={cash}; no buying power",
+            detail=(
+                f"budget exhausted: available_for_deployment="
+                f"{budget.available_for_deployment:.2f} "
+                f"(cash={budget.cash_balance}, tax_reserved={budget.estimated_tax_usd:.2f}, "
+                f"buffer={budget.cash_buffer_reserve:.2f})"
+            ),
         )
-    return RuleResult(rule="cash_unknown", passed=True)
+    return RuleResult(
+        rule="budget_available",
+        passed=True,
+        detail=f"budget ok: available_for_deployment={budget.available_for_deployment:.2f}",
+    )
 
 
 def _check_concentration(
@@ -558,7 +573,7 @@ def evaluate_recommendation(
     Steps:
       1. Load the recommendation row.
       2. Load all required state from DB (kill switch, coverage, thesis,
-         quote, cash, sector exposure).
+         quote, budget state, sector exposure).
       3. Evaluate rules in order; collect results.
       4. Write audit row + update recommendation status atomically.
       5. Return GuardResult.
@@ -588,7 +603,7 @@ def evaluate_recommendation(
     coverage: dict[str, Any] | None = None
     thesis: dict[str, Any] | None = None
     quote: dict[str, Any] | None = None
-    cash: float | None = None
+    budget: BudgetState | None = None
     instrument_found: bool = True
     sector: str | None = None
     current_sector_pct: float = 0.0
@@ -598,7 +613,13 @@ def evaluate_recommendation(
         coverage = _load_coverage(conn, instrument_id)
         thesis = _load_latest_thesis(conn, instrument_id)
         quote = _load_quote(conn, instrument_id)
-        cash = _load_cash(conn)
+        # Budget-aware cash check: replaces raw _load_cash(conn).
+        # compute_budget_state reads budget_config, cash_ledger, positions,
+        # copy_mirrors, disposal_matches, and live_fx_rates.
+        try:
+            budget = compute_budget_state(conn)
+        except BudgetConfigCorrupt:
+            budget = None
         instrument_found, sector, current_sector_pct, total_aum = _load_sector_exposure(conn, instrument_id)
 
     # --- Step 3: evaluate rules ---
@@ -633,7 +654,16 @@ def evaluate_recommendation(
         if coverage is not None:
             rule_results.append(_check_thesis_freshness(thesis, coverage, now))
         rule_results.append(_check_spread(quote))
-        rule_results.append(_check_cash(cash))
+        if budget is None:
+            rule_results.append(
+                RuleResult(
+                    rule="budget_available",
+                    passed=False,
+                    detail="budget_config singleton row missing — cannot verify budget",
+                )
+            )
+        else:
+            rule_results.append(_check_budget(budget))
         rule_results.append(_check_concentration(instrument_found, sector, current_sector_pct, total_aum))
 
     # --- Step 4: derive verdict ---

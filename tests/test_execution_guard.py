@@ -7,7 +7,7 @@ Structure:
   - TestCheckCoverage          — _check_coverage
   - TestCheckThesisFreshness   — _check_thesis_freshness
   - TestCheckSpread            — _check_spread
-  - TestCheckCash              — _check_cash
+  - TestCheckBudget            — _check_budget
   - TestCheckConcentration     — _check_concentration
   - TestBuildExplanation       — _build_explanation
   - TestEvaluateRecommendation — end-to-end via evaluate_recommendation with mock DB
@@ -19,40 +19,44 @@ Mock DB approach mirrors test_portfolio.py:
   - conn.execute() is a no-op mock (for UPDATE and INSERT without RETURNING)
   - conn.transaction() is a no-op context manager
 
-Cursor call order inside evaluate_recommendation:
+Cursor call order inside evaluate_recommendation (BUY):
   1. _load_recommendation          — fetchone
   2. _load_kill_switch             — fetchone
   3. get_runtime_config            — fetchone (runtime_config singleton)
   4. _load_coverage                — fetchone
   5. _load_latest_thesis           — fetchone
   6. _load_quote                   — fetchone
-  7. _load_cash                    — fetchone
-  8. _load_sector_exposure         — 4 cursors: instruments, positions,
+  7-12. compute_budget_state       — 6 cursors:
+         budget_config, cash_balance, deployed_capital,
+         mirror_equity, tax_estimates, gbp_usd_rate
+  13. _load_sector_exposure        — 4 cursors: instruments, positions,
                                      cash_ledger, mirror_equity
                                      (the mirror_equity cursor is consumed
                                      by _load_mirror_equity, wired into
                                      total_aum by Track 1b / #187).
-  9. _write_audit                  — 1 cursor (INSERT RETURNING decision_id)
-     + conn.execute (UPDATE status)
+  14. _write_audit                 — 1 cursor (INSERT RETURNING decision_id)
+      + conn.execute (UPDATE status)
 
-Note: for EXIT actions, cursors 4-8 (coverage through sector_exposure) are
+Note: for EXIT actions, cursors 4-14 (coverage through sector_exposure) are
 skipped, so the sequence is shorter.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.services.budget import BudgetState
 from app.services.execution_guard import (
     GuardResult,
     RuleResult,
     _build_explanation,
     _check_auto_trading,
-    _check_cash,
+    _check_budget,
     _check_concentration,
     _check_coverage,
     _check_kill_switch,
@@ -159,8 +163,38 @@ def _quote_cursor(spread_flag: bool | None = False) -> MagicMock:
     return _make_cursor([{"spread_flag": spread_flag}])
 
 
-def _cash_ledger_cursor(balance: float | None = 10_000.0) -> MagicMock:
-    return _make_cursor([{"balance": balance}])
+def _budget_config_cursor() -> MagicMock:
+    return _make_cursor(
+        [
+            {
+                "cash_buffer_pct": Decimal("0.0500"),
+                "cgt_scenario": "higher",
+                "updated_at": _NOW,
+                "updated_by": "system",
+                "reason": "initial seed",
+            }
+        ]
+    )
+
+
+def _budget_cash_cursor(balance: float | None = 10_000.0) -> MagicMock:
+    return _make_cursor([{"balance": Decimal(str(balance)) if balance is not None else None}])
+
+
+def _budget_deployed_cursor(deployed: float = 0.0) -> MagicMock:
+    return _make_cursor([{"deployed": Decimal(str(deployed))}])
+
+
+def _budget_mirror_cursor(equity: float = 0.0) -> MagicMock:
+    return _make_cursor([{"mirror_equity": Decimal(str(equity))}])
+
+
+def _budget_tax_cursor() -> MagicMock:
+    return _make_cursor([{"total_gains": Decimal("0"), "net_gain": Decimal("0")}])
+
+
+def _budget_fx_cursor(rate: float = 1.27) -> MagicMock:
+    return _make_cursor([{"rate": Decimal(str(rate))}])
 
 
 def _sector_cursors(
@@ -197,6 +231,30 @@ def _audit_cursor(decision_id: int = 99) -> MagicMock:
     return _make_cursor([{"decision_id": decision_id}])
 
 
+def _budget_cursors_list(
+    *,
+    cash_balance: float | None = 10_000.0,
+    budget_corrupt: bool = False,
+) -> list[MagicMock]:
+    """Return the cursor sequence consumed by compute_budget_state.
+
+    When budget_corrupt=True, budget_config returns no rows which
+    triggers BudgetConfigCorrupt.  Otherwise 6 cursors are returned:
+    budget_config, cash_balance, deployed_capital, mirror_equity,
+    tax_estimates, gbp_usd_rate.
+    """
+    if budget_corrupt:
+        return [_make_cursor([])]  # empty budget_config -> BudgetConfigCorrupt
+    return [
+        _budget_config_cursor(),
+        _budget_cash_cursor(balance=cash_balance),
+        _budget_deployed_cursor(),
+        _budget_mirror_cursor(),
+        _budget_tax_cursor(),
+        _budget_fx_cursor(),
+    ]
+
+
 def _buy_cursors(
     *,
     ks_active: bool = False,
@@ -208,6 +266,7 @@ def _buy_cursors(
     thesis_age_days: int = 3,
     spread_flag: bool | None = False,
     cash_balance: float | None = 10_000.0,
+    budget_corrupt: bool = False,
     sector: str | None = "Technology",
     sector_mv: float = 0.0,
     total_positions: float = 0.0,
@@ -228,7 +287,7 @@ def _buy_cursors(
         _coverage_cursor(tier=coverage_tier, frequency=coverage_frequency),
         _thesis_cursor(age_days=thesis_age_days),
         _quote_cursor(spread_flag=spread_flag),
-        _cash_ledger_cursor(balance=cash_balance),
+        *_budget_cursors_list(cash_balance=cash_balance, budget_corrupt=budget_corrupt),
         *_sector_cursors(
             sector=sector,
             sector_market_value=sector_mv,
@@ -424,30 +483,50 @@ class TestCheckSpread:
 
 
 # ---------------------------------------------------------------------------
-# TestCheckCash
+# TestCheckBudget
 # ---------------------------------------------------------------------------
 
 
-class TestCheckCash:
-    def test_none_cash_fails(self) -> None:
-        result = _check_cash(None)
-        assert result.passed is False
-        assert result.rule == "cash_unknown"
+class TestCheckBudget:
+    def _budget(
+        self,
+        available: Decimal | None = Decimal("9250"),
+        cash: Decimal | None = Decimal("10000"),
+    ) -> BudgetState:
+        return BudgetState(
+            cash_balance=cash,
+            deployed_capital=Decimal("5000"),
+            mirror_equity=Decimal("0"),
+            working_budget=Decimal("15000") if cash is not None else None,
+            estimated_tax_gbp=Decimal("0"),
+            estimated_tax_usd=Decimal("0"),
+            gbp_usd_rate=Decimal("1.27"),
+            cash_buffer_reserve=Decimal("750"),
+            available_for_deployment=available,
+            cash_buffer_pct=Decimal("0.05"),
+            cgt_scenario="higher",
+            tax_year="2025/26",
+        )
 
-    def test_zero_cash_fails(self) -> None:
-        # Zero means no buying power — block BUY/ADD
-        result = _check_cash(0.0)
-        assert result.passed is False
-        assert result.rule == "cash_unknown"
-
-    def test_negative_cash_fails(self) -> None:
-        result = _check_cash(-1.0)
-        assert result.passed is False
-        assert result.rule == "cash_unknown"
-
-    def test_positive_cash_passes(self) -> None:
-        result = _check_cash(5_000.0)
+    def test_positive_available_passes(self) -> None:
+        result = _check_budget(self._budget(available=Decimal("9250")))
         assert result.passed is True
+        assert result.rule == "budget_available"
+
+    def test_none_available_fails(self) -> None:
+        result = _check_budget(self._budget(available=None, cash=None))
+        assert result.passed is False
+        assert result.rule == "budget_available"
+
+    def test_zero_available_fails(self) -> None:
+        result = _check_budget(self._budget(available=Decimal("0")))
+        assert result.passed is False
+        assert result.rule == "budget_available"
+
+    def test_negative_available_fails(self) -> None:
+        result = _check_budget(self._budget(available=Decimal("-7450")))
+        assert result.passed is False
+        assert "budget exhausted" in result.detail
 
 
 # ---------------------------------------------------------------------------
@@ -502,11 +581,11 @@ class TestBuildExplanation:
     def test_single_failure_named(self) -> None:
         results = [
             RuleResult(rule="kill_switch", passed=True),
-            RuleResult(rule="cash_unknown", passed=False, detail="ledger empty"),
+            RuleResult(rule="budget_available", passed=False, detail="ledger empty"),
         ]
         explanation = _build_explanation(results)
         assert "FAIL" in explanation
-        assert "cash_unknown" in explanation
+        assert "budget_available" in explanation
         assert "ledger empty" in explanation
 
     def test_multiple_failures_all_listed(self) -> None:
@@ -663,21 +742,27 @@ class TestEvaluateRecommendation:
         result = self._eval(_exit_cursors())
         assert result.verdict == "PASS"
 
-    # --- Cash ---
+    # --- Budget ---
 
-    def test_cash_unknown_fails_buy(self) -> None:
+    def test_budget_unavailable_fails_buy(self) -> None:
         cursors = _buy_cursors(cash_balance=None)
         result = self._eval(cursors)
         assert result.verdict == "FAIL"
-        assert "cash_unknown" in result.failed_rules
+        assert "budget_available" in result.failed_rules
 
-    def test_zero_cash_fails_buy(self) -> None:
+    def test_zero_cash_budget_exhausted_fails_buy(self) -> None:
         cursors = _buy_cursors(cash_balance=0.0)
         result = self._eval(cursors)
         assert result.verdict == "FAIL"
-        assert "cash_unknown" in result.failed_rules
+        assert "budget_available" in result.failed_rules
 
-    def test_cash_unknown_does_not_fail_exit(self) -> None:
+    def test_budget_config_corrupt_fails_buy(self) -> None:
+        cursors = _buy_cursors(budget_corrupt=True)
+        result = self._eval(cursors)
+        assert result.verdict == "FAIL"
+        assert "budget_available" in result.failed_rules
+
+    def test_budget_does_not_fail_exit(self) -> None:
         result = self._eval(_exit_cursors())
         assert result.verdict == "PASS"
 
