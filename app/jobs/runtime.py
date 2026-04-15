@@ -62,8 +62,10 @@ from app.workers.scheduler import (
     JOB_DAILY_THESIS_REFRESH,
     JOB_EXECUTE_APPROVED_ORDERS,
     JOB_FX_RATES_REFRESH,
+    JOB_MONITOR_POSITIONS,
     JOB_MORNING_CANDIDATE_REVIEW,
     JOB_NIGHTLY_UNIVERSE_SYNC,
+    JOB_RETRY_DEFERRED,
     JOB_WEEKLY_COVERAGE_REVIEW,
     SCHEDULED_JOBS,
     Cadence,
@@ -78,8 +80,10 @@ from app.workers.scheduler import (
     daily_thesis_refresh,
     execute_approved_orders,
     fx_rates_refresh,
+    monitor_positions_job,
     morning_candidate_review,
     nightly_universe_sync,
+    retry_deferred_recommendations_job,
     weekly_coverage_review,
 )
 
@@ -119,6 +123,8 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_MORNING_CANDIDATE_REVIEW: morning_candidate_review,
     JOB_WEEKLY_COVERAGE_REVIEW: weekly_coverage_review,
     JOB_DAILY_TAX_RECONCILIATION: daily_tax_reconciliation,
+    JOB_RETRY_DEFERRED: retry_deferred_recommendations_job,
+    JOB_MONITOR_POSITIONS: monitor_positions_job,
 }
 
 
