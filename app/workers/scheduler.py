@@ -1149,61 +1149,66 @@ def execute_approved_orders() -> None:
                     new_status = "timing_deferred" if evaluation.verdict == "defer" else None
 
                     if evaluation.verdict in ("pass", "defer"):
-                        # Write decision_audit row for the timing decision.
-                        conn.execute(
-                            """
-                            INSERT INTO decision_audit
-                                (decision_time, instrument_id, recommendation_id,
-                                 stage, pass_fail, explanation, evidence_json)
-                            VALUES
-                                (NOW(), %(iid)s, %(rid)s,
-                                 'entry_timing', %(pf)s, %(expl)s, %(ev)s)
-                            """,
-                            {
-                                "iid": instrument_id,
-                                "rid": rec_id,
-                                "pf": pass_fail,
-                                "expl": evaluation.rationale,
-                                "ev": Jsonb(evaluation.condition_details),
-                            },
-                        )
-
-                        # Update recommendation with SL/TP and timing verdict.
-                        update_params: dict[str, Any] = {
-                            "sl": evaluation.stop_loss_rate,
-                            "tp": evaluation.take_profit_rate,
-                            "verdict": evaluation.verdict,
-                            "rationale": evaluation.rationale,
-                            "rid": rec_id,
-                        }
-                        if new_status is not None:
+                        # Atomic: audit row + rec update in one transaction.
+                        # If either statement fails, both roll back and the
+                        # outer except catches it → _timing_error_defer.
+                        with conn.transaction():
                             conn.execute(
                                 """
-                                UPDATE trade_recommendations
-                                SET status = 'timing_deferred',
-                                    stop_loss_rate = %(sl)s,
-                                    take_profit_rate = %(tp)s,
-                                    timing_verdict = %(verdict)s,
-                                    timing_rationale = %(rationale)s
-                                WHERE recommendation_id = %(rid)s
+                                INSERT INTO decision_audit
+                                    (decision_time, instrument_id, recommendation_id,
+                                     stage, pass_fail, explanation, evidence_json)
+                                VALUES
+                                    (NOW(), %(iid)s, %(rid)s,
+                                     'entry_timing', %(pf)s, %(expl)s, %(ev)s)
                                 """,
-                                update_params,
+                                {
+                                    "iid": instrument_id,
+                                    "rid": rec_id,
+                                    "pf": pass_fail,
+                                    "expl": evaluation.rationale,
+                                    "ev": Jsonb(evaluation.condition_details),
+                                },
                             )
+                            update_params: dict[str, Any] = {
+                                "sl": evaluation.stop_loss_rate,
+                                "tp": evaluation.take_profit_rate,
+                                "verdict": evaluation.verdict,
+                                "rationale": evaluation.rationale,
+                                "rid": rec_id,
+                            }
+                            if new_status is not None:
+                                conn.execute(
+                                    """
+                                    UPDATE trade_recommendations
+                                    SET status = 'timing_deferred',
+                                        stop_loss_rate = %(sl)s,
+                                        take_profit_rate = %(tp)s,
+                                        timing_verdict = %(verdict)s,
+                                        timing_rationale = %(rationale)s
+                                    WHERE recommendation_id = %(rid)s
+                                    """,
+                                    update_params,
+                                )
+                            else:
+                                conn.execute(
+                                    """
+                                    UPDATE trade_recommendations
+                                    SET stop_loss_rate = %(sl)s,
+                                        take_profit_rate = %(tp)s,
+                                        timing_verdict = %(verdict)s,
+                                        timing_rationale = %(rationale)s
+                                    WHERE recommendation_id = %(rid)s
+                                    """,
+                                    update_params,
+                                )
+
+                        # Counter increment AFTER transaction commit (reached
+                        # only if both writes succeeded).
+                        if new_status is not None:
                             timing_deferred += 1
                         else:
-                            conn.execute(
-                                """
-                                UPDATE trade_recommendations
-                                SET stop_loss_rate = %(sl)s,
-                                    take_profit_rate = %(tp)s,
-                                    timing_verdict = %(verdict)s,
-                                    timing_rationale = %(rationale)s
-                                WHERE recommendation_id = %(rid)s
-                                """,
-                                update_params,
-                            )
                             timing_passed += 1
-                        conn.commit()
 
                         logger.info(
                             "execute_approved_orders: timing %s rec=%d rationale=%s",
@@ -1223,6 +1228,14 @@ def execute_approved_orders() -> None:
                         if skip_ok:
                             timing_deferred += 1
                         else:
+                            # Defer failed — rec stays proposed. Log at
+                            # CRITICAL: this is the last safety path before
+                            # the execution guard (which is the final gate).
+                            logger.critical(
+                                "execute_approved_orders: rec=%d could not be deferred after skip verdict; "
+                                "rec remains proposed — execution guard is the final safety net",
+                                rec_id,
+                            )
                             timing_skipped += 1
             except Exception:
                 # Timing failure must not let an uninspected BUY/ADD rec
