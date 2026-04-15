@@ -49,7 +49,10 @@ RSI_OVERBOUGHT = 75.0
 # band range (upper - lower), consider overextended and defer.
 BB_OVEREXTENDED_PCT = 0.95
 
-TimingVerdict = Literal["pass", "defer", "skip", "error"]
+# Verdicts returned by evaluate_entry_conditions.  The DB CHECK
+# constraint also permits 'error' (written by the scheduler for
+# error-deferred recs), but the service itself never produces it.
+TimingVerdict = Literal["pass", "defer", "skip"]
 
 
 # ---------------------------------------------------------------------------

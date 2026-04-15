@@ -1215,12 +1215,15 @@ def execute_approved_orders() -> None:
                         # verdict == "skip" for a BUY/ADD rec — should not
                         # happen, but must not let an uninspected rec reach
                         # the guard. Defer it as a safety measure.
-                        _timing_error_defer(
+                        skip_ok = _timing_error_defer(
                             rec_id,
                             instrument_id,
                             "evaluate_entry_conditions returned 'skip' for BUY/ADD rec — deferred as safety fallback",
                         )
-                        timing_deferred += 1
+                        if skip_ok:
+                            timing_deferred += 1
+                        else:
+                            timing_skipped += 1
             except Exception:
                 # Timing failure must not let an uninspected BUY/ADD rec
                 # reach the guard without SL/TP. Mark as timing_deferred

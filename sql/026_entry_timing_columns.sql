@@ -26,11 +26,10 @@ ALTER TABLE trade_recommendations
 -- Constrain timing_verdict to known values.  NULL is allowed for
 -- pre-migration rows.  'error' marks recs where timing evaluation
 -- raised an exception and the rec was deferred as a safety fallback.
-DO $$
-BEGIN
-    ALTER TABLE trade_recommendations
-        ADD CONSTRAINT chk_timing_verdict
-        CHECK (timing_verdict IN ('pass', 'defer', 'skip', 'error'));
-EXCEPTION
-    WHEN duplicate_object THEN NULL;
-END $$;
+-- DROP + ADD so the constraint always reflects the current allowed set.
+ALTER TABLE trade_recommendations
+    DROP CONSTRAINT IF EXISTS chk_timing_verdict;
+
+ALTER TABLE trade_recommendations
+    ADD CONSTRAINT chk_timing_verdict
+    CHECK (timing_verdict IN ('pass', 'defer', 'skip', 'error'));
