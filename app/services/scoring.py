@@ -34,10 +34,14 @@ from psycopg.types.json import Jsonb
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL_VERSION = "v1-balanced"
+_DEFAULT_MODEL_VERSION = "v1.1-balanced"
 
 # ---------------------------------------------------------------------------
 # Weight modes  (must sum to 1.0)
+#
+# v1   — return-only momentum (3 return windows, no TA)
+# v1.1 — TA-enhanced momentum (returns + trend/quality/volatility subcomponents)
+#         Same family weights as v1; the difference is inside _momentum_score.
 # ---------------------------------------------------------------------------
 
 _WEIGHT_MODES: dict[str, dict[str, float]] = {
@@ -58,6 +62,30 @@ _WEIGHT_MODES: dict[str, dict[str, float]] = {
         "turnaround": 0.05,
     },
     "v1-speculative": {
+        "turnaround": 0.30,
+        "value": 0.25,
+        "momentum": 0.15,
+        "confidence": 0.15,
+        "sentiment": 0.10,
+        "quality": 0.05,
+    },
+    "v1.1-balanced": {
+        "quality": 0.25,
+        "value": 0.25,
+        "turnaround": 0.20,
+        "confidence": 0.15,
+        "momentum": 0.10,
+        "sentiment": 0.05,
+    },
+    "v1.1-conservative": {
+        "quality": 0.35,
+        "value": 0.25,
+        "confidence": 0.20,
+        "momentum": 0.10,
+        "sentiment": 0.05,
+        "turnaround": 0.05,
+    },
+    "v1.1-speculative": {
         "turnaround": 0.30,
         "value": 0.25,
         "momentum": 0.15,

@@ -88,7 +88,7 @@ def test_run_portfolio_review_total_aum_includes_mirror_equity(
     # emitted. The two log messages are disjoint by construction,
     # so this pins the execution path directly.
     full_path_log = next(
-        (r for r in caplog.records if "ranked=1 model=v1-balanced" in r.getMessage()),
+        (r for r in caplog.records if "ranked=1 model=v1.1-balanced" in r.getMessage()),
         None,
     )
     assert full_path_log is not None, (

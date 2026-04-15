@@ -858,7 +858,7 @@ def _should_persist_hold(
 
 def run_portfolio_review(
     conn: psycopg.Connection[Any],
-    model_version: str = "v1-balanced",
+    model_version: str = "v1.1-balanced",
 ) -> PortfolioReviewResult:
     """
     Evaluate the Tier 1 ranked candidate list against current portfolio state

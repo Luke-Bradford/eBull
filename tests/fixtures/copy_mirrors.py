@@ -358,7 +358,7 @@ def mirror_aum_fixture(conn: psycopg.Connection[Any]) -> None:
          such that the MTM delta is non-zero but hand-computable).
       4. An instruments row for _GUARD_INSTRUMENT_ID with
          sector=_GUARD_INSTRUMENT_SECTOR.
-      5. A scores row with model_version='v1-balanced', rank=1,
+      5. A scores row with model_version='v1.1-balanced', rank=1,
          total_score=0.5, instrument_id=_GUARD_INSTRUMENT_ID —
          required by run_portfolio_review's _load_ranked_scores
          WHERE rank IS NOT NULL clause (portfolio.py:203).
@@ -539,7 +539,7 @@ def mirror_aum_fixture(conn: psycopg.Connection[Any]) -> None:
             """
             INSERT INTO scores (instrument_id, model_version,
                                 total_score, rank, scored_at)
-            VALUES (%(iid)s, 'v1-balanced', 0.5, 1, %(now)s)
+            VALUES (%(iid)s, 'v1.1-balanced', 0.5, 1, %(now)s)
             """,
             {"iid": _GUARD_INSTRUMENT_ID, "now": _NOW},
         )

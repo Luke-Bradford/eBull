@@ -48,7 +48,7 @@ def _make_ranking_row(
     confidence_score: float | None = 0.85,
     penalties_json: list[dict[str, object]] | None = None,
     explanation: str | None = "Strong quality + value",
-    model_version: str = "v1-balanced",
+    model_version: str = "v1.1-balanced",
     scored_at: datetime = _NOW,
 ) -> dict[str, Any]:
     """Build a dict matching the joined scores+instruments+coverage query shape."""
@@ -89,7 +89,7 @@ def _make_history_row(
     explanation: str | None = "Strong quality + value",
     rank: int | None = 1,
     rank_delta: int | None = -2,
-    model_version: str = "v1-balanced",
+    model_version: str = "v1.1-balanced",
 ) -> dict[str, Any]:
     return {
         "scored_at": scored_at,
@@ -185,7 +185,7 @@ class TestListRankings:
         assert body["total"] == 1
         assert body["offset"] == 0
         assert body["limit"] == 50
-        assert body["model_version"] == "v1-balanced"
+        assert body["model_version"] == "v1.1-balanced"
         assert body["scored_at"] is not None
         assert len(body["items"]) == 1
 
