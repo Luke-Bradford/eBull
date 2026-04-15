@@ -171,6 +171,17 @@ def test_app_lifespan_boots_and_state_is_coherent() -> None:
             # came up but the app object itself is broken.
             resp = client.get("/health")
             assert resp.status_code == 200, resp.text
+
+            # /budget exercises the full SQL path in compute_budget_state
+            # against the real schema. This catches column-name mismatches
+            # (e.g. referencing cm.status or cmp.current_value when the
+            # actual columns have different names) that mock-based unit
+            # tests silently miss because they never run real SQL.
+            # budget_config is seeded by migration 027 so the singleton
+            # row is always present on a migrated dev DB.
+            resp = client.get("/budget")
+            assert resp.status_code == 200, resp.text
+            assert "available_for_deployment" in resp.json()
     finally:
         # Restore the snapshot regardless of how the body exited.
         # On the success path TestClient's exit hook has already run
