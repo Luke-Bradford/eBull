@@ -671,3 +671,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `capital_events.currency` was a free-text TEXT column with no CHECK constraint. While SQL injection is blocked by parameterized queries, arbitrary strings persisting in domain columns violate the enum-style semantics.
 - Prevention: Before merge, `grep 'TEXT NOT NULL' sql/0*.sql` on new migrations and confirm each user-supplied column has either a CHECK constraint or an enum type. On the API model side, use `Literal["a", "b"]` instead of `str` for columns with constrained values.
 - Enforced in: `sql/027_budget_capital.sql` (`chk_capital_events_currency`); `app/api/budget.py` (`Literal["USD", "GBP"]`)
+
+---
+
+### Dependency override save/restore must not gate on `value is not None`
+
+- First seen in: #234 (review BLOCKING 2)
+- Symptom: Smoke test saved a `dependency_overrides` entry with `pop(key, None)`, then only restored it when `saved is not None`. If the override was explicitly set to `None` (a valid FastAPI override value), the restore was skipped, permanently deleting the entry for subsequent tests.
+- Prevention: When saving and restoring `app.dependency_overrides` entries, track presence separately (`had_key = key in overrides`) and restore unconditionally when the key was present. Do not use the value itself as a presence sentinel.
+- Enforced in: `tests/smoke/test_app_boots.py` (`had_get_conn` / `saved_get_conn` pattern)

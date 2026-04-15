@@ -296,6 +296,11 @@ def _load_mirror_equity(conn: psycopg.Connection[Any]) -> float:
     the aggregate could go negative too. Callers sum this
     directly into `total_aum` without assuming positivity.
 
+    Pricing uses the same 3-tier hierarchy as `load_mirror_breakdowns`:
+    live quote → most-recent daily close → position open rate.
+    This ensures budget state and dashboard AUM agree when quotes
+    are absent but `price_daily` has data.
+
     This helper does NOT open its own transaction; it reads
     under the caller's scope, matching `_load_cash` /
     `_load_positions`.
@@ -311,7 +316,7 @@ def _load_mirror_equity(conn: psycopg.Connection[Any]) -> float:
                       cmp.amount
                     + (CASE WHEN cmp.is_buy THEN 1 ELSE -1 END)
                       * cmp.units
-                      * (COALESCE(q.last, cmp.open_rate) - cmp.open_rate)
+                      * (COALESCE(q.last, pd.close, cmp.open_rate) - cmp.open_rate)
                       * cmp.open_conversion_rate
                 ) AS mv
                 FROM copy_mirror_positions cmp
@@ -322,6 +327,14 @@ def _load_mirror_equity(conn: psycopg.Connection[Any]) -> float:
                     ORDER BY quoted_at DESC
                     LIMIT 1
                 ) q ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT close
+                    FROM price_daily
+                    WHERE instrument_id = cmp.instrument_id
+                      AND close IS NOT NULL
+                    ORDER BY price_date DESC
+                    LIMIT 1
+                ) pd ON TRUE
                 WHERE cmp.mirror_id = m.mirror_id
             ) p ON TRUE
             WHERE m.active

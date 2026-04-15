@@ -30,6 +30,7 @@ import psycopg
 import psycopg.rows
 from psycopg import sql
 
+from app.services.portfolio import _load_mirror_equity
 from app.services.tax_ledger import ANNUAL_EXEMPT
 
 logger = logging.getLogger(__name__)
@@ -427,35 +428,6 @@ def _load_deployed_capital(conn: psycopg.Connection[Any]) -> Decimal:
     return Decimal(str(row["deployed"]))
 
 
-def _load_mirror_equity(conn: psycopg.Connection[Any]) -> Decimal:
-    """Load total equity held in active copy mirrors.
-
-    Mirror equity = active mirrors' available_amount + their positions'
-    current_value.  Returns ``Decimal("0")`` if no mirrors exist.
-    """
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT COALESCE(
-                (SELECT COALESCE(SUM(cm.available_amount), 0)
-                 FROM copy_mirrors cm
-                 WHERE cm.status = 'active')
-                +
-                (SELECT COALESCE(SUM(cmp.current_value), 0)
-                 FROM copy_mirror_positions cmp
-                 JOIN copy_mirrors cm2 ON cm2.mirror_id = cmp.mirror_id
-                 WHERE cm2.status = 'active'),
-                0
-            ) AS mirror_equity
-            """
-        )
-        row = cur.fetchone()
-
-    if row is None:
-        return _ZERO  # defensive; should never happen
-    return Decimal(str(row["mirror_equity"]))
-
-
 def _load_tax_estimates(
     conn: psycopg.Connection[Any],
     tax_year: str,
@@ -529,7 +501,7 @@ def compute_budget_state(conn: psycopg.Connection[Any]) -> BudgetState:
 
     cash_balance = _load_cash_balance(conn)
     deployed_capital = _load_deployed_capital(conn)
-    mirror_equity = _load_mirror_equity(conn)
+    mirror_equity = Decimal(str(_load_mirror_equity(conn)))
 
     # working_budget = cash + deployed + mirrors (None if cash is unknown)
     if cash_balance is not None:

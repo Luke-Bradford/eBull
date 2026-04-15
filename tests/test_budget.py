@@ -430,20 +430,24 @@ def _budget_conn(
     config_row: dict[str, Any] | None = None,
     cash_balance: Decimal | None = Decimal("10000"),
     deployed: Decimal = Decimal("5000"),
-    mirror_equity: Decimal = Decimal("2000"),
+    mirror_equity: float = 2000.0,
     total_gains: Decimal = Decimal("3500"),
     net_gain: Decimal = Decimal("3500"),
     gbp_usd_rate: Decimal | None = Decimal("1.25"),
-) -> MagicMock:
+) -> tuple[MagicMock, float]:
     """Build a mock connection for compute_budget_state.
 
-    Cursor order:
+    _load_mirror_equity is now imported from portfolio.py and must be patched
+    by callers via ``unittest.mock.patch("app.services.budget._load_mirror_equity")``.
+    This helper returns (conn, mirror_equity_float) so callers can supply the
+    patch return_value.
+
+    Cursor order (5 cursors — mirror_equity consumed by patched function):
       0: budget_config (get_budget_config)
       1: cash_balance (_load_cash_balance)
       2: deployed_capital (_load_deployed_capital)
-      3: mirror_equity (_load_mirror_equity)
-      4: tax estimates (_load_tax_estimates)
-      5: gbp_usd rate (_load_gbp_usd_rate)
+      3: tax estimates (_load_tax_estimates)
+      4: gbp_usd rate (_load_gbp_usd_rate)
     """
     if config_row is None:
         config_row = _budget_config_row()
@@ -451,7 +455,6 @@ def _budget_conn(
     cur_config = _make_cursor(single=config_row)
     cur_cash = _make_cursor(single={"balance": cash_balance})
     cur_deployed = _make_cursor(single={"deployed": deployed})
-    cur_mirrors = _make_cursor(single={"mirror_equity": mirror_equity})
     cur_tax = _make_cursor(
         single={"total_gains": total_gains, "net_gain": net_gain},
     )
@@ -462,7 +465,7 @@ def _budget_conn(
         cur_fx = _make_cursor()
         cur_fx.fetchone.return_value = None
 
-    return _make_conn([cur_config, cur_cash, cur_deployed, cur_mirrors, cur_tax, cur_fx])
+    return _make_conn([cur_config, cur_cash, cur_deployed, cur_tax, cur_fx]), mirror_equity
 
 
 class TestComputeBudgetState:
@@ -472,10 +475,16 @@ class TestComputeBudgetState:
         rate=1.25 → tax_usd=150, buffer=5% of 17000=850,
         available=10000-150-850=9000.
         """
-        conn = _budget_conn()
-        with unittest.mock.patch(
-            "app.services.budget._current_uk_tax_year",
-            return_value="2025/26",
+        conn, mirror_val = _budget_conn()
+        with (
+            unittest.mock.patch(
+                "app.services.budget._current_uk_tax_year",
+                return_value="2025/26",
+            ),
+            unittest.mock.patch(
+                "app.services.budget._load_mirror_equity",
+                return_value=mirror_val,
+            ),
         ):
             state = compute_budget_state(conn)
 
@@ -506,10 +515,16 @@ class TestComputeBudgetState:
         """When cash_ledger SUM is NULL, cash_balance=None,
         working_budget=None, available=None.
         """
-        conn = _budget_conn(cash_balance=None)
-        with unittest.mock.patch(
-            "app.services.budget._current_uk_tax_year",
-            return_value="2025/26",
+        conn, mirror_val = _budget_conn(cash_balance=None)
+        with (
+            unittest.mock.patch(
+                "app.services.budget._current_uk_tax_year",
+                return_value="2025/26",
+            ),
+            unittest.mock.patch(
+                "app.services.budget._load_mirror_equity",
+                return_value=mirror_val,
+            ),
         ):
             state = compute_budget_state(conn)
 
@@ -520,11 +535,15 @@ class TestComputeBudgetState:
 
     def test_no_fx_rate_uses_zero_tax(self) -> None:
         """When GBP->USD rate is None, tax_usd=0 and a warning is logged."""
-        conn = _budget_conn(gbp_usd_rate=None)
+        conn, mirror_val = _budget_conn(gbp_usd_rate=None)
         with (
             unittest.mock.patch(
                 "app.services.budget._current_uk_tax_year",
                 return_value="2025/26",
+            ),
+            unittest.mock.patch(
+                "app.services.budget._load_mirror_equity",
+                return_value=mirror_val,
             ),
             unittest.mock.patch("app.services.budget.logger") as mock_logger,
         ):
@@ -544,16 +563,22 @@ class TestComputeBudgetState:
         # tax_usd = 11280 * 1.25 = 14100
         # buffer = 50100 * 0.05 = 2505
         # available = 100 - 14100 - 2505 = -16505
-        conn = _budget_conn(
+        conn, mirror_val = _budget_conn(
             cash_balance=Decimal("100"),
             deployed=Decimal("50000"),
-            mirror_equity=Decimal("0"),
+            mirror_equity=0.0,
             total_gains=Decimal("50000"),
             net_gain=Decimal("50000"),
         )
-        with unittest.mock.patch(
-            "app.services.budget._current_uk_tax_year",
-            return_value="2025/26",
+        with (
+            unittest.mock.patch(
+                "app.services.budget._current_uk_tax_year",
+                return_value="2025/26",
+            ),
+            unittest.mock.patch(
+                "app.services.budget._load_mirror_equity",
+                return_value=mirror_val,
+            ),
         ):
             state = compute_budget_state(conn)
 
@@ -562,12 +587,18 @@ class TestComputeBudgetState:
 
     def test_basic_cgt_scenario_uses_basic_estimate(self) -> None:
         """When cgt_scenario='basic', the basic rate (18%) is used."""
-        conn = _budget_conn(
+        conn, mirror_val = _budget_conn(
             config_row=_budget_config_row(scenario="basic"),
         )
-        with unittest.mock.patch(
-            "app.services.budget._current_uk_tax_year",
-            return_value="2025/26",
+        with (
+            unittest.mock.patch(
+                "app.services.budget._current_uk_tax_year",
+                return_value="2025/26",
+            ),
+            unittest.mock.patch(
+                "app.services.budget._load_mirror_equity",
+                return_value=mirror_val,
+            ),
         ):
             state = compute_budget_state(conn)
 

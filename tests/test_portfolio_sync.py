@@ -14,6 +14,7 @@ from app.services.portfolio_sync import (
     PortfolioSyncResult,
     _aggregate_by_instrument,
     _upsert_broker_positions,
+    _validate_mirror_equity,
     sync_portfolio,
 )
 from tests.fixtures.copy_mirrors import _NOW
@@ -896,3 +897,74 @@ class TestBrokerPositionsInSyncPortfolio:
         assert result.positions_updated == 1
         assert result.broker_positions_upserted == 0
         assert result.broker_positions_deleted == 0
+
+
+# ---------------------------------------------------------------------------
+# _validate_mirror_equity — sanity check after sync
+# ---------------------------------------------------------------------------
+
+
+class TestValidateMirrorEquity:
+    """Tests for the post-sync mirror equity sanity check."""
+
+    @staticmethod
+    def _make_conn(rows: list[dict[str, Any]]) -> MagicMock:
+        cur = MagicMock()
+        cur.fetchall.return_value = rows
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        return conn
+
+    def test_warns_on_overstatement(self, caplog: pytest.LogCaptureFixture) -> None:
+        """When equity > 2× funded, a warning is logged."""
+        import logging
+
+        rows = [
+            {
+                "mirror_id": 42,
+                "available_amount": Decimal("5000"),
+                "funded": Decimal("1000"),
+                "positions_total": Decimal("3000"),
+            },
+        ]
+        conn = self._make_conn(rows)
+        with caplog.at_level(logging.WARNING):
+            _validate_mirror_equity(conn)
+        assert "possible double-count" in caplog.text
+        assert "42" in caplog.text
+
+    def test_no_warning_when_equity_is_normal(self, caplog: pytest.LogCaptureFixture) -> None:
+        """When equity is within 2× funded, no warning is logged."""
+        import logging
+
+        rows = [
+            {
+                "mirror_id": 1,
+                "available_amount": Decimal("300"),
+                "funded": Decimal("1000"),
+                "positions_total": Decimal("700"),
+            },
+        ]
+        conn = self._make_conn(rows)
+        with caplog.at_level(logging.WARNING):
+            _validate_mirror_equity(conn)
+        assert "possible double-count" not in caplog.text
+
+    def test_skips_zero_funded(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Zero-funded mirrors should not trigger false positives."""
+        import logging
+
+        rows = [
+            {
+                "mirror_id": 99,
+                "available_amount": Decimal("100"),
+                "funded": Decimal("0"),
+                "positions_total": Decimal("0"),
+            },
+        ]
+        conn = self._make_conn(rows)
+        with caplog.at_level(logging.WARNING):
+            _validate_mirror_equity(conn)
+        assert "possible double-count" not in caplog.text
