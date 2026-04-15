@@ -260,7 +260,263 @@ def _budget_snapshot(conn: psycopg.Connection[Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Monthly-only section functions
+# ---------------------------------------------------------------------------
+
+
+def _position_pnl_breakdown(
+    conn: psycopg.Connection[Any],
+    period_start: date,
+    period_end: date,
+) -> list[dict[str, Any]]:
+    """Per-position P&L for positions that had fill activity in the period."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT p.instrument_id,
+                   i.symbol,
+                   i.company_name,
+                   p.cost_basis,
+                   p.realized_pnl,
+                   p.unrealized_pnl,
+                   p.current_units,
+                   p.avg_cost
+            FROM positions p
+            JOIN instruments i USING (instrument_id)
+            WHERE p.instrument_id IN (
+                SELECT DISTINCT o.instrument_id
+                FROM fills f
+                JOIN orders o USING (order_id)
+                WHERE f.filled_at >= %(start)s
+                  AND f.filled_at < %(end)s::date + 1
+            )
+            ORDER BY p.realized_pnl + p.unrealized_pnl DESC
+            """,
+            {"start": period_start, "end": period_end},
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "instrument_id": r["instrument_id"],
+            "symbol": r["symbol"],
+            "company_name": r["company_name"],
+            "cost_basis": _dec(r["cost_basis"]),
+            "realized_pnl": _dec(r["realized_pnl"]),
+            "unrealized_pnl": _dec(r["unrealized_pnl"]),
+            "current_units": _dec(r["current_units"]),
+        }
+        for r in rows
+    ]
+
+
+def _win_rate_and_holding(
+    conn: psycopg.Connection[Any],
+    period_start: date,
+    period_end: date,
+) -> dict[str, Any]:
+    """Win rate and average holding period for positions closed in the period."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT ra.gross_return_pct, ra.hold_days
+            FROM return_attribution ra
+            WHERE ra.hold_end >= %(start)s
+              AND ra.hold_end <= %(end)s
+            """,
+            {"start": period_start, "end": period_end},
+        )
+        rows = cur.fetchall()
+
+    total = len(rows)
+    if total == 0:
+        return {
+            "total_closed": 0,
+            "winners": 0,
+            "losers": 0,
+            "win_rate_pct": None,
+            "avg_holding_days": None,
+        }
+
+    winners = sum(1 for r in rows if r["gross_return_pct"] is not None and r["gross_return_pct"] > 0)
+    losers = total - winners
+    win_rate = f"{100 * winners / total:.2f}"
+    hold_days_vals = [float(r["hold_days"]) for r in rows if r["hold_days"] is not None]
+    avg_holding = sum(hold_days_vals) / len(hold_days_vals) if hold_days_vals else None
+    return {
+        "total_closed": total,
+        "winners": winners,
+        "losers": losers,
+        "win_rate_pct": win_rate,
+        "avg_holding_days": avg_holding,
+    }
+
+
+def _best_worst_trade(
+    conn: psycopg.Connection[Any],
+    period_start: date,
+    period_end: date,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Best and worst attributed trade closed in the period."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT ra.instrument_id,
+                   i.symbol,
+                   ra.gross_return_pct,
+                   ra.hold_days,
+                   ra.model_alpha_pct
+            FROM return_attribution ra
+            JOIN instruments i USING (instrument_id)
+            WHERE ra.hold_end >= %(start)s
+              AND ra.hold_end <= %(end)s
+            ORDER BY ra.gross_return_pct DESC
+            """,
+            {"start": period_start, "end": period_end},
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        return None, None
+
+    def _to_dict(r: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "instrument_id": r["instrument_id"],
+            "symbol": r["symbol"],
+            "gross_return_pct": _dec(r["gross_return_pct"]),
+            "hold_days": r["hold_days"],
+            "model_alpha_pct": _dec(r["model_alpha_pct"]),
+        }
+
+    best = _to_dict(rows[0])
+    worst = _to_dict(rows[-1]) if len(rows) > 1 else _to_dict(rows[0])
+    return best, worst
+
+
+def _period_attribution(
+    conn: psycopg.Connection[Any],
+    period_start: date,
+    period_end: date,
+) -> dict[str, Any]:
+    """Period-bounded attribution aggregated directly from return_attribution."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*) AS positions_attributed,
+                   AVG(gross_return_pct)   AS avg_gross,
+                   AVG(market_return_pct)  AS avg_market,
+                   AVG(model_alpha_pct)    AS avg_alpha
+            FROM return_attribution
+            WHERE hold_end >= %(start)s
+              AND hold_end <= %(end)s
+            """,
+            {"start": period_start, "end": period_end},
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return {
+            "positions_attributed": 0,
+            "avg_gross_return_pct": None,
+            "avg_market_return_pct": None,
+            "avg_model_alpha_pct": None,
+        }
+    return {
+        "positions_attributed": row["positions_attributed"],
+        "avg_gross_return_pct": _dec(row["avg_gross"]),
+        "avg_market_return_pct": _dec(row["avg_market"]),
+        "avg_model_alpha_pct": _dec(row["avg_alpha"]),
+    }
+
+
+def _thesis_accuracy(
+    conn: psycopg.Connection[Any],
+    period_start: date,
+    period_end: date,
+) -> list[dict[str, Any]]:
+    """Thesis accuracy for closed positions, using thesis active at position open.
+
+    For each closed position, determines whether the exit price hit the bull,
+    base, or bear target from the thesis that was active when the position
+    was opened (nearest thesis by created_at before hold_start).
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT ra.instrument_id,
+                   i.symbol,
+                   ra.gross_return_pct,
+                   t.base_value,
+                   t.bull_value,
+                   t.bear_value,
+                   t.stance,
+                   t.confidence_score,
+                   f_exit.price AS exit_price
+            FROM return_attribution ra
+            JOIN instruments i USING (instrument_id)
+            LEFT JOIN LATERAL (
+                SELECT base_value, bull_value, bear_value, stance, confidence_score
+                FROM theses
+                WHERE instrument_id = ra.instrument_id
+                  AND created_at <= (ra.hold_start::timestamptz)
+                ORDER BY created_at DESC
+                LIMIT 1
+            ) t ON true
+            LEFT JOIN fills f_exit ON f_exit.fill_id = ra.exit_fill_id
+            WHERE ra.hold_end >= %(start)s
+              AND ra.hold_end <= %(end)s
+            """,
+            {"start": period_start, "end": period_end},
+        )
+        rows = cur.fetchall()
+
+    results: list[dict[str, Any]] = []
+    for r in rows:
+        exit_price = r["exit_price"]
+        bull_value = r["bull_value"]
+        base_value = r["base_value"]
+        bear_value = r["bear_value"]
+
+        target_hit: str | None
+        if exit_price is None or bull_value is None or base_value is None or bear_value is None:
+            target_hit = None
+        elif exit_price >= bull_value:
+            target_hit = "bull"
+        elif exit_price >= base_value:
+            target_hit = "base"
+        elif exit_price <= bear_value:
+            target_hit = "bear"
+        else:
+            target_hit = "between_bear_and_base"
+
+        results.append(
+            {
+                "instrument_id": r["instrument_id"],
+                "symbol": r["symbol"],
+                "gross_return_pct": _dec(r["gross_return_pct"]),
+                "stance": r["stance"],
+                "confidence_score": _dec(r["confidence_score"]),
+                "exit_price": _dec(exit_price),
+                "base_value": _dec(base_value),
+                "bull_value": _dec(bull_value),
+                "bear_value": _dec(bear_value),
+                "target_hit": target_hit,
+            }
+        )
+    return results
+
+
+def _tax_provision_snapshot(conn: psycopg.Connection[Any]) -> dict[str, Any]:
+    """Current tax provision from the budget service."""
+    budget = compute_budget_state(conn)
+    return {
+        "estimated_tax_gbp": _dec(budget.estimated_tax_gbp),
+        "estimated_tax_usd": _dec(budget.estimated_tax_usd),
+        "tax_year": budget.tax_year,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main entry points
 # ---------------------------------------------------------------------------
 
 
@@ -298,4 +554,43 @@ def generate_weekly_report(
         "upcoming_earnings": upcoming_earnings,
         "score_changes": score_changes,
         "budget": budget,
+    }
+
+
+def generate_monthly_report(
+    conn: psycopg.Connection[Any],
+    period_start: date,
+    period_end: date,
+) -> MonthlyReport:
+    """Generate a monthly performance report snapshot.
+
+    Reads from positions, fills, orders, instruments, return_attribution,
+    theses, and the budget service.
+
+    The caller owns the transaction; this function never calls conn.commit().
+
+    Returns a plain dict suitable for storage in report_snapshots.snapshot_json.
+    """
+    pnl = _pnl_snapshot(conn)
+    position_pnl = _position_pnl_breakdown(conn, period_start, period_end)
+    win_rate_data = _win_rate_and_holding(conn, period_start, period_end)
+    best_trade, worst_trade = _best_worst_trade(conn, period_start, period_end)
+    attribution_summary = _period_attribution(conn, period_start, period_end)
+    thesis_accuracy = _thesis_accuracy(conn, period_start, period_end)
+    tax_provision = _tax_provision_snapshot(conn)
+
+    return {
+        "report_type": "monthly",
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "generated_at": datetime.now(tz=UTC).isoformat(),
+        "pnl": pnl,
+        "position_pnl": position_pnl,
+        "win_rate": win_rate_data["win_rate_pct"],
+        "avg_holding_days": win_rate_data["avg_holding_days"],
+        "best_trade": best_trade,
+        "worst_trade": worst_trade,
+        "attribution_summary": attribution_summary,
+        "thesis_accuracy": thesis_accuracy,
+        "tax_provision": tax_provision,
     }

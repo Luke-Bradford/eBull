@@ -125,3 +125,55 @@ class TestGenerateWeeklyReport:
         assert "upcoming_earnings" in report
         assert "score_changes" in report
         assert "budget" in report
+
+
+# ---------------------------------------------------------------------------
+# Monthly report generator tests
+# ---------------------------------------------------------------------------
+
+from app.services.reporting import generate_monthly_report  # noqa: E402
+
+
+class TestGenerateMonthlyReport:
+    def test_returns_monthly_report_structure(self) -> None:
+        """Monthly report should contain all expected sections."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = []
+        cursor.fetchone.return_value = {
+            "realized": Decimal("0"),
+            "unrealized": Decimal("0"),
+            "positions_attributed": 0,
+            "avg_gross": None,
+            "avg_market": None,
+            "avg_alpha": None,
+        }
+
+        with patch(f"{_REPORTING}.compute_budget_state") as mock_budget:
+            mock_budget.return_value = MagicMock(
+                cash_balance=Decimal("10000"),
+                deployed_capital=Decimal("5000"),
+                estimated_tax_usd=Decimal("200"),
+                estimated_tax_gbp=Decimal("160"),
+                available_for_deployment=Decimal("4800"),
+                tax_year="2025/26",
+            )
+            report = generate_monthly_report(
+                conn,
+                period_start=date(2026, 3, 1),
+                period_end=date(2026, 3, 31),
+            )
+
+        assert report["report_type"] == "monthly"
+        assert report["period_start"] == "2026-03-01"
+        assert report["period_end"] == "2026-03-31"
+        assert "position_pnl" in report
+        assert "win_rate" in report
+        assert "avg_holding_days" in report
+        assert "best_trade" in report
+        assert "worst_trade" in report
+        assert "attribution_summary" in report
+        assert "thesis_accuracy" in report
+        assert "tax_provision" in report
