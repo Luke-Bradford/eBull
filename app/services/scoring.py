@@ -391,8 +391,12 @@ def _momentum_score(
         notes.append("TA: sma_200 unavailable")
 
     macd_hist = ta_indicators.get("macd_histogram")
-    if macd_hist is not None:
-        trend_parts.append((_clip(0.5 + macd_hist / 10.0), 0.40))
+    if macd_hist is not None and current_close is not None and current_close != 0:
+        # Normalise histogram to percentage of price so signal is
+        # comparable across price levels.  Scale factor 20 maps a ±2.5 %
+        # histogram to the 0-1 clip range (moderate signal ≈ 0.7/0.3).
+        macd_pct = macd_hist / current_close
+        trend_parts.append((_clip(0.5 + macd_pct * 20.0), 0.40))
     else:
         notes.append("TA: macd_histogram unavailable")
 
