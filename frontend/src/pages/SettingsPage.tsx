@@ -30,6 +30,7 @@ import {
 import { runJob } from "@/api/jobs";
 import { ValidationResultDisplay } from "@/components/broker/ValidationResultDisplay";
 import { useRecoveryPhraseModal } from "@/components/security/RecoveryPhraseModal";
+import { BudgetConfigSection } from "@/components/settings/BudgetConfigSection";
 import { DisplayCurrencySection } from "@/components/settings/DisplayCurrencySection";
 import { deriveCredentialSetMode, ENVIRONMENT } from "@/lib/credentialSetMode";
 import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
@@ -48,6 +49,7 @@ export function SettingsPage(): JSX.Element {
         currentCurrency={displayCurrency}
         onChanged={() => window.location.reload()}
       />
+      <BudgetConfigSection />
       <BrokerCredentialsSection />
     </div>
   );
