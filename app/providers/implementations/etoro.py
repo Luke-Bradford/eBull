@@ -161,9 +161,11 @@ class EtoroMarketDataProvider(MarketDataProvider):
             chunk = instrument_ids[i : i + _RATES_BATCH_SIZE]
             ids_param = ",".join(str(id_) for id_ in chunk)
             try:
+                # Build the query string inline instead of via params={}
+                # so the comma in "1181,1699" is not percent-encoded.
+                # httpx encodes commas as %2C which eToro rejects with 500.
                 response = self._http.get(
-                    "/api/v1/market-data/instruments/rates",
-                    params={"instrumentIds": ids_param},
+                    f"/api/v1/market-data/instruments/rates?instrumentIds={ids_param}",
                     headers=self._request_headers(),
                 )
                 response.raise_for_status()
