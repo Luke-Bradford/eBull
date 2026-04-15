@@ -26,9 +26,15 @@ export function BudgetConfigSection() {
   const [configSuccess, setConfigSuccess] = useState(false);
   const [configError, setConfigError] = useState(false);
 
-  // Derive displayed values: local override > server value > default
-  const displayedBufferPct =
-    cashBufferPct ?? config.data?.cash_buffer_pct ?? 10;
+  // Derive displayed values: local override > server value > default.
+  // Backend stores cash_buffer_pct as a fraction (0.05 = 5%); the input
+  // operates on a percentage scale so we multiply by 100 for display and
+  // divide by 100 when sending.
+  const serverBufferPct =
+    config.data?.cash_buffer_pct != null
+      ? Math.round(config.data.cash_buffer_pct * 100)
+      : null;
+  const displayedBufferPct = cashBufferPct ?? serverBufferPct ?? 5;
   const displayedCgtScenario =
     cgtScenario ??
     (config.data?.cgt_scenario === "higher" ? "higher" : "basic");
@@ -39,9 +45,15 @@ export function BudgetConfigSection() {
     setConfigError(false);
     setConfigSuccess(false);
     try {
+      // Only send fields that actually changed — the backend rejects
+      // no-op patches with 422 "no fields changed".
+      const bufferChanged = cashBufferPct !== null;
+      const scenarioChanged = cgtScenario !== null;
+
       await updateBudgetConfig({
-        cash_buffer_pct: displayedBufferPct,
-        cgt_scenario: displayedCgtScenario,
+        // Convert percentage (display) back to fraction (API).
+        cash_buffer_pct: bufferChanged ? displayedBufferPct / 100 : undefined,
+        cgt_scenario: scenarioChanged ? displayedCgtScenario : undefined,
         updated_by: "operator",
         reason: configReason,
       });
@@ -101,6 +113,7 @@ export function BudgetConfigSection() {
   }
 
   const configReasonMissing = configReason.trim().length === 0;
+  const configNothingChanged = cashBufferPct === null && cgtScenario === null;
   const eventAmountInvalid =
     eventAmount === "" || Number.isNaN(Number(eventAmount)) || Number(eventAmount) <= 0;
 
@@ -178,7 +191,7 @@ export function BudgetConfigSection() {
 
               <button
                 type="submit"
-                disabled={configSaving || configReasonMissing}
+                disabled={configSaving || configReasonMissing || configNothingChanged}
                 className="rounded bg-slate-800 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {configSaving ? "Saving..." : "Save config"}
