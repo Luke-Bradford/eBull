@@ -43,7 +43,12 @@ RETRY_EXPIRY_HOURS: int = 24
 
 @dataclass(frozen=True)
 class RetryResult:
-    """Counts from a single run of retry_deferred_recommendations()."""
+    """Counts from a single run of retry_deferred_recommendations().
+
+    ``retried`` counts all evaluation attempts, including those that
+    errored.  Invariant: retried == re_proposed + re_deferred + errors
+    (for the non-expired subset).
+    """
 
     retried: int
     re_proposed: int
