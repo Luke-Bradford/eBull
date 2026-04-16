@@ -61,20 +61,24 @@ class TestFreshByAudit:
 
     def test_fresh_when_latest_is_success_within_window(self) -> None:
         now = datetime.now(UTC)
-        conn = _mock_conn_with_row((now - timedelta(hours=2), "success", None, timedelta(hours=2)))
+        conn = _mock_conn_with_row((now - timedelta(hours=2), "success", None, timedelta(hours=2).total_seconds()))
         fresh, detail = _fresh_by_audit(conn, "some_job", timedelta(hours=24))
         assert fresh is True
         assert "some_job" in detail
 
     def test_fresh_when_latest_is_prereq_skip(self) -> None:
         now = datetime.now(UTC)
-        conn = _mock_conn_with_row((now - timedelta(hours=2), "skipped", "prereq_missing: no key", timedelta(hours=2)))
+        conn = _mock_conn_with_row(
+            (now - timedelta(hours=2), "skipped", "prereq_missing: no key", timedelta(hours=2).total_seconds())
+        )
         fresh, _ = _fresh_by_audit(conn, "some_job", timedelta(hours=24))
         assert fresh is True
 
     def test_stale_when_latest_is_unmarked_skip(self) -> None:
         now = datetime.now(UTC)
-        conn = _mock_conn_with_row((now - timedelta(hours=2), "skipped", "legacy skip reason", timedelta(hours=2)))
+        conn = _mock_conn_with_row(
+            (now - timedelta(hours=2), "skipped", "legacy skip reason", timedelta(hours=2).total_seconds())
+        )
         fresh, detail = _fresh_by_audit(conn, "some_job", timedelta(hours=24))
         assert fresh is False
         assert "skipped" in detail
@@ -83,14 +87,14 @@ class TestFreshByAudit:
         """Regression: must query latest row first. A newer failure at
         t-2h beats an older success at t-12h."""
         now = datetime.now(UTC)
-        conn = _mock_conn_with_row((now - timedelta(hours=2), "failure", "boom", timedelta(hours=2)))
+        conn = _mock_conn_with_row((now - timedelta(hours=2), "failure", "boom", timedelta(hours=2).total_seconds()))
         fresh, detail = _fresh_by_audit(conn, "some_job", timedelta(hours=24))
         assert fresh is False
         assert "failure" in detail
 
     def test_stale_when_latest_success_is_outside_window(self) -> None:
         now = datetime.now(UTC)
-        conn = _mock_conn_with_row((now - timedelta(hours=48), "success", None, timedelta(hours=48)))
+        conn = _mock_conn_with_row((now - timedelta(hours=48), "success", None, timedelta(hours=48).total_seconds()))
         fresh, detail = _fresh_by_audit(conn, "some_job", timedelta(hours=24))
         assert fresh is False
         assert "window" in detail
@@ -139,7 +143,7 @@ class TestSimpleAuditOnlyPredicates:
     )
     def test_fresh_when_recent_success(self, predicate, job_name, window) -> None:
         now = datetime.now(UTC)
-        conn = _mock_conn_with_row((now - window / 2, "success", None, window / 2))
+        conn = _mock_conn_with_row((now - window / 2, "success", None, (window / 2).total_seconds()))
         fresh, _ = predicate(conn)
         assert fresh is True
 
@@ -153,7 +157,9 @@ class TestCandlesIsFresh:
     def test_stale_when_audit_fresh_but_instruments_missing_candles(self, monkeypatch) -> None:
         now = datetime.now(UTC)
         # First query = _fresh_by_audit; second = content check returning 3 missing.
-        conn = _mock_conn_with_rows([(now - timedelta(hours=1), "success", None, timedelta(hours=1)), (3,)])
+        conn = _mock_conn_with_rows(
+            [(now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()), (3,)]
+        )
         monkeypatch.setattr(
             "app.services.market_data._most_recent_trading_day",
             lambda _: date(2026, 4, 16),
@@ -164,7 +170,9 @@ class TestCandlesIsFresh:
 
     def test_fresh_when_audit_and_content_ok(self, monkeypatch) -> None:
         now = datetime.now(UTC)
-        conn = _mock_conn_with_rows([(now - timedelta(hours=1), "success", None, timedelta(hours=1)), (0,)])
+        conn = _mock_conn_with_rows(
+            [(now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()), (0,)]
+        )
         monkeypatch.setattr(
             "app.services.market_data._most_recent_trading_day",
             lambda _: date(2026, 4, 16),
@@ -178,14 +186,18 @@ class TestFundamentalsIsFresh:
         self,
     ) -> None:
         now = datetime.now(UTC)
-        conn = _mock_conn_with_rows([(now - timedelta(hours=1), "success", None, timedelta(hours=1)), (5,)])
+        conn = _mock_conn_with_rows(
+            [(now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()), (5,)]
+        )
         fresh, detail = fundamentals_is_fresh(conn)
         assert fresh is False
         assert "5 tradable instruments lack fundamentals snapshot" in detail
 
     def test_fresh_when_all_have_quarter_snapshot(self) -> None:
         now = datetime.now(UTC)
-        conn = _mock_conn_with_rows([(now - timedelta(hours=1), "success", None, timedelta(hours=1)), (0,)])
+        conn = _mock_conn_with_rows(
+            [(now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()), (0,)]
+        )
         fresh, _ = fundamentals_is_fresh(conn)
         assert fresh is True
 
@@ -193,7 +205,7 @@ class TestFundamentalsIsFresh:
 class TestThesisIsFresh:
     def test_stale_when_find_stale_instruments_returns_some(self, monkeypatch) -> None:
         now = datetime.now(UTC)
-        conn = _mock_conn_with_row((now - timedelta(hours=1), "success", None, timedelta(hours=1)))
+        conn = _mock_conn_with_row((now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()))
         monkeypatch.setattr(
             "app.services.thesis.find_stale_instruments",
             lambda _conn, tier: [1, 2, 3],
@@ -204,7 +216,7 @@ class TestThesisIsFresh:
 
     def test_fresh_when_no_stale_instruments(self, monkeypatch) -> None:
         now = datetime.now(UTC)
-        conn = _mock_conn_with_row((now - timedelta(hours=1), "success", None, timedelta(hours=1)))
+        conn = _mock_conn_with_row((now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()))
         monkeypatch.setattr(
             "app.services.thesis.find_stale_instruments",
             lambda _conn, tier: [],
@@ -218,7 +230,7 @@ class TestScoringIsFresh:
         now = datetime.now(UTC)
         conn = _mock_conn_with_rows(
             [
-                (now - timedelta(hours=1), "success", None, timedelta(hours=1)),
+                (now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()),
                 (now - timedelta(hours=5), now - timedelta(hours=1), None),
             ]
         )
@@ -230,7 +242,7 @@ class TestScoringIsFresh:
         now = datetime.now(UTC)
         conn = _mock_conn_with_rows(
             [
-                (now - timedelta(hours=1), "success", None, timedelta(hours=1)),
+                (now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()),
                 (now - timedelta(hours=5), None, now - timedelta(hours=1)),
             ]
         )
@@ -242,7 +254,7 @@ class TestScoringIsFresh:
         now = datetime.now(UTC)
         conn = _mock_conn_with_rows(
             [
-                (now - timedelta(hours=1), "success", None, timedelta(hours=1)),
+                (now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()),
                 (
                     now - timedelta(minutes=30),
                     now - timedelta(hours=3),
@@ -256,7 +268,7 @@ class TestScoringIsFresh:
     def test_stale_when_no_scores(self) -> None:
         now = datetime.now(UTC)
         conn = _mock_conn_with_rows(
-            [(now - timedelta(hours=1), "success", None, timedelta(hours=1)), (None, None, None)]
+            [(now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()), (None, None, None)]
         )
         fresh, detail = scoring_is_fresh(conn)
         assert fresh is False
@@ -279,7 +291,7 @@ class TestRecommendationsIsFresh:
         conn = _mock_conn_with_rows(
             [
                 (None, None),
-                (now - timedelta(hours=2), "success", None, timedelta(hours=2)),
+                (now - timedelta(hours=2), "success", None, timedelta(hours=2).total_seconds()),
             ]
         )
         fresh, _ = recommendations_is_fresh(conn)
@@ -294,7 +306,7 @@ class TestRecommendationsIsFresh:
         conn = _mock_conn_with_rows(
             [
                 (now - timedelta(hours=5), now - timedelta(hours=1)),
-                (now - timedelta(hours=48), "success", None, timedelta(hours=48)),
+                (now - timedelta(hours=48), "success", None, timedelta(hours=48).total_seconds()),
             ]
         )
         fresh, _ = recommendations_is_fresh(conn)

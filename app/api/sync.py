@@ -30,13 +30,18 @@ from app.services.sync_orchestrator.registry import JOB_TO_LAYERS
 # Registry invariant: every layer is emitted by at most one legacy job.
 # Built once at import time; a duplicate emit fails loudly at startup
 # rather than silently 500-ing per request under client traffic.
+#
+# Uses explicit `if/raise` rather than `assert` — `python -O` or
+# PYTHONOPTIMIZE=1 strips asserts, and this is a security-relevant
+# registry invariant, not an internal sanity check.
 _LAYER_TO_JOB: dict[str, str] = {}
 for _job, _emits in JOB_TO_LAYERS.items():
     for _emit in _emits:
-        assert _emit not in _LAYER_TO_JOB, (
-            f"layer {_emit!r} emitted by both {_LAYER_TO_JOB[_emit]!r} "
-            f"and {_job!r}; JOB_TO_LAYERS must have disjoint emits"
-        )
+        if _emit in _LAYER_TO_JOB:
+            raise RuntimeError(
+                f"layer {_emit!r} emitted by both {_LAYER_TO_JOB[_emit]!r} "
+                f"and {_job!r}; JOB_TO_LAYERS must have disjoint emits"
+            )
         _LAYER_TO_JOB[_emit] = _job
 
 router = APIRouter(

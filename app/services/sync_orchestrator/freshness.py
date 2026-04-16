@@ -54,10 +54,14 @@ def _fresh_by_audit(
     layers (portfolio_sync, fx_rates at 5 min) that causes spurious
     flips at the boundary.
     """
+    # EXTRACT(EPOCH FROM ...) returns DOUBLE PRECISION (float) — mapped
+    # by psycopg3 to Python float regardless of interval-type registration.
+    # Using raw interval would depend on the connection's type loaders,
+    # which could return str under some adapter configurations.
     row = conn.execute(
         """
         SELECT started_at, status, error_msg,
-               (now() - started_at) AS age
+               EXTRACT(EPOCH FROM now() - started_at) AS age_seconds
         FROM job_runs
         WHERE job_name = %s
         ORDER BY started_at DESC
@@ -67,7 +71,8 @@ def _fresh_by_audit(
     ).fetchone()
     if row is None:
         return False, f"no job_runs row for {job_name}"
-    _started_at, status, error_msg, age = row
+    _started_at, status, error_msg, age_seconds = row
+    age = timedelta(seconds=float(age_seconds))
     is_counting = status == "success" or (
         status == "skipped" and error_msg is not None and error_msg.startswith(PREREQ_SKIP_MARKER)
     )
