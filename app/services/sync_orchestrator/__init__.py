@@ -1,12 +1,24 @@
 """Sync orchestrator package.
 
-Phase 1 exports types + constants + exceptions. Registries, planner,
-executor, adapters, reaper wired in subsequent tasks.
+Public surface: types + registries + planner + public entry points
+(run_sync, submit_sync, set_executor). Adapters and reaper wired in
+subsequent tasks.
 
 Spec: docs/superpowers/specs/2026-04-16-data-orchestrator-and-observability-design.md
 Plan: docs/superpowers/plans/2026-04-16-data-orchestrator-p1.md
 """
 
+from app.services.sync_orchestrator.executor import (
+    run_sync,
+    set_executor,
+    submit_sync,
+)
+from app.services.sync_orchestrator.planner import build_execution_plan
+from app.services.sync_orchestrator.registry import (
+    JOB_TO_LAYERS,
+    LAYERS,
+    DataLayer,
+)
 from app.services.sync_orchestrator.types import (
     PREREQ_SKIP_MARKER,
     ExecutionPlan,
@@ -24,7 +36,10 @@ from app.services.sync_orchestrator.types import (
 )
 
 __all__ = [
+    "DataLayer",
     "ExecutionPlan",
+    "JOB_TO_LAYERS",
+    "LAYERS",
     "LayerOutcome",
     "LayerPlan",
     "LayerRefresh",
@@ -36,5 +51,9 @@ __all__ = [
     "SyncResult",
     "SyncScope",
     "SyncTrigger",
+    "build_execution_plan",
     "prereq_skip_reason",
+    "run_sync",
+    "set_executor",
+    "submit_sync",
 ]
