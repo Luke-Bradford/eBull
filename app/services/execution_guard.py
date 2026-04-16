@@ -473,7 +473,8 @@ def _check_transaction_cost(
         passed=True,
         detail=(
             f"cost ok: total={estimate.total_cost_bps} bps "
-            f"(spread={estimate.spread_bps}, carry={estimate.total_carry_cost_bps})"
+            f"(spread={estimate.spread_bps}, carry={estimate.total_carry_cost_bps}, "
+            f"fx={estimate.fx_markup_bps}\u00d72)"
         ),
     )
 

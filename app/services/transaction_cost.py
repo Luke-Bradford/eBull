@@ -260,7 +260,8 @@ def record_estimated_cost(
     breakdown = {
         "spread_bps": str(estimate.spread_bps),
         "overnight_bps_per_day": str(estimate.overnight_bps_per_day),
-        "fx_markup_bps": str(estimate.fx_markup_bps),
+        "fx_markup_bps": str(estimate.fx_markup_bps),  # one-way
+        "fx_roundtrip_bps": str(estimate.fx_markup_bps * 2),
         "estimated_hold_days": estimate.estimated_hold_days,
         "total_entry_cost_bps": str(estimate.total_entry_cost_bps),
         "total_carry_cost_bps": str(estimate.total_carry_cost_bps),
