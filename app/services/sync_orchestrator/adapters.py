@@ -43,8 +43,15 @@ from app.services.sync_orchestrator.types import (
 def _latest_job_outcome(job_name: str) -> tuple[LayerOutcome, int]:
     """Read the most recent job_runs row for `job_name` and map to
     LayerOutcome. Called INSIDE the JobLock context so a concurrent
-    cron-triggered run cannot race a newer row in between."""
-    with psycopg.connect(settings.database_url) as conn:
+    cron-triggered run cannot race a newer row in between.
+
+    autocommit=True so the SELECT does not leave an idle transaction
+    open on the connection — consistent with every other orchestrator
+    connection. The context-manager close would roll back anyway, but
+    explicit autocommit avoids accumulating idle transactions on the
+    DB during periods of high invocation frequency.
+    """
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
         row = conn.execute(
             """
             SELECT status, row_count, error_msg
@@ -374,11 +381,25 @@ def refresh_scoring_and_recommendations(
 
     job_name = JOB_MORNING_CANDIDATE_REVIEW
 
-    # Acquire the lock first; separate exception channel for contention.
+    # Acquire the lock via a normal `with` so the context manager
+    # receives the real (exc_type, exc_val, exc_tb) on abnormal exit,
+    # not the (None, None, None) of a manual __exit__ call. On any
+    # inner exception: the `with` exits with the live exception info
+    # (JobLock's __exit__ sees it), then re-raises — the orchestrator
+    # records FAILED for every emit.
     try:
-        lock_cm = JobLock(settings.database_url, job_name)
-        lock_cm.__enter__()
+        with JobLock(settings.database_url, job_name):
+            with _tracked_job(job_name) as tracker:
+                result = compute_morning_recommendations()
+                tracker.row_count = len(result.ranking_result.scored) + (
+                    len(result.review_result.recommendations) if result.review_result is not None else 0
+                )
+            # Reading outcome INSIDE the JobLock context ensures a
+            # concurrent cron-triggered fire cannot race a newer row in.
+            outcome, _ = _latest_job_outcome(job_name)
     except JobAlreadyRunning:
+        # JobAlreadyRunning raises from `__enter__` BEFORE the body
+        # executes, so no result/outcome variables are in scope here.
         with psycopg.connect(settings.database_url, autocommit=True) as conn:
             record_job_skip(
                 conn,
@@ -395,20 +416,8 @@ def refresh_scoring_and_recommendations(
         )
         return [("scoring", skip), ("recommendations", skip)]
 
-    # Inside the lock: run, capture outcome, release. Any inner exception
-    # re-raises after releasing the lock — the orchestrator marks emits
-    # FAILED. The post-lock result-access block is unreachable via any
-    # exception path, so result/outcome are always bound when read.
-    try:
-        with _tracked_job(job_name) as tracker:
-            result = compute_morning_recommendations()
-            tracker.row_count = len(result.ranking_result.scored) + (
-                len(result.review_result.recommendations) if result.review_result is not None else 0
-            )
-        outcome, _ = _latest_job_outcome(job_name)
-    finally:
-        lock_cm.__exit__(None, None, None)
-
+    # Reached only on the success path; every other exception propagated
+    # out with the live exc_info passed to JobLock.__exit__.
     scoring_count = len(result.ranking_result.scored)
     if result.review_result is None:
         rec_outcome = LayerOutcome.NO_WORK

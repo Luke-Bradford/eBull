@@ -171,13 +171,20 @@ def get_sync_layers(
         # Per-layer isolation: one broken predicate should not 500 the
         # whole endpoint. Operators need the dashboard most when things
         # are red; masking a partial failure would hide which layer broke.
+        #
+        # Exception type names are NEVER exposed raw — they leak Python
+        # internals and violate spec §3.4 sanitized-category contract.
+        # Route through _categorize_error so the response only carries a
+        # stable, documented category.
         try:
             fresh, detail = layer.is_fresh(conn)
             predicate_error: str | None = None
         except Exception as exc:
+            from app.services.sync_orchestrator.executor import _categorize_error
+
+            predicate_error = _categorize_error(exc)
             fresh = False
-            detail = f"freshness predicate error: {type(exc).__name__}"
-            predicate_error = type(exc).__name__
+            detail = f"freshness predicate error ({predicate_error})"
         job_name = layer_to_job[name]
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
