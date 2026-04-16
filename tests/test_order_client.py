@@ -16,18 +16,27 @@ Mock DB approach mirrors test_execution_guard.py:
 Cursor call order inside execute_order (demo BUY with suggested_size_pct):
   1. _load_approved_recommendation  — fetchone
   2. _load_cash                     — fetchone
-  3. _load_latest_quote_price       — fetchone
+  3. _load_quote_for_execution      — fetchone (last/bid/ask/spread_pct)
   4. _persist_order                 — fetchone (INSERT RETURNING)
-  5. _persist_fill                  — fetchone (INSERT RETURNING)
-  6. conn.execute x5                — position upsert, broker_positions, cash_ledger, rec status, audit
+  5. get_transaction_cost_config    — fetchone
+  6. load_instrument_cost           — fetchone
+  7. record_estimated_cost          — cursor (INSERT, no fetchone)
+  8. _persist_fill                  — fetchone (INSERT RETURNING)
+  9. conn.execute x5                — position upsert, broker_positions, cash_ledger, rec status, audit
+
+  When spread data is unavailable (no cost_model, no quote spread_pct),
+  cursor 7 (record_estimated_cost) is skipped — s_bps is None.
 
 Cursor call order inside execute_order (demo EXIT):
   1. _load_approved_recommendation  — fetchone
   2. _load_position_units           — fetchone
-  3. _load_latest_quote_price       — fetchone
+  3. _load_quote_for_execution      — fetchone (last/bid/ask/spread_pct)
   4. _persist_order                 — fetchone (INSERT RETURNING)
-  5. _persist_fill                  — fetchone (INSERT RETURNING)
-  6. conn.execute x4                — position update, cash_ledger, rec status, audit
+  5. get_transaction_cost_config    — fetchone
+  6. load_instrument_cost           — fetchone
+  7. record_estimated_cost          — cursor (INSERT, no fetchone)
+  8. _persist_fill                  — fetchone (INSERT RETURNING)
+  9. conn.execute x4                — position update, cash_ledger, rec status, audit
 """
 
 from __future__ import annotations
@@ -51,6 +60,16 @@ from app.services.order_client import (
     execute_order,
 )
 from app.services.runtime_config import RuntimeConfig, RuntimeConfigCorrupt
+
+# ---------------------------------------------------------------------------
+# Cost-related test constants
+# ---------------------------------------------------------------------------
+
+_DEFAULT_COST_CONFIG: dict[str, Any] = {
+    "max_total_cost_bps": Decimal("150"),
+    "min_return_vs_cost_ratio": Decimal("3.0"),
+    "default_hold_days": 90,
+}
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -146,8 +165,16 @@ def _cash_cursor(balance: float | None = 10_000.0) -> MagicMock:
     return _make_cursor([{"balance": balance}])
 
 
-def _quote_cursor(last: float | None = 150.0) -> MagicMock:
-    return _make_cursor([{"last": last}] if last is not None else [])
+def _quote_cursor(
+    last: float | None = 150.0,
+    bid: float | None = None,
+    ask: float | None = None,
+    spread_pct: float | None = None,
+) -> MagicMock:
+    if last is None and bid is None:
+        return _make_cursor([])
+    row: dict[str, Any] = {"last": last, "bid": bid, "ask": ask, "spread_pct": spread_pct}
+    return _make_cursor([row])
 
 
 def _position_cursor(current_units: float = 10.0) -> MagicMock:
@@ -160,6 +187,19 @@ def _order_returning_cursor(order_id: int = 1) -> MagicMock:
 
 def _fill_returning_cursor(fill_id: int = 1) -> MagicMock:
     return _make_cursor([{"fill_id": fill_id}])
+
+
+def _cost_config_cursor() -> MagicMock:
+    return _make_cursor([_DEFAULT_COST_CONFIG])
+
+
+def _cost_model_cursor(row: dict[str, Any] | None = None) -> MagicMock:
+    return _make_cursor([row] if row is not None else [])
+
+
+def _cost_record_write_cursor() -> MagicMock:
+    """Cursor consumed by record_estimated_cost INSERT (no rows returned)."""
+    return _make_cursor([])
 
 
 # ---------------------------------------------------------------------------
@@ -353,9 +393,12 @@ class TestExecuteOrderDemoMode:
         cursors = [
             _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
             _cash_cursor(balance=10_000.0),
-            _quote_cursor(last=100.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
             # Inside transaction:
             _order_returning_cursor(order_id=7),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote spread
+            _cost_record_write_cursor(),  # record_estimated_cost INSERT
             _fill_returning_cursor(fill_id=3),
         ]
         conn = _make_conn(cursors)
@@ -380,9 +423,12 @@ class TestExecuteOrderDemoMode:
         cursors = [
             _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
             _position_cursor(current_units=5.0),
-            _quote_cursor(last=200.0),
+            _quote_cursor(last=200.0, spread_pct=0.30),
             # Inside transaction:
             _order_returning_cursor(order_id=8),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
             _fill_returning_cursor(fill_id=4),
             # Post-fill: read current_units for attribution check
             _make_cursor([{"current_units": 0}]),
@@ -406,9 +452,11 @@ class TestExecuteOrderDemoMode:
         cursors = [
             _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
             _cash_cursor(balance=10_000.0),
-            _make_cursor([]),  # no quote
+            _make_cursor([]),  # no quote → quote_data=None
             # Inside transaction: order persisted, no fill (zero units)
             _order_returning_cursor(order_id=9),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → s_bps=None, no record_estimated_cost
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -431,8 +479,11 @@ class TestExecuteOrderDemoMode:
         cursors = [
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
-            _quote_cursor(last=100.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
             _order_returning_cursor(order_id=1),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
             _fill_returning_cursor(fill_id=1),
         ]
         conn = _make_conn(cursors)
@@ -452,8 +503,11 @@ class TestExecuteOrderDemoMode:
         cursors = [
             _rec_cursor(action="BUY", stop_loss_rate=90.0, take_profit_rate=120.0),
             _cash_cursor(balance=10_000.0),
-            _quote_cursor(last=100.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
             _order_returning_cursor(order_id=7),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
             _fill_returning_cursor(fill_id=3),
         ]
         conn = _make_conn(cursors)
@@ -484,8 +538,11 @@ class TestExecuteOrderDemoMode:
         cursors = [
             _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
             _position_cursor(current_units=5.0),
-            _quote_cursor(last=200.0),
+            _quote_cursor(last=200.0, spread_pct=0.30),
             _order_returning_cursor(order_id=8),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
             _fill_returning_cursor(fill_id=4),
             # Post-fill: read current_units for attribution check
             _make_cursor([{"current_units": 0}]),
@@ -506,8 +563,11 @@ class TestExecuteOrderDemoMode:
         cursors = [
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
-            _quote_cursor(last=100.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
             _order_returning_cursor(order_id=1),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
             _fill_returning_cursor(fill_id=1),
         ]
         conn = _make_conn(cursors)
@@ -551,6 +611,8 @@ class TestExecuteOrderLiveMode:
             _cash_cursor(balance=10_000.0),
             # broker called (no cursor)
             _order_returning_cursor(order_id=10),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model, quote_data=None → s_bps=None, no record
             _fill_returning_cursor(fill_id=6),
         ]
         conn = _make_conn(cursors)
@@ -583,6 +645,8 @@ class TestExecuteOrderLiveMode:
             _make_cursor([{"position_id": 98765}]),
             # broker called (no cursor)
             _order_returning_cursor(order_id=11),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model, quote_data=None → s_bps=None, no record
             _fill_returning_cursor(fill_id=7),
             # Post-fill: read current_units for attribution check
             _make_cursor([{"current_units": 0}]),
@@ -608,6 +672,8 @@ class TestExecuteOrderLiveMode:
             _make_cursor([]),
             # broker NOT called — broker_result is constructed inline as failed
             _order_returning_cursor(order_id=12),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model, quote_data=None → s_bps=None, no record
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -668,6 +734,8 @@ class TestExecuteOrderFailures:
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=12),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model, quote_data=None → s_bps=None, no record
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -700,6 +768,8 @@ class TestExecuteOrderFailures:
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=13),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -747,6 +817,8 @@ class TestExecuteOrderFailures:
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=14),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -775,6 +847,8 @@ class TestExecuteOrderFailures:
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=15),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
         ]
         conn = _make_conn(cursors)
         execute_order(

@@ -35,6 +35,14 @@ from psycopg.types.json import Jsonb
 from app.providers.broker import BrokerOrderResult, BrokerProvider, OrderParams
 from app.services.return_attribution import compute_attribution, persist_attribution
 from app.services.runtime_config import get_runtime_config
+from app.services.transaction_cost import (
+    TransactionCostConfigCorrupt,
+    estimate_cost,
+    get_transaction_cost_config,
+    load_instrument_cost,
+    record_estimated_cost,
+    spread_pct_to_bps,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +127,26 @@ def _load_latest_quote_price(
     if row is None or row["last"] is None:
         return None
     return Decimal(str(row["last"]))
+
+
+def _load_quote_for_execution(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+) -> dict[str, Any] | None:
+    """Load full quote data for execution: last, bid, ask, spread_pct."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT last, bid, ask, spread_pct
+            FROM quotes
+            WHERE instrument_id = %(iid)s
+            ORDER BY quoted_at DESC
+            LIMIT 1
+            """,
+            {"iid": instrument_id},
+        )
+        row = cur.fetchone()
+    return dict(row) if row is not None else None
 
 
 def _load_position_units(
@@ -684,6 +712,8 @@ def execute_order(
     runtime = get_runtime_config(conn)
     is_live = runtime.enable_live_trading
 
+    quote_data: dict[str, Any] | None = None
+
     if is_live:
         if broker is None:
             raise ValueError("enable_live_trading is True but no broker provider supplied")
@@ -714,7 +744,8 @@ def execute_order(
                 params=order_params,
             )
     else:
-        quote_price = _load_latest_quote_price(conn, instrument_id)
+        quote_data = _load_quote_for_execution(conn, instrument_id)
+        quote_price = Decimal(str(quote_data["last"])) if quote_data and quote_data.get("last") is not None else None
         broker_result = _synthetic_fill(
             instrument_id=instrument_id,
             action=action,
@@ -722,6 +753,8 @@ def execute_order(
             requested_amount=requested_amount,
             requested_units=requested_units,
             params=order_params,
+            bid=Decimal(str(quote_data["bid"])) if quote_data and quote_data.get("bid") is not None else None,
+            ask=Decimal(str(quote_data["ask"])) if quote_data and quote_data.get("ask") is not None else None,
         )
         logger.info(
             "demo mode: instrument_id=%d action=%s price=%s units=%s",
@@ -750,6 +783,46 @@ def execute_order(
             raw_payload=broker_result.raw_payload,
             now=now,
         )
+
+        # Record estimated cost (best-effort: config-missing doesn't block order)
+        try:
+            cost_config = get_transaction_cost_config(conn)
+            cost_model_row = load_instrument_cost(conn, instrument_id)
+            if cost_model_row is not None:
+                s_bps = cost_model_row["spread_bps"]
+                o_rate = cost_model_row["overnight_rate"]
+                fx_bps = cost_model_row["fx_markup_bps"]
+            elif quote_data is not None and quote_data.get("spread_pct") is not None:
+                s_bps = spread_pct_to_bps(Decimal(str(quote_data["spread_pct"])))
+                o_rate = Decimal("0")
+                fx_bps = Decimal("0")
+            else:
+                s_bps = None
+                o_rate = Decimal("0")
+                fx_bps = Decimal("0")
+
+            if s_bps is not None:
+                cost_est = estimate_cost(
+                    spread_bps=s_bps,
+                    overnight_rate=o_rate,
+                    fx_markup_bps=fx_bps,
+                    hold_days=cost_config["default_hold_days"],
+                    max_total_cost_bps=cost_config["max_total_cost_bps"],
+                    min_return_vs_cost_ratio=cost_config["min_return_vs_cost_ratio"],
+                    expected_return_pct=None,
+                )
+                record_estimated_cost(
+                    conn,
+                    order_id=order_id,
+                    recommendation_id=recommendation_id,
+                    instrument_id=instrument_id,
+                    estimate=cost_est,
+                )
+        except TransactionCostConfigCorrupt:
+            logger.warning(
+                "transaction_cost_config missing — skipping cost record for order_id=%d",
+                order_id,
+            )
 
         fp = broker_result.filled_price
         fu = broker_result.filled_units
