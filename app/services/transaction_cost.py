@@ -289,7 +289,7 @@ def record_estimated_cost(
                 "instrument_id": instrument_id,
                 "estimated_spread_bps": estimate.spread_bps,
                 "estimated_carry_bps": estimate.total_carry_cost_bps,
-                "estimated_fx_bps": estimate.fx_markup_bps,
+                "estimated_fx_bps": estimate.fx_markup_bps * 2,  # round-trip
                 "estimated_total_bps": estimate.total_cost_bps,
                 "cost_breakdown": psycopg.types.json.Jsonb(breakdown),
             },

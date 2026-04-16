@@ -233,6 +233,39 @@ class TestRecordEstimatedCost:
 
         assert isinstance(params["cost_breakdown"], Jsonb)
 
+    def test_fx_bps_stored_as_round_trip(self) -> None:
+        """estimated_fx_bps must store the round-trip FX cost (markup × 2)."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        estimate = CostEstimate(
+            spread_bps=Decimal("30"),
+            overnight_bps_per_day=Decimal("0"),
+            fx_markup_bps=Decimal("50"),
+            estimated_hold_days=90,
+            total_entry_cost_bps=Decimal("130"),  # 30 + 50 * 2
+            total_carry_cost_bps=Decimal("0"),
+            total_cost_bps=Decimal("130"),
+            is_cost_prohibitive=False,
+            prohibitive_reason=None,
+        )
+        record_estimated_cost(
+            conn,
+            order_id=1,
+            recommendation_id=10,
+            instrument_id=100,
+            estimate=estimate,
+        )
+        params = cursor.execute.call_args[0][1]
+        # Components must sum to total: spread + fx_roundtrip + carry = total
+        assert params["estimated_fx_bps"] == Decimal("100")  # 50 * 2
+        assert (
+            params["estimated_spread_bps"] + params["estimated_fx_bps"] + params["estimated_carry_bps"]
+            == params["estimated_total_bps"]
+        )
+
 
 class TestRecordActualCost:
     def test_updates_actual_columns(self) -> None:
