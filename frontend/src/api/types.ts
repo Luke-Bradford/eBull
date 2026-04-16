@@ -51,7 +51,11 @@ export interface ConfigResponse {
 export type LayerStatus = "ok" | "stale" | "empty" | "error";
 export type OverallStatus = "ok" | "degraded" | "down";
 export type JobLastStatus = "running" | "success" | "failure" | "skipped" | null;
-export type CadenceKind = "hourly" | "daily" | "weekly";
+export type CadenceKind =
+  | "hourly"
+  | "daily"
+  | "weekly"
+  | "every_n_minutes";
 
 export interface LayerHealthResponse {
   layer: string;
