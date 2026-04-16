@@ -21,7 +21,7 @@ def _make_xbrl_entry(
     accn: str = "0000320193-24-000042",
     start: str | None = "2024-01-01",
     frame: str | None = "CY2024Q1",
-    decimals: int = -3,
+    decimals: int | str = -3,
 ) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "end": end,
@@ -55,7 +55,7 @@ class TestXbrlFactDataclass:
             filed_date=date(2024, 5, 1),
             fiscal_year=2024,
             fiscal_period="Q1",
-            decimals=-3,
+            decimals="-3",
         )
         assert fact.concept == "Revenues"
         assert fact.period_start == date(2024, 1, 1)
@@ -75,7 +75,7 @@ class TestXbrlFactDataclass:
             filed_date=date(2024, 5, 1),
             fiscal_year=2024,
             fiscal_period="Q1",
-            decimals=-6,
+            decimals="-6",
         )
         assert fact.period_start is None
         assert fact.frame is None
@@ -185,6 +185,21 @@ class TestExtractFactsFromGaap:
     def test_empty_gaap_returns_empty(self) -> None:
         facts = _extract_facts_from_gaap({})
         assert facts == []
+
+    def test_handles_inf_decimals(self) -> None:
+        """XBRL allows 'INF' as decimals value — should be stored as string."""
+        gaap = {
+            "Revenues": {
+                "units": {
+                    "USD": [
+                        _make_xbrl_entry(end="2024-03-31", val=50_000_000.0, decimals="INF"),
+                    ]
+                }
+            }
+        }
+        facts = _extract_facts_from_gaap(gaap)
+        assert len(facts) == 1
+        assert facts[0].decimals == "INF"
 
     def test_missing_required_fields_skips_entry(self) -> None:
         gaap = {

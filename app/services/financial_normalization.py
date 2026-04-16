@@ -57,8 +57,6 @@ _FLOW_COLUMNS: frozenset[str] = frozenset(
         "gross_profit",
         "operating_income",
         "net_income",
-        "eps_basic",
-        "eps_diluted",
         "research_and_dev",
         "sga_expense",
         "depreciation_amort",
@@ -76,6 +74,11 @@ _FLOW_COLUMNS: frozenset[str] = frozenset(
         # belong to the period, but TTM uses latest rather than sum.
     }
 )
+
+# EPS is NOT safely derivable via Q4 = FY - Q1 - Q2 - Q3 because the
+# denominator (share count) changes across periods.  These columns are
+# excluded from Q4 subtraction — use FY EPS values for Q4 instead.
+_NON_DERIVABLE_FLOW: frozenset[str] = frozenset({"eps_basic", "eps_diluted"})
 
 _BALANCE_SHEET_COLUMNS: frozenset[str] = frozenset(
     {
@@ -302,15 +305,27 @@ def _derive_periods_from_facts(
         )
 
         # Derive flow columns: Q4 = FY - Q1 - Q2 - Q3
+        # Only derive when FY AND all three quarters have the column (missing → skip, not zero).
         for col in _FLOW_COLUMNS:
+            if col in _NON_DERIVABLE_FLOW:
+                continue  # EPS not safely subtractive across different share counts
             fy_val = getattr(fy_row, col)
             if fy_val is None:
                 continue
-            q1_val = getattr(q1, col) or Decimal(0)
-            q2_val = getattr(q2, col) or Decimal(0)
-            q3_val = getattr(q3, col) or Decimal(0)
+            q1_val = getattr(q1, col)
+            q2_val = getattr(q2, col)
+            q3_val = getattr(q3, col)
+            if q1_val is None or q2_val is None or q3_val is None:
+                continue  # cannot derive — would overstate Q4
             derived = fy_val - q1_val - q2_val - q3_val
             setattr(q4, col, derived)
+
+        # EPS: use FY values directly for Q4 (approximate; correct derivation
+        # would require share-count weighting which we don't have).
+        for col in _NON_DERIVABLE_FLOW:
+            fy_val = getattr(fy_row, col)
+            if fy_val is not None:
+                setattr(q4, col, fy_val)
 
         # Balance sheet columns: use FY values (they're the same date as Q4 end)
         for col in _BALANCE_SHEET_COLUMNS:
@@ -535,6 +550,10 @@ def _canonical_merge_instrument(
         ON CONFLICT (instrument_id, period_end_date, period_type)
         DO UPDATE SET
             fiscal_year = EXCLUDED.fiscal_year,
+            fiscal_quarter = EXCLUDED.fiscal_quarter,
+            period_start_date = EXCLUDED.period_start_date,
+            months_covered = EXCLUDED.months_covered,
+            reported_currency = EXCLUDED.reported_currency,
             revenue = EXCLUDED.revenue,
             cost_of_revenue = EXCLUDED.cost_of_revenue,
             gross_profit = EXCLUDED.gross_profit,

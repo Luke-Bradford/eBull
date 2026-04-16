@@ -41,7 +41,7 @@ def _make_fact(
         filed_date=filed_date,
         fiscal_year=fiscal_year,
         fiscal_period=fiscal_period,
-        decimals=-3,
+        decimals="-3",
     )
 
 

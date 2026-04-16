@@ -50,7 +50,7 @@ class XbrlFact:
     filed_date: date
     fiscal_year: int | None
     fiscal_period: str | None
-    decimals: int | None
+    decimals: str | None  # XBRL allows non-integer values like "INF"
 
 
 class FundamentalsProvider(ABC):

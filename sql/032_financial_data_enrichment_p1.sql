@@ -43,11 +43,20 @@ CREATE TABLE IF NOT EXISTS financial_facts_raw (
     filed_date           DATE NOT NULL,
     fiscal_year          INTEGER,
     fiscal_period        TEXT,
-    decimals             INTEGER,
+    decimals             TEXT,    -- XBRL allows non-integer values like "INF"
     ingestion_run_id     BIGINT REFERENCES data_ingestion_runs(ingestion_run_id),
     fetched_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(instrument_id, concept, unit, period_end, accession_number)
 );
+
+-- Identity: one fact per instrument/concept/unit/period-range/filing.
+-- period_start is NULL for instant facts, so COALESCE makes NULLs comparable
+-- (plain UNIQUE treats NULLs as distinct, which would allow duplicate instants).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_facts_raw_identity
+    ON financial_facts_raw(
+        instrument_id, concept, unit,
+        COALESCE(period_start, '0001-01-01'::date),
+        period_end, accession_number
+    );
 
 CREATE INDEX IF NOT EXISTS idx_facts_raw_instrument_concept
     ON financial_facts_raw(instrument_id, concept, period_end DESC);
@@ -423,6 +432,7 @@ new_pipeline AS (
 
     FROM priced p
     JOIN financial_periods_ttm ttm USING (instrument_id)
+    WHERE ttm.is_complete_ttm = TRUE
 ),
 -- Legacy fallback: old fundamentals_snapshot (used until new pipeline is populated)
 legacy AS (
@@ -496,6 +506,7 @@ legacy AS (
     WHERE NOT EXISTS (
         SELECT 1 FROM financial_periods_ttm ttm
         WHERE ttm.instrument_id = p.instrument_id
+          AND ttm.is_complete_ttm = TRUE
     )
     ORDER BY fs.instrument_id, fs.as_of_date DESC
 ),

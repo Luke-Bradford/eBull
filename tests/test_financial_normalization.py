@@ -317,6 +317,146 @@ class TestDeriveQ4EdgeCases:
         q4 = next(p for p in periods if p.period_type == "Q4")
         assert q4.total_assets == Decimal("999")
 
+    def test_q4_derivation_skips_column_when_quarter_missing(self) -> None:
+        """If Q2 lacks revenue but Q1+Q3+FY have it, Q4 revenue is NOT derived
+        (it would be overstated if we treated missing as zero)."""
+        facts = [
+            _fact(
+                concept="Revenues",
+                fiscal_period="Q1",
+                val=Decimal("100"),
+                period_end="2024-03-31",
+                period_start="2024-01-01",
+                frame="CY2024Q1",
+                accession_number="q1",
+            ),
+            # Q2 has gross_profit but NOT revenue
+            _fact(
+                concept="GrossProfit",
+                fiscal_period="Q2",
+                val=Decimal("50"),
+                period_end="2024-06-30",
+                period_start="2024-04-01",
+                frame="CY2024Q2",
+                accession_number="q2",
+            ),
+            _fact(
+                concept="Revenues",
+                fiscal_period="Q3",
+                val=Decimal("110"),
+                period_end="2024-09-30",
+                period_start="2024-07-01",
+                frame="CY2024Q3",
+                accession_number="q3",
+            ),
+            _fact(
+                concept="Revenues",
+                fiscal_period="FY",
+                fiscal_year=2024,
+                val=Decimal("500"),
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame="CY2024",
+                form_type="10-K",
+                accession_number="fy",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        q4 = next(p for p in periods if p.period_type == "Q4")
+        # Revenue should NOT be derived — Q2 is missing
+        assert q4.revenue is None
+
+    def test_q4_derivation_uses_fy_eps_not_subtraction(self) -> None:
+        """EPS is not safely subtractive across periods with different share
+        counts, so derived Q4 should use FY EPS values directly."""
+        facts = [
+            _fact(
+                concept="EarningsPerShareDiluted",
+                fiscal_period="Q1",
+                val=Decimal("1.50"),
+                period_end="2024-03-31",
+                period_start="2024-01-01",
+                frame="CY2024Q1",
+                accession_number="q1",
+                unit="USD/shares",
+            ),
+            _fact(
+                concept="EarningsPerShareDiluted",
+                fiscal_period="Q2",
+                val=Decimal("1.60"),
+                period_end="2024-06-30",
+                period_start="2024-04-01",
+                frame="CY2024Q2",
+                accession_number="q2",
+                unit="USD/shares",
+            ),
+            _fact(
+                concept="EarningsPerShareDiluted",
+                fiscal_period="Q3",
+                val=Decimal("1.70"),
+                period_end="2024-09-30",
+                period_start="2024-07-01",
+                frame="CY2024Q3",
+                accession_number="q3",
+                unit="USD/shares",
+            ),
+            _fact(
+                concept="EarningsPerShareDiluted",
+                fiscal_period="FY",
+                fiscal_year=2024,
+                val=Decimal("6.50"),
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame="CY2024",
+                form_type="10-K",
+                accession_number="fy",
+                unit="USD/shares",
+            ),
+            # Need revenue facts so Q4 derivation triggers
+            _fact(
+                concept="Revenues",
+                fiscal_period="Q1",
+                val=Decimal("100"),
+                period_end="2024-03-31",
+                period_start="2024-01-01",
+                frame="CY2024Q1",
+                accession_number="q1",
+            ),
+            _fact(
+                concept="Revenues",
+                fiscal_period="Q2",
+                val=Decimal("120"),
+                period_end="2024-06-30",
+                period_start="2024-04-01",
+                frame="CY2024Q2",
+                accession_number="q2",
+            ),
+            _fact(
+                concept="Revenues",
+                fiscal_period="Q3",
+                val=Decimal("110"),
+                period_end="2024-09-30",
+                period_start="2024-07-01",
+                frame="CY2024Q3",
+                accession_number="q3",
+            ),
+            _fact(
+                concept="Revenues",
+                fiscal_period="FY",
+                fiscal_year=2024,
+                val=Decimal("500"),
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame="CY2024",
+                form_type="10-K",
+                accession_number="fy",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        q4 = next(p for p in periods if p.period_type == "Q4")
+        # EPS should be FY value (6.50), NOT 6.50 - 1.50 - 1.60 - 1.70 = 1.70
+        assert q4.eps_diluted == Decimal("6.50")
+
 
 class TestMultiYearNormalization:
     def test_multiple_fiscal_years(self) -> None:

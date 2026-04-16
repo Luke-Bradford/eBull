@@ -194,7 +194,7 @@ def _extract_facts_from_gaap(gaap: dict[str, Any]) -> list[XbrlFact]:
                         filed_date=filed_date,
                         fiscal_year=entry.get("fy"),
                         fiscal_period=entry.get("fp"),
-                        decimals=entry.get("decimals"),
+                        decimals=str(entry["decimals"]) if "decimals" in entry else None,
                     )
                 )
     return facts

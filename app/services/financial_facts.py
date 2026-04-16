@@ -116,7 +116,11 @@ def _upsert_facts(
                 %(fiscal_year)s, %(fiscal_period)s, %(decimals)s,
                 %(ingestion_run_id)s
             )
-            ON CONFLICT (instrument_id, concept, unit, period_end, accession_number)
+            ON CONFLICT (
+                instrument_id, concept, unit,
+                COALESCE(period_start, '0001-01-01'::date),
+                period_end, accession_number
+            )
             DO UPDATE SET
                 val = EXCLUDED.val,
                 frame = EXCLUDED.frame,
