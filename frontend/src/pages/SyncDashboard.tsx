@@ -229,7 +229,15 @@ export function SyncDashboard() {
                   </div>
                   <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                     {group.map((layer) => (
-                      <LayerCard key={layer.name} layer={layer} />
+                      <LayerCard
+                        key={layer.name}
+                        layer={layer}
+                        activeProgress={
+                          status.data?.active_layer?.name === layer.name
+                            ? status.data.active_layer
+                            : null
+                        }
+                      />
                     ))}
                   </div>
                 </div>
@@ -305,9 +313,33 @@ export function SyncDashboard() {
   );
 }
 
-function LayerCard({ layer }: { layer: SyncLayer }) {
-  const border = layer.is_fresh ? "border-emerald-200" : "border-amber-200";
-  const dot = layer.is_fresh ? "bg-emerald-500" : "bg-amber-500";
+interface ActiveLayerProgress {
+  name: string;
+  started_at: string | null;
+  items_total: number | null;
+  items_done: number | null;
+}
+
+function LayerCard({
+  layer,
+  activeProgress,
+}: {
+  layer: SyncLayer;
+  activeProgress: ActiveLayerProgress | null;
+}) {
+  // "Running" wins visually over fresh/stale so the operator can see
+  // the layer that is currently moving, regardless of its prior state.
+  const isRunning = activeProgress !== null;
+  const border = isRunning
+    ? "border-sky-300"
+    : layer.is_fresh
+      ? "border-emerald-200"
+      : "border-amber-200";
+  const dot = isRunning
+    ? "bg-sky-500"
+    : layer.is_fresh
+      ? "bg-emerald-500"
+      : "bg-amber-500";
   return (
     <div
       className={`rounded border ${border} bg-white p-3 text-sm shadow-sm`}
@@ -316,7 +348,7 @@ function LayerCard({ layer }: { layer: SyncLayer }) {
         <span className="font-medium text-slate-800">{layer.display_name}</span>
         <span className="flex items-center gap-1">
           <span className="sr-only">
-            {layer.is_fresh ? "fresh" : "stale"}
+            {isRunning ? "running" : layer.is_fresh ? "fresh" : "stale"}
           </span>
           <span className={`h-2 w-2 rounded-full ${dot}`} aria-hidden />
         </span>
@@ -327,6 +359,7 @@ function LayerCard({ layer }: { layer: SyncLayer }) {
       >
         {layer.freshness_detail}
       </p>
+      {isRunning && <LayerProgressBar progress={activeProgress} />}
       <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-400">
         {layer.last_success_at && (
           <span title={layer.last_success_at}>
@@ -347,6 +380,54 @@ function LayerCard({ layer }: { layer: SyncLayer }) {
           deps: {layer.dependencies.join(", ")}
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * Progress bar for an active layer.
+ *
+ * Renders three shapes depending on what the adapter has reported:
+ *   - "starting…" while items_done is null (the initial tick has not
+ *     landed, or the layer just installed the callback).
+ *   - "N items" as a plain counter when items_total is null (the
+ *     adapter does not know the total — e.g. non-item-oriented work).
+ *   - A proportional bar when both items_done and items_total are
+ *     known. Width is capped at 100% so an adapter that misreports
+ *     items_done > items_total never blows past the visible track.
+ */
+function LayerProgressBar({ progress }: { progress: ActiveLayerProgress }) {
+  const { items_done, items_total } = progress;
+  if (items_done === null) {
+    return <p className="mt-2 text-xs text-sky-600">starting…</p>;
+  }
+  if (items_total === null || items_total === 0) {
+    return (
+      <p className="mt-2 text-xs text-sky-600">{items_done} items processed</p>
+    );
+  }
+  const pct = Math.min(100, Math.round((items_done / items_total) * 100));
+  return (
+    <div className="mt-2">
+      <div className="flex items-center justify-between text-xs text-sky-600">
+        <span>
+          {items_done} / {items_total}
+        </span>
+        <span>{pct}%</span>
+      </div>
+      <div
+        className="mt-1 h-1.5 w-full overflow-hidden rounded bg-sky-100"
+        role="progressbar"
+        aria-valuenow={pct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={`${progress.name} progress`}
+      >
+        <div
+          className="h-full bg-sky-500 transition-[width] duration-500"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
     </div>
   );
 }

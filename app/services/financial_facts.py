@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 import psycopg
 
 from app.providers.fundamentals import XbrlFact
+from app.services.sync_orchestrator.progress import report_progress
 
 if TYPE_CHECKING:
     from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
@@ -182,8 +183,9 @@ def refresh_financial_facts(
     total_upserted = 0
     total_skipped = 0
     failed = 0
+    total = len(symbols)
 
-    for symbol, instrument_id, cik in symbols:
+    for idx, (symbol, instrument_id, cik) in enumerate(symbols, start=1):
         try:
             with conn.transaction():
                 facts = provider.extract_facts(symbol, cik)
@@ -207,6 +209,9 @@ def refresh_financial_facts(
         except Exception:
             failed += 1
             logger.exception("Failed to refresh SEC facts for %s", symbol)
+        report_progress(idx, total)
+
+    report_progress(total, total, force=True)
 
     status = "success" if failed == 0 else ("partial" if total_upserted > 0 else "failed")
     _finish_ingestion_run(
