@@ -239,39 +239,19 @@ class TestLoadReportSnapshots:
 # ---------------------------------------------------------------------------
 
 
-class TestReportSchedulerJobs:
-    def test_weekly_report_job_registered(self) -> None:
-        """weekly_report job should be in SCHEDULED_JOBS."""
-        from app.workers.scheduler import SCHEDULED_JOBS
+class TestReportJobsAvailability:
+    """weekly_report and monthly_report used to be scheduled directly;
+    since Phase 4 they are driven by the orchestrator full sync (via
+    JOB_TO_LAYERS → weekly_reports / monthly_reports layers). They
+    remain in _INVOKERS so POST /jobs/{name}/run continues to work."""
 
-        names = [j.name for j in SCHEDULED_JOBS]
-        assert "weekly_report" in names
+    def test_reports_available_via_orchestrator(self) -> None:
+        from app.services.sync_orchestrator.registry import JOB_TO_LAYERS
 
-    def test_monthly_report_job_registered(self) -> None:
-        """monthly_report job should be in SCHEDULED_JOBS."""
-        from app.workers.scheduler import SCHEDULED_JOBS
+        assert JOB_TO_LAYERS["weekly_report"] == ("weekly_reports",)
+        assert JOB_TO_LAYERS["monthly_report"] == ("monthly_reports",)
 
-        names = [j.name for j in SCHEDULED_JOBS]
-        assert "monthly_report" in names
-
-    def test_weekly_report_cadence(self) -> None:
-        """weekly_report should run Saturday morning."""
-        from app.workers.scheduler import SCHEDULED_JOBS
-
-        job = next(j for j in SCHEDULED_JOBS if j.name == "weekly_report")
-        assert job.cadence.kind == "weekly"
-        assert job.cadence.weekday == 5  # Saturday
-
-    def test_monthly_report_cadence(self) -> None:
-        """monthly_report should run on the 1st of each month."""
-        from app.workers.scheduler import SCHEDULED_JOBS
-
-        job = next(j for j in SCHEDULED_JOBS if j.name == "monthly_report")
-        assert job.cadence.kind == "monthly"
-        assert job.cadence.day == 1
-
-    def test_drift_guard_invokers_match(self) -> None:
-        """Both new jobs must have entries in _INVOKERS."""
+    def test_reports_still_in_invokers(self) -> None:
         from app.jobs.runtime import _INVOKERS
 
         assert "weekly_report" in _INVOKERS

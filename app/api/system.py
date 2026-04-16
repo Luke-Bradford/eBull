@@ -112,7 +112,7 @@ class JobOverviewResponse(BaseModel):
     name: str
     description: str
     cadence: str
-    cadence_kind: Literal["hourly", "daily", "weekly", "monthly"]
+    cadence_kind: Literal["every_n_minutes", "hourly", "daily", "weekly", "monthly"]
     next_run_time: datetime
     next_run_time_source: Literal["live", "declared"]
     last_status: Literal["running", "success", "failure", "skipped"] | None

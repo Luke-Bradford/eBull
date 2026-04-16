@@ -93,7 +93,7 @@ logger = logging.getLogger(__name__)
 # next-fire-time from APScheduler; ``compute_next_run`` is retained as
 # a pure utility for catch-up-on-boot and tests.
 
-CadenceKind = Literal["hourly", "daily", "weekly", "monthly"]
+CadenceKind = Literal["every_n_minutes", "hourly", "daily", "weekly", "monthly"]
 
 
 @dataclass(frozen=True)
@@ -110,6 +110,17 @@ class Cadence:
     hour: int = 0
     weekday: int = 0  # 0=Mon (matches datetime.weekday())
     day: int = 0  # 1..28 for monthly cadence
+    interval_minutes: int = 0  # every_n_minutes cadence (e.g. 5 for every 5 min)
+
+    @classmethod
+    def every_n_minutes(cls, *, interval: int) -> Cadence:
+        """Cron-style sub-hourly cadence — e.g. interval=5 fires at
+        :00, :05, :10, … every hour. Used by orchestrator_high_frequency_sync."""
+        if interval < 1 or interval > 30:
+            raise ValueError(f"every_n_minutes interval must be 1..30, got {interval}")
+        if 60 % interval != 0:
+            raise ValueError(f"every_n_minutes interval must divide 60 evenly, got {interval}")
+        return cls(kind="every_n_minutes", interval_minutes=interval)
 
     @classmethod
     def hourly(cls, *, minute: int = 0) -> Cadence:
@@ -148,6 +159,8 @@ class Cadence:
     @property
     def label(self) -> str:
         """Human-readable label for API responses."""
+        if self.kind == "every_n_minutes":
+            return f"every {self.interval_minutes}m"
         if self.kind == "hourly":
             return f"hourly at :{self.minute:02d} UTC"
         if self.kind == "daily":
@@ -209,6 +222,8 @@ JOB_WEEKLY_REPORT = "weekly_report"
 JOB_MONTHLY_REPORT = "monthly_report"
 JOB_SEED_COST_MODELS = "seed_cost_models"
 JOB_DAILY_FINANCIAL_FACTS = "daily_financial_facts"
+JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
+JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC = "orchestrator_high_frequency_sync"
 
 
 # ---------------------------------------------------------------------------
@@ -353,63 +368,31 @@ def _has_positions_or_attributions(conn: psycopg.Connection[Any]) -> Prerequisit
 # until APScheduler is wired — the values are stable enough for operator UI
 # planning but should not be treated as the live truth. See module docstring.
 SCHEDULED_JOBS: list[ScheduledJob] = [
-    # -- Always-on: data infrastructure, no prerequisites ----------------
-    # nightly_universe_sync is on-demand only (eToro's instrument list
-    # barely changes).  It stays in _INVOKERS for "Run now" in the Admin UI.
+    # -- Orchestrator triggers (Phase 4 — replaces 12 legacy cron jobs) --
+    # Single daily full-DAG sync at 03:00 UTC. The orchestrator plans
+    # which layers are stale and refreshes only those, in topological
+    # order. Replaces the 12 removed legacy entries that mapped to
+    # non-empty JOB_TO_LAYERS values (see spec §4.5). The 13th in-DAG
+    # adapter is nightly_universe_sync, which was already on-demand
+    # only before Phase 4 — it remains in _INVOKERS for the Admin UI.
     ScheduledJob(
-        name=JOB_DAILY_CIK_REFRESH,
-        description="Refresh the SEC ticker→CIK mapping in external_identifiers.",
+        name=JOB_ORCHESTRATOR_FULL_SYNC,
+        description="Orchestrator full sync — walks the DAG and refreshes stale layers.",
         cadence=Cadence.daily(hour=3, minute=0),
     ),
-    # -- Pipeline: skip when upstream data is absent ---------------------
+    # Every-5-minutes refresh of independent high-frequency layers
+    # (portfolio_sync + fx_rates). The orchestrator's partial unique
+    # index gate ensures this cannot overlap with a still-running FULL
+    # sync — the wrapper catches SyncAlreadyRunning and logs.
     ScheduledJob(
-        name=JOB_DAILY_CANDLE_REFRESH,
-        description="Fetch daily candles for all active Tier 1/2 instruments after US market close.",
-        cadence=Cadence.daily(hour=22, minute=0),
-        prerequisite=_has_coverage_tier12,
+        name=JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
+        description="Orchestrator high-frequency sync — portfolio_sync + fx_rates every 5 minutes.",
+        cadence=Cadence.every_n_minutes(interval=5),
+        catch_up_on_boot=False,
     ),
-    ScheduledJob(
-        name=JOB_FX_RATES_REFRESH,
-        description="Refresh live FX rates (Frankfurter primary, eToro secondary).",
-        cadence=Cadence.hourly(minute=0),
-        # No prerequisite: Frankfurter FX is independent of instrument coverage.
-        # The eToro quote refresh inside the job self-guards on coverage.
-    ),
-    ScheduledJob(
-        name=JOB_DAILY_RESEARCH_REFRESH,
-        description="Refresh fundamentals and filings for all tradable instruments.",
-        cadence=Cadence.daily(hour=3, minute=30),
-        prerequisite=_has_any_coverage,
-    ),
-    ScheduledJob(
-        name=JOB_DAILY_FINANCIAL_FACTS,
-        description="Fetch expanded SEC XBRL facts and normalize into financial periods.",
-        cadence=Cadence.daily(hour=3, minute=45),
-        prerequisite=_has_any_coverage,
-    ),
-    ScheduledJob(
-        name=JOB_DAILY_NEWS_REFRESH,
-        description="Fetch, deduplicate, and score news events for active Tier 1/2 instruments.",
-        cadence=Cadence.daily(hour=4, minute=0),
-        prerequisite=_has_coverage_tier12,
-    ),
-    ScheduledJob(
-        name=JOB_DAILY_THESIS_REFRESH,
-        description="Regenerate theses for stale Tier 1/2 instruments.",
-        cadence=Cadence.daily(hour=4, minute=30),
-        prerequisite=_has_coverage_tier12,
-    ),
-    ScheduledJob(
-        name=JOB_DAILY_PORTFOLIO_SYNC,
-        description="Sync positions and cash from eToro broker to local state.",
-        cadence=Cadence.daily(hour=5, minute=30),
-    ),
-    ScheduledJob(
-        name=JOB_MORNING_CANDIDATE_REVIEW,
-        description="Re-score, rank, and generate trade recommendations for Tier 1 candidates.",
-        cadence=Cadence.daily(hour=6, minute=0),
-        prerequisite=_has_scoreable_instruments,
-    ),
+    # -- Outside-DAG jobs (5 kept on their own cron triggers) ------------
+    # These have empty JOB_TO_LAYERS entries and remain independently
+    # scheduled; they do not participate in the orchestrator DAG.
     ScheduledJob(
         name=JOB_EXECUTE_APPROVED_ORDERS,
         description="Guard and execute actionable trade recommendations.",
@@ -446,26 +429,6 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         prerequisite=_has_attributions,
         catch_up_on_boot=False,
     ),
-    # -- Reporting: generate periodic reports when there's data to report on --
-    ScheduledJob(
-        name=JOB_WEEKLY_REPORT,
-        description="Generate weekly performance report snapshot.",
-        cadence=Cadence.weekly(weekday=5, hour=7, minute=0),  # Saturday 07:00
-        prerequisite=_has_positions_or_attributions,
-    ),
-    ScheduledJob(
-        name=JOB_MONTHLY_REPORT,
-        description="Generate monthly performance report snapshot.",
-        cadence=Cadence.monthly(day=1, hour=7, minute=0),  # 1st of month 07:00
-        prerequisite=_has_positions_or_attributions,
-    ),
-    # -- Cost model maintenance --
-    ScheduledJob(
-        name=JOB_SEED_COST_MODELS,
-        description="Refresh per-instrument cost models from current quote spreads.",
-        cadence=Cadence.daily(hour=6, minute=15),
-        prerequisite=_has_tier1_coverage,
-    ),
     # -- On-demand jobs are NOT listed here.  They stay in _INVOKERS
     # (runtime.py) so "Run now" in the Admin UI works, but they are
     # not registered with APScheduler and do not participate in
@@ -488,6 +451,18 @@ def compute_next_run(cadence: Cadence, now: datetime) -> datetime:
     if now.tzinfo is None:
         raise ValueError("compute_next_run requires a timezone-aware 'now'")
     now_utc = now.astimezone(UTC)
+
+    if cadence.kind == "every_n_minutes":
+        # Next slot is the smallest k*interval minute past the current hour
+        # that is strictly after now.
+        interval = cadence.interval_minutes
+        candidate = now_utc.replace(second=0, microsecond=0)
+        next_minute = ((now_utc.minute // interval) + 1) * interval
+        if next_minute >= 60:
+            candidate = candidate.replace(minute=0) + timedelta(hours=1)
+        else:
+            candidate = candidate.replace(minute=next_minute)
+        return candidate
 
     if cadence.kind == "hourly":
         candidate = now_utc.replace(minute=cadence.minute, second=0, microsecond=0)
@@ -2177,4 +2152,53 @@ def seed_cost_models() -> None:
             "seed_cost_models: processed=%d skipped=%d",
             result["processed"],
             result["skipped"],
+        )
+
+
+def orchestrator_full_sync() -> None:
+    """Scheduled job: full DAG sync via the orchestrator.
+
+    Replaces 12 legacy cron triggers removed in Phase 4. Runs
+    `run_sync(FULL, trigger='scheduled')` which plans, executes, and
+    finalizes synchronously in this worker thread. Any layer failure
+    is recorded in `sync_runs` / `sync_layer_progress`; the
+    `_safe_run_and_finalize` wrapper ensures the partial unique index
+    gate always releases, even on crash.
+    """
+    from app.services.sync_orchestrator import SyncScope, run_sync
+
+    logger.info("orchestrator_full_sync: starting")
+    result = run_sync(SyncScope.full(), trigger="scheduled")
+    logger.info(
+        "orchestrator_full_sync complete: sync_run_id=%d outcomes=%d",
+        result.sync_run_id,
+        len(result.outcomes),
+    )
+
+
+def orchestrator_high_frequency_sync() -> None:
+    """Scheduled job: refresh portfolio_sync + fx_rates every 5 minutes
+    via the orchestrator. Runs `run_sync(HIGH_FREQUENCY, trigger='scheduled')`.
+
+    The orchestrator's partial unique index gate ensures this cannot
+    overlap with a still-running FULL sync — it returns early via
+    SyncAlreadyRunning, which this wrapper catches and logs.
+    """
+    from app.services.sync_orchestrator import (
+        SyncAlreadyRunning,
+        SyncScope,
+        run_sync,
+    )
+
+    try:
+        result = run_sync(SyncScope.high_frequency(), trigger="scheduled")
+        logger.info(
+            "orchestrator_high_frequency_sync complete: sync_run_id=%d outcomes=%d",
+            result.sync_run_id,
+            len(result.outcomes),
+        )
+    except SyncAlreadyRunning as exc:
+        logger.info(
+            "orchestrator_high_frequency_sync skipped: sync %s already running",
+            exc.active_sync_run_id,
         )
