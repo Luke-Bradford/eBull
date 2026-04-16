@@ -658,6 +658,42 @@ class TestExecuteOrderLiveMode:
         sql = cost_insert_cursor.__enter__.return_value.execute.call_args[0][0]
         assert "INSERT INTO trade_cost_record" in sql
 
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_cost_insert_failure_does_not_abort_fill(self, _mock_now: MagicMock) -> None:
+        """A DB error during record_estimated_cost must not prevent the fill.
+
+        The cost recording block runs inside a savepoint.  If the cost INSERT
+        raises, the savepoint rolls back and the outer transaction stays
+        intact — _persist_fill still executes.
+        """
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-COST-FAIL",
+            status="filled",
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            fees=Decimal("1.50"),
+            raw_payload={"orderId": "ORD-COST-FAIL"},
+        )
+        # Cost INSERT cursor raises on execute — simulates a DB error.
+        bad_cost_cursor = _make_cursor([])
+        bad_cost_cursor.__enter__.return_value.execute.side_effect = Exception("FK violation")
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=10),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, bid=99.5, ask=100.5, spread_pct=0.30),
+            bad_cost_cursor,  # record_estimated_cost INSERT — will raise
+            _fill_returning_cursor(fill_id=6),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+        # Fill must succeed despite cost recording failure.
+        assert result.outcome == "filled"
+        assert result.fill_id == 6
+
     @patch("app.services.order_client._maybe_trigger_attribution")
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_live_exit_calls_broker_close_position(self, _mock_now: MagicMock, _mock_attr: MagicMock) -> None:
