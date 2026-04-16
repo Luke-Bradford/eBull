@@ -23,10 +23,11 @@ Rule application by action:
     - no_coverage_row       — no coverage row exists at all
     - thesis_stale          — latest thesis older than freshness window
     - no_thesis             — no thesis row exists
-    - spread_wide           — quotes.spread_flag is TRUE
-    - spread_unavailable    — no quotes row or spread_flag is NULL
-    - budget_available      — budget exhausted or unknown (accounts for tax + buffer)
-    - concentration_breach  — post-action sector exposure would exceed 25% AUM
+    - spread_wide                  — quotes.spread_flag is TRUE
+    - spread_unavailable           — no quotes row or spread_flag is NULL
+    - transaction_cost_prohibitive — estimated cost exceeds threshold or return/cost ratio too low
+    - budget_available             — budget exhausted or unknown (accounts for tax + buffer)
+    - concentration_breach         — post-action sector exposure would exceed 25% AUM
 
   EXIT:
     - above kill switch / config rules only; thesis, coverage, spread, and
@@ -433,8 +434,9 @@ def _check_transaction_cost(
     elif quote is not None and quote.get("spread_pct") is not None:
         converted = spread_pct_to_bps(quote["spread_pct"])
         # spread_pct_to_bps returns None only when input is None, which the
-        # guard above already excluded.  Assert for pyright narrowing.
-        assert converted is not None  # pragma: no cover
+        # guard above already excluded.
+        if converted is None:  # pragma: no cover
+            raise RuntimeError("spread_pct_to_bps returned None for non-None input")
         spread_bps = converted
         overnight_rate = Decimal("0")
         fx_markup_bps = Decimal("0")

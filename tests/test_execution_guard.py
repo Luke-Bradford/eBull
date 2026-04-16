@@ -651,7 +651,24 @@ class TestTransactionCostRule:
                 "default_hold_days": 90,
             },
         )
+        # 1.2% spread = 120 bps < 150 threshold → passes via quote fallback
         assert result.passed is True
+        assert "120" in result.detail
+
+    def test_cost_rule_fails_via_quote_spread_fallback(self) -> None:
+        """Quote spread exceeds threshold when no cost_model row exists."""
+        result = _check_transaction_cost(
+            quote={"spread_pct": Decimal("2.0"), "spread_flag": True},
+            cost_model_row=None,
+            cost_config={
+                "max_total_cost_bps": Decimal("150"),
+                "min_return_vs_cost_ratio": Decimal("3.0"),
+                "default_hold_days": 90,
+            },
+        )
+        # 2.0% spread = 200 bps > 150 threshold → fails
+        assert result.passed is False
+        assert "200" in result.detail
 
     def test_cost_rule_fails_closed_when_no_quote(self) -> None:
         result = _check_transaction_cost(
@@ -893,6 +910,12 @@ class TestEvaluateRecommendation:
         result = self._eval(cursors)
         assert result.verdict == "FAIL"
         assert "budget_available" in result.failed_rules
+
+    def test_cost_config_corrupt_fails_buy(self) -> None:
+        cursors = _buy_cursors(cost_config_corrupt=True)
+        result = self._eval(cursors)
+        assert result.verdict == "FAIL"
+        assert "transaction_cost_prohibitive" in result.failed_rules
 
     def test_budget_does_not_fail_exit(self) -> None:
         result = self._eval(_exit_cursors())
