@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS cost_model (
     cost_model_id    BIGSERIAL      PRIMARY KEY,
     instrument_id    BIGINT         NOT NULL REFERENCES instruments(instrument_id),
     spread_bps       NUMERIC(10,4)  NOT NULL,
-    overnight_rate   NUMERIC(10,6)  NOT NULL DEFAULT 0,
+    overnight_rate   NUMERIC(10,6)  NOT NULL DEFAULT 0,  -- bps per day
     fx_pair          TEXT,
     fx_markup_bps    NUMERIC(10,4)  NOT NULL DEFAULT 0,
     valid_from       TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
@@ -27,6 +27,11 @@ CREATE TABLE IF NOT EXISTS cost_model (
 
 CREATE INDEX IF NOT EXISTS idx_cost_model_instrument_active
     ON cost_model(instrument_id, valid_from DESC)
+    WHERE valid_to IS NULL;
+
+-- Enforce one active row per instrument at the DB level.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cost_model_one_active
+    ON cost_model(instrument_id)
     WHERE valid_to IS NULL;
 
 -- Singleton cost config

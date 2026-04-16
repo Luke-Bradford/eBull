@@ -37,6 +37,11 @@ Cursor call order inside execute_order (demo EXIT):
   7. record_estimated_cost          — cursor (INSERT, no fetchone)
   8. _persist_fill                  — fetchone (INSERT RETURNING)
   9. conn.execute x4                — position update, cash_ledger, rec status, audit
+
+Live mode cursor sequences are similar but without step 3 in the main path
+(no _load_quote_for_execution for the fill). Instead, when cost_model_row is
+None, _load_quote_for_execution is called in the cost-recording fallback path
+(between steps 6 and 7).
 """
 
 from __future__ import annotations
@@ -456,7 +461,8 @@ class TestExecuteOrderDemoMode:
             # Inside transaction: order persisted, no fill (zero units)
             _order_returning_cursor(order_id=9),
             _cost_config_cursor(),
-            _cost_model_cursor(),  # no cost_model → s_bps=None, no record_estimated_cost
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _make_cursor([]),  # cost fallback: no quote either → s_bps=None, no record
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -612,7 +618,9 @@ class TestExecuteOrderLiveMode:
             # broker called (no cursor)
             _order_returning_cursor(order_id=10),
             _cost_config_cursor(),
-            _cost_model_cursor(),  # no cost_model, quote_data=None → s_bps=None, no record
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, bid=99.5, ask=100.5, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
             _fill_returning_cursor(fill_id=6),
         ]
         conn = _make_conn(cursors)
@@ -625,6 +633,36 @@ class TestExecuteOrderLiveMode:
         assert result.outcome == "filled"
         assert result.broker_order_ref == "ORD-123"
         broker.place_order.assert_called_once()
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_live_buy_records_cost_from_quote_fallback(self, _mock_now: MagicMock) -> None:
+        """Live mode with no cost_model falls back to quote spread_pct for cost recording."""
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-789",
+            status="filled",
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            fees=Decimal("1.50"),
+            raw_payload={"orderId": "ORD-789"},
+        )
+        cost_insert_cursor = _make_cursor([])
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=10),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, bid=99.5, ask=100.5, spread_pct=0.30),
+            cost_insert_cursor,  # record_estimated_cost INSERT
+            _fill_returning_cursor(fill_id=6),
+        ]
+        conn = _make_conn(cursors)
+        execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+        # Verify the cost record INSERT was called
+        cost_insert_cursor.__enter__.return_value.execute.assert_called_once()
+        sql = cost_insert_cursor.__enter__.return_value.execute.call_args[0][0]
+        assert "INSERT INTO trade_cost_record" in sql
 
     @patch("app.services.order_client._maybe_trigger_attribution")
     @patch("app.services.order_client._utcnow", return_value=_NOW)
@@ -646,7 +684,9 @@ class TestExecuteOrderLiveMode:
             # broker called (no cursor)
             _order_returning_cursor(order_id=11),
             _cost_config_cursor(),
-            _cost_model_cursor(),  # no cost_model, quote_data=None → s_bps=None, no record
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=200.0, bid=199.0, ask=201.0, spread_pct=0.50),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
             _fill_returning_cursor(fill_id=7),
             # Post-fill: read current_units for attribution check
             _make_cursor([{"current_units": 0}]),
@@ -673,7 +713,9 @@ class TestExecuteOrderLiveMode:
             # broker NOT called — broker_result is constructed inline as failed
             _order_returning_cursor(order_id=12),
             _cost_config_cursor(),
-            _cost_model_cursor(),  # no cost_model, quote_data=None → s_bps=None, no record
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=150.0, bid=149.0, ask=151.0, spread_pct=0.40),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -735,7 +777,9 @@ class TestExecuteOrderFailures:
             _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=12),
             _cost_config_cursor(),
-            _cost_model_cursor(),  # no cost_model, quote_data=None → s_bps=None, no record
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -769,7 +813,9 @@ class TestExecuteOrderFailures:
             _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=13),
             _cost_config_cursor(),
-            _cost_model_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -818,7 +864,9 @@ class TestExecuteOrderFailures:
             _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=14),
             _cost_config_cursor(),
-            _cost_model_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -848,7 +896,9 @@ class TestExecuteOrderFailures:
             _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=15),
             _cost_config_cursor(),
-            _cost_model_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
         ]
         conn = _make_conn(cursors)
         execute_order(

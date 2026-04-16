@@ -792,12 +792,15 @@ def execute_order(
                 s_bps = cost_model_row["spread_bps"]
                 o_rate = cost_model_row["overnight_rate"]
                 fx_bps = cost_model_row["fx_markup_bps"]
-            elif quote_data is not None and quote_data.get("spread_pct") is not None:
-                s_bps = spread_pct_to_bps(Decimal(str(quote_data["spread_pct"])))
-                o_rate = Decimal("0")
-                fx_bps = Decimal("0")
             else:
-                s_bps = None
+                # No cost_model row — fall back to quote spread_pct.
+                # In live mode quote_data is not loaded for the fill,
+                # so load it here for cost recording.
+                qd = quote_data if quote_data is not None else _load_quote_for_execution(conn, instrument_id)
+                if qd is not None and qd.get("spread_pct") is not None:
+                    s_bps = spread_pct_to_bps(Decimal(str(qd["spread_pct"])))
+                else:
+                    s_bps = None
                 o_rate = Decimal("0")
                 fx_bps = Decimal("0")
 
