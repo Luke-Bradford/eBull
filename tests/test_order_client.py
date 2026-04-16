@@ -231,6 +231,61 @@ class TestSyntheticFill:
 
 
 # ---------------------------------------------------------------------------
+# TestSyntheticFillSpreadCost
+# ---------------------------------------------------------------------------
+
+
+class TestSyntheticFillSpreadCost:
+    def test_buy_fills_at_ask_with_spread_fee(self) -> None:
+        result = _synthetic_fill(
+            instrument_id=123,
+            action="BUY",
+            quote_price=Decimal("100.00"),
+            requested_amount=Decimal("1000"),
+            requested_units=None,
+            bid=Decimal("99.80"),
+            ask=Decimal("100.20"),
+        )
+        # BUY fills at ask
+        assert result.filled_price == Decimal("100.20")
+        # units = 1000 / 100.20
+        expected_units = (Decimal("1000") / Decimal("100.20")).quantize(Decimal("0.000001"))
+        assert result.filled_units == expected_units
+        # Spread cost = (ask - bid) / 2 * units
+        spread_per_unit = (Decimal("100.20") - Decimal("99.80")) / 2
+        expected_fees = (spread_per_unit * expected_units).quantize(Decimal("0.000001"))
+        assert result.fees == expected_fees
+
+    def test_exit_fills_at_bid_with_spread_fee(self) -> None:
+        result = _synthetic_fill(
+            instrument_id=123,
+            action="EXIT",
+            quote_price=Decimal("100.00"),
+            requested_amount=None,
+            requested_units=Decimal("10"),
+            bid=Decimal("99.80"),
+            ask=Decimal("100.20"),
+        )
+        assert result.filled_price == Decimal("99.80")
+        spread_per_unit = (Decimal("100.20") - Decimal("99.80")) / 2
+        expected_fees = (spread_per_unit * Decimal("10")).quantize(Decimal("0.000001"))
+        assert result.fees == expected_fees
+
+    def test_no_bid_ask_falls_back_to_zero_fees(self) -> None:
+        result = _synthetic_fill(
+            instrument_id=123,
+            action="BUY",
+            quote_price=Decimal("100.00"),
+            requested_amount=Decimal("1000"),
+            requested_units=None,
+            bid=None,
+            ask=None,
+        )
+        assert result.fees == Decimal("0")
+        assert result.filled_price == Decimal("100.00")
+
+
+# ---------------------------------------------------------------------------
 # TestLoadApprovedRec
 # ---------------------------------------------------------------------------
 

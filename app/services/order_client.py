@@ -189,15 +189,25 @@ def _synthetic_fill(
     requested_amount: Decimal | None,
     requested_units: Decimal | None,
     params: OrderParams | None = None,
+    bid: Decimal | None = None,
+    ask: Decimal | None = None,
 ) -> BrokerOrderResult:
-    """
-    Build a synthetic BrokerOrderResult for demo mode.
+    """Build a synthetic BrokerOrderResult for demo mode.
 
-    Uses the latest quote price.  If no price is available, the fill is
-    produced at Decimal("0") with a note in the payload — this lets demo
-    runs proceed without real market data while making the issue visible.
+    Uses bid/ask for realistic pricing when available:
+    - BUY fills at ask, EXIT fills at bid (worst-case execution)
+    - Fees = half-spread × units (entry cost of crossing the spread)
+    Falls back to last price with zero fees when bid/ask unavailable.
     """
-    price = quote_price if quote_price is not None else Decimal("0")
+    # Determine fill price: BUY at ask, EXIT at bid, fallback to last
+    if action in ("BUY", "ADD") and ask is not None:
+        price = ask
+    elif action == "EXIT" and bid is not None:
+        price = bid
+    elif quote_price is not None:
+        price = quote_price
+    else:
+        price = Decimal("0")
 
     if requested_units is not None:
         units = requested_units
@@ -206,17 +216,23 @@ def _synthetic_fill(
     else:
         units = Decimal("0")
 
+    # Compute spread-based fees
+    if bid is not None and ask is not None and units > 0:
+        half_spread = (ask - bid) / 2
+        fees = (half_spread * units).quantize(Decimal("0.000001"))
+    else:
+        fees = Decimal("0")
+
     payload: dict[str, Any] = {
         "demo": True,
         "instrument_id": instrument_id,
         "action": action,
         "price": str(price),
         "units": str(units),
+        "fees": str(fees),
         "note": "synthetic fill — no real API call"
-        + ("" if quote_price is not None else "; no quote available, price=0"),
+        + ("" if quote_price is not None or ask is not None else "; no quote available, price=0"),
     }
-    # Record intended SL/TP in raw_payload for audit completeness
-    # (demo mode has no broker to enforce these, but they should be visible).
     if params is not None:
         if params.stop_loss_rate is not None:
             payload["stop_loss_rate"] = str(params.stop_loss_rate)
@@ -228,7 +244,7 @@ def _synthetic_fill(
         status="filled",
         filled_price=price,
         filled_units=units,
-        fees=Decimal("0"),
+        fees=fees,
         raw_payload=payload,
     )
 
