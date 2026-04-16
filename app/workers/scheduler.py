@@ -49,7 +49,12 @@ from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_
 from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
-from app.services.ops_monitor import check_row_count_spike, record_job_finish, record_job_start
+from app.services.ops_monitor import (
+    check_row_count_spike,
+    record_job_finish,
+    record_job_skip,
+    record_job_start,
+)
 from app.services.order_client import execute_order
 from app.services.portfolio import run_portfolio_review
 from app.services.portfolio_sync import sync_portfolio
@@ -60,7 +65,7 @@ from app.services.return_attribution import (
     persist_attribution_summary,
 )
 from app.services.scoring import compute_rankings
-from app.services.sentiment import ClaudeSentimentScorer
+from app.services.sync_orchestrator import prereq_skip_reason
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
 from app.services.thesis import find_stale_instruments, generate_thesis
 from app.services.universe import enrich_instrument_currencies, sync_universe
@@ -622,6 +627,22 @@ def _load_etoro_credentials(job_name: str) -> tuple[str, str] | None:
     return (api_key, user_key)
 
 
+def _record_prereq_skip(job_name: str, detail: str) -> None:
+    """Write a PREREQ_SKIP-marked job_runs row for a job that cannot run
+    due to a missing prerequisite (credentials, API key, etc.).
+
+    Called BEFORE entering `_tracked_job` so exactly one job_runs row is
+    written. The orchestrator's fresh_by_audit rule counts this row as
+    ran-to-prerequisite-check (spec §1.3) so the layer doesn't look
+    stale-forever while the prerequisite is missing.
+    """
+    try:
+        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+            record_job_skip(conn, job_name, prereq_skip_reason(detail))
+    except Exception:
+        logger.error("%s: failed to write prereq-skip audit row", job_name, exc_info=True)
+
+
 def _promote_held_to_tier1(conn: psycopg.Connection[Any]) -> int:
     """Promote instruments with open positions to coverage Tier 1.
 
@@ -650,6 +671,7 @@ def nightly_universe_sync() -> None:
     """
     creds = _load_etoro_credentials("nightly_universe_sync")
     if creds is None:
+        _record_prereq_skip(JOB_NIGHTLY_UNIVERSE_SYNC, "etoro credentials missing")
         return
     api_key, user_key = creds
 
@@ -748,6 +770,7 @@ def daily_candle_refresh() -> None:
     """
     creds = _load_etoro_credentials("daily_candle_refresh")
     if creds is None:
+        _record_prereq_skip(JOB_DAILY_CANDLE_REFRESH, "etoro credentials missing")
         return
     api_key, user_key = creds
 
@@ -1079,45 +1102,17 @@ def daily_news_refresh() -> None:
     """
     if not settings.anthropic_api_key:
         logger.error("daily_news_refresh: ANTHROPIC_API_KEY not set, skipping")
+        _record_prereq_skip(JOB_DAILY_NEWS_REFRESH, "anthropic api key missing")
         return
 
-    to_dt = datetime.now(tz=UTC)
-    from_dt = to_dt - timedelta(hours=72)
-
-    with _tracked_job(JOB_DAILY_NEWS_REFRESH) as tracker:
-        # The DB connection is opened once and kept open for the full pipeline.
-        # refresh_news() performs DB reads (dedup checks) and writes (upserts)
-        # throughout its execution — the connection must not be closed early.
-        with psycopg.connect(settings.database_url) as conn:
-            rows = conn.execute(
-                """
-                SELECT i.symbol, i.instrument_id::text
-                FROM instruments i
-                JOIN coverage c ON c.instrument_id = i.instrument_id
-                WHERE i.is_tradable = TRUE
-                  AND c.coverage_tier IN (1, 2)
-                ORDER BY i.symbol
-                """
-            ).fetchall()
-
-            if not rows:
-                logger.info("daily_news_refresh: no covered instruments found, skipping")
-                return
-
-            instrument_symbols = [(row[0], row[1]) for row in rows]
-            scorer = ClaudeSentimentScorer(api_key=settings.anthropic_api_key)
-
-            # NewsProvider: no concrete implementation wired in v1.
-            # Wire a real provider here once one is available (e.g. Benzinga, NewsAPI).
-            # When wired, replace the warning + return with:
-            #   summary = refresh_news(provider, scorer, conn, instrument_symbols, from_dt, to_dt)
-            #   logger.info("News refresh: %s", summary)
-            logger.warning("daily_news_refresh: no NewsProvider implementation wired in v1 — skipping fetch")
-            _ = instrument_symbols
-            _ = scorer
-            _ = from_dt
-            _ = to_dt
-        tracker.row_count = 0
+    # No concrete NewsProvider implementation wired in v1. The guard
+    # must live OUTSIDE `_tracked_job` — otherwise a naive
+    # record_job_skip inside the tracker would produce two job_runs
+    # rows for one invocation (skipped + tracked-success). Wire a real
+    # provider here once one is available and remove this block.
+    logger.warning("daily_news_refresh: no NewsProvider implementation wired in v1 — skipping fetch")
+    _record_prereq_skip(JOB_DAILY_NEWS_REFRESH, "news provider not configured")
+    return
 
 
 def daily_thesis_refresh() -> None:
@@ -1134,22 +1129,22 @@ def daily_thesis_refresh() -> None:
     """
     if not settings.anthropic_api_key:
         logger.error("daily_thesis_refresh: ANTHROPIC_API_KEY not set, skipping")
+        _record_prereq_skip(JOB_DAILY_THESIS_REFRESH, "anthropic api key missing")
         return
 
     with _tracked_job(JOB_DAILY_THESIS_REFRESH) as tracker:
         logger.info("daily_thesis_refresh: checking for stale Tier 1/2 instruments")
-        try:
-            with psycopg.connect(settings.database_url) as conn:
-                # Generate theses for T1 and T2 instruments.  T2 instruments
-                # need theses to be promoted to T1 (coverage.py requires
-                # thesis for T2→T1).  The portfolio manager also requires a
-                # thesis with stance="buy" before recommending a BUY.
-                stale_t1 = find_stale_instruments(conn, tier=1)
-                stale_t2 = find_stale_instruments(conn, tier=2)
-                stale = stale_t1 + stale_t2
-        except Exception:
-            logger.error("daily_thesis_refresh: failed to query stale instruments", exc_info=True)
-            return
+        # Previously: except Exception: log + return silent-success.
+        # That left the layer looking fresh after a DB failure. Now:
+        # let the exception propagate — _tracked_job records failure.
+        with psycopg.connect(settings.database_url) as conn:
+            # Generate theses for T1 and T2 instruments.  T2 instruments
+            # need theses to be promoted to T1 (coverage.py requires
+            # thesis for T2→T1).  The portfolio manager also requires a
+            # thesis with stance="buy" before recommending a BUY.
+            stale_t1 = find_stale_instruments(conn, tier=1)
+            stale_t2 = find_stale_instruments(conn, tier=2)
+            stale = stale_t1 + stale_t2
 
         if not stale:
             logger.info("daily_thesis_refresh: no stale Tier 1/2 instruments found")
@@ -1205,6 +1200,7 @@ def daily_portfolio_sync() -> None:
 
     creds = _load_etoro_credentials(JOB_DAILY_PORTFOLIO_SYNC)
     if creds is None:
+        _record_prereq_skip(JOB_DAILY_PORTFOLIO_SYNC, "etoro credentials missing")
         return
 
     api_key, user_key = creds
@@ -1258,40 +1254,24 @@ def morning_candidate_review() -> None:
     Each phase opens its own connection so a failure in recommendations
     does not roll back the completed scoring run.
     """
+    # Restructured: do not reference `result` outside the `_tracked_job`
+    # block. This matches the prevention-log entry "Unbound variable
+    # after context-manager exit" added in this same PR — exception
+    # paths from compute_morning_recommendations re-raise through
+    # _tracked_job before the post-block code, so the pattern was
+    # safe-as-written, but referencing inside the block removes the
+    # fragility entirely and gives future readers a consistent shape.
+    rec_result: Any | None = None
     with _tracked_job(JOB_MORNING_CANDIDATE_REVIEW) as tracker:
-        logger.info("morning_candidate_review: starting scoring run")
-        try:
-            with psycopg.connect(settings.database_url) as conn:
-                score_result = compute_rankings(conn)
-        except Exception:
-            logger.error("morning_candidate_review: scoring run failed", exc_info=True)
-            return
-
-        if not score_result.scored:
-            logger.info("morning_candidate_review: no eligible instruments to score")
-            tracker.row_count = 0
-            return
-
-        top5 = score_result.scored[:5]
-        top5_summary = ", ".join(
-            f"instrument_id={r.instrument_id} score={r.total_score:.3f} rank={r.rank}" for r in top5
+        result = compute_morning_recommendations()
+        tracker.row_count = len(result.ranking_result.scored) + (
+            len(result.review_result.recommendations) if result.review_result is not None else 0
         )
-        logger.info(
-            "morning_candidate_review: scored %d instruments [model=%s] top5=[%s]",
-            len(score_result.scored),
-            score_result.model_version,
-            top5_summary,
-        )
+        rec_result = result.review_result  # None or PortfolioReviewResult
 
-        logger.info("morning_candidate_review: starting portfolio review")
-        try:
-            with psycopg.connect(settings.database_url) as conn:
-                rec_result = run_portfolio_review(conn, model_version=score_result.model_version)
-        except Exception:
-            logger.error("morning_candidate_review: portfolio review failed", exc_info=True)
-            return
-
-        tracker.row_count = len(score_result.scored) + len(rec_result.recommendations)
+    # No-score path: nothing to log further, nothing to execute.
+    if rec_result is None:
+        return
 
     logger.info(
         "morning_candidate_review: recommendations=%d (BUY=%d ADD=%d HOLD=%d EXIT=%d) aum=%.2f",
@@ -1307,6 +1287,10 @@ def morning_candidate_review() -> None:
     # Gate on kill switch and auto-trading flag before invoking the execution
     # path — the guard inside execute_approved_orders is a second line of
     # defence, not a substitute for checking at the call site.
+    #
+    # CRITICAL: this side-effect lives ONLY on the legacy scheduled path.
+    # The sync orchestrator's morning_candidate_review adapter calls
+    # compute_morning_recommendations() directly (no order execution).
     actionable_count = sum(1 for r in rec_result.recommendations if r.action in ("BUY", "ADD", "EXIT"))
     if actionable_count > 0:
         try:
@@ -1332,6 +1316,58 @@ def morning_candidate_review() -> None:
                 "morning_candidate_review: pipeline trigger to execute_approved_orders failed",
                 exc_info=True,
             )
+
+
+@dataclass(frozen=True)
+class MorningComputeResult:
+    """Result of compute_morning_recommendations.
+
+    review_result is None when scoring produced no eligible instruments —
+    portfolio review is skipped in that case (preserving the legacy
+    no-score path). The orchestrator adapter maps None review_result to
+    LayerOutcome.NO_WORK for the recommendations layer."""
+
+    ranking_result: Any  # RankingResult — avoid top-level import cycle
+    review_result: Any | None  # PortfolioReviewResult | None
+
+
+def compute_morning_recommendations() -> MorningComputeResult:
+    """Run scoring + portfolio review. Does NOT call execute_approved_orders.
+
+    Used by the sync orchestrator's morning_candidate_review adapter,
+    which must not trigger order execution as a side effect of a data
+    refresh. The legacy `morning_candidate_review` scheduled job retains
+    its execute trigger during Phase 1–3; Phase 4 removes that scheduled
+    path entirely.
+
+    Opens TWO separate `psycopg.connect()` blocks — one per phase — so a
+    recommendation failure cannot roll back the completed scoring run.
+
+    No-score path: if scoring produces an empty `scored` list, portfolio
+    review does NOT run and `review_result` is None.
+    """
+    logger.info("compute_morning_recommendations: starting scoring run")
+    with psycopg.connect(settings.database_url) as conn:
+        score_result = compute_rankings(conn)
+
+    if not score_result.scored:
+        logger.info("compute_morning_recommendations: no eligible instruments to score")
+        return MorningComputeResult(ranking_result=score_result, review_result=None)
+
+    top5 = score_result.scored[:5]
+    top5_summary = ", ".join(f"instrument_id={r.instrument_id} score={r.total_score:.3f} rank={r.rank}" for r in top5)
+    logger.info(
+        "compute_morning_recommendations: scored %d instruments [model=%s] top5=[%s]",
+        len(score_result.scored),
+        score_result.model_version,
+        top5_summary,
+    )
+
+    logger.info("compute_morning_recommendations: starting portfolio review")
+    with psycopg.connect(settings.database_url) as conn:
+        rec_result = run_portfolio_review(conn, model_version=score_result.model_version)
+
+    return MorningComputeResult(ranking_result=score_result, review_result=rec_result)
 
 
 def _timing_error_defer(

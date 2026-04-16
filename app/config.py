@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     # to ``EBULL_SERVICE_TOKEN`` (documented in .env.example).
     service_token: str | None = None
 
+    # --- Sync orchestrator (issue #260) ---------------------------------
+    # Phase 1 ships orchestrator infrastructure behind this flag. When
+    # False (default), POST /sync returns 503 "sync orchestrator
+    # disabled (Phase 1)" and no orchestrator-triggered runs occur —
+    # the scheduler continues its current behaviour unchanged.
+    # Phase 4 flips this to True and removes the 12 cron triggers
+    # whose JOB_TO_LAYERS entries are non-empty.
+    orchestrator_enabled: bool = False
+
     # --- Browser session settings (issue #98) ---------------------------
     # Both timeouts are enforced server-side in get_active_session. The
     # cookie expiry is set from session_absolute_timeout_hours so the
