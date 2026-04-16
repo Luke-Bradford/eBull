@@ -13,6 +13,7 @@ from typing import Any
 
 import psycopg
 import psycopg.rows
+import psycopg.types.json
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -179,3 +180,80 @@ def spread_pct_to_bps(spread_pct: Decimal | None) -> Decimal | None:
     if spread_pct is None:
         return None
     return spread_pct * 100
+
+
+# ---------------------------------------------------------------------------
+# Cost record persistence
+# ---------------------------------------------------------------------------
+
+
+def record_estimated_cost(
+    conn: psycopg.Connection[Any],
+    *,
+    order_id: int,
+    recommendation_id: int,
+    instrument_id: int,
+    estimate: CostEstimate,
+) -> None:
+    """Persist the estimated cost breakdown for a trade at order time."""
+    breakdown = {
+        "spread_bps": str(estimate.spread_bps),
+        "overnight_bps_per_day": str(estimate.overnight_bps_per_day),
+        "fx_markup_bps": str(estimate.fx_markup_bps),
+        "estimated_hold_days": estimate.estimated_hold_days,
+        "total_entry_cost_bps": str(estimate.total_entry_cost_bps),
+        "total_carry_cost_bps": str(estimate.total_carry_cost_bps),
+        "total_cost_bps": str(estimate.total_cost_bps),
+        "is_cost_prohibitive": estimate.is_cost_prohibitive,
+        "prohibitive_reason": estimate.prohibitive_reason,
+    }
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO trade_cost_record (
+                order_id, recommendation_id, instrument_id,
+                estimated_spread_bps, estimated_carry_bps,
+                estimated_fx_bps, estimated_total_bps,
+                cost_breakdown
+            ) VALUES (
+                %(order_id)s, %(recommendation_id)s, %(instrument_id)s,
+                %(estimated_spread_bps)s, %(estimated_carry_bps)s,
+                %(estimated_fx_bps)s, %(estimated_total_bps)s,
+                %(cost_breakdown)s
+            )
+            """,
+            {
+                "order_id": order_id,
+                "recommendation_id": recommendation_id,
+                "instrument_id": instrument_id,
+                "estimated_spread_bps": estimate.spread_bps,
+                "estimated_carry_bps": estimate.total_carry_cost_bps,
+                "estimated_fx_bps": estimate.fx_markup_bps,
+                "estimated_total_bps": estimate.total_cost_bps,
+                "cost_breakdown": psycopg.types.json.Jsonb(breakdown),
+            },
+        )
+
+
+def record_actual_cost(
+    conn: psycopg.Connection[Any],
+    *,
+    order_id: int,
+    actual_spread_bps: Decimal,
+    actual_total_bps: Decimal,
+) -> None:
+    """Update the cost record with actual costs computed from fill data."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE trade_cost_record
+            SET actual_spread_bps = %(actual_spread_bps)s,
+                actual_total_bps = %(actual_total_bps)s
+            WHERE order_id = %(order_id)s
+            """,
+            {
+                "order_id": order_id,
+                "actual_spread_bps": actual_spread_bps,
+                "actual_total_bps": actual_total_bps,
+            },
+        )

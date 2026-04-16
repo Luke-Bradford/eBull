@@ -8,10 +8,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.transaction_cost import (
+    CostEstimate,
     TransactionCostConfigCorrupt,
     estimate_cost,
     get_transaction_cost_config,
     load_instrument_cost,
+    record_actual_cost,
+    record_estimated_cost,
 )
 
 
@@ -173,3 +176,55 @@ class TestComputeSpreadFromQuote:
         from app.services.transaction_cost import spread_pct_to_bps
 
         assert spread_pct_to_bps(None) is None
+
+
+class TestRecordEstimatedCost:
+    def test_inserts_cost_record(self) -> None:
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        estimate = CostEstimate(
+            spread_bps=Decimal("50"),
+            overnight_bps_per_day=Decimal("0"),
+            fx_markup_bps=Decimal("0"),
+            estimated_hold_days=90,
+            total_entry_cost_bps=Decimal("50"),
+            total_carry_cost_bps=Decimal("0"),
+            total_cost_bps=Decimal("50"),
+            is_cost_prohibitive=False,
+            prohibitive_reason=None,
+        )
+        record_estimated_cost(
+            conn,
+            order_id=1,
+            recommendation_id=10,
+            instrument_id=100,
+            estimate=estimate,
+        )
+        cursor.execute.assert_called_once()
+        sql = cursor.execute.call_args[0][0]
+        assert "INSERT INTO trade_cost_record" in sql
+        params = cursor.execute.call_args[0][1]
+        assert params["estimated_total_bps"] == Decimal("50")
+
+
+class TestRecordActualCost:
+    def test_updates_actual_columns(self) -> None:
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        record_actual_cost(
+            conn,
+            order_id=1,
+            actual_spread_bps=Decimal("48"),
+            actual_total_bps=Decimal("48"),
+        )
+        cursor.execute.assert_called_once()
+        sql = cursor.execute.call_args[0][0]
+        assert "UPDATE trade_cost_record" in sql
+        params = cursor.execute.call_args[0][1]
+        assert params["actual_spread_bps"] == Decimal("48")
