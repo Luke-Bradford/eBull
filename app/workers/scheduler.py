@@ -286,6 +286,13 @@ def _has_tier1_stale_theses(conn: psycopg.Connection[Any]) -> PrerequisiteResult
     return (False, "no Tier 1 instruments")
 
 
+def _has_tier1_coverage(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if at least one instrument has Tier 1 coverage."""
+    if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM coverage WHERE coverage_tier = 1)")):
+        return (True, "")
+    return (False, "no Tier 1 instruments yet")
+
+
 def _has_attributions(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     """True if at least one attributed position exists."""
     if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM return_attribution)")):
@@ -414,7 +421,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         name=JOB_SEED_COST_MODELS,
         description="Refresh per-instrument cost models from current quote spreads.",
         cadence=Cadence.daily(hour=6, minute=15),
-        prerequisite=_has_tier1_stale_theses,
+        prerequisite=_has_tier1_coverage,
     ),
     # -- On-demand jobs are NOT listed here.  They stay in _INVOKERS
     # (runtime.py) so "Run now" in the Admin UI works, but they are

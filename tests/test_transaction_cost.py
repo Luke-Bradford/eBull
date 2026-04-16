@@ -139,6 +139,21 @@ class TestEstimateCost:
         assert result.total_cost_bps == Decimal("0")
         assert result.is_cost_prohibitive is False
 
+    def test_zero_cost_with_return_skips_ratio_check(self) -> None:
+        """Zero-cost instrument with expected return skips ratio (division by zero guard)."""
+        result = estimate_cost(
+            spread_bps=Decimal("0"),
+            overnight_rate=Decimal("0"),
+            fx_markup_bps=Decimal("0"),
+            hold_days=90,
+            max_total_cost_bps=Decimal("150"),
+            min_return_vs_cost_ratio=Decimal("3.0"),
+            expected_return_pct=Decimal("10.0"),
+        )
+        assert result.total_cost_bps == Decimal("0")
+        assert result.is_cost_prohibitive is False
+        assert result.prohibitive_reason is None
+
 
 class TestLoadInstrumentCost:
     def test_returns_cost_model_row_when_exists(self) -> None:
@@ -213,6 +228,10 @@ class TestRecordEstimatedCost:
         assert "INSERT INTO trade_cost_record" in sql
         params = cursor.execute.call_args[0][1]
         assert params["estimated_total_bps"] == Decimal("50")
+        # cost_breakdown must be a Jsonb instance, not a raw dict
+        from psycopg.types.json import Jsonb
+
+        assert isinstance(params["cost_breakdown"], Jsonb)
 
 
 class TestRecordActualCost:

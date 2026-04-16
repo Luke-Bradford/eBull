@@ -7,6 +7,7 @@ are prohibitive relative to its expected return.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -15,6 +16,8 @@ import psycopg
 import psycopg.rows
 import psycopg.types.json
 from psycopg import sql
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -329,33 +332,34 @@ def seed_cost_models_from_quotes(
         currency = row["currency"] or "USD"
         fx_markup_bps = Decimal("0") if currency == "USD" else Decimal("50")
 
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE cost_model
-                SET valid_to = NOW()
-                WHERE instrument_id = %(iid)s
-                  AND valid_to IS NULL
-                """,
-                {"iid": row["instrument_id"]},
-            )
-            cur.execute(
-                """
-                INSERT INTO cost_model (
-                    instrument_id, spread_bps, overnight_rate,
-                    fx_pair, fx_markup_bps, source
-                ) VALUES (
-                    %(iid)s, %(spread_bps)s, 0,
-                    %(fx_pair)s, %(fx_markup_bps)s, 'computed'
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE cost_model
+                    SET valid_to = NOW()
+                    WHERE instrument_id = %(iid)s
+                      AND valid_to IS NULL
+                    """,
+                    {"iid": row["instrument_id"]},
                 )
-                """,
-                {
-                    "iid": row["instrument_id"],
-                    "spread_bps": spread_bps,
-                    "fx_pair": None if currency == "USD" else f"{currency}/USD",
-                    "fx_markup_bps": fx_markup_bps,
-                },
-            )
+                cur.execute(
+                    """
+                    INSERT INTO cost_model (
+                        instrument_id, spread_bps, overnight_rate,
+                        fx_pair, fx_markup_bps, source
+                    ) VALUES (
+                        %(iid)s, %(spread_bps)s, 0,
+                        %(fx_pair)s, %(fx_markup_bps)s, 'computed'
+                    )
+                    """,
+                    {
+                        "iid": row["instrument_id"],
+                        "spread_bps": spread_bps,
+                        "fx_pair": None if currency == "USD" else f"{currency}/USD",
+                        "fx_markup_bps": fx_markup_bps,
+                    },
+                )
         processed += 1
 
     return {"processed": processed, "skipped": skipped}
@@ -368,7 +372,12 @@ def record_actual_cost(
     actual_spread_bps: Decimal,
     actual_total_bps: Decimal,
 ) -> None:
-    """Update the cost record with actual costs computed from fill data."""
+    """Update the cost record with actual costs computed from fill data.
+
+    Logs a warning (but does not raise) when no estimated-cost row exists
+    for this order — the estimated record is best-effort, so its absence
+    is expected when TransactionCostConfigCorrupt was caught at order time.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -383,3 +392,8 @@ def record_actual_cost(
                 "actual_total_bps": actual_total_bps,
             },
         )
+        if cur.rowcount == 0:
+            logger.warning(
+                "record_actual_cost: no trade_cost_record for order_id=%d — actual cost not recorded",
+                order_id,
+            )
