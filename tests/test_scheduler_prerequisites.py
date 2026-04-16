@@ -51,7 +51,11 @@ class TestHasScoreableInstruments:
 
         cursor = conn.cursor.return_value.__enter__.return_value
         sql_arg = cursor.execute.call_args[0][0]
-        sql_text = sql_arg.as_string(conn)
+        # Access the raw template string from psycopg.sql.SQL — _obj is
+        # the underlying str.  as_string() requires a real connection so
+        # it returns a MagicMock on a mock conn (vacuous assertions).
+        sql_text = sql_arg._obj
+        assert isinstance(sql_text, str), "sql_arg._obj should be a plain string"
 
         # Must join coverage and check for at least one data source
         assert "coverage" in sql_text
