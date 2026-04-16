@@ -246,6 +246,37 @@ def _has_scores(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     return (False, "no scores rows")
 
 
+def _has_scoreable_instruments(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if at least one tradable instrument has data to score.
+
+    Mirrors the eligibility query in compute_rankings (scoring.py) so the
+    prerequisite passes if and only if scoring would find at least one
+    instrument to score.  This replaces _has_scores for
+    morning_candidate_review to break the bootstrap deadlock where
+    scoring cannot run because no scores exist yet.
+    """
+    if _exists(
+        conn,
+        psycopg.sql.SQL(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM instruments i
+                JOIN coverage c ON c.instrument_id = i.instrument_id
+                WHERE i.is_tradable = TRUE
+                  AND (
+                      EXISTS (SELECT 1 FROM theses t WHERE t.instrument_id = i.instrument_id)
+                      OR EXISTS (SELECT 1 FROM fundamentals_snapshot f WHERE f.instrument_id = i.instrument_id)
+                      OR EXISTS (SELECT 1 FROM price_daily p WHERE p.instrument_id = i.instrument_id)
+                  )
+            )
+            """
+        ),
+    ):
+        return (True, "")
+    return (False, "no scoreable instruments")
+
+
 def _has_actionable_recommendations(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     """True if at least one proposed or approved recommendation exists."""
     if _exists(
@@ -365,7 +396,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         name=JOB_MORNING_CANDIDATE_REVIEW,
         description="Re-score, rank, and generate trade recommendations for Tier 1 candidates.",
         cadence=Cadence.daily(hour=6, minute=0),
-        prerequisite=_has_scores,
+        prerequisite=_has_scoreable_instruments,
     ),
     ScheduledJob(
         name=JOB_EXECUTE_APPROVED_ORDERS,
