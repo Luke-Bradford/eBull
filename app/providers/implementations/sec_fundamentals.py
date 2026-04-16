@@ -40,7 +40,7 @@ from typing import Any
 
 import httpx
 
-from app.providers.fundamentals import FundamentalsProvider, FundamentalsSnapshot
+from app.providers.fundamentals import FundamentalsProvider, FundamentalsSnapshot, XbrlFact
 from app.providers.resilient_client import ResilientClient
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,60 @@ _EQUITY_TAGS = ("StockholdersEquity", "StockholdersEquityIncludingPortionAttribu
 _EPS_TAGS = ("EarningsPerShareDiluted",)
 _SHARES_TAGS = ("CommonStockSharesOutstanding", "WeightedAverageNumberOfDilutedSharesOutstanding")
 
+# ── Expanded XBRL tags for financial_facts_raw pipeline ──────────
+TRACKED_CONCEPTS: dict[str, tuple[str, ...]] = {
+    "revenue": (
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+        "SalesRevenueNet",
+        "RevenueFromContractWithCustomerIncludingAssessedTax",
+    ),
+    "cost_of_revenue": ("CostOfGoodsAndServicesSold", "CostOfRevenue"),
+    "gross_profit": ("GrossProfit",),
+    "operating_income": ("OperatingIncomeLoss",),
+    "net_income": ("NetIncomeLoss",),
+    "eps_basic": ("EarningsPerShareBasic",),
+    "eps_diluted": ("EarningsPerShareDiluted",),
+    "research_and_dev": ("ResearchAndDevelopmentExpense",),
+    "sga_expense": ("SellingGeneralAndAdministrativeExpense",),
+    "depreciation_amort": (
+        "DepreciationDepletionAndAmortization",
+        "DepreciationAndAmortization",
+    ),
+    "interest_expense": ("InterestExpense", "InterestExpenseDebt"),
+    "income_tax": ("IncomeTaxExpenseBenefit",),
+    "shares_basic": ("WeightedAverageNumberOfSharesOutstandingBasic",),
+    "shares_diluted": ("WeightedAverageNumberOfDilutedSharesOutstanding",),
+    "sbc_expense": ("AllocatedShareBasedCompensationExpense", "ShareBasedCompensation"),
+    "total_assets": ("Assets",),
+    "total_liabilities": ("Liabilities",),
+    "shareholders_equity": (
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+    ),
+    "cash": (
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashCashEquivalentsAndShortTermInvestments",
+    ),
+    "long_term_debt": ("LongTermDebt", "LongTermDebtNoncurrent"),
+    "short_term_debt": ("ShortTermBorrowings", "CommercialPaper"),
+    "shares_outstanding": ("CommonStockSharesOutstanding",),
+    "inventory": ("InventoryNet",),
+    "receivables": ("AccountsReceivableNetCurrent",),
+    "payables": ("AccountsPayableCurrent",),
+    "goodwill": ("Goodwill",),
+    "ppe_net": ("PropertyPlantAndEquipmentNet",),
+    "operating_cf": ("NetCashProvidedByUsedInOperatingActivities",),
+    "investing_cf": ("NetCashProvidedByUsedInInvestingActivities",),
+    "financing_cf": ("NetCashProvidedByUsedInFinancingActivities",),
+    "capex": ("PaymentsToAcquirePropertyPlantAndEquipment", "CapitalExpenditures"),
+    "dividends_paid": ("PaymentsOfDividends",),
+    "dps_declared": ("CommonStockDividendsPerShareDeclared",),
+    "buyback_spend": ("PaymentsForRepurchaseOfCommonStock",),
+}
+
+_ALL_TRACKED_TAGS: frozenset[str] = frozenset(tag for tags in TRACKED_CONCEPTS.values() for tag in tags)
+
 
 def _persist_raw(tag: str, payload: object) -> None:
     try:
@@ -90,6 +144,70 @@ def _persist_raw(tag: str, payload: object) -> None:
 
 def _zero_pad_cik(cik: str | int) -> str:
     return str(int(cik)).zfill(10)
+
+
+_UNIT_PRIORITY = ("USD", "USD/shares", "shares", "pure")
+
+
+def _extract_facts_from_gaap(gaap: dict[str, Any]) -> list[XbrlFact]:
+    """Extract all tracked XBRL facts from a companyfacts us-gaap section."""
+    facts: list[XbrlFact] = []
+    for tag_name, fact_data in gaap.items():
+        if tag_name not in _ALL_TRACKED_TAGS:
+            continue
+        units = fact_data.get("units", {})
+        for unit_key in _UNIT_PRIORITY:
+            entries = units.get(unit_key)
+            if not entries:
+                continue
+            for entry in entries:
+                try:
+                    end_str = entry["end"]
+                    val = entry["val"]
+                    accn = entry["accn"]
+                    form = entry["form"]
+                    filed_str = entry["filed"]
+                except KeyError:
+                    logger.debug("Skipping XBRL entry for %s: missing required field", tag_name)
+                    continue
+
+                start_str = entry.get("start")
+                try:
+                    period_end = date.fromisoformat(end_str)
+                    period_start = date.fromisoformat(start_str) if start_str else None
+                    filed_date = date.fromisoformat(filed_str)
+                except ValueError, TypeError:
+                    logger.debug("Skipping XBRL entry for %s: bad date format", tag_name)
+                    continue
+
+                # Guard against NaN/Infinity values in SEC data
+                try:
+                    decimal_val = Decimal(str(val))
+                    if not decimal_val.is_finite():
+                        logger.debug("Skipping XBRL entry for %s: non-finite val %s", tag_name, val)
+                        continue
+                except Exception:
+                    logger.debug("Skipping XBRL entry for %s: unparseable val %s", tag_name, val)
+                    continue
+
+                facts.append(
+                    XbrlFact(
+                        concept=tag_name,
+                        taxonomy="us-gaap",
+                        unit=unit_key,
+                        period_start=period_start,
+                        period_end=period_end,
+                        val=decimal_val,
+                        frame=entry.get("frame"),
+                        accession_number=accn,
+                        form_type=form,
+                        filed_date=filed_date,
+                        fiscal_year=entry.get("fy"),
+                        fiscal_period=entry.get("fp"),
+                        decimals=str(entry["decimals"]) if "decimals" in entry else None,
+                    )
+                )
+    return facts
 
 
 class SecFundamentalsProvider(FundamentalsProvider):
@@ -199,6 +317,17 @@ class SecFundamentalsProvider(FundamentalsProvider):
             return []
 
         return _build_history_snapshots(symbol, gaap, from_date, to_date, limit)
+
+    def extract_facts(self, symbol: str, cik: str) -> list[XbrlFact]:
+        """Extract all tracked XBRL facts from SEC companyfacts."""
+        raw = self._fetch_company_facts(cik)
+        if raw is None:
+            return []
+        gaap = raw.get("facts", {}).get("us-gaap", {})
+        if not gaap:
+            logger.info("No us-gaap facts for %s (CIK %s)", symbol, cik)
+            return []
+        return _extract_facts_from_gaap(gaap)
 
     # ------------------------------------------------------------------
     # Private HTTP
