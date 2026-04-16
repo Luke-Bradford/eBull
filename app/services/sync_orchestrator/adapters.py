@@ -27,6 +27,10 @@ import psycopg
 from app.config import settings
 from app.jobs.locks import JobAlreadyRunning, JobLock
 from app.services.ops_monitor import record_job_skip
+from app.services.sync_orchestrator.progress import (
+    clear_active_progress,
+    set_active_progress,
+)
 from app.services.sync_orchestrator.types import (
     PREREQ_SKIP_MARKER,
     LayerOutcome,
@@ -78,18 +82,30 @@ def _latest_job_outcome(job_name: str) -> tuple[LayerOutcome, int]:
 def _run_with_lock(
     job_name: str,
     legacy_fn: Any,
+    progress: ProgressCallback | None = None,
 ) -> tuple[LayerOutcome, int] | str:
     """Run legacy_fn() under JobLock. Returns (outcome, row_count) on
     success-or-handled-failure; returns a PREREQ_SKIP reason string on
-    JobAlreadyRunning contention."""
+    JobAlreadyRunning contention.
+
+    When ``progress`` is provided, installs it on the shared ContextVar
+    (spec §2.7) so long-running inner loops can call
+    ``sync_orchestrator.progress.report_progress`` without extra
+    plumbing. The var is cleared in ``finally`` so it never leaks
+    between layers in the same sync run.
+    """
     try:
         with JobLock(settings.database_url, job_name):
+            token = set_active_progress(progress) if progress is not None else None
             try:
                 legacy_fn()
             except Exception:
                 # _tracked_job recorded failure; re-raise so the
                 # orchestrator records FAILED for the emit.
                 raise
+            finally:
+                if token is not None:
+                    clear_active_progress(token)
             return _latest_job_outcome(job_name)
     except JobAlreadyRunning:
         with psycopg.connect(settings.database_url, autocommit=True) as conn:
@@ -132,9 +148,10 @@ def _wrap_single(
     job_name: str,
     layer_name: str,
     legacy_fn: Any,
+    progress: ProgressCallback | None = None,
 ) -> Sequence[tuple[str, RefreshResult]]:
     """Common pattern for single-emit adapters."""
-    result = _run_with_lock(job_name, legacy_fn)
+    result = _run_with_lock(job_name, legacy_fn, progress=progress)
     if isinstance(result, str):
         return _single_emit_result(layer_name, LayerOutcome.PREREQ_SKIP, 0, result)
     outcome, row_count = result
@@ -183,6 +200,7 @@ def refresh_candles(
         job_name="daily_candle_refresh",
         layer_name="candles",
         legacy_fn=daily_candle_refresh,
+        progress=progress,
     )
 
 
@@ -228,6 +246,7 @@ def refresh_thesis(
         job_name="daily_thesis_refresh",
         layer_name="thesis",
         legacy_fn=daily_thesis_refresh,
+        progress=progress,
     )
 
 
@@ -321,7 +340,7 @@ def refresh_financial_facts_and_normalization(
     financial_normalization). Atomic — both emits share one outcome."""
     from app.workers.scheduler import daily_financial_facts
 
-    result = _run_with_lock("daily_financial_facts", daily_financial_facts)
+    result = _run_with_lock("daily_financial_facts", daily_financial_facts, progress=progress)
     if isinstance(result, str):
         skip = RefreshResult(
             outcome=LayerOutcome.PREREQ_SKIP,

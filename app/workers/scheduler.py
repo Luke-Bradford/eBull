@@ -66,6 +66,7 @@ from app.services.return_attribution import (
 )
 from app.services.scoring import compute_rankings
 from app.services.sync_orchestrator import prereq_skip_reason
+from app.services.sync_orchestrator.progress import report_progress
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
 from app.services.thesis import find_stale_instruments, generate_thesis
 from app.services.universe import enrich_instrument_currencies, sync_universe
@@ -1137,7 +1138,8 @@ def daily_thesis_refresh() -> None:
 
         generated = 0
         skipped = 0
-        for item in stale:
+        total = len(stale)
+        for idx, item in enumerate(stale, start=1):
             try:
                 with psycopg.connect(settings.database_url) as conn:
                     generate_thesis(
@@ -1154,7 +1156,9 @@ def daily_thesis_refresh() -> None:
                     exc_info=True,
                 )
                 skipped += 1
+            report_progress(idx, total)
 
+        report_progress(total, total, force=True)
         tracker.row_count = generated
 
     logger.info(

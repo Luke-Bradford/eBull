@@ -16,6 +16,7 @@ from decimal import Decimal
 import psycopg
 
 from app.providers.market_data import MarketDataProvider, OHLCVBar, Quote
+from app.services.sync_orchestrator.progress import report_progress
 from app.services.technical_analysis import OHLCVRow, compute_indicators
 
 logger = logging.getLogger(__name__)
@@ -80,9 +81,11 @@ def refresh_market_data(
     candles_skipped = 0
 
     # --- Candles: per-instrument (with freshness skip) ---
-    for instrument_id, symbol in instruments:
+    total = len(instruments)
+    for idx, (instrument_id, symbol) in enumerate(instruments, start=1):
         if _candles_are_fresh(conn, instrument_id, today):
             candles_skipped += 1
+            report_progress(idx, total)
             continue
         try:
             with conn.transaction():
@@ -94,6 +97,11 @@ def refresh_market_data(
                     features_computed += computed
         except Exception:
             logger.warning("Failed to refresh candles for %s (id=%d), skipping", symbol, instrument_id, exc_info=True)
+        report_progress(idx, total)
+
+    # Final force-tick so items_done lands at the loop boundary even
+    # if the last increment was below the throttle threshold.
+    report_progress(total, total, force=True)
 
     if candles_skipped:
         logger.info("Candle freshness skip: %d/%d instruments already fresh", candles_skipped, len(instruments))
