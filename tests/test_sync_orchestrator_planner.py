@@ -38,12 +38,34 @@ def _make_conn_with_freshness(fresh_layers: set[str]) -> MagicMock:
 
 @pytest.fixture(autouse=True)
 def _restore_layer_predicates():
-    """Save + restore real is_fresh callables after each test."""
-    from app.services.sync_orchestrator import registry
+    """Restore is_fresh callables to their original freshness-module
+    definitions after each test.
 
-    original: dict[str, object] = {name: layer.is_fresh for name, layer in registry.LAYERS.items()}
+    Importing from `freshness` (not from LAYERS) guards against a
+    previous test leaving LAYERS in a half-restored state — we always
+    pin back to the real module-level predicate regardless of current
+    LAYERS content."""
+    from app.services.sync_orchestrator import freshness, registry
+
+    originals = {
+        "universe": freshness.universe_is_fresh,
+        "cik_mapping": freshness.cik_mapping_is_fresh,
+        "candles": freshness.candles_is_fresh,
+        "financial_facts": freshness.financial_facts_is_fresh,
+        "financial_normalization": freshness.financial_normalization_is_fresh,
+        "fundamentals": freshness.fundamentals_is_fresh,
+        "news": freshness.news_is_fresh,
+        "thesis": freshness.thesis_is_fresh,
+        "scoring": freshness.scoring_is_fresh,
+        "recommendations": freshness.recommendations_is_fresh,
+        "portfolio_sync": freshness.portfolio_sync_is_fresh,
+        "fx_rates": freshness.fx_rates_is_fresh,
+        "cost_models": freshness.cost_models_is_fresh,
+        "weekly_reports": freshness.weekly_reports_is_fresh,
+        "monthly_reports": freshness.monthly_reports_is_fresh,
+    }
     yield
-    for name, pred in original.items():
+    for name, pred in originals.items():
         object.__setattr__(registry.LAYERS[name], "is_fresh", pred)
 
 

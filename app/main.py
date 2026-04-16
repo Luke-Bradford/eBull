@@ -31,6 +31,7 @@ from app.api.portfolio import router as portfolio_router
 from app.api.recommendations import router as recommendations_router
 from app.api.reports import router as reports_router
 from app.api.scores import router as scores_router
+from app.api.sync import router as sync_router
 from app.api.system import router as system_router
 from app.api.theses import router as theses_router
 from app.config import settings
@@ -89,6 +90,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         boot.recovery_required,
     )
 
+    # Sync orchestrator: reap orphaned runs BEFORE the scheduler starts
+    # so the partial-unique-index gate is clear for the first new sync.
+    # Crash here must not block boot — log loud, continue.
+    try:
+        from app.services.sync_orchestrator.reaper import reap_orphaned_syncs
+
+        reaped = reap_orphaned_syncs()
+        if reaped:
+            logger.info(
+                "orchestrator reaper: transitioned %d orphaned sync_runs row(s)",
+                reaped,
+            )
+    except Exception:
+        logger.exception("orchestrator reaper failed — continuing startup")
+
     # Start the in-process job runtime (#13). All SCHEDULED_JOBS are
     # registered with APScheduler; catch-up fires overdue jobs at boot.
     job_runtime: JobRuntime | None
@@ -102,6 +118,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.exception("Job runtime failed to start; continuing without scheduler")
         job_runtime = None
     app.state.job_runtime = job_runtime
+
+    # Register the executor for submit_sync() — only when job_runtime
+    # started successfully. If None, submit_sync raises RuntimeError on
+    # call; POST /sync still returns 503 via ORCHESTRATOR_ENABLED flag.
+    if job_runtime is not None:
+        try:
+            from app.services.sync_orchestrator import set_executor
+
+            set_executor(job_runtime._manual_executor)
+        except Exception:
+            logger.exception("failed to register orchestrator executor")
 
     yield
 
@@ -136,6 +163,7 @@ app.include_router(portfolio_router)
 app.include_router(recommendations_router)
 app.include_router(reports_router)
 app.include_router(scores_router)
+app.include_router(sync_router)
 app.include_router(system_router)
 app.include_router(theses_router)
 
