@@ -13,6 +13,21 @@ from typing import Any
 
 import psycopg
 
+from app.services.sync_orchestrator.adapters import (
+    refresh_candles,
+    refresh_cik_mapping,
+    refresh_cost_models,
+    refresh_financial_facts_and_normalization,
+    refresh_fundamentals,
+    refresh_fx_rates,
+    refresh_monthly_reports,
+    refresh_news,
+    refresh_portfolio_sync,
+    refresh_scoring_and_recommendations,
+    refresh_thesis,
+    refresh_universe,
+    refresh_weekly_reports,
+)
 from app.services.sync_orchestrator.freshness import (
     candles_is_fresh,
     cik_mapping_is_fresh,
@@ -45,18 +60,13 @@ class DataLayer:
     cadence: str = "daily"
 
 
-def _not_implemented_adapter(**kwargs: Any) -> Any:
-    """Temporary stub — real adapters wired in Task 10."""
-    raise NotImplementedError("adapter wired in Task 10")
-
-
 LAYERS: dict[str, DataLayer] = {
     "universe": DataLayer(
         name="universe",
         display_name="Tradable Universe",
         tier=0,
         is_fresh=universe_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_universe,
         dependencies=(),
     ),
     "cik_mapping": DataLayer(
@@ -64,7 +74,7 @@ LAYERS: dict[str, DataLayer] = {
         display_name="SEC CIK Mapping",
         tier=0,
         is_fresh=cik_mapping_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_cik_mapping,
         dependencies=("universe",),
     ),
     "candles": DataLayer(
@@ -72,7 +82,7 @@ LAYERS: dict[str, DataLayer] = {
         display_name="Daily Price Candles",
         tier=1,
         is_fresh=candles_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_candles,
         dependencies=("universe",),
     ),
     "financial_facts": DataLayer(
@@ -80,7 +90,7 @@ LAYERS: dict[str, DataLayer] = {
         display_name="SEC EDGAR XBRL Facts",
         tier=1,
         is_fresh=financial_facts_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_financial_facts_and_normalization,
         dependencies=("cik_mapping",),
     ),
     "financial_normalization": DataLayer(
@@ -88,7 +98,7 @@ LAYERS: dict[str, DataLayer] = {
         display_name="Financial Period Normalization",
         tier=2,
         is_fresh=financial_normalization_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_financial_facts_and_normalization,
         dependencies=("financial_facts",),
     ),
     "fundamentals": DataLayer(
@@ -96,7 +106,7 @@ LAYERS: dict[str, DataLayer] = {
         display_name="Fundamentals Snapshot",
         tier=1,
         is_fresh=fundamentals_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_fundamentals,
         dependencies=("universe",),
         cadence="quarterly",
     ),
@@ -105,7 +115,7 @@ LAYERS: dict[str, DataLayer] = {
         display_name="News & Sentiment",
         tier=1,
         is_fresh=news_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_news,
         dependencies=("universe",),
         is_blocking=False,
         cadence="4h",
@@ -115,7 +125,7 @@ LAYERS: dict[str, DataLayer] = {
         display_name="Investment Thesis",
         tier=2,
         is_fresh=thesis_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_thesis,
         dependencies=("fundamentals", "financial_normalization", "news"),
     ),
     "scoring": DataLayer(
@@ -123,7 +133,7 @@ LAYERS: dict[str, DataLayer] = {
         display_name="Ranking Scores",
         tier=3,
         is_fresh=scoring_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_scoring_and_recommendations,
         dependencies=("thesis", "candles"),
     ),
     "recommendations": DataLayer(
@@ -131,7 +141,7 @@ LAYERS: dict[str, DataLayer] = {
         display_name="Trade Recommendations",
         tier=3,
         is_fresh=recommendations_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_scoring_and_recommendations,
         dependencies=("scoring",),
     ),
     "portfolio_sync": DataLayer(
@@ -139,7 +149,7 @@ LAYERS: dict[str, DataLayer] = {
         display_name="Portfolio Sync",
         tier=0,
         is_fresh=portfolio_sync_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_portfolio_sync,
         dependencies=(),
         is_blocking=False,
         cadence="5m",
@@ -149,7 +159,7 @@ LAYERS: dict[str, DataLayer] = {
         display_name="FX Rates",
         tier=0,
         is_fresh=fx_rates_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_fx_rates,
         dependencies=(),
         is_blocking=False,
         cadence="5m",
@@ -159,7 +169,7 @@ LAYERS: dict[str, DataLayer] = {
         display_name="Transaction Cost Models",
         tier=2,
         is_fresh=cost_models_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_cost_models,
         dependencies=("universe",),
     ),
     "weekly_reports": DataLayer(
@@ -167,7 +177,7 @@ LAYERS: dict[str, DataLayer] = {
         display_name="Weekly Performance Report",
         tier=3,
         is_fresh=weekly_reports_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_weekly_reports,
         dependencies=(),
         is_blocking=False,
         cadence="weekly",
@@ -177,7 +187,7 @@ LAYERS: dict[str, DataLayer] = {
         display_name="Monthly Performance Report",
         tier=3,
         is_fresh=monthly_reports_is_fresh,
-        refresh=_not_implemented_adapter,
+        refresh=refresh_monthly_reports,
         dependencies=(),
         is_blocking=False,
         cadence="monthly",
