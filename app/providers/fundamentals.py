@@ -34,6 +34,25 @@ class FundamentalsSnapshot:
     eps: Decimal | None  # diluted EPS, TTM
 
 
+@dataclass(frozen=True)
+class XbrlFact:
+    """Single XBRL fact extracted from SEC companyfacts response."""
+
+    concept: str
+    taxonomy: str
+    unit: str
+    period_start: date | None
+    period_end: date
+    val: Decimal
+    frame: str | None
+    accession_number: str
+    form_type: str
+    filed_date: date
+    fiscal_year: int | None
+    fiscal_period: str | None
+    decimals: int | None
+
+
 class FundamentalsProvider(ABC):
     """
     Interface for normalised company fundamentals: income, balance sheet, cash flow.
