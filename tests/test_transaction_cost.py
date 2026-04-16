@@ -11,6 +11,7 @@ from app.services.transaction_cost import (
     TransactionCostConfigCorrupt,
     estimate_cost,
     get_transaction_cost_config,
+    load_instrument_cost,
 )
 
 
@@ -129,3 +130,46 @@ class TestEstimateCost:
         )
         assert result.total_cost_bps == Decimal("0")
         assert result.is_cost_prohibitive is False
+
+
+class TestLoadInstrumentCost:
+    def test_returns_cost_model_row_when_exists(self) -> None:
+        """Active cost_model row is preferred over computed spread."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchone.return_value = {
+            "spread_bps": Decimal("45.5"),
+            "overnight_rate": Decimal("1.2"),
+            "fx_pair": "GBP/USD",
+            "fx_markup_bps": Decimal("50"),
+        }
+        result = load_instrument_cost(conn, instrument_id=123)
+        assert result is not None
+        assert result["spread_bps"] == Decimal("45.5")
+        assert result["overnight_rate"] == Decimal("1.2")
+        assert result["fx_pair"] == "GBP/USD"
+
+    def test_returns_none_when_no_cost_model(self) -> None:
+        """No cost_model row — caller should fall back to quote spread."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchone.return_value = None
+        result = load_instrument_cost(conn, instrument_id=123)
+        assert result is None
+
+
+class TestComputeSpreadFromQuote:
+    def test_computes_bps_from_spread_pct(self) -> None:
+        """spread_pct is in percent; convert to bps (* 100)."""
+        from app.services.transaction_cost import spread_pct_to_bps
+
+        assert spread_pct_to_bps(Decimal("0.45")) == Decimal("45")
+
+    def test_none_returns_none(self) -> None:
+        from app.services.transaction_cost import spread_pct_to_bps
+
+        assert spread_pct_to_bps(None) is None

@@ -137,3 +137,45 @@ def estimate_cost(
         is_cost_prohibitive=is_prohibitive,
         prohibitive_reason=reason,
     )
+
+
+# ---------------------------------------------------------------------------
+# Instrument cost lookup
+# ---------------------------------------------------------------------------
+
+
+def load_instrument_cost(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+) -> dict[str, Any] | None:
+    """Load the active fee schedule for an instrument.
+
+    Returns the most recent cost_model row where valid_to IS NULL.
+    Returns None if no cost_model row exists (caller should fall back
+    to computing spread from live quote data).
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT spread_bps, overnight_rate, fx_pair, fx_markup_bps
+            FROM cost_model
+            WHERE instrument_id = %(iid)s
+              AND valid_to IS NULL
+            ORDER BY valid_from DESC
+            LIMIT 1
+            """,
+            {"iid": instrument_id},
+        )
+        row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def spread_pct_to_bps(spread_pct: Decimal | None) -> Decimal | None:
+    """Convert spread_pct (percent, e.g. 0.45%) to basis points (45 bps).
+
+    quotes.spread_pct stores (ask - bid) / mid * 100, i.e. already in percent.
+    Basis points = percent * 100.
+    """
+    if spread_pct is None:
+        return None
+    return spread_pct * 100
