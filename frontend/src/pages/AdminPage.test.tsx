@@ -100,6 +100,42 @@ function jobsResponse(): JobsListResponse {
         last_finished_at: null,
         detail: "no runs recorded",
       },
+      {
+        name: "retry_deferred_recommendations",
+        description: "Retry deferred recommendations.",
+        cadence: "hourly",
+        cadence_kind: "hourly",
+        next_run_time: "2026-04-16T02:00:00Z",
+        next_run_time_source: "declared",
+        last_status: "success",
+        last_started_at: "2026-04-16T01:00:00Z",
+        last_finished_at: "2026-04-16T01:00:05Z",
+        detail: "",
+      },
+      {
+        name: "weekly_coverage_review",
+        description: "Weekly coverage review.",
+        cadence: "weekly",
+        cadence_kind: "weekly",
+        next_run_time: "2026-04-20T08:00:00Z",
+        next_run_time_source: "declared",
+        last_status: "success",
+        last_started_at: "2026-04-13T08:00:00Z",
+        last_finished_at: "2026-04-13T08:00:20Z",
+        detail: "",
+      },
+      {
+        name: "attribution_summary",
+        description: "Portfolio attribution summary.",
+        cadence: "daily at 07:00 UTC",
+        cadence_kind: "daily",
+        next_run_time: "2026-04-17T07:00:00Z",
+        next_run_time_source: "declared",
+        last_status: "failure",
+        last_started_at: "2026-04-16T07:00:00Z",
+        last_finished_at: "2026-04-16T07:00:02Z",
+        detail: "provider timeout",
+      },
     ],
   };
 }
@@ -135,6 +171,19 @@ describe("AdminPage — background tasks table", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Run monitor_positions now" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Run retry_deferred_recommendations now",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Run weekly_coverage_review now",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Run attribution_summary now" }),
     ).toBeInTheDocument();
     // Orchestrator-owned entries filtered out.
     expect(
