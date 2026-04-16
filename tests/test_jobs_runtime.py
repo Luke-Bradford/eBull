@@ -273,16 +273,28 @@ class TestGetNextRunTimes:
         assert result[JOB_ORCHESTRATOR_FULL_SYNC] is None
 
     def test_excludes_unwired_scheduled_jobs(self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch) -> None:
-        """SCHEDULED_JOBS entries not in the invoker map are excluded."""
-        from app.workers.scheduler import JOB_DAILY_CANDLE_REFRESH, JOB_ORCHESTRATOR_FULL_SYNC
+        """SCHEDULED_JOBS entries not in the invoker map are excluded.
 
-        # Wire only one of two scheduled jobs — the other should be absent.
+        Uses JOB_EXECUTE_APPROVED_ORDERS as the 'unwired' case — it IS
+        still in SCHEDULED_JOBS after Phase 4 but is deliberately NOT
+        passed to _make_runtime. A scheduled job with no invoker must
+        be excluded from get_next_run_times(), otherwise the Admin UI
+        would show a next-run time for a job that would silently 404
+        on manual trigger.
+        """
+        from app.workers.scheduler import (
+            JOB_EXECUTE_APPROVED_ORDERS,
+            JOB_ORCHESTRATOR_FULL_SYNC,
+        )
+
+        # Wire only one of the two scheduled jobs — the unwired one
+        # (execute_approved_orders) must be absent from the result.
         rt = _make_runtime({JOB_ORCHESTRATOR_FULL_SYNC: lambda: None})
         monkeypatch.setattr(rt._scheduler, "get_job", lambda _job_id: None)
 
         result = rt.get_next_run_times()
         assert JOB_ORCHESTRATOR_FULL_SYNC in result
-        assert JOB_DAILY_CANDLE_REFRESH not in result
+        assert JOB_EXECUTE_APPROVED_ORDERS not in result
 
 
 class TestProductionInvokerRegistry:
