@@ -1255,39 +1255,16 @@ def morning_candidate_review() -> None:
     does not roll back the completed scoring run.
     """
     with _tracked_job(JOB_MORNING_CANDIDATE_REVIEW) as tracker:
-        logger.info("morning_candidate_review: starting scoring run")
-        # Previously: except Exception: log + return (silent success).
-        # Now: let scoring failures propagate so _tracked_job records
-        # failure — the layer correctly shows as red on the dashboard.
-        with psycopg.connect(settings.database_url) as conn:
-            score_result = compute_rankings(conn)
-
-        if not score_result.scored:
-            logger.info("morning_candidate_review: no eligible instruments to score")
-            tracker.row_count = 0
-            return
-
-        top5 = score_result.scored[:5]
-        top5_summary = ", ".join(
-            f"instrument_id={r.instrument_id} score={r.total_score:.3f} rank={r.rank}" for r in top5
-        )
-        logger.info(
-            "morning_candidate_review: scored %d instruments [model=%s] top5=[%s]",
-            len(score_result.scored),
-            score_result.model_version,
-            top5_summary,
+        result = compute_morning_recommendations()
+        tracker.row_count = len(result.ranking_result.scored) + (
+            len(result.review_result.recommendations) if result.review_result is not None else 0
         )
 
-        logger.info("morning_candidate_review: starting portfolio review")
-        # Previously: except Exception: log + return (silent success).
-        # Now: let portfolio-review failures propagate — _tracked_job
-        # records failure. Scoring has already committed in its own
-        # connection above, so that work is preserved (spec §2.3.1).
-        with psycopg.connect(settings.database_url) as conn:
-            rec_result = run_portfolio_review(conn, model_version=score_result.model_version)
+    # No-score path: nothing to log further, nothing to execute.
+    if result.review_result is None:
+        return
 
-        tracker.row_count = len(score_result.scored) + len(rec_result.recommendations)
-
+    rec_result = result.review_result
     logger.info(
         "morning_candidate_review: recommendations=%d (BUY=%d ADD=%d HOLD=%d EXIT=%d) aum=%.2f",
         len(rec_result.recommendations),
@@ -1302,6 +1279,10 @@ def morning_candidate_review() -> None:
     # Gate on kill switch and auto-trading flag before invoking the execution
     # path — the guard inside execute_approved_orders is a second line of
     # defence, not a substitute for checking at the call site.
+    #
+    # CRITICAL: this side-effect lives ONLY on the legacy scheduled path.
+    # The sync orchestrator's morning_candidate_review adapter calls
+    # compute_morning_recommendations() directly (no order execution).
     actionable_count = sum(1 for r in rec_result.recommendations if r.action in ("BUY", "ADD", "EXIT"))
     if actionable_count > 0:
         try:
@@ -1327,6 +1308,58 @@ def morning_candidate_review() -> None:
                 "morning_candidate_review: pipeline trigger to execute_approved_orders failed",
                 exc_info=True,
             )
+
+
+@dataclass(frozen=True)
+class MorningComputeResult:
+    """Result of compute_morning_recommendations.
+
+    review_result is None when scoring produced no eligible instruments —
+    portfolio review is skipped in that case (preserving the legacy
+    no-score path). The orchestrator adapter maps None review_result to
+    LayerOutcome.NO_WORK for the recommendations layer."""
+
+    ranking_result: Any  # RankingResult — avoid top-level import cycle
+    review_result: Any | None  # PortfolioReviewResult | None
+
+
+def compute_morning_recommendations() -> MorningComputeResult:
+    """Run scoring + portfolio review. Does NOT call execute_approved_orders.
+
+    Used by the sync orchestrator's morning_candidate_review adapter,
+    which must not trigger order execution as a side effect of a data
+    refresh. The legacy `morning_candidate_review` scheduled job retains
+    its execute trigger during Phase 1–3; Phase 4 removes that scheduled
+    path entirely.
+
+    Opens TWO separate `psycopg.connect()` blocks — one per phase — so a
+    recommendation failure cannot roll back the completed scoring run.
+
+    No-score path: if scoring produces an empty `scored` list, portfolio
+    review does NOT run and `review_result` is None.
+    """
+    logger.info("compute_morning_recommendations: starting scoring run")
+    with psycopg.connect(settings.database_url) as conn:
+        score_result = compute_rankings(conn)
+
+    if not score_result.scored:
+        logger.info("compute_morning_recommendations: no eligible instruments to score")
+        return MorningComputeResult(ranking_result=score_result, review_result=None)
+
+    top5 = score_result.scored[:5]
+    top5_summary = ", ".join(f"instrument_id={r.instrument_id} score={r.total_score:.3f} rank={r.rank}" for r in top5)
+    logger.info(
+        "compute_morning_recommendations: scored %d instruments [model=%s] top5=[%s]",
+        len(score_result.scored),
+        score_result.model_version,
+        top5_summary,
+    )
+
+    logger.info("compute_morning_recommendations: starting portfolio review")
+    with psycopg.connect(settings.database_url) as conn:
+        rec_result = run_portfolio_review(conn, model_version=score_result.model_version)
+
+    return MorningComputeResult(ranking_result=score_result, review_result=rec_result)
 
 
 def _timing_error_defer(
