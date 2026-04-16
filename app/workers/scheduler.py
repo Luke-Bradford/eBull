@@ -203,6 +203,7 @@ JOB_ATTRIBUTION_SUMMARY = "attribution_summary"
 JOB_WEEKLY_REPORT = "weekly_report"
 JOB_MONTHLY_REPORT = "monthly_report"
 JOB_SEED_COST_MODELS = "seed_cost_models"
+JOB_DAILY_FINANCIAL_FACTS = "daily_financial_facts"
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +374,12 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         name=JOB_DAILY_RESEARCH_REFRESH,
         description="Refresh fundamentals and filings for all tradable instruments.",
         cadence=Cadence.daily(hour=3, minute=30),
+        prerequisite=_has_any_coverage,
+    ),
+    ScheduledJob(
+        name=JOB_DAILY_FINANCIAL_FACTS,
+        description="Fetch expanded SEC XBRL facts and normalize into financial periods.",
+        cadence=Cadence.daily(hour=3, minute=45),
         prerequisite=_has_any_coverage,
     ),
     ScheduledJob(
@@ -1009,6 +1016,58 @@ def daily_research_refresh() -> None:
             )
 
         tracker.row_count = total_rows
+
+
+def daily_financial_facts() -> None:
+    """Fetch expanded XBRL facts from SEC and run normalization pipeline."""
+    with _tracked_job(JOB_DAILY_FINANCIAL_FACTS) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            cur = conn.execute(
+                """
+                SELECT i.symbol, i.instrument_id, ei.identifier_value
+                FROM instruments i
+                JOIN external_identifiers ei
+                    ON ei.instrument_id = i.instrument_id
+                    AND ei.provider = 'sec'
+                    AND ei.identifier_type = 'cik'
+                    AND ei.is_primary = TRUE
+                WHERE i.is_tradable = TRUE
+                ORDER BY i.symbol
+                """
+            )
+            symbols = [(row[0], row[1], row[2]) for row in cur.fetchall()]
+
+            if not symbols:
+                logger.info("daily_financial_facts: no instruments with SEC CIK, skipping")
+                tracker.row_count = 0
+                return
+
+            from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
+            from app.services.financial_facts import refresh_financial_facts
+            from app.services.financial_normalization import normalize_financial_periods
+
+            # Phase 1: Fetch and store raw XBRL facts
+            with SecFundamentalsProvider(user_agent=settings.sec_user_agent) as provider:
+                summary = refresh_financial_facts(provider, conn, symbols)
+                logger.info(
+                    "Financial facts: %d attempted, %d upserted, %d skipped, %d failed",
+                    summary.symbols_attempted,
+                    summary.facts_upserted,
+                    summary.facts_skipped,
+                    summary.symbols_failed,
+                )
+
+            # Phase 2: Normalize facts → periods_raw → canonical
+            instrument_ids = [iid for _, iid, _ in symbols]
+            norm_summary = normalize_financial_periods(conn, instrument_ids)
+            logger.info(
+                "Normalization: %d instruments, %d raw periods, %d canonical",
+                norm_summary.instruments_processed,
+                norm_summary.periods_raw_upserted,
+                norm_summary.periods_canonical_upserted,
+            )
+
+            tracker.row_count = summary.facts_upserted + norm_summary.periods_canonical_upserted
 
 
 def daily_news_refresh() -> None:
