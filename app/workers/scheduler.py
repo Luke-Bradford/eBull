@@ -715,12 +715,27 @@ def nightly_universe_sync() -> None:
             tracker.row_count = row_count
 
 
+_T3_BOOTSTRAP_BATCH_SIZE = 200
+"""Max T3 instruments to include in candle refresh for bootstrap scoring.
+
+Prevents hitting API rate limits while giving enough T3 instruments price
+data to enable T3→T2 promotion via the scoring/coverage pipeline.
+"""
+
+
 def daily_candle_refresh() -> None:
     """
-    Refresh quotes and candles for all active Tier 1/2 instruments.
+    Refresh candles for Tier 1/2 instruments and a bootstrap subset of
+    Tier 3 instruments that have fundamentals data.
 
-    Fetches up to 400 daily candles (enough for 1y return + buffer)
-    and the current quote for each covered instrument.
+    T1/T2: all covered instruments (uncapped).
+    T3: up to _T3_BOOTSTRAP_BATCH_SIZE instruments that already have a
+    fundamentals_snapshot row, ordered by symbol for determinism.  This
+    gives T3 instruments enough price data for momentum scoring, enabling
+    T3→T2 promotion via the weekly coverage review.
+
+    Fetches up to 400 daily candles per instrument (enough for 1y return
+    + buffer).  Quotes are skipped (owned by the hourly job).
 
     Runs daily at 22:00 UTC, after US market close.
     """
@@ -734,7 +749,8 @@ def daily_candle_refresh() -> None:
             EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
             psycopg.connect(settings.database_url) as conn,
         ):
-            rows = conn.execute(
+            # T1/T2: all covered instruments
+            tier12_rows = conn.execute(
                 """
                 SELECT i.instrument_id, i.symbol
                 FROM instruments i
@@ -745,12 +761,43 @@ def daily_candle_refresh() -> None:
                 """
             ).fetchall()
 
-            if not rows:
+            # T3: bootstrap batch — instruments with fundamentals but no
+            # candle data yet, capped to avoid API rate limit pressure.
+            t3_rows = conn.execute(
+                """
+                SELECT i.instrument_id, i.symbol
+                FROM instruments i
+                JOIN coverage c ON c.instrument_id = i.instrument_id
+                WHERE i.is_tradable = TRUE
+                  AND c.coverage_tier = 3
+                  AND EXISTS (
+                      SELECT 1 FROM fundamentals_snapshot f
+                      WHERE f.instrument_id = i.instrument_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM price_daily p
+                      WHERE p.instrument_id = i.instrument_id
+                  )
+                ORDER BY i.symbol
+                LIMIT %(limit)s
+                """,
+                {"limit": _T3_BOOTSTRAP_BATCH_SIZE},
+            ).fetchall()
+
+            all_rows = tier12_rows + t3_rows
+            if not all_rows:
                 logger.info("daily_candle_refresh: no covered instruments found, skipping")
                 tracker.row_count = 0
                 return
 
-            instruments = [(row[0], row[1]) for row in rows]
+            logger.info(
+                "daily_candle_refresh: %d T1/T2 + %d T3 bootstrap = %d instruments",
+                len(tier12_rows),
+                len(t3_rows),
+                len(all_rows),
+            )
+
+            instruments = [(row[0], row[1]) for row in all_rows]
             # skip_quotes=True: quote freshness is owned by the hourly
             # fx_rates_refresh job; daily candle job must not shadow
             # those fresher values with stale end-of-day data.
