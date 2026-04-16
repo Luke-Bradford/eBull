@@ -752,3 +752,39 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `limit: int = 50` with no upper bound allows callers to pass `limit=10000000`, holding a DB connection open for the full scan with no timeout.
 - Prevention: Use `Query(default=N, le=1000)` (or appropriate upper bound) for all `limit` parameters in FastAPI routes. Grep for `limit: int =` in router files before pushing.
 - Enforced in: this prevention log
+
+---
+
+### `UniqueViolation` scope too broad
+
+- First seen in: #261
+- Symptom: `_start_sync_run` wrapped `build_execution_plan` inside the same `try/except psycopg.errors.UniqueViolation` that guarded the `sync_runs` INSERT. A future freshness predicate that uses `ON CONFLICT DO NOTHING RETURNING` (or any other constraint path) would have its UniqueViolation misidentified as a concurrency conflict, silently surfaced as `SyncAlreadyRunning` with a nonsensical `active_sync_run_id` and the real bug hidden.
+- Prevention: `except psycopg.errors.UniqueViolation` guards MUST wrap only the exact INSERT statement that can legitimately fire the unique violation. Grep for `except psycopg.errors.UniqueViolation` before push and verify the `try` block contains no additional queries beyond the guarded INSERT.
+- Enforced in: `app/services/sync_orchestrator/executor.py` (`_start_sync_run`)
+
+---
+
+### `datetime.now(UTC)` vs DB `now()` in freshness windows
+
+- First seen in: #261
+- Symptom: Freshness predicates computed `age = datetime.now(UTC) - started_at` using the Python wall-clock. Under a long-lived planning transaction (or across process/DB time drift), Python time and Postgres time can diverge — for short-window layers (`portfolio_sync` / `fx_rates` at 5 minutes) the boundary comparison flipped spuriously.
+- Prevention: For freshness windows shorter than ~10 minutes, do age comparison in SQL (`now() - started_at AS age`) on the same connection that wrote the `started_at` timestamp. Grep for `datetime.now(UTC)` inside freshness-predicate modules and verify it is not being subtracted from a DB timestamp.
+- Enforced in: `app/services/sync_orchestrator/freshness.py` (`_fresh_by_audit`)
+
+---
+
+### PREREQ_SKIP inside `_tracked_job` double-writes `job_runs`
+
+- First seen in: #261
+- Symptom: `daily_news_refresh` entered `_tracked_job`, reached a no-provider guard deep inside the body, and called `record_job_skip`. `_tracked_job` then exited normally on `return` and wrote its own `status='success'` row — the single invocation produced two `job_runs` rows (one `skipped`, one `success`), breaking fresh_by_audit which reads only the latest row.
+- Prevention: PREREQ_SKIP guards (missing creds, unwired providers, absent API keys) MUST live BEFORE the `with _tracked_job(...)` block. Grep for `record_job_skip` inside scheduler job bodies and verify every call-site is outside any `_tracked_job` context.
+- Enforced in: `app/workers/scheduler.py` (`_record_prereq_skip` helper is always called outside `_tracked_job`)
+
+---
+
+### Unbound variable after context-manager exit
+
+- First seen in: #261
+- Symptom: `refresh_scoring_and_recommendations` assigned `result` and `outcome` INSIDE a `with JobLock + _tracked_job` block, then referenced them AFTER the block. A non-`JobAlreadyRunning` exception propagated out, leaving `result`/`outcome` unbound if a broader `except` were ever added — an `UnboundLocalError` waiting for a future code change to trigger.
+- Prevention: When the success path of a `try` assigns variables used in the code after the `try/except`, verify every `except` branch either returns/raises or assigns the same variables. Grep for `result =` or similar assignments inside `with JobLock(...)` contexts and check the post-block readers are unreachable from any exception channel. The adapter pattern now uses explicit `JobLock.__enter__()` + `try/finally JobLock.__exit__()` so the success-path scoping is unambiguous.
+- Enforced in: `app/services/sync_orchestrator/adapters.py` (`refresh_scoring_and_recommendations`)

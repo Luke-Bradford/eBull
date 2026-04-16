@@ -368,25 +368,16 @@ def refresh_scoring_and_recommendations(
     """
     from app.workers.scheduler import (
         JOB_MORNING_CANDIDATE_REVIEW,
-        MorningComputeResult,
         _tracked_job,
         compute_morning_recommendations,
     )
 
     job_name = JOB_MORNING_CANDIDATE_REVIEW
 
+    # Acquire the lock first; separate exception channel for contention.
     try:
-        with JobLock(settings.database_url, job_name):
-            # _tracked_job writes the job_runs row under the legacy
-            # name; compute_morning_recommendations owns its own
-            # connections per phase. No order execution.
-            result: MorningComputeResult
-            with _tracked_job(job_name) as tracker:
-                result = compute_morning_recommendations()
-                tracker.row_count = len(result.ranking_result.scored) + (
-                    len(result.review_result.recommendations) if result.review_result is not None else 0
-                )
-            outcome, _ = _latest_job_outcome(job_name)
+        lock_cm = JobLock(settings.database_url, job_name)
+        lock_cm.__enter__()
     except JobAlreadyRunning:
         with psycopg.connect(settings.database_url, autocommit=True) as conn:
             record_job_skip(
@@ -403,6 +394,20 @@ def refresh_scoring_and_recommendations(
             error_category=None,
         )
         return [("scoring", skip), ("recommendations", skip)]
+
+    # Inside the lock: run, capture outcome, release. Any inner exception
+    # re-raises after releasing the lock — the orchestrator marks emits
+    # FAILED. The post-lock result-access block is unreachable via any
+    # exception path, so result/outcome are always bound when read.
+    try:
+        with _tracked_job(job_name) as tracker:
+            result = compute_morning_recommendations()
+            tracker.row_count = len(result.ranking_result.scored) + (
+                len(result.review_result.recommendations) if result.review_result is not None else 0
+            )
+        outcome, _ = _latest_job_outcome(job_name)
+    finally:
+        lock_cm.__exit__(None, None, None)
 
     scoring_count = len(result.ranking_result.scored)
     if result.review_result is None:

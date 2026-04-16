@@ -102,11 +102,16 @@ def _start_sync_run(
 
     UniqueViolation on idx_sync_runs_single_running → SyncAlreadyRunning
     carrying the active sync_run_id for the HTTP 409 body.
+
+    Planning runs OUTSIDE the try/except so a UniqueViolation raised from
+    anywhere in build_execution_plan (e.g. a future freshness predicate
+    using ON CONFLICT DO NOTHING RETURNING) cannot be misidentified as a
+    concurrency conflict. Only the two INSERTs are wrapped.
     """
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        plan = build_execution_plan(conn, scope)
         try:
             with conn.transaction():
-                plan = build_execution_plan(conn, scope)
                 sync_run_id = _insert_sync_run(conn, scope, trigger, plan)
                 _insert_layer_progress_rows(conn, sync_run_id, plan)
             return sync_run_id, plan
@@ -476,6 +481,7 @@ def _finalize_sync_run(
     sync_layer_progress rows; log drift vs in-memory outcomes."""
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         with conn.transaction():
+            # COUNT(*) with FILTER always returns exactly one row — no None fallback needed.
             counts_row = conn.execute(
                 """
                 SELECT
@@ -487,7 +493,8 @@ def _finalize_sync_run(
                 """,
                 (sync_run_id,),
             ).fetchone()
-            done, failed, skipped = counts_row or (0, 0, 0)
+            assert counts_row is not None, "COUNT(*) aggregate returned no row"
+            done, failed, skipped = counts_row
 
             if failed == 0:
                 status = "complete"

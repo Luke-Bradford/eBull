@@ -18,7 +18,7 @@ BEFORE ordering would hide a newer failure behind an older success.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import psycopg
@@ -45,10 +45,19 @@ def _fresh_by_audit(
 ) -> tuple[bool, str]:
     """Return (True, detail) iff the LATEST job_runs row for job_name is a
     counting row within window. Latest-first ordering ensures a newer
-    failure invalidates an older success."""
+    failure invalidates an older success.
+
+    Age comparison is done in SQL (now() - started_at) so the freshness
+    window uses the same clock that the started_at column was written
+    with. Python wall-clock datetime.now(UTC) would drift from the DB
+    clock inside a long-lived planning transaction; for short-window
+    layers (portfolio_sync, fx_rates at 5 min) that causes spurious
+    flips at the boundary.
+    """
     row = conn.execute(
         """
-        SELECT started_at, status, error_msg
+        SELECT started_at, status, error_msg,
+               (now() - started_at) AS age
         FROM job_runs
         WHERE job_name = %s
         ORDER BY started_at DESC
@@ -58,13 +67,12 @@ def _fresh_by_audit(
     ).fetchone()
     if row is None:
         return False, f"no job_runs row for {job_name}"
-    started_at, status, error_msg = row
+    _started_at, status, error_msg, age = row
     is_counting = status == "success" or (
         status == "skipped" and error_msg is not None and error_msg.startswith(PREREQ_SKIP_MARKER)
     )
     if not is_counting:
         return False, f"latest {job_name} has status={status}, not a counting row"
-    age = datetime.now(UTC) - started_at
     if age > window:
         return (
             False,

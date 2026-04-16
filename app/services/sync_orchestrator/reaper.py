@@ -30,8 +30,8 @@ def reap_orphaned_syncs(timeout: timedelta = timedelta(hours=1)) -> int:
     """
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         with conn.transaction():
-            # Step 1: reap sync_runs + their pending/running progress
-            # rows in one statement. CTE returns reaped sync_run_ids.
+            # Step 1: reap sync_runs + cascade-fail their pending/running
+            # progress rows. CTE returns reaped sync_run_ids for step 2.
             reaped_rows = conn.execute(
                 """
                 WITH reaped AS (
@@ -59,8 +59,12 @@ def reap_orphaned_syncs(timeout: timedelta = timedelta(hours=1)) -> int:
             ).fetchall()
             reaped_ids = [r[0] for r in reaped_rows]
 
-            # Step 2: recompute aggregate counts on each reaped row so
-            # GET /sync/runs shows truthful layers_done/failed/skipped.
+            # Step 2: recompute aggregate counts. Inside the SAME
+            # transaction so status='failed' and counts either both
+            # land or neither does — the non-atomic split in the prior
+            # draft left sync_runs marked failed with stale pre-crash
+            # layers_done/failed/skipped if the process died between
+            # the two statements.
             if reaped_ids:
                 conn.execute(
                     """

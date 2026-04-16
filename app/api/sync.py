@@ -153,10 +153,31 @@ def get_sync_layers(
     from app.services.sync_orchestrator import LAYERS
     from app.services.sync_orchestrator.registry import JOB_TO_LAYERS
 
-    layer_to_job = {emit: job for job, emits in JOB_TO_LAYERS.items() for emit in emits}
+    # Collision guard: JOB_TO_LAYERS maps N jobs → M layer names. If two
+    # jobs ever claimed the same layer, last-writer-wins would silently
+    # hide the conflict and send a wrong job_name into freshness lookups.
+    layer_to_job: dict[str, str] = {}
+    for job, emits in JOB_TO_LAYERS.items():
+        for emit in emits:
+            if emit in layer_to_job:
+                raise RuntimeError(
+                    f"layer {emit!r} emitted by both {layer_to_job[emit]!r} "
+                    f"and {job!r}; JOB_TO_LAYERS must have disjoint emits"
+                )
+            layer_to_job[emit] = job
+
     out: list[dict[str, Any]] = []
     for name, layer in LAYERS.items():
-        fresh, detail = layer.is_fresh(conn)
+        # Per-layer isolation: one broken predicate should not 500 the
+        # whole endpoint. Operators need the dashboard most when things
+        # are red; masking a partial failure would hide which layer broke.
+        try:
+            fresh, detail = layer.is_fresh(conn)
+            predicate_error: str | None = None
+        except Exception as exc:
+            fresh = False
+            detail = f"freshness predicate error: {type(exc).__name__}"
+            predicate_error = type(exc).__name__
         job_name = layer_to_job[name]
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
@@ -183,7 +204,7 @@ def get_sync_layers(
                 "last_duration_seconds": (
                     int((last_success_at - last_start).total_seconds()) if last_success_at and last_start else None
                 ),
-                "last_error_category": None,
+                "last_error_category": predicate_error,
                 "consecutive_failures": 0,
                 "dependencies": list(layer.dependencies),
                 "is_blocking": layer.is_blocking,
