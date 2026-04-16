@@ -103,6 +103,14 @@ export function fetchSyncStatus(): Promise<SyncStatusResponse> {
 }
 
 export function fetchSyncRuns(limit: number = 20): Promise<SyncRunsResponse> {
+  // Fail-closed on invalid input: NaN / non-integer / out-of-range
+  // would otherwise interpolate into the URL and hit the server as
+  // an obviously-bad request. Backend caps at 100; match the cap.
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    return Promise.reject(
+      new RangeError(`fetchSyncRuns limit must be an integer in [1, 100], got ${limit}`),
+    );
+  }
   return apiFetch<SyncRunsResponse>(`/sync/runs?limit=${limit}`);
 }
 

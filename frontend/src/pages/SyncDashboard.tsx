@@ -79,6 +79,16 @@ export function SyncDashboard() {
     | { kind: "queued"; syncRunId: number }
   >({ kind: "idle" });
 
+  // Clear `queued` banner once the status poll confirms the trigger
+  // took effect (is_running=true). Otherwise the banner would stick
+  // around indefinitely if the sync ran fast and finished before the
+  // next poll tick.
+  useEffect(() => {
+    if (triggerState.kind === "queued" && isRunning) {
+      setTriggerState({ kind: "idle" });
+    }
+  }, [triggerState, isRunning]);
+
   const handleSyncNow = useCallback(async () => {
     setTriggerState({ kind: "running" });
     try {
@@ -144,7 +154,15 @@ export function SyncDashboard() {
             type="button"
             onClick={handleSyncNow}
             disabled={
-              triggerState.kind === "running" || isRunning
+              // Disabled from click until either (a) the backend confirms
+              // is_running=true via the next /sync/status poll, or (b)
+              // the trigger returned an error and we're back in idle.
+              // Without the "queued" guard, a second click between the
+              // POST returning 202 and the status poll could fire a
+              // second concurrent trigger.
+              triggerState.kind === "running" ||
+              triggerState.kind === "queued" ||
+              isRunning
             }
             className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-white hover:bg-sky-700 disabled:bg-slate-300"
           >
@@ -276,7 +294,12 @@ function LayerCard({ layer }: { layer: SyncLayer }) {
     >
       <div className="flex items-center justify-between">
         <span className="font-medium text-slate-800">{layer.display_name}</span>
-        <span className={`h-2 w-2 rounded-full ${dot}`} aria-hidden />
+        <span className="flex items-center gap-1">
+          <span className="sr-only">
+            {layer.is_fresh ? "fresh" : "stale"}
+          </span>
+          <span className={`h-2 w-2 rounded-full ${dot}`} aria-hidden />
+        </span>
       </div>
       <p
         className="mt-1 truncate text-xs text-slate-500"
