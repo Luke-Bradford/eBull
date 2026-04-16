@@ -36,7 +36,6 @@ from app.providers.broker import BrokerOrderResult, BrokerProvider, OrderParams
 from app.services.return_attribution import compute_attribution, persist_attribution
 from app.services.runtime_config import get_runtime_config
 from app.services.transaction_cost import (
-    TransactionCostConfigCorrupt,
     estimate_cost,
     get_transaction_cost_config,
     load_instrument_cost,
@@ -785,7 +784,8 @@ def execute_order(
         )
 
         # Record estimated cost for BUY/ADD only (entry cost is meaningless
-        # for EXIT orders).  Best-effort: config-missing doesn't block order.
+        # for EXIT orders).  Best-effort: any failure here must not block the
+        # order or abort the enclosing transaction.
         if action in ("BUY", "ADD"):
             try:
                 cost_config = get_transaction_cost_config(conn)
@@ -823,10 +823,11 @@ def execute_order(
                         instrument_id=instrument_id,
                         estimate=cost_est,
                     )
-            except TransactionCostConfigCorrupt:
+            except Exception:
                 logger.warning(
-                    "transaction_cost_config missing — skipping cost record for order_id=%d",
+                    "cost recording failed for order_id=%d — continuing without cost record",
                     order_id,
+                    exc_info=True,
                 )
 
         fp = broker_result.filled_price
