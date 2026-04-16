@@ -25,6 +25,19 @@ from app.services.sync_orchestrator import (
     SyncScope,
     submit_sync,
 )
+from app.services.sync_orchestrator.registry import JOB_TO_LAYERS
+
+# Registry invariant: every layer is emitted by at most one legacy job.
+# Built once at import time; a duplicate emit fails loudly at startup
+# rather than silently 500-ing per request under client traffic.
+_LAYER_TO_JOB: dict[str, str] = {}
+for _job, _emits in JOB_TO_LAYERS.items():
+    for _emit in _emits:
+        assert _emit not in _LAYER_TO_JOB, (
+            f"layer {_emit!r} emitted by both {_LAYER_TO_JOB[_emit]!r} "
+            f"and {_job!r}; JOB_TO_LAYERS must have disjoint emits"
+        )
+        _LAYER_TO_JOB[_emit] = _job
 
 router = APIRouter(
     prefix="/sync",
@@ -151,21 +164,8 @@ def get_sync_layers(
 ) -> dict[str, Any]:
     """All 15 layers with freshness + last successful run."""
     from app.services.sync_orchestrator import LAYERS
-    from app.services.sync_orchestrator.registry import JOB_TO_LAYERS
 
-    # Collision guard: JOB_TO_LAYERS maps N jobs → M layer names. If two
-    # jobs ever claimed the same layer, last-writer-wins would silently
-    # hide the conflict and send a wrong job_name into freshness lookups.
-    layer_to_job: dict[str, str] = {}
-    for job, emits in JOB_TO_LAYERS.items():
-        for emit in emits:
-            if emit in layer_to_job:
-                raise RuntimeError(
-                    f"layer {emit!r} emitted by both {layer_to_job[emit]!r} "
-                    f"and {job!r}; JOB_TO_LAYERS must have disjoint emits"
-                )
-            layer_to_job[emit] = job
-
+    # _LAYER_TO_JOB is built and asserted-disjoint at module import.
     out: list[dict[str, Any]] = []
     for name, layer in LAYERS.items():
         # Per-layer isolation: one broken predicate should not 500 the
@@ -185,7 +185,7 @@ def get_sync_layers(
             predicate_error = _categorize_error(exc)
             fresh = False
             detail = f"freshness predicate error ({predicate_error})"
-        job_name = layer_to_job[name]
+        job_name = _LAYER_TO_JOB[name]
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 """

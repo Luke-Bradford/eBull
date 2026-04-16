@@ -332,7 +332,10 @@ def _last_counting_outcome_from_job_runs(layer_name: str) -> LayerOutcome:
     if job_name is None:
         return LayerOutcome.FAILED
 
-    with psycopg.connect(settings.database_url) as conn:
+    # autocommit=True per orchestrator convention — SELECT must not leave
+    # an idle implicit transaction open across dependency-resolution
+    # calls during the _run_layers_loop walk.
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
         row = conn.execute(
             """
             SELECT status, row_count, error_msg

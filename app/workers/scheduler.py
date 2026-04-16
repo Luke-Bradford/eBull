@@ -1254,17 +1254,25 @@ def morning_candidate_review() -> None:
     Each phase opens its own connection so a failure in recommendations
     does not roll back the completed scoring run.
     """
+    # Restructured: do not reference `result` outside the `_tracked_job`
+    # block. This matches the prevention-log entry "Unbound variable
+    # after context-manager exit" added in this same PR — exception
+    # paths from compute_morning_recommendations re-raise through
+    # _tracked_job before the post-block code, so the pattern was
+    # safe-as-written, but referencing inside the block removes the
+    # fragility entirely and gives future readers a consistent shape.
+    rec_result: Any | None = None
     with _tracked_job(JOB_MORNING_CANDIDATE_REVIEW) as tracker:
         result = compute_morning_recommendations()
         tracker.row_count = len(result.ranking_result.scored) + (
             len(result.review_result.recommendations) if result.review_result is not None else 0
         )
+        rec_result = result.review_result  # None or PortfolioReviewResult
 
     # No-score path: nothing to log further, nothing to execute.
-    if result.review_result is None:
+    if rec_result is None:
         return
 
-    rec_result = result.review_result
     logger.info(
         "morning_candidate_review: recommendations=%d (BUY=%d ADD=%d HOLD=%d EXIT=%d) aum=%.2f",
         len(rec_result.recommendations),
