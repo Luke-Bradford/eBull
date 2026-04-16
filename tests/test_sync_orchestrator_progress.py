@@ -103,13 +103,8 @@ class TestThrottle:
 
 
 class TestCallbackErrorHandling:
-    def test_callback_exception_is_swallowed_and_state_advances(self) -> None:
-        # A callback that raises must not abort the loop. The throttle
-        # state is NOT advanced on failure, so subsequent threshold
-        # checks continue to operate on the prior tick — this is
-        # intentional: if the DB is momentarily unavailable, we want
-        # to retry on the next tick rather than silently skip until
-        # the next time threshold.
+    def test_callback_exception_is_swallowed(self) -> None:
+        # A callback that raises must not abort the loop.
         cb = MagicMock(side_effect=RuntimeError("db down"))
         with patch("app.services.sync_orchestrator.progress.time.monotonic", return_value=100.0):
             token = set_active_progress(cb)
@@ -118,7 +113,25 @@ class TestCallbackErrorHandling:
 
             report_progress(5, 100)  # hits threshold, callback raises
 
-            # Callback was invoked once despite raising.
+            cb.assert_called_once_with(5, 100)
+            clear_active_progress(token)
+
+    def test_throttle_state_advances_on_exception(self) -> None:
+        # A sustained DB failure must not cause a hot-retry loop. The
+        # throttle state is advanced BEFORE the callback is invoked,
+        # so the next threshold is measured from the attempted tick,
+        # not the last successful one. Verify by firing a failing
+        # tick then immediately another below the item threshold —
+        # the second call must be throttled, not attempted.
+        cb = MagicMock(side_effect=RuntimeError("db down"))
+        with patch("app.services.sync_orchestrator.progress.time.monotonic", return_value=100.0):
+            token = set_active_progress(cb)
+            cb.reset_mock()
+            cb.side_effect = RuntimeError("db down")
+
+            report_progress(5, 100)  # threshold, callback raises, state advances
+            report_progress(6, 100)  # item delta = 1 from the advanced state, throttled
+
             cb.assert_called_once_with(5, 100)
             clear_active_progress(token)
 

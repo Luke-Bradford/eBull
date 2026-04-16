@@ -89,7 +89,12 @@ def report_progress(
     is always persisted even if the delta is below threshold.
 
     Callback exceptions are caught and ignored — progress reporting
-    must never abort the underlying work.
+    must never abort the underlying work. Throttle state is advanced
+    regardless of whether the callback succeeded, so a sustained DB
+    failure does not cause a hot-retry every iteration: the next
+    threshold is measured from the attempted tick, not the last
+    successful one. A transient blip drops one tick; the next tick
+    lands naturally when the throttle elapses again.
     """
     state = _active.get()
     if state is None:
@@ -102,10 +107,12 @@ def report_progress(
     if not force and items_since < tick_every_items and seconds_since < tick_every_seconds:
         return
 
+    # Advance throttle state BEFORE calling the callback so a raised
+    # exception cannot prevent the update — preventing a hot-retry
+    # loop on sustained DB failure.
+    state.last_tick_items = items_done
+    state.last_tick_time = now
     try:
         state.callback(items_done, items_total)
     except Exception:
         return
-
-    state.last_tick_items = items_done
-    state.last_tick_time = now
