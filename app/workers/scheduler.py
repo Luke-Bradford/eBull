@@ -757,12 +757,19 @@ def daily_candle_refresh() -> None:
                 JOIN coverage c ON c.instrument_id = i.instrument_id
                 WHERE i.is_tradable = TRUE
                   AND c.coverage_tier IN (1, 2)
-                ORDER BY i.symbol
+                ORDER BY i.symbol, i.instrument_id
                 """
             ).fetchall()
 
             # T3: bootstrap batch — instruments with fundamentals but no
             # candle data yet, capped to avoid API rate limit pressure.
+            # NOT EXISTS(price_daily) is intentional: once an instrument
+            # has any candle data it drops out of the bootstrap pool.
+            # refresh_market_data fetches ~400 candles per instrument in
+            # a single API call, so a "partial" bootstrap still gives
+            # enough data for momentum scoring.  If the API call fails
+            # entirely, no rows are inserted and the instrument retries
+            # next run.
             t3_rows = conn.execute(
                 """
                 SELECT i.instrument_id, i.symbol
@@ -778,7 +785,7 @@ def daily_candle_refresh() -> None:
                       SELECT 1 FROM price_daily p
                       WHERE p.instrument_id = i.instrument_id
                   )
-                ORDER BY i.symbol
+                ORDER BY i.symbol, i.instrument_id
                 LIMIT %(limit)s
                 """,
                 {"limit": _T3_BOOTSTRAP_BATCH_SIZE},
