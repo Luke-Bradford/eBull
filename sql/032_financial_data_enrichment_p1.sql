@@ -278,8 +278,14 @@ GROUP BY instrument_id;
 --
 -- Falls back to the old fundamentals_snapshot-based calculation if no
 -- financial_periods data exists yet (migration transition period).
+--
+-- Must DROP first: the column types changed (UNION ALL widens
+-- NUMERIC(18,6) to NUMERIC), and CREATE OR REPLACE cannot change types.
+-- No dependent views exist — checked before writing this migration.
 
-CREATE OR REPLACE VIEW instrument_valuation AS
+DROP VIEW IF EXISTS instrument_valuation;
+
+CREATE VIEW instrument_valuation AS
 WITH priced AS (
     SELECT instrument_id,
            COALESCE(
