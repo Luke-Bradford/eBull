@@ -32,16 +32,15 @@ Cursor call order inside execute_order (demo EXIT):
   2. _load_position_units           — fetchone
   3. _load_quote_for_execution      — fetchone (last/bid/ask/spread_pct)
   4. _persist_order                 — fetchone (INSERT RETURNING)
-  5. get_transaction_cost_config    — fetchone
-  6. load_instrument_cost           — fetchone
-  7. record_estimated_cost          — cursor (INSERT, no fetchone)
-  8. _persist_fill                  — fetchone (INSERT RETURNING)
-  9. conn.execute x4                — position update, cash_ledger, rec status, audit
+  5. _persist_fill                  — fetchone (INSERT RETURNING)
+  6. conn.execute x4                — position update, cash_ledger, rec status, audit
 
-Live mode cursor sequences are similar but without step 3 in the main path
-(no _load_quote_for_execution for the fill). Instead, when cost_model_row is
-None, _load_quote_for_execution is called in the cost-recording fallback path
-(between steps 6 and 7).
+  Cost recording (steps 5-7 in BUY sequence) is BUY/ADD only — skipped for EXIT.
+
+Live mode BUY cursor sequences are similar but without step 3 in the main
+path (no _load_quote_for_execution for the fill). Instead, when
+cost_model_row is None, _load_quote_for_execution is called in the
+cost-recording fallback path (between steps 6 and 7).
 """
 
 from __future__ import annotations
@@ -429,11 +428,8 @@ class TestExecuteOrderDemoMode:
             _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
             _position_cursor(current_units=5.0),
             _quote_cursor(last=200.0, spread_pct=0.30),
-            # Inside transaction:
+            # Inside transaction (no cost recording for EXIT):
             _order_returning_cursor(order_id=8),
-            _cost_config_cursor(),
-            _cost_model_cursor(),
-            _cost_record_write_cursor(),
             _fill_returning_cursor(fill_id=4),
             # Post-fill: read current_units for attribution check
             _make_cursor([{"current_units": 0}]),
@@ -545,10 +541,8 @@ class TestExecuteOrderDemoMode:
             _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
             _position_cursor(current_units=5.0),
             _quote_cursor(last=200.0, spread_pct=0.30),
+            # No cost recording for EXIT
             _order_returning_cursor(order_id=8),
-            _cost_config_cursor(),
-            _cost_model_cursor(),
-            _cost_record_write_cursor(),
             _fill_returning_cursor(fill_id=4),
             # Post-fill: read current_units for attribution check
             _make_cursor([{"current_units": 0}]),
@@ -682,11 +676,8 @@ class TestExecuteOrderLiveMode:
             # _load_position_id_for_exit resolves instrument_id → position_id
             _make_cursor([{"position_id": 98765}]),
             # broker called (no cursor)
+            # No cost recording for EXIT
             _order_returning_cursor(order_id=11),
-            _cost_config_cursor(),
-            _cost_model_cursor(),  # no cost_model → falls back to quote
-            _quote_cursor(last=200.0, bid=199.0, ask=201.0, spread_pct=0.50),  # cost fallback
-            _make_cursor([]),  # record_estimated_cost INSERT
             _fill_returning_cursor(fill_id=7),
             # Post-fill: read current_units for attribution check
             _make_cursor([{"current_units": 0}]),
@@ -711,11 +702,8 @@ class TestExecuteOrderLiveMode:
             # _load_position_id_for_exit returns None — no broker_positions row
             _make_cursor([]),
             # broker NOT called — broker_result is constructed inline as failed
+            # No cost recording for EXIT
             _order_returning_cursor(order_id=12),
-            _cost_config_cursor(),
-            _cost_model_cursor(),  # no cost_model → falls back to quote
-            _quote_cursor(last=150.0, bid=149.0, ask=151.0, spread_pct=0.40),  # cost fallback
-            _make_cursor([]),  # record_estimated_cost INSERT
         ]
         conn = _make_conn(cursors)
         result = execute_order(

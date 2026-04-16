@@ -784,48 +784,50 @@ def execute_order(
             now=now,
         )
 
-        # Record estimated cost (best-effort: config-missing doesn't block order)
-        try:
-            cost_config = get_transaction_cost_config(conn)
-            cost_model_row = load_instrument_cost(conn, instrument_id)
-            if cost_model_row is not None:
-                s_bps = cost_model_row["spread_bps"]
-                o_rate = cost_model_row["overnight_rate"]
-                fx_bps = cost_model_row["fx_markup_bps"]
-            else:
-                # No cost_model row — fall back to quote spread_pct.
-                # In live mode quote_data is not loaded for the fill,
-                # so load it here for cost recording.
-                qd = quote_data if quote_data is not None else _load_quote_for_execution(conn, instrument_id)
-                if qd is not None and qd.get("spread_pct") is not None:
-                    s_bps = spread_pct_to_bps(Decimal(str(qd["spread_pct"])))
+        # Record estimated cost for BUY/ADD only (entry cost is meaningless
+        # for EXIT orders).  Best-effort: config-missing doesn't block order.
+        if action in ("BUY", "ADD"):
+            try:
+                cost_config = get_transaction_cost_config(conn)
+                cost_model_row = load_instrument_cost(conn, instrument_id)
+                if cost_model_row is not None:
+                    s_bps = cost_model_row["spread_bps"]
+                    o_rate = cost_model_row["overnight_rate"]
+                    fx_bps = cost_model_row["fx_markup_bps"]
                 else:
-                    s_bps = None
-                o_rate = Decimal("0")
-                fx_bps = Decimal("0")
+                    # No cost_model row — fall back to quote spread_pct.
+                    # In live mode quote_data is not loaded for the fill,
+                    # so load it here for cost recording.
+                    qd = quote_data if quote_data is not None else _load_quote_for_execution(conn, instrument_id)
+                    if qd is not None and qd.get("spread_pct") is not None:
+                        s_bps = spread_pct_to_bps(Decimal(str(qd["spread_pct"])))
+                    else:
+                        s_bps = None
+                    o_rate = Decimal("0")
+                    fx_bps = Decimal("0")
 
-            if s_bps is not None:
-                cost_est = estimate_cost(
-                    spread_bps=s_bps,
-                    overnight_rate=o_rate,
-                    fx_markup_bps=fx_bps,
-                    hold_days=cost_config["default_hold_days"],
-                    max_total_cost_bps=cost_config["max_total_cost_bps"],
-                    min_return_vs_cost_ratio=cost_config["min_return_vs_cost_ratio"],
-                    expected_return_pct=None,
+                if s_bps is not None:
+                    cost_est = estimate_cost(
+                        spread_bps=s_bps,
+                        overnight_rate=o_rate,
+                        fx_markup_bps=fx_bps,
+                        hold_days=cost_config["default_hold_days"],
+                        max_total_cost_bps=cost_config["max_total_cost_bps"],
+                        min_return_vs_cost_ratio=cost_config["min_return_vs_cost_ratio"],
+                        expected_return_pct=None,
+                    )
+                    record_estimated_cost(
+                        conn,
+                        order_id=order_id,
+                        recommendation_id=recommendation_id,
+                        instrument_id=instrument_id,
+                        estimate=cost_est,
+                    )
+            except TransactionCostConfigCorrupt:
+                logger.warning(
+                    "transaction_cost_config missing — skipping cost record for order_id=%d",
+                    order_id,
                 )
-                record_estimated_cost(
-                    conn,
-                    order_id=order_id,
-                    recommendation_id=recommendation_id,
-                    instrument_id=instrument_id,
-                    estimate=cost_est,
-                )
-        except TransactionCostConfigCorrupt:
-            logger.warning(
-                "transaction_cost_config missing — skipping cost record for order_id=%d",
-                order_id,
-            )
 
         fp = broker_result.filled_price
         fu = broker_result.filled_units

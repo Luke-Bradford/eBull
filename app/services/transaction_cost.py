@@ -334,6 +334,8 @@ def seed_cost_models_from_quotes(
             rows = cur.fetchall()
 
         for row in rows:
+            # Defensive: SQL already filters IS NOT NULL, but guard against
+            # future query changes or unexpected mock data.
             if row["spread_pct"] is None:
                 skipped += 1
                 continue
@@ -342,35 +344,43 @@ def seed_cost_models_from_quotes(
             currency = row["currency"] or "USD"
             fx_markup_bps = Decimal("0") if currency == "USD" else Decimal("50")
 
-            with conn.transaction():
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        UPDATE cost_model
-                        SET valid_to = NOW()
-                        WHERE instrument_id = %(iid)s
-                          AND valid_to IS NULL
-                        """,
-                        {"iid": row["instrument_id"]},
-                    )
-                    cur.execute(
-                        """
-                        INSERT INTO cost_model (
-                            instrument_id, spread_bps, overnight_rate,
-                            fx_pair, fx_markup_bps, source
-                        ) VALUES (
-                            %(iid)s, %(spread_bps)s, 0,
-                            %(fx_pair)s, %(fx_markup_bps)s, 'computed'
+            try:
+                with conn.transaction():
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            UPDATE cost_model
+                            SET valid_to = NOW()
+                            WHERE instrument_id = %(iid)s
+                              AND valid_to IS NULL
+                            """,
+                            {"iid": row["instrument_id"]},
                         )
-                        """,
-                        {
-                            "iid": row["instrument_id"],
-                            "spread_bps": spread_bps,
-                            "fx_pair": None if currency == "USD" else f"{currency}/USD",
-                            "fx_markup_bps": fx_markup_bps,
-                        },
-                    )
-            processed += 1
+                        cur.execute(
+                            """
+                            INSERT INTO cost_model (
+                                instrument_id, spread_bps, overnight_rate,
+                                fx_pair, fx_markup_bps, source
+                            ) VALUES (
+                                %(iid)s, %(spread_bps)s, 0,
+                                %(fx_pair)s, %(fx_markup_bps)s, 'computed'
+                            )
+                            """,
+                            {
+                                "iid": row["instrument_id"],
+                                "spread_bps": spread_bps,
+                                "fx_pair": None if currency == "USD" else f"{currency}/USD",
+                                "fx_markup_bps": fx_markup_bps,
+                            },
+                        )
+                processed += 1
+            except Exception:
+                logger.warning(
+                    "seed_cost_models: failed for instrument_id=%d, skipping",
+                    row["instrument_id"],
+                    exc_info=True,
+                )
+                skipped += 1
 
     return {"processed": processed, "skipped": skipped}
 
