@@ -58,16 +58,36 @@ class TestRegistryShape:
 # ---------------------------------------------------------------------------
 
 
-class TestDailyCandleJob:
-    def test_daily_candle_job_registered(self) -> None:
-        names = [job.name for job in SCHEDULED_JOBS]
-        assert "daily_candle_refresh" in names
+class TestOrchestratorTriggers:
+    """Phase 4: SCHEDULED_JOBS now carries two orchestrator triggers in
+    place of the 12 legacy cron entries that mapped to non-empty
+    JOB_TO_LAYERS values. daily_candle_refresh still exists as an
+    _INVOKERS entry for POST /jobs/{name}/run, but no longer has its
+    own cron schedule."""
 
-    def test_daily_candle_job_cadence(self) -> None:
-        job = next(j for j in SCHEDULED_JOBS if j.name == "daily_candle_refresh")
+    def test_orchestrator_full_sync_registered(self) -> None:
+        names = [job.name for job in SCHEDULED_JOBS]
+        assert "orchestrator_full_sync" in names
+
+    def test_orchestrator_full_sync_cadence_daily_03_utc(self) -> None:
+        job = next(j for j in SCHEDULED_JOBS if j.name == "orchestrator_full_sync")
         assert job.cadence.kind == "daily"
-        assert job.cadence.hour == 22
+        assert job.cadence.hour == 3
         assert job.cadence.minute == 0
+
+    def test_orchestrator_high_frequency_registered_every_5min(self) -> None:
+        job = next(j for j in SCHEDULED_JOBS if j.name == "orchestrator_high_frequency_sync")
+        assert job.cadence.kind == "every_n_minutes"
+        assert job.cadence.interval_minutes == 5
+
+    def test_daily_candle_refresh_still_invokable_via_invokers(self) -> None:
+        from app.jobs.runtime import _INVOKERS
+
+        assert "daily_candle_refresh" in _INVOKERS
+
+    def test_daily_candle_refresh_no_longer_scheduled(self) -> None:
+        names = [job.name for job in SCHEDULED_JOBS]
+        assert "daily_candle_refresh" not in names
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +96,14 @@ class TestDailyCandleJob:
 
 
 class TestCadenceValidators:
+    @pytest.mark.parametrize("interval", [0, 31, 7])
+    def test_every_n_minutes_invalid_raises(self, interval: int) -> None:
+        with pytest.raises(ValueError, match="every_n_minutes"):
+            Cadence.every_n_minutes(interval=interval)
+
+    def test_every_n_minutes_label(self) -> None:
+        assert Cadence.every_n_minutes(interval=5).label == "every 5m"
+
     @pytest.mark.parametrize("minute", [-1, 60, 75])
     def test_hourly_invalid_minute_raises(self, minute: int) -> None:
         with pytest.raises(ValueError, match="hourly minute"):

@@ -209,13 +209,13 @@ class TestStartWiring:
         # Wire an invoker for a name that IS in SCHEDULED_JOBS, plus
         # one that is not. start() should register the first and
         # silently ignore the second.
-        from app.workers.scheduler import JOB_DAILY_CIK_REFRESH
+        from app.workers.scheduler import JOB_ORCHESTRATOR_FULL_SYNC
 
         added: list[str] = []
 
         rt = _make_runtime(
             {
-                JOB_DAILY_CIK_REFRESH: lambda: None,
+                JOB_ORCHESTRATOR_FULL_SYNC: lambda: None,
                 "not_in_registry": lambda: None,
             }
         )
@@ -229,7 +229,7 @@ class TestStartWiring:
 
         rt.start()
 
-        assert added == [f"recurring:{JOB_DAILY_CIK_REFRESH}"]
+        assert added == [f"recurring:{JOB_ORCHESTRATOR_FULL_SYNC}"]
 
     def test_double_start_raises(self, patched_runtime: None) -> None:
         rt = _make_runtime({})
@@ -243,46 +243,58 @@ class TestGetNextRunTimes:
         self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """get_next_run_times queries APScheduler's in-memory jobs."""
-        from app.workers.scheduler import JOB_DAILY_CIK_REFRESH
+        from app.workers.scheduler import JOB_ORCHESTRATOR_FULL_SYNC
 
         fire_time = datetime(2026, 4, 11, 3, 0, 0, tzinfo=UTC)
 
         fake_aps_job = MagicMock()
         fake_aps_job.next_run_time = fire_time
 
-        rt = _make_runtime({JOB_DAILY_CIK_REFRESH: lambda: None})
+        rt = _make_runtime({JOB_ORCHESTRATOR_FULL_SYNC: lambda: None})
         monkeypatch.setattr(
             rt._scheduler,
             "get_job",
-            lambda job_id: fake_aps_job if job_id == f"recurring:{JOB_DAILY_CIK_REFRESH}" else None,
+            lambda job_id: fake_aps_job if job_id == f"recurring:{JOB_ORCHESTRATOR_FULL_SYNC}" else None,
         )
 
         result = rt.get_next_run_times()
-        assert result[JOB_DAILY_CIK_REFRESH] == fire_time
+        assert result[JOB_ORCHESTRATOR_FULL_SYNC] == fire_time
 
     def test_returns_none_for_missing_scheduler_job(
         self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """If APScheduler doesn't know about a job, return None."""
-        from app.workers.scheduler import JOB_DAILY_CIK_REFRESH
+        from app.workers.scheduler import JOB_ORCHESTRATOR_FULL_SYNC
 
-        rt = _make_runtime({JOB_DAILY_CIK_REFRESH: lambda: None})
+        rt = _make_runtime({JOB_ORCHESTRATOR_FULL_SYNC: lambda: None})
         monkeypatch.setattr(rt._scheduler, "get_job", lambda _job_id: None)
 
         result = rt.get_next_run_times()
-        assert result[JOB_DAILY_CIK_REFRESH] is None
+        assert result[JOB_ORCHESTRATOR_FULL_SYNC] is None
 
     def test_excludes_unwired_scheduled_jobs(self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch) -> None:
-        """SCHEDULED_JOBS entries not in the invoker map are excluded."""
-        from app.workers.scheduler import JOB_DAILY_CANDLE_REFRESH, JOB_DAILY_CIK_REFRESH
+        """SCHEDULED_JOBS entries not in the invoker map are excluded.
 
-        # Wire only one of two scheduled jobs — the other should be absent.
-        rt = _make_runtime({JOB_DAILY_CIK_REFRESH: lambda: None})
+        Uses JOB_EXECUTE_APPROVED_ORDERS as the 'unwired' case — it IS
+        still in SCHEDULED_JOBS after Phase 4 but is deliberately NOT
+        passed to _make_runtime. A scheduled job with no invoker must
+        be excluded from get_next_run_times(), otherwise the Admin UI
+        would show a next-run time for a job that would silently 404
+        on manual trigger.
+        """
+        from app.workers.scheduler import (
+            JOB_EXECUTE_APPROVED_ORDERS,
+            JOB_ORCHESTRATOR_FULL_SYNC,
+        )
+
+        # Wire only one of the two scheduled jobs — the unwired one
+        # (execute_approved_orders) must be absent from the result.
+        rt = _make_runtime({JOB_ORCHESTRATOR_FULL_SYNC: lambda: None})
         monkeypatch.setattr(rt._scheduler, "get_job", lambda _job_id: None)
 
         result = rt.get_next_run_times()
-        assert JOB_DAILY_CIK_REFRESH in result
-        assert JOB_DAILY_CANDLE_REFRESH not in result
+        assert JOB_ORCHESTRATOR_FULL_SYNC in result
+        assert JOB_EXECUTE_APPROVED_ORDERS not in result
 
 
 class TestProductionInvokerRegistry:
@@ -314,8 +326,32 @@ class TestProductionInvokerRegistry:
         registry_names = {job.name for job in SCHEDULED_JOBS}
         invoker_names = set(_INVOKERS.keys())
         on_demand = invoker_names - registry_names
-        assert on_demand == {"daily_tax_reconciliation", "nightly_universe_sync"}, (
-            f"Unexpected on-demand invokers (update this test if intentional): {sorted(on_demand)}"
+        # Phase 4: 12 former-scheduled jobs are now driven by the
+        # orchestrator_full_sync DAG walk. They stay in _INVOKERS so
+        # POST /jobs/{name}/run continues to work, but they are
+        # no longer independently scheduled.
+        expected_on_demand = {
+            # Pre-Phase-4 on-demand (unchanged):
+            "daily_tax_reconciliation",
+            "nightly_universe_sync",
+            # Phase-4 moved from SCHEDULED_JOBS to orchestrator-driven:
+            "daily_candle_refresh",
+            "daily_cik_refresh",
+            "daily_financial_facts",
+            "daily_news_refresh",
+            "daily_portfolio_sync",
+            "daily_research_refresh",
+            "daily_thesis_refresh",
+            "fx_rates_refresh",
+            "monthly_report",
+            "morning_candidate_review",
+            "seed_cost_models",
+            "weekly_report",
+        }
+        assert on_demand == expected_on_demand, (
+            f"Unexpected on-demand invokers (update this test if intentional): "
+            f"unexpected={sorted(on_demand - expected_on_demand)} "
+            f"missing={sorted(expected_on_demand - on_demand)}"
         )
 
 

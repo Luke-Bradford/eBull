@@ -68,6 +68,8 @@ from app.workers.scheduler import (
     JOB_MONTHLY_REPORT,
     JOB_MORNING_CANDIDATE_REVIEW,
     JOB_NIGHTLY_UNIVERSE_SYNC,
+    JOB_ORCHESTRATOR_FULL_SYNC,
+    JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
     JOB_RETRY_DEFERRED,
     JOB_SEED_COST_MODELS,
     JOB_WEEKLY_COVERAGE_REVIEW,
@@ -91,6 +93,8 @@ from app.workers.scheduler import (
     monthly_report,
     morning_candidate_review,
     nightly_universe_sync,
+    orchestrator_full_sync,
+    orchestrator_high_frequency_sync,
     retry_deferred_recommendations_job,
     seed_cost_models,
     weekly_coverage_review,
@@ -140,6 +144,8 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_SEED_COST_MODELS: seed_cost_models,
     JOB_WEEKLY_REPORT: weekly_report,
     JOB_MONTHLY_REPORT: monthly_report,
+    JOB_ORCHESTRATOR_FULL_SYNC: orchestrator_full_sync,
+    JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC: orchestrator_high_frequency_sync,
 }
 
 
@@ -163,6 +169,8 @@ def _trigger_for(cadence: Cadence) -> CronTrigger:
     so a future cadence kind that is not handled raises ``ValueError``
     rather than silently picking a wrong default.
     """
+    if cadence.kind == "every_n_minutes":
+        return CronTrigger(minute=f"*/{cadence.interval_minutes}", timezone="UTC")
     if cadence.kind == "hourly":
         return CronTrigger(minute=cadence.minute, timezone="UTC")
     if cadence.kind == "daily":
