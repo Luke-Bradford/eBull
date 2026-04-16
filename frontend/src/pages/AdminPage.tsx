@@ -1,32 +1,31 @@
 /**
- * Admin page — scheduled jobs (#13 PR B).
+ * Admin page (issue #260 Phase 5).
  *
- * Two panels, each owning its own request lifecycle so a slow or
- * failing endpoint cannot blank the other:
+ * Two sections:
+ *   1. Sync dashboard — 15-layer freshness grid + recent sync runs +
+ *      "Sync now" button. Owned by the orchestrator.
+ *   2. Background tasks — the 5 scheduled jobs that live outside the
+ *      orchestrator DAG (execute_approved_orders, monitor_positions,
+ *      retry_deferred_recommendations, weekly_coverage_review,
+ *      attribution_summary). Retained because the operator still needs
+ *      Run-Now for them and they are not part of the data-sync flow.
  *
- *   1. Jobs table — declared schedule + computed next-run + last-run
- *      summary, sourced from GET /system/jobs. Each row carries a
- *      "Run now" button that POSTs /jobs/{name}/run; the per-row
- *      transient state (running / error / success) lives in this page,
- *      not in a global store.
- *   2. Recent runs — newest-first slice of job_runs from GET /jobs/runs.
- *      Refetched whenever a manual trigger is fired so the operator
- *      sees their action take effect without a manual refresh.
- *
- * The system-status / kill-switch / data-layer surface is intentionally
- * NOT duplicated here — it lives on the dashboard's SystemStatusPanel
- * already and PR B is scoped to the jobs surface only.
+ * The prior "Recent runs" table is removed — the Sync dashboard's
+ * recent-sync-runs table is the authoritative per-run view now, and
+ * individual job runs for the background tasks can be retrieved via
+ * the /jobs/runs API if needed (operator CLI, not UI).
  */
 
 import { useCallback, useState } from "react";
 
-import { fetchJobRuns, fetchJobsOverview, runJob } from "@/api/jobs";
-import type {
-  JobOverviewResponse,
-  JobRunResponse,
-} from "@/api/types";
+import { fetchJobsOverview, runJob } from "@/api/jobs";
+import type { JobOverviewResponse } from "@/api/types";
 import { ApiError } from "@/api/client";
-import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import {
+  Section,
+  SectionError,
+  SectionSkeleton,
+} from "@/components/dashboard/Section";
 import { useAsync } from "@/lib/useAsync";
 import { formatDateTime } from "@/lib/format";
 import { SyncDashboard } from "@/pages/SyncDashboard";
@@ -44,35 +43,26 @@ const STATUS_TONE: Record<string, string> = {
   skipped: "text-slate-400",
 };
 
+// Orchestrator-owned scheduled jobs — surfaced by the Sync dashboard
+// above; not duplicated here. Every other SCHEDULED_JOBS entry is a
+// "background task" that remains outside the orchestrator DAG.
+const ORCHESTRATOR_OWNED = new Set([
+  "orchestrator_full_sync",
+  "orchestrator_high_frequency_sync",
+]);
+
 export function AdminPage() {
   const jobs = useAsync(fetchJobsOverview, []);
-  const runs = useAsync(() => fetchJobRuns(null, 50), []);
 
-  // Per-row transient state. Keyed on job name; cleared automatically
-  // when a fresh fetch resolves so a stale "queued" badge does not
-  // outlive the next refresh.
   const [rowState, setRowState] = useState<Record<string, RowState>>({});
 
-  // Depend on the stable refetch references rather than the full
-  // useAsync state objects -- ``jobs`` and ``runs`` are new objects on
-  // every render (loading/data/error transitions), but their
-  // ``refetch`` callbacks are memoised inside ``useAsync``. Closing
-  // over the state objects would recreate ``handleRun`` (and force
-  // ``JobsTable`` to re-render every row) on every async transition.
-  // Round 1 review WARNING 3.
   const refetchJobs = jobs.refetch;
-  const refetchRuns = runs.refetch;
   const handleRun = useCallback(
     async (name: string) => {
       setRowState((prev) => ({ ...prev, [name]: { kind: "running" } }));
       try {
         await runJob(name);
         setRowState((prev) => ({ ...prev, [name]: { kind: "queued" } }));
-        // Refresh both panels so the operator's action is reflected
-        // without a manual refresh. A single refresh is enough; the
-        // operator can hit the button again or reload the page if
-        // they want to see further updates.
-        refetchRuns();
         refetchJobs();
       } catch (err) {
         const message =
@@ -83,58 +73,43 @@ export function AdminPage() {
                 ? "Unknown job"
                 : `Failed (HTTP ${err.status})`
             : "Failed";
-        setRowState((prev) => ({ ...prev, [name]: { kind: "error", message } }));
+        setRowState((prev) => ({
+          ...prev,
+          [name]: { kind: "error", message },
+        }));
       }
     },
-    [refetchJobs, refetchRuns],
+    [refetchJobs],
+  );
+
+  const backgroundJobs = (jobs.data?.jobs ?? []).filter(
+    (j) => !ORCHESTRATOR_OWNED.has(j.name),
   );
 
   return (
     <div className="space-y-8">
-      {/* Phase 3: sync orchestrator dashboard (issue #260). Sits above the
-          legacy jobs table — the jobs table remains until Phase 5 removes
-          it, so operators can cross-check old behaviour vs orchestrator
-          behaviour during the cutover window. */}
       <SyncDashboard />
 
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-slate-800">
-          Legacy scheduled jobs
-        </h1>
-      </div>
-
-      <Section title="Jobs">
+      <Section title="Background tasks">
         {jobs.loading ? (
-          <SectionSkeleton rows={6} />
+          <SectionSkeleton rows={5} />
         ) : jobs.error !== null ? (
           <SectionError onRetry={jobs.refetch} />
         ) : (
-          <JobsTable
-            items={jobs.data?.jobs ?? []}
-            rowState={rowState}
-            onRun={handleRun}
-          />
-        )}
-      </Section>
-
-      <Section
-        title="Recent runs"
-        action={
-          <button
-            type="button"
-            onClick={runs.refetch}
-            className="rounded border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-medium text-slate-600 hover:bg-slate-50"
-          >
-            Refresh
-          </button>
-        }
-      >
-        {runs.loading ? (
-          <SectionSkeleton rows={5} />
-        ) : runs.error !== null ? (
-          <SectionError onRetry={runs.refetch} />
-        ) : (
-          <RecentRunsTable items={runs.data?.items ?? []} />
+          <>
+            <p className="mb-3 text-xs text-slate-500">
+              Scheduled jobs that live outside the orchestrator DAG —
+              transaction execution, position monitoring, deferred-rec
+              retries, and periodic governance. Data-pipeline jobs
+              (candles, theses, scoring, reports, etc.) are driven by
+              the orchestrator above.
+            </p>
+            <JobsTable
+              items={backgroundJobs}
+              rowState={rowState}
+              onRun={handleRun}
+            />
+          </>
         )}
       </Section>
     </div>
@@ -151,7 +126,7 @@ function JobsTable({
   onRun: (name: string) => void;
 }) {
   if (items.length === 0) {
-    return <p className="text-sm text-slate-500">No jobs registered.</p>;
+    return <p className="text-sm text-slate-500">No background jobs registered.</p>;
   }
   return (
     <div className="overflow-x-auto">
@@ -173,15 +148,21 @@ function JobsTable({
               <tr key={job.name} className="align-top">
                 <td className="py-2 pr-4">
                   <div className="font-medium text-slate-700">{job.name}</div>
-                  <div className="text-xs text-slate-500">{job.description}</div>
+                  <div className="text-xs text-slate-500">
+                    {job.description}
+                  </div>
                 </td>
-                <td className="py-2 pr-4 text-xs text-slate-600">{job.cadence}</td>
+                <td className="py-2 pr-4 text-xs text-slate-600">
+                  {job.cadence}
+                </td>
                 <td className="py-2 pr-4 text-xs text-slate-600">
                   {formatDateTime(job.next_run_time)}
                 </td>
                 <td className="py-2 pr-4 text-xs">
                   <span
-                    className={STATUS_TONE[job.last_status ?? ""] ?? "text-slate-400"}
+                    className={
+                      STATUS_TONE[job.last_status ?? ""] ?? "text-slate-400"
+                    }
                   >
                     {job.last_status ?? "never run"}
                   </span>
@@ -239,54 +220,5 @@ function RunButton({
     >
       {label}
     </button>
-  );
-}
-
-function RecentRunsTable({ items }: { items: JobRunResponse[] }) {
-  if (items.length === 0) {
-    return <p className="text-sm text-slate-500">No runs recorded yet.</p>;
-  }
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-left text-sm">
-        <thead className="text-xs uppercase tracking-wide text-slate-500">
-          <tr>
-            <th className="py-2 pr-4">Job</th>
-            <th className="py-2 pr-4">Status</th>
-            <th className="py-2 pr-4">Started</th>
-            <th className="py-2 pr-4">Finished</th>
-            <th className="py-2 pr-4">Rows</th>
-            <th className="py-2 pr-4">Error</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100">
-          {items.map((run) => (
-            <tr key={run.run_id}>
-              <td className="py-2 pr-4 font-medium text-slate-700">{run.job_name}</td>
-              <td className="py-2 pr-4 text-xs">
-                <span className={STATUS_TONE[run.status] ?? "text-slate-500"}>
-                  {run.status}
-                </span>
-              </td>
-              <td className="py-2 pr-4 text-xs text-slate-600">
-                {formatDateTime(run.started_at)}
-              </td>
-              <td className="py-2 pr-4 text-xs text-slate-600">
-                {formatDateTime(run.finished_at)}
-              </td>
-              <td className="py-2 pr-4 text-xs text-slate-600">
-                {run.row_count ?? "—"}
-              </td>
-              <td
-                className="max-w-xs truncate py-2 pr-4 text-xs text-red-600"
-                title={run.error_msg ?? undefined}
-              >
-                {run.error_msg ?? ""}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
   );
 }
