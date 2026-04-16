@@ -68,6 +68,7 @@ from app.workers.scheduler import (
     JOB_MORNING_CANDIDATE_REVIEW,
     JOB_NIGHTLY_UNIVERSE_SYNC,
     JOB_RETRY_DEFERRED,
+    JOB_SEED_COST_MODELS,
     JOB_WEEKLY_COVERAGE_REVIEW,
     JOB_WEEKLY_REPORT,
     SCHEDULED_JOBS,
@@ -89,6 +90,7 @@ from app.workers.scheduler import (
     morning_candidate_review,
     nightly_universe_sync,
     retry_deferred_recommendations_job,
+    seed_cost_models,
     weekly_coverage_review,
     weekly_report,
 )
@@ -132,6 +134,7 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_RETRY_DEFERRED: retry_deferred_recommendations_job,
     JOB_MONITOR_POSITIONS: monitor_positions_job,
     JOB_ATTRIBUTION_SUMMARY: attribution_summary_job,
+    JOB_SEED_COST_MODELS: seed_cost_models,
     JOB_WEEKLY_REPORT: weekly_report,
     JOB_MONTHLY_REPORT: monthly_report,
 }

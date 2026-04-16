@@ -202,6 +202,7 @@ JOB_MONITOR_POSITIONS = "monitor_positions"
 JOB_ATTRIBUTION_SUMMARY = "attribution_summary"
 JOB_WEEKLY_REPORT = "weekly_report"
 JOB_MONTHLY_REPORT = "monthly_report"
+JOB_SEED_COST_MODELS = "seed_cost_models"
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +284,13 @@ def _has_tier1_stale_theses(conn: psycopg.Connection[Any]) -> PrerequisiteResult
     if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM coverage WHERE coverage_tier = 1)")):
         return (True, "")
     return (False, "no Tier 1 instruments")
+
+
+def _has_tier1_coverage(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if at least one instrument has Tier 1 coverage."""
+    if _exists(conn, psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM coverage WHERE coverage_tier = 1)")):
+        return (True, "")
+    return (False, "no Tier 1 instruments yet")
 
 
 def _has_attributions(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
@@ -407,6 +415,13 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         description="Generate monthly performance report snapshot.",
         cadence=Cadence.monthly(day=1, hour=7, minute=0),  # 1st of month 07:00
         prerequisite=_has_positions_or_attributions,
+    ),
+    # -- Cost model maintenance --
+    ScheduledJob(
+        name=JOB_SEED_COST_MODELS,
+        description="Refresh per-instrument cost models from current quote spreads.",
+        cadence=Cadence.daily(hour=6, minute=15),
+        prerequisite=_has_tier1_coverage,
     ),
     # -- On-demand jobs are NOT listed here.  They stay in _INVOKERS
     # (runtime.py) so "Run now" in the Admin UI works, but they are
@@ -1967,3 +1982,19 @@ def monthly_report() -> None:
             )
             conn.commit()
         tracker.row_count = 1
+
+
+def seed_cost_models() -> None:
+    """Scheduled job: refresh cost_model rows from current quotes."""
+    from app.services.transaction_cost import seed_cost_models_from_quotes
+
+    with _tracked_job(JOB_SEED_COST_MODELS) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            result = seed_cost_models_from_quotes(conn)
+            conn.commit()
+        tracker.row_count = result["processed"]
+        logger.info(
+            "seed_cost_models: processed=%d skipped=%d",
+            result["processed"],
+            result["skipped"],
+        )

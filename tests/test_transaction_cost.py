@@ -1,0 +1,411 @@
+"""Tests for the transaction cost model service."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from decimal import Decimal
+from unittest.mock import MagicMock
+
+import pytest
+
+from app.services.transaction_cost import (
+    CostEstimate,
+    TransactionCostConfigCorrupt,
+    estimate_cost,
+    get_transaction_cost_config,
+    load_instrument_cost,
+    record_actual_cost,
+    record_estimated_cost,
+    seed_cost_models_from_quotes,
+    update_transaction_cost_config,
+)
+
+_NOW = datetime(2026, 4, 16, 12, 0, 0, tzinfo=UTC)
+
+
+class TestGetTransactionCostConfig:
+    def test_returns_config_when_row_exists(self) -> None:
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchone.return_value = {
+            "max_total_cost_bps": Decimal("150"),
+            "min_return_vs_cost_ratio": Decimal("3.0"),
+            "default_hold_days": 90,
+        }
+        config = get_transaction_cost_config(conn)
+        assert config["max_total_cost_bps"] == Decimal("150")
+        assert config["default_hold_days"] == 90
+
+    def test_raises_when_row_missing(self) -> None:
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchone.return_value = None
+        with pytest.raises(TransactionCostConfigCorrupt):
+            get_transaction_cost_config(conn)
+
+
+class TestEstimateCost:
+    def test_spread_only_us_stock(self) -> None:
+        """USD instrument with no overnight or FX costs."""
+        result = estimate_cost(
+            spread_bps=Decimal("50"),
+            overnight_rate=Decimal("0"),
+            fx_markup_bps=Decimal("0"),
+            hold_days=90,
+            max_total_cost_bps=Decimal("150"),
+            min_return_vs_cost_ratio=Decimal("3.0"),
+            expected_return_pct=None,
+        )
+        assert result.spread_bps == Decimal("50")
+        assert result.total_entry_cost_bps == Decimal("50")
+        assert result.total_carry_cost_bps == Decimal("0")
+        assert result.total_cost_bps == Decimal("50")
+        assert result.is_cost_prohibitive is False
+
+    def test_spread_plus_overnight(self) -> None:
+        """CFD-like instrument with overnight fees."""
+        result = estimate_cost(
+            spread_bps=Decimal("50"),
+            overnight_rate=Decimal("1.5"),
+            fx_markup_bps=Decimal("0"),
+            hold_days=90,
+            max_total_cost_bps=Decimal("150"),
+            min_return_vs_cost_ratio=Decimal("3.0"),
+            expected_return_pct=None,
+        )
+        assert result.overnight_bps_per_day == Decimal("1.5")
+        assert result.total_carry_cost_bps == Decimal("135")
+        assert result.total_cost_bps == Decimal("185")
+        assert result.is_cost_prohibitive is True
+
+    def test_spread_plus_fx(self) -> None:
+        """Non-USD instrument with FX markup."""
+        result = estimate_cost(
+            spread_bps=Decimal("30"),
+            overnight_rate=Decimal("0"),
+            fx_markup_bps=Decimal("50"),
+            hold_days=90,
+            max_total_cost_bps=Decimal("200"),
+            min_return_vs_cost_ratio=Decimal("3.0"),
+            expected_return_pct=None,
+        )
+        assert result.fx_markup_bps == Decimal("50")
+        assert result.total_entry_cost_bps == Decimal("130")
+        assert result.total_cost_bps == Decimal("130")
+        assert result.is_cost_prohibitive is False
+
+    def test_cost_prohibitive_by_ratio(self) -> None:
+        """Cost is below threshold but return/cost ratio is too low."""
+        result = estimate_cost(
+            spread_bps=Decimal("80"),
+            overnight_rate=Decimal("0"),
+            fx_markup_bps=Decimal("0"),
+            hold_days=90,
+            max_total_cost_bps=Decimal("150"),
+            min_return_vs_cost_ratio=Decimal("3.0"),
+            expected_return_pct=Decimal("2.0"),
+        )
+        assert result.is_cost_prohibitive is True
+        assert "ratio" in (result.prohibitive_reason or "").lower()
+
+    def test_no_return_estimate_skips_ratio_check(self) -> None:
+        """When expected_return_pct is None, only absolute threshold applies."""
+        result = estimate_cost(
+            spread_bps=Decimal("80"),
+            overnight_rate=Decimal("0"),
+            fx_markup_bps=Decimal("0"),
+            hold_days=90,
+            max_total_cost_bps=Decimal("150"),
+            min_return_vs_cost_ratio=Decimal("3.0"),
+            expected_return_pct=None,
+        )
+        assert result.is_cost_prohibitive is False
+
+    def test_zero_spread_passes(self) -> None:
+        """Commission-free trade with zero spread (unlikely but safe)."""
+        result = estimate_cost(
+            spread_bps=Decimal("0"),
+            overnight_rate=Decimal("0"),
+            fx_markup_bps=Decimal("0"),
+            hold_days=90,
+            max_total_cost_bps=Decimal("150"),
+            min_return_vs_cost_ratio=Decimal("3.0"),
+            expected_return_pct=None,
+        )
+        assert result.total_cost_bps == Decimal("0")
+        assert result.is_cost_prohibitive is False
+
+    def test_zero_cost_with_return_skips_ratio_check(self) -> None:
+        """Zero-cost instrument with expected return skips ratio (division by zero guard)."""
+        result = estimate_cost(
+            spread_bps=Decimal("0"),
+            overnight_rate=Decimal("0"),
+            fx_markup_bps=Decimal("0"),
+            hold_days=90,
+            max_total_cost_bps=Decimal("150"),
+            min_return_vs_cost_ratio=Decimal("3.0"),
+            expected_return_pct=Decimal("10.0"),
+        )
+        assert result.total_cost_bps == Decimal("0")
+        assert result.is_cost_prohibitive is False
+        assert result.prohibitive_reason is None
+
+
+class TestLoadInstrumentCost:
+    def test_returns_cost_model_row_when_exists(self) -> None:
+        """Active cost_model row is preferred over computed spread."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchone.return_value = {
+            "spread_bps": Decimal("45.5"),
+            "overnight_rate": Decimal("1.2"),
+            "fx_pair": "GBP/USD",
+            "fx_markup_bps": Decimal("50"),
+        }
+        result = load_instrument_cost(conn, instrument_id=123)
+        assert result is not None
+        assert result["spread_bps"] == Decimal("45.5")
+        assert result["overnight_rate"] == Decimal("1.2")
+        assert result["fx_pair"] == "GBP/USD"
+
+    def test_returns_none_when_no_cost_model(self) -> None:
+        """No cost_model row — caller should fall back to quote spread."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchone.return_value = None
+        result = load_instrument_cost(conn, instrument_id=123)
+        assert result is None
+
+
+class TestComputeSpreadFromQuote:
+    def test_computes_bps_from_spread_pct(self) -> None:
+        """spread_pct is in percent; convert to bps (* 100)."""
+        from app.services.transaction_cost import spread_pct_to_bps
+
+        assert spread_pct_to_bps(Decimal("0.45")) == Decimal("45")
+
+    def test_none_returns_none(self) -> None:
+        from app.services.transaction_cost import spread_pct_to_bps
+
+        assert spread_pct_to_bps(None) is None
+
+
+class TestRecordEstimatedCost:
+    def test_inserts_cost_record(self) -> None:
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        estimate = CostEstimate(
+            spread_bps=Decimal("50"),
+            overnight_bps_per_day=Decimal("0"),
+            fx_markup_bps=Decimal("0"),
+            estimated_hold_days=90,
+            total_entry_cost_bps=Decimal("50"),
+            total_carry_cost_bps=Decimal("0"),
+            total_cost_bps=Decimal("50"),
+            is_cost_prohibitive=False,
+            prohibitive_reason=None,
+        )
+        record_estimated_cost(
+            conn,
+            order_id=1,
+            recommendation_id=10,
+            instrument_id=100,
+            estimate=estimate,
+        )
+        cursor.execute.assert_called_once()
+        sql = cursor.execute.call_args[0][0]
+        assert "INSERT INTO trade_cost_record" in sql
+        params = cursor.execute.call_args[0][1]
+        assert params["estimated_total_bps"] == Decimal("50")
+        # cost_breakdown must be a Jsonb instance, not a raw dict
+        from psycopg.types.json import Jsonb
+
+        assert isinstance(params["cost_breakdown"], Jsonb)
+
+    def test_fx_bps_stored_as_round_trip(self) -> None:
+        """estimated_fx_bps must store the round-trip FX cost (markup × 2)."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        estimate = CostEstimate(
+            spread_bps=Decimal("30"),
+            overnight_bps_per_day=Decimal("0"),
+            fx_markup_bps=Decimal("50"),
+            estimated_hold_days=90,
+            total_entry_cost_bps=Decimal("130"),  # 30 + 50 * 2
+            total_carry_cost_bps=Decimal("0"),
+            total_cost_bps=Decimal("130"),
+            is_cost_prohibitive=False,
+            prohibitive_reason=None,
+        )
+        record_estimated_cost(
+            conn,
+            order_id=1,
+            recommendation_id=10,
+            instrument_id=100,
+            estimate=estimate,
+        )
+        params = cursor.execute.call_args[0][1]
+        # Components must sum to total: spread + fx_roundtrip + carry = total
+        assert params["estimated_fx_bps"] == Decimal("100")  # 50 * 2
+        assert (
+            params["estimated_spread_bps"] + params["estimated_fx_bps"] + params["estimated_carry_bps"]
+            == params["estimated_total_bps"]
+        )
+
+
+class TestRecordActualCost:
+    def test_updates_actual_columns(self) -> None:
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        record_actual_cost(
+            conn,
+            order_id=1,
+            actual_spread_bps=Decimal("48"),
+            actual_total_bps=Decimal("48"),
+        )
+        cursor.execute.assert_called_once()
+        sql = cursor.execute.call_args[0][0]
+        assert "UPDATE trade_cost_record" in sql
+        params = cursor.execute.call_args[0][1]
+        assert params["actual_spread_bps"] == Decimal("48")
+
+
+class TestUpdateTransactionCostConfig:
+    def test_updates_provided_fields(self) -> None:
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchone.return_value = {
+            "max_total_cost_bps": Decimal("200"),
+            "min_return_vs_cost_ratio": Decimal("3.0"),
+            "default_hold_days": 90,
+            "updated_at": _NOW,
+            "updated_by": "operator",
+            "reason": "adjusted threshold",
+        }
+        result = update_transaction_cost_config(
+            conn,
+            max_total_cost_bps=Decimal("200"),
+            updated_by="operator",
+            reason="adjusted threshold",
+        )
+        assert result["max_total_cost_bps"] == Decimal("200")
+        cursor.execute.assert_called_once()
+        query = cursor.execute.call_args[0][0]
+        assert "max_total_cost_bps" in str(query)
+
+    def test_raises_when_row_missing(self) -> None:
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchone.return_value = None
+        with pytest.raises(TransactionCostConfigCorrupt):
+            update_transaction_cost_config(
+                conn,
+                max_total_cost_bps=Decimal("200"),
+                updated_by="operator",
+                reason="test",
+            )
+
+
+class TestSeedCostModels:
+    def test_creates_cost_model_for_instrument_with_spread(self) -> None:
+        """Instruments with valid spread_pct get cost_model rows created."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = [
+            {"instrument_id": 1, "spread_pct": Decimal("0.30"), "currency": "USD"},
+            {"instrument_id": 2, "spread_pct": Decimal("0.50"), "currency": "GBP"},
+        ]
+        result = seed_cost_models_from_quotes(conn)
+        assert result["processed"] == 2
+        assert result["skipped"] == 0
+
+    def test_skips_instruments_without_spread(self) -> None:
+        """Instruments where spread_pct is None are skipped."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = [
+            {"instrument_id": 1, "spread_pct": None, "currency": "USD"},
+        ]
+        result = seed_cost_models_from_quotes(conn)
+        assert result["processed"] == 0
+        assert result["skipped"] == 1
+
+    def test_empty_universe_returns_zero(self) -> None:
+        """No instruments → processed=0, skipped=0."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = []
+        result = seed_cost_models_from_quotes(conn)
+        assert result["processed"] == 0
+        assert result["skipped"] == 0
+
+    def test_usd_instrument_gets_zero_fx_markup(self) -> None:
+        """USD instruments should have fx_markup_bps=0 and no fx_pair."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = [
+            {"instrument_id": 1, "spread_pct": Decimal("0.30"), "currency": "USD"},
+        ]
+        seed_cost_models_from_quotes(conn)
+        # Find the INSERT call (second execute call on the cursor)
+        insert_calls = [c for c in cursor.execute.call_args_list if "INSERT INTO cost_model" in str(c)]
+        assert len(insert_calls) == 1
+        params = insert_calls[0][0][1]
+        assert params["fx_markup_bps"] == Decimal("0")
+        assert params["fx_pair"] is None
+
+    def test_non_usd_instrument_gets_fx_markup(self) -> None:
+        """Non-USD instruments should have fx_markup_bps=50 and fx_pair set."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = [
+            {"instrument_id": 2, "spread_pct": Decimal("0.50"), "currency": "GBP"},
+        ]
+        seed_cost_models_from_quotes(conn)
+        insert_calls = [c for c in cursor.execute.call_args_list if "INSERT INTO cost_model" in str(c)]
+        assert len(insert_calls) == 1
+        params = insert_calls[0][0][1]
+        assert params["fx_markup_bps"] == Decimal("50")
+        assert params["fx_pair"] == "GBP/USD"
+
+
+class TestCostConfigAPI:
+    def test_cost_config_router_exists(self) -> None:
+        """The cost config endpoints should be registered."""
+        from fastapi.routing import APIRoute
+
+        from app.api.budget import router
+
+        paths = [r.path for r in router.routes if isinstance(r, APIRoute)]
+        assert any("/cost-config" in p for p in paths)

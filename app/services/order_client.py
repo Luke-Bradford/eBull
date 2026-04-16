@@ -35,6 +35,13 @@ from psycopg.types.json import Jsonb
 from app.providers.broker import BrokerOrderResult, BrokerProvider, OrderParams
 from app.services.return_attribution import compute_attribution, persist_attribution
 from app.services.runtime_config import get_runtime_config
+from app.services.transaction_cost import (
+    estimate_cost,
+    get_transaction_cost_config,
+    load_instrument_cost,
+    record_estimated_cost,
+    spread_pct_to_bps,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +128,26 @@ def _load_latest_quote_price(
     return Decimal(str(row["last"]))
 
 
+def _load_quote_for_execution(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+) -> dict[str, Any] | None:
+    """Load full quote data for execution: last, bid, ask, spread_pct."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT last, bid, ask, spread_pct
+            FROM quotes
+            WHERE instrument_id = %(iid)s
+            ORDER BY quoted_at DESC
+            LIMIT 1
+            """,
+            {"iid": instrument_id},
+        )
+        row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
 def _load_position_units(
     conn: psycopg.Connection[Any],
     instrument_id: int,
@@ -189,15 +216,25 @@ def _synthetic_fill(
     requested_amount: Decimal | None,
     requested_units: Decimal | None,
     params: OrderParams | None = None,
+    bid: Decimal | None = None,
+    ask: Decimal | None = None,
 ) -> BrokerOrderResult:
-    """
-    Build a synthetic BrokerOrderResult for demo mode.
+    """Build a synthetic BrokerOrderResult for demo mode.
 
-    Uses the latest quote price.  If no price is available, the fill is
-    produced at Decimal("0") with a note in the payload — this lets demo
-    runs proceed without real market data while making the issue visible.
+    Uses bid/ask for realistic pricing when available:
+    - BUY fills at ask, EXIT fills at bid (worst-case execution)
+    - Fees = half-spread × units (entry cost of crossing the spread)
+    Falls back to last price with zero fees when bid/ask unavailable.
     """
-    price = quote_price if quote_price is not None else Decimal("0")
+    # Determine fill price: BUY at ask, EXIT at bid, fallback to last
+    if action in ("BUY", "ADD") and ask is not None:
+        price = ask
+    elif action == "EXIT" and bid is not None:
+        price = bid
+    elif quote_price is not None:
+        price = quote_price
+    else:
+        price = Decimal("0")
 
     if requested_units is not None:
         units = requested_units
@@ -206,17 +243,23 @@ def _synthetic_fill(
     else:
         units = Decimal("0")
 
+    # Compute spread-based fees
+    if bid is not None and ask is not None and units > 0:
+        half_spread = (ask - bid) / 2
+        fees = (half_spread * units).quantize(Decimal("0.000001"))
+    else:
+        fees = Decimal("0")
+
     payload: dict[str, Any] = {
         "demo": True,
         "instrument_id": instrument_id,
         "action": action,
         "price": str(price),
         "units": str(units),
+        "fees": str(fees),
         "note": "synthetic fill — no real API call"
-        + ("" if quote_price is not None else "; no quote available, price=0"),
+        + ("" if quote_price is not None or ask is not None else "; no quote available, price=0"),
     }
-    # Record intended SL/TP in raw_payload for audit completeness
-    # (demo mode has no broker to enforce these, but they should be visible).
     if params is not None:
         if params.stop_loss_rate is not None:
             payload["stop_loss_rate"] = str(params.stop_loss_rate)
@@ -228,7 +271,7 @@ def _synthetic_fill(
         status="filled",
         filled_price=price,
         filled_units=units,
-        fees=Decimal("0"),
+        fees=fees,
         raw_payload=payload,
     )
 
@@ -668,6 +711,8 @@ def execute_order(
     runtime = get_runtime_config(conn)
     is_live = runtime.enable_live_trading
 
+    quote_data: dict[str, Any] | None = None
+
     if is_live:
         if broker is None:
             raise ValueError("enable_live_trading is True but no broker provider supplied")
@@ -698,7 +743,8 @@ def execute_order(
                 params=order_params,
             )
     else:
-        quote_price = _load_latest_quote_price(conn, instrument_id)
+        quote_data = _load_quote_for_execution(conn, instrument_id)
+        quote_price = Decimal(str(quote_data["last"])) if quote_data and quote_data.get("last") is not None else None
         broker_result = _synthetic_fill(
             instrument_id=instrument_id,
             action=action,
@@ -706,6 +752,8 @@ def execute_order(
             requested_amount=requested_amount,
             requested_units=requested_units,
             params=order_params,
+            bid=Decimal(str(quote_data["bid"])) if quote_data and quote_data.get("bid") is not None else None,
+            ask=Decimal(str(quote_data["ask"])) if quote_data and quote_data.get("ask") is not None else None,
         )
         logger.info(
             "demo mode: instrument_id=%d action=%s price=%s units=%s",
@@ -734,6 +782,56 @@ def execute_order(
             raw_payload=broker_result.raw_payload,
             now=now,
         )
+
+        # Record estimated cost for BUY/ADD only (entry cost is meaningless
+        # for EXIT orders).  Best-effort: any failure here must not block the
+        # order or abort the enclosing transaction.  The savepoint ensures a
+        # DB error during cost recording rolls back only the cost INSERT,
+        # leaving the outer transaction intact for _persist_fill.
+        if action in ("BUY", "ADD"):
+            try:
+                with conn.transaction():
+                    cost_config = get_transaction_cost_config(conn)
+                    cost_model_row = load_instrument_cost(conn, instrument_id)
+                    if cost_model_row is not None:
+                        s_bps = cost_model_row["spread_bps"]
+                        o_rate = cost_model_row["overnight_rate"]
+                        fx_bps = cost_model_row["fx_markup_bps"]
+                    else:
+                        # No cost_model row — fall back to quote spread_pct.
+                        # In live mode quote_data is not loaded for the fill,
+                        # so load it here for cost recording.
+                        qd = quote_data if quote_data is not None else _load_quote_for_execution(conn, instrument_id)
+                        if qd is not None and qd.get("spread_pct") is not None:
+                            s_bps = spread_pct_to_bps(Decimal(str(qd["spread_pct"])))
+                        else:
+                            s_bps = None
+                        o_rate = Decimal("0")
+                        fx_bps = Decimal("0")
+
+                    if s_bps is not None:
+                        cost_est = estimate_cost(
+                            spread_bps=s_bps,
+                            overnight_rate=o_rate,
+                            fx_markup_bps=fx_bps,
+                            hold_days=cost_config["default_hold_days"],
+                            max_total_cost_bps=cost_config["max_total_cost_bps"],
+                            min_return_vs_cost_ratio=cost_config["min_return_vs_cost_ratio"],
+                            expected_return_pct=None,
+                        )
+                        record_estimated_cost(
+                            conn,
+                            order_id=order_id,
+                            recommendation_id=recommendation_id,
+                            instrument_id=instrument_id,
+                            estimate=cost_est,
+                        )
+            except Exception:
+                logger.warning(
+                    "cost recording failed for order_id=%d — continuing without cost record",
+                    order_id,
+                    exc_info=True,
+                )
 
         fp = broker_result.filled_price
         fu = broker_result.filled_units

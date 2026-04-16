@@ -16,18 +16,31 @@ Mock DB approach mirrors test_execution_guard.py:
 Cursor call order inside execute_order (demo BUY with suggested_size_pct):
   1. _load_approved_recommendation  — fetchone
   2. _load_cash                     — fetchone
-  3. _load_latest_quote_price       — fetchone
+  3. _load_quote_for_execution      — fetchone (last/bid/ask/spread_pct)
   4. _persist_order                 — fetchone (INSERT RETURNING)
-  5. _persist_fill                  — fetchone (INSERT RETURNING)
-  6. conn.execute x5                — position upsert, broker_positions, cash_ledger, rec status, audit
+  5. get_transaction_cost_config    — fetchone
+  6. load_instrument_cost           — fetchone
+  7. record_estimated_cost          — cursor (INSERT, no fetchone)
+  8. _persist_fill                  — fetchone (INSERT RETURNING)
+  9. conn.execute x5                — position upsert, broker_positions, cash_ledger, rec status, audit
+
+  When spread data is unavailable (no cost_model, no quote spread_pct),
+  cursor 7 (record_estimated_cost) is skipped — s_bps is None.
 
 Cursor call order inside execute_order (demo EXIT):
   1. _load_approved_recommendation  — fetchone
   2. _load_position_units           — fetchone
-  3. _load_latest_quote_price       — fetchone
+  3. _load_quote_for_execution      — fetchone (last/bid/ask/spread_pct)
   4. _persist_order                 — fetchone (INSERT RETURNING)
   5. _persist_fill                  — fetchone (INSERT RETURNING)
   6. conn.execute x4                — position update, cash_ledger, rec status, audit
+
+  Cost recording (steps 5-7 in BUY sequence) is BUY/ADD only — skipped for EXIT.
+
+Live mode BUY cursor sequences are similar but without step 3 in the main
+path (no _load_quote_for_execution for the fill). Instead, when
+cost_model_row is None, _load_quote_for_execution is called in the
+cost-recording fallback path (between steps 6 and 7).
 """
 
 from __future__ import annotations
@@ -51,6 +64,16 @@ from app.services.order_client import (
     execute_order,
 )
 from app.services.runtime_config import RuntimeConfig, RuntimeConfigCorrupt
+
+# ---------------------------------------------------------------------------
+# Cost-related test constants
+# ---------------------------------------------------------------------------
+
+_DEFAULT_COST_CONFIG: dict[str, Any] = {
+    "max_total_cost_bps": Decimal("150"),
+    "min_return_vs_cost_ratio": Decimal("3.0"),
+    "default_hold_days": 90,
+}
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -146,8 +169,16 @@ def _cash_cursor(balance: float | None = 10_000.0) -> MagicMock:
     return _make_cursor([{"balance": balance}])
 
 
-def _quote_cursor(last: float | None = 150.0) -> MagicMock:
-    return _make_cursor([{"last": last}] if last is not None else [])
+def _quote_cursor(
+    last: float | None = 150.0,
+    bid: float | None = None,
+    ask: float | None = None,
+    spread_pct: float | None = None,
+) -> MagicMock:
+    if last is None and bid is None:
+        return _make_cursor([])
+    row: dict[str, Any] = {"last": last, "bid": bid, "ask": ask, "spread_pct": spread_pct}
+    return _make_cursor([row])
 
 
 def _position_cursor(current_units: float = 10.0) -> MagicMock:
@@ -160,6 +191,19 @@ def _order_returning_cursor(order_id: int = 1) -> MagicMock:
 
 def _fill_returning_cursor(fill_id: int = 1) -> MagicMock:
     return _make_cursor([{"fill_id": fill_id}])
+
+
+def _cost_config_cursor() -> MagicMock:
+    return _make_cursor([_DEFAULT_COST_CONFIG])
+
+
+def _cost_model_cursor(row: dict[str, Any] | None = None) -> MagicMock:
+    return _make_cursor([row] if row is not None else [])
+
+
+def _cost_record_write_cursor() -> MagicMock:
+    """Cursor consumed by record_estimated_cost INSERT (no rows returned)."""
+    return _make_cursor([])
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +275,61 @@ class TestSyntheticFill:
 
 
 # ---------------------------------------------------------------------------
+# TestSyntheticFillSpreadCost
+# ---------------------------------------------------------------------------
+
+
+class TestSyntheticFillSpreadCost:
+    def test_buy_fills_at_ask_with_spread_fee(self) -> None:
+        result = _synthetic_fill(
+            instrument_id=123,
+            action="BUY",
+            quote_price=Decimal("100.00"),
+            requested_amount=Decimal("1000"),
+            requested_units=None,
+            bid=Decimal("99.80"),
+            ask=Decimal("100.20"),
+        )
+        # BUY fills at ask
+        assert result.filled_price == Decimal("100.20")
+        # units = 1000 / 100.20
+        expected_units = (Decimal("1000") / Decimal("100.20")).quantize(Decimal("0.000001"))
+        assert result.filled_units == expected_units
+        # Spread cost = (ask - bid) / 2 * units
+        spread_per_unit = (Decimal("100.20") - Decimal("99.80")) / 2
+        expected_fees = (spread_per_unit * expected_units).quantize(Decimal("0.000001"))
+        assert result.fees == expected_fees
+
+    def test_exit_fills_at_bid_with_spread_fee(self) -> None:
+        result = _synthetic_fill(
+            instrument_id=123,
+            action="EXIT",
+            quote_price=Decimal("100.00"),
+            requested_amount=None,
+            requested_units=Decimal("10"),
+            bid=Decimal("99.80"),
+            ask=Decimal("100.20"),
+        )
+        assert result.filled_price == Decimal("99.80")
+        spread_per_unit = (Decimal("100.20") - Decimal("99.80")) / 2
+        expected_fees = (spread_per_unit * Decimal("10")).quantize(Decimal("0.000001"))
+        assert result.fees == expected_fees
+
+    def test_no_bid_ask_falls_back_to_zero_fees(self) -> None:
+        result = _synthetic_fill(
+            instrument_id=123,
+            action="BUY",
+            quote_price=Decimal("100.00"),
+            requested_amount=Decimal("1000"),
+            requested_units=None,
+            bid=None,
+            ask=None,
+        )
+        assert result.fees == Decimal("0")
+        assert result.filled_price == Decimal("100.00")
+
+
+# ---------------------------------------------------------------------------
 # TestLoadApprovedRec
 # ---------------------------------------------------------------------------
 
@@ -298,9 +397,12 @@ class TestExecuteOrderDemoMode:
         cursors = [
             _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
             _cash_cursor(balance=10_000.0),
-            _quote_cursor(last=100.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
             # Inside transaction:
             _order_returning_cursor(order_id=7),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote spread
+            _cost_record_write_cursor(),  # record_estimated_cost INSERT
             _fill_returning_cursor(fill_id=3),
         ]
         conn = _make_conn(cursors)
@@ -325,8 +427,8 @@ class TestExecuteOrderDemoMode:
         cursors = [
             _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
             _position_cursor(current_units=5.0),
-            _quote_cursor(last=200.0),
-            # Inside transaction:
+            _quote_cursor(last=200.0, spread_pct=0.30),
+            # Inside transaction (no cost recording for EXIT):
             _order_returning_cursor(order_id=8),
             _fill_returning_cursor(fill_id=4),
             # Post-fill: read current_units for attribution check
@@ -351,9 +453,12 @@ class TestExecuteOrderDemoMode:
         cursors = [
             _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
             _cash_cursor(balance=10_000.0),
-            _make_cursor([]),  # no quote
+            _make_cursor([]),  # no quote → quote_data=None
             # Inside transaction: order persisted, no fill (zero units)
             _order_returning_cursor(order_id=9),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _make_cursor([]),  # cost fallback: no quote either → s_bps=None, no record
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -376,8 +481,11 @@ class TestExecuteOrderDemoMode:
         cursors = [
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
-            _quote_cursor(last=100.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
             _order_returning_cursor(order_id=1),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
             _fill_returning_cursor(fill_id=1),
         ]
         conn = _make_conn(cursors)
@@ -397,8 +505,11 @@ class TestExecuteOrderDemoMode:
         cursors = [
             _rec_cursor(action="BUY", stop_loss_rate=90.0, take_profit_rate=120.0),
             _cash_cursor(balance=10_000.0),
-            _quote_cursor(last=100.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
             _order_returning_cursor(order_id=7),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
             _fill_returning_cursor(fill_id=3),
         ]
         conn = _make_conn(cursors)
@@ -429,7 +540,8 @@ class TestExecuteOrderDemoMode:
         cursors = [
             _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
             _position_cursor(current_units=5.0),
-            _quote_cursor(last=200.0),
+            _quote_cursor(last=200.0, spread_pct=0.30),
+            # No cost recording for EXIT
             _order_returning_cursor(order_id=8),
             _fill_returning_cursor(fill_id=4),
             # Post-fill: read current_units for attribution check
@@ -451,8 +563,11 @@ class TestExecuteOrderDemoMode:
         cursors = [
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
-            _quote_cursor(last=100.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
             _order_returning_cursor(order_id=1),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
             _fill_returning_cursor(fill_id=1),
         ]
         conn = _make_conn(cursors)
@@ -496,6 +611,10 @@ class TestExecuteOrderLiveMode:
             _cash_cursor(balance=10_000.0),
             # broker called (no cursor)
             _order_returning_cursor(order_id=10),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, bid=99.5, ask=100.5, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
             _fill_returning_cursor(fill_id=6),
         ]
         conn = _make_conn(cursors)
@@ -508,6 +627,72 @@ class TestExecuteOrderLiveMode:
         assert result.outcome == "filled"
         assert result.broker_order_ref == "ORD-123"
         broker.place_order.assert_called_once()
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_live_buy_records_cost_from_quote_fallback(self, _mock_now: MagicMock) -> None:
+        """Live mode with no cost_model falls back to quote spread_pct for cost recording."""
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-789",
+            status="filled",
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            fees=Decimal("1.50"),
+            raw_payload={"orderId": "ORD-789"},
+        )
+        cost_insert_cursor = _make_cursor([])
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=10),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, bid=99.5, ask=100.5, spread_pct=0.30),
+            cost_insert_cursor,  # record_estimated_cost INSERT
+            _fill_returning_cursor(fill_id=6),
+        ]
+        conn = _make_conn(cursors)
+        execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+        # Verify the cost record INSERT was called
+        cost_insert_cursor.__enter__.return_value.execute.assert_called_once()
+        sql = cost_insert_cursor.__enter__.return_value.execute.call_args[0][0]
+        assert "INSERT INTO trade_cost_record" in sql
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_cost_insert_failure_does_not_abort_fill(self, _mock_now: MagicMock) -> None:
+        """A DB error during record_estimated_cost must not prevent the fill.
+
+        The cost recording block runs inside a savepoint.  If the cost INSERT
+        raises, the savepoint rolls back and the outer transaction stays
+        intact — _persist_fill still executes.
+        """
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-COST-FAIL",
+            status="filled",
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            fees=Decimal("1.50"),
+            raw_payload={"orderId": "ORD-COST-FAIL"},
+        )
+        # Cost INSERT cursor raises on execute — simulates a DB error.
+        bad_cost_cursor = _make_cursor([])
+        bad_cost_cursor.__enter__.return_value.execute.side_effect = Exception("FK violation")
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=10),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, bid=99.5, ask=100.5, spread_pct=0.30),
+            bad_cost_cursor,  # record_estimated_cost INSERT — will raise
+            _fill_returning_cursor(fill_id=6),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+        # Fill must succeed despite cost recording failure.
+        assert result.outcome == "filled"
+        assert result.fill_id == 6
 
     @patch("app.services.order_client._maybe_trigger_attribution")
     @patch("app.services.order_client._utcnow", return_value=_NOW)
@@ -527,6 +712,7 @@ class TestExecuteOrderLiveMode:
             # _load_position_id_for_exit resolves instrument_id → position_id
             _make_cursor([{"position_id": 98765}]),
             # broker called (no cursor)
+            # No cost recording for EXIT
             _order_returning_cursor(order_id=11),
             _fill_returning_cursor(fill_id=7),
             # Post-fill: read current_units for attribution check
@@ -552,6 +738,7 @@ class TestExecuteOrderLiveMode:
             # _load_position_id_for_exit returns None — no broker_positions row
             _make_cursor([]),
             # broker NOT called — broker_result is constructed inline as failed
+            # No cost recording for EXIT
             _order_returning_cursor(order_id=12),
         ]
         conn = _make_conn(cursors)
@@ -613,6 +800,10 @@ class TestExecuteOrderFailures:
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=12),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -645,6 +836,10 @@ class TestExecuteOrderFailures:
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=13),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -692,6 +887,10 @@ class TestExecuteOrderFailures:
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=14),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
         ]
         conn = _make_conn(cursors)
         result = execute_order(
@@ -720,6 +919,10 @@ class TestExecuteOrderFailures:
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
             _order_returning_cursor(order_id=15),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
         ]
         conn = _make_conn(cursors)
         execute_order(
