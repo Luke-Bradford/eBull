@@ -52,6 +52,24 @@ function formatDuration(seconds: number | null): string {
   return `${m}m ${s}s`;
 }
 
+/**
+ * Parse an ISO-8601 timestamp defensively.
+ *
+ * Backend uses Postgres TIMESTAMPTZ and psycopg3 returns aware
+ * datetimes, which `datetime.isoformat()` serialises with a timezone
+ * offset ("+00:00"). Safari is strict about this: a string without a
+ * timezone designator is parsed as local time, producing wrong
+ * durations for operators not in UTC. Appending `Z` when the string
+ * carries neither `Z` nor `±HH:MM` forces UTC parsing.
+ *
+ * Exported for unit testing (SyncDashboard.test.tsx). The production
+ * component uses the local reference.
+ */
+export function parseUtc(iso: string): Date {
+  const hasOffset = /[+-]\d{2}:?\d{2}$|Z$/.test(iso);
+  return new Date(hasOffset ? iso : `${iso}Z`);
+}
+
 export function SyncDashboard() {
   const layers = useAsync(fetchSyncLayers, []);
   const status = useAsync(fetchSyncStatus, []);
@@ -80,14 +98,14 @@ export function SyncDashboard() {
   >({ kind: "idle" });
 
   // Clear `queued` banner once the status poll confirms the trigger
-  // took effect (is_running=true). Otherwise the banner would stick
-  // around indefinitely if the sync ran fast and finished before the
-  // next poll tick.
+  // took effect (is_running=true). Depend on triggerState.kind (not
+  // the whole object) so setTriggerState calls don't retrigger this
+  // effect on every render — only on actual kind transitions.
   useEffect(() => {
     if (triggerState.kind === "queued" && isRunning) {
       setTriggerState({ kind: "idle" });
     }
-  }, [triggerState, isRunning]);
+  }, [triggerState.kind, isRunning]);
 
   const handleSyncNow = useCallback(async () => {
     setTriggerState({ kind: "running" });
@@ -168,9 +186,11 @@ export function SyncDashboard() {
           >
             {triggerState.kind === "running"
               ? "Triggering…"
-              : isRunning
-                ? "Running"
-                : "Sync now"}
+              : triggerState.kind === "queued"
+                ? "Queued"
+                : isRunning
+                  ? "Running"
+                  : "Sync now"}
           </button>
         }
       >
@@ -268,8 +288,8 @@ export function SyncDashboard() {
                     {r.finished_at
                       ? formatDuration(
                           Math.round(
-                            (new Date(r.finished_at).getTime() -
-                              new Date(r.started_at).getTime()) /
+                            (parseUtc(r.finished_at).getTime() -
+                              parseUtc(r.started_at).getTime()) /
                               1000,
                           ),
                         )
