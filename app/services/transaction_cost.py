@@ -14,6 +14,7 @@ from typing import Any
 import psycopg
 import psycopg.rows
 import psycopg.types.json
+from psycopg import sql
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -64,11 +65,65 @@ def get_transaction_cost_config(
             """
             SELECT max_total_cost_bps,
                    min_return_vs_cost_ratio,
-                   default_hold_days
+                   default_hold_days,
+                   updated_at,
+                   updated_by,
+                   reason
             FROM transaction_cost_config
             WHERE id = TRUE
             """
         )
+        row = cur.fetchone()
+    if row is None:
+        raise TransactionCostConfigCorrupt("transaction_cost_config singleton row missing")
+    return dict(row)
+
+
+def update_transaction_cost_config(
+    conn: psycopg.Connection[Any],
+    *,
+    max_total_cost_bps: Decimal | None = None,
+    min_return_vs_cost_ratio: Decimal | None = None,
+    default_hold_days: int | None = None,
+    updated_by: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Update the transaction_cost_config singleton.
+
+    Only provided (non-None) fields are changed.  Always updates
+    updated_at, updated_by, and reason for audit.
+
+    Raises TransactionCostConfigCorrupt if the row is missing.
+    """
+    # Build dynamic SET clause using psycopg.sql for type-safe composition.
+    # Column names come from a fixed set in code (never user input).
+    set_parts: list[sql.Composable] = [
+        sql.SQL("updated_at = NOW()"),
+        sql.SQL("updated_by = {by}").format(by=sql.Placeholder("updated_by")),
+        sql.SQL("reason = {reason}").format(reason=sql.Placeholder("reason")),
+    ]
+    params: dict[str, Any] = {"updated_by": updated_by, "reason": reason}
+
+    if max_total_cost_bps is not None:
+        set_parts.append(sql.SQL("max_total_cost_bps = {v}").format(v=sql.Placeholder("max_total_cost_bps")))
+        params["max_total_cost_bps"] = max_total_cost_bps
+    if min_return_vs_cost_ratio is not None:
+        set_parts.append(
+            sql.SQL("min_return_vs_cost_ratio = {v}").format(v=sql.Placeholder("min_return_vs_cost_ratio"))
+        )
+        params["min_return_vs_cost_ratio"] = min_return_vs_cost_ratio
+    if default_hold_days is not None:
+        set_parts.append(sql.SQL("default_hold_days = {v}").format(v=sql.Placeholder("default_hold_days")))
+        params["default_hold_days"] = default_hold_days
+
+    query = sql.SQL(
+        "UPDATE transaction_cost_config SET {sets} WHERE id = TRUE"
+        " RETURNING max_total_cost_bps, min_return_vs_cost_ratio,"
+        " default_hold_days, updated_at, updated_by, reason"
+    ).format(sets=sql.SQL(", ").join(set_parts))
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(query, params)
         row = cur.fetchone()
     if row is None:
         raise TransactionCostConfigCorrupt("transaction_cost_config singleton row missing")

@@ -40,6 +40,11 @@ from app.services.budget import (
     record_capital_event,
     update_budget_config,
 )
+from app.services.transaction_cost import (
+    TransactionCostConfigCorrupt,
+    get_transaction_cost_config,
+    update_transaction_cost_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +94,15 @@ class BudgetConfigResponse(BaseModel):
     reason: str
 
 
+class CostConfigResponse(BaseModel):
+    max_total_cost_bps: float
+    min_return_vs_cost_ratio: float
+    default_hold_days: int
+    updated_at: datetime
+    updated_by: str
+    reason: str
+
+
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -111,6 +125,22 @@ class UpdateBudgetConfigRequest(BaseModel):
     def _at_least_one_field(self) -> UpdateBudgetConfigRequest:
         if self.cash_buffer_pct is None and self.cgt_scenario is None:
             raise ValueError("at least one of cash_buffer_pct or cgt_scenario must be provided")
+        return self
+
+
+class UpdateCostConfigRequest(BaseModel):
+    max_total_cost_bps: float | None = Field(default=None, gt=0, le=1000)
+    min_return_vs_cost_ratio: float | None = Field(default=None, ge=1.0)
+    default_hold_days: int | None = Field(default=None, gt=0, le=365)
+    updated_by: str
+    reason: str
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self) -> UpdateCostConfigRequest:
+        if self.max_total_cost_bps is None and self.min_return_vs_cost_ratio is None and self.default_hold_days is None:
+            raise ValueError(
+                "at least one of max_total_cost_bps, min_return_vs_cost_ratio, or default_hold_days must be provided"
+            )
         return self
 
 
@@ -252,4 +282,64 @@ def patch_budget_config(
         updated_at=config.updated_at,
         updated_by=config.updated_by,
         reason=config.reason,
+    )
+
+
+@router.get("/cost-config", response_model=CostConfigResponse)
+def get_cost_config(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> CostConfigResponse:
+    """Return the current transaction cost configuration."""
+    try:
+        config = get_transaction_cost_config(conn)
+    except TransactionCostConfigCorrupt:
+        logger.exception("transaction cost config corrupt")
+        raise HTTPException(status_code=503, detail="transaction cost configuration unavailable")
+
+    return CostConfigResponse(
+        max_total_cost_bps=float(config["max_total_cost_bps"]),
+        min_return_vs_cost_ratio=float(config["min_return_vs_cost_ratio"]),
+        default_hold_days=config["default_hold_days"],
+        updated_at=config["updated_at"],
+        updated_by=config["updated_by"],
+        reason=config["reason"],
+    )
+
+
+@router.patch("/cost-config", response_model=CostConfigResponse)
+def patch_cost_config(
+    body: UpdateCostConfigRequest,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> CostConfigResponse:
+    """Partial update of transaction cost configuration.
+
+    Only fields provided as non-None are changed.  Both ``updated_by`` and
+    ``reason`` are required for every mutation so the audit trail always
+    carries attribution.
+    """
+    try:
+        config = update_transaction_cost_config(
+            conn,
+            max_total_cost_bps=Decimal(str(body.max_total_cost_bps)) if body.max_total_cost_bps is not None else None,
+            min_return_vs_cost_ratio=(
+                Decimal(str(body.min_return_vs_cost_ratio)) if body.min_return_vs_cost_ratio is not None else None
+            ),
+            default_hold_days=body.default_hold_days,
+            updated_by=body.updated_by,
+            reason=body.reason,
+        )
+    except TransactionCostConfigCorrupt:
+        logger.exception("transaction cost config corrupt")
+        raise HTTPException(status_code=503, detail="transaction cost configuration unavailable")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    conn.commit()
+    return CostConfigResponse(
+        max_total_cost_bps=float(config["max_total_cost_bps"]),
+        min_return_vs_cost_ratio=float(config["min_return_vs_cost_ratio"]),
+        default_hold_days=config["default_hold_days"],
+        updated_at=config["updated_at"],
+        updated_by=config["updated_by"],
+        reason=config["reason"],
     )

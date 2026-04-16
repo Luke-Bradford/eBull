@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock
 
@@ -15,7 +16,10 @@ from app.services.transaction_cost import (
     load_instrument_cost,
     record_actual_cost,
     record_estimated_cost,
+    update_transaction_cost_config,
 )
+
+_NOW = datetime(2026, 4, 16, 12, 0, 0, tzinfo=UTC)
 
 
 class TestGetTransactionCostConfig:
@@ -228,3 +232,54 @@ class TestRecordActualCost:
         assert "UPDATE trade_cost_record" in sql
         params = cursor.execute.call_args[0][1]
         assert params["actual_spread_bps"] == Decimal("48")
+
+
+class TestUpdateTransactionCostConfig:
+    def test_updates_provided_fields(self) -> None:
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchone.return_value = {
+            "max_total_cost_bps": Decimal("200"),
+            "min_return_vs_cost_ratio": Decimal("3.0"),
+            "default_hold_days": 90,
+            "updated_at": _NOW,
+            "updated_by": "operator",
+            "reason": "adjusted threshold",
+        }
+        result = update_transaction_cost_config(
+            conn,
+            max_total_cost_bps=Decimal("200"),
+            updated_by="operator",
+            reason="adjusted threshold",
+        )
+        assert result["max_total_cost_bps"] == Decimal("200")
+        cursor.execute.assert_called_once()
+        query = cursor.execute.call_args[0][0]
+        assert "max_total_cost_bps" in str(query)
+
+    def test_raises_when_row_missing(self) -> None:
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchone.return_value = None
+        with pytest.raises(TransactionCostConfigCorrupt):
+            update_transaction_cost_config(
+                conn,
+                max_total_cost_bps=Decimal("200"),
+                updated_by="operator",
+                reason="test",
+            )
+
+
+class TestCostConfigAPI:
+    def test_cost_config_router_exists(self) -> None:
+        """The cost config endpoints should be registered."""
+        from fastapi.routing import APIRoute
+
+        from app.api.budget import router
+
+        paths = [r.path for r in router.routes if isinstance(r, APIRoute)]
+        assert any("/cost-config" in p for p in paths)
