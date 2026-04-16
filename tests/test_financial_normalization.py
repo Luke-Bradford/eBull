@@ -366,9 +366,9 @@ class TestDeriveQ4EdgeCases:
         # Revenue should NOT be derived — Q2 is missing
         assert q4.revenue is None
 
-    def test_q4_derivation_uses_fy_eps_not_subtraction(self) -> None:
-        """EPS is not safely subtractive across periods with different share
-        counts, so derived Q4 should use FY EPS values directly."""
+    def test_q4_eps_derived_via_subtraction(self) -> None:
+        """EPS Q4 = FY - Q1 - Q2 - Q3 (subtraction, not FY copy).
+        FY copy would overstate TTM since TTM = Q1+Q2+Q3+Q4."""
         facts = [
             _fact(
                 concept="EarningsPerShareDiluted",
@@ -454,8 +454,9 @@ class TestDeriveQ4EdgeCases:
         ]
         periods = _derive_periods_from_facts(facts, reported_currency="USD")
         q4 = next(p for p in periods if p.period_type == "Q4")
-        # EPS should be FY value (6.50), NOT 6.50 - 1.50 - 1.60 - 1.70 = 1.70
-        assert q4.eps_diluted == Decimal("6.50")
+        # EPS derived via subtraction: 6.50 - 1.50 - 1.60 - 1.70 = 1.70
+        # (not FY copy which would make TTM = Q1+Q2+Q3+FY = 11.30)
+        assert q4.eps_diluted == Decimal("1.70")
 
 
 class TestMultiYearNormalization:

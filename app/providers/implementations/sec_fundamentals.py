@@ -180,6 +180,16 @@ def _extract_facts_from_gaap(gaap: dict[str, Any]) -> list[XbrlFact]:
                     logger.debug("Skipping XBRL entry for %s: bad date format", tag_name)
                     continue
 
+                # Guard against NaN/Infinity values in SEC data
+                try:
+                    decimal_val = Decimal(str(val))
+                    if not decimal_val.is_finite():
+                        logger.debug("Skipping XBRL entry for %s: non-finite val %s", tag_name, val)
+                        continue
+                except Exception:
+                    logger.debug("Skipping XBRL entry for %s: unparseable val %s", tag_name, val)
+                    continue
+
                 facts.append(
                     XbrlFact(
                         concept=tag_name,
@@ -187,7 +197,7 @@ def _extract_facts_from_gaap(gaap: dict[str, Any]) -> list[XbrlFact]:
                         unit=unit_key,
                         period_start=period_start,
                         period_end=period_end,
-                        val=Decimal(str(val)),
+                        val=decimal_val,
                         frame=entry.get("frame"),
                         accession_number=accn,
                         form_type=form,

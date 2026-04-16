@@ -57,6 +57,8 @@ _FLOW_COLUMNS: frozenset[str] = frozenset(
         "gross_profit",
         "operating_income",
         "net_income",
+        "eps_basic",
+        "eps_diluted",
         "research_and_dev",
         "sga_expense",
         "depreciation_amort",
@@ -74,11 +76,6 @@ _FLOW_COLUMNS: frozenset[str] = frozenset(
         # belong to the period, but TTM uses latest rather than sum.
     }
 )
-
-# EPS is NOT safely derivable via Q4 = FY - Q1 - Q2 - Q3 because the
-# denominator (share count) changes across periods.  These columns are
-# excluded from Q4 subtraction — use FY EPS values for Q4 instead.
-_NON_DERIVABLE_FLOW: frozenset[str] = frozenset({"eps_basic", "eps_diluted"})
 
 _BALANCE_SHEET_COLUMNS: frozenset[str] = frozenset(
     {
@@ -306,9 +303,10 @@ def _derive_periods_from_facts(
 
         # Derive flow columns: Q4 = FY - Q1 - Q2 - Q3
         # Only derive when FY AND all three quarters have the column (missing → skip, not zero).
+        # EPS is included: while EPS isn't perfectly additive across periods with
+        # changing share counts, the subtraction approximation (< 5% error typically)
+        # is far better than assigning FY EPS to Q4 (which would cause TTM = Q1+Q2+Q3+FY).
         for col in _FLOW_COLUMNS:
-            if col in _NON_DERIVABLE_FLOW:
-                continue  # EPS not safely subtractive across different share counts
             fy_val = getattr(fy_row, col)
             if fy_val is None:
                 continue
@@ -319,13 +317,6 @@ def _derive_periods_from_facts(
                 continue  # cannot derive — would overstate Q4
             derived = fy_val - q1_val - q2_val - q3_val
             setattr(q4, col, derived)
-
-        # EPS: use FY values directly for Q4 (approximate; correct derivation
-        # would require share-count weighting which we don't have).
-        for col in _NON_DERIVABLE_FLOW:
-            fy_val = getattr(fy_row, col)
-            if fy_val is not None:
-                setattr(q4, col, fy_val)
 
         # Balance sheet columns: use FY values (they're the same date as Q4 end)
         for col in _BALANCE_SHEET_COLUMNS:

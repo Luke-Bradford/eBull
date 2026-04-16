@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS financial_facts_raw (
     fiscal_period        TEXT,
     decimals             TEXT,    -- XBRL allows non-integer values like "INF"
     ingestion_run_id     BIGINT REFERENCES data_ingestion_runs(ingestion_run_id),
-    fetched_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    fetched_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Identity: one fact per instrument/concept/unit/period-range/filing.
