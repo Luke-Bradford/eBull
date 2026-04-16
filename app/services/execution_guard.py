@@ -42,6 +42,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Literal
 
 import psycopg
@@ -51,6 +52,13 @@ from psycopg.types.json import Jsonb
 from app.services.budget import BudgetConfigCorrupt, BudgetState, compute_budget_state
 from app.services.portfolio import _load_mirror_equity
 from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
+from app.services.transaction_cost import (
+    TransactionCostConfigCorrupt,
+    estimate_cost,
+    get_transaction_cost_config,
+    load_instrument_cost,
+    spread_pct_to_bps,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +97,7 @@ RuleName = Literal[
     "no_thesis",
     "spread_wide",
     "spread_unavailable",
+    "transaction_cost_prohibitive",
     "budget_available",
     "instrument_missing",
     "sector_missing",
@@ -201,7 +210,7 @@ def _load_quote(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT spread_flag
+            SELECT spread_flag, spread_pct
             FROM quotes
             WHERE instrument_id = %(iid)s
             ORDER BY quoted_at DESC
@@ -411,6 +420,62 @@ def _check_spread(quote: dict[str, Any] | None) -> RuleResult:
     return RuleResult(rule="spread_wide", passed=True)
 
 
+def _check_transaction_cost(
+    quote: dict[str, Any] | None,
+    cost_model_row: dict[str, Any] | None,
+    cost_config: dict[str, Any],
+) -> RuleResult:
+    """Check whether the estimated transaction cost is prohibitive."""
+    if cost_model_row is not None:
+        spread_bps = cost_model_row["spread_bps"]
+        overnight_rate = cost_model_row["overnight_rate"]
+        fx_markup_bps = cost_model_row["fx_markup_bps"]
+    elif quote is not None and quote.get("spread_pct") is not None:
+        converted = spread_pct_to_bps(quote["spread_pct"])
+        # spread_pct_to_bps returns None only when input is None, which the
+        # guard above already excluded.  Assert for pyright narrowing.
+        assert converted is not None  # pragma: no cover
+        spread_bps = converted
+        overnight_rate = Decimal("0")
+        fx_markup_bps = Decimal("0")
+    else:
+        return RuleResult(
+            rule="transaction_cost_prohibitive",
+            passed=False,
+            detail="cost unavailable: no cost_model row and no quote spread_pct",
+        )
+
+    estimate = estimate_cost(
+        spread_bps=spread_bps,
+        overnight_rate=overnight_rate,
+        fx_markup_bps=fx_markup_bps,
+        hold_days=cost_config["default_hold_days"],
+        max_total_cost_bps=cost_config["max_total_cost_bps"],
+        min_return_vs_cost_ratio=cost_config["min_return_vs_cost_ratio"],
+        expected_return_pct=None,
+    )
+
+    if estimate.is_cost_prohibitive:
+        return RuleResult(
+            rule="transaction_cost_prohibitive",
+            passed=False,
+            detail=(
+                f"cost prohibitive: total={estimate.total_cost_bps} bps "
+                f"(spread={estimate.spread_bps}, carry={estimate.total_carry_cost_bps}, "
+                f"fx={estimate.fx_markup_bps}\u00d72)"
+                + (f"; {estimate.prohibitive_reason}" if estimate.prohibitive_reason else "")
+            ),
+        )
+    return RuleResult(
+        rule="transaction_cost_prohibitive",
+        passed=True,
+        detail=(
+            f"cost ok: total={estimate.total_cost_bps} bps "
+            f"(spread={estimate.spread_bps}, carry={estimate.total_carry_cost_bps})"
+        ),
+    )
+
+
 def _check_budget(budget: BudgetState) -> RuleResult:
     """Check budget availability for BUY/ADD orders.
 
@@ -609,10 +674,20 @@ def evaluate_recommendation(
     current_sector_pct: float = 0.0
     total_aum: float = 0.0
 
+    cost_config: dict[str, Any] | None = None
+    cost_config_corrupt: bool = False
+    cost_model_row: dict[str, Any] | None = None
+
     if action in ("BUY", "ADD"):
         coverage = _load_coverage(conn, instrument_id)
         thesis = _load_latest_thesis(conn, instrument_id)
         quote = _load_quote(conn, instrument_id)
+        # Transaction cost state
+        try:
+            cost_config = get_transaction_cost_config(conn)
+        except TransactionCostConfigCorrupt:
+            cost_config_corrupt = True
+        cost_model_row = load_instrument_cost(conn, instrument_id)
         # Budget-aware cash check: replaces raw _load_cash(conn).
         # compute_budget_state reads budget_config, cash_ledger, positions,
         # copy_mirrors, disposal_matches, and live_fx_rates.
@@ -654,6 +729,19 @@ def evaluate_recommendation(
         if coverage is not None:
             rule_results.append(_check_thesis_freshness(thesis, coverage, now))
         rule_results.append(_check_spread(quote))
+
+        # Transaction cost check
+        if cost_config_corrupt or cost_config is None:
+            rule_results.append(
+                RuleResult(
+                    rule="transaction_cost_prohibitive",
+                    passed=False,
+                    detail="transaction_cost_config singleton row missing",
+                )
+            )
+        else:
+            rule_results.append(_check_transaction_cost(quote, cost_model_row, cost_config))
+
         if budget is None:
             rule_results.append(
                 RuleResult(
