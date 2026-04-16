@@ -290,6 +290,77 @@ def record_estimated_cost(
         )
 
 
+def seed_cost_models_from_quotes(
+    conn: psycopg.Connection[Any],
+) -> dict[str, int]:
+    """Create or refresh cost_model rows from current quote spread data.
+
+    For each Tier 1 instrument with a valid spread_pct:
+    - Close any existing active cost_model row (set valid_to = NOW())
+    - Insert a new active row with computed spread
+
+    FX markup is set based on instrument currency:
+    - USD → 0 bps
+    - non-USD → 50 bps (eToro's typical FX markup)
+
+    Overnight rate is 0 for all instruments (real stocks, not CFDs in v1).
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT i.instrument_id, q.spread_pct, i.currency
+            FROM instruments i
+            JOIN coverage c USING (instrument_id)
+            JOIN quotes q USING (instrument_id)
+            WHERE c.coverage_tier = 1
+              AND q.spread_pct IS NOT NULL
+            """
+        )
+        rows = cur.fetchall()
+
+    processed = 0
+    skipped = 0
+    for row in rows:
+        if row["spread_pct"] is None:
+            skipped += 1
+            continue
+
+        spread_bps = spread_pct_to_bps(row["spread_pct"])
+        currency = row["currency"] or "USD"
+        fx_markup_bps = Decimal("0") if currency == "USD" else Decimal("50")
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE cost_model
+                SET valid_to = NOW()
+                WHERE instrument_id = %(iid)s
+                  AND valid_to IS NULL
+                """,
+                {"iid": row["instrument_id"]},
+            )
+            cur.execute(
+                """
+                INSERT INTO cost_model (
+                    instrument_id, spread_bps, overnight_rate,
+                    fx_pair, fx_markup_bps, source
+                ) VALUES (
+                    %(iid)s, %(spread_bps)s, 0,
+                    %(fx_pair)s, %(fx_markup_bps)s, 'computed'
+                )
+                """,
+                {
+                    "iid": row["instrument_id"],
+                    "spread_bps": spread_bps,
+                    "fx_pair": None if currency == "USD" else f"{currency}/USD",
+                    "fx_markup_bps": fx_markup_bps,
+                },
+            )
+        processed += 1
+
+    return {"processed": processed, "skipped": skipped}
+
+
 def record_actual_cost(
     conn: psycopg.Connection[Any],
     *,

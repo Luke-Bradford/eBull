@@ -16,6 +16,7 @@ from app.services.transaction_cost import (
     load_instrument_cost,
     record_actual_cost,
     record_estimated_cost,
+    seed_cost_models_from_quotes,
     update_transaction_cost_config,
 )
 
@@ -272,6 +273,79 @@ class TestUpdateTransactionCostConfig:
                 updated_by="operator",
                 reason="test",
             )
+
+
+class TestSeedCostModels:
+    def test_creates_cost_model_for_instrument_with_spread(self) -> None:
+        """Instruments with valid spread_pct get cost_model rows created."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = [
+            {"instrument_id": 1, "spread_pct": Decimal("0.30"), "currency": "USD"},
+            {"instrument_id": 2, "spread_pct": Decimal("0.50"), "currency": "GBP"},
+        ]
+        result = seed_cost_models_from_quotes(conn)
+        assert result["processed"] == 2
+        assert result["skipped"] == 0
+
+    def test_skips_instruments_without_spread(self) -> None:
+        """Instruments where spread_pct is None are skipped."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = [
+            {"instrument_id": 1, "spread_pct": None, "currency": "USD"},
+        ]
+        result = seed_cost_models_from_quotes(conn)
+        assert result["processed"] == 0
+        assert result["skipped"] == 1
+
+    def test_empty_universe_returns_zero(self) -> None:
+        """No instruments → processed=0, skipped=0."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = []
+        result = seed_cost_models_from_quotes(conn)
+        assert result["processed"] == 0
+        assert result["skipped"] == 0
+
+    def test_usd_instrument_gets_zero_fx_markup(self) -> None:
+        """USD instruments should have fx_markup_bps=0 and no fx_pair."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = [
+            {"instrument_id": 1, "spread_pct": Decimal("0.30"), "currency": "USD"},
+        ]
+        seed_cost_models_from_quotes(conn)
+        # Find the INSERT call (second execute call on the cursor)
+        insert_calls = [c for c in cursor.execute.call_args_list if "INSERT INTO cost_model" in str(c)]
+        assert len(insert_calls) == 1
+        params = insert_calls[0][0][1]
+        assert params["fx_markup_bps"] == Decimal("0")
+        assert params["fx_pair"] is None
+
+    def test_non_usd_instrument_gets_fx_markup(self) -> None:
+        """Non-USD instruments should have fx_markup_bps=50 and fx_pair set."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = [
+            {"instrument_id": 2, "spread_pct": Decimal("0.50"), "currency": "GBP"},
+        ]
+        seed_cost_models_from_quotes(conn)
+        insert_calls = [c for c in cursor.execute.call_args_list if "INSERT INTO cost_model" in str(c)]
+        assert len(insert_calls) == 1
+        params = insert_calls[0][0][1]
+        assert params["fx_markup_bps"] == Decimal("50")
+        assert params["fx_pair"] == "GBP/USD"
 
 
 class TestCostConfigAPI:
