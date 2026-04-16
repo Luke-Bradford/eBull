@@ -29,6 +29,7 @@ import { ApiError } from "@/api/client";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { useAsync } from "@/lib/useAsync";
 import { formatDateTime } from "@/lib/format";
+import { SyncDashboard } from "@/pages/SyncDashboard";
 
 type RowState =
   | { kind: "idle" }
@@ -89,9 +90,17 @@ export function AdminPage() {
   );
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
+      {/* Phase 3: sync orchestrator dashboard (issue #260). Sits above the
+          legacy jobs table — the jobs table remains until Phase 5 removes
+          it, so operators can cross-check old behaviour vs orchestrator
+          behaviour during the cutover window. */}
+      <SyncDashboard />
+
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-slate-800">Scheduled jobs</h1>
+        <h1 className="text-xl font-semibold text-slate-800">
+          Legacy scheduled jobs
+        </h1>
       </div>
 
       <Section title="Jobs">
