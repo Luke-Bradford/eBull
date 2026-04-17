@@ -119,12 +119,24 @@ class TestSetWatermark:
         assert params[3] is None
         assert params[4] is None
 
-    def test_refuses_to_write_outside_a_transaction(self) -> None:
-        """Autocommit/idle connections would commit the watermark
-        immediately, potentially ahead of the data ingest — crash
-        recovery would then skip unfinished work silently. The runtime
-        check turns this correctness hazard into a loud RuntimeError."""
-        conn = _mock_conn(transaction_status=TransactionStatus.IDLE)
+    @pytest.mark.parametrize(
+        "status",
+        [
+            TransactionStatus.IDLE,
+            TransactionStatus.UNKNOWN,
+            TransactionStatus.INERROR,
+            TransactionStatus.ACTIVE,
+        ],
+    )
+    def test_refuses_to_write_outside_an_open_transaction(self, status: TransactionStatus) -> None:
+        """Every non-INTRANS status must raise BEFORE execute is called.
+        Autocommit connections report IDLE; closed/broken report UNKNOWN;
+        aborted transactions report INERROR; a command mid-flight reports
+        ACTIVE. None of them are safe targets for a watermark write —
+        committing watermark ahead of data (IDLE/UNKNOWN) or against an
+        aborted transaction (INERROR) would silently skip work on the
+        next run or produce a cryptic downstream error."""
+        conn = _mock_conn(transaction_status=status)
         with pytest.raises(RuntimeError, match="inside an open transaction"):
             set_watermark(
                 conn,
@@ -132,8 +144,15 @@ class TestSetWatermark:
                 key="0000320193",
                 watermark="acc-1",
             )
-        # Critically: execute was NEVER called — we refused before writing.
         conn.execute.assert_not_called()
+
+    def test_inerror_produces_dedicated_rollback_hint(self) -> None:
+        """INERROR is the trickiest state — PostgreSQL would reject the
+        write with 'current transaction is aborted' anyway, but the
+        helpful cause ('rollback before retrying') beats the raw error."""
+        conn = _mock_conn(transaction_status=TransactionStatus.INERROR)
+        with pytest.raises(RuntimeError, match="rollback before retrying"):
+            set_watermark(conn, source="s", key="k", watermark="v")
 
 
 class TestListKeys:

@@ -119,12 +119,22 @@ def set_watermark(
     """
     status = conn.info.transaction_status
     if status != TransactionStatus.INTRANS:
+        # INTRANS is the ONLY valid status. All other values fail:
+        #   IDLE     — autocommit or no transaction opened
+        #   UNKNOWN  — connection broken / closed
+        #   ACTIVE   — a command is currently executing (bug: should not reach here)
+        #   INERROR  — transaction is aborted; any write would raise
+        #              "current transaction is aborted" — surface the
+        #              true cause up front instead.
+        if status == TransactionStatus.INERROR:
+            detail = "transaction is in error state — rollback before retrying"
+        else:
+            detail = "wrap this call in `with conn.transaction():` along with the data write"
         raise RuntimeError(
             f"set_watermark must be called inside an open transaction "
             f"(got TransactionStatus={status}). The watermark write and "
             f"the data upsert must be atomic — otherwise a crash between "
-            f"them leaves the watermark ahead of the data. Wrap this call "
-            f"in `with conn.transaction():` along with the data write."
+            f"them leaves the watermark ahead of the data. {detail}."
         )
     conn.execute(
         """
