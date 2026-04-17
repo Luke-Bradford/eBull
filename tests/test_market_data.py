@@ -25,8 +25,10 @@ from app.providers.implementations.etoro import (
 )
 from app.providers.market_data import OHLCVBar, Quote
 from app.services.market_data import (
+    _INCREMENTAL_FETCH_BARS,
     DEFAULT_MAX_SPREAD_PCT,
     _candles_are_fresh,
+    _candles_fetch_count,
     _compute_and_store_features,
     _compute_rolling_returns,
     _compute_volatility_30d,
@@ -828,3 +830,28 @@ class TestComputeAndStoreFeaturesTA:
 
         assert "price_vs_sma200" not in params
         assert "trend_sma_cross" not in params
+
+
+class TestCandlesFetchCount:
+    """_candles_fetch_count (#271) — two-mode backfill vs incremental."""
+
+    def _mock_conn(self, fetchone_return):
+        """Return a MagicMock conn whose .execute().fetchone() yields the row."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = fetchone_return
+        conn.execute.return_value = cursor
+        return conn
+
+    def test_returns_default_for_instrument_with_no_prior_candles(self) -> None:
+        """Backfill mode — no price_daily rows, so we pull the full
+        lookback_days window (caller default: 400)."""
+        conn = self._mock_conn(fetchone_return=None)
+        assert _candles_fetch_count(conn, 42, default=400) == 400
+
+    def test_returns_incremental_for_instrument_with_history(self) -> None:
+        """Incremental mode — prior candles exist, pull only
+        _INCREMENTAL_FETCH_BARS (yesterday + today + correction)."""
+        conn = self._mock_conn(fetchone_return=(1,))
+        assert _candles_fetch_count(conn, 42, default=400) == _INCREMENTAL_FETCH_BARS
+        assert _INCREMENTAL_FETCH_BARS == 3  # sanity — pinning the documented value

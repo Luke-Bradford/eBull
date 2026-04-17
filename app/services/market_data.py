@@ -80,16 +80,28 @@ def refresh_market_data(
     today = date.today()
     candles_skipped = 0
 
-    # --- Candles: per-instrument (with freshness skip) ---
+    # --- Candles: per-instrument (with freshness skip + two-mode fetch) ---
+    # Two-mode fetch (#271):
+    #   * Backfill mode — instrument has NO prior candles (new to the
+    #     universe, or gap detected). Pull full `lookback_days` history
+    #     (default 400 bars).
+    #   * Incremental mode — instrument already has candle history.
+    #     Pull only INCREMENTAL_FETCH_BARS bars (yesterday + today +
+    #     correction buffer). The upsert dedupes on (instrument_id,
+    #     price_date) so overlap with existing rows is harmless.
+    # On a typical day, ~100% of Tier 1/2 instruments are in incremental
+    # mode — eToro call weight drops from 400 bars × ~500 instruments
+    # (~200k rows) to 3 × 500 (~1500 rows).
     total = len(instruments)
     for idx, (instrument_id, symbol) in enumerate(instruments, start=1):
         if _candles_are_fresh(conn, instrument_id, today):
             candles_skipped += 1
             report_progress(idx, total)
             continue
+        fetch_count = _candles_fetch_count(conn, instrument_id, default=lookback_days)
         try:
             with conn.transaction():
-                bars = provider.get_daily_candles(instrument_id, lookback_days)
+                bars = provider.get_daily_candles(instrument_id, fetch_count)
                 if bars:
                     upserted = _upsert_candles(conn, instrument_id, bars)
                     candle_rows_upserted += upserted
@@ -194,6 +206,40 @@ def _candles_are_fresh(
         return False
     latest_date: date = row[0]
     return latest_date >= _most_recent_trading_day(today)
+
+
+# Incremental fetch window in bars — yesterday + today + one
+# correction-day buffer. eToro's /candles endpoint has no date-range
+# filter, only `candlesCount`; this is the smallest count that still
+# catches the latest bar plus a one-day retrospective correction.
+_INCREMENTAL_FETCH_BARS = 3
+
+
+def _candles_fetch_count(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_id: int,
+    *,
+    default: int,
+) -> int:
+    """Decide the candlesCount for an instrument's fetch (#271).
+
+    Returns ``default`` (typically 400) for instruments with NO prior
+    candles — backfill mode. Returns ``_INCREMENTAL_FETCH_BARS`` for
+    instruments that already have history — incremental mode. The
+    upsert dedupes on (instrument_id, price_date) so overlap between
+    the incremental window and existing rows is safe.
+    """
+    row = conn.execute(
+        """
+        SELECT 1 FROM price_daily
+        WHERE instrument_id = %(instrument_id)s
+        LIMIT 1
+        """,
+        {"instrument_id": instrument_id},
+    ).fetchone()
+    if row is None:
+        return default  # backfill
+    return _INCREMENTAL_FETCH_BARS
 
 
 def _upsert_candles(
