@@ -299,14 +299,30 @@ def _run_cik_upsert(
     try:
         inst = _instrument_for_cik(conn, cik)
         if inst is None:
+            logger.warning(
+                "sec_incremental: no tradable instrument found for cik=%s (plan drift?)",
+                cik,
+            )
             return False
         instrument_id, symbol = inst
+        # Close the implicit read transaction opened by _instrument_for_cik
+        # before the HTTP calls below so the session is not idle-in-
+        # transaction for multi-second windows × hundreds of CIKs.
+        conn.commit()
 
         submissions = filings_provider.fetch_submissions(cik)
         if submissions is None:
+            logger.warning(
+                "sec_incremental: no submissions.json for cik=%s (private/de-registered?)",
+                cik,
+            )
             return False
         top_accession = _top_accession_from_submissions(submissions)
         if top_accession is None:
+            logger.warning(
+                "sec_incremental: submissions.json for cik=%s has empty filings.recent",
+                cik,
+            )
             return False
 
         facts = fundamentals_provider.extract_facts(symbol, cik)
@@ -340,8 +356,8 @@ def _run_cik_upsert(
         # transaction block had been entered yet.
         try:
             conn.rollback()
-        except Exception:
-            pass
+        except psycopg.Error:
+            logger.debug("rollback suppressed after executor exception", exc_info=True)
         failed.append((cik, type(exc).__name__))
         logger.exception("sec_incremental per-CIK upsert failed for cik=%s", cik)
         return False
@@ -429,8 +445,8 @@ def execute_refresh(
         except Exception as exc:
             try:
                 conn.rollback()
-            except Exception:
-                pass
+            except psycopg.Error:
+                logger.debug("rollback suppressed after executor exception", exc_info=True)
             failed.append((cik, type(exc).__name__))
             logger.exception(
                 "sec_incremental submissions-only advance failed for cik=%s",

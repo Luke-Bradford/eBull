@@ -154,6 +154,12 @@ def test_seed_writes_facts_and_both_watermarks(
     count_row = ebull_test_conn.execute("SELECT COUNT(*) FROM financial_facts_raw WHERE instrument_id = 1").fetchone()
     assert count_row is not None and count_row[0] >= 1
 
+    status_row = ebull_test_conn.execute(
+        "SELECT status FROM data_ingestion_runs ORDER BY ingestion_run_id DESC LIMIT 1"
+    ).fetchone()
+    assert status_row is not None
+    assert status_row[0] == "success"
+
 
 def test_refresh_advances_both_watermarks(
     ebull_test_conn: psycopg.Connection[tuple],
@@ -231,6 +237,12 @@ def test_failure_does_not_advance_watermarks(
     assert wm is not None
     assert wm.watermark == "0000320193-25-000108"
 
+    status_row = ebull_test_conn.execute(
+        "SELECT status FROM data_ingestion_runs ORDER BY ingestion_run_id DESC LIMIT 1"
+    ).fetchone()
+    assert status_row is not None
+    assert status_row[0] == "failed"
+
 
 def test_one_failure_does_not_abort_siblings(
     ebull_test_conn: psycopg.Connection[tuple],
@@ -266,6 +278,12 @@ def test_one_failure_does_not_abort_siblings(
     wm_success = get_watermark(ebull_test_conn, "sec.submissions", "0000000002")
     assert wm_success is not None
     assert wm_success.watermark == "0000000002-26-000001"
+
+    status_row = ebull_test_conn.execute(
+        "SELECT status FROM data_ingestion_runs ORDER BY ingestion_run_id DESC LIMIT 1"
+    ).fetchone()
+    assert status_row is not None
+    assert status_row[0] == "partial"
 
 
 def test_submissions_only_advance_skips_companyfacts(
