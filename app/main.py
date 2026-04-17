@@ -43,6 +43,7 @@ from app.security.secrets_crypto import set_active_key as set_broker_encryption_
 from app.services.coverage import override_tier
 from app.services.operator_setup import ensure_startup_token, operators_empty
 from app.services.ops_monitor import get_system_health
+from app.services.sync_orchestrator.reaper import reap_orphaned_syncs
 from app.workers.scheduler import SCHEDULED_JOBS
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
@@ -93,10 +94,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Sync orchestrator: reap orphaned runs BEFORE the scheduler starts
     # so the partial-unique-index gate is clear for the first new sync.
     # Crash here must not block boot — log loud, continue.
+    #
+    # reap_all=True: orchestrator runs in-process, so any `status='running'`
+    # row at boot is from a prior dead process — there is no live sync to
+    # preserve. The age-based predicate would miss rows started within the
+    # same clock tick when timeout collapses to zero; reap_all bypasses the
+    # age check entirely. If the orchestrator ever becomes multi-process,
+    # this must switch to an activity-based liveness check.
     try:
-        from app.services.sync_orchestrator.reaper import reap_orphaned_syncs
-
-        reaped = reap_orphaned_syncs()
+        reaped = reap_orphaned_syncs(reap_all=True)
         if reaped:
             logger.info(
                 "orchestrator reaper: transitioned %d orphaned sync_runs row(s)",

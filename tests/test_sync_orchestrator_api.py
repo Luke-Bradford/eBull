@@ -108,3 +108,20 @@ class TestReaperIdempotent:
         result = reap_orphaned_syncs()
         assert isinstance(result, int)
         assert result >= 0
+
+    def test_reap_orphaned_syncs_reap_all_runs_without_error(self) -> None:
+        """Smoke: reap_all=True accepts the kwarg and returns an int.
+
+        Exercises the lifespan-startup code path without writing rows
+        (destructive mutations in unit tests against the dev DB are
+        blocked by tests/smoke/test_no_settings_url_in_destructive_paths.py).
+        Full same-clock-tick boundary behaviour is exercised at boot
+        on every process start — the predicate `%(reap_all)s OR
+        started_at < now() - %(timeout)s::interval` short-circuits on
+        the boolean, so any row with status='running' is reaped
+        regardless of started_at."""
+        from app.services.sync_orchestrator.reaper import reap_orphaned_syncs
+
+        result = reap_orphaned_syncs(reap_all=True)
+        assert isinstance(result, int)
+        assert result >= 0
