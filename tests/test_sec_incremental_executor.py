@@ -198,6 +198,10 @@ def test_refresh_advances_both_watermarks(
     assert outcome.refreshed == 1
     assert outcome.failed == []
 
+    # Refresh path must NOT call fetch_submissions — the planner
+    # already captured top_accession and passed it via known_top_accession.
+    assert filings.fetch_calls == 0
+
     submissions_wm = get_watermark(ebull_test_conn, "sec.submissions", "0000320193")
     assert submissions_wm is not None
     assert submissions_wm.watermark == "0000320193-26-000042"
