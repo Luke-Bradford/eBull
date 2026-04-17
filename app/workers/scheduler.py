@@ -709,8 +709,18 @@ def nightly_universe_sync() -> None:
             # UPDATE-based coverage audit / gate would silently no-op on
             # them. See #292.
             #
-            # bootstrap_missing_coverage_rows opens its own transaction
-            # internally, so no outer wrapper is needed here.
+            # bootstrap_missing_coverage_rows opens its own conn.transaction()
+            # which becomes a savepoint under the outer connection's
+            # implicit transaction. If a later step in nightly_universe_sync
+            # raises, the connection context manager rolls back the outer
+            # transaction — including this savepoint's inserts. That's
+            # intended: coverage bootstrap is a dependent side effect of a
+            # successful universe sync. A rolled-back bootstrap is harmless
+            # because the missing-row predicate is idempotent and the next
+            # nightly run re-inserts. The row_count contribution reflects
+            # rows staged inside the connection's transaction; it is
+            # accurate for "work attempted this run" even if the outer tx
+            # later rolls back.
             bootstrap_result = bootstrap_missing_coverage_rows(conn)
             row_count += bootstrap_result.bootstrapped
             tracker.row_count = row_count
