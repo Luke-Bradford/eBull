@@ -688,10 +688,28 @@ def generate_thesis(
       4. Open a transaction, INSERT a new thesis row with an atomically-computed
          thesis_version, update coverage.last_reviewed_at, commit.
 
-    Returns ThesisResult. Claude calls are made outside the transaction to avoid
-    holding a connection open during network I/O.
+    Returns ThesisResult. Claude calls are made outside any DB transaction
+    to avoid holding a connection open during network I/O.
+
+    The explicit ``conn.commit()`` after ``_assemble_context`` is
+    load-bearing: on a non-autocommit connection the context SELECTs
+    open an implicit transaction that would otherwise stay open through
+    both Claude calls (2-5s each, sometimes 10s+). Holding a DB tx
+    across HTTP is the anti-pattern called out in CLAUDE.md Architecture
+    invariants; the commit closes the read tx so the connection is
+    ``idle`` (not ``idle in transaction``) while Claude runs.
+
+    **Caller contract:** do NOT wrap this call in ``with conn.transaction():``.
+    psycopg3 forbids explicit ``commit()`` inside an outer transaction
+    block; this function commits mid-flow. Callers managing their own
+    transaction must either split the call boundary around it or open a
+    dedicated connection.
     """
     context = _assemble_context(conn, instrument_id)
+    # Close the implicit read tx opened by _assemble_context SELECTs
+    # BEFORE the Claude calls below. Without this, the connection stays
+    # ``idle in transaction`` for the duration of the Claude round-trips.
+    conn.commit()
 
     # Claude calls — outside any DB transaction; these can take seconds
     writer_output = _call_writer(client, context)
