@@ -225,7 +225,11 @@ def audit_all_instruments(conn: psycopg.Connection[Any]) -> AuditSummary:
                 raise RuntimeError("audit_all_instruments UPDATE: server did not report a command tag (rowcount=-1)")
             total_updated = result.rowcount
 
-        null_anomalies = _count_null_anomalies(conn)
+    # Null-anomaly check runs AFTER the transaction commits so the
+    # count reflects durable state. Running it inside the `with` block
+    # would count uncommitted rows; on commit failure those counts
+    # would be stale. Post-commit makes the check unambiguous.
+    null_anomalies = _count_null_anomalies(conn)
 
     if null_anomalies > 0:
         logger.warning(
