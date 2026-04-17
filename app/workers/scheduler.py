@@ -1197,6 +1197,37 @@ def daily_financial_facts() -> None:
                 # remains the liveness signal.
                 tracker.row_count = 0
 
+            # Phase 3: cascade refresh (#276 Chunk K.1). Explicit
+            # conn.commit() BEFORE cascade so cascade's fresh reads
+            # see committed state from Phase 1 + Phase 2 —
+            # normalize_financial_periods uses savepoints and does not
+            # itself commit. Cascade runs even on submissions-only
+            # days (8-K thesis context update) as long as there were
+            # successful non-seed CIKs.
+            conn.commit()
+            if settings.anthropic_api_key:
+                from app.services.refresh_cascade import (
+                    cascade_refresh,
+                    changed_instruments_from_outcome,
+                )
+
+                changed_ids = changed_instruments_from_outcome(conn, plan, outcome)
+                if changed_ids:
+                    cascade_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+                    cascade_outcome = cascade_refresh(conn, cascade_client, changed_ids)
+                    logger.info(
+                        "cascade_refresh outcome: considered=%d thesis_refreshed=%d rankings=%s failed=%d",
+                        cascade_outcome.instruments_considered,
+                        cascade_outcome.thesis_refreshed,
+                        cascade_outcome.rankings_recomputed,
+                        len(cascade_outcome.failed),
+                    )
+            else:
+                logger.info(
+                    "daily_financial_facts: ANTHROPIC_API_KEY not set — "
+                    "skipping cascade refresh (facts + normalization still committed)"
+                )
+
 
 def daily_news_refresh() -> None:
     """
