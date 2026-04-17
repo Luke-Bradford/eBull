@@ -218,9 +218,15 @@ def _load_instruments_for_review(
             FROM instruments i
             JOIN coverage c ON c.instrument_id = i.instrument_id
             LEFT JOIN LATERAL (
+                -- #268 Chunk J: only surface the latest score if the
+                -- instrument is currently analysable. A tier-3
+                -- instrument whose filings_status regressed to
+                -- insufficient / fpi / no_primary_sec_cik must not
+                -- get promoted on a pre-regression score.
                 SELECT total_score
                 FROM scores
                 WHERE instrument_id = i.instrument_id
+                  AND c.filings_status = 'analysable'
                 ORDER BY scored_at DESC
                 LIMIT 1
             ) ls ON TRUE

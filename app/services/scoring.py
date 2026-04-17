@@ -1130,6 +1130,7 @@ def compute_rankings(
             FROM instruments i
             JOIN coverage c ON c.instrument_id = i.instrument_id
             WHERE i.is_tradable = TRUE
+              AND c.filings_status = 'analysable'
               AND (
                   EXISTS (SELECT 1 FROM theses t WHERE t.instrument_id = i.instrument_id)
                   OR EXISTS (SELECT 1 FROM fundamentals_snapshot f WHERE f.instrument_id = i.instrument_id)

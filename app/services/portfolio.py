@@ -362,22 +362,32 @@ def _load_ranked_scores(
     Load the most recent score row per instrument for model_version,
     returned in rank order (rank 1 first). Instruments without a rank
     (unscored this run) are excluded.
+
+    #268 Chunk J gate: the ``coverage.filings_status = 'analysable'``
+    JOIN predicate excludes pre-existing score rows for instruments
+    that fell out of the analysable pool (e.g. SEC coverage regressed,
+    or audit classified them ``insufficient``/``fpi``). Without this
+    gate, recommendations would still surface on stale ineligible
+    scores. Gating at read time preserves audit history — we don't
+    purge the old rows, we just stop surfacing them.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT DISTINCT ON (instrument_id)
-                instrument_id,
-                score_id,
-                total_score,
-                confidence_score,
-                rank,
-                model_version,
-                scored_at
-            FROM scores
-            WHERE model_version = %(mv)s
-              AND rank IS NOT NULL
-            ORDER BY instrument_id, scored_at DESC
+            SELECT DISTINCT ON (s.instrument_id)
+                s.instrument_id,
+                s.score_id,
+                s.total_score,
+                s.confidence_score,
+                s.rank,
+                s.model_version,
+                s.scored_at
+            FROM scores s
+            JOIN coverage c ON c.instrument_id = s.instrument_id
+            WHERE s.model_version = %(mv)s
+              AND s.rank IS NOT NULL
+              AND c.filings_status = 'analysable'
+            ORDER BY s.instrument_id, s.scored_at DESC
             """,
             {"mv": model_version},
         )

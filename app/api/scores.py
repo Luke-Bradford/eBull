@@ -211,9 +211,15 @@ def list_rankings(
             )
 
         # Step 2: build dynamic WHERE / JOIN fragments.
+        # #268 Chunk J gate: always require coverage.filings_status =
+        # 'analysable' so the list endpoint can't surface stale score
+        # rows for instruments that fell out of the analysable pool
+        # between the last scoring run and now (e.g. audit regressed
+        # them to insufficient / fpi / no_primary_sec_cik).
         where_clauses: list[str] = [
             "s.model_version = %(mv)s",
             "s.scored_at = %(scored_at)s",
+            "c.filings_status = 'analysable'",
         ]
         filter_params: dict[str, object] = {
             "mv": model_version,

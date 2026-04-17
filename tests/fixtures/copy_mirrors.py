@@ -533,6 +533,19 @@ def mirror_aum_fixture(conn: psycopg.Connection[Any]) -> None:
             """,
             {"now": _NOW},
         )
+        # Coverage row with filings_status='analysable' so
+        # _load_ranked_scores's #268 Chunk J gate lets the score row
+        # through. Without this the JOIN in portfolio.py excludes the
+        # score and run_portfolio_review takes the early-return path.
+        cur.execute(
+            """
+            INSERT INTO coverage (instrument_id, coverage_tier, filings_status)
+            VALUES (%(iid)s, 1, 'analysable')
+            ON CONFLICT (instrument_id) DO UPDATE SET
+                filings_status = EXCLUDED.filings_status
+            """,
+            {"iid": _GUARD_INSTRUMENT_ID},
+        )
         # Scores row so run_portfolio_review does NOT early-return
         # at portfolio.py:733 — required by §8.6 Test 2.
         cur.execute(
