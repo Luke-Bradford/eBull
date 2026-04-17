@@ -309,15 +309,16 @@ def _run_cik_upsert(
     fundamentals_provider: SecFundamentalsProvider,
     run_id: int,
     failed: list[tuple[str, str]],
-) -> int:
+) -> int | None:
     """Per-CIK seed/refresh body.
 
-    Returns the number of fact rows upserted on success (0 on skip,
-    non-negative int otherwise) or -1 on failure. Appends
-    ``(cik, ExceptionName)`` to ``failed`` on exception. All writes
-    for one CIK happen inside one ``with conn.transaction()`` block
-    so on exception the facts upsert AND both watermark writes roll
-    back together — watermarks never drift ahead of data.
+    Returns the number of fact rows upserted on success (``int >= 0``)
+    or ``None`` on skip or failure. Failures additionally append
+    ``(cik, ExceptionName)`` to ``failed``; skips do not.
+
+    All writes for one CIK happen inside one ``with conn.transaction()``
+    block so on exception the facts upsert AND both watermark writes
+    roll back together — watermarks never drift ahead of data.
     """
     try:
         inst = _instrument_for_cik(conn, cik)
@@ -326,7 +327,7 @@ def _run_cik_upsert(
                 "sec_incremental: no tradable instrument found for cik=%s (plan drift?)",
                 cik,
             )
-            return 0
+            return None
         instrument_id, symbol = inst
         # Close the implicit read transaction opened by _instrument_for_cik
         # before the HTTP calls below so the session is not idle-in-
@@ -339,14 +340,14 @@ def _run_cik_upsert(
                 "sec_incremental: no submissions.json for cik=%s (private/de-registered?)",
                 cik,
             )
-            return 0
+            return None
         top_accession = _top_accession_from_submissions(submissions)
         if top_accession is None:
             logger.warning(
                 "sec_incremental: submissions.json for cik=%s has empty filings.recent",
                 cik,
             )
-            return 0
+            return None
 
         facts = fundamentals_provider.extract_facts(symbol, cik)
         facts_upserted = 0
@@ -385,8 +386,7 @@ def _run_cik_upsert(
             logger.debug("rollback suppressed after executor exception", exc_info=True)
         failed.append((cik, type(exc).__name__))
         logger.exception("sec_incremental per-CIK upsert failed for cik=%s", cik)
-        return -1
-        return False
+        return None
 
 
 def execute_refresh(
@@ -445,7 +445,7 @@ def execute_refresh(
                 run_id=run_id,
                 failed=failed,
             )
-            if upserted >= 0 and cik not in {c for c, _ in failed}:
+            if upserted is not None:
                 seeded += 1
                 facts_upserted_total += upserted
             report_progress(done, total)
@@ -460,7 +460,7 @@ def execute_refresh(
                 run_id=run_id,
                 failed=failed,
             )
-            if upserted >= 0 and cik not in {c for c, _ in failed}:
+            if upserted is not None:
                 refreshed += 1
                 facts_upserted_total += upserted
             report_progress(done, total)
