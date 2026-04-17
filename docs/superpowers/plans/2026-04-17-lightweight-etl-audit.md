@@ -135,19 +135,23 @@ No provider wired. Out of scope. When wired, apply the same watermark principle 
 **Impact:** Near-real-time position updates (seconds not 5 min) AND ~3x reduction in REST polling.
 **Ticket:** #274.
 
-### `fx_rates` → `fx_rates_refresh` (Frankfurter)
+### `fx_rates` — split into live + EOD sources
 
-**Current:** Hourly poll.
-**Provider capability:** `ETag` → 304. ECB publishes ~16:00 CET on TARGET working days.
-**Recommendation:**
-- Schedule **one call per day at 16:15 CET** with `If-None-Match` holding last ETag.
-- If 304, no writes.
-- If 200, upsert with the ECB publication date as `quoted_at` (matches current pattern).
+Decision 2026-04-17: two FX sources, split by purpose, no accidental mixing.
+
+**Live stock / portfolio / P&L conversions → eToro FX instruments** (ticket #281):
+- FX pairs (GBP/USD, GBP/EUR, EUR/USD, …) are tradable instruments on eToro with their own WebSocket rate streams.
+- Subscribe via the WebSocket integration from #274.
+- Marks match what actually executes on the broker — no drift between eBull P&L and eToro statements.
+
+**Tax report conversions → Frankfurter ECB** (ticket #275):
+- ECB published central-bank reference rate — the correct source for tax filings wanting a regulatory-approved rate.
+- Fetched once per day at 16:15 CET with `If-None-Match` → 304 on no-change.
 - Skip non-TARGET days (weekends + TARGET holidays).
-- Optional: one fallback call at 17:00 CET for late-publication days (rare).
 
-**Impact:** 24 calls/day → 1-2. ~95% reduction. Eliminates the meaningless weekend polls.
-**Ticket:** #275.
+Every conversion path must be tagged at the call site with which source should feed it. No caller should ever be able to pick up the wrong one by accident — separate service modules (`fx_live.py` vs `fx_eod.py`) keep the boundary explicit.
+
+**Impact:** Live P&L becomes intraday-accurate. Frankfurter polling drops from 24/day → 1-2/day. Broker-statement reconciliation becomes trivial.
 
 ### `cost_models` / `weekly_reports` / `monthly_reports`
 
