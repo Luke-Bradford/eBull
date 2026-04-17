@@ -22,9 +22,10 @@ watermark row and is placed in ``seeds`` for a full initial backfill.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import psycopg
@@ -85,6 +86,13 @@ class RefreshPlan:
     - ``ciks_by_day`` — ISO-date to list-of-hit-CIKs mapping used by
       the executor to decide which pending master-index writes are safe
       to commit.
+    - ``new_filings_by_cik`` — per-CIK list of master-index entries
+      that landed in this cycle. Populated for every covered CIK that
+      had at least one master-index hit in the 7-day window (including
+      seeds that happened to file this week). The executor only
+      consumes this dict on the refresh + submissions-only paths; the
+      seed path ignores it because seeds need full historical backfill
+      (#268 Chunk E), not just this week's entries.
     """
 
     seeds: list[str] = field(default_factory=list)
@@ -95,6 +103,7 @@ class RefreshPlan:
     submissions_only_advances: list[tuple[str, str]] = field(default_factory=list)
     pending_master_index_writes: list[tuple[str, str, str]] = field(default_factory=list)
     ciks_by_day: dict[str, list[str]] = field(default_factory=dict)
+    new_filings_by_cik: dict[str, list[MasterIndexEntry]] = field(default_factory=dict)
     # CIKs skipped during planning itself (fetch_submissions returned None
     # or filings.recent was empty). These never make it to
     # seeds/refreshes/submissions_only_advances, so the executor's
@@ -289,6 +298,10 @@ def plan_refresh(
         pending_master_index_writes=pending_master_index_writes,
         ciks_by_day=ciks_by_day_filtered,
         failed_plan_ciks=sorted(failed_plan_ciks),
+        # master_hits_by_cik has already been intersected with the
+        # covered cohort above; pass it through so the executor can
+        # upsert each hit into filing_events.
+        new_filings_by_cik=master_hits_by_cik,
     )
 
 
@@ -321,6 +334,88 @@ def _instrument_for_cik(
     return int(row[0]), str(row[1])
 
 
+def _upsert_filing_from_master_index(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+    entry: MasterIndexEntry,
+    symbol: str,
+) -> None:
+    """Upsert a filing_events row from a master-index entry.
+
+    Distinct from ``filings._upsert_filing`` on the ON CONFLICT path:
+    when the row already exists, we DO NOT overwrite ``primary_document_url``
+    or ``source_url``. Master-index only carries the generic
+    ``{accession}-index.htm`` landing page, whereas the submissions-
+    based ingest (``daily_research_refresh``) stores the specific
+    primary document (e.g. ``aapl-20260330.htm``). A master-index
+    upsert arriving after the richer ingest must not downgrade the URL.
+    COALESCE preserves the existing value unless it is NULL.
+
+    ``filing_date`` and ``filing_type`` still refresh on conflict —
+    both are authoritative from either source and carry no loss-of-
+    detail risk.
+    """
+    accession_no_dashes = entry.accession_number.replace("-", "")
+    cik_int = int(entry.cik)
+    master_index_url = (
+        f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_no_dashes}/{entry.accession_number}-index.htm"
+    )
+    try:
+        filed_at = datetime.fromisoformat(entry.date_filed).replace(tzinfo=UTC)
+    except ValueError:
+        # Master-index dates are always ISO; ValueError here indicates
+        # corrupt data. Log loudly so operators can investigate rather
+        # than silently substituting now().
+        logger.warning(
+            "sec_incremental: malformed date_filed %r for accession %s (cik=%s) — "
+            "falling back to now() so upsert proceeds",
+            entry.date_filed,
+            entry.accession_number,
+            entry.cik,
+        )
+        filed_at = datetime.now(UTC)
+    conn.execute(
+        """
+        INSERT INTO filing_events (
+            instrument_id, filing_date, filing_type,
+            provider, provider_filing_id, source_url, primary_document_url,
+            raw_payload_json
+        )
+        VALUES (
+            %(instrument_id)s, %(filing_date)s, %(filing_type)s,
+            %(provider)s, %(provider_filing_id)s, %(source_url)s, %(primary_document_url)s,
+            %(raw_payload_json)s
+        )
+        ON CONFLICT (provider, provider_filing_id) DO UPDATE SET
+            filing_date          = EXCLUDED.filing_date,
+            filing_type          = EXCLUDED.filing_type,
+            source_url           = COALESCE(filing_events.source_url, EXCLUDED.source_url),
+            primary_document_url = COALESCE(filing_events.primary_document_url, EXCLUDED.primary_document_url)
+        """,
+        {
+            "instrument_id": instrument_id,
+            "filing_date": filed_at.date(),
+            "filing_type": entry.form_type,
+            "provider": "sec",
+            "provider_filing_id": entry.accession_number,
+            "source_url": master_index_url,
+            "primary_document_url": master_index_url,
+            "raw_payload_json": json.dumps(
+                {
+                    "source": "master-index",
+                    "provider_filing_id": entry.accession_number,
+                    "symbol": symbol,
+                    "filed_at": filed_at.isoformat(),
+                    "filing_type": entry.form_type,
+                    "company_name": entry.company_name,
+                    "date_filed": entry.date_filed,
+                }
+            ),
+        },
+    )
+
+
 def _run_cik_upsert(
     conn: psycopg.Connection[tuple],
     *,
@@ -330,6 +425,7 @@ def _run_cik_upsert(
     run_id: int,
     failed: list[tuple[str, str]],
     known_top_accession: str | None = None,
+    new_filings: list[MasterIndexEntry] | None = None,
 ) -> int | None:
     """Per-CIK seed/refresh body.
 
@@ -412,6 +508,20 @@ def _run_cik_upsert(
                     ingestion_run_id=run_id,
                 )
                 facts_upserted = upserted
+            # Upsert each master-index entry for this CIK into
+            # filing_events so downstream event-driven triggers
+            # (#273 thesis, #276 cascade) have a timestamped signal.
+            # Idempotent: ON CONFLICT preserves richer URLs stored by
+            # the submissions-based ingest path. Atomic with the facts
+            # upsert and watermark writes below.
+            if new_filings:
+                for entry in new_filings:
+                    _upsert_filing_from_master_index(
+                        conn,
+                        instrument_id=instrument_id,
+                        entry=entry,
+                        symbol=symbol,
+                    )
             set_watermark(
                 conn,
                 source="sec.submissions",
@@ -486,6 +596,15 @@ def execute_refresh(
         # Seeds + refreshes share one per-CIK body. _run_cik_upsert
         # returns the fact-row count (int >= 0) on success, or None
         # on skip / failure. Failures additionally append to `failed`.
+        #
+        # Seeds deliberately do NOT pass ``new_filings`` even if the
+        # CIK has entries in ``plan.new_filings_by_cik`` — seeds need
+        # full historical backfill (#268 Chunk E), not just this
+        # cycle's master-index hits. Writing only this week's filings
+        # for a seed would give downstream event triggers a misleading
+        # signal ("look, a filing landed") when the instrument still
+        # lacks most of its history. Chunk E owns the seed-time
+        # filing_events population.
         for cik in plan.seeds:
             done += 1
             upserted = _run_cik_upsert(
@@ -511,6 +630,7 @@ def execute_refresh(
                 run_id=run_id,
                 failed=failed,
                 known_top_accession=top_accession,
+                new_filings=plan.new_filings_by_cik.get(cik),
             )
             if upserted is not None:
                 refreshed += 1
@@ -520,7 +640,35 @@ def execute_refresh(
         for cik, accession in plan.submissions_only_advances:
             done += 1
             try:
+                inst = _instrument_for_cik(conn, cik)
+                conn.commit()  # close implicit read tx from the SELECT
+                if inst is None:
+                    # Plan-drift: CIK fell out of the tradable-with-SEC
+                    # cohort between planning and execution. Record as
+                    # failed so the master-index watermark for this
+                    # day is withheld.
+                    logger.warning(
+                        "sec_incremental: submissions-only path — no tradable instrument for cik=%s (plan drift?)",
+                        cik,
+                    )
+                    failed.append((cik, "InstrumentMissing"))
+                    report_progress(done, total)
+                    continue
+                instrument_id, symbol = inst
+                new_filings = plan.new_filings_by_cik.get(cik)
                 with conn.transaction():
+                    # Upsert filing_events for each master-index entry
+                    # on this CIK so the 8-K (or similar) is visible to
+                    # downstream event-driven triggers, even though we
+                    # don't fetch companyfacts.
+                    if new_filings:
+                        for entry in new_filings:
+                            _upsert_filing_from_master_index(
+                                conn,
+                                instrument_id=instrument_id,
+                                entry=entry,
+                                symbol=symbol,
+                            )
                     set_watermark(
                         conn,
                         source="sec.submissions",

@@ -52,6 +52,7 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "job_runs",
     "financial_periods_raw",
     "financial_periods",
+    "filing_events",
 )
 
 

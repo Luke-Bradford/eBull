@@ -11,7 +11,7 @@ import psycopg
 import pytest
 
 from app.providers.fundamentals import XbrlFact
-from app.providers.implementations.sec_edgar import SecFilingsProvider
+from app.providers.implementations.sec_edgar import MasterIndexEntry, SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
 from app.services.sec_incremental import (
     RefreshOutcome,
@@ -470,3 +470,209 @@ def test_successful_ciks_commit_master_index_watermark(
     assert master_wm is not None
     assert master_wm.watermark == "Wed, 15 Apr 2026 22:00:00 GMT"
     assert master_wm.response_hash == "abc123"
+
+
+def _mk_entry(accession: str, form: str, cik: str = "0000320193") -> MasterIndexEntry:
+    return MasterIndexEntry(
+        cik=cik,
+        company_name="TEST CORP",
+        form_type=form,
+        date_filed="2026-04-15",
+        accession_number=accession,
+    )
+
+
+def test_refresh_path_writes_filing_events(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """On the refresh path, each master-index entry for the CIK must
+    be upserted into filing_events so downstream event-driven triggers
+    see the new filing. #291 regression guard."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000320193")
+    with ebull_test_conn.transaction():
+        set_watermark(
+            ebull_test_conn,
+            source="sec.submissions",
+            key="0000320193",
+            watermark="0000320193-25-000108",
+        )
+        set_watermark(
+            ebull_test_conn,
+            source="sec.companyfacts",
+            key="0000320193",
+            watermark="0000320193-25-000108",
+        )
+    ebull_test_conn.commit()
+
+    plan = RefreshPlan(
+        refreshes=[("0000320193", "0000320193-26-000042")],
+        new_filings_by_cik={
+            "0000320193": [
+                _mk_entry("0000320193-26-000042", "10-Q"),
+                _mk_entry("0000320193-26-000043", "8-K"),
+            ],
+        },
+    )
+    filings = StubFilingsProvider(
+        submissions_by_cik={"0000320193": _submissions_with_top("0000320193-26-000042")},
+    )
+    fundamentals = StubFundamentalsProvider(
+        facts_by_cik={"0000320193": [_sample_fact("0000320193-26-000042")]},
+    )
+
+    outcome = execute_refresh(
+        ebull_test_conn,
+        filings_provider=cast(SecFilingsProvider, filings),
+        fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+        plan=plan,
+    )
+
+    assert outcome.refreshed == 1
+
+    rows = ebull_test_conn.execute(
+        "SELECT filing_type, provider, provider_filing_id, primary_document_url "
+        "FROM filing_events WHERE instrument_id = 1 ORDER BY provider_filing_id"
+    ).fetchall()
+    assert len(rows) == 2
+    assert rows[0][0] == "10-Q"
+    assert rows[0][1] == "sec"
+    assert rows[0][2] == "0000320193-26-000042"
+    assert rows[0][3] is not None and "edgar/data/320193" in rows[0][3]
+    assert rows[1][0] == "8-K"
+    assert rows[1][2] == "0000320193-26-000043"
+
+
+def test_submissions_only_path_writes_filing_events(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """submissions_only_advances path (8-K only, no companyfacts)
+    must still upsert the 8-K into filing_events — otherwise the
+    cascade's event predicate in #273 never sees it."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000789019")
+    with ebull_test_conn.transaction():
+        set_watermark(
+            ebull_test_conn,
+            source="sec.submissions",
+            key="0000789019",
+            watermark="older",
+        )
+    ebull_test_conn.commit()
+
+    plan = RefreshPlan(
+        submissions_only_advances=[("0000789019", "0000789019-26-000017")],
+        new_filings_by_cik={
+            "0000789019": [_mk_entry("0000789019-26-000017", "8-K", cik="0000789019")],
+        },
+    )
+    filings = StubFilingsProvider()
+    fundamentals = StubFundamentalsProvider()
+
+    outcome = execute_refresh(
+        ebull_test_conn,
+        filings_provider=cast(SecFilingsProvider, filings),
+        fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+        plan=plan,
+    )
+
+    assert outcome.submissions_advanced == 1
+
+    row = ebull_test_conn.execute(
+        "SELECT filing_type, provider, provider_filing_id FROM filing_events WHERE instrument_id = 1"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "8-K"
+    assert row[1] == "sec"
+    assert row[2] == "0000789019-26-000017"
+
+
+def test_refresh_path_preserves_existing_primary_document_url(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """When filing_events already has a row with a richer primary_document_url
+    (e.g. from the submissions-based ingest path), the master-index upsert
+    MUST NOT downgrade it to the generic index URL. #291 Codex P2."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000320193")
+    # Pre-existing filing_events row with specific primary doc URL
+    # (simulating daily_research_refresh path).
+    ebull_test_conn.execute(
+        """
+        INSERT INTO filing_events (
+            instrument_id, filing_date, filing_type,
+            provider, provider_filing_id, source_url, primary_document_url
+        ) VALUES (
+            1, DATE '2026-04-15', '10-Q',
+            'sec', '0000320193-26-000042',
+            'https://www.sec.gov/Archives/edgar/data/320193/000032019326000042/aapl-20260330.htm',
+            'https://www.sec.gov/Archives/edgar/data/320193/000032019326000042/aapl-20260330.htm'
+        )
+        """
+    )
+    ebull_test_conn.commit()
+    with ebull_test_conn.transaction():
+        set_watermark(
+            ebull_test_conn,
+            source="sec.submissions",
+            key="0000320193",
+            watermark="0000320193-25-000108",
+        )
+        set_watermark(
+            ebull_test_conn,
+            source="sec.companyfacts",
+            key="0000320193",
+            watermark="0000320193-25-000108",
+        )
+    ebull_test_conn.commit()
+
+    plan = RefreshPlan(
+        refreshes=[("0000320193", "0000320193-26-000042")],
+        new_filings_by_cik={
+            "0000320193": [_mk_entry("0000320193-26-000042", "10-Q")],
+        },
+    )
+    filings = StubFilingsProvider(
+        submissions_by_cik={"0000320193": _submissions_with_top("0000320193-26-000042")},
+    )
+    fundamentals = StubFundamentalsProvider(
+        facts_by_cik={"0000320193": [_sample_fact("0000320193-26-000042")]},
+    )
+
+    execute_refresh(
+        ebull_test_conn,
+        filings_provider=cast(SecFilingsProvider, filings),
+        fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+        plan=plan,
+    )
+
+    row = ebull_test_conn.execute(
+        "SELECT primary_document_url FROM filing_events WHERE provider_filing_id = '0000320193-26-000042'"
+    ).fetchone()
+    assert row is not None
+    # Original URL preserved — master-index upsert did NOT overwrite
+    # with the generic ...-index.htm URL.
+    assert row[0].endswith("aapl-20260330.htm"), f"master-index upsert downgraded primary_document_url to: {row[0]}"
+
+
+def test_seed_path_does_not_write_filing_events(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Seeds have no master-index hit metadata (first sight) so they
+    MUST NOT write filing_events. Historical backfill is the job of
+    #268 Chunk E, not this executor."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000320193")
+    plan = RefreshPlan(seeds=["0000320193"])
+    filings = StubFilingsProvider(
+        submissions_by_cik={"0000320193": _submissions_with_top("0000320193-26-000042")},
+    )
+    fundamentals = StubFundamentalsProvider(
+        facts_by_cik={"0000320193": [_sample_fact("0000320193-26-000042")]},
+    )
+
+    execute_refresh(
+        ebull_test_conn,
+        filings_provider=cast(SecFilingsProvider, filings),
+        fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+        plan=plan,
+    )
+
+    count = ebull_test_conn.execute("SELECT COUNT(*) FROM filing_events WHERE instrument_id = 1").fetchone()
+    assert count is not None and count[0] == 0
