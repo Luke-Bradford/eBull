@@ -40,7 +40,7 @@ from app.providers.implementations.fmp import FmpFundamentalsProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
-from app.services.coverage import review_coverage, seed_coverage
+from app.services.coverage import bootstrap_missing_coverage_rows, review_coverage, seed_coverage
 from app.services.deferred_retry import retry_deferred_recommendations
 from app.services.enrichment import refresh_enrichment
 from app.services.entry_timing import evaluate_entry_conditions
@@ -699,6 +699,35 @@ def nightly_universe_sync() -> None:
                     "Coverage seed: seeded=%d already_populated=%s",
                     seed_result.seeded,
                     seed_result.already_populated,
+                )
+
+            # Post-bootstrap gap filler: insert Tier 3 rows for any
+            # tradable instrument that joined the universe after the
+            # initial seed and therefore has no coverage row. seed_coverage
+            # no-ops once the table is populated; without this step, such
+            # instruments would never get a coverage row and every
+            # UPDATE-based coverage audit / gate would silently no-op on
+            # them. See #292.
+            #
+            # bootstrap_missing_coverage_rows opens its own conn.transaction()
+            # which becomes a savepoint under the outer connection's
+            # implicit transaction. If a later step in nightly_universe_sync
+            # raises, the connection context manager rolls back the outer
+            # transaction — including this savepoint's inserts. That's
+            # intended: coverage bootstrap is a dependent side effect of a
+            # successful universe sync. A rolled-back bootstrap is harmless
+            # because the missing-row predicate is idempotent and the next
+            # nightly run re-inserts. The row_count contribution reflects
+            # rows staged inside the connection's transaction; it is
+            # accurate for "work attempted this run" even if the outer tx
+            # later rolls back.
+            bootstrap_result = bootstrap_missing_coverage_rows(conn)
+            row_count += bootstrap_result.bootstrapped
+            tracker.row_count = row_count
+            if bootstrap_result.bootstrapped > 0:
+                logger.info(
+                    "Coverage bootstrap: inserted %d missing rows at Tier 3",
+                    bootstrap_result.bootstrapped,
                 )
 
             # Enrich instrument currencies from FMP for instruments that

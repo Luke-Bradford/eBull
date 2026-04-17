@@ -1002,3 +1002,54 @@ class TestSeedCoverage:
         conn = self._mock_conn(coverage_count=0, inserted_rows=10)
         seed_coverage(conn)
         conn.transaction.assert_called_once()
+
+
+class TestBootstrapMissingCoverageRows:
+    """Tests for the post-bootstrap gap-filler for newly-added instruments."""
+
+    def _mock_conn(self, inserted_rows: int) -> MagicMock:
+        conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.rowcount = inserted_rows
+        conn.execute.return_value = mock_result
+        conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
+        conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
+        return conn
+
+    def test_inserts_missing_rows(self) -> None:
+        """Three newly-added tradable instruments without coverage rows
+        get Tier 3 entries."""
+        from app.services.coverage import bootstrap_missing_coverage_rows
+
+        conn = self._mock_conn(inserted_rows=3)
+        result = bootstrap_missing_coverage_rows(conn)
+        assert result.bootstrapped == 3
+        conn.execute.assert_called_once()
+        sql = conn.execute.call_args[0][0]
+        assert "INSERT INTO coverage" in sql
+        assert "NOT EXISTS" in sql
+        assert "is_tradable = TRUE" in sql
+
+    def test_noop_when_no_gaps(self) -> None:
+        """Every tradable instrument already has coverage → zero inserts."""
+        from app.services.coverage import bootstrap_missing_coverage_rows
+
+        conn = self._mock_conn(inserted_rows=0)
+        result = bootstrap_missing_coverage_rows(conn)
+        assert result.bootstrapped == 0
+
+    def test_runs_inside_transaction(self) -> None:
+        """Insert must be atomic — wrapped in conn.transaction()."""
+        from app.services.coverage import bootstrap_missing_coverage_rows
+
+        conn = self._mock_conn(inserted_rows=5)
+        bootstrap_missing_coverage_rows(conn)
+        conn.transaction.assert_called_once()
+
+    def test_raises_on_unknown_rowcount(self) -> None:
+        """rowcount=-1 (server did not report command tag) must raise, not return silently."""
+        from app.services.coverage import bootstrap_missing_coverage_rows
+
+        conn = self._mock_conn(inserted_rows=-1)
+        with pytest.raises(RuntimeError, match="command tag"):
+            bootstrap_missing_coverage_rows(conn)
