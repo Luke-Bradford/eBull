@@ -25,8 +25,10 @@ Provider contract:
     populate external_identifiers during daily CIK refresh.
 """
 
+import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import TracebackType
@@ -59,6 +61,25 @@ def _persist_raw(tag: str, payload: object) -> None:
 def _zero_pad_cik(cik: str | int) -> str:
     """Return a 10-digit zero-padded CIK string."""
     return str(int(cik)).zfill(10)
+
+
+@dataclass(frozen=True)
+class CikMappingResult:
+    """Result of a conditional-GET fetch of company_tickers.json.
+
+    - ``mapping`` — parsed {TICKER: zero-padded-CIK} dict.
+    - ``body_hash`` — sha256 hex of the raw response bytes. Callers
+      persist this as the watermark's ``response_hash`` so a subsequent
+      run that fetches the same body (without a 304) can still no-op
+      without reparsing.
+    - ``last_modified`` — the server's ``Last-Modified`` header value,
+      to be persisted as the watermark and sent as ``If-Modified-Since``
+      on the next run. ``None`` if the header is absent.
+    """
+
+    mapping: dict[str, str]
+    body_hash: str
+    last_modified: str | None
 
 
 class SecFilingsProvider(FilingsProvider):
@@ -176,12 +197,59 @@ class SecFilingsProvider(FilingsProvider):
         ticker → zero-padded CIK string.
 
         Called by the service layer during the daily CIK refresh job.
+        Unconditional path — retained for callers that don't care about
+        deltas. Prefer ``build_cik_mapping_conditional`` for scheduled
+        refreshes.
         """
         resp = self._http_tickers.get(_TICKERS_URL)
         resp.raise_for_status()
         raw = resp.json()
         _persist_raw("sec_tickers", raw)
         return _parse_cik_mapping(raw)
+
+    def build_cik_mapping_conditional(
+        self,
+        *,
+        if_modified_since: str | None = None,
+    ) -> CikMappingResult | None:
+        """
+        Conditional-GET variant of ``build_cik_mapping``.
+
+        Sends ``If-Modified-Since: <if_modified_since>`` when a prior
+        ``Last-Modified`` value is available. Returns:
+
+        - ``None`` when the server responds 304 Not Modified.
+        - ``CikMappingResult`` otherwise, carrying the parsed mapping,
+          the raw body hash (sha256 hex) for secondary dedup, and the
+          response ``Last-Modified`` header (may be None).
+
+        www.sec.gov honours conditional requests on this endpoint
+        (observed 2026-04-17). Per the SEC developer guidelines the
+        User-Agent must identify the caller with an email — set
+        via ``settings.sec_user_agent`` at client construction.
+        """
+        headers: dict[str, str] = {}
+        if if_modified_since:
+            headers["If-Modified-Since"] = if_modified_since
+
+        resp = self._http_tickers.get(_TICKERS_URL, headers=headers)
+        if resp.status_code == 304:
+            logger.info("SEC tickers: 304 Not Modified")
+            return None
+
+        resp.raise_for_status()
+        # Hash the raw bytes BEFORE decoding so body_hash always
+        # reflects exactly what arrived over the wire — independent of
+        # downstream JSON parsing or any future HTTP client swap that
+        # might mutate the content view.
+        body_hash = hashlib.sha256(resp.content).hexdigest()
+        raw = resp.json()
+        _persist_raw("sec_tickers", raw)
+        return CikMappingResult(
+            mapping=_parse_cik_mapping(raw),
+            body_hash=body_hash,
+            last_modified=resp.headers.get("Last-Modified"),
+        )
 
     # ------------------------------------------------------------------
     # Private helpers
