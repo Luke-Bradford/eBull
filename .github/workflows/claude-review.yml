@@ -28,26 +28,39 @@ jobs:
         # Doc-only PRs (plan docs, README, etc.) don't benefit from an
         # engineering review — skip the API call entirely.
         # A PR is "doc-only" when every changed file matches one of:
-        #   - *.md / .mdx / .rst
-        #   - docs/ path
+        #   - *.md / *.mdx / *.rst
+        #   - anything under docs/ at any nesting depth
         #   - LICENSE / CHANGELOG / NOTICE (no extension)
         # If even one code/test/config file changes, we review as normal.
+        #
+        # Uses `git diff --name-only` against the PR base (checkout is
+        # fetch-depth: 0) rather than `gh pr view --json files` because
+        # the gh API caps at 100 files — a large PR would be silently
+        # truncated and potentially misclassified. git diff has no cap.
+        # Uses bash `[[ ... == pattern ]]` rather than `case` so the
+        # `docs/*` pattern matches nested paths (bash `*` in `[[ ]]`
+        # crosses `/`).
         id: docs_only
+        shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          files=$(gh pr view "$PR_NUMBER" --json files --jq '.files[].path')
+          git fetch --no-tags --depth=1 origin "$BASE_REF" 2>/dev/null || true
+          files=$(git diff --name-only "origin/${BASE_REF}...HEAD")
           if [ -z "$files" ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           is_docs_only=true
           while IFS= read -r f; do
-            case "$f" in
-              *.md|*.mdx|*.rst|docs/*|LICENSE|CHANGELOG|NOTICE) ;;
-              *) is_docs_only=false; break ;;
-            esac
+            [ -z "$f" ] && continue
+            if [[ "$f" == *.md || "$f" == *.mdx || "$f" == *.rst \
+                  || "$f" == docs/* \
+                  || "$f" == LICENSE || "$f" == CHANGELOG || "$f" == NOTICE ]]; then
+              continue
+            fi
+            is_docs_only=false
+            break
           done <<< "$files"
           echo "docs_only=$is_docs_only" >> "$GITHUB_OUTPUT"
           echo "docs_only=$is_docs_only"
@@ -57,12 +70,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+        # Uses printf rather than an indented heredoc so the posted
+        # comment has no leading-whitespace indent on each line (which
+        # would otherwise render each line as a code block on GitHub).
         run: |
-          cat > skip_notice.md <<'EOF'
-          ## Claude Code Review
-
-          Doc-only diff — engineering review skipped to save tokens. If this PR needs a review (e.g. material claims in the docs that affect behaviour), request one manually.
-          EOF
+          printf '## Claude Code Review\n\nDoc-only diff — engineering review skipped to save tokens. If this PR needs a review (e.g. material claims in the docs that affect behaviour), request one manually.\n' > skip_notice.md
           gh pr comment "$PR_NUMBER" --body-file skip_notice.md
 
       - name: Get incremental diff (changes since last push)
