@@ -238,9 +238,13 @@ class SecFilingsProvider(FilingsProvider):
             return None
 
         resp.raise_for_status()
+        # Hash the raw bytes BEFORE decoding so body_hash always
+        # reflects exactly what arrived over the wire — independent of
+        # downstream JSON parsing or any future HTTP client swap that
+        # might mutate the content view.
+        body_hash = hashlib.sha256(resp.content).hexdigest()
         raw = resp.json()
         _persist_raw("sec_tickers", raw)
-        body_hash = hashlib.sha256(resp.content).hexdigest()
         return CikMappingResult(
             mapping=_parse_cik_mapping(raw),
             body_hash=body_hash,
