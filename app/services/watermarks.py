@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import psycopg
+from psycopg.pq import TransactionStatus
 
 
 @dataclass(frozen=True)
@@ -106,11 +107,25 @@ def set_watermark(
 ) -> None:
     """Upsert the watermark row for (source, key).
 
-    Callers must invoke this inside their own transaction — the
-    watermark write and the actual data upsert must land atomically
-    so a crash mid-ingest doesn't leave the watermark ahead of the
-    data (next run would skip work that wasn't finished).
+    Callers MUST invoke this inside their own transaction. The watermark
+    write and the actual data upsert must land atomically — a crash
+    mid-ingest that committed the watermark but not the data would
+    cause the next run to skip work that was never finished.
+
+    Enforced at runtime: raises RuntimeError if the connection is not
+    currently in an open transaction (INTRANS status). Autocommit
+    connections and idle connections both fail the check. This turns
+    a silent correctness hazard into a loud boot-time signal.
     """
+    status = conn.info.transaction_status
+    if status != TransactionStatus.INTRANS:
+        raise RuntimeError(
+            f"set_watermark must be called inside an open transaction "
+            f"(got TransactionStatus={status}). The watermark write and "
+            f"the data upsert must be atomic — otherwise a crash between "
+            f"them leaves the watermark ahead of the data. Wrap this call "
+            f"in `with conn.transaction():` along with the data write."
+        )
     conn.execute(
         """
         INSERT INTO external_data_watermarks (

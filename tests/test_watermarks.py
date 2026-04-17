@@ -11,23 +11,34 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
+import pytest
+from psycopg.pq import TransactionStatus
+
 from app.services.watermarks import Watermark, get_watermark, list_keys, set_watermark
 
 
-def _mock_conn(fetchone_return=None, fetchall_return=None):
+def _mock_conn(
+    fetchone_return=None,
+    fetchall_return=None,
+    transaction_status=TransactionStatus.INTRANS,
+):
     """Build a MagicMock conn whose `execute().fetchone()` returns the
     given row and whose `execute().fetchall()` returns the given list.
 
     Each call to `execute()` returns a fresh cursor-like mock with both
     `fetchone` and `fetchall` wired — matches the psycopg3 pattern
     where `conn.execute(...)` returns a cursor you can immediately
-    call `fetchone()`/`fetchall()` on.
+    call `fetchone()`/`fetchall()` on. `transaction_status` simulates
+    the `conn.info.transaction_status` check `set_watermark` uses to
+    enforce its in-transaction invariant; default is INTRANS so tests
+    that don't care about the guard behave like legitimate callers.
     """
     conn = MagicMock()
     cursor = MagicMock()
     cursor.fetchone.return_value = fetchone_return
     cursor.fetchall.return_value = fetchall_return or []
     conn.execute.return_value = cursor
+    conn.info.transaction_status = transaction_status
     return conn
 
 
@@ -107,6 +118,22 @@ class TestSetWatermark:
         _sql, params = conn.execute.call_args[0]
         assert params[3] is None
         assert params[4] is None
+
+    def test_refuses_to_write_outside_a_transaction(self) -> None:
+        """Autocommit/idle connections would commit the watermark
+        immediately, potentially ahead of the data ingest — crash
+        recovery would then skip unfinished work silently. The runtime
+        check turns this correctness hazard into a loud RuntimeError."""
+        conn = _mock_conn(transaction_status=TransactionStatus.IDLE)
+        with pytest.raises(RuntimeError, match="inside an open transaction"):
+            set_watermark(
+                conn,
+                source="sec.submissions",
+                key="0000320193",
+                watermark="acc-1",
+            )
+        # Critically: execute was NEVER called — we refused before writing.
+        conn.execute.assert_not_called()
 
 
 class TestListKeys:

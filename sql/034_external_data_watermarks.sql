@@ -30,8 +30,6 @@ CREATE TABLE IF NOT EXISTS external_data_watermarks (
     PRIMARY KEY (source, key)
 );
 
--- Index helps `SELECT key FROM external_data_watermarks WHERE source = ?`
--- scans which the incremental-fetch jobs run to enumerate "CIKs we have
--- a prior watermark for" vs "CIKs still needing initial backfill."
-CREATE INDEX IF NOT EXISTS idx_external_data_watermarks_source
-    ON external_data_watermarks(source);
+-- No separate single-column index on `source` needed: the composite PK
+-- above already creates a btree index on (source, key), which Postgres
+-- can use for leftmost-prefix lookups on `source` alone.
