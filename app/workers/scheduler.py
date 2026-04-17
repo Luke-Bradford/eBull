@@ -1996,13 +1996,21 @@ def fx_rates_refresh() -> None:
                                 quoted_at=ecb_quoted_at,
                             )
                             fx_rows_written += 1
-                        if result.etag:
-                            set_watermark(
-                                conn,
-                                source=FX_SOURCE,
-                                key=FX_WATERMARK_KEY,
-                                watermark=result.etag,
-                            )
+                        # Always advance the watermark on 200 — prefer ETag
+                        # (what Frankfurter's server actually validates),
+                        # fall back to the ecb_date when ETag is absent
+                        # (content-based fingerprint: next run comparing
+                        # result.ecb_date against prior.watermark still
+                        # detects "same publication"). An empty string is
+                        # the last-ditch sentinel meaning "no validator
+                        # available" — next run's truthy check skips
+                        # If-None-Match altogether.
+                        set_watermark(
+                            conn,
+                            source=FX_SOURCE,
+                            key=FX_WATERMARK_KEY,
+                            watermark=result.etag or result.ecb_date or "",
+                        )
                 logger.info(
                     "fx_rates_refresh: Frankfurter ECB rates written: %d pairs (date=%s, etag=%s)",
                     fx_rows_written,

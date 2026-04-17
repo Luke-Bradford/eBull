@@ -123,8 +123,13 @@ def fetch_latest_rates_conditional(
             logger.info("Frankfurter: 304 Not Modified")
             return None
         response.raise_for_status()
+        # Read all response fields (including ETag) INSIDE the client
+        # context so a lazily-closed response never returns a stale
+        # value. httpx does not currently close the response on client
+        # exit, but being explicit future-proofs against that change.
+        data = response.json()
+        etag = response.headers.get("ETag")
 
-    data = response.json()
     ecb_date: str | None = data.get("date")
     raw_rates: dict[str, object] = data.get("rates", {})
 
@@ -136,8 +141,4 @@ def fetch_latest_rates_conditional(
             except Exception:
                 logger.warning("Failed to parse Frankfurter rate %s→%s: %s", base, ccy, value)
 
-    return FrankfurterResult(
-        rates=rates,
-        ecb_date=ecb_date,
-        etag=response.headers.get("ETag"),
-    )
+    return FrankfurterResult(rates=rates, ecb_date=ecb_date, etag=etag)
