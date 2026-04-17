@@ -98,6 +98,9 @@ class TestConditional200:
 
         assert isinstance(result, CikMappingResult)
         assert result.mapping == {"AAPL": "0000320193"}
+        # Length check defends against a future transcription error
+        # that silently changes the pinned value.
+        assert len(result.body_hash) == 64, f"sha256 hex must be 64 chars, got {len(result.body_hash)}"
         # Exact sha256 of the fixture body — pinned so a future
         # refactor that changes hashing (digest, encoding, etc.) fails
         # this test rather than silently producing a different watermark.
