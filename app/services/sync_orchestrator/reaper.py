@@ -22,9 +22,20 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
-def reap_orphaned_syncs(timeout: timedelta = timedelta(hours=1)) -> int:
+def reap_orphaned_syncs(
+    timeout: timedelta = timedelta(hours=1),
+    *,
+    reap_all: bool = False,
+) -> int:
     """Transition stale-running sync_runs rows to failed; clean up their
     unfinished sync_layer_progress rows; recompute aggregate counts.
+
+    When ``reap_all=True`` the ``timeout`` predicate is bypassed and
+    EVERY ``status='running'`` row is reaped regardless of age. This is
+    the correct choice at lifespan startup, where the orchestrator runs
+    in-process and any running row must be from a prior dead process —
+    the age-based predicate can miss same-clock-tick rows when ``timeout``
+    collapses to zero.
 
     Returns count of sync_runs rows reaped.
     """
@@ -32,6 +43,9 @@ def reap_orphaned_syncs(timeout: timedelta = timedelta(hours=1)) -> int:
         with conn.transaction():
             # Step 1: reap sync_runs + cascade-fail their pending/running
             # progress rows. CTE returns reaped sync_run_ids for step 2.
+            # The `OR %(reap_all)s` branch reaps unconditionally when the
+            # caller explicitly opts in — avoids the <=/< boundary bug
+            # of a timedelta=0 age check.
             reaped_rows = conn.execute(
                 """
                 WITH reaped AS (
@@ -40,7 +54,7 @@ def reap_orphaned_syncs(timeout: timedelta = timedelta(hours=1)) -> int:
                         finished_at = now(),
                         error_category = 'orchestrator_crash'
                     WHERE status = 'running'
-                      AND started_at < now() - %s::interval
+                      AND (%(reap_all)s OR started_at < now() - %(timeout)s::interval)
                     RETURNING sync_run_id
                 ),
                 _progress_cleanup AS (
@@ -55,7 +69,7 @@ def reap_orphaned_syncs(timeout: timedelta = timedelta(hours=1)) -> int:
                 )
                 SELECT sync_run_id FROM reaped
                 """,
-                (timeout,),
+                {"timeout": timeout, "reap_all": reap_all},
             ).fetchall()
             reaped_ids = [r[0] for r in reaped_rows]
 
