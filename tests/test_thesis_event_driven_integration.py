@@ -391,6 +391,47 @@ def test_time_based_cadence_still_triggers_stale(
     assert result[0].reason == "stale"
 
 
+def test_same_second_filings_use_tiebreak_deterministically(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """PR review BLOCKING #301 regression guard: if two filings have
+    identical created_at, the LATERAL subquery's ORDER BY
+    (created_at DESC, filing_event_id DESC) resolves tiebreaks
+    deterministically. Latest inserted (highest filing_event_id) wins.
+    Asserting the *form type* matches the tiebreaker catches the class
+    of bug where an aggregate MAX disagrees with a correlated
+    subquery's ORDER BY."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="AAPL")
+    _seed_thesis(ebull_test_conn, instrument_id=1, created_at=datetime.now(UTC) - timedelta(days=2))
+    same_ts = datetime.now(UTC)
+    # Insert 10-K first, then 8-K — same timestamp. filing_event_id
+    # is BIGSERIAL so 8-K gets the higher value and wins the tiebreak.
+    _seed_filing(
+        ebull_test_conn,
+        instrument_id=1,
+        filing_date=date.today(),
+        filing_type="10-K",
+        accession="TIE-1",
+        created_at=same_ts,
+    )
+    _seed_filing(
+        ebull_test_conn,
+        instrument_id=1,
+        filing_date=date.today(),
+        filing_type="8-K",
+        accession="TIE-2",
+        created_at=same_ts,
+    )
+
+    result = find_stale_instruments(ebull_test_conn, tier=1)
+
+    # The reason must be the tiebreak-winner's form (8-K, higher id),
+    # not the aggregate-MAX-winner's form. Both timestamps are equal
+    # so without a single deterministic source of truth the reason
+    # could report 10-K while the newest row is 8-K.
+    assert result[0].reason == "event_new_8k"
+
+
 def test_event_reason_takes_precedence_over_time_based(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:

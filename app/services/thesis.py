@@ -197,12 +197,22 @@ def find_stale_instruments(
         where_clauses.append("i.instrument_id = ANY(%(ids)s)")
         params["ids"] = list(instrument_ids)
 
-    where_sql_str = " AND ".join(where_clauses)
+    # Build WHERE via structural psql.SQL composition (each clause is
+    # a literal fragment from the list above — no user input channel).
+    # Avoids ad-hoc string concatenation so a future caller that adds
+    # a user-derived clause cannot regress into injection.
+    where_block = psql.SQL(" AND ").join(
+        psql.SQL(clause)  # pyright: ignore[reportArgumentType]
+        for clause in where_clauses
+    )
 
-    # Build query as psql.SQL so pyright is happy with the strict
-    # Query type; the ``where_sql_str`` is assembled from hardcoded
-    # fragments only (no user input) so adapting it as a bare SQL
-    # literal is safe.
+    # Single LATERAL subquery drives both the timestamp AND the form
+    # type from the SAME row so they can never disagree on same-second
+    # ties. MAX-aggregate + correlated-subquery would tiebreak
+    # independently and could report "new 10-K" while the actual
+    # newest row is an 8-K (audit-trail lie). LATERAL scope + explicit
+    # ORDER BY created_at DESC, filing_event_id DESC resolves ties
+    # deterministically.
     query = (
         psql.SQL(
             """
@@ -211,45 +221,28 @@ def find_stale_instruments(
             i.symbol,
             c.review_frequency,
             MAX(t.created_at)                        AS latest_thesis_at,
-            -- Latest qualifying-filing created_at timestamp. Use
-            -- ``created_at`` (ingest time) not ``filing_date`` so:
-            -- (a) a filing ingested AFTER the thesis on the same
-            --     calendar day triggers a refresh,
-            -- (b) a backfilled filing with an old filing_date but a
-            --     recent created_at also triggers (thesis generated
-            --     before the backfill could not have incorporated it).
-            MAX(fe.created_at) FILTER (
-                WHERE fe.filing_type IN (
-                    '10-K','10-K/A','10-Q','10-Q/A','8-K','8-K/A'
-                )
-            )                                        AS latest_event_created_at,
-            -- Form type of the filing with the max created_at. The
-            -- subquery orders by the same column so the two aggregates
-            -- identify the same row even for same-second multi-insert.
-            (
-                SELECT fe2.filing_type
-                FROM filing_events fe2
-                WHERE fe2.instrument_id = i.instrument_id
-                  AND fe2.filing_type IN (
-                      '10-K','10-K/A','10-Q','10-Q/A','8-K','8-K/A'
-                  )
-                ORDER BY fe2.created_at DESC, fe2.filing_event_id DESC
-                LIMIT 1
-            )                                        AS latest_event_filing_type
+            le.created_at                            AS latest_event_created_at,
+            le.filing_type                           AS latest_event_filing_type
         FROM instruments i
         JOIN coverage c ON c.instrument_id = i.instrument_id
         LEFT JOIN theses t ON t.instrument_id = i.instrument_id
-        LEFT JOIN filing_events fe ON fe.instrument_id = i.instrument_id
+        LEFT JOIN LATERAL (
+            SELECT fe.created_at, fe.filing_type
+            FROM filing_events fe
+            WHERE fe.instrument_id = i.instrument_id
+              AND fe.filing_type IN (
+                  '10-K','10-K/A','10-Q','10-Q/A','8-K','8-K/A'
+              )
+            ORDER BY fe.created_at DESC, fe.filing_event_id DESC
+            LIMIT 1
+        ) le ON TRUE
         WHERE """
         )
-        # where_sql_str is assembled from hardcoded fragments above —
-        # safe to adapt as a SQL literal. Pyright's LiteralString
-        # tightening can't see the provenance; ignore here rather
-        # than restructure the branching logic.
-        + psql.SQL(where_sql_str)  # pyright: ignore[reportArgumentType]
+        + where_block
         + psql.SQL(
             """
-        GROUP BY i.instrument_id, i.symbol, c.review_frequency
+        GROUP BY i.instrument_id, i.symbol, c.review_frequency,
+                 le.created_at, le.filing_type
         ORDER BY i.symbol
         """
         )
