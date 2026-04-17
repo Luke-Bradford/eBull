@@ -90,6 +90,43 @@ If the review has not posted yet, wait and poll again rather than continuing bli
 6. Re-run local checks before every follow-up push.
 7. Merge only after review is satisfied on the most recent commit and CI is green.
 
+## Codex second-opinion — mandatory checkpoints
+
+Codex runs at exactly three points in the workflow. Non-negotiable.
+
+1. **Before writing code** — describe the implementation plan (or spec) to Codex; read its feedback; fix issues before starting. Invocation: `codex.cmd exec "Review this plan for <feature>. Spec: <path>. Focus on correctness gaps and invariant violations. Reply terse."`
+2. **Before first push** — after self-review + local gates pass, run `codex.cmd exec review` on the branch. Fix anything real before pushing.
+3. **Before merging on a rebuttal-only round** — if the latest review's findings are all rebuttals (no code changes pending), run Codex to confirm the rebuttals are sound. Without this step, rebuttals are unverified and may hide real bugs the review bot *did* catch in disguise.
+
+When Codex is NOT required:
+- Follow-up pushes that fix review comments (the review bot will re-check).
+- Routine edits after Codex already reviewed the plan + first diff and there is no rebuttal-only round pending.
+
+Invocation rule: always use `codex.cmd exec` (non-interactive). Never bare `codex` (requires terminal).
+
+## Review decision tree — who to consult in what order
+
+```
+Self-review (diff + engineering skills)
+  ↓
+Codex review (checkpoint 2: before first push)
+  ↓
+Push + wait for Claude review bot + CI
+  ↓
+Bot findings? → Triage each: FIXED / DEFERRED / REBUTTED
+  ↓
+Any rebuttals on latest review?
+  ├─ No  → all fixed → merge when green + APPROVE on latest commit
+  └─ Yes → Codex review (checkpoint 3: before rebuttal-only merge)
+            ↓
+            Codex confirms rebuttals sound? → merge
+            Codex finds new issues? → fix, re-push, restart loop
+  ↓
+Ask the user for final approval only AFTER Codex has signed off on rebuttals.
+```
+
+Never ask the user to approve a merge that Codex has not yet second-opinioned on the rebuttal round.
+
 ## Review comment resolution contract
 
 Every review comment must end in exactly one of these states:
