@@ -76,11 +76,22 @@ class RefreshPlan:
     - ``submissions_only_advances`` — CIKs that filed a non-fundamentals
       form (e.g. 8-K). Advance ``sec.submissions`` watermark only; no
       companyfacts pull.
+    - ``pending_master_index_writes`` — per-day master-index watermarks
+      that the planner parsed but has NOT yet committed. The executor
+      commits each one only when every covered CIK whose filing appeared
+      in that day's hits has been processed successfully. A failed CIK
+      leaves its day's watermark un-advanced so the next run re-fetches
+      the master-index on 200, re-parses, and re-plans the failed CIK.
+    - ``ciks_by_day`` — ISO-date to list-of-hit-CIKs mapping used by
+      the executor to decide which pending master-index writes are safe
+      to commit.
     """
 
     seeds: list[str] = field(default_factory=list)
     refreshes: list[str] = field(default_factory=list)
     submissions_only_advances: list[tuple[str, str]] = field(default_factory=list)
+    pending_master_index_writes: list[tuple[str, str, str]] = field(default_factory=list)
+    ciks_by_day: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -164,6 +175,11 @@ def plan_refresh(
         return RefreshPlan()
 
     master_hits_by_cik: dict[str, list[MasterIndexEntry]] = {}
+    # Per-day provenance so the executor can commit master-index
+    # watermarks only when every CIK hit on that day was processed.
+    ciks_by_day: dict[str, set[str]] = {}
+    pending_master_index_writes: list[tuple[str, str, str]] = []
+
     for target in _lookback_dates(today):
         wm = get_watermark(conn, "sec.master-index", target.isoformat())
         if_modified_since = wm.watermark if wm else None
@@ -171,39 +187,30 @@ def plan_refresh(
         if result is None:
             # 304 Not Modified OR 404 (weekend / holiday): nothing to
             # parse, and no Last-Modified to persist on 404. The 304
-            # path is also a no-op because the stored watermark is
-            # still the correct ``If-Modified-Since`` for next run.
+            # path is safe — the stored watermark is still the correct
+            # ``If-Modified-Since`` for next run.
             continue
 
         if wm is not None and wm.response_hash == result.body_hash:
-            # Body identical to the last run but without a 304 — refresh
-            # fetched_at only (watermark + hash unchanged) and skip
-            # re-parsing. Secondary dedup for providers that don't
-            # honour If-Modified-Since perfectly.
-            with conn.transaction():
-                set_watermark(
-                    conn,
-                    source="sec.master-index",
-                    key=target.isoformat(),
-                    watermark=result.last_modified or "",
-                    response_hash=result.body_hash,
-                )
-            conn.commit()
+            # Body identical to the last run but without a 304 —
+            # watermark + hash are unchanged so no commit is required.
+            # Skip re-parsing; next run still has a valid watermark.
             continue
 
         entries = parse_master_index(result.body)
+        day_ciks: set[str] = set()
         for entry in entries:
             master_hits_by_cik.setdefault(entry.cik, []).append(entry)
+            day_ciks.add(entry.cik)
 
-        with conn.transaction():
-            set_watermark(
-                conn,
-                source="sec.master-index",
-                key=target.isoformat(),
-                watermark=result.last_modified or "",
-                response_hash=result.body_hash,
-            )
-        conn.commit()
+        # Capture the watermark write as pending — executor commits it
+        # only if every covered CIK on this day completes successfully.
+        # A mid-run failure leaves the watermark un-advanced so the next
+        # run re-fetches this day's master-index (200), re-parses, and
+        # re-plans the missed CIK instead of 304-skipping it forever.
+        iso = target.isoformat()
+        pending_master_index_writes.append((iso, result.last_modified or "", result.body_hash))
+        ciks_by_day[iso] = day_ciks
 
     seeds: list[str] = []
     refreshes: list[str] = []
@@ -215,6 +222,10 @@ def plan_refresh(
     # ``.get(cik)`` lookup below would implicitly filter anyway, but
     # an explicit intersect documents intent.
     master_hits_by_cik = {cik: entries for cik, entries in master_hits_by_cik.items() if cik in covered_set}
+    # Restrict per-day cohort tracking to covered CIKs too — the
+    # executor's commit-if-all-succeeded check only cares about CIKs
+    # that were actually planned this run.
+    ciks_by_day_filtered: dict[str, list[str]] = {iso: sorted(ciks & covered_set) for iso, ciks in ciks_by_day.items()}
 
     for cik in covered:
         wm = get_watermark(conn, "sec.submissions", cik)
@@ -256,6 +267,8 @@ def plan_refresh(
         seeds=sorted(seeds),
         refreshes=sorted(refreshes),
         submissions_only_advances=sorted(submissions_only),
+        pending_master_index_writes=pending_master_index_writes,
+        ciks_by_day=ciks_by_day_filtered,
     )
 
 
@@ -296,11 +309,11 @@ def _run_cik_upsert(
     fundamentals_provider: SecFundamentalsProvider,
     run_id: int,
     failed: list[tuple[str, str]],
-) -> bool:
+) -> int:
     """Per-CIK seed/refresh body.
 
-    Returns True on success, False on skip (missing instrument,
-    missing submissions, missing top accession) or failure. Appends
+    Returns the number of fact rows upserted on success (0 on skip,
+    non-negative int otherwise) or -1 on failure. Appends
     ``(cik, ExceptionName)`` to ``failed`` on exception. All writes
     for one CIK happen inside one ``with conn.transaction()`` block
     so on exception the facts upsert AND both watermark writes roll
@@ -313,7 +326,7 @@ def _run_cik_upsert(
                 "sec_incremental: no tradable instrument found for cik=%s (plan drift?)",
                 cik,
             )
-            return False
+            return 0
         instrument_id, symbol = inst
         # Close the implicit read transaction opened by _instrument_for_cik
         # before the HTTP calls below so the session is not idle-in-
@@ -326,25 +339,27 @@ def _run_cik_upsert(
                 "sec_incremental: no submissions.json for cik=%s (private/de-registered?)",
                 cik,
             )
-            return False
+            return 0
         top_accession = _top_accession_from_submissions(submissions)
         if top_accession is None:
             logger.warning(
                 "sec_incremental: submissions.json for cik=%s has empty filings.recent",
                 cik,
             )
-            return False
+            return 0
 
         facts = fundamentals_provider.extract_facts(symbol, cik)
+        facts_upserted = 0
 
         with conn.transaction():
             if facts:
-                upsert_facts_for_instrument(
+                upserted, _skipped = upsert_facts_for_instrument(
                     conn,
                     instrument_id=instrument_id,
                     facts=facts,
                     ingestion_run_id=run_id,
                 )
+                facts_upserted = upserted
             set_watermark(
                 conn,
                 source="sec.submissions",
@@ -358,7 +373,7 @@ def _run_cik_upsert(
                 watermark=top_accession,
             )
         conn.commit()
-        return True
+        return facts_upserted
     except Exception as exc:
         # ``with conn.transaction()`` already rolled back on exception;
         # the explicit rollback here covers the pre-transaction path
@@ -370,6 +385,7 @@ def _run_cik_upsert(
             logger.debug("rollback suppressed after executor exception", exc_info=True)
         failed.append((cik, type(exc).__name__))
         logger.exception("sec_incremental per-CIK upsert failed for cik=%s", cik)
+        return -1
         return False
 
 
@@ -410,36 +426,43 @@ def execute_refresh(
     seeded = 0
     refreshed = 0
     submissions_advanced = 0
+    facts_upserted_total = 0
     failed: list[tuple[str, str]] = []
     done = 0
     catastrophic_error: str | None = None
 
     try:
-        # Seeds + refreshes share one per-CIK body.
+        # Seeds + refreshes share one per-CIK body. _run_cik_upsert
+        # returns the count of fact rows written (>=0 on success/skip,
+        # -1 on failure).
         for cik in plan.seeds:
             done += 1
-            if _run_cik_upsert(
+            upserted = _run_cik_upsert(
                 conn,
                 cik=cik,
                 filings_provider=filings_provider,
                 fundamentals_provider=fundamentals_provider,
                 run_id=run_id,
                 failed=failed,
-            ):
+            )
+            if upserted >= 0 and cik not in {c for c, _ in failed}:
                 seeded += 1
+                facts_upserted_total += upserted
             report_progress(done, total)
 
         for cik in plan.refreshes:
             done += 1
-            if _run_cik_upsert(
+            upserted = _run_cik_upsert(
                 conn,
                 cik=cik,
                 filings_provider=filings_provider,
                 fundamentals_provider=fundamentals_provider,
                 run_id=run_id,
                 failed=failed,
-            ):
+            )
+            if upserted >= 0 and cik not in {c for c, _ in failed}:
                 refreshed += 1
+                facts_upserted_total += upserted
             report_progress(done, total)
 
         for cik, accession in plan.submissions_only_advances:
@@ -467,6 +490,45 @@ def execute_refresh(
             report_progress(done, total)
 
         report_progress(done, total, force=True)
+
+        # Commit pending master-index watermarks ONLY for days where
+        # every covered CIK that appeared in that day's hits was
+        # processed without failure. A failed CIK leaves its day's
+        # watermark un-advanced so the next run re-fetches that day's
+        # master-index on 200, re-parses, and re-plans the failed CIK
+        # instead of 304-skipping it forever.
+        failed_ciks = {cik for cik, _ in failed}
+        for iso_date, last_modified, body_hash in plan.pending_master_index_writes:
+            day_ciks = set(plan.ciks_by_day.get(iso_date, []))
+            if day_ciks & failed_ciks:
+                logger.info(
+                    "sec_incremental: withholding master-index watermark for %s due to failed CIKs in its hit set (%s)",
+                    iso_date,
+                    sorted(day_ciks & failed_ciks),
+                )
+                continue
+            try:
+                with conn.transaction():
+                    set_watermark(
+                        conn,
+                        source="sec.master-index",
+                        key=iso_date,
+                        watermark=last_modified,
+                        response_hash=body_hash,
+                    )
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except psycopg.Error:
+                    logger.debug(
+                        "rollback suppressed after master-index watermark commit failure",
+                        exc_info=True,
+                    )
+                logger.exception(
+                    "sec_incremental: master-index watermark commit failed for %s",
+                    iso_date,
+                )
     except Exception as exc:
         # Non-per-CIK failure escaped (per-CIK exceptions are caught
         # inside _run_cik_upsert and the submissions-only try block).
@@ -505,14 +567,13 @@ def execute_refresh(
                 conn,
                 run_id=run_id,
                 status=status,
-                rows_upserted=seeded + refreshed,
+                rows_upserted=facts_upserted_total,
                 error=error_msg,
             )
             conn.commit()
         except Exception:
-            # Last-ditch: don't mask the original exception already
-            # logged above. Roll back the aborted tx so the next caller
-            # gets a clean session.
+            # Roll back the aborted tx so the next caller gets a clean
+            # session, and log regardless of outcome.
             try:
                 conn.rollback()
             except psycopg.Error:
@@ -521,6 +582,14 @@ def execute_refresh(
                     exc_info=True,
                 )
             logger.exception("sec_incremental: finish_ingestion_run failed")
+            # On a clean run path (no catastrophic exception already
+            # being re-raised) we MUST surface the audit failure so the
+            # scheduler's _tracked_job marks the job failed. Swallowing
+            # here would report job success despite an orphaned run row.
+            # On the catastrophic path the original exception is already
+            # re-raised by the `except` above; don't mask it.
+            if catastrophic_error is None:
+                raise
 
     return RefreshOutcome(
         seeded=seeded,

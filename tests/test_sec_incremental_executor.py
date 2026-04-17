@@ -354,3 +354,74 @@ def test_all_failures_mark_run_status_failed(
     assert status_row is not None
     assert status_row[0] == "failed"
     assert status_row[1] is not None and "1 CIKs failed" in status_row[1]
+
+
+def test_failed_cik_withholds_master_index_watermark(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """When a CIK that appeared in a day's master-index hits fails,
+    that day's sec.master-index watermark must NOT advance. The next
+    run must re-fetch (200 not 304), re-parse, and re-plan the failed
+    CIK. Regression guard against Codex-found correctness bug: missed
+    filings would be skipped forever once master-index was committed."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000320193")
+    plan = RefreshPlan(
+        refreshes=["0000320193"],
+        pending_master_index_writes=[
+            ("2026-04-15", "Wed, 15 Apr 2026 22:00:00 GMT", "abc123"),
+        ],
+        ciks_by_day={"2026-04-15": ["0000320193"]},
+    )
+    filings = StubFilingsProvider(
+        submissions_by_cik={"0000320193": _submissions_with_top("0000320193-26-000042")},
+    )
+    fundamentals = StubFundamentalsProvider(fail_on={"0000320193"})
+
+    execute_refresh(
+        ebull_test_conn,
+        filings_provider=cast(SecFilingsProvider, filings),
+        fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+        plan=plan,
+    )
+
+    master_wm = get_watermark(ebull_test_conn, "sec.master-index", "2026-04-15")
+    assert master_wm is None, (
+        "Master-index watermark must not advance when a CIK in that day's "
+        "hits failed — otherwise the next run would 304-skip and never retry"
+    )
+
+
+def test_successful_ciks_commit_master_index_watermark(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Positive case: a day whose CIK hits all succeed has its
+    master-index watermark committed, so the next run can 304-skip."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000320193")
+    plan = RefreshPlan(
+        seeds=["0000320193"],
+        pending_master_index_writes=[
+            ("2026-04-15", "Wed, 15 Apr 2026 22:00:00 GMT", "abc123"),
+        ],
+        ciks_by_day={"2026-04-15": ["0000320193"]},
+    )
+    filings = StubFilingsProvider(
+        submissions_by_cik={"0000320193": _submissions_with_top("0000320193-26-000042")},
+    )
+    fundamentals = StubFundamentalsProvider(
+        facts_by_cik={"0000320193": [_sample_fact("0000320193-26-000042")]},
+    )
+
+    outcome = execute_refresh(
+        ebull_test_conn,
+        filings_provider=cast(SecFilingsProvider, filings),
+        fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+        plan=plan,
+    )
+
+    assert outcome.seeded == 1
+    assert outcome.failed == []
+
+    master_wm = get_watermark(ebull_test_conn, "sec.master-index", "2026-04-15")
+    assert master_wm is not None
+    assert master_wm.watermark == "Wed, 15 Apr 2026 22:00:00 GMT"
+    assert master_wm.response_hash == "abc123"

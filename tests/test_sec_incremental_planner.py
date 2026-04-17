@@ -18,7 +18,6 @@ from app.providers.implementations.sec_edgar import (
 from app.services.sec_incremental import (
     FUNDAMENTALS_FORMS,
     LOOKBACK_DAYS,
-    RefreshPlan,
     plan_refresh,
 )
 from app.services.watermarks import set_watermark
@@ -94,7 +93,9 @@ def test_empty_cohort_returns_empty_plan(
         cast(SecFilingsProvider, provider),
         today=date(2026, 4, 15),
     )
-    assert plan == RefreshPlan(seeds=[], refreshes=[], submissions_only_advances=[])
+    assert plan.seeds == []
+    assert plan.refreshes == []
+    assert plan.submissions_only_advances == []
 
 
 def test_fresh_cohort_no_watermarks_all_ciks_are_seeds(
@@ -133,7 +134,9 @@ def test_all_304_returns_empty_plan_for_watermarked_cohort(
         cast(SecFilingsProvider, provider),
         today=date(2026, 4, 15),
     )
-    assert plan == RefreshPlan(seeds=[], refreshes=[], submissions_only_advances=[])
+    assert plan.seeds == []
+    assert plan.refreshes == []
+    assert plan.submissions_only_advances == []
 
 
 def test_master_index_hit_with_fundamentals_form_becomes_refresh(
@@ -214,7 +217,9 @@ def test_master_index_hit_non_covered_cik_ignored(
         cast(SecFilingsProvider, provider),
         today=date(2026, 4, 15),
     )
-    assert plan == RefreshPlan(seeds=[], refreshes=[], submissions_only_advances=[])
+    assert plan.seeds == []
+    assert plan.refreshes == []
+    assert plan.submissions_only_advances == []
 
 
 def test_master_index_hit_accession_unchanged_is_skip(
@@ -238,7 +243,9 @@ def test_master_index_hit_accession_unchanged_is_skip(
         cast(SecFilingsProvider, provider),
         today=date(2026, 4, 15),
     )
-    assert plan == RefreshPlan(seeds=[], refreshes=[], submissions_only_advances=[])
+    assert plan.seeds == []
+    assert plan.refreshes == []
+    assert plan.submissions_only_advances == []
 
 
 def test_fundamentals_forms_constant_covers_10k_10q() -> None:
