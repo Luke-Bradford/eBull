@@ -277,6 +277,11 @@ def _has_scoreable_instruments(conn: psycopg.Connection[Any]) -> PrerequisiteRes
     instrument to score.  This replaces _has_scores for
     morning_candidate_review to break the bootstrap deadlock where
     scoring cannot run because no scores exist yet.
+
+    Must include the #268 analysability gate — coverage.filings_status =
+    'analysable' — to stay in lockstep with compute_rankings. Otherwise
+    the prerequisite could report "scoreable" while the downstream query
+    filters every candidate out, producing a confusing empty-scoring run.
     """
     if _exists(
         conn,
@@ -287,6 +292,7 @@ def _has_scoreable_instruments(conn: psycopg.Connection[Any]) -> PrerequisiteRes
                 FROM instruments i
                 JOIN coverage c ON c.instrument_id = i.instrument_id
                 WHERE i.is_tradable = TRUE
+                  AND c.filings_status = 'analysable'
                   AND (
                       EXISTS (SELECT 1 FROM theses t WHERE t.instrument_id = i.instrument_id)
                       OR EXISTS (SELECT 1 FROM fundamentals_snapshot f WHERE f.instrument_id = i.instrument_id)
