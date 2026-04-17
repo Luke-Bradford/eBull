@@ -366,6 +366,16 @@ class SecFilingsProvider(FilingsProvider):
             last_modified=resp.headers.get("Last-Modified"),
         )
 
+    def fetch_submissions(self, cik: str) -> dict[str, object] | None:
+        """Fetch ``data.sec.gov/submissions/CIKNNNNNNNNNN.json`` for a CIK.
+
+        Returns the parsed JSON dict or ``None`` on 404. Callers must pass
+        a 10-digit zero-padded CIK or a numeric string that zero-pads
+        correctly; the helper normalizes via ``_zero_pad_cik``.
+        """
+        cik_padded = _zero_pad_cik(cik)
+        return self._fetch_submissions(cik_padded)
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------

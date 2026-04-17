@@ -119,11 +119,11 @@ def apply_migrations_to_test_db() -> None:
     for path in files:
         if path.name in done:
             continue
-        sql = path.read_text(encoding="utf-8")
+        sql_text = path.read_text(encoding="utf-8")
         with psycopg.connect(test_database_url()) as conn:
             try:
                 with psycopg.ClientCursor(conn) as cur:
-                    cur.execute(sql)  # type: ignore[call-overload]
+                    cur.execute(sql_text)  # type: ignore[call-overload]
                     cur.execute(  # type: ignore[call-overload]
                         "INSERT INTO schema_migrations (filename) VALUES (%s)",
                         (path.name,),

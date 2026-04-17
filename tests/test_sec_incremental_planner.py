@@ -25,10 +25,8 @@ from app.services.watermarks import set_watermark
 from tests.fixtures.ebull_test_db import ebull_test_conn
 from tests.fixtures.ebull_test_db import test_db_available as _test_db_available
 
-# ``ebull_test_conn`` is imported into this module's namespace so pytest
-# picks it up as a fixture during collection. ``test_db_available`` is
-# aliased to a non-``test_*`` name so pytest does not mis-collect it as
-# a test function.
+# Re-export for readability; pytest discovers the fixture via the import
+# above, not __all__.
 __all__ = ["ebull_test_conn"]
 
 pytestmark = pytest.mark.skipif(
@@ -63,7 +61,7 @@ class StubFilingsProvider:
             last_modified=f"lm-{target_date.isoformat()}",
         )
 
-    def _fetch_submissions(self, cik: str) -> dict[str, object] | None:
+    def fetch_submissions(self, cik: str) -> dict[str, object] | None:
         return self.submissions_by_cik.get(cik)
 
 
@@ -248,3 +246,86 @@ def test_fundamentals_forms_constant_covers_10k_10q() -> None:
     assert "10-K" in FUNDAMENTALS_FORMS
     assert "10-Q" in FUNDAMENTALS_FORMS
     assert "8-K" not in FUNDAMENTALS_FORMS
+
+
+def test_plan_refresh_returns_sorted_lists(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """RefreshPlan output must be deterministically sorted so
+    dependent tests and dashboards don't flap on insert order."""
+    # Seed cohort in reverse-sorted order to prove output is re-sorted.
+    _seed_us_cohort(
+        ebull_test_conn,
+        ["0000789019", "0000320193", "0001045810"],
+    )
+    provider = StubFilingsProvider()  # no master-index bodies — all None
+    plan = plan_refresh(
+        ebull_test_conn,
+        cast(SecFilingsProvider, provider),
+        today=date(2026, 4, 15),
+    )
+    assert plan.seeds == sorted(plan.seeds)
+    assert plan.seeds == ["0000320193", "0000789019", "0001045810"]
+
+
+def test_body_hash_match_skips_parse(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """When master-index returns 200 but body hash matches the stored
+    response_hash, the planner must NOT parse the body — it should
+    advance fetched_at and move on without populating master_hits."""
+    import hashlib
+
+    _seed_us_cohort(ebull_test_conn, ["0000320193"])
+    today = date(2026, 4, 15)
+    master_body = FIXTURE_MASTER.read_bytes()
+
+    # Seed a sec.master-index watermark whose response_hash matches
+    # what the stub will return for `today`.
+    stored_hash = hashlib.sha256(master_body).hexdigest()
+    with ebull_test_conn.transaction():
+        set_watermark(
+            ebull_test_conn,
+            source="sec.master-index",
+            key=today.isoformat(),
+            watermark="Wed, 15 Apr 2026 22:00:00 GMT",
+            response_hash=stored_hash,
+        )
+        # Also seed the submissions watermark so the CIK would
+        # otherwise hit the refresh branch if the body were parsed.
+        set_watermark(
+            ebull_test_conn,
+            source="sec.submissions",
+            key="0000320193",
+            watermark="0000320193-25-000108",
+        )
+
+    class HashMatchingStub:
+        def fetch_master_index(
+            self,
+            target_date: date,
+            *,
+            if_modified_since: str | None = None,
+        ) -> MasterIndexFetchResult | None:
+            if target_date != today:
+                return None
+            return MasterIndexFetchResult(
+                body=master_body,
+                body_hash=stored_hash,
+                last_modified="Wed, 15 Apr 2026 22:00:00 GMT",
+            )
+
+        def fetch_submissions(self, cik: str) -> dict[str, object] | None:
+            raise AssertionError(
+                f"fetch_submissions should NOT be called when body hash matches stored watermark (cik={cik})"
+            )
+
+    plan = plan_refresh(
+        ebull_test_conn,
+        cast(SecFilingsProvider, HashMatchingStub()),
+        today=today,
+    )
+
+    # Body-hash match → no parse → no entries → no refresh/submissions-only.
+    assert plan.refreshes == []
+    assert plan.submissions_only_advances == []

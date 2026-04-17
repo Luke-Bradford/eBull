@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 
 LOOKBACK_DAYS = 7
 
+# 6-K (foreign-private-issuer interim reports) is deliberately
+# excluded — typically lacks structured XBRL, so refreshing
+# companyfacts on 6-K yields no new fundamentals rows.
 FUNDAMENTALS_FORMS: frozenset[str] = frozenset(
     {
         "10-K",
@@ -91,10 +94,10 @@ def _lookback_dates(today: date) -> list[date]:
     return [today - timedelta(days=i) for i in range(LOOKBACK_DAYS)]
 
 
-def _top_accession_and_forms(
+def _top_accession_from_submissions(
     submissions: dict[str, object],
-) -> tuple[str, list[str]] | None:
-    """Return (top_accession, forms_list) or None for empty submissions."""
+) -> str | None:
+    """Return the top accession number or None for empty submissions."""
     filings_block = submissions.get("filings")
     if not isinstance(filings_block, dict):
         return None
@@ -102,10 +105,9 @@ def _top_accession_and_forms(
     if not isinstance(recent, dict):
         return None
     accessions = recent.get("accessionNumber") or []
-    forms = recent.get("form") or []
     if not accessions:
         return None
-    return str(accessions[0]), [str(f) for f in forms]
+    return str(accessions[0])
 
 
 def plan_refresh(
@@ -161,6 +163,7 @@ def plan_refresh(
                     watermark=result.last_modified or "",
                     response_hash=result.body_hash,
                 )
+            conn.commit()
             continue
 
         entries = parse_master_index(result.body)
@@ -175,6 +178,7 @@ def plan_refresh(
                 watermark=result.last_modified or "",
                 response_hash=result.body_hash,
             )
+        conn.commit()
 
     seeds: list[str] = []
     refreshes: list[str] = []
@@ -197,13 +201,12 @@ def plan_refresh(
         if not entries:
             continue
 
-        submissions = provider._fetch_submissions(cik)  # type: ignore[attr-defined]
+        submissions = provider.fetch_submissions(cik)
         if submissions is None:
             continue
-        top = _top_accession_and_forms(submissions)
-        if top is None:
+        top_accession = _top_accession_from_submissions(submissions)
+        if top_accession is None:
             continue
-        top_accession, _all_forms = top
         if top_accession == wm.watermark:
             # Amendment or re-listing of a filing we already have.
             continue
