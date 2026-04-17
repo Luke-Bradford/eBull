@@ -25,8 +25,10 @@ from app.providers.implementations.etoro import (
 )
 from app.providers.market_data import OHLCVBar, Quote
 from app.services.market_data import (
+    _INCREMENTAL_FETCH_BARS,
     DEFAULT_MAX_SPREAD_PCT,
     _candles_are_fresh,
+    _candles_fetch_count,
     _compute_and_store_features,
     _compute_rolling_returns,
     _compute_volatility_30d,
@@ -828,3 +830,49 @@ class TestComputeAndStoreFeaturesTA:
 
         assert "price_vs_sma200" not in params
         assert "trend_sma_cross" not in params
+
+
+class TestCandlesFetchCount:
+    """_candles_fetch_count (#271) — two-mode backfill vs incremental."""
+
+    def _mock_conn(self, fetchone_return):
+        """Return a MagicMock conn whose .execute().fetchone() yields the row."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = fetchone_return
+        conn.execute.return_value = cursor
+        return conn
+
+    def test_returns_default_when_no_prior_candles(self) -> None:
+        """Initial backfill — fetchone returns None (no rows)."""
+        conn = self._mock_conn(fetchone_return=None)
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == 400
+
+    def test_returns_default_when_max_price_date_is_null(self) -> None:
+        """Defensive — SELECT MAX(...) always returns a row; NULL when
+        there are no matching rows. Treat as initial backfill."""
+        conn = self._mock_conn(fetchone_return=(None,))
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == 400
+
+    def test_returns_incremental_when_latest_is_within_window(self) -> None:
+        """Normal daily maintenance — last candle is yesterday."""
+        conn = self._mock_conn(fetchone_return=(date(2026, 4, 16),))
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == _INCREMENTAL_FETCH_BARS
+        assert _INCREMENTAL_FETCH_BARS == 3  # pinning documented value
+
+    def test_returns_default_when_gap_exceeds_incremental_window(self) -> None:
+        """Gap resumption — instrument was halted / re-added after a
+        multi-day closure. Last candle is 10 days ago. A 3-bar
+        incremental fetch would leave a 7-day hole; fall back to
+        full backfill instead."""
+        conn = self._mock_conn(fetchone_return=(date(2026, 4, 7),))
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == 400
+
+    def test_returns_incremental_at_exact_window_boundary(self) -> None:
+        """Boundary — gap of exactly _INCREMENTAL_FETCH_BARS days is
+        still coverable by the incremental fetch window."""
+        today = date(2026, 4, 17)
+        latest = date(2026, 4, 14)  # 3 days ago
+        assert (today - latest).days == _INCREMENTAL_FETCH_BARS
+        conn = self._mock_conn(fetchone_return=(latest,))
+        assert _candles_fetch_count(conn, 42, default=400, today=today) == _INCREMENTAL_FETCH_BARS
