@@ -489,11 +489,16 @@ class TestGenerateThesis:
 
         generate_thesis(instrument_id=1, conn=conn, client=client)
 
-        # First commit must precede first claude call. Both must appear.
+        # First event must be the commit. Every Claude call must come
+        # after it — guards both writer AND critic, not just the first
+        # Claude call. A pre-commit Claude would land at call_log[0].
         assert "commit" in call_log, "expected conn.commit() to be called"
         assert "claude" in call_log, "expected client.messages.create to be called"
-        assert call_log.index("commit") < call_log.index("claude"), (
-            f"commit must precede first Claude call, got order: {call_log}"
+        assert call_log[0] == "commit", (
+            f"commit must be the first event; got order: {call_log}"
+        )
+        assert call_log.rindex("claude") > call_log.index("commit"), (
+            f"every Claude call must follow the commit; got order: {call_log}"
         )
 
     def test_critic_failure_does_not_block_insert(self) -> None:
