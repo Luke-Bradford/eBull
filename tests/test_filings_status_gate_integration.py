@@ -180,15 +180,12 @@ def test_has_scoreable_instruments_prereq_respects_filings_status(
 
     # Instrument blocked by filings_status but has fundamentals.
     ebull_test_conn.execute(
-        "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
-        "VALUES (1, 'BAD', 'BAD', TRUE)"
+        "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) VALUES (1, 'BAD', 'BAD', TRUE)"
     )
     ebull_test_conn.execute(
         "INSERT INTO coverage (instrument_id, coverage_tier, filings_status) VALUES (1, 1, 'insufficient')"
     )
-    ebull_test_conn.execute(
-        "INSERT INTO fundamentals_snapshot (instrument_id, as_of_date) VALUES (1, CURRENT_DATE)"
-    )
+    ebull_test_conn.execute("INSERT INTO fundamentals_snapshot (instrument_id, as_of_date) VALUES (1, CURRENT_DATE)")
     ebull_test_conn.commit()
 
     ok, _reason = _has_scoreable_instruments(ebull_test_conn)
