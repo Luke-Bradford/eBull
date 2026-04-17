@@ -1030,6 +1030,21 @@ class TestBootstrapMissingCoverageRows:
         assert "NOT EXISTS" in sql
         assert "is_tradable = TRUE" in sql
 
+    def test_new_rows_marked_filings_status_unknown(self) -> None:
+        """#268 Chunk G: rows inserted by the post-bootstrap gap filler
+        must be marked filings_status='unknown' so the weekly audit
+        picks them up without the null_anomalies counter flagging them
+        as data-integrity warnings."""
+        from app.services.coverage import bootstrap_missing_coverage_rows
+
+        conn = self._mock_conn(inserted_rows=2)
+        bootstrap_missing_coverage_rows(conn)
+        sql = conn.execute.call_args[0][0]
+        # Both the column list and the SELECT projection must carry
+        # the unknown sentinel literally.
+        assert "filings_status" in sql
+        assert "'unknown'" in sql
+
     def test_noop_when_no_gaps(self) -> None:
         """Every tradable instrument already has coverage → zero inserts."""
         from app.services.coverage import bootstrap_missing_coverage_rows

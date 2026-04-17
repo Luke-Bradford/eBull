@@ -771,6 +771,14 @@ def bootstrap_missing_coverage_rows(
     every tradable instrument has a coverage row going into the
     downstream audit / thesis / scoring passes.
 
+    New rows land with ``filings_status = 'unknown'`` (#268 Chunk G)
+    so the weekly coverage audit (Chunk F) picks them up on its next
+    run and classifies them into one of the four terminal outputs.
+    Without this, the audit would leave them as NULL
+    filings_status and the ``null_anomalies`` counter would flag
+    every new instrument as a data-integrity warning until the audit
+    could catch up.
+
     Opens its own ``conn.transaction()`` (savepoint when nested) so
     the INSERT is atomic. ``ON CONFLICT DO NOTHING`` is defence-in-
     depth; the ``NOT EXISTS`` predicate already guarantees no
@@ -779,8 +787,8 @@ def bootstrap_missing_coverage_rows(
     with conn.transaction():
         result = conn.execute(
             """
-            INSERT INTO coverage (instrument_id, coverage_tier)
-            SELECT i.instrument_id, 3
+            INSERT INTO coverage (instrument_id, coverage_tier, filings_status)
+            SELECT i.instrument_id, 3, 'unknown'
             FROM instruments i
             WHERE i.is_tradable = TRUE
               AND NOT EXISTS (
