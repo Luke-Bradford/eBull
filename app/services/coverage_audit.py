@@ -222,10 +222,7 @@ def audit_all_instruments(conn: psycopg.Connection[Any]) -> AuditSummary:
                 (instrument_ids, statuses),
             )
             if result.rowcount == -1:
-                raise RuntimeError(
-                    "audit_all_instruments UPDATE: server did not report a "
-                    "command tag (rowcount=-1)"
-                )
+                raise RuntimeError("audit_all_instruments UPDATE: server did not report a command tag (rowcount=-1)")
             total_updated = result.rowcount
 
         null_anomalies = _count_null_anomalies(conn)
