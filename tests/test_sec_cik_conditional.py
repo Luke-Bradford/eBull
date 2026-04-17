@@ -98,11 +98,10 @@ class TestConditional200:
 
         assert isinstance(result, CikMappingResult)
         assert result.mapping == {"AAPL": "0000320193"}
-        # body_hash is sha256(body).hexdigest(); stability matters for dedup.
-        assert (
-            result.body_hash == ("a4dc6fcecc9c2a2ddb98df0b5cdfab08fdc0f7dc16c0d9e9ed76d5e7e5f4c21a")
-            or len(result.body_hash) == 64
-        )  # loose check — hex of sha256
+        # Exact sha256 of the fixture body — pinned so a future
+        # refactor that changes hashing (digest, encoding, etc.) fails
+        # this test rather than silently producing a different watermark.
+        assert result.body_hash == ("1d750f0716a1ad1927c275a3df2fd6516613ef094cd0a53ad742bc10bea4e0f9")
         assert result.last_modified == "Wed, 15 Apr 2026 20:05:57 GMT"
 
     def test_last_modified_none_when_header_absent(self, provider: SecFilingsProvider) -> None:

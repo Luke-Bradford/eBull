@@ -852,13 +852,22 @@ def daily_cik_refresh() -> None:
     SOURCE = "sec.tickers"
     WATERMARK_KEY = "global"
 
+    # Pre-bind so any reference after the inner `with` blocks is always
+    # bound — a future refactor that moves these assignments deeper
+    # cannot produce an UnboundLocalError under an exception path.
+    upserted = 0
+    mapping_size = 0
+
     with _tracked_job(JOB_DAILY_CIK_REFRESH) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
             psycopg.connect(settings.database_url) as conn,
         ):
             prior = get_watermark(conn, SOURCE, WATERMARK_KEY)
-            if_modified_since = prior.watermark if prior else None
+            # Explicit truthy check: an empty-string watermark from a
+            # prior run where Last-Modified was absent must NOT be sent
+            # as `If-Modified-Since: ` (invalid HTTP date).
+            if_modified_since = prior.watermark if (prior and prior.watermark) else None
 
             result = provider.build_cik_mapping_conditional(
                 if_modified_since=if_modified_since,
@@ -870,6 +879,8 @@ def daily_cik_refresh() -> None:
                 tracker.row_count = 0
                 return
 
+            mapping_size = len(result.mapping)
+
             if prior and prior.response_hash == result.body_hash:
                 # 200 with identical bytes. Advance fetched_at only.
                 logger.info("daily_cik_refresh: 200 but body hash unchanged, skipping upsert")
@@ -878,7 +889,7 @@ def daily_cik_refresh() -> None:
                         conn,
                         source=SOURCE,
                         key=WATERMARK_KEY,
-                        watermark=result.last_modified or (prior.watermark if prior else ""),
+                        watermark=result.last_modified or prior.watermark,
                         response_hash=result.body_hash,
                     )
                 tracker.row_count = 0
@@ -898,6 +909,10 @@ def daily_cik_refresh() -> None:
                     conn,
                     source=SOURCE,
                     key=WATERMARK_KEY,
+                    # Empty string when Last-Modified is absent is the
+                    # "no validator available" sentinel — next run's
+                    # truthy check above will fall back to no-header.
+                    # The body_hash still works for dedup in that case.
                     watermark=result.last_modified or "",
                     response_hash=result.body_hash,
                 )
@@ -905,7 +920,7 @@ def daily_cik_refresh() -> None:
 
     logger.info(
         "CIK refresh complete: mapping_size=%d upserted=%d",
-        len(result.mapping),
+        mapping_size,
         upserted,
     )
 
