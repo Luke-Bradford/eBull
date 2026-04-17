@@ -86,12 +86,13 @@ class RefreshPlan:
     - ``ciks_by_day`` — ISO-date to list-of-hit-CIKs mapping used by
       the executor to decide which pending master-index writes are safe
       to commit.
-    - ``new_filings_by_cik`` — per-CIK list of master-index entries that
-      landed in this cycle. Executor upserts each into ``filing_events``
-      so downstream event-driven triggers (thesis, scoring) have a
-      timestamped signal to query. Only populated for covered CIKs with
-      non-empty master-index hits; seeds do NOT appear here (no hit
-      yet — historical backfill is #268 Chunk E territory).
+    - ``new_filings_by_cik`` — per-CIK list of master-index entries
+      that landed in this cycle. Populated for every covered CIK that
+      had at least one master-index hit in the 7-day window (including
+      seeds that happened to file this week). The executor only
+      consumes this dict on the refresh + submissions-only paths; the
+      seed path ignores it because seeds need full historical backfill
+      (#268 Chunk E), not just this week's entries.
     """
 
     seeds: list[str] = field(default_factory=list)
@@ -363,6 +364,16 @@ def _upsert_filing_from_master_index(
     try:
         filed_at = datetime.fromisoformat(entry.date_filed).replace(tzinfo=UTC)
     except ValueError:
+        # Master-index dates are always ISO; ValueError here indicates
+        # corrupt data. Log loudly so operators can investigate rather
+        # than silently substituting now().
+        logger.warning(
+            "sec_incremental: malformed date_filed %r for accession %s (cik=%s) — "
+            "falling back to now() so upsert proceeds",
+            entry.date_filed,
+            entry.accession_number,
+            entry.cik,
+        )
         filed_at = datetime.now(UTC)
     conn.execute(
         """
