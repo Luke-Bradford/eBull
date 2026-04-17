@@ -323,10 +323,16 @@ def _run_cik_upsert(
     try:
         inst = _instrument_for_cik(conn, cik)
         if inst is None:
+            # Plan-time drift: CIK was covered during planning but no
+            # longer resolves to a tradable instrument. Record as a
+            # failure so the master-index watermark for this CIK's day
+            # is WITHHELD — a future run re-checks after universe
+            # reconciliation rather than 304-skipping forever.
             logger.warning(
                 "sec_incremental: no tradable instrument found for cik=%s (plan drift?)",
                 cik,
             )
+            failed.append((cik, "InstrumentMissing"))
             return None
         instrument_id, symbol = inst
         # Close the implicit read transaction opened by _instrument_for_cik
@@ -336,17 +342,27 @@ def _run_cik_upsert(
 
         submissions = filings_provider.fetch_submissions(cik)
         if submissions is None:
+            # Transient: submissions endpoint unavailable (404 on a CIK
+            # the master-index says filed today — private / de-registered
+            # issuer, or a provider glitch). Record as failure so the
+            # master-index watermark for this day is NOT committed and
+            # the next run re-fetches + re-plans this CIK.
             logger.warning(
                 "sec_incremental: no submissions.json for cik=%s (private/de-registered?)",
                 cik,
             )
+            failed.append((cik, "SubmissionsMissing"))
             return None
         top_accession = _top_accession_from_submissions(submissions)
         if top_accession is None:
+            # Transient: submissions.json returned but filings.recent
+            # is empty despite a master-index hit. Same invariant —
+            # withhold the master-index watermark so next run retries.
             logger.warning(
                 "sec_incremental: submissions.json for cik=%s has empty filings.recent",
                 cik,
             )
+            failed.append((cik, "EmptyFilingsRecent"))
             return None
 
         facts = fundamentals_provider.extract_facts(symbol, cik)

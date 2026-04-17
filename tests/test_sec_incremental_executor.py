@@ -391,6 +391,42 @@ def test_failed_cik_withholds_master_index_watermark(
     )
 
 
+def test_transient_skip_withholds_master_index_watermark(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Regression guard: a CIK that skips because its submissions.json
+    is unavailable (transient provider glitch) must withhold the master-
+    index watermark, same as an exception would. Otherwise next run
+    304-skips the day and the transient failure becomes permanent."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000320193")
+    plan = RefreshPlan(
+        refreshes=["0000320193"],
+        pending_master_index_writes=[
+            ("2026-04-15", "Wed, 15 Apr 2026 22:00:00 GMT", "abc123"),
+        ],
+        ciks_by_day={"2026-04-15": ["0000320193"]},
+    )
+    # Provider returns None for submissions (transient skip path).
+    filings = StubFilingsProvider(submissions_by_cik={})
+    fundamentals = StubFundamentalsProvider()
+
+    outcome = execute_refresh(
+        ebull_test_conn,
+        filings_provider=cast(SecFilingsProvider, filings),
+        fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+        plan=plan,
+    )
+
+    assert outcome.seeded == 0
+    assert outcome.refreshed == 0
+    assert ("0000320193", "SubmissionsMissing") in outcome.failed
+
+    master_wm = get_watermark(ebull_test_conn, "sec.master-index", "2026-04-15")
+    assert master_wm is None, (
+        "Transient submissions-unavailable skip must withhold the master-index watermark so the next run retries"
+    )
+
+
 def test_successful_ciks_commit_master_index_watermark(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
