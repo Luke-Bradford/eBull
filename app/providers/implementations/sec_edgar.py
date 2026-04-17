@@ -98,6 +98,19 @@ class MasterIndexEntry:
     accession_number: str
 
 
+@dataclass(frozen=True)
+class MasterIndexFetchResult:
+    """Result of a conditional-GET fetch of master.YYYYMMDD.idx.
+
+    Callers parse ``body`` via ``parse_master_index`` and persist
+    ``body_hash`` + ``last_modified`` as watermark fields.
+    """
+
+    body: bytes
+    body_hash: str
+    last_modified: str | None
+
+
 def parse_master_index(body: bytes) -> list[MasterIndexEntry]:
     """Parse SEC daily master-index bytes into entries.
 
@@ -312,6 +325,43 @@ class SecFilingsProvider(FilingsProvider):
         _persist_raw("sec_tickers", raw)
         return CikMappingResult(
             mapping=_parse_cik_mapping(raw),
+            body_hash=body_hash,
+            last_modified=resp.headers.get("Last-Modified"),
+        )
+
+    def fetch_master_index(
+        self,
+        target_date: date,
+        *,
+        if_modified_since: str | None = None,
+    ) -> MasterIndexFetchResult | None:
+        """Conditional-GET the SEC daily master-index for a given date.
+
+        URL shape: ``https://www.sec.gov/Archives/edgar/daily-index/
+        YYYY/QTR{1..4}/master.YYYYMMDD.idx``. Returns ``None`` on 304
+        (or 404 — weekends and holidays have no file). Otherwise returns
+        body bytes + sha256 hash + Last-Modified header for the caller
+        to persist in the watermark row.
+
+        Rate-limited alongside the other SEC clients via the shared
+        timestamp list, so a burst of 7 calls respects the 10 rps cap.
+        """
+        quarter = (target_date.month - 1) // 3 + 1
+        url = (
+            f"https://www.sec.gov/Archives/edgar/daily-index/"
+            f"{target_date.year}/QTR{quarter}/master.{target_date.strftime('%Y%m%d')}.idx"
+        )
+        headers: dict[str, str] = {}
+        if if_modified_since:
+            headers["If-Modified-Since"] = if_modified_since
+
+        resp = self._http_tickers.get(url, headers=headers)
+        if resp.status_code in (304, 404):
+            return None
+        resp.raise_for_status()
+        body_hash = hashlib.sha256(resp.content).hexdigest()
+        return MasterIndexFetchResult(
+            body=resp.content,
             body_hash=body_hash,
             last_modified=resp.headers.get("Last-Modified"),
         )
