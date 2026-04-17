@@ -82,6 +82,84 @@ class CikMappingResult:
     last_modified: str | None
 
 
+@dataclass(frozen=True)
+class MasterIndexEntry:
+    """One row from SEC's daily master-index file.
+
+    - ``cik`` — 10-digit zero-padded CIK string.
+    - ``accession_number`` — canonical dashed form like
+      ``0000320193-26-000042``, extracted from ``Filename``.
+    """
+
+    cik: str
+    company_name: str
+    form_type: str
+    date_filed: str
+    accession_number: str
+
+
+@dataclass(frozen=True)
+class MasterIndexFetchResult:
+    """Result of a conditional-GET fetch of master.YYYYMMDD.idx.
+
+    Callers parse ``body`` via ``parse_master_index`` and persist
+    ``body_hash`` + ``last_modified`` as watermark fields.
+    """
+
+    body: bytes
+    body_hash: str
+    last_modified: str | None
+
+
+def parse_master_index(body: bytes) -> list[MasterIndexEntry]:
+    """Parse SEC daily master-index bytes into entries.
+
+    Format: header lines, a ``CIK|...|Filename`` column row, a dashed
+    separator line, then pipe-delimited data rows. Malformed rows are
+    skipped silently — the provider contract is best-effort parsing.
+    """
+    entries: list[MasterIndexEntry] = []
+    text = body.decode("utf-8", errors="replace")
+    in_data = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Data rows start after a line of dashes
+        if set(line) == {"-"}:
+            in_data = True
+            continue
+        if not in_data:
+            continue
+        parts = line.split("|")
+        if len(parts) != 5:
+            continue
+        cik_raw, company, form, filed, filename = parts
+        try:
+            cik = _zero_pad_cik(cik_raw.strip())
+        except ValueError:
+            continue
+        # Filename: edgar/data/<cik>/<accession-no-dashes>.txt
+        stem = filename.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        # Normalize to canonical dashed accession (0000320193-26-000042)
+        # regardless of whether the filename stem supplied it dashed or
+        # as 18 straight digits.
+        digits_only = stem.replace("-", "")
+        if len(digits_only) != 18 or not digits_only.isdigit():
+            continue
+        accession = f"{digits_only[:10]}-{digits_only[10:12]}-{digits_only[12:]}"
+        entries.append(
+            MasterIndexEntry(
+                cik=cik,
+                company_name=company.strip(),
+                form_type=form.strip(),
+                date_filed=filed.strip(),
+                accession_number=accession,
+            )
+        )
+    return entries
+
+
 class SecFilingsProvider(FilingsProvider):
     """
     Fetches filing metadata from SEC EDGAR.
@@ -250,6 +328,53 @@ class SecFilingsProvider(FilingsProvider):
             body_hash=body_hash,
             last_modified=resp.headers.get("Last-Modified"),
         )
+
+    def fetch_master_index(
+        self,
+        target_date: date,
+        *,
+        if_modified_since: str | None = None,
+    ) -> MasterIndexFetchResult | None:
+        """Conditional-GET the SEC daily master-index for a given date.
+
+        URL shape: ``https://www.sec.gov/Archives/edgar/daily-index/
+        YYYY/QTR{1..4}/master.YYYYMMDD.idx``. Returns ``None`` on 304
+        (or 404 — weekends and holidays have no file). Otherwise returns
+        body bytes + sha256 hash + Last-Modified header for the caller
+        to persist in the watermark row.
+
+        Rate-limited alongside the other SEC clients via the shared
+        timestamp list, so a burst of 7 calls respects the 10 rps cap.
+        """
+        quarter = (target_date.month - 1) // 3 + 1
+        url = (
+            f"https://www.sec.gov/Archives/edgar/daily-index/"
+            f"{target_date.year}/QTR{quarter}/master.{target_date.strftime('%Y%m%d')}.idx"
+        )
+        headers: dict[str, str] = {}
+        if if_modified_since:
+            headers["If-Modified-Since"] = if_modified_since
+
+        resp = self._http_tickers.get(url, headers=headers)
+        if resp.status_code in (304, 404):
+            return None
+        resp.raise_for_status()
+        body_hash = hashlib.sha256(resp.content).hexdigest()
+        return MasterIndexFetchResult(
+            body=resp.content,
+            body_hash=body_hash,
+            last_modified=resp.headers.get("Last-Modified"),
+        )
+
+    def fetch_submissions(self, cik: str) -> dict[str, object] | None:
+        """Fetch ``data.sec.gov/submissions/CIKNNNNNNNNNN.json`` for a CIK.
+
+        Returns the parsed JSON dict or ``None`` on 404. Callers must pass
+        a 10-digit zero-padded CIK or a numeric string that zero-pads
+        correctly; the helper normalizes via ``_zero_pad_cik``.
+        """
+        cik_padded = _zero_pad_cik(cik)
+        return self._fetch_submissions(cik_padded)
 
     # ------------------------------------------------------------------
     # Private helpers

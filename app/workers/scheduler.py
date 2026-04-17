@@ -1091,55 +1091,76 @@ def daily_research_refresh() -> None:
 
 
 def daily_financial_facts() -> None:
-    """Fetch expanded XBRL facts from SEC and run normalization pipeline."""
+    """Incremental SEC facts refresh driven by the daily master-index
+    + per-CIK watermarks. See app.services.sec_incremental."""
     with _tracked_job(JOB_DAILY_FINANCIAL_FACTS) as tracker:
         with psycopg.connect(settings.database_url) as conn:
-            cur = conn.execute(
-                """
-                SELECT i.symbol, i.instrument_id, ei.identifier_value
-                FROM instruments i
-                JOIN external_identifiers ei
-                    ON ei.instrument_id = i.instrument_id
-                    AND ei.provider = 'sec'
-                    AND ei.identifier_type = 'cik'
-                    AND ei.is_primary = TRUE
-                WHERE i.is_tradable = TRUE
-                ORDER BY i.symbol
-                """
-            )
-            symbols = [(row[0], row[1], row[2]) for row in cur.fetchall()]
+            from app.services.sec_incremental import execute_refresh, plan_refresh
 
-            if not symbols:
-                logger.info("daily_financial_facts: no instruments with SEC CIK, skipping")
-                tracker.row_count = 0
-                return
-
-            from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
-            from app.services.financial_facts import refresh_financial_facts
-            from app.services.financial_normalization import normalize_financial_periods
-
-            # Phase 1: Fetch and store raw XBRL facts
-            with SecFundamentalsProvider(user_agent=settings.sec_user_agent) as provider:
-                summary = refresh_financial_facts(provider, conn, symbols)
+            today = datetime.now(UTC).date()
+            with (
+                SecFilingsProvider(user_agent=settings.sec_user_agent) as filings,
+                SecFundamentalsProvider(user_agent=settings.sec_user_agent) as fundamentals,
+            ):
+                plan = plan_refresh(conn, filings, today=today)
                 logger.info(
-                    "Financial facts: %d attempted, %d upserted, %d skipped, %d failed",
-                    summary.symbols_attempted,
-                    summary.facts_upserted,
-                    summary.facts_skipped,
-                    summary.symbols_failed,
+                    "daily_financial_facts plan: seeds=%d refreshes=%d submissions_only=%d",
+                    len(plan.seeds),
+                    len(plan.refreshes),
+                    len(plan.submissions_only_advances),
+                )
+                outcome = execute_refresh(
+                    conn,
+                    filings_provider=filings,
+                    fundamentals_provider=fundamentals,
+                    plan=plan,
+                )
+                logger.info(
+                    "daily_financial_facts outcome: seeded=%d refreshed=%d submissions_advanced=%d failed=%d",
+                    outcome.seeded,
+                    outcome.refreshed,
+                    outcome.submissions_advanced,
+                    len(outcome.failed),
                 )
 
-            # Phase 2: Normalize facts → periods_raw → canonical
-            instrument_ids = [iid for _, iid, _ in symbols]
-            norm_summary = normalize_financial_periods(conn, instrument_ids)
-            logger.info(
-                "Normalization: %d instruments, %d raw periods, %d canonical",
-                norm_summary.instruments_processed,
-                norm_summary.periods_raw_upserted,
-                norm_summary.periods_canonical_upserted,
-            )
+            touched_ciks = list(plan.seeds) + [cik for cik, _ in plan.refreshes]
+            if outcome.seeded + outcome.refreshed > 0 and touched_ciks:
+                # Phase 2: normalization for CIKs we actually touched this run.
+                from app.services.financial_normalization import normalize_financial_periods
 
-            tracker.row_count = summary.facts_upserted + norm_summary.periods_canonical_upserted
+                cur = conn.execute(
+                    """
+                    SELECT i.instrument_id
+                    FROM instruments i
+                    JOIN external_identifiers ei
+                        ON ei.instrument_id = i.instrument_id
+                        AND ei.provider = 'sec'
+                        AND ei.identifier_type = 'cik'
+                        AND ei.identifier_value = ANY(%s)
+                        AND ei.is_primary = TRUE
+                    WHERE i.is_tradable = TRUE
+                    """,
+                    (touched_ciks,),
+                )
+                instrument_ids = [row[0] for row in cur.fetchall()]
+                if instrument_ids:
+                    norm_summary = normalize_financial_periods(conn, instrument_ids)
+                    logger.info(
+                        "Normalization: %d instruments, %d raw periods, %d canonical",
+                        norm_summary.instruments_processed,
+                        norm_summary.periods_raw_upserted,
+                        norm_summary.periods_canonical_upserted,
+                    )
+                    tracker.row_count = outcome.seeded + outcome.refreshed + norm_summary.periods_canonical_upserted
+                else:
+                    tracker.row_count = outcome.seeded + outcome.refreshed
+            else:
+                # No facts written this run. Submissions-only advances are
+                # watermark bookkeeping, not data ingestion — excluded from
+                # row_count so ops-monitor spike detection reflects actual
+                # data volume, not conditional-GET activity. status='success'
+                # remains the liveness signal.
+                tracker.row_count = 0
 
 
 def daily_news_refresh() -> None:

@@ -33,7 +33,7 @@ class FactsRefreshSummary:
     symbols_failed: int
 
 
-def _start_ingestion_run(
+def start_ingestion_run(
     conn: psycopg.Connection[tuple],
     *,
     source: str,
@@ -54,7 +54,7 @@ def _start_ingestion_run(
     return row[0]
 
 
-def _finish_ingestion_run(
+def finish_ingestion_run(
     conn: psycopg.Connection[tuple],
     *,
     run_id: int,
@@ -84,7 +84,7 @@ def _finish_ingestion_run(
     )
 
 
-def _upsert_facts(
+def upsert_facts_for_instrument(
     conn: psycopg.Connection[tuple],
     *,
     instrument_id: int,
@@ -173,7 +173,7 @@ def refresh_financial_facts(
     symbols:
         List of (symbol, instrument_id, cik) tuples.
     """
-    run_id = _start_ingestion_run(
+    run_id = start_ingestion_run(
         conn,
         source="sec_edgar",
         endpoint="/api/xbrl/companyfacts",
@@ -192,7 +192,7 @@ def refresh_financial_facts(
                 if not facts:
                     logger.info("No XBRL facts for %s (CIK %s)", symbol, cik)
                     continue
-                upserted, skipped = _upsert_facts(
+                upserted, skipped = upsert_facts_for_instrument(
                     conn,
                     instrument_id=instrument_id,
                     facts=facts,
@@ -214,7 +214,7 @@ def refresh_financial_facts(
     report_progress(total, total, force=True)
 
     status = "success" if failed == 0 else ("partial" if total_upserted > 0 else "failed")
-    _finish_ingestion_run(
+    finish_ingestion_run(
         conn,
         run_id=run_id,
         status=status,

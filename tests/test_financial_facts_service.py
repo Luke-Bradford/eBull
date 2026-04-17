@@ -8,9 +8,9 @@ from unittest.mock import MagicMock
 
 from app.providers.fundamentals import XbrlFact
 from app.services.financial_facts import (
-    _finish_ingestion_run,
-    _start_ingestion_run,
-    _upsert_facts,
+    finish_ingestion_run,
+    start_ingestion_run,
+    upsert_facts_for_instrument,
 )
 
 
@@ -51,7 +51,7 @@ class TestStartIngestionRun:
         cursor = MagicMock()
         cursor.fetchone.return_value = (42,)
         conn.execute.return_value = cursor
-        run_id = _start_ingestion_run(conn, source="sec_edgar", endpoint="/api/xbrl/companyfacts", instrument_count=5)
+        run_id = start_ingestion_run(conn, source="sec_edgar", endpoint="/api/xbrl/companyfacts", instrument_count=5)
         assert run_id == 42
         conn.execute.assert_called_once()
 
@@ -59,7 +59,7 @@ class TestStartIngestionRun:
 class TestFinishIngestionRun:
     def test_updates_run_status(self) -> None:
         conn = MagicMock()
-        _finish_ingestion_run(conn, run_id=42, status="success", rows_upserted=100, rows_skipped=3)
+        finish_ingestion_run(conn, run_id=42, status="success", rows_upserted=100, rows_skipped=3)
         conn.execute.assert_called_once()
         call_args = conn.execute.call_args
         sql = call_args[0][0]
@@ -74,13 +74,13 @@ class TestUpsertFacts:
         cursor.rowcount = 1
         conn.execute.return_value = cursor
         facts = [_make_fact()]
-        upserted, skipped = _upsert_facts(conn, instrument_id=1, facts=facts, ingestion_run_id=42)
+        upserted, skipped = upsert_facts_for_instrument(conn, instrument_id=1, facts=facts, ingestion_run_id=42)
         assert upserted == 1
         assert skipped == 0
 
     def test_handles_empty_facts(self) -> None:
         conn = MagicMock()
-        upserted, skipped = _upsert_facts(conn, instrument_id=1, facts=[], ingestion_run_id=42)
+        upserted, skipped = upsert_facts_for_instrument(conn, instrument_id=1, facts=[], ingestion_run_id=42)
         assert upserted == 0
         assert skipped == 0
 
@@ -90,6 +90,6 @@ class TestUpsertFacts:
         cursor.rowcount = 0  # ON CONFLICT skipped because data unchanged
         conn.execute.return_value = cursor
         facts = [_make_fact()]
-        upserted, skipped = _upsert_facts(conn, instrument_id=1, facts=facts, ingestion_run_id=42)
+        upserted, skipped = upsert_facts_for_instrument(conn, instrument_id=1, facts=facts, ingestion_run_id=42)
         assert upserted == 0
         assert skipped == 1
