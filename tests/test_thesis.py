@@ -459,6 +459,43 @@ class TestGenerateThesis:
 
         assert result.thesis_version == 3
 
+    def test_commits_read_tx_before_claude_calls(self) -> None:
+        """Regression guard for #293: the implicit read tx opened by
+        _assemble_context's SELECTs must be committed BEFORE the Claude
+        writer/critic calls. Otherwise the connection sits
+        'idle in transaction' for 2-10s per Claude round-trip, violating
+        the CLAUDE.md 'no HTTP inside DB tx' invariant."""
+        conn = _make_conn(insert_returns_version=1)
+        client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
+
+        # Track the order commit vs Claude calls land on their respective
+        # mocks. A MagicMock on the parent captures every child attribute
+        # call, so recording `mock_calls` on conn and client separately
+        # gives us the interleaving we need without a manual parent mock.
+        call_log: list[str] = []
+        original_commit = conn.commit
+        original_create = client.messages.create
+
+        def tracked_commit() -> None:
+            call_log.append("commit")
+            return original_commit()
+
+        def tracked_create(*args: object, **kwargs: object) -> object:
+            call_log.append("claude")
+            return original_create(*args, **kwargs)
+
+        conn.commit = tracked_commit
+        client.messages.create = tracked_create
+
+        generate_thesis(instrument_id=1, conn=conn, client=client)
+
+        # First commit must precede first claude call. Both must appear.
+        assert "commit" in call_log, "expected conn.commit() to be called"
+        assert "claude" in call_log, "expected client.messages.create to be called"
+        assert call_log.index("commit") < call_log.index("claude"), (
+            f"commit must precede first Claude call, got order: {call_log}"
+        )
+
     def test_critic_failure_does_not_block_insert(self) -> None:
         import anthropic
 
