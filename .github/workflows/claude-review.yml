@@ -175,14 +175,26 @@ jobs:
           python3 -c "
           import json, sys
           data = json.load(open('response.json'))
-          if 'content' in data and data['content']:
-              text = data['content'][0]['text']
-              with open('review.txt', 'w') as f:
-                  f.write(text)
-              print('Review extracted successfully')
-          else:
+          if 'content' not in data or not data['content']:
               print('Unexpected response shape:', json.dumps(data, indent=2))
               sys.exit(1)
+          stop_reason = data.get('stop_reason') or ''
+          text = data['content'][0]['text']
+          with open('stop_reason.txt', 'w') as f:
+              f.write(stop_reason)
+          if stop_reason == 'max_tokens':
+              # Truncation silently loses BLOCKING items at the tail.
+              # Prepend a banner so the operator sees the partial review
+              # was cut off. Failing the workflow happens in a later
+              # step so the (partial) comment still posts first.
+              text = (
+                  '> :warning: **Review truncated by max_tokens cap — findings below may be incomplete. '
+                  'Bump max_tokens in .github/workflows/claude-review.yml or split the PR.**\n\n'
+                  + text
+              )
+          with open('review.txt', 'w') as f:
+              f.write(text)
+          print(f'Review extracted (stop_reason={stop_reason!r})')
           "
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -194,3 +206,12 @@ jobs:
         run: |
           { echo "## Claude Code Review"; echo ""; cat review.txt; } > comment_body.txt
           gh pr comment "$PR_NUMBER" --body-file comment_body.txt
+
+      - name: Fail workflow on truncated review
+        run: |
+          STOP_REASON=$(cat stop_reason.txt)
+          if [ "$STOP_REASON" = "max_tokens" ]; then
+            echo "::error::Claude review hit max_tokens cap — review may be truncated. Raise max_tokens or split the PR."
+            exit 1
+          fi
+          echo "stop_reason=$STOP_REASON"
