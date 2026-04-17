@@ -24,7 +24,72 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: gh pr diff "$PR_NUMBER" > pr.diff
 
+      - name: Check if diff is doc-only
+        # Doc-only PRs (plan docs, README, etc.) don't benefit from an
+        # engineering review — skip the API call entirely.
+        # A PR is "doc-only" when every changed file matches one of:
+        #   - *.md / *.mdx / *.rst
+        #   - anything under docs/ at any nesting depth
+        #   - LICENSE / CHANGELOG / NOTICE (no extension)
+        # If even one code/test/config file changes, we review as normal.
+        #
+        # Uses `git diff --name-only` against the PR base (checkout is
+        # fetch-depth: 0) rather than `gh pr view --json files` because
+        # the gh API caps at 100 files — a large PR would be silently
+        # truncated and potentially misclassified. git diff has no cap.
+        # Uses bash `[[ ... == pattern ]]` rather than `case` so the
+        # `docs/*` pattern matches nested paths (bash `*` in `[[ ]]`
+        # crosses `/`).
+        id: docs_only
+        shell: bash
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        # Relies on actions/checkout's fetch-depth: 0 (set above) to
+        # make origin/$BASE_REF available for the three-dot diff. No
+        # extra fetch needed — adding one would only shallow the base
+        # and risk a missing merge-base on diverged histories.
+        run: |
+          set -euo pipefail
+          # Fail loudly if the base ref is unreachable (e.g. deleted
+          # remote branch, unexpected remote name). An empty diff from
+          # a missing ref must not silently classify as "not doc-only".
+          if ! git rev-parse --verify --quiet "origin/${BASE_REF}" >/dev/null; then
+            echo "::error::origin/${BASE_REF} not found — cannot classify PR; failing to avoid misclassification"
+            exit 1
+          fi
+          files=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+          if [ -z "$files" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          is_docs_only=true
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if [[ "$f" == *.md || "$f" == *.mdx || "$f" == *.rst \
+                  || "$f" == docs/* \
+                  || "$f" == LICENSE || "$f" == CHANGELOG || "$f" == NOTICE ]]; then
+              continue
+            fi
+            is_docs_only=false
+            break
+          done <<< "$files"
+          echo "docs_only=$is_docs_only" >> "$GITHUB_OUTPUT"
+          echo "docs_only=$is_docs_only"
+
+      - name: Post docs-only skip notice
+        if: steps.docs_only.outputs.docs_only == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        # Uses printf rather than an indented heredoc so the posted
+        # comment has no leading-whitespace indent on each line (which
+        # would otherwise render each line as a code block on GitHub).
+        run: |
+          printf '## Claude Code Review\n\nDoc-only diff — engineering review skipped to save tokens. If this PR needs a review (e.g. material claims in the docs that affect behaviour), request one manually.\n' > skip_notice.md
+          gh pr comment "$PR_NUMBER" --body-file skip_notice.md
+
       - name: Get incremental diff (changes since last push)
+        if: steps.docs_only.outputs.docs_only != 'true'
         env:
           BEFORE_SHA: ${{ github.event.before }}
           EVENT_ACTION: ${{ github.event.action }}
@@ -44,6 +109,7 @@ jobs:
           fi
 
       - name: Get PR comments
+        if: steps.docs_only.outputs.docs_only != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -53,7 +119,18 @@ jobs:
             --jq '[.[] | "### Comment by " + .user.login + " at " + .created_at + "\n" + .body] | join("\n\n---\n\n")' \
             > pr_comments.txt
 
+      - name: Get PR title + body
+        if: steps.docs_only.outputs.docs_only != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr view "$PR_NUMBER" --json title,body \
+            --jq '"# " + .title + "\n\n" + (.body // "(no description)")' \
+            > pr_description.txt
+
       - name: Build request body
+        if: steps.docs_only.outputs.docs_only != 'true'
         run: |
           cat > build_prompt.py << 'PYEOF'
           import json
@@ -62,23 +139,17 @@ jobs:
           incremental = open('incremental.diff', encoding='utf-8', errors='replace').read()
           flag = open('incremental_flag.txt').read().strip()
           comments_raw = open('pr_comments.txt').read().strip()
+          pr_description = open('pr_description.txt', encoding='utf-8', errors='replace').read().strip()
 
           has_incremental = flag == "has_incremental=true"
 
-          comments_section = (
-              "## PR Comment History (previous review rounds and author responses)\n\n"
-              + (comments_raw if comments_raw else "(no comments yet)")
-          )
-
-          incremental_section = ""
-          if has_incremental:
-              incremental_section = (
-                  "## Incremental diff (changes since last push)\n"
-                  "Focus review here. Use the full diff below for context.\n"
-                  "```diff\n" + incremental + "\n```\n\n"
-              )
-
-          prompt = (
+          # ---------------------------------------------------------------
+          # System block — STATIC. Cached via cache_control so repeat
+          # reviews only pay for this block once per 5-minute cache TTL.
+          # Keep every token in here stable across runs; any per-PR content
+          # MUST live in the dynamic user block below, not here.
+          # ---------------------------------------------------------------
+          system_rules = (
               "You are a code reviewer for eBull, a Python 3.14/FastAPI investment engine "
               "(psycopg v3, PostgreSQL 17, Pydantic v2). The author is Claude Code — it "
               "already knows the stack. Only surface real problems.\n\n"
@@ -97,23 +168,31 @@ jobs:
               "- No live trading unless `enable_live_trading=true`\n"
               "- Raw API payloads persisted before normalisation\n\n"
 
+              "## Architecture invariants — do not flag as bugs\n"
+              "- Scheduler is single-process: APScheduler + JobLock guard concurrent invocation. "
+              "No multi-writer race exists for scheduler jobs; do not suggest wrapping network "
+              "calls in DB transactions to 'fix' non-existent races.\n"
+              "- Holding a DB transaction across a network call is an ANTI-PATTERN in this "
+              "codebase — never suggest it as a fix.\n"
+              "- `_tracked_job` is a `@contextmanager` with `yield` inside try/except/else. "
+              "`return` inside the body triggers the else branch (success path) normally — "
+              "job_runs completion is written. Do not flag early returns as 'swallowing' completion.\n"
+              "- psycopg3's Connection and Transaction context managers commit on clean exit. "
+              "`return` inside a `with conn.transaction():` block commits — standard Python.\n\n"
+
               "## Review rules\n"
-              "- Do not explain what the code does — the author wrote it\n"
-              "- Do not re-raise issues already resolved in the comment history\n"
-              "- Do not flag unchanged code or intentional removals\n"
-              "- Post only confirmed findings. If a candidate issue turns out not to be "
-              "real, omit it entirely — do not mention it, do not reason about it in "
-              "writing, do not walk the reader through discarding it. Silent discards only.\n\n"
-          )
-
-          if has_incremental:
-              prompt += (
-                  "**Incremental diff included.** Focus on changes in this push. "
-                  "Full diff is context. Do not re-review unchanged code.\n\n"
-              )
-
-          prompt += (
-              comments_section + "\n\n"
+              "- Do not explain what the code does — the author wrote it.\n"
+              "- Do not re-raise issues already resolved in the comment history. If the author "
+              "has rebutted a prior-round finding with concrete file:line evidence, ACCEPT.\n"
+              "- Do not flag unchanged code or intentional removals.\n"
+              "- Post only confirmed findings. If a candidate issue turns out not to be real, "
+              "omit it entirely — no 'actually...', no 'on closer inspection', no self-withdrawals. "
+              "Silent discards only.\n"
+              "- Before posting any finding, quote the exact line you are flagging. If you "
+              "cannot quote it verbatim from the supplied diff, you did not read it correctly — "
+              "DELETE the finding.\n"
+              "- Count characters, line numbers, and hex digits carefully before making claims "
+              "about lengths or positions. When in doubt, omit the finding.\n\n"
 
               "## Check for\n"
               "Correctness and edge cases, SQL injection / missing parameterisation, "
@@ -133,28 +212,56 @@ jobs:
               "Only if BLOCKING or WARNING items exist. One line per issue: "
               "**label**: actionable grep/rule/check the author can add to a checklist.\n\n"
               "### Verdict\n"
-              "**APPROVE**, **REQUEST CHANGES**, or **NEEDS DISCUSSION**. One sentence max.\n\n"
+              "**APPROVE**, **REQUEST CHANGES**, or **NEEDS DISCUSSION**. One sentence max.\n"
+          )
+
+          # ---------------------------------------------------------------
+          # User block — DYNAMIC. Contains per-PR context.
+          # Incremental diff comes before full diff so the model anchors
+          # on the changes under review. PR description gives stated
+          # intent (~300 tokens) so the reviewer doesn't re-flag
+          # expected behaviour. Comment history carries prior rounds.
+          # ---------------------------------------------------------------
+          user_prompt = "## PR title + description\n\n" + pr_description + "\n\n"
+
+          user_prompt += (
+              "## PR Comment History (previous review rounds and author responses)\n\n"
+              + (comments_raw if comments_raw else "(no comments yet)")
+              + "\n\n"
           )
 
           if has_incremental:
-              prompt += incremental_section
+              user_prompt += (
+                  "**Incremental diff included.** Focus on changes in this push. "
+                  "Full diff is context. Do not re-review unchanged code.\n\n"
+                  "## Incremental diff (changes since last push)\n"
+                  "```diff\n" + incremental + "\n```\n\n"
+              )
 
-          prompt += "## Full diff\n```diff\n" + diff + "\n```"
+          user_prompt += "## Full diff\n```diff\n" + diff + "\n```"
 
           payload = {
               "model": "claude-sonnet-4-6",
               "max_tokens": 2000,
-              "messages": [{"role": "user", "content": prompt}]
+              "system": [
+                  {
+                      "type": "text",
+                      "text": system_rules,
+                      "cache_control": {"type": "ephemeral"},
+                  }
+              ],
+              "messages": [{"role": "user", "content": user_prompt}],
           }
 
           with open('request.json', 'w') as f:
               json.dump(payload, f)
 
-          print(f"Request written: {len(diff)} chars of diff, {len(prompt)} chars total prompt")
+          print(f"Request written: {len(diff)} chars of diff, {len(user_prompt)} chars user prompt, {len(system_rules)} chars cached system")
           PYEOF
           python3 build_prompt.py
 
       - name: Call Claude API
+        if: steps.docs_only.outputs.docs_only != 'true'
         run: |
           HTTP_STATUS=$(curl -s -w "%{http_code}" \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
@@ -183,10 +290,6 @@ jobs:
           with open('stop_reason.txt', 'w') as f:
               f.write(stop_reason)
           if stop_reason == 'max_tokens':
-              # Truncation silently loses BLOCKING items at the tail.
-              # Prepend a banner so the operator sees the partial review
-              # was cut off. Failing the workflow happens in a later
-              # step so the (partial) comment still posts first.
               text = (
                   '> :warning: **Review truncated by max_tokens cap — findings below may be incomplete. '
                   'Bump max_tokens in .github/workflows/claude-review.yml or split the PR.**\n\n'
@@ -194,12 +297,14 @@ jobs:
               )
           with open('review.txt', 'w') as f:
               f.write(text)
-          print(f'Review extracted (stop_reason={stop_reason!r})')
+          usage = data.get('usage', {})
+          print(f'Review extracted (stop_reason={stop_reason!r}, usage={usage})')
           "
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
       - name: Post review comment
+        if: steps.docs_only.outputs.docs_only != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -208,6 +313,7 @@ jobs:
           gh pr comment "$PR_NUMBER" --body-file comment_body.txt
 
       - name: Fail workflow on truncated review
+        if: steps.docs_only.outputs.docs_only != 'true'
         run: |
           STOP_REASON=$(cat stop_reason.txt)
           if [ "$STOP_REASON" = "max_tokens" ]; then
