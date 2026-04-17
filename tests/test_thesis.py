@@ -497,7 +497,11 @@ class TestGenerateThesis:
         assert call_log[0] == "commit", (
             f"commit must be the first event; got order: {call_log}"
         )
-        assert call_log.rindex("claude") > call_log.index("commit"), (
+        # Guard every Claude call, not just the first — a regression
+        # that inserted _call_critic before the commit would still
+        # satisfy an index-based check on the writer call alone.
+        last_claude_idx = max(i for i, v in enumerate(call_log) if v == "claude")
+        assert last_claude_idx > call_log.index("commit"), (
             f"every Claude call must follow the commit; got order: {call_log}"
         )
 
