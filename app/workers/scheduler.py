@@ -1093,12 +1093,8 @@ def daily_research_refresh() -> None:
 def daily_financial_facts() -> None:
     """Incremental SEC facts refresh driven by the daily master-index
     + per-CIK watermarks. See app.services.sec_incremental."""
-    from datetime import UTC, datetime
-
     with _tracked_job(JOB_DAILY_FINANCIAL_FACTS) as tracker:
         with psycopg.connect(settings.database_url) as conn:
-            from app.providers.implementations.sec_edgar import SecFilingsProvider
-            from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
             from app.services.sec_incremental import execute_refresh, plan_refresh
 
             today = datetime.now(UTC).date()
@@ -1159,10 +1155,12 @@ def daily_financial_facts() -> None:
                 else:
                     tracker.row_count = outcome.seeded + outcome.refreshed
             else:
-                # No facts written — use submissions-only advance count
-                # so empty days still show non-zero row_count when
-                # watermarks advanced.
-                tracker.row_count = outcome.submissions_advanced
+                # No facts written this run. Submissions-only advances are
+                # watermark bookkeeping, not data ingestion — excluded from
+                # row_count so ops-monitor spike detection reflects actual
+                # data volume, not conditional-GET activity. status='success'
+                # remains the liveness signal.
+                tracker.row_count = 0
 
 
 def daily_news_refresh() -> None:
