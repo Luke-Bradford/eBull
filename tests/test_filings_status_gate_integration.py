@@ -274,10 +274,18 @@ def test_scores_api_source_contains_filings_status_gate() -> None:
     loudly at test-collection time rather than drifting silently."""
     from pathlib import Path
 
-    source = Path("app/api/scores.py").read_text(encoding="utf-8")
+    # Anchor on __file__ so pytest works from any working directory
+    # (subdir, docker container with different WORKDIR). Relative
+    # "app/api/scores.py" would silently FileNotFoundError in those
+    # cases and the test would be a false negative.
+    scores_py = Path(__file__).resolve().parent.parent / "app" / "api" / "scores.py"
+    source = scores_py.read_text(encoding="utf-8")
     assert "LEFT JOIN coverage c USING (instrument_id)" in source, (
         "scores.py list_rankings base query must JOIN coverage on alias 'c' so the filings_status WHERE clause resolves"
     )
-    assert "\"c.filings_status = 'analysable'\"" in source, (
+    # Assert the plain SQL snippet, not its Python string-literal
+    # surround — the production code could use single OR double
+    # quotes around the string element without changing SQL behavior.
+    assert "c.filings_status = 'analysable'" in source, (
         "scores.py list_rankings where_clauses must include the filings_status gate literal for #268 Chunk J"
     )
