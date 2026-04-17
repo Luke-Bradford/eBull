@@ -130,7 +130,13 @@ def test_fresh_install_seeds_cohort_then_steady_state_is_noop(
         "SELECT status FROM data_ingestion_runs ORDER BY ingestion_run_id DESC LIMIT 1"
     ).fetchone()
     assert status_row is not None
-    assert status_row[0] in {"success", "partial"}
+    assert status_row[0] == "success"
+
+    # Phase 2 (normalization) must have fired on the seeded instrument.
+    periods_count = ebull_test_conn.execute(
+        "SELECT COUNT(*) FROM financial_periods_raw WHERE instrument_id = 1"
+    ).fetchone()
+    assert periods_count is not None and periods_count[0] >= 1
 
     # ----- Run 2 -----
     filings_2, fundamentals_2 = _build_stubs_run_two()

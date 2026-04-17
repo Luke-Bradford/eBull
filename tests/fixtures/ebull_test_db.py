@@ -49,6 +49,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "external_identifiers",
     "external_data_watermarks",
     "instruments",
+    "job_runs",
+    "financial_periods_raw",
+    "financial_periods",
 )
 
 

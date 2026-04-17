@@ -76,7 +76,9 @@ def sample_fact(accession: str) -> XbrlFact:
         period_start=date(2026, 1, 1),
         period_end=date(2026, 3, 31),
         val=Decimal("90000000000"),
-        frame=None,
+        # Frame must be set for duration facts; normalizer filters out
+        # ``frame IS NULL`` duration rows as YTD cumulative.
+        frame="CY2026Q1",
         accession_number=accession,
         form_type="10-Q",
         filed_date=date(2026, 4, 15),
