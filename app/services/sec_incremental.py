@@ -484,8 +484,8 @@ def execute_refresh(
 
     try:
         # Seeds + refreshes share one per-CIK body. _run_cik_upsert
-        # returns the count of fact rows written (>=0 on success/skip,
-        # -1 on failure).
+        # returns the fact-row count (int >= 0) on success, or None
+        # on skip / failure. Failures additionally append to `failed`.
         for cik in plan.seeds:
             done += 1
             upserted = _run_cik_upsert(
