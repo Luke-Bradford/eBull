@@ -49,6 +49,14 @@ jobs:
         # extra fetch needed — adding one would only shallow the base
         # and risk a missing merge-base on diverged histories.
         run: |
+          set -euo pipefail
+          # Fail loudly if the base ref is unreachable (e.g. deleted
+          # remote branch, unexpected remote name). An empty diff from
+          # a missing ref must not silently classify as "not doc-only".
+          if ! git rev-parse --verify --quiet "origin/${BASE_REF}" >/dev/null; then
+            echo "::error::origin/${BASE_REF} not found — cannot classify PR; failing to avoid misclassification"
+            exit 1
+          fi
           files=$(git diff --name-only "origin/${BASE_REF}...HEAD")
           if [ -z "$files" ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
