@@ -32,12 +32,14 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import anthropic
 import psycopg
+from psycopg import sql as psql
 from psycopg.types.json import Jsonb
 
 logger = logging.getLogger(__name__)
@@ -48,7 +50,14 @@ logger = logging.getLogger(__name__)
 
 ThesisType = Literal["compounder", "value", "turnaround", "speculative"]
 Stance = Literal["buy", "hold", "watch", "avoid"]
-StaleReason = Literal["no_thesis", "stale", "missing_frequency"]
+StaleReason = Literal[
+    "no_thesis",
+    "stale",
+    "missing_frequency",
+    "event_new_10k",
+    "event_new_10q",
+    "event_new_8k",
+]
 
 _VALID_THESIS_TYPES: frozenset[str] = frozenset({"compounder", "value", "turnaround", "speculative"})
 _VALID_STANCES: frozenset[str] = frozenset({"buy", "hold", "watch", "avoid"})
@@ -142,34 +151,103 @@ def _to_float(val: object) -> float | None:
 
 def find_stale_instruments(
     conn: psycopg.Connection[Any],
-    tier: int = 1,
+    tier: int | None = 1,
+    *,
+    instrument_ids: Sequence[int] | None = None,
 ) -> list[StaleInstrument]:
     """
-    Return instruments whose most recent thesis is absent or older than
-    their coverage.review_frequency allows.
+    Return instruments whose most recent thesis is absent, older than
+    their coverage.review_frequency allows, or superseded by a new
+    10-K / 10-Q / 8-K filing (#273 event-driven trigger).
 
-    Stale rules (evaluated in order):
+    Stale rules (evaluated in order per instrument):
       1. No thesis row exists → stale (reason: "no_thesis")
       2. review_frequency missing / unrecognised → stale (reason: "missing_frequency")
-      3. now >= latest_thesis.created_at + interval(review_frequency) → stale (reason: "stale")
+      3. filing_events row newer than latest thesis, filing_type in
+         ('10-K', '10-K/A', '10-Q', '10-Q/A', '8-K', '8-K/A') → stale
+         (reason: "event_new_{10k,10q,8k}")
+      4. now >= latest_thesis.created_at + interval(review_frequency) → stale (reason: "stale")
+
+    Every returned instrument must have ``coverage.filings_status =
+    'analysable'`` (#268 Chunk J gate). Non-analysable instruments are
+    silently excluded — thesis generation on them is wasted Claude
+    spend.
+
+    Parameters
+    ----------
+    tier
+        Coverage tier filter. Pass ``None`` to bypass tier filtering
+        entirely — typically used by the cascade (#276) in
+        combination with ``instrument_ids`` to scope to a specific
+        subset across any tier.
+    instrument_ids
+        When provided, restrict the scan to these instruments. Used by
+        the cascade to check "did the CIKs that just had filings need
+        a thesis refresh". Does not bypass the filings_status gate.
     """
-    rows = conn.execute(
-        """
+    params: dict[str, Any] = {}
+    where_clauses = [
+        "i.is_tradable = TRUE",
+        "c.filings_status = 'analysable'",
+    ]
+    if tier is not None:
+        where_clauses.append("c.coverage_tier = %(tier)s")
+        params["tier"] = tier
+    if instrument_ids is not None:
+        where_clauses.append("i.instrument_id = ANY(%(ids)s)")
+        params["ids"] = list(instrument_ids)
+
+    # Build WHERE via structural psql.SQL composition (each clause is
+    # a literal fragment from the list above — no user input channel).
+    # Avoids ad-hoc string concatenation so a future caller that adds
+    # a user-derived clause cannot regress into injection.
+    where_block = psql.SQL(" AND ").join(
+        psql.SQL(clause)  # pyright: ignore[reportArgumentType]
+        for clause in where_clauses
+    )
+
+    # Single LATERAL subquery drives both the timestamp AND the form
+    # type from the SAME row so they can never disagree on same-second
+    # ties. MAX-aggregate + correlated-subquery would tiebreak
+    # independently and could report "new 10-K" while the actual
+    # newest row is an 8-K (audit-trail lie). LATERAL scope + explicit
+    # ORDER BY created_at DESC, filing_event_id DESC resolves ties
+    # deterministically.
+    query = (
+        psql.SQL(
+            """
         SELECT
             i.instrument_id,
             i.symbol,
             c.review_frequency,
-            MAX(t.created_at) AS latest_thesis_at
+            MAX(t.created_at)                        AS latest_thesis_at,
+            le.created_at                            AS latest_event_created_at,
+            le.filing_type                           AS latest_event_filing_type
         FROM instruments i
         JOIN coverage c ON c.instrument_id = i.instrument_id
         LEFT JOIN theses t ON t.instrument_id = i.instrument_id
-        WHERE i.is_tradable = TRUE
-          AND c.coverage_tier = %(tier)s
-        GROUP BY i.instrument_id, i.symbol, c.review_frequency
+        LEFT JOIN LATERAL (
+            SELECT fe.created_at, fe.filing_type
+            FROM filing_events fe
+            WHERE fe.instrument_id = i.instrument_id
+              AND fe.filing_type IN (
+                  '10-K','10-K/A','10-Q','10-Q/A','8-K','8-K/A'
+              )
+            ORDER BY fe.created_at DESC, fe.filing_event_id DESC
+            LIMIT 1
+        ) le ON TRUE
+        WHERE """
+        )
+        + where_block
+        + psql.SQL(
+            """
+        GROUP BY i.instrument_id, i.symbol, c.review_frequency,
+                 le.created_at, le.filing_type
         ORDER BY i.symbol
-        """,
-        {"tier": tier},
-    ).fetchall()
+        """
+        )
+    )
+    rows = conn.execute(query, params).fetchall()
 
     now = _utcnow()
     stale: list[StaleInstrument] = []
@@ -179,6 +257,8 @@ def find_stale_instruments(
         symbol: str = row[1]
         review_frequency: str | None = row[2]
         latest_thesis_at: datetime | None = row[3]
+        latest_event_created_at: datetime | None = row[4]
+        latest_event_filing_type: str | None = row[5]
 
         if latest_thesis_at is None:
             stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="no_thesis"))
@@ -188,11 +268,38 @@ def find_stale_instruments(
             stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="missing_frequency"))
             continue
 
+        # Event-driven refresh: any qualifying filing INGESTED
+        # (``filing_events.created_at``) after the thesis was generated
+        # triggers a fresh run regardless of the time-based cadence
+        # window. Timestamp comparison (not date) so same-day
+        # post-thesis filings still fire. Using created_at instead of
+        # filing_date also catches backfilled filings whose reported
+        # filing_date predates the thesis — the thesis couldn't have
+        # seen them, so the refresh is warranted.
+        if (
+            latest_event_created_at is not None
+            and latest_event_filing_type is not None
+            and latest_event_created_at > latest_thesis_at
+        ):
+            reason = _event_reason_for_form(latest_event_filing_type)
+            stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason=reason))
+            continue
+
         threshold = latest_thesis_at + timedelta(days=_REVIEW_FREQUENCY_DAYS[review_frequency])
         if now >= threshold:
             stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="stale"))
 
     return stale
+
+
+def _event_reason_for_form(form_type: str) -> StaleReason:
+    """Map a filing_type to its corresponding event_* StaleReason."""
+    base = form_type.split("/", 1)[0]  # strip /A suffix
+    if base == "10-K":
+        return "event_new_10k"
+    if base == "10-Q":
+        return "event_new_10q"
+    return "event_new_8k"  # 8-K, 8-K/A
 
 
 # ---------------------------------------------------------------------------

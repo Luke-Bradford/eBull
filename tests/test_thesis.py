@@ -75,9 +75,13 @@ def _make_conn(
     """
     conn = MagicMock()
 
-    def execute_side_effect(sql: str, params: dict | None = None):
+    def execute_side_effect(sql, params: dict | None = None):  # type: ignore[no-untyped-def]
+        # sql may be a str OR a psycopg.sql.SQL/Composed object.
+        # Normalise via str() so substring-based branch matching still
+        # works regardless of which shape the service uses.
         cursor = MagicMock()
-        sql_strip = " ".join(sql.split()).lower()
+        sql_str = sql if isinstance(sql, str) else str(sql)
+        sql_strip = " ".join(sql_str.split()).lower()
 
         if "insert into theses" in sql_strip:
             # Branch priority note: this check must come before any branch that
@@ -146,7 +150,9 @@ class TestToFloat:
 
 class TestFindStaleInstruments:
     def test_no_thesis_is_stale(self) -> None:
-        rows = [(1, "AAPL", "weekly", None)]
+        # (instrument_id, symbol, review_frequency, latest_thesis_at,
+        #  latest_event_filing_date, latest_event_filing_type)
+        rows = [(1, "AAPL", "weekly", None, None, None)]
         conn = _make_conn(stale_rows=rows)
         result = find_stale_instruments(conn, tier=1)
         assert len(result) == 1
@@ -154,14 +160,14 @@ class TestFindStaleInstruments:
         assert result[0].symbol == "AAPL"
 
     def test_unknown_frequency_is_stale(self) -> None:
-        rows = [(1, "AAPL", "biannual", _NOW - timedelta(days=1))]
+        rows = [(1, "AAPL", "biannual", _NOW - timedelta(days=1), None, None)]
         conn = _make_conn(stale_rows=rows)
         result = find_stale_instruments(conn, tier=1)
         assert len(result) == 1
         assert result[0].reason == "missing_frequency"
 
     def test_null_frequency_is_stale(self) -> None:
-        rows = [(1, "AAPL", None, _NOW - timedelta(days=1))]
+        rows = [(1, "AAPL", None, _NOW - timedelta(days=1), None, None)]
         conn = _make_conn(stale_rows=rows)
         result = find_stale_instruments(conn, tier=1)
         assert len(result) == 1
@@ -169,7 +175,7 @@ class TestFindStaleInstruments:
 
     def test_past_weekly_threshold_is_stale(self) -> None:
         # thesis created 8 days ago, weekly frequency → stale
-        rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=8))]
+        rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=8), None, None)]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
@@ -178,7 +184,7 @@ class TestFindStaleInstruments:
 
     def test_within_weekly_threshold_is_fresh(self) -> None:
         # thesis created 3 days ago, weekly frequency → fresh
-        rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=3))]
+        rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=3), None, None)]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
@@ -186,7 +192,7 @@ class TestFindStaleInstruments:
 
     def test_daily_threshold(self) -> None:
         # thesis created 25 hours ago, daily frequency → stale
-        rows = [(1, "MSFT", "daily", _NOW - timedelta(hours=25))]
+        rows = [(1, "MSFT", "daily", _NOW - timedelta(hours=25), None, None)]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
@@ -195,7 +201,7 @@ class TestFindStaleInstruments:
 
     def test_monthly_threshold(self) -> None:
         # thesis created 31 days ago, monthly frequency → stale
-        rows = [(1, "TSLA", "monthly", _NOW - timedelta(days=31))]
+        rows = [(1, "TSLA", "monthly", _NOW - timedelta(days=31), None, None)]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
@@ -203,9 +209,9 @@ class TestFindStaleInstruments:
 
     def test_multiple_instruments_mixed(self) -> None:
         rows = [
-            (1, "AAPL", "weekly", _NOW - timedelta(days=3)),  # fresh
-            (2, "MSFT", "weekly", _NOW - timedelta(days=8)),  # stale
-            (3, "GOOG", "weekly", None),  # no thesis
+            (1, "AAPL", "weekly", _NOW - timedelta(days=3), None, None),  # fresh
+            (2, "MSFT", "weekly", _NOW - timedelta(days=8), None, None),  # stale
+            (3, "GOOG", "weekly", None, None, None),  # no thesis
         ]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
@@ -217,7 +223,7 @@ class TestFindStaleInstruments:
 
     def test_exactly_at_threshold_is_stale(self) -> None:
         # now == created_at + 7 days exactly → stale (>= boundary)
-        rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=7))]
+        rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=7), None, None)]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
