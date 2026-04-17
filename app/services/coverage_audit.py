@@ -324,7 +324,7 @@ def audit_instrument(conn: psycopg.Connection[Any], instrument_id: int) -> str:
 
         status = _classify(agg, has_sec_cik)
 
-        conn.execute(
+        result = conn.execute(
             """
             UPDATE coverage
             SET filings_status = %s,
@@ -333,5 +333,16 @@ def audit_instrument(conn: psycopg.Connection[Any], instrument_id: int) -> str:
             """,
             (status, instrument_id),
         )
+        if result.rowcount == 0:
+            # No coverage row for this instrument. Post-#292 this
+            # should never happen — universe sync + the weekly backfill
+            # together guarantee coverage rows for every tradable
+            # instrument. Raise loudly rather than return a status
+            # string that was never persisted.
+            raise RuntimeError(
+                f"audit_instrument: no coverage row for instrument_id={instrument_id}; "
+                f"classifier returned {status!r} but UPDATE matched zero rows. "
+                f"Check coverage bootstrap (#292) + universe sync wiring."
+            )
 
     return status

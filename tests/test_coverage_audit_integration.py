@@ -86,10 +86,13 @@ def test_analysable_us_issuer_with_full_history(
         filing_type="10-K",
         accession="0000320193-25-000001",
     )
+    # Second 10-K at days=700: well inside the 3-year window
+    # (1095 days) with ~12 months of safety margin so the test
+    # doesn't become a calendar-drift time-bomb a year from now.
     _seed_filing(
         ebull_test_conn,
         instrument_id=1,
-        filing_date=today - timedelta(days=765),
+        filing_date=today - timedelta(days=700),
         filing_type="10-K",
         accession="0000320193-24-000001",
     )
@@ -336,3 +339,19 @@ def test_null_anomaly_detected(
     summary = audit_all_instruments(ebull_test_conn)
 
     assert summary.null_anomalies >= 1
+
+
+def test_audit_instrument_raises_on_missing_coverage_row(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Single-instrument audit must NOT silently succeed when the
+    coverage row is missing (a Chunk B regression). Raising loudly
+    beats returning a status string that was never persisted."""
+    # Instrument exists + tradable but NO coverage row.
+    ebull_test_conn.execute(
+        "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) VALUES (42, 'NOCOV', 'NOCOV', TRUE)"
+    )
+    ebull_test_conn.commit()
+
+    with pytest.raises(RuntimeError, match="no coverage row"):
+        audit_instrument(ebull_test_conn, instrument_id=42)
