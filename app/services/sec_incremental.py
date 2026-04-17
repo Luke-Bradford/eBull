@@ -596,6 +596,15 @@ def execute_refresh(
         # Seeds + refreshes share one per-CIK body. _run_cik_upsert
         # returns the fact-row count (int >= 0) on success, or None
         # on skip / failure. Failures additionally append to `failed`.
+        #
+        # Seeds deliberately do NOT pass ``new_filings`` even if the
+        # CIK has entries in ``plan.new_filings_by_cik`` — seeds need
+        # full historical backfill (#268 Chunk E), not just this
+        # cycle's master-index hits. Writing only this week's filings
+        # for a seed would give downstream event triggers a misleading
+        # signal ("look, a filing landed") when the instrument still
+        # lacks most of its history. Chunk E owns the seed-time
+        # filing_events population.
         for cik in plan.seeds:
             done += 1
             upserted = _run_cik_upsert(
