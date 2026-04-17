@@ -1938,53 +1938,85 @@ def fx_rates_refresh() -> None:
 
     1. **Frankfurter (primary FX):** Fetch ECB reference rates for all
        supported display currencies. No API key, no coverage prerequisite.
-       Runs unconditionally.
+       Conditional ETag (#275): sends If-None-Match against the last
+       persisted ETag. 304 responses are no-ops (ECB only publishes
+       once per working day ~16:00 CET, so >95% of 5-min polls are 304).
 
     2. **eToro quotes (secondary):** Batch-fetch quotes for covered Tier 1/2
        instruments. Extracts eToro-specific conversion rates as a supplement,
        and upserts quotes for hourly freshness. Skips gracefully if eToro
        credentials are missing or the rates endpoint fails.
 
-    Runs hourly at :00.
+    Runs hourly at :00 (invoked by orchestrator_high_frequency_sync).
     """
-    from app.providers.implementations.frankfurter import fetch_latest_rates
+    from app.providers.implementations.frankfurter import fetch_latest_rates_conditional
     from app.services.fx import upsert_live_fx_rate
     from app.services.market_data import compute_spread_pct
     from app.services.runtime_config import SUPPORTED_CURRENCIES
+
+    FX_SOURCE = "frankfurter.latest"
+    FX_WATERMARK_KEY = "global"
 
     with _tracked_job(JOB_FX_RATES_REFRESH) as tracker:
         fx_rows_written = 0
         quotes_updated = 0
 
-        # --- Phase 1: Frankfurter ECB rates (always runs) ---
+        # --- Phase 1: Frankfurter ECB rates (conditional GET) ---
         # Fetch USD → every other supported currency.
         targets = sorted(c for c in SUPPORTED_CURRENCIES if c != "USD")
         try:
-            ecb_rates, ecb_date = fetch_latest_rates("USD", targets)
-            # Use the ECB publication date for quoted_at so freshness
-            # checks reflect when the rate was actually set, not when
-            # we fetched it (matters on weekends/holidays).
-            if ecb_date is not None:
-                ecb_quoted_at = datetime.fromisoformat(ecb_date).replace(tzinfo=UTC)
-            else:
-                ecb_quoted_at = datetime.now(UTC)
             with psycopg.connect(settings.database_url) as conn:
-                with conn.transaction():
-                    for (from_ccy, to_ccy), rate in ecb_rates.items():
-                        upsert_live_fx_rate(
+                prior = get_watermark(conn, FX_SOURCE, FX_WATERMARK_KEY)
+                if_none_match = prior.watermark if (prior and prior.watermark) else None
+
+            result = fetch_latest_rates_conditional("USD", targets, if_none_match=if_none_match)
+
+            if result is None:
+                # 304 — ECB hasn't published a new rate since last fetch.
+                logger.info("fx_rates_refresh: Frankfurter 304 Not Modified, skipping upsert")
+            else:
+                # Use the ECB publication date for quoted_at so freshness
+                # checks reflect when the rate was actually set, not when
+                # we fetched it (matters on weekends/holidays).
+                if result.ecb_date is not None:
+                    ecb_quoted_at = datetime.fromisoformat(result.ecb_date).replace(tzinfo=UTC)
+                else:
+                    ecb_quoted_at = datetime.now(UTC)
+                with psycopg.connect(settings.database_url) as conn:
+                    # Upsert + watermark advance inside one transaction so
+                    # a crash between them can't leave the watermark ahead
+                    # of the data (next run would skip unfinished work).
+                    with conn.transaction():
+                        for (from_ccy, to_ccy), rate in result.rates.items():
+                            upsert_live_fx_rate(
+                                conn,
+                                from_currency=from_ccy,
+                                to_currency=to_ccy,
+                                rate=rate,
+                                quoted_at=ecb_quoted_at,
+                            )
+                            fx_rows_written += 1
+                        # Always advance the watermark on 200 — prefer ETag
+                        # (what Frankfurter's server actually validates),
+                        # fall back to the ecb_date when ETag is absent
+                        # (content-based fingerprint: next run comparing
+                        # result.ecb_date against prior.watermark still
+                        # detects "same publication"). An empty string is
+                        # the last-ditch sentinel meaning "no validator
+                        # available" — next run's truthy check skips
+                        # If-None-Match altogether.
+                        set_watermark(
                             conn,
-                            from_currency=from_ccy,
-                            to_currency=to_ccy,
-                            rate=rate,
-                            quoted_at=ecb_quoted_at,
+                            source=FX_SOURCE,
+                            key=FX_WATERMARK_KEY,
+                            watermark=result.etag or result.ecb_date or "",
                         )
-                        fx_rows_written += 1
-                conn.commit()
-            logger.info(
-                "fx_rates_refresh: Frankfurter ECB rates written: %d pairs (date=%s)",
-                fx_rows_written,
-                ecb_date,
-            )
+                logger.info(
+                    "fx_rates_refresh: Frankfurter ECB rates written: %d pairs (date=%s, etag=%s)",
+                    fx_rows_written,
+                    result.ecb_date,
+                    result.etag,
+                )
         except Exception:
             logger.warning("fx_rates_refresh: Frankfurter fetch failed, continuing with eToro fallback", exc_info=True)
 
