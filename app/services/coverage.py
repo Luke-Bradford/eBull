@@ -746,3 +746,57 @@ def seed_coverage(
         seeded = result.rowcount
         logger.info("seed_coverage: seeded %d instruments at Tier 3", seeded)
         return SeedResult(seeded=seeded, already_populated=False)
+
+
+@dataclass(frozen=True)
+class BootstrapResult:
+    """Outcome of ``bootstrap_missing_coverage_rows``."""
+
+    bootstrapped: int
+
+
+def bootstrap_missing_coverage_rows(
+    conn: psycopg.Connection[Any],
+) -> BootstrapResult:
+    """Insert Tier 3 coverage rows for tradable instruments that lack one.
+
+    Unlike ``seed_coverage`` which is a first-run-only bootstrap (no-ops
+    if the table is non-empty), this function targets the post-bootstrap
+    gap: newly-added tradable instruments that joined the universe
+    after the initial seed. It performs a set-difference insert keyed
+    on ``NOT EXISTS`` so existing rows are untouched and no tier is
+    ever clobbered.
+
+    Called from ``nightly_universe_sync`` after ``seed_coverage`` so
+    every tradable instrument has a coverage row going into the
+    downstream audit / thesis / scoring passes.
+
+    Opens its own ``conn.transaction()`` (savepoint when nested) so
+    the INSERT is atomic. ``ON CONFLICT DO NOTHING`` is defence-in-
+    depth; the ``NOT EXISTS`` predicate already guarantees no
+    conflict on non-concurrent callers.
+    """
+    with conn.transaction():
+        result = conn.execute(
+            """
+            INSERT INTO coverage (instrument_id, coverage_tier)
+            SELECT i.instrument_id, 3
+            FROM instruments i
+            WHERE i.is_tradable = TRUE
+              AND NOT EXISTS (
+                  SELECT 1 FROM coverage c WHERE c.instrument_id = i.instrument_id
+              )
+            ON CONFLICT DO NOTHING
+            """
+        )
+        if result.rowcount == -1:
+            raise RuntimeError(
+                "bootstrap_missing_coverage_rows INSERT INTO coverage: "
+                "server did not report a command tag (rowcount=-1)"
+            )
+        bootstrapped = result.rowcount
+        logger.info(
+            "bootstrap_missing_coverage_rows: inserted %d missing coverage rows at Tier 3",
+            bootstrapped,
+        )
+        return BootstrapResult(bootstrapped=bootstrapped)
