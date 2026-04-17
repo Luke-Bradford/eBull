@@ -1,0 +1,11 @@
+Description:           Master Index of EDGAR Dissemination Feed
+Last Data Received:    April 15, 2026
+Comments:              webmaster@sec.gov
+Anonymous FTP:         ftp://ftp.sec.gov/edgar/
+
+CIK|Company Name|Form Type|Date Filed|Filename
+--------------------------------------------------------------------------------
+320193|APPLE INC|10-Q|2026-04-15|edgar/data/320193/0000320193-26-000042.txt
+789019|MICROSOFT CORP|8-K|2026-04-15|edgar/data/789019/0000789019-26-000017.txt
+1045810|NVIDIA CORP|10-K|2026-04-15|edgar/data/1045810/0001045810-26-000003.txt
+0000999999|UNUSUAL ZEROPAD INC|4|2026-04-15|edgar/data/999999/0000999999-26-000001.txt

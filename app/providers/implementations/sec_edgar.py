@@ -82,6 +82,74 @@ class CikMappingResult:
     last_modified: str | None
 
 
+@dataclass(frozen=True)
+class MasterIndexEntry:
+    """One row from SEC's daily master-index file.
+
+    - ``cik`` — 10-digit zero-padded CIK string.
+    - ``accession_number`` — canonical dashed form like
+      ``0000320193-26-000042``, extracted from ``Filename``.
+    """
+
+    cik: str
+    company_name: str
+    form_type: str
+    date_filed: str
+    accession_number: str
+
+
+def parse_master_index(body: bytes) -> list[MasterIndexEntry]:
+    """Parse SEC daily master-index bytes into entries.
+
+    Format: header lines, a ``CIK|...|Filename`` column row, a dashed
+    separator line, then pipe-delimited data rows. Malformed rows are
+    skipped silently — the provider contract is best-effort parsing.
+    """
+    entries: list[MasterIndexEntry] = []
+    text = body.decode("utf-8", errors="replace")
+    in_data = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Data rows start after a line of dashes
+        if set(line) == {"-"}:
+            in_data = True
+            continue
+        if not in_data:
+            continue
+        parts = line.split("|")
+        if len(parts) != 5:
+            continue
+        cik_raw, company, form, filed, filename = parts
+        try:
+            cik = _zero_pad_cik(cik_raw.strip())
+        except ValueError:
+            continue
+        # Filename: edgar/data/<cik>/<accession-no-dashes>.txt
+        stem = filename.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        if len(stem) != 18 or "-" in stem:
+            # Canonical accession format is 18 chars with 2 dashes
+            # (e.g. 0000320193-26-000042). Reconstruct if the
+            # filename supplies it without dashes.
+            digits_only = stem.replace("-", "")
+            if len(digits_only) != 18 or not digits_only.isdigit():
+                continue
+            accession = f"{digits_only[:10]}-{digits_only[10:12]}-{digits_only[12:]}"
+        else:
+            accession = stem
+        entries.append(
+            MasterIndexEntry(
+                cik=cik,
+                company_name=company.strip(),
+                form_type=form.strip(),
+                date_filed=filed.strip(),
+                accession_number=accession,
+            )
+        )
+    return entries
+
+
 class SecFilingsProvider(FilingsProvider):
     """
     Fetches filing metadata from SEC EDGAR.
