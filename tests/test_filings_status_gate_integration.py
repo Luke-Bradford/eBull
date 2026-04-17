@@ -263,3 +263,21 @@ def test_scores_list_api_excludes_non_analysable(
 
     ids = [int(r[0]) for r in rows]
     assert ids == [1]
+
+
+def test_scores_api_source_contains_filings_status_gate() -> None:
+    """Closes the PR-review gap flagged on the locally-written query
+    in test_scores_list_api_excludes_non_analysable: assert directly
+    that the production ``app/api/scores.py`` module source contains
+    both the LEFT JOIN coverage c clause AND the filings_status gate
+    so a future refactor that drops one without the other fails
+    loudly at test-collection time rather than drifting silently."""
+    from pathlib import Path
+
+    source = Path("app/api/scores.py").read_text(encoding="utf-8")
+    assert "LEFT JOIN coverage c USING (instrument_id)" in source, (
+        "scores.py list_rankings base query must JOIN coverage on alias 'c' so the filings_status WHERE clause resolves"
+    )
+    assert "\"c.filings_status = 'analysable'\"" in source, (
+        "scores.py list_rankings where_clauses must include the filings_status gate literal for #268 Chunk J"
+    )
