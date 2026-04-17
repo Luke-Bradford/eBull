@@ -92,6 +92,14 @@ class RefreshPlan:
     submissions_only_advances: list[tuple[str, str]] = field(default_factory=list)
     pending_master_index_writes: list[tuple[str, str, str]] = field(default_factory=list)
     ciks_by_day: dict[str, list[str]] = field(default_factory=dict)
+    # CIKs skipped during planning itself (fetch_submissions returned None
+    # or filings.recent was empty). These never make it to
+    # seeds/refreshes/submissions_only_advances, so the executor's
+    # ``failed`` list does not capture them — but their master-index
+    # day must still withhold. Executor unions this set into its
+    # commit-gate so planner-phase transient skips block the watermark
+    # advance exactly like executor-phase failures do.
+    failed_plan_ciks: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -215,6 +223,7 @@ def plan_refresh(
     seeds: list[str] = []
     refreshes: list[str] = []
     submissions_only: list[tuple[str, str]] = []
+    failed_plan_ciks: list[str] = []
 
     covered_set = set(covered)
     # Drop hits outside the cohort before the per-CIK loop so we never
@@ -239,19 +248,26 @@ def plan_refresh(
 
         submissions = provider.fetch_submissions(cik)
         if submissions is None:
+            # Transient planner-phase skip — feed into failed_plan_ciks
+            # so the executor's commit-gate withholds this day's
+            # master-index watermark. Without this, the day would
+            # commit, the next run would 304, and this CIK would be
+            # permanently skipped.
             logger.warning(
                 "plan_refresh: fetch_submissions returned None for cik=%s "
-                "despite master-index hit — watermark left stale, will retry "
-                "when CIK appears in a future master-index window",
+                "despite master-index hit — withholding master-index watermark",
                 cik,
             )
+            failed_plan_ciks.append(cik)
             continue
         top_accession = _top_accession_from_submissions(submissions)
         if top_accession is None:
             logger.warning(
-                "plan_refresh: submissions.json for cik=%s has empty filings.recent despite master-index hit",
+                "plan_refresh: submissions.json for cik=%s has empty filings.recent "
+                "despite master-index hit — withholding master-index watermark",
                 cik,
             )
+            failed_plan_ciks.append(cik)
             continue
         if top_accession == wm.watermark:
             # Amendment or re-listing of a filing we already have.
@@ -269,6 +285,7 @@ def plan_refresh(
         submissions_only_advances=sorted(submissions_only),
         pending_master_index_writes=pending_master_index_writes,
         ciks_by_day=ciks_by_day_filtered,
+        failed_plan_ciks=sorted(failed_plan_ciks),
     )
 
 
@@ -513,7 +530,9 @@ def execute_refresh(
         # watermark un-advanced so the next run re-fetches that day's
         # master-index on 200, re-parses, and re-plans the failed CIK
         # instead of 304-skipping it forever.
-        failed_ciks = {cik for cik, _ in failed}
+        # Union executor-phase failures with planner-phase skips so
+        # both sources withhold the master-index watermark for their day.
+        failed_ciks = {cik for cik, _ in failed} | set(plan.failed_plan_ciks)
         for iso_date, last_modified, body_hash in plan.pending_master_index_writes:
             day_ciks = set(plan.ciks_by_day.get(iso_date, []))
             if day_ciks & failed_ciks:

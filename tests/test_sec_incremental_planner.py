@@ -275,6 +275,37 @@ def test_plan_refresh_returns_sorted_lists(
     assert plan.seeds == ["0000320193", "0000789019", "0001045810"]
 
 
+def test_planner_submissions_skip_populates_failed_plan_ciks(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Regression guard: when plan_refresh's own fetch_submissions
+    returns None for a master-index-hit CIK, the CIK must land in
+    plan.failed_plan_ciks so the executor's commit-gate withholds
+    the master-index watermark for that day."""
+    _seed_us_cohort(ebull_test_conn, ["0000320193"])
+    with ebull_test_conn.transaction():
+        set_watermark(
+            ebull_test_conn,
+            source="sec.submissions",
+            key="0000320193",
+            watermark="0000320193-25-000108",
+        )
+    master = FIXTURE_MASTER.read_bytes()
+    # Master-index hit for AAPL but submissions_by_cik empty → None.
+    provider = StubFilingsProvider(
+        master_bodies={d: master if d == date(2026, 4, 15) else None for d in _window(date(2026, 4, 15))},
+        submissions_by_cik={},  # fetch_submissions returns None
+    )
+    plan = plan_refresh(
+        ebull_test_conn,
+        cast(SecFilingsProvider, provider),
+        today=date(2026, 4, 15),
+    )
+    assert "0000320193" in plan.failed_plan_ciks
+    assert plan.refreshes == []
+    assert plan.submissions_only_advances == []
+
+
 def test_body_hash_match_skips_parse(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:

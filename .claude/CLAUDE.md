@@ -119,13 +119,14 @@ Any rebuttals on latest review?
   ├─ No  → all fixed → merge when green + APPROVE on latest commit
   └─ Yes → Codex review (checkpoint 3: before rebuttal-only merge)
             ↓
-            Codex confirms rebuttals sound? → merge
+            Codex + author both agree rebuttals sound + nothing else to do → merge
             Codex finds new issues? → fix, re-push, restart loop
-  ↓
-Ask the user for final approval only AFTER Codex has signed off on rebuttals.
+            Codex agrees with bot against author? → fix, re-push, restart loop
 ```
 
-Never ask the user to approve a merge that Codex has not yet second-opinioned on the rebuttal round.
+Rule: if Codex and the author both agree the remaining bot findings are unfounded rebuttals and there is nothing else to action, that's sufficient to merge — no user rubber-stamp required. Only escalate to the user when there is a genuine judgment call Codex cannot resolve (architecture trade-off, scope decision, settled-decision change).
+
+Never merge on rebuttal-only rounds without Codex sign-off. Never cite "the bot is wrong" as sole justification — Codex must independently agree.
 
 ## Review comment resolution contract
 
