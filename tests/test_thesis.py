@@ -494,9 +494,7 @@ class TestGenerateThesis:
         # Claude call. A pre-commit Claude would land at call_log[0].
         assert "commit" in call_log, "expected conn.commit() to be called"
         assert "claude" in call_log, "expected client.messages.create to be called"
-        assert call_log[0] == "commit", (
-            f"commit must be the first event; got order: {call_log}"
-        )
+        assert call_log[0] == "commit", f"commit must be the first event; got order: {call_log}"
         # Guard every Claude call, not just the first — a regression
         # that inserted _call_critic before the commit would still
         # satisfy an index-based check on the writer call alone.
