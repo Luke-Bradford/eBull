@@ -88,7 +88,10 @@ class RefreshPlan:
     """
 
     seeds: list[str] = field(default_factory=list)
-    refreshes: list[str] = field(default_factory=list)
+    # refreshes carries (cik, top_accession) so the executor reuses
+    # the accession the planner already fetched — no second
+    # submissions.json request per refresh CIK.
+    refreshes: list[tuple[str, str]] = field(default_factory=list)
     submissions_only_advances: list[tuple[str, str]] = field(default_factory=list)
     pending_master_index_writes: list[tuple[str, str, str]] = field(default_factory=list)
     ciks_by_day: dict[str, list[str]] = field(default_factory=dict)
@@ -221,7 +224,7 @@ def plan_refresh(
         ciks_by_day[iso] = day_ciks
 
     seeds: list[str] = []
-    refreshes: list[str] = []
+    refreshes: list[tuple[str, str]] = []
     submissions_only: list[tuple[str, str]] = []
     failed_plan_ciks: list[str] = []
 
@@ -275,7 +278,7 @@ def plan_refresh(
 
         hit_forms = {e.form_type for e in entries}
         if hit_forms & FUNDAMENTALS_FORMS:
-            refreshes.append(cik)
+            refreshes.append((cik, top_accession))
         else:
             submissions_only.append((cik, top_accession))
 
@@ -326,8 +329,16 @@ def _run_cik_upsert(
     fundamentals_provider: SecFundamentalsProvider,
     run_id: int,
     failed: list[tuple[str, str]],
+    known_top_accession: str | None = None,
 ) -> int | None:
     """Per-CIK seed/refresh body.
+
+    ``known_top_accession`` lets callers pass an accession the planner
+    already fetched — avoids a second ``fetch_submissions`` call on the
+    refresh path (planner fetches to decide refresh vs submissions-only;
+    executor would otherwise re-fetch to read the top accession again).
+    Seeds pass ``None`` because the planner has no prior watermark and
+    doesn't call ``fetch_submissions`` for them.
 
     Returns the number of fact rows upserted on success (``int >= 0``)
     or ``None`` on skip or failure. Failures additionally append
@@ -357,30 +368,37 @@ def _run_cik_upsert(
         # transaction for multi-second windows × hundreds of CIKs.
         conn.commit()
 
-        submissions = filings_provider.fetch_submissions(cik)
-        if submissions is None:
-            # Transient: submissions endpoint unavailable (404 on a CIK
-            # the master-index says filed today — private / de-registered
-            # issuer, or a provider glitch). Record as failure so the
-            # master-index watermark for this day is NOT committed and
-            # the next run re-fetches + re-plans this CIK.
-            logger.warning(
-                "sec_incremental: no submissions.json for cik=%s (private/de-registered?)",
-                cik,
-            )
-            failed.append((cik, "SubmissionsMissing"))
-            return None
-        top_accession = _top_accession_from_submissions(submissions)
-        if top_accession is None:
-            # Transient: submissions.json returned but filings.recent
-            # is empty despite a master-index hit. Same invariant —
-            # withhold the master-index watermark so next run retries.
-            logger.warning(
-                "sec_incremental: submissions.json for cik=%s has empty filings.recent",
-                cik,
-            )
-            failed.append((cik, "EmptyFilingsRecent"))
-            return None
+        # Skip the second fetch_submissions round-trip if the planner
+        # already captured the top accession (refresh / submissions-only
+        # paths). Seeds have no prior watermark, so the planner never
+        # fetched for them — executor still fetches once.
+        if known_top_accession is not None:
+            top_accession: str | None = known_top_accession
+        else:
+            submissions = filings_provider.fetch_submissions(cik)
+            if submissions is None:
+                # Transient: submissions endpoint unavailable (404 on a
+                # CIK the master-index says filed today — private /
+                # de-registered issuer, or a provider glitch). Record as
+                # failure so the master-index watermark for this day is
+                # NOT committed and the next run re-fetches + re-plans.
+                logger.warning(
+                    "sec_incremental: no submissions.json for cik=%s (private/de-registered?)",
+                    cik,
+                )
+                failed.append((cik, "SubmissionsMissing"))
+                return None
+            top_accession = _top_accession_from_submissions(submissions)
+            if top_accession is None:
+                # Transient: submissions.json returned but filings.recent
+                # is empty despite a master-index hit. Same invariant —
+                # withhold the master-index watermark so next run retries.
+                logger.warning(
+                    "sec_incremental: submissions.json for cik=%s has empty filings.recent",
+                    cik,
+                )
+                failed.append((cik, "EmptyFilingsRecent"))
+                return None
 
         facts = fundamentals_provider.extract_facts(symbol, cik)
         facts_upserted = 0
@@ -483,7 +501,7 @@ def execute_refresh(
                 facts_upserted_total += upserted
             report_progress(done, total)
 
-        for cik in plan.refreshes:
+        for cik, top_accession in plan.refreshes:
             done += 1
             upserted = _run_cik_upsert(
                 conn,
@@ -492,6 +510,7 @@ def execute_refresh(
                 fundamentals_provider=fundamentals_provider,
                 run_id=run_id,
                 failed=failed,
+                known_top_accession=top_accession,
             )
             if upserted is not None:
                 refreshed += 1

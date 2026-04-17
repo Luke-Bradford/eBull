@@ -1123,7 +1123,7 @@ def daily_financial_facts() -> None:
                     len(outcome.failed),
                 )
 
-            touched_ciks = list(plan.seeds) + list(plan.refreshes)
+            touched_ciks = list(plan.seeds) + [cik for cik, _ in plan.refreshes]
             if outcome.seeded + outcome.refreshed > 0 and touched_ciks:
                 # Phase 2: normalization for CIKs we actually touched this run.
                 from app.services.financial_normalization import normalize_financial_periods

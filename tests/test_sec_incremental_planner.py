@@ -160,7 +160,7 @@ def test_master_index_hit_with_fundamentals_form_becomes_refresh(
         cast(SecFilingsProvider, provider),
         today=date(2026, 4, 15),
     )
-    assert "0000320193" in plan.refreshes
+    assert ("0000320193", "0000320193-26-000042") in plan.refreshes
     assert plan.seeds == []
     assert plan.submissions_only_advances == []
 

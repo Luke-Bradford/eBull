@@ -180,7 +180,7 @@ def test_refresh_advances_both_watermarks(
         )
     ebull_test_conn.commit()
 
-    plan = RefreshPlan(refreshes=["0000320193"])
+    plan = RefreshPlan(refreshes=[("0000320193", "0000320193-26-000042")])
     filings = StubFilingsProvider(
         submissions_by_cik={"0000320193": _submissions_with_top("0000320193-26-000042")},
     )
@@ -216,7 +216,7 @@ def test_failure_does_not_advance_watermarks(
         )
     ebull_test_conn.commit()
 
-    plan = RefreshPlan(refreshes=["0000320193"])
+    plan = RefreshPlan(refreshes=[("0000320193", "0000320193-26-000042")])
     filings = StubFilingsProvider(
         submissions_by_cik={"0000320193": _submissions_with_top("0000320193-26-000042")},
     )
@@ -366,7 +366,7 @@ def test_failed_cik_withholds_master_index_watermark(
     filings would be skipped forever once master-index was committed."""
     _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000320193")
     plan = RefreshPlan(
-        refreshes=["0000320193"],
+        refreshes=[("0000320193", "0000320193-26-000042")],
         pending_master_index_writes=[
             ("2026-04-15", "Wed, 15 Apr 2026 22:00:00 GMT", "abc123"),
         ],
@@ -394,13 +394,18 @@ def test_failed_cik_withholds_master_index_watermark(
 def test_transient_skip_withholds_master_index_watermark(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    """Regression guard: a CIK that skips because its submissions.json
-    is unavailable (transient provider glitch) must withhold the master-
+    """Regression guard: a seed-path CIK whose submissions.json is
+    unavailable (transient provider glitch) must withhold the master-
     index watermark, same as an exception would. Otherwise next run
-    304-skips the day and the transient failure becomes permanent."""
+    304-skips the day and the transient failure becomes permanent.
+
+    Seeds are the only path that still calls fetch_submissions in the
+    executor; refresh path reuses the accession the planner already
+    captured.
+    """
     _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000320193")
     plan = RefreshPlan(
-        refreshes=["0000320193"],
+        seeds=["0000320193"],
         pending_master_index_writes=[
             ("2026-04-15", "Wed, 15 Apr 2026 22:00:00 GMT", "abc123"),
         ],
