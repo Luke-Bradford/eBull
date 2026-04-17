@@ -493,6 +493,14 @@ def execute_refresh(
             status = "success"
             error_msg = None
         try:
+            # Clear any aborted transaction state left over from a
+            # catastrophic psycopg error before the audit write — an
+            # InFailedSqlTransaction on the next execute would orphan
+            # the run row. Rollback on a clean connection is a no-op.
+            try:
+                conn.rollback()
+            except psycopg.Error:
+                logger.debug("pre-finish rollback suppressed", exc_info=True)
             finish_ingestion_run(
                 conn,
                 run_id=run_id,
