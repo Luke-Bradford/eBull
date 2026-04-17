@@ -323,3 +323,34 @@ def test_submissions_only_advance_skips_companyfacts(
     # No companyfacts watermark should have been written.
     facts_wm = get_watermark(ebull_test_conn, "sec.companyfacts", "0000789019")
     assert facts_wm is None
+
+
+def test_all_failures_mark_run_status_failed(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Audit-trail non-negotiable: start_ingestion_run is always paired
+    with finish_ingestion_run. When every CIK in the plan fails, the
+    run row must be marked status='failed' with an error message — not
+    left in 'running'."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000320193")
+    plan = RefreshPlan(seeds=["0000320193"])
+    filings = StubFilingsProvider(
+        submissions_by_cik={"0000320193": _submissions_with_top("0000320193-26-000042")},
+    )
+    fundamentals = StubFundamentalsProvider(fail_on={"0000320193"})
+
+    outcome = execute_refresh(
+        ebull_test_conn,
+        filings_provider=cast(SecFilingsProvider, filings),
+        fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+        plan=plan,
+    )
+
+    assert outcome.failed == [("0000320193", "RuntimeError")]
+
+    status_row = ebull_test_conn.execute(
+        "SELECT status, error FROM data_ingestion_runs ORDER BY ingestion_run_id DESC LIMIT 1"
+    ).fetchone()
+    assert status_row is not None
+    assert status_row[0] == "failed"
+    assert status_row[1] is not None and "1 CIKs failed" in status_row[1]

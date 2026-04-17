@@ -228,9 +228,19 @@ def plan_refresh(
 
         submissions = provider.fetch_submissions(cik)
         if submissions is None:
+            logger.warning(
+                "plan_refresh: fetch_submissions returned None for cik=%s "
+                "despite master-index hit — watermark left stale, will retry "
+                "when CIK appears in a future master-index window",
+                cik,
+            )
             continue
         top_accession = _top_accession_from_submissions(submissions)
         if top_accession is None:
+            logger.warning(
+                "plan_refresh: submissions.json for cik=%s has empty filings.recent despite master-index hit",
+                cik,
+            )
             continue
         if top_accession == wm.watermark:
             # Amendment or re-listing of a filing we already have.
@@ -402,76 +412,107 @@ def execute_refresh(
     submissions_advanced = 0
     failed: list[tuple[str, str]] = []
     done = 0
+    catastrophic_error: str | None = None
 
-    # Seeds + refreshes share one per-CIK body.
-    for cik in plan.seeds:
-        done += 1
-        if _run_cik_upsert(
-            conn,
-            cik=cik,
-            filings_provider=filings_provider,
-            fundamentals_provider=fundamentals_provider,
-            run_id=run_id,
-            failed=failed,
-        ):
-            seeded += 1
-        report_progress(done, total)
+    try:
+        # Seeds + refreshes share one per-CIK body.
+        for cik in plan.seeds:
+            done += 1
+            if _run_cik_upsert(
+                conn,
+                cik=cik,
+                filings_provider=filings_provider,
+                fundamentals_provider=fundamentals_provider,
+                run_id=run_id,
+                failed=failed,
+            ):
+                seeded += 1
+            report_progress(done, total)
 
-    for cik in plan.refreshes:
-        done += 1
-        if _run_cik_upsert(
-            conn,
-            cik=cik,
-            filings_provider=filings_provider,
-            fundamentals_provider=fundamentals_provider,
-            run_id=run_id,
-            failed=failed,
-        ):
-            refreshed += 1
-        report_progress(done, total)
+        for cik in plan.refreshes:
+            done += 1
+            if _run_cik_upsert(
+                conn,
+                cik=cik,
+                filings_provider=filings_provider,
+                fundamentals_provider=fundamentals_provider,
+                run_id=run_id,
+                failed=failed,
+            ):
+                refreshed += 1
+            report_progress(done, total)
 
-    for cik, accession in plan.submissions_only_advances:
-        done += 1
-        try:
-            with conn.transaction():
-                set_watermark(
-                    conn,
-                    source="sec.submissions",
-                    key=cik,
-                    watermark=accession,
+        for cik, accession in plan.submissions_only_advances:
+            done += 1
+            try:
+                with conn.transaction():
+                    set_watermark(
+                        conn,
+                        source="sec.submissions",
+                        key=cik,
+                        watermark=accession,
+                    )
+                conn.commit()
+                submissions_advanced += 1
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except psycopg.Error:
+                    logger.debug("rollback suppressed after executor exception", exc_info=True)
+                failed.append((cik, type(exc).__name__))
+                logger.exception(
+                    "sec_incremental submissions-only advance failed for cik=%s",
+                    cik,
                 )
+            report_progress(done, total)
+
+        report_progress(done, total, force=True)
+    except Exception as exc:
+        # Non-per-CIK failure escaped (per-CIK exceptions are caught
+        # inside _run_cik_upsert and the submissions-only try block).
+        # Typical triggers: DB connection drop, unhandled programming
+        # error. Record it so the audit trail still has a terminal
+        # status instead of orphaning the run row in 'running'.
+        catastrophic_error = f"{type(exc).__name__}: {exc}"
+        logger.exception("sec_incremental: catastrophic failure in execute_refresh")
+        raise
+    finally:
+        # Always record a terminal status — required by the audit
+        # non-negotiable (settled-decisions.md Auditability).
+        progressed = seeded + refreshed + submissions_advanced
+        if catastrophic_error is not None:
+            status = "failed"
+            error_msg: str | None = catastrophic_error
+        elif failed and progressed == 0:
+            status = "failed"
+            error_msg = f"{len(failed)} CIKs failed"
+        elif failed:
+            status = "partial"
+            error_msg = f"{len(failed)} CIKs failed"
+        else:
+            status = "success"
+            error_msg = None
+        try:
+            finish_ingestion_run(
+                conn,
+                run_id=run_id,
+                status=status,
+                rows_upserted=seeded + refreshed,
+                error=error_msg,
+            )
             conn.commit()
-            submissions_advanced += 1
-        except Exception as exc:
+        except Exception:
+            # Last-ditch: don't mask the original exception already
+            # logged above. Roll back the aborted tx so the next caller
+            # gets a clean session.
             try:
                 conn.rollback()
             except psycopg.Error:
-                logger.debug("rollback suppressed after executor exception", exc_info=True)
-            failed.append((cik, type(exc).__name__))
-            logger.exception(
-                "sec_incremental submissions-only advance failed for cik=%s",
-                cik,
-            )
-        report_progress(done, total)
-
-    report_progress(done, total, force=True)
-
-    progressed = seeded + refreshed + submissions_advanced
-    if failed and progressed == 0:
-        status = "failed"
-    elif failed:
-        status = "partial"
-    else:
-        status = "success"
-
-    finish_ingestion_run(
-        conn,
-        run_id=run_id,
-        status=status,
-        rows_upserted=seeded + refreshed,
-        error=f"{len(failed)} CIKs failed" if failed else None,
-    )
-    conn.commit()
+                logger.debug(
+                    "rollback after finish_ingestion_run failure suppressed",
+                    exc_info=True,
+                )
+            logger.exception("sec_incremental: finish_ingestion_run failed")
 
     return RefreshOutcome(
         seeded=seeded,
