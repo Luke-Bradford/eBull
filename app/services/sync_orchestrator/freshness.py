@@ -109,7 +109,13 @@ def _current_quarter_start(today: date) -> date:
 
 
 def universe_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
-    return _fresh_by_audit(conn, "nightly_universe_sync", timedelta(hours=24))
+    # Weekly cadence (#277). eToro's /instruments endpoint has no delta
+    # filter — we pull the whole list (~15k rows) every refresh. The
+    # universe rarely changes day-to-day (new listings are rare, ticker
+    # changes rarer still), so a daily refresh was write amplification
+    # for no information gain. A 7-day window catches meaningful
+    # changes without re-pulling weekly volumes of identical rows.
+    return _fresh_by_audit(conn, "nightly_universe_sync", timedelta(days=7))
 
 
 def cik_mapping_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:

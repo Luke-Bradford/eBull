@@ -125,7 +125,7 @@ class TestSimpleAuditOnlyPredicates:
     @pytest.mark.parametrize(
         "predicate,job_name,window",
         [
-            (universe_is_fresh, "nightly_universe_sync", timedelta(hours=24)),
+            (universe_is_fresh, "nightly_universe_sync", timedelta(days=7)),
             (cik_mapping_is_fresh, "daily_cik_refresh", timedelta(hours=24)),
             (financial_facts_is_fresh, "daily_financial_facts", timedelta(hours=24)),
             (
