@@ -145,7 +145,11 @@ def test_new_10k_since_thesis_triggers_event_reason(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     """Thesis was fresh by cadence, but a new 10-K landed after it —
-    must surface with reason='event_new_10k'."""
+    must surface with reason='event_new_10k'.
+
+    Pins both timestamps explicitly so a Python/DB clock skew cannot
+    invert the order and produce a silent false-negative empty result.
+    """
     _seed_instrument(ebull_test_conn, instrument_id=1, symbol="AAPL")
     thesis_at = datetime.now(UTC) - timedelta(days=3)  # well within weekly window
     _seed_thesis(ebull_test_conn, instrument_id=1, created_at=thesis_at)
@@ -155,6 +159,7 @@ def test_new_10k_since_thesis_triggers_event_reason(
         filing_date=date.today() - timedelta(days=1),  # newer than thesis
         filing_type="10-K",
         accession="0000320193-26-000001",
+        created_at=datetime.now(UTC),  # explicit: post-thesis ingest
     )
 
     result = find_stale_instruments(ebull_test_conn, tier=1)
