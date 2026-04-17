@@ -577,8 +577,7 @@ def test_submissions_only_path_writes_filing_events(
     assert outcome.submissions_advanced == 1
 
     row = ebull_test_conn.execute(
-        "SELECT filing_type, provider, provider_filing_id "
-        "FROM filing_events WHERE instrument_id = 1"
+        "SELECT filing_type, provider, provider_filing_id FROM filing_events WHERE instrument_id = 1"
     ).fetchone()
     assert row is not None
     assert row[0] == "8-K"
@@ -645,15 +644,12 @@ def test_refresh_path_preserves_existing_primary_document_url(
     )
 
     row = ebull_test_conn.execute(
-        "SELECT primary_document_url FROM filing_events "
-        "WHERE provider_filing_id = '0000320193-26-000042'"
+        "SELECT primary_document_url FROM filing_events WHERE provider_filing_id = '0000320193-26-000042'"
     ).fetchone()
     assert row is not None
     # Original URL preserved — master-index upsert did NOT overwrite
     # with the generic ...-index.htm URL.
-    assert row[0].endswith("aapl-20260330.htm"), (
-        f"master-index upsert downgraded primary_document_url to: {row[0]}"
-    )
+    assert row[0].endswith("aapl-20260330.htm"), f"master-index upsert downgraded primary_document_url to: {row[0]}"
 
 
 def test_seed_path_does_not_write_filing_events(
@@ -678,7 +674,5 @@ def test_seed_path_does_not_write_filing_events(
         plan=plan,
     )
 
-    count = ebull_test_conn.execute(
-        "SELECT COUNT(*) FROM filing_events WHERE instrument_id = 1"
-    ).fetchone()
+    count = ebull_test_conn.execute("SELECT COUNT(*) FROM filing_events WHERE instrument_id = 1").fetchone()
     assert count is not None and count[0] == 0
