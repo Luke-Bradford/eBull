@@ -43,15 +43,6 @@ jobs:
             : > incremental.diff
           fi
 
-      - name: Get PR description
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          gh pr view "$PR_NUMBER" \
-            --json title,body \
-            -q '"# " + .title + "\n\n" + .body' > pr_desc.txt
-
       - name: Get PR comments
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -62,59 +53,41 @@ jobs:
             --jq '[.[] | "### Comment by " + .user.login + " at " + .created_at + "\n" + .body] | join("\n\n---\n\n")' \
             > pr_comments.txt
 
-      - name: Get linked issue
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-        run: |
-          ISSUE_NUM=$(gh pr view "$PR_NUMBER" --json body -q '.body' \
-            | grep -oP '(?<=Closes #|closes #|Fixes #|fixes #|Resolves #|resolves #)\d+' | head -1)
-          if [ -n "$ISSUE_NUM" ]; then
-            gh issue view "$ISSUE_NUM" --repo "$REPO" \
-              --json number,title,body -q '"# Issue #" + (.number | tostring) + ": " + .title + "\n\n" + .body' \
-              > linked_issue.txt 2>/dev/null || echo "(issue not found)" > linked_issue.txt
-          else
-            echo "(no linked issue found in PR body)" > linked_issue.txt
-          fi
-
       - name: Build request body
         run: |
           cat > build_prompt.py << 'PYEOF'
-          import json, os
+          import json
 
           diff = open('pr.diff', encoding='utf-8', errors='replace').read()
           incremental = open('incremental.diff', encoding='utf-8', errors='replace').read()
           flag = open('incremental_flag.txt').read().strip()
-          desc = open('pr_desc.txt').read()
           comments_raw = open('pr_comments.txt').read().strip()
-          issue = open('linked_issue.txt').read().strip()
+
+          has_incremental = flag == "has_incremental=true"
 
           comments_section = (
               "## PR Comment History (previous review rounds and author responses)\n\n"
               + (comments_raw if comments_raw else "(no comments yet)")
           )
 
-          issue_section = "## Linked Issue / Ticket\n\n" + issue
-
-          # Flag file written by shell step — no string-matching heuristic
-          has_incremental = flag == "has_incremental=true"
           incremental_section = ""
           if has_incremental:
               incremental_section = (
                   "## Incremental diff (changes since last push)\n"
-                  "This shows ONLY the code changed in the most recent push. "
-                  "Focus your review here. Use the full diff below for context.\n"
+                  "Focus review here. Use the full diff below for context.\n"
                   "```diff\n" + incremental + "\n```\n\n"
               )
 
           prompt = (
-              "You are a code reviewer for eBull, a Python 3.14/FastAPI investment engine (psycopg v3, PostgreSQL 17, Pydantic v2). "
-              "The code author is Claude Code (an AI agent) — it already knows the stack. Only surface real problems.\n\n"
+              "You are a code reviewer for eBull, a Python 3.14/FastAPI investment engine "
+              "(psycopg v3, PostgreSQL 17, Pydantic v2). The author is Claude Code — it "
+              "already knows the stack. Only surface real problems.\n\n"
+
               "## Python 3.14 syntax notes\n"
-              "- PEP 758: `except A, B:` without parentheses is valid Python 3.14 syntax for catching multiple exceptions. "
-              "This is NOT the old Python 2 `except ExceptionType, variable:` pattern. Do not flag it.\n"
-              "- PEP 649: deferred evaluation of annotations. Forward-reference quotes on return types are unnecessary.\n"
+              "- PEP 758: `except A, B:` without parentheses is valid Python 3.14 syntax "
+              "for catching multiple exceptions. NOT the old Python 2 `except T, var:` pattern.\n"
+              "- PEP 649: deferred evaluation of annotations. Forward-reference quotes on "
+              "return types are unnecessary.\n"
               "- `Generator[X]` is valid — send and return type args default to `None` since 3.13.\n\n"
 
               "## Non-negotiables — flag any violation\n"
@@ -125,54 +98,22 @@ jobs:
               "- Raw API payloads persisted before normalisation\n\n"
 
               "## Review rules\n"
-              "- Trust the PR description for context about code outside the diff\n"
-              "- Do not explain how the code works — the author wrote it\n"
-              "- Do not re-raise issues resolved in the comment history\n"
-              "- Do not flag: unchanged code, intentional removals explained in PR, demo/dry-run safe defaults\n\n"
-
-              "## Two-phase review — analyse privately, then write\n"
-              "Your review has two strictly separate phases. Do not blur them.\n\n"
-              "**Phase 1 — Analysis (private, never shown to the reader).**\n"
-              "Read the diff. Enumerate every candidate issue. For each one, verify it "
-              "against the diff, the PR description, the comment history, and your knowledge "
-              "of the stack. Decide its final severity, or discard it. This is scratch work — "
-              "it never appears in your output. Do this thinking silently before you write a "
-              "single character of the review.\n\n"
-              "**Phase 2 — Write-up (published).**\n"
-              "Only confirmed, surviving findings make it into the review. The published "
-              "review must read as if Phase 1 never happened: no 'I initially thought', no "
-              "'on closer inspection', no 'actually this is fine', no narration of your own "
-              "verification process. Each finding is a single, committed claim. Each severity "
-              "tier contains only issues you are sure about.\n\n"
-              "Severity is a commitment, not a draft. BLOCKING means: 'I have verified in "
-              "Phase 1 that this is wrong and it must be fixed before merge.' If you are not "
-              "sure, it is not BLOCKING. If Phase 1 discarded a finding, it does not appear "
-              "in Phase 2 in any form — not even as a paragraph reasoning it away.\n\n"
-              "**Banned in the published review** — if you would write any of these, the "
-              "finding belonged in Phase 1 scratch work and must be deleted entirely:\n"
-              "- 'Actually, ...' / 'On second thought ...' / 'Wait, ...'\n"
-              "- 'Withdrawing' / 'Retracting' / 'Never mind'\n"
-              "- 'Re-examining' / 'Let me identify the real issues' / 'Looking again'\n"
-              "- 'Not a real issue' / 'Not actually a problem' / 'this is safe'\n"
-              "- 'After inspecting ... this is fine' / 'this is correct'\n"
-              "- Any paragraph that introduces a finding and then concludes it is not one\n"
-              "- Any sentence that contradicts an earlier sentence in the same finding\n"
-              "- Any tier header (e.g. `[BLOCKING]`) followed by prose that walks the reader "
-              "through findings being discarded\n"
-              "The author should never see the inside of your reasoning. They should see a "
-              "clean list of confirmed issues and a verdict. Nothing else.\n\n"
+              "- Do not explain what the code does — the author wrote it\n"
+              "- Do not re-raise issues already resolved in the comment history\n"
+              "- Do not flag unchanged code or intentional removals\n"
+              "- Post only confirmed findings. If a candidate issue turns out not to be "
+              "real, omit it entirely — do not mention it, do not reason about it in "
+              "writing, do not walk the reader through discarding it. Silent discards only.\n\n"
           )
 
           if has_incremental:
               prompt += (
-                  "**Incremental diff included.** Focus on new changes only. "
+                  "**Incremental diff included.** Focus on changes in this push. "
                   "Full diff is context. Do not re-review unchanged code.\n\n"
               )
 
           prompt += (
-              issue_section + "\n\n"
-              + "## PR Description\n\n" + desc + "\n\n"
-              + comments_section + "\n\n"
+              comments_section + "\n\n"
 
               "## Check for\n"
               "Correctness and edge cases, SQL injection / missing parameterisation, "
@@ -180,25 +121,21 @@ jobs:
               "API contract consistency, regressions from removed code.\n\n"
 
               "## Output format\n\n"
-              "**Be terse.** Do all reasoning internally. Only output findings and verdict. "
-              "One sentence per item. No preamble, no analysis narrative, no restating what the code does.\n\n"
-              "**If an issue is not real after analysis, do not include it at all.** This is "
-              "non-negotiable. Do not post a finding and then retract it in the same comment.\n"
-              "Only include a section if it has items. No empty sections.\n\n"
+              "Be terse. Findings only. One sentence per item. No preamble, no narrative.\n"
+              "Omit any section with no items — empty sections are not allowed.\n\n"
               "### [BLOCKING] — must fix before merge\n"
-              "`file:line` — what is wrong (one sentence). Omit section if none.\n\n"
+              "`file:line` — what is wrong (one sentence).\n\n"
               "### [WARNING] — should fix\n"
-              "`file:line` — what is wrong (one sentence). Omit section if none.\n\n"
+              "`file:line` — what is wrong (one sentence).\n\n"
               "### [NITPICK] — optional\n"
-              "`file:line` — suggestion (one sentence). Omit section if none.\n\n"
+              "`file:line` — suggestion (one sentence).\n\n"
               "### [PREVENTION]\n"
               "Only if BLOCKING or WARNING items exist. One line per issue: "
-              "**label**: actionable grep/rule/check the author can add to its pre-push checklist.\n\n"
+              "**label**: actionable grep/rule/check the author can add to a checklist.\n\n"
               "### Verdict\n"
               "**APPROVE**, **REQUEST CHANGES**, or **NEEDS DISCUSSION**. One sentence max.\n\n"
           )
 
-          # Add incremental diff before the full diff when available
           if has_incremental:
               prompt += incremental_section
 
@@ -206,7 +143,7 @@ jobs:
 
           payload = {
               "model": "claude-sonnet-4-6",
-              "max_tokens": 2000,
+              "max_tokens": 1200,
               "messages": [{"role": "user", "content": prompt}]
           }
 
