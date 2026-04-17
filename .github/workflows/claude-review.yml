@@ -44,8 +44,11 @@ jobs:
         shell: bash
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+        # Relies on actions/checkout's fetch-depth: 0 (set above) to
+        # make origin/$BASE_REF available for the three-dot diff. No
+        # extra fetch needed — adding one would only shallow the base
+        # and risk a missing merge-base on diverged histories.
         run: |
-          git fetch --no-tags --depth=1 origin "$BASE_REF" 2>/dev/null || true
           files=$(git diff --name-only "origin/${BASE_REF}...HEAD")
           if [ -z "$files" ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
