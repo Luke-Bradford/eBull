@@ -70,6 +70,7 @@ from app.services.sync_orchestrator.progress import report_progress
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
 from app.services.thesis import find_stale_instruments, generate_thesis
 from app.services.universe import enrich_instrument_currencies, sync_universe
+from app.services.watermarks import get_watermark, set_watermark
 
 logger = logging.getLogger(__name__)
 
@@ -839,23 +840,74 @@ def daily_cik_refresh() -> None:
     Refresh SEC ticker → CIK mapping and upsert into external_identifiers.
 
     Runs daily. Idempotent — safe to re-run.
+
+    Conditional-fetch path (#270): sends If-Modified-Since against the
+    prior Last-Modified watermark. When the server returns 304, skips
+    the upsert loop entirely — most days this is a zero-byte no-op.
+    On 200 with an unchanged body (defensive — SEC could serve 200
+    with identical bytes), the sha256 body-hash watermark lets us skip
+    anyway. Only when the body genuinely changed do we do the full
+    upsert and advance the watermark.
     """
+    SOURCE = "sec.tickers"
+    WATERMARK_KEY = "global"
+
     with _tracked_job(JOB_DAILY_CIK_REFRESH) as tracker:
         with (
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
             psycopg.connect(settings.database_url) as conn,
         ):
-            mapping = provider.build_cik_mapping()
+            prior = get_watermark(conn, SOURCE, WATERMARK_KEY)
+            if_modified_since = prior.watermark if prior else None
+
+            result = provider.build_cik_mapping_conditional(
+                if_modified_since=if_modified_since,
+            )
+
+            if result is None:
+                # 304 — nothing changed.
+                logger.info("daily_cik_refresh: 304 Not Modified, skipping upsert")
+                tracker.row_count = 0
+                return
+
+            if prior and prior.response_hash == result.body_hash:
+                # 200 with identical bytes. Advance fetched_at only.
+                logger.info("daily_cik_refresh: 200 but body hash unchanged, skipping upsert")
+                with conn.transaction():
+                    set_watermark(
+                        conn,
+                        source=SOURCE,
+                        key=WATERMARK_KEY,
+                        watermark=result.last_modified or (prior.watermark if prior else ""),
+                        response_hash=result.body_hash,
+                    )
+                tracker.row_count = 0
+                return
 
             rows = conn.execute(
                 "SELECT symbol, instrument_id::text FROM instruments WHERE is_tradable = TRUE"
             ).fetchall()
             instrument_symbols = [(row[0], row[1]) for row in rows]
 
-            upserted = upsert_cik_mapping(conn, mapping, instrument_symbols)
+            # Upsert + watermark advance must land atomically — if the
+            # watermark committed but the upserts didn't (crash), the
+            # next run would skip and the data would drift.
+            with conn.transaction():
+                upserted = upsert_cik_mapping(conn, result.mapping, instrument_symbols)
+                set_watermark(
+                    conn,
+                    source=SOURCE,
+                    key=WATERMARK_KEY,
+                    watermark=result.last_modified or "",
+                    response_hash=result.body_hash,
+                )
         tracker.row_count = upserted
 
-    logger.info("CIK refresh complete: mapping_size=%d upserted=%d", len(mapping), upserted)
+    logger.info(
+        "CIK refresh complete: mapping_size=%d upserted=%d",
+        len(result.mapping),
+        upserted,
+    )
 
 
 def daily_research_refresh() -> None:
