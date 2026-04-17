@@ -380,6 +380,12 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         name=JOB_ORCHESTRATOR_FULL_SYNC,
         description="Orchestrator full sync — walks the DAG and refreshes stale layers.",
         cadence=Cadence.daily(hour=3, minute=0),
+        # Never catch up on boot. A full sync runs ~45min (research refresh
+        # dominates) and holds DB connections the HTTP layer needs. Every
+        # dev-stack restart would otherwise fire a catch-up and wedge the
+        # site until it finishes. If the 03:00 UTC slot is missed, the
+        # operator can click "Sync now" in the admin UI.
+        catch_up_on_boot=False,
     ),
     # Every-5-minutes refresh of independent high-frequency layers
     # (portfolio_sync + fx_rates). The orchestrator's partial unique

@@ -117,6 +117,28 @@ def upsert_cik_mapping(
             if not cik:
                 logger.debug("CIK mapping: no CIK found for symbol %s", symbol)
                 continue
+            # external_identifiers has TWO uniqueness constraints:
+            #   (a) uq_external_identifiers_provider_value — UNIQUE(provider,
+            #       identifier_type, identifier_value)
+            #   (b) uq_external_identifiers_primary — partial UNIQUE
+            #       (instrument_id, provider, identifier_type) WHERE is_primary=TRUE
+            # ON CONFLICT can only target one. If an instrument already has a
+            # primary sec/cik row with a DIFFERENT value (e.g. the SEC ticker
+            # map changed), the INSERT below would violate (b) before (a)
+            # ever matched. Demote any mismatching primary row first so the
+            # upsert's own conflict target handles the rest.
+            conn.execute(
+                """
+                UPDATE external_identifiers
+                SET is_primary = FALSE
+                WHERE instrument_id     = %(instrument_id)s
+                  AND provider          = 'sec'
+                  AND identifier_type   = 'cik'
+                  AND is_primary        = TRUE
+                  AND identifier_value != %(cik)s
+                """,
+                {"instrument_id": instrument_id, "cik": cik},
+            )
             conn.execute(
                 """
                 INSERT INTO external_identifiers (
@@ -129,6 +151,7 @@ def upsert_cik_mapping(
                 )
                 ON CONFLICT (provider, identifier_type, identifier_value) DO UPDATE SET
                     instrument_id    = EXCLUDED.instrument_id,
+                    is_primary       = TRUE,
                     last_verified_at = NOW()
                 """,
                 {"instrument_id": instrument_id, "cik": cik},
