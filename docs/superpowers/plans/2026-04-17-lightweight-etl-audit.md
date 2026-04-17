@@ -135,19 +135,17 @@ No provider wired. Out of scope. When wired, apply the same watermark principle 
 **Impact:** Near-real-time position updates (seconds not 5 min) AND ~3x reduction in REST polling.
 **Ticket:** #274.
 
-### `fx_rates` → `fx_rates_refresh` (Frankfurter)
+### `fx_rates` → `fx_rates_refresh` (SUPERSEDED — Frankfurter dropped)
 
-**Current:** Hourly poll.
-**Provider capability:** `ETag` → 304. ECB publishes ~16:00 CET on TARGET working days.
-**Recommendation:**
-- Schedule **one call per day at 16:15 CET** with `If-None-Match` holding last ETag.
-- If 304, no writes.
-- If 200, upsert with the ECB publication date as `quoted_at` (matches current pattern).
-- Skip non-TARGET days (weekends + TARGET holidays).
-- Optional: one fallback call at 17:00 CET for late-publication days (rare).
+**Decision 2026-04-17:** Drop Frankfurter entirely. Single FX source of truth = eToro FX instrument rates (ticket #281, supersedes #275 which is now closed).
 
-**Impact:** 24 calls/day → 1-2. ~95% reduction. Eliminates the meaningless weekend polls.
-**Ticket:** #275.
+**Reasoning:**
+- eToro FX pair rates are what actually executes — using them for marks means P&L matches the broker statement by construction.
+- ECB publishes once/day; eToro streams intraday. Using ECB for conversions makes every live display and P&L number lag the underlying market.
+- Reconciling two sources (ECB for books, eToro for display) adds complexity that doesn't serve any real use case for a retail operator.
+- Regulatory / tax-reporting paths that would need a central-bank rate would not use ECB anyway (e.g. HMRC uses HMRC monthly rates). When/if those land, they feed from a dedicated source.
+
+**Ticket:** #281.
 
 ### `cost_models` / `weekly_reports` / `monthly_reports`
 
@@ -202,7 +200,7 @@ How each recommendation preserves history:
 
 1. **#269 — watermarks table + helpers** (blocker for the per-job tickets). ~1 day.
 2. **#270 — SEC CIK conditional GET** (smallest scope, validates watermark pattern). ~0.5 day.
-3. **#275 — Frankfurter ETag + TARGET calendar** (also small, proves the pattern on a second source). ~0.5 day.
+3. ~~#275 — Frankfurter ETag~~ — **SUPERSEDED by #281**. Dropping Frankfurter entirely rather than optimising its polling.
 4. **#271 — eToro candles two-mode split** (biggest daily win outside research). ~1 day.
 5. **#272 — SEC master-index + per-CIK watermark** (biggest daily win overall; the 45-min job). ~2 days.
 6. **#274 — eToro WebSocket portfolio + quotes** (architecturally significant; moves us off polling for push-stream data). ~2-3 days.
