@@ -93,10 +93,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Sync orchestrator: reap orphaned runs BEFORE the scheduler starts
     # so the partial-unique-index gate is clear for the first new sync.
     # Crash here must not block boot — log loud, continue.
+    #
+    # timeout=0: orchestrator is single-process (executor runs inside this
+    # FastAPI/APScheduler process), so any `status='running'` row at boot
+    # is definitionally from a prior process that's dead — there is no
+    # live sync to preserve. The default 1h timeout would leave a fresh
+    # crashed sync wedging the concurrency gate through a quick restart,
+    # as happened on 2026-04-17. If the orchestrator ever becomes
+    # multi-process, this must switch to an activity-based liveness check.
     try:
+        from datetime import timedelta
+
         from app.services.sync_orchestrator.reaper import reap_orphaned_syncs
 
-        reaped = reap_orphaned_syncs()
+        reaped = reap_orphaned_syncs(timeout=timedelta(seconds=0))
         if reaped:
             logger.info(
                 "orchestrator reaper: transitioned %d orphaned sync_runs row(s)",
