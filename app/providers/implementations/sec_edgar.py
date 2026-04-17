@@ -128,16 +128,13 @@ def parse_master_index(body: bytes) -> list[MasterIndexEntry]:
             continue
         # Filename: edgar/data/<cik>/<accession-no-dashes>.txt
         stem = filename.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-        if len(stem) != 18 or "-" in stem:
-            # Canonical accession format is 18 chars with 2 dashes
-            # (e.g. 0000320193-26-000042). Reconstruct if the
-            # filename supplies it without dashes.
-            digits_only = stem.replace("-", "")
-            if len(digits_only) != 18 or not digits_only.isdigit():
-                continue
-            accession = f"{digits_only[:10]}-{digits_only[10:12]}-{digits_only[12:]}"
-        else:
-            accession = stem
+        # Normalize to canonical dashed accession (0000320193-26-000042)
+        # regardless of whether the filename stem supplied it dashed or
+        # as 18 straight digits.
+        digits_only = stem.replace("-", "")
+        if len(digits_only) != 18 or not digits_only.isdigit():
+            continue
+        accession = f"{digits_only[:10]}-{digits_only[10:12]}-{digits_only[12:]}"
         entries.append(
             MasterIndexEntry(
                 cik=cik,

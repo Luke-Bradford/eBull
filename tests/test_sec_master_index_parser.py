@@ -66,3 +66,16 @@ def test_skips_malformed_rows_silently() -> None:
     )
     entries = parse_master_index(body)
     assert len(entries) == 2
+
+
+def test_reconstructs_dashed_accession_from_nodash_filename() -> None:
+    """Some SEC tools emit filenames with the 18-digit accession and
+    no dashes. Parser must normalise to the canonical dashed form."""
+    body = (
+        b"CIK|Company Name|Form Type|Date Filed|Filename\n"
+        b"------\n"
+        b"320193|APPLE INC|10-Q|2026-04-15|edgar/data/320193/000032019326000042.txt\n"
+    )
+    entries = parse_master_index(body)
+    assert len(entries) == 1
+    assert entries[0].accession_number == "0000320193-26-000042"
