@@ -843,15 +843,36 @@ class TestCandlesFetchCount:
         conn.execute.return_value = cursor
         return conn
 
-    def test_returns_default_for_instrument_with_no_prior_candles(self) -> None:
-        """Backfill mode — no price_daily rows, so we pull the full
-        lookback_days window (caller default: 400)."""
+    def test_returns_default_when_no_prior_candles(self) -> None:
+        """Initial backfill — fetchone returns None (no rows)."""
         conn = self._mock_conn(fetchone_return=None)
-        assert _candles_fetch_count(conn, 42, default=400) == 400
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == 400
 
-    def test_returns_incremental_for_instrument_with_history(self) -> None:
-        """Incremental mode — prior candles exist, pull only
-        _INCREMENTAL_FETCH_BARS (yesterday + today + correction)."""
-        conn = self._mock_conn(fetchone_return=(1,))
-        assert _candles_fetch_count(conn, 42, default=400) == _INCREMENTAL_FETCH_BARS
-        assert _INCREMENTAL_FETCH_BARS == 3  # sanity — pinning the documented value
+    def test_returns_default_when_max_price_date_is_null(self) -> None:
+        """Defensive — SELECT MAX(...) always returns a row; NULL when
+        there are no matching rows. Treat as initial backfill."""
+        conn = self._mock_conn(fetchone_return=(None,))
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == 400
+
+    def test_returns_incremental_when_latest_is_within_window(self) -> None:
+        """Normal daily maintenance — last candle is yesterday."""
+        conn = self._mock_conn(fetchone_return=(date(2026, 4, 16),))
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == _INCREMENTAL_FETCH_BARS
+        assert _INCREMENTAL_FETCH_BARS == 3  # pinning documented value
+
+    def test_returns_default_when_gap_exceeds_incremental_window(self) -> None:
+        """Gap resumption — instrument was halted / re-added after a
+        multi-day closure. Last candle is 10 days ago. A 3-bar
+        incremental fetch would leave a 7-day hole; fall back to
+        full backfill instead."""
+        conn = self._mock_conn(fetchone_return=(date(2026, 4, 7),))
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == 400
+
+    def test_returns_incremental_at_exact_window_boundary(self) -> None:
+        """Boundary — gap of exactly _INCREMENTAL_FETCH_BARS days is
+        still coverable by the incremental fetch window."""
+        today = date(2026, 4, 17)
+        latest = date(2026, 4, 14)  # 3 days ago
+        assert (today - latest).days == _INCREMENTAL_FETCH_BARS
+        conn = self._mock_conn(fetchone_return=(latest,))
+        assert _candles_fetch_count(conn, 42, default=400, today=today) == _INCREMENTAL_FETCH_BARS

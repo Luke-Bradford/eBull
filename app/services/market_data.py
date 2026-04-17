@@ -98,7 +98,7 @@ def refresh_market_data(
             candles_skipped += 1
             report_progress(idx, total)
             continue
-        fetch_count = _candles_fetch_count(conn, instrument_id, default=lookback_days)
+        fetch_count = _candles_fetch_count(conn, instrument_id, default=lookback_days, today=today)
         try:
             with conn.transaction():
                 bars = provider.get_daily_candles(instrument_id, fetch_count)
@@ -220,25 +220,38 @@ def _candles_fetch_count(
     instrument_id: int,
     *,
     default: int,
+    today: date | None = None,
 ) -> int:
     """Decide the candlesCount for an instrument's fetch (#271).
 
-    Returns ``default`` (typically 400) for instruments with NO prior
-    candles — backfill mode. Returns ``_INCREMENTAL_FETCH_BARS`` for
-    instruments that already have history — incremental mode. The
-    upsert dedupes on (instrument_id, price_date) so overlap between
-    the incremental window and existing rows is safe.
+    Returns ``default`` (typically 400) in two cases:
+      * No prior candles at all — initial backfill mode.
+      * Prior candles exist but the most recent is older than the
+        incremental window (e.g. instrument was halted, re-added to
+        the universe after a gap, or a multi-day market closure). A
+        3-bar incremental fetch here would silently leave a history
+        gap; falling back to ``default`` closes the gap.
+
+    Returns ``_INCREMENTAL_FETCH_BARS`` when the most recent candle is
+    within the incremental window — normal daily maintenance mode.
+    The upsert dedupes on (instrument_id, price_date) so overlap is
+    safe.
     """
     row = conn.execute(
         """
-        SELECT 1 FROM price_daily
+        SELECT MAX(price_date) FROM price_daily
         WHERE instrument_id = %(instrument_id)s
-        LIMIT 1
         """,
         {"instrument_id": instrument_id},
     ).fetchone()
-    if row is None:
-        return default  # backfill
+    if row is None or row[0] is None:
+        return default  # no prior data — backfill
+    latest: date = row[0]
+    reference = today if today is not None else date.today()
+    gap_days = (reference - latest).days
+    if gap_days > _INCREMENTAL_FETCH_BARS:
+        # Gap wider than the incremental window — backfill to close it.
+        return default
     return _INCREMENTAL_FETCH_BARS
 
 
