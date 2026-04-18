@@ -23,7 +23,7 @@ from datetime import date
 
 import psycopg
 
-from app.providers.filings import FilingSearchResult, FilingsProvider
+from app.providers.filings import FilingEvent, FilingSearchResult, FilingsProvider
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +184,60 @@ def _resolve_identifier(
         },
     ).fetchone()
     return row[0] if row else None
+
+
+def _upsert_filing_event(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_id: str | int,
+    provider_name: str,
+    event: FilingEvent,
+) -> None:
+    """Upsert a ``FilingEvent`` (from ``provider.get_filing``) into
+    ``filing_events``.
+
+    Mirrors ``_upsert_filing``'s idempotent ON CONFLICT semantics and
+    payload shape but accepts the richer ``FilingEvent`` variant
+    returned by ``FilingsProvider.get_filing``. Chunk E's 8-K gap
+    fill path uses this when re-fetching a single accession (#268).
+    """
+    conn.execute(
+        """
+        INSERT INTO filing_events (
+            instrument_id, filing_date, filing_type,
+            provider, provider_filing_id, source_url, primary_document_url,
+            raw_payload_json
+        )
+        VALUES (
+            %(instrument_id)s, %(filing_date)s, %(filing_type)s,
+            %(provider)s, %(provider_filing_id)s, %(source_url)s, %(primary_document_url)s,
+            %(raw_payload_json)s
+        )
+        ON CONFLICT (provider, provider_filing_id) DO UPDATE SET
+            filing_date          = EXCLUDED.filing_date,
+            filing_type          = EXCLUDED.filing_type,
+            source_url           = EXCLUDED.source_url,
+            primary_document_url = EXCLUDED.primary_document_url
+        """,
+        {
+            "instrument_id": instrument_id,
+            "filing_date": event.filed_at.date(),
+            "filing_type": event.filing_type,
+            "provider": provider_name,
+            "provider_filing_id": event.provider_filing_id,
+            "source_url": event.primary_document_url,
+            "primary_document_url": event.primary_document_url,
+            "raw_payload_json": json.dumps(
+                {
+                    "provider_filing_id": event.provider_filing_id,
+                    "symbol": event.symbol,
+                    "filed_at": event.filed_at.isoformat(),
+                    "filing_type": event.filing_type,
+                    "period_of_report": event.period_of_report.isoformat() if event.period_of_report else None,
+                    "primary_document_url": event.primary_document_url,
+                }
+            ),
+        },
+    )
 
 
 def _upsert_filing(

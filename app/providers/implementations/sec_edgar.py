@@ -376,6 +376,25 @@ class SecFilingsProvider(FilingsProvider):
         cik_padded = _zero_pad_cik(cik)
         return self._fetch_submissions(cik_padded)
 
+    def fetch_submissions_page(self, name: str) -> dict[str, object] | None:
+        """Fetch a secondary submissions page named in
+        ``filings.files[].name`` (e.g. ``CIK0000320193-submissions-001.json``).
+
+        Used by Chunk E's pagination loop (#268). Returns the parsed
+        JSON dict or ``None`` on 404. Uses the same rate-limited HTTP
+        client as ``fetch_submissions`` so the 10 req/s SEC cap is
+        respected across the combined call pattern.
+        """
+        path = f"/submissions/{name}"
+        resp = self._http.get(path)
+        if resp.status_code == 404:
+            logger.warning("SEC: submissions page not found: %s", name)
+            return None
+        resp.raise_for_status()
+        raw = resp.json()
+        _persist_raw(f"sec_submissions_page_{name}", raw)
+        return raw  # type: ignore[return-value]
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -416,38 +435,36 @@ def _parse_cik_mapping(raw: object) -> dict[str, str]:
     return mapping
 
 
-def _normalise_filings(
-    raw: dict[str, object],
+def _normalise_submissions_block(
+    block: dict[str, object],
     cik_padded: str,
-    start_date: date | None,
-    end_date: date | None,
-    filing_types: list[str] | None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    filing_types: list[str] | None = None,
+    symbol: str | None = None,
 ) -> list[FilingSearchResult]:
+    """Pure normalisation of one submissions page (either the
+    inline ``filings.recent`` sub-dict or a ``files[]`` secondary
+    page JSON).
+
+    Both shapes carry the same parallel arrays —
+    ``{accessionNumber, filingDate, form, primaryDocument, reportDate}``
+    — so Chunk E's pagination loop (#268) can call this per page
+    without re-fetching the primary ``submissions.json``.
+
+    ``symbol`` is used to populate ``FilingSearchResult.symbol``; if
+    omitted the accession number is used as a fallback (matches the
+    pre-refactor behaviour on empty ``tickers``).
     """
-    Normalise an EDGAR submissions JSON response into FilingSearchResult list.
-
-    The submissions JSON has recent filings inline under raw["filings"]["recent"]
-    and may reference additional filing pages under raw["filings"]["files"].
-    V1 only processes the inline "recent" block.
-    """
-    filings_block = raw.get("filings")
-    if not isinstance(filings_block, dict):
-        return []
-
-    recent = filings_block.get("recent")
-    if not isinstance(recent, dict):
-        return []
-
-    accession_numbers: list[str] = recent.get("accessionNumber") or []  # type: ignore[assignment]
-    filing_dates: list[str] = recent.get("filingDate") or []  # type: ignore[assignment]
-    form_types: list[str] = recent.get("form") or []  # type: ignore[assignment]
-    primary_docs: list[str] = recent.get("primaryDocument") or []  # type: ignore[assignment]
-    report_dates: list[str | None] = recent.get("reportDate") or []  # type: ignore[assignment]
+    accession_numbers: list[str] = block.get("accessionNumber") or []  # type: ignore[assignment]
+    filing_dates: list[str] = block.get("filingDate") or []  # type: ignore[assignment]
+    form_types: list[str] = block.get("form") or []  # type: ignore[assignment]
+    primary_docs: list[str] = block.get("primaryDocument") or []  # type: ignore[assignment]
+    report_dates: list[str | None] = block.get("reportDate") or []  # type: ignore[assignment]
 
     results: list[FilingSearchResult] = []
     for i, accession in enumerate(accession_numbers):
         form = form_types[i] if i < len(form_types) else ""
-        # Skip entries with no form type rather than storing an empty string
         if not form:
             continue
         if filing_types and form not in filing_types:
@@ -483,7 +500,7 @@ def _normalise_filings(
         results.append(
             FilingSearchResult(
                 provider_filing_id=accession,
-                symbol=raw.get("tickers", [accession])[0] if isinstance(raw.get("tickers"), list) else accession,  # type: ignore[arg-type]
+                symbol=symbol if symbol else accession,
                 filed_at=filed_at,
                 filing_type=form,
                 period_of_report=period_of_report,
@@ -491,9 +508,38 @@ def _normalise_filings(
             )
         )
 
-    # Return oldest-first
+    # Oldest-first (matches pre-refactor contract).
     results.sort(key=lambda r: r.filed_at)
     return results
+
+
+def _normalise_filings(
+    raw: dict[str, object],
+    cik_padded: str,
+    start_date: date | None,
+    end_date: date | None,
+    filing_types: list[str] | None,
+) -> list[FilingSearchResult]:
+    """Normalise an EDGAR submissions JSON response into
+    ``FilingSearchResult`` list.
+
+    Extracts the inline ``filings.recent`` block and delegates to
+    ``_normalise_submissions_block``. V1 of this function only
+    processes the inline block; secondary ``filings.files[]`` pages
+    are handled by Chunk E's backfill flow (#268) via explicit
+    per-page calls to ``_normalise_submissions_block``.
+    """
+    filings_block = raw.get("filings")
+    if not isinstance(filings_block, dict):
+        return []
+
+    recent = filings_block.get("recent")
+    if not isinstance(recent, dict):
+        return []
+
+    tickers = raw.get("tickers")
+    symbol = str(tickers[0]) if isinstance(tickers, list) and tickers else None
+    return _normalise_submissions_block(recent, cik_padded, start_date, end_date, filing_types, symbol=symbol)
 
 
 def _normalise_filing_event(provider_filing_id: str, raw: dict[str, object]) -> FilingEvent:
