@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+# Import the module at module-level so ``patch("app.services.coverage_audit.X")``
+# has a concrete target BEFORE the lazy ``from app.services.coverage_audit import
+# audit_all_instruments`` inside ``weekly_coverage_audit`` resolves its binding.
+import app.services.coverage_audit  # noqa: F401
 from app.services.coverage_audit import AuditSummary
 from app.workers import scheduler
 

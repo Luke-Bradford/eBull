@@ -2107,17 +2107,21 @@ def weekly_coverage_audit() -> None:
             raise
 
         tracker.row_count = summary.total_updated
-
-    logger.info(
-        "weekly_coverage_audit complete: analysable=%d insufficient=%d "
-        "fpi=%d no_primary_sec_cik=%d total_updated=%d null_anomalies=%d",
-        summary.analysable,
-        summary.insufficient,
-        summary.fpi,
-        summary.no_primary_sec_cik,
-        summary.total_updated,
-        summary.null_anomalies,
-    )
+        # Log inside the with so ``summary`` is always bound at the
+        # point of use. Hoisting the log after the with would leak
+        # a NameError if _tracked_job.__exit__ raises (tracker
+        # write-back failure, etc.) because ``summary`` would be
+        # bound only in a now-torn-down scope.
+        logger.info(
+            "weekly_coverage_audit complete: analysable=%d insufficient=%d "
+            "fpi=%d no_primary_sec_cik=%d total_updated=%d null_anomalies=%d",
+            summary.analysable,
+            summary.insufficient,
+            summary.fpi,
+            summary.no_primary_sec_cik,
+            summary.total_updated,
+            summary.null_anomalies,
+        )
 
 
 def weekly_coverage_review() -> None:
