@@ -1340,18 +1340,42 @@ def daily_thesis_refresh() -> None:
 
         claude_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
+        # K.3: import lazily so the cascade module (which itself
+        # imports scoring) isn't hit at scheduler module import time.
+        from app.services.refresh_cascade import (
+            demote_to_rerank_needed,
+            instrument_lock,
+        )
+
         generated = 0
         skipped = 0
+        locked_skipped = 0
         total = len(stale)
         for idx, item in enumerate(stale, start=1):
             try:
                 with psycopg.connect(settings.database_url) as conn:
-                    generate_thesis(
-                        instrument_id=item.instrument_id,
-                        conn=conn,
-                        client=claude_client,
-                    )
-                generated += 1
+                    with instrument_lock(conn, item.instrument_id) as acquired:
+                        if not acquired:
+                            logger.info(
+                                "daily_thesis_refresh: LOCKED_BY_SIBLING symbol=%s instrument_id=%d",
+                                item.symbol,
+                                item.instrument_id,
+                            )
+                            locked_skipped += 1
+                        else:
+                            generate_thesis(
+                                instrument_id=item.instrument_id,
+                                conn=conn,
+                                client=claude_client,
+                            )
+                            # Daily's thesis write resolves any pending
+                            # cascade thesis signal but does not run
+                            # compute_rankings, so demote rather than
+                            # delete — preserves RERANK_NEEDED rows
+                            # untouched and converts thesis-failure /
+                            # LOCKED_BY_SIBLING rows to RERANK_NEEDED.
+                            demote_to_rerank_needed(conn, item.instrument_id)
+                            generated += 1
             except Exception:
                 logger.warning(
                     "daily_thesis_refresh: failed for symbol=%s instrument_id=%d, skipping",
@@ -1366,9 +1390,10 @@ def daily_thesis_refresh() -> None:
         tracker.row_count = generated
 
     logger.info(
-        "daily_thesis_refresh complete: generated=%d skipped=%d",
+        "daily_thesis_refresh complete: generated=%d skipped=%d locked_skipped=%d",
         generated,
         skipped,
+        locked_skipped,
     )
 
 

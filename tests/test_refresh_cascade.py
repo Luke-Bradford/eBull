@@ -11,14 +11,20 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.services.refresh_cascade import (
     ATTEMPT_CAP,
+    LOCKED_BY_SIBLING,
     RERANK_MARKER,
     CascadeOutcome,
     cascade_refresh,
     changed_instruments_from_outcome,
+    demote_to_rerank_needed,
     drain_retry_queue,
+    enqueue_locked_by_sibling,
     enqueue_retry,
+    instrument_lock,
 )
 from app.services.sec_incremental import RefreshOutcome, RefreshPlan
 from app.services.thesis import StaleInstrument
@@ -138,12 +144,98 @@ class TestChangedInstrumentsFromOutcome:
 # ---------------------------------------------------------------------------
 
 
+class TestInstrumentLock:
+    def test_acquired_yields_true_and_unlocks_on_exit(self) -> None:
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (True,)
+        conn.execute.return_value = cursor
+        with instrument_lock(conn, 42) as acquired:
+            assert acquired is True
+        # First call: pg_try_advisory_lock. Second: pg_advisory_unlock.
+        assert conn.execute.call_count == 2
+        first_sql = conn.execute.call_args_list[0].args[0]
+        second_sql = conn.execute.call_args_list[1].args[0]
+        assert "pg_try_advisory_lock" in first_sql
+        assert "pg_advisory_unlock" in second_sql
+
+    def test_not_acquired_yields_false_and_no_unlock(self) -> None:
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (False,)
+        conn.execute.return_value = cursor
+        with instrument_lock(conn, 42) as acquired:
+            assert acquired is False
+        # Only the pg_try_advisory_lock call — no unlock.
+        assert conn.execute.call_count == 1
+
+    def test_unlocks_even_if_body_raises(self) -> None:
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (True,)
+        conn.execute.return_value = cursor
+        with pytest.raises(RuntimeError):
+            with instrument_lock(conn, 42):
+                raise RuntimeError("body failed")
+        # Unlock still ran
+        assert conn.execute.call_count == 2
+
+    def test_unlock_retries_after_psycopg_error(self) -> None:
+        conn = MagicMock()
+        lock_cursor = MagicMock()
+        lock_cursor.fetchone.return_value = (True,)
+        # First unlock raises psycopg.Error; rollback succeeds; second unlock succeeds.
+        import psycopg as _psycopg
+
+        conn.execute.side_effect = [
+            lock_cursor,  # pg_try_advisory_lock
+            _psycopg.Error("connection INERROR"),  # first unlock
+            MagicMock(),  # second unlock after rollback
+        ]
+        with instrument_lock(conn, 42) as acquired:
+            assert acquired is True
+        conn.rollback.assert_called_once()
+        assert conn.execute.call_count == 3
+
+
+class TestEnqueueLockedBySibling:
+    def test_insert_on_conflict_do_nothing_and_commits(self) -> None:
+        conn = MagicMock()
+        enqueue_locked_by_sibling(conn, 42)
+        conn.execute.assert_called_once()
+        conn.commit.assert_called_once()
+        sql = conn.execute.call_args.args[0]
+        params = conn.execute.call_args.args[1]
+        assert "INSERT INTO cascade_retry_queue" in sql
+        assert "ON CONFLICT (instrument_id) DO NOTHING" in sql
+        assert params == (42, LOCKED_BY_SIBLING)
+
+
+class TestDemoteToRerankNeeded:
+    def test_update_with_rerank_marker_filter_and_commits(self) -> None:
+        conn = MagicMock()
+        demote_to_rerank_needed(conn, 42)
+        conn.execute.assert_called_once()
+        conn.commit.assert_called_once()
+        sql = conn.execute.call_args.args[0]
+        params = conn.execute.call_args.args[1]
+        assert "UPDATE cascade_retry_queue" in sql
+        assert "last_error != %s" in sql
+        assert "SET attempt_count = 0" in sql
+        # (RERANK_MARKER for SET, instrument_id, RERANK_MARKER for WHERE filter)
+        assert params == (RERANK_MARKER, 42, RERANK_MARKER)
+
+
 class TestEnqueueRetry:
-    def test_wraps_in_transaction_and_upserts(self) -> None:
+    def test_executes_upsert_and_commits(self) -> None:
+        """K.3 refactor: helpers commit explicitly rather than using
+        ``with conn.transaction():``. This makes the queue write
+        durable regardless of implicit-tx state so a later
+        cascade-level rollback cannot erase it."""
         conn = MagicMock()
         enqueue_retry(conn, 42, "RuntimeError")
-        conn.transaction.assert_called_once()
         conn.execute.assert_called_once()
+        conn.commit.assert_called_once()
         args, _ = conn.execute.call_args
         sql = args[0]
         params = args[1]
@@ -456,6 +548,74 @@ class TestCascadeRefresh:
         """Sanity: the marker string is importable and matches the
         spec wording used in admin surfaces (Chunk H)."""
         assert RERANK_MARKER == "RERANK_NEEDED"
+
+    def test_locked_by_sibling_skips_generate_and_enqueues_marker(
+        self,
+    ) -> None:
+        """K.3: when instrument_lock returns False, cascade must
+        NOT call generate_thesis, MUST write a LOCKED_BY_SIBLING
+        marker via enqueue_locked_by_sibling, and MUST increment
+        locked_skipped without adding to failed."""
+        conn = MagicMock()
+        client = MagicMock()
+        stale_rows = [
+            StaleInstrument(instrument_id=7, symbol="LOCKED", reason="event_new_10q"),
+        ]
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def fake_lock(conn_, iid):  # type: ignore[no-untyped-def]
+            yield False  # never acquired
+
+        with (
+            patch("app.services.refresh_cascade.drain_retry_queue", return_value=[]),
+            patch(
+                "app.services.refresh_cascade.find_stale_instruments",
+                return_value=stale_rows,
+            ),
+            patch("app.services.refresh_cascade.instrument_lock", fake_lock),
+            patch("app.services.refresh_cascade.generate_thesis") as gen_mock,
+            patch("app.services.refresh_cascade.enqueue_locked_by_sibling") as lbs_mock,
+            patch("app.services.refresh_cascade.compute_rankings") as rank_mock,
+        ):
+            outcome = cascade_refresh(conn, client, [7])
+
+        gen_mock.assert_not_called()
+        lbs_mock.assert_called_once_with(conn, 7)
+        rank_mock.assert_not_called()  # nothing to rerank
+        assert outcome.locked_skipped == 1
+        assert outcome.thesis_refreshed == 0
+        assert outcome.failed == ()  # locked-skip is NOT a failure
+
+    def test_locked_by_sibling_on_retry_path(self) -> None:
+        """Retry path also respects the lock."""
+        conn = MagicMock()
+        client = MagicMock()
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def fake_lock(conn_, iid):  # type: ignore[no-untyped-def]
+            yield False
+
+        with (
+            patch(
+                "app.services.refresh_cascade.drain_retry_queue",
+                return_value=[99],
+            ),
+            patch("app.services.refresh_cascade.find_stale_instruments", return_value=[]),
+            patch("app.services.refresh_cascade.instrument_lock", fake_lock),
+            patch("app.services.refresh_cascade.generate_thesis") as gen_mock,
+            patch("app.services.refresh_cascade.enqueue_locked_by_sibling") as lbs_mock,
+        ):
+            outcome = cascade_refresh(conn, client, [])
+
+        gen_mock.assert_not_called()
+        lbs_mock.assert_called_once_with(conn, 99)
+        assert outcome.locked_skipped == 1
+        assert outcome.retries_drained == 1
+        assert outcome.failed == ()
 
     def test_non_psycopg_exception_from_enqueue_retry_does_not_abort_loop(
         self,

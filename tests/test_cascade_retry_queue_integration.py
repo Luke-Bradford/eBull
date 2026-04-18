@@ -14,12 +14,16 @@ import pytest
 
 from app.services.refresh_cascade import (
     ATTEMPT_CAP,
+    LOCKED_BY_SIBLING,
     RERANK_MARKER,
     cascade_refresh,
     clear_retry_success,
+    demote_to_rerank_needed,
     drain_retry_queue,
+    enqueue_locked_by_sibling,
     enqueue_rerank_marker,
     enqueue_retry,
+    instrument_lock,
 )
 from app.services.thesis import StaleInstrument
 from tests.fixtures.ebull_test_db import ebull_test_conn
@@ -188,3 +192,114 @@ class TestCascadeCompositionAtCapRerankFailure:
         assert _queue_row(ebull_test_conn, 42) == (0, RERANK_MARKER)
         # Next cascade cycle will pick it up.
         assert drain_retry_queue(ebull_test_conn) == [42]
+
+
+class TestInstrumentLockIntegration:
+    """Real-DB lock behaviour — cross-connection contention,
+    INERROR-recovery unlock path, release at session close."""
+
+    def test_two_connections_mutex(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Conn A acquires the lock for iid=1. Conn B on a separate
+        session gets False. After A releases, B can acquire."""
+        from tests.fixtures.ebull_test_db import test_database_url
+
+        with psycopg.connect(test_database_url()) as conn_b:
+            with instrument_lock(ebull_test_conn, 1) as a_acquired:
+                assert a_acquired is True
+                with instrument_lock(conn_b, 1) as b_acquired:
+                    assert b_acquired is False
+            # After A's context exits, lock is released.
+            with instrument_lock(conn_b, 1) as b_acquired_after:
+                assert b_acquired_after is True
+
+    def test_inerror_unlock_recovers_via_rollback(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Acquire lock, run invalid SQL inside the body to put the
+        conn in INERROR, exit normally. The lock must still release
+        — verified by a second conn acquiring immediately after."""
+        from tests.fixtures.ebull_test_db import test_database_url
+
+        with instrument_lock(ebull_test_conn, 2) as acquired:
+            assert acquired is True
+            with pytest.raises(psycopg.Error):
+                ebull_test_conn.execute("SELECT * FROM non_existent_xyz")
+        # Second connection should acquire immediately.
+        with psycopg.connect(test_database_url()) as conn_b:
+            with instrument_lock(conn_b, 2) as acquired_b:
+                assert acquired_b is True
+
+
+class TestEnqueueLockedBySiblingIntegration:
+    def test_insert_on_empty_queue(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_instrument(ebull_test_conn, 1, "A")
+        enqueue_locked_by_sibling(ebull_test_conn, 1)
+        assert _queue_row(ebull_test_conn, 1) == (0, LOCKED_BY_SIBLING)
+
+    def test_preserves_existing_row(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """ON CONFLICT DO NOTHING — existing count + last_error stay."""
+        _seed_instrument(ebull_test_conn, 1, "A")
+        enqueue_retry(ebull_test_conn, 1, "RuntimeError")
+        ebull_test_conn.execute(
+            "UPDATE cascade_retry_queue SET attempt_count = %s WHERE instrument_id = 1",
+            (ATTEMPT_CAP,),
+        )
+        ebull_test_conn.commit()
+        # Sibling tries to enqueue LOCKED_BY_SIBLING — preserved.
+        enqueue_locked_by_sibling(ebull_test_conn, 1)
+        assert _queue_row(ebull_test_conn, 1) == (ATTEMPT_CAP, "RuntimeError")
+
+    def test_does_not_trample_rerank_needed(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Codex K.3 pre-push check (2): LOCKED_BY_SIBLING on an
+        existing RERANK_NEEDED row must preserve the marker via
+        ON CONFLICT DO NOTHING."""
+        _seed_instrument(ebull_test_conn, 1, "A")
+        enqueue_rerank_marker(ebull_test_conn, 1)
+        enqueue_locked_by_sibling(ebull_test_conn, 1)
+        assert _queue_row(ebull_test_conn, 1) == (0, RERANK_MARKER)
+
+
+class TestDemoteToRerankNeededIntegration:
+    def test_thesis_failure_row_demoted(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_instrument(ebull_test_conn, 1, "A")
+        enqueue_retry(ebull_test_conn, 1, "RuntimeError")
+        assert _queue_row(ebull_test_conn, 1) == (1, "RuntimeError")
+        demote_to_rerank_needed(ebull_test_conn, 1)
+        assert _queue_row(ebull_test_conn, 1) == (0, RERANK_MARKER)
+
+    def test_locked_by_sibling_row_demoted(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_instrument(ebull_test_conn, 1, "A")
+        enqueue_locked_by_sibling(ebull_test_conn, 1)
+        demote_to_rerank_needed(ebull_test_conn, 1)
+        assert _queue_row(ebull_test_conn, 1) == (0, RERANK_MARKER)
+
+    def test_rerank_needed_row_untouched(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Pre-existing RERANK_NEEDED row filtered out by the WHERE
+        clause — demote_to_rerank_needed is a no-op."""
+        _seed_instrument(ebull_test_conn, 1, "A")
+        enqueue_rerank_marker(ebull_test_conn, 1)
+        # Mutate the row to detect if demote touches it.
+        ebull_test_conn.execute("UPDATE cascade_retry_queue SET last_attempted_at = NULL WHERE instrument_id = 1")
+        ebull_test_conn.commit()
+        demote_to_rerank_needed(ebull_test_conn, 1)
+        # Row state unchanged — if demote had fired, last_attempted_at would have been set to NOW().
+        row = ebull_test_conn.execute(
+            "SELECT attempt_count, last_error, last_attempted_at FROM cascade_retry_queue WHERE instrument_id = 1"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 0
+        assert row[1] == RERANK_MARKER
+        assert row[2] is None  # untouched
+
+
+class TestDurabilityOfHelperCommits:
+    """Regression for the K.3 commit-after-execute refactor — a
+    later cascade-level rollback must NOT erase a prior enqueue
+    write. Pre-K.3 the helper used ``with conn.transaction():``
+    which creates a savepoint under the implicit outer tx; the
+    savepoint's writes are lost when ``conn.rollback()`` fires."""
+
+    def test_rollback_after_enqueue_preserves_row(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_instrument(ebull_test_conn, 1, "A")
+        enqueue_retry(ebull_test_conn, 1, "RuntimeError")
+        # Simulate cascade's later rollback of the implicit tx.
+        ebull_test_conn.rollback()
+        assert _queue_row(ebull_test_conn, 1) == (1, "RuntimeError")
