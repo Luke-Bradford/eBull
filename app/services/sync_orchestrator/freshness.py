@@ -18,7 +18,7 @@ BEFORE ordering would hide a newer failure behind an older success.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -202,9 +202,37 @@ def news_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
 
 
 def thesis_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
+    # K.4: thesis is refreshed by TWO independent paths —
+    # daily_thesis_refresh (its own scheduled job) and cascade_refresh
+    # (runs inside daily_financial_facts). Either a recent
+    # daily_thesis_refresh job_runs row OR a recent successful
+    # cascade_refresh ingestion run is sufficient audit evidence.
     audit_fresh, audit_detail = _fresh_by_audit(conn, "daily_thesis_refresh", timedelta(hours=24))
     if not audit_fresh:
-        return False, audit_detail
+        cascade_row = conn.execute(
+            """
+            SELECT finished_at, status
+            FROM data_ingestion_runs
+            WHERE source = 'cascade_refresh'
+              AND finished_at IS NOT NULL
+            ORDER BY finished_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if cascade_row is None or cascade_row[0] is None or cascade_row[1] != "success":
+            return False, audit_detail
+        finished_at = cascade_row[0]
+        # data_ingestion_runs.finished_at is TIMESTAMPTZ so psycopg3
+        # returns aware datetimes. Defensive coerce in case a future
+        # adapter config strips tz — subtracting aware from naive
+        # raises TypeError at runtime.
+        if finished_at.tzinfo is None:
+            finished_at = finished_at.replace(tzinfo=UTC)
+        age = datetime.now(UTC) - finished_at
+        if age >= timedelta(hours=24):
+            return False, f"{audit_detail}; cascade_refresh last success {_format_age(age)} ago"
+        audit_detail = f"cascade_refresh success {_format_age(age)} ago (daily_thesis_refresh stale)"
+
     from app.services.thesis import find_stale_instruments
 
     stale_t1 = find_stale_instruments(conn, tier=1)

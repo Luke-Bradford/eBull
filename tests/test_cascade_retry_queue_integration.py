@@ -290,6 +290,61 @@ class TestDemoteToRerankNeededIntegration:
         assert row[2] is None  # untouched
 
 
+class TestCascadeObservabilityRun:
+    """K.4 — cascade_refresh must write its own data_ingestion_runs
+    row so sync_orchestrator/freshness.py can detect recent cascade
+    activity independently of daily_thesis_refresh."""
+
+    def test_clean_run_writes_success_row(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_instrument(ebull_test_conn, 1, "A")
+        stale_rows = [StaleInstrument(instrument_id=1, symbol="A", reason="event_new_10q")]
+        with (
+            patch(
+                "app.services.refresh_cascade.find_stale_instruments",
+                return_value=stale_rows,
+            ),
+            patch("app.services.refresh_cascade.generate_thesis"),
+            patch(
+                "app.services.refresh_cascade.compute_rankings",
+                return_value=MagicMock(scored=[]),
+            ),
+        ):
+            cascade_refresh(ebull_test_conn, MagicMock(), [1])
+
+        row = ebull_test_conn.execute(
+            "SELECT source, status, rows_upserted, rows_skipped FROM data_ingestion_runs "
+            "ORDER BY ingestion_run_id DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "cascade_refresh"
+        assert row[1] == "success"
+        assert row[2] == 1  # thesis_refreshed
+        assert row[3] == 0  # locked_skipped
+
+    def test_failed_run_writes_failed_row_with_error(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_instrument(ebull_test_conn, 1, "A")
+        stale_rows = [StaleInstrument(instrument_id=1, symbol="A", reason="event_new_10q")]
+        with (
+            patch(
+                "app.services.refresh_cascade.find_stale_instruments",
+                return_value=stale_rows,
+            ),
+            patch("app.services.refresh_cascade.generate_thesis"),
+            patch(
+                "app.services.refresh_cascade.compute_rankings",
+                side_effect=RuntimeError("scoring broke"),
+            ),
+        ):
+            cascade_refresh(ebull_test_conn, MagicMock(), [1])
+
+        row = ebull_test_conn.execute(
+            "SELECT status, error FROM data_ingestion_runs ORDER BY ingestion_run_id DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "failed"
+        assert "RuntimeError" in row[1]
+
+
 class TestDurabilityOfHelperCommits:
     """Regression for the K.3 commit-after-execute refactor — a
     later cascade-level rollback must NOT erase a prior enqueue
