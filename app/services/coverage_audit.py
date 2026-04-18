@@ -347,20 +347,22 @@ def audit_instrument(conn: psycopg.Connection[Any], instrument_id: int) -> str:
 
         # Demote-guard: preserve ``structurally_young`` on an
         # ``insufficient`` classifier output. See module docstring.
+        # Use named params so the guard's two references to ``status``
+        # can't silently desynchronise under a future refactor.
         result = conn.execute(
             """
             UPDATE coverage
             SET filings_status = CASE
                     WHEN filings_status = 'structurally_young'
-                         AND %s = 'insufficient'
+                         AND %(status)s = 'insufficient'
                     THEN filings_status
-                    ELSE %s
+                    ELSE %(status)s
                 END,
                 filings_audit_at = NOW()
-            WHERE instrument_id = %s
+            WHERE instrument_id = %(instrument_id)s
             RETURNING filings_status
             """,
-            (status, status, instrument_id),
+            {"status": status, "instrument_id": instrument_id},
         )
         row = result.fetchone()
         if row is None:

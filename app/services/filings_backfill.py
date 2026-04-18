@@ -417,16 +417,22 @@ def backfill_filings(
     if not isinstance(files_meta, list):
         files_meta = []
 
-    try:
-        entries = sorted(
-            files_meta,
-            key=lambda e: date.fromisoformat(str(e["filingTo"])),
-            reverse=True,
-        )
-    except KeyError, TypeError, ValueError:
-        # Missing/malformed filingTo — fall back to reversed original
-        # order (SEC documents files[] as chronological oldest→newest).
-        entries = list(reversed(files_meta))
+    def _entry_filing_to(e: object) -> date:
+        """Per-entry key resolver. Returns ``date.min`` for entries
+        whose ``filingTo`` is missing/malformed so a single bad entry
+        sinks to the back of the sort rather than aborting the whole
+        ordering (pre-v4 fallback silently demoted all pages to
+        oldest-first, wasting HTTP budget on unnecessary old pages).
+        """
+        if not isinstance(e, dict):
+            return date.min
+        raw = e.get("filingTo")
+        try:
+            return date.fromisoformat(str(raw))
+        except TypeError, ValueError:
+            return date.min
+
+    entries = sorted(files_meta, key=_entry_filing_to, reverse=True)
 
     for entry in entries:
         if bar_met and eight_k_window_covered:

@@ -671,6 +671,45 @@ class TestEightKGap:
         assert result.eight_k_gap_filled == 0  # no gap
         assert provider.get_filing_calls == []
 
+    def test_16b_db_only_8k_is_not_treated_as_gap(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Documents the one-directional semantics of step 4:
+        the reconciliation is defensive (``fetched - db``), NOT
+        external-truth-detection (``sec_truth - our_db``). An 8-K
+        already in DB that is NOT in seen_filings must NOT trigger
+        a spurious gap-fill attempt — ground-truth completeness
+        is guaranteed by step 3's pagination loop.
+
+        PR #307 review PREVENTION item.
+        """
+        today = date.today()
+        _seed(ebull_test_conn, instrument_id=1, cik="0000000001", filings_status="insufficient")
+        # Pre-seed an 8-K directly in DB (from some prior daily-index
+        # ingest) that SEC's submissions.json response does NOT include.
+        _seed_filing(
+            ebull_test_conn,
+            instrument_id=1,
+            filing_date=today - timedelta(days=100),
+            filing_type="8-K",
+            accession="K-26-PRE-DB",
+        )
+        # Provider returns analysable filings but none of the 8-Ks
+        # the DB already has.
+        provider = FakeSecProvider(
+            _FakeResponse(
+                primary=_build_submissions(recent_filings=_analysable_recent(today)),
+                pages={},
+                filings={},
+            )
+        )
+
+        result = backfill_filings(ebull_test_conn, provider, "0000000001", 1)  # type: ignore[arg-type]
+
+        assert result.outcome == BackfillOutcome.COMPLETE_OK
+        assert result.eight_k_gap_filled == 0
+        # get_filing must NOT be called for the pre-existing DB 8-K —
+        # otherwise we'd be re-fetching filings we already have.
+        assert provider.get_filing_calls == []
+
     def test_17_http_error_on_gap_fill_classifies_retryable(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """When step 3 leaves a genuine 8-K gap (seen_filings but
         DB missing), get_filing is called; an HTTP error here must
