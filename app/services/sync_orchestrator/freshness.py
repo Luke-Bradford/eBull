@@ -18,7 +18,7 @@ BEFORE ordering would hide a newer failure behind an older success.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -221,9 +221,13 @@ def thesis_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
         ).fetchone()
         if cascade_row is None or cascade_row[0] is None or cascade_row[1] != "success":
             return False, audit_detail
-        from datetime import UTC, datetime
-
         finished_at = cascade_row[0]
+        # data_ingestion_runs.finished_at is TIMESTAMPTZ so psycopg3
+        # returns aware datetimes. Defensive coerce in case a future
+        # adapter config strips tz — subtracting aware from naive
+        # raises TypeError at runtime.
+        if finished_at.tzinfo is None:
+            finished_at = finished_at.replace(tzinfo=UTC)
         age = datetime.now(UTC) - finished_at
         if age >= timedelta(hours=24):
             return False, f"{audit_detail}; cascade_refresh last success {_format_age(age)} ago"

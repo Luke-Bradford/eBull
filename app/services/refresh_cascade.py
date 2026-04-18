@@ -404,15 +404,32 @@ def cascade_refresh(
     # observable separately from daily_financial_facts' fundamentals
     # telemetry. Populated with thesis_refreshed / locked_skipped /
     # failed counts at the end of the run. The row exists across
-    # both success and failure paths; status='failure' captures the
+    # both success and failure paths; status='failed' captures the
     # raise-inducing cascade_outcome.failed case.
-    run_id = start_ingestion_run(
-        conn,
-        source=CASCADE_RUN_SOURCE,
-        endpoint=None,
-        instrument_count=len(retry_ids) + len(stale),
-    )
-    conn.commit()
+    #
+    # Guard against start_ingestion_run failures: if the INSERT
+    # itself raises (DB down, constraint drift), we log and skip
+    # the telemetry row — cascade work itself still runs. run_id
+    # stays None so the finish_ingestion_run call is skipped too,
+    # avoiding an unbound-name crash.
+    run_id: int | None = None
+    try:
+        run_id = start_ingestion_run(
+            conn,
+            source=CASCADE_RUN_SOURCE,
+            endpoint=None,
+            instrument_count=len(retry_ids) + len(stale),
+        )
+        conn.commit()
+    except Exception:
+        logger.exception("cascade_refresh: start_ingestion_run failed — continuing without telemetry row")
+        try:
+            conn.rollback()
+        except psycopg.Error:
+            logger.debug(
+                "cascade_refresh: rollback suppressed after start_ingestion_run failure",
+                exc_info=True,
+            )
 
     thesis_refreshed = 0
     failed: list[tuple[int, str]] = []
@@ -574,24 +591,26 @@ def cascade_refresh(
         len(failed),
     )
 
-    # K.4: finalize ingestion-run telemetry. status=failure when any
+    # K.4: finalize ingestion-run telemetry. status=failed when any
     # per-instrument or rerank failure occurred so the freshness
     # predicate does not treat a degraded run as a clean one.
-    try:
-        finish_ingestion_run(
-            conn,
-            run_id=run_id,
-            status="failed" if failed else "success",
-            rows_upserted=thesis_refreshed,
-            rows_skipped=locked_skipped,
-            error=(f"{len(failed)} failures: {failed}" if failed else None),
-        )
-        conn.commit()
-    except Exception:
-        logger.exception(
-            "cascade_refresh: finish_ingestion_run failed (run_id=%d) — telemetry may be stale until next cycle",
-            run_id,
-        )
+    # Skipped when start_ingestion_run earlier failed (run_id is None).
+    if run_id is not None:
+        try:
+            finish_ingestion_run(
+                conn,
+                run_id=run_id,
+                status="failed" if failed else "success",
+                rows_upserted=thesis_refreshed,
+                rows_skipped=locked_skipped,
+                error=(f"{len(failed)} failures: {failed}" if failed else None),
+            )
+            conn.commit()
+        except Exception:
+            logger.exception(
+                "cascade_refresh: finish_ingestion_run failed (run_id=%d) — telemetry may be stale until next cycle",
+                run_id,
+            )
 
     return CascadeOutcome(
         instruments_considered=len(instrument_ids),
