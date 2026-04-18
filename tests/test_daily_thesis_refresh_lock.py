@@ -38,7 +38,12 @@ def mocked_env():  # type: ignore[no-untyped-def]
         patch.object(scheduler, "report_progress"),
     ):
         tracker = MagicMock()
-        tracker.row_count = None
+        # Defensive init: scheduler's ``tracker.row_count = generated``
+        # assignment runs inside the tracked-job body and will overwrite
+        # this. Keeping it as an int (not None) makes the downstream
+        # assertions unambiguous if the scheduler ever skipped the
+        # assignment.
+        tracker.row_count = 0
         tracked_cm.return_value.__enter__.return_value = tracker
         find_stale.side_effect = [[stale_item], []]  # T1 has one, T2 empty
         anthropic_mod.Anthropic.return_value = MagicMock()
