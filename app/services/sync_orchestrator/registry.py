@@ -213,9 +213,10 @@ JOB_TO_LAYERS: dict[str, tuple[str, ...]] = {
     "weekly_report": ("weekly_reports",),
     "monthly_report": ("monthly_reports",),
     "fx_rates_refresh": ("fx_rates",),
-    # Outside-DAG (6 entries, empty tuples):
+    # Outside-DAG (7 entries, empty tuples):
     "execute_approved_orders": (),
     "weekly_coverage_review": (),
+    "weekly_coverage_audit": (),
     "retry_deferred_recommendations": (),
     "monitor_positions": (),
     "attribution_summary": (),
