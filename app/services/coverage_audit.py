@@ -20,6 +20,13 @@ not here):
 Windows are computed in SQL via ``COUNT(*) FILTER (WHERE ...)`` so the
 Python classifier receives exact per-window counts. ``INTERVAL '18
 months'`` is calendar-correct — no ``timedelta(days=548)`` drift.
+
+Chunk E demote-guard: backfill owns ``structurally_young`` (master plan
+line 165). Audit must not write ``insufficient`` over a backfill-owned
+``structurally_young`` row on demote paths — otherwise the post-backfill
+status signal is lost. Promotion to ``analysable`` / ``fpi`` is always
+allowed. Implemented via a CASE expression in the UPDATE so the guard
+applies in both the bulk and single-instrument audit paths.
 """
 
 from __future__ import annotations
@@ -211,10 +218,20 @@ def audit_all_instruments(conn: psycopg.Connection[Any]) -> AuditSummary:
         if classifications:
             instrument_ids = [c[0] for c in classifications]
             statuses = [c[1] for c in classifications]
+            # Demote-guard: preserve ``structurally_young`` on an
+            # ``insufficient`` classifier output. Chunk E owns that
+            # value — the post-backfill signal must survive until
+            # either backfill itself demotes (issuer aged out, clean
+            # EXHAUSTED run) or promotes (enough base forms now).
             result = conn.execute(
                 """
                 UPDATE coverage c
-                SET filings_status = v.status,
+                SET filings_status = CASE
+                        WHEN c.filings_status = 'structurally_young'
+                             AND v.status = 'insufficient'
+                        THEN c.filings_status
+                        ELSE v.status
+                    END,
                     filings_audit_at = NOW()
                 FROM unnest(%s::bigint[], %s::text[]) AS v(instrument_id, status)
                 WHERE c.instrument_id = v.instrument_id
@@ -328,16 +345,27 @@ def audit_instrument(conn: psycopg.Connection[Any], instrument_id: int) -> str:
 
         status = _classify(agg, has_sec_cik)
 
+        # Demote-guard: preserve ``structurally_young`` on an
+        # ``insufficient`` classifier output. See module docstring.
+        # Use named params so the guard's two references to ``status``
+        # can't silently desynchronise under a future refactor.
         result = conn.execute(
             """
             UPDATE coverage
-            SET filings_status = %s,
+            SET filings_status = CASE
+                    WHEN filings_status = 'structurally_young'
+                         AND %(status)s = 'insufficient'
+                    THEN filings_status
+                    ELSE %(status)s
+                END,
                 filings_audit_at = NOW()
-            WHERE instrument_id = %s
+            WHERE instrument_id = %(instrument_id)s
+            RETURNING filings_status
             """,
-            (status, instrument_id),
+            {"status": status, "instrument_id": instrument_id},
         )
-        if result.rowcount == 0:
+        row = result.fetchone()
+        if row is None:
             # No coverage row for this instrument. Post-#292 this
             # should never happen — universe sync + the weekly backfill
             # together guarantee coverage rows for every tradable
@@ -348,5 +376,78 @@ def audit_instrument(conn: psycopg.Connection[Any], instrument_id: int) -> str:
                 f"classifier returned {status!r} but UPDATE matched zero rows. "
                 f"Check coverage bootstrap (#292) + universe sync wiring."
             )
+        # Return what the DB actually holds post-guard, not the raw
+        # classifier output — otherwise a preserved young row would
+        # report as 'insufficient' to callers (Chunk E's probe path).
+        return str(row[0])
 
-    return status
+
+def probe_status(conn: psycopg.Connection[Any], instrument_id: int) -> str:
+    """Read-only classifier probe (#268 Chunk E).
+
+    Identical aggregate + ``_classify`` logic to ``audit_instrument``,
+    but does NOT UPDATE coverage. Backfill uses this inside its
+    pagination loop so a later retryable error cannot leave a
+    premature ``'analysable'`` in coverage (Chunk E design v3 C1).
+
+    Returns the classifier output (never reads current
+    ``filings_status``). Commits after the SELECTs to close the
+    implicit transaction per the backfill durability invariant.
+    """
+    agg_rows = conn.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (
+                WHERE fe.filing_type = '10-K'
+                  AND fe.filing_date >= (CURRENT_DATE - INTERVAL '3 years')
+            ),
+            COUNT(*) FILTER (
+                WHERE fe.filing_type = '10-Q'
+                  AND fe.filing_date >= (CURRENT_DATE - INTERVAL '18 months')
+            ),
+            COUNT(*) FILTER (
+                WHERE fe.filing_type IN ('10-K','10-K/A','10-Q','10-Q/A')
+            ),
+            COUNT(*) FILTER (
+                WHERE fe.filing_type IN ('20-F','20-F/A','40-F','40-F/A','6-K','6-K/A')
+            )
+        FROM filing_events fe
+        JOIN external_identifiers ei
+            ON ei.instrument_id = fe.instrument_id
+           AND ei.provider = 'sec'
+           AND ei.identifier_type = 'cik'
+           AND ei.is_primary = TRUE
+        WHERE fe.provider = 'sec'
+          AND fe.instrument_id = %s
+        """,
+        (instrument_id,),
+    ).fetchone()
+
+    has_cik_row = conn.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM external_identifiers ei
+            WHERE ei.instrument_id = %s
+              AND ei.provider = 'sec'
+              AND ei.identifier_type = 'cik'
+              AND ei.is_primary = TRUE
+        )
+        """,
+        (instrument_id,),
+    ).fetchone()
+    has_sec_cik = bool(has_cik_row[0]) if has_cik_row is not None else False
+
+    agg: AuditCounts | None
+    if agg_rows is None or all(v == 0 for v in agg_rows):
+        agg = None
+    else:
+        agg = AuditCounts(
+            instrument_id=instrument_id,
+            ten_k_in_3y=int(agg_rows[0]),
+            ten_q_in_18m=int(agg_rows[1]),
+            us_base_or_amend_total=int(agg_rows[2]),
+            fpi_total=int(agg_rows[3]),
+        )
+
+    conn.commit()  # close implicit tx per backfill durability invariant.
+    return _classify(agg, has_sec_cik)

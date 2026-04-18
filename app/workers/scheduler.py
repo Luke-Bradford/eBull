@@ -2082,45 +2082,113 @@ def monitor_positions_job() -> None:
 
 
 def weekly_coverage_audit() -> None:
-    """Re-classify every tradable instrument's ``coverage.filings_status``
-    using the current ``filing_events`` set (#268 Chunk F minimal).
+    """Classify every tradable SEC-covered instrument via the bulk
+    audit, then drive any non-terminal one toward terminal state
+    via ``backfill_filings``.
 
-    Runs Tuesday 04:00 UTC. Scope is deliberately audit-only — the
-    master plan's full Chunk F includes historical backfill via
-    Chunk E's ``backfill_filings`` helper, which is not yet shipped.
-    Until E lands, this job surfaces drift (analysable → insufficient,
-    etc.) so ops can see it without auto-remediating.
+    Eligibility for backfill: ``filings_status IN ('insufficient',
+    'unknown', 'structurally_young')``. Including ``structurally_young``
+    lets aging young issuers re-promote to ``analysable`` once they
+    have filed past the 18-month bar (master plan line 184). ``fpi``
+    and ``no_primary_sec_cik`` are terminal and not eligible.
 
-    Idempotent; uses the existing ``audit_all_instruments`` bulk-
-    UPDATE path which only touches rows whose status actually
-    changed.
+    No post-audit re-sweep: ``backfill_filings`` writes the terminal
+    ``filings_status`` for each instrument it touches. A post-audit
+    would risk publishing ``analysable`` for instruments whose 8-K
+    window was not verified by backfill (audit's bar is 10-K/10-Q
+    only), which is the exact invariant Chunk E exists to protect
+    (design v3 C1).
+
+    Runs Tuesday 04:00 UTC.
     """
     with _tracked_job(JOB_WEEKLY_COVERAGE_AUDIT) as tracker:
         from app.services.coverage_audit import audit_all_instruments
+        from app.services.filings_backfill import BackfillOutcome, backfill_filings
 
+        outcomes: dict[BackfillOutcome, int] = {o: 0 for o in BackfillOutcome}
+        eligible_count = 0
         logger.info("weekly_coverage_audit: starting bulk classifier")
         try:
             with psycopg.connect(settings.database_url) as conn:
-                summary = audit_all_instruments(conn)
+                pre_audit = audit_all_instruments(conn)
+
+                eligible_rows = conn.execute(
+                    """
+                    SELECT c.instrument_id, ei.identifier_value AS cik
+                    FROM coverage c
+                    JOIN external_identifiers ei
+                        ON ei.instrument_id = c.instrument_id
+                       AND ei.provider = 'sec'
+                       AND ei.identifier_type = 'cik'
+                       AND ei.is_primary = TRUE
+                    WHERE c.filings_status IN ('insufficient', 'unknown', 'structurally_young')
+                    """
+                ).fetchall()
+                conn.commit()  # close implicit read tx before mutation.
+                eligible_count = len(eligible_rows)
+
+                with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+                    for row in eligible_rows:
+                        iid, cik = int(row[0]), str(row[1])
+                        try:
+                            result = backfill_filings(conn, provider, cik, iid)
+                        except Exception:
+                            # K.1 round 1 gotcha — ``except psycopg.Error``
+                            # too narrow for per-instrument isolation.
+                            logger.exception(
+                                "weekly_coverage_audit: backfill raised for instrument_id=%d",
+                                iid,
+                            )
+                            # Shared connection may be in failed-tx state
+                            # after an escaped psycopg error. Roll back so
+                            # later instruments aren't poisoned.
+                            try:
+                                conn.rollback()
+                            except Exception:
+                                logger.exception(
+                                    "weekly_coverage_audit: rollback failed after "
+                                    "instrument_id=%d — later instruments may fail",
+                                    iid,
+                                )
+                            continue
+                        outcomes[result.outcome] += 1
         except Exception:
             logger.error("weekly_coverage_audit: failed", exc_info=True)
             raise
 
-        tracker.row_count = summary.total_updated
-        # Log inside the with so ``summary`` is always bound at the
-        # point of use. Hoisting the log after the with would leak
-        # a NameError if _tracked_job.__exit__ raises (tracker
-        # write-back failure, etc.) because ``summary`` would be
-        # bound only in a now-torn-down scope.
+        # Per design v5: audit row count + every non-skipped backfill that
+        # wrote coverage (includes EXHAUSTED / STRUCTURALLY_YOUNG / HTTP /
+        # PARSE, which all UPDATE the coverage row even when filings_status
+        # is preserved).
+        non_skipped_backfill_writes = sum(
+            outcomes[o]
+            for o in (
+                BackfillOutcome.COMPLETE_OK,
+                BackfillOutcome.COMPLETE_FPI,
+                BackfillOutcome.STILL_INSUFFICIENT_STRUCTURALLY_YOUNG,
+                BackfillOutcome.STILL_INSUFFICIENT_EXHAUSTED,
+                BackfillOutcome.STILL_INSUFFICIENT_HTTP_ERROR,
+                BackfillOutcome.STILL_INSUFFICIENT_PARSE_ERROR,
+            )
+        )
+        tracker.row_count = pre_audit.total_updated + non_skipped_backfill_writes
         logger.info(
-            "weekly_coverage_audit complete: analysable=%d insufficient=%d "
-            "fpi=%d no_primary_sec_cik=%d total_updated=%d null_anomalies=%d",
-            summary.analysable,
-            summary.insufficient,
-            summary.fpi,
-            summary.no_primary_sec_cik,
-            summary.total_updated,
-            summary.null_anomalies,
+            "weekly_coverage_audit complete: "
+            "pre_analysable=%d eligible=%d "
+            "complete_ok=%d complete_fpi=%d structurally_young=%d "
+            "exhausted=%d http_err=%d parse_err=%d "
+            "skipped_cap=%d skipped_backoff=%d null_anomalies=%d",
+            pre_audit.analysable,
+            eligible_count,
+            outcomes[BackfillOutcome.COMPLETE_OK],
+            outcomes[BackfillOutcome.COMPLETE_FPI],
+            outcomes[BackfillOutcome.STILL_INSUFFICIENT_STRUCTURALLY_YOUNG],
+            outcomes[BackfillOutcome.STILL_INSUFFICIENT_EXHAUSTED],
+            outcomes[BackfillOutcome.STILL_INSUFFICIENT_HTTP_ERROR],
+            outcomes[BackfillOutcome.STILL_INSUFFICIENT_PARSE_ERROR],
+            outcomes[BackfillOutcome.SKIPPED_ATTEMPTS_CAP],
+            outcomes[BackfillOutcome.SKIPPED_BACKOFF_WINDOW],
+            pre_audit.null_anomalies,
         )
 
 

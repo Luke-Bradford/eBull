@@ -14,6 +14,7 @@ import pytest
 from app.services.coverage_audit import (
     audit_all_instruments,
     audit_instrument,
+    probe_status,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn
 from tests.fixtures.ebull_test_db import test_db_available as _test_db_available
@@ -355,3 +356,170 @@ def test_audit_instrument_raises_on_missing_coverage_row(
 
     with pytest.raises(RuntimeError, match="no coverage row"):
         audit_instrument(ebull_test_conn, instrument_id=42)
+
+
+# ---------------------------------------------------------------------
+# Chunk E demote-guard (#268)
+# ---------------------------------------------------------------------
+
+
+def _force_status(conn: psycopg.Connection[tuple], instrument_id: int, status: str) -> None:
+    """Direct UPDATE bypass for test setup: sets filings_status without
+    going through the classifier. Simulates Chunk E backfill having
+    written ``structurally_young`` previously."""
+    conn.execute(
+        "UPDATE coverage SET filings_status = %s WHERE instrument_id = %s",
+        (status, instrument_id),
+    )
+    conn.commit()
+
+
+def test_audit_all_preserves_structurally_young_on_demote(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Bulk audit must not write 'insufficient' over a
+    backfill-owned 'structurally_young' row (Chunk E demote-guard).
+    """
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="YOUNG1", cik="0000000101")
+    # Classifier will output 'insufficient' (zero filings but has CIK).
+    _force_status(ebull_test_conn, instrument_id=1, status="structurally_young")
+
+    audit_all_instruments(ebull_test_conn)
+
+    row = ebull_test_conn.execute(
+        "SELECT filings_status, filings_audit_at FROM coverage WHERE instrument_id = 1"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "structurally_young"  # preserved
+    assert row[1] is not None  # audit_at still bumped
+
+
+def test_audit_all_promotes_structurally_young_to_analysable(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Young issuer that has since filed enough base forms must
+    promote on the next audit. Demote-guard does NOT block promotion.
+    """
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="AGED1", cik="0000000102")
+    today = date.today()
+    # 2 × 10-K in 3y + 4 × 10-Q in 18mo — meets the bar.
+    for offset, kind, acc in [
+        (400, "10-K", "0000000102-24-000001"),
+        (700, "10-K", "0000000102-23-000001"),
+        (30, "10-Q", "0000000102-26-000001"),
+        (120, "10-Q", "0000000102-26-000002"),
+        (210, "10-Q", "0000000102-25-000003"),
+        (300, "10-Q", "0000000102-25-000004"),
+    ]:
+        _seed_filing(
+            ebull_test_conn,
+            instrument_id=1,
+            filing_date=today - timedelta(days=offset),
+            filing_type=kind,
+            accession=acc,
+        )
+    _force_status(ebull_test_conn, instrument_id=1, status="structurally_young")
+
+    audit_all_instruments(ebull_test_conn)
+
+    row = ebull_test_conn.execute("SELECT filings_status FROM coverage WHERE instrument_id = 1").fetchone()
+    assert row is not None
+    assert row[0] == "analysable"
+
+
+def test_audit_instrument_preserves_structurally_young_on_demote(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Single-instrument path obeys the same demote-guard."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="YOUNG2", cik="0000000103")
+    _force_status(ebull_test_conn, instrument_id=1, status="structurally_young")
+
+    returned = audit_instrument(ebull_test_conn, instrument_id=1)
+
+    assert returned == "structurally_young"
+    row = ebull_test_conn.execute("SELECT filings_status FROM coverage WHERE instrument_id = 1").fetchone()
+    assert row is not None
+    assert row[0] == "structurally_young"
+
+
+def test_audit_instrument_promotes_structurally_young_to_fpi(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Promotion from structurally_young to fpi when 20-F appears."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="FPI2", cik="0000000104")
+    _seed_filing(
+        ebull_test_conn,
+        instrument_id=1,
+        filing_date=date.today() - timedelta(days=60),
+        filing_type="20-F",
+        accession="0000000104-26-000001",
+    )
+    _force_status(ebull_test_conn, instrument_id=1, status="structurally_young")
+
+    returned = audit_instrument(ebull_test_conn, instrument_id=1)
+
+    assert returned == "fpi"
+    row = ebull_test_conn.execute("SELECT filings_status FROM coverage WHERE instrument_id = 1").fetchone()
+    assert row is not None
+    assert row[0] == "fpi"
+
+
+# ---------------------------------------------------------------------
+# probe_status (Chunk E read-only classifier)
+# ---------------------------------------------------------------------
+
+
+def test_probe_status_returns_analysable_without_writing(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """probe_status must never UPDATE coverage."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="PROBE1", cik="0000000201")
+    today = date.today()
+    for offset, kind, acc in [
+        (400, "10-K", "0000000201-24-000001"),
+        (700, "10-K", "0000000201-23-000001"),
+        (30, "10-Q", "0000000201-26-000001"),
+        (120, "10-Q", "0000000201-26-000002"),
+        (210, "10-Q", "0000000201-25-000003"),
+        (300, "10-Q", "0000000201-25-000004"),
+    ]:
+        _seed_filing(
+            ebull_test_conn,
+            instrument_id=1,
+            filing_date=today - timedelta(days=offset),
+            filing_type=kind,
+            accession=acc,
+        )
+
+    status = probe_status(ebull_test_conn, instrument_id=1)
+
+    assert status == "analysable"
+    # Coverage row must be untouched (filings_status NULL, no audit_at).
+    row = ebull_test_conn.execute(
+        "SELECT filings_status, filings_audit_at FROM coverage WHERE instrument_id = 1"
+    ).fetchone()
+    assert row is not None
+    assert row[0] is None
+    assert row[1] is None
+
+
+def test_probe_status_returns_insufficient_when_no_filings(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Probe with SEC CIK but zero filings returns 'insufficient'."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="PROBE2", cik="0000000202")
+
+    status = probe_status(ebull_test_conn, instrument_id=1)
+
+    assert status == "insufficient"
+
+
+def test_probe_status_returns_no_primary_sec_cik(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Probe without SEC CIK returns 'no_primary_sec_cik'."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="PROBE3")  # no cik
+
+    status = probe_status(ebull_test_conn, instrument_id=1)
+
+    assert status == "no_primary_sec_cik"
