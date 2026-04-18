@@ -788,3 +788,30 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `refresh_scoring_and_recommendations` assigned `result` and `outcome` INSIDE a `with JobLock + _tracked_job` block, then referenced them AFTER the block. A non-`JobAlreadyRunning` exception propagated out, leaving `result`/`outcome` unbound if a broader `except` were ever added — an `UnboundLocalError` waiting for a future code change to trigger.
 - Prevention: When the success path of a `try` assigns variables used in the code after the `try/except`, verify every `except` branch either returns/raises or assigns the same variables. Grep for `result =` or similar assignments inside `with JobLock(...)` contexts and check the post-block readers are unreachable from any exception channel. The adapter pattern now uses explicit `JobLock.__enter__()` + `try/finally JobLock.__exit__()` so the success-path scoping is unambiguous.
 - Enforced in: `app/services/sync_orchestrator/adapters.py` (`refresh_scoring_and_recommendations`)
+
+---
+
+### `setSubmitting(false)` missing on a modal submit's success path
+
+- First seen in: #319
+- Symptom: A modal's async submit handler reset `submitting=true` before awaiting the POST, then on success called `onFilled()` + `onRequestClose()` without first calling `setSubmitting(false)`. The parent normally unmounts the modal immediately via `onRequestClose`, so the stuck state is invisible in practice — but any future caller that delays unmount (a wrapping confirm dialog, a test reusing the modal instance, a test that does not trigger unmount through the same branch) leaves the submit button permanently locked in `"Placing…"` / `"Closing…"` with no recovery.
+- Prevention: In any async submit handler, reset `setSubmitting(false)` on BOTH the success and error branches before handing control back to the parent. Pattern: `setSubmitting(false)` immediately after the `await` resolves, guarded by `mountedRef.current`, before the `onFilled`/`onRequestClose` calls. A bare `finally { setSubmitting(false) }` is an acceptable alternative when the success branch does not need early-return semantics. Grep for `setSubmitting(true)` in modal files and confirm each occurrence has a matching `setSubmitting(false)` on every exit path.
+- Enforced in: this prevention log; `frontend/src/components/orders/OrderEntryModal.tsx`, `frontend/src/components/orders/ClosePositionModal.tsx`
+
+---
+
+### `canSubmit` expression omits `!async.loading` during refetch
+
+- First seen in: #319
+- Symptom: A modal's `canSubmit` boolean gated on `trade !== null && !submitting && !detail.error` but did not include `!detail.loading`. `useAsync` clears `data` to `null` at the start of a refetch (see `async-data-loading.md`), so this is usually safe — but any defensive caller that preserves prior `data` during refetch, or a future change to `useAsync`'s clear-on-refetch semantics, would leave submit enabled against stale context while the fresh fetch is mid-flight.
+- Prevention: Any `canSubmit` / `canProceed` boolean whose inputs include an async data slot MUST also include `!async.loading`. Pattern: `const canSubmit = async.data !== null && !async.loading && !async.error && ...`. Grep `canSubmit` / `canSave` / `canProceed` in frontend modals and confirm each includes an explicit loading guard.
+- Enforced in: this prevention log; `frontend/src/components/orders/OrderEntryModal.tsx`, `frontend/src/components/orders/ClosePositionModal.tsx`
+
+---
+
+### `handleSubmit` early-return guard diverges from `canSubmit`
+
+- First seen in: #319
+- Symptom: A submit handler's early-return guard checked only a subset of the conditions that `canSubmit` already enforced — e.g. partial-close handler checked `units > 0` but not `units <= trade.units` or `units >= MIN_UNITS`. Under the current call site the submit button is always disabled when any of those fail, so the gap is invisible in practice. A programmatic call (test, future caller that reuses the submit path without the button), or a future refactor that inlines the handler into a different trigger, would skip those additional constraints and POST an invalid payload the backend rejects with a confusing message.
+- Prevention: In any handler whose validity is already computed as a `canSubmit` boolean for the button's `disabled` state, the handler's own early-return guard MUST be a strict superset of `canSubmit`'s conditions, OR use `if (!canSubmit) return` as a single gate. Defence-in-depth is cheap; divergence between the UI gate and the submit path is a class of bug that hides until a future caller lands. Grep `async function handleSubmit` in modal files and compare the return guards to the `canSubmit` expression at the top of the component.
+- Enforced in: this prevention log; `frontend/src/components/orders/ClosePositionModal.tsx` (`handleSubmit` now re-checks `MIN_UNITS` and `<= trade.units`)
