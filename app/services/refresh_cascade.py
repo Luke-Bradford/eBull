@@ -346,8 +346,7 @@ def instrument_lock(
                     conn.execute("SELECT pg_advisory_unlock(%s)", (instrument_id,))
                 except psycopg.Error:
                     logger.exception(
-                        "instrument_lock: unlock failed for instrument_id=%d — "
-                        "session close will release",
+                        "instrument_lock: unlock failed for instrument_id=%d — session close will release",
                         instrument_id,
                     )
 

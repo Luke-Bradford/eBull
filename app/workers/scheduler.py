@@ -1368,14 +1368,28 @@ def daily_thesis_refresh() -> None:
                                 conn=conn,
                                 client=claude_client,
                             )
+                            # Increment BEFORE demote so a demote
+                            # failure can't silently under-count
+                            # a successful thesis write. The thesis
+                            # row is already committed by
+                            # generate_thesis (#293); the demote
+                            # call is a separate queue-mutation
+                            # side-effect we want to best-effort.
+                            generated += 1
                             # Daily's thesis write resolves any pending
                             # cascade thesis signal but does not run
                             # compute_rankings, so demote rather than
                             # delete — preserves RERANK_NEEDED rows
                             # untouched and converts thesis-failure /
                             # LOCKED_BY_SIBLING rows to RERANK_NEEDED.
-                            demote_to_rerank_needed(conn, item.instrument_id)
-                            generated += 1
+                            try:
+                                demote_to_rerank_needed(conn, item.instrument_id)
+                            except Exception:
+                                logger.exception(
+                                    "daily_thesis_refresh: demote_to_rerank_needed failed "
+                                    "for instrument_id=%d — queue signal stale until next run",
+                                    item.instrument_id,
+                                )
             except Exception:
                 logger.warning(
                     "daily_thesis_refresh: failed for symbol=%s instrument_id=%d, skipping",
