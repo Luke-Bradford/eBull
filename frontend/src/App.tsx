@@ -8,6 +8,7 @@ import { RankingsPage } from "@/pages/RankingsPage";
 import { InstrumentDetailPage } from "@/pages/InstrumentDetailPage";
 import { RecommendationsPage } from "@/pages/RecommendationsPage";
 import { AdminPage } from "@/pages/AdminPage";
+import { CoverageInsufficientPage } from "@/pages/CoverageInsufficientPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 import { LoginPage } from "@/pages/LoginPage";
@@ -44,6 +45,10 @@ export function App() {
           <Route path="copy-trading/:mirrorId" element={<CopyTradingPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />
           <Route path="admin" element={<AdminPage />} />
+          <Route
+            path="admin/coverage/insufficient"
+            element={<CoverageInsufficientPage />}
+          />
           <Route path="operators" element={<OperatorsPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="*" element={<NotFoundPage />} />

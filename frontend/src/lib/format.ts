@@ -38,6 +38,19 @@ const DATE = new Intl.DateTimeFormat("en-GB", {
   minute: "2-digit",
 });
 
+// UTC timezone pinned: backend date-only strings (``YYYY-MM-DD``)
+// parse as midnight UTC in JS. Without ``timeZone: "UTC"`` here,
+// Intl renders them in local TZ — a London operator sees "15 Jun
+// 2024" correctly, but a New York operator (UTC-5) sees "14 Jun
+// 2024" for the same input. Pin UTC so the calendar date is
+// stable regardless of viewer timezone.
+const DATE_ONLY = new Intl.DateTimeFormat("en-GB", {
+  year: "numeric",
+  month: "short",
+  day: "2-digit",
+  timeZone: "UTC",
+});
+
 export function formatMoney(
   value: number | null | undefined,
   currency = "GBP",
@@ -65,6 +78,15 @@ export function formatDateTime(iso: string | null | undefined): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
   return DATE.format(d);
+}
+
+/** Format a YYYY-MM-DD date-only value (pydantic `date` serialisation).
+ *  Unlike formatDateTime, does NOT render hours/minutes. */
+export function formatDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return DATE_ONLY.format(d);
 }
 
 /** Compute unrealized P&L percentage from raw cost and PnL values. */
