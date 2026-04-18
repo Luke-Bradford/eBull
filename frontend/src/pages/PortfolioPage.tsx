@@ -6,7 +6,21 @@ import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatMoney, formatNumber, formatPct, pnlPct } from "@/lib/format";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
-import type { PositionItem, PortfolioMirrorItem } from "@/api/types";
+import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
+import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
+import type {
+  BrokerPositionItem,
+  PositionItem,
+  PortfolioMirrorItem,
+} from "@/api/types";
+
+type ValuationSource = "quote" | "daily_close" | "cost_basis";
+
+interface CloseTarget {
+  instrumentId: number;
+  trade: BrokerPositionItem;
+  valuationSource: ValuationSource;
+}
 
 /**
  * Portfolio page — the operator's main working view.
@@ -20,6 +34,16 @@ export function PortfolioPage() {
   const portfolio = useAsync(fetchPortfolio, []);
   const currency = useDisplayCurrency();
   const [search, setSearch] = useState("");
+  const [addFor, setAddFor] = useState<PositionItem | null>(null);
+  const [closeFor, setCloseFor] = useState<CloseTarget | null>(null);
+
+  function handleFilled() {
+    // Close modals BEFORE the portfolio refetch fires so a refetch
+    // error is never hidden behind an open dialog (prevention #125).
+    setAddFor(null);
+    setCloseFor(null);
+    portfolio.refetch();
+  }
 
   return (
     <div className="space-y-4">
@@ -40,9 +64,34 @@ export function PortfolioPage() {
             currency={currency}
             search={search}
             onSearchChange={setSearch}
+            onAdd={setAddFor}
+            onClose={setCloseFor}
           />
         </>
       )}
+
+      {addFor !== null ? (
+        <OrderEntryModal
+          isOpen
+          instrumentId={addFor.instrument_id}
+          symbol={addFor.symbol}
+          companyName={addFor.company_name}
+          valuationSource={addFor.valuation_source}
+          onRequestClose={() => setAddFor(null)}
+          onFilled={handleFilled}
+        />
+      ) : null}
+
+      {closeFor !== null ? (
+        <ClosePositionModal
+          isOpen
+          instrumentId={closeFor.instrumentId}
+          positionId={closeFor.trade.position_id}
+          valuationSource={closeFor.valuationSource}
+          onRequestClose={() => setCloseFor(null)}
+          onFilled={handleFilled}
+        />
+      ) : null}
     </div>
   );
 }
@@ -147,12 +196,16 @@ function PortfolioTable({
   currency,
   search,
   onSearchChange,
+  onAdd,
+  onClose,
 }: {
   positions: PositionItem[];
   mirrors?: PortfolioMirrorItem[];
   currency: string;
   search: string;
   onSearchChange: (v: string) => void;
+  onAdd: (p: PositionItem) => void;
+  onClose: (t: CloseTarget) => void;
 }) {
   const allRows: RowItem[] = [
     ...positions.map((p) => ({ kind: "position" as const, data: p })),
@@ -202,12 +255,19 @@ function PortfolioTable({
             <th className="px-2 py-2 text-right">Value</th>
             <th className="px-2 py-2 text-right">P&L</th>
             <th className="px-2 py-2 text-right">%</th>
+            <th className="px-2 py-2 text-right">Actions</th>
           </tr>
         </thead>
         <tbody>
           {filtered.map((row) =>
             row.kind === "position" ? (
-              <PositionRow key={`pos-${row.data.instrument_id}`} p={row.data} currency={currency} />
+              <PositionRow
+                key={`pos-${row.data.instrument_id}`}
+                p={row.data}
+                currency={currency}
+                onAdd={onAdd}
+                onClose={onClose}
+              />
             ) : (
               <MirrorRow key={`mir-${row.data.mirror_id}`} m={row.data} currency={currency} />
             ),
@@ -222,11 +282,26 @@ function PortfolioTable({
 // Position row — click navigates to /portfolio/:instrumentId
 // ---------------------------------------------------------------------------
 
-function PositionRow({ p, currency }: { p: PositionItem; currency: string }) {
+function PositionRow({
+  p,
+  currency,
+  onAdd,
+  onClose,
+}: {
+  p: PositionItem;
+  currency: string;
+  onAdd: (p: PositionItem) => void;
+  onClose: (t: CloseTarget) => void;
+}) {
   const navigate = useNavigate();
   const pct = pnlPct(p.unrealized_pnl, p.cost_basis);
   const positive = p.unrealized_pnl >= 0;
-  const trades = p.trades ?? [];
+  const trades = p.trades;
+  // Close is only exposed when a single broker position backs the
+  // instrument. Aggregated positions defer to #314's detail panel,
+  // where per-broker-position rows get their own Close buttons.
+  const singleTrade: BrokerPositionItem | null =
+    trades.length === 1 && trades[0] !== undefined ? trades[0] : null;
 
   return (
     <tr
@@ -259,6 +334,36 @@ function PositionRow({ p, currency }: { p: PositionItem; currency: string }) {
         <span className={positive ? "text-emerald-600" : "text-red-600"}>
           {pct === null ? "—" : formatPct(pct)}
         </span>
+      </td>
+      <td className="px-2 py-2 text-right whitespace-nowrap">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onAdd(p);
+          }}
+          aria-label={`Add to ${p.symbol}`}
+          className="mr-1 rounded border border-blue-300 bg-white px-2 py-0.5 text-xs font-medium text-blue-700 hover:bg-blue-50"
+        >
+          Add
+        </button>
+        {singleTrade !== null ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onClose({
+                instrumentId: p.instrument_id,
+                trade: singleTrade,
+                valuationSource: p.valuation_source,
+              });
+            }}
+            aria-label={`Close ${p.symbol}`}
+            className="rounded border border-red-300 bg-white px-2 py-0.5 text-xs font-medium text-red-700 hover:bg-red-50"
+          >
+            Close
+          </button>
+        ) : null}
       </td>
     </tr>
   );
@@ -310,6 +415,8 @@ function MirrorRow({ m, currency }: { m: PortfolioMirrorItem; currency: string }
           {pct === null ? "—" : formatPct(pct)}
         </span>
       </td>
+      {/* No Actions for mirror rows — copy trading is a separate flow. */}
+      <td className="px-2 py-2" />
     </tr>
   );
 }

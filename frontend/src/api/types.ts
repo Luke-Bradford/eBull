@@ -289,6 +289,37 @@ export interface InstrumentPositionDetail {
 }
 
 // ---------------------------------------------------------------------------
+// /portfolio/orders, /portfolio/positions/{id}/close (app/api/orders.py)
+// ---------------------------------------------------------------------------
+
+export type OrderAction = "BUY" | "ADD";
+
+export interface PlaceOrderRequest {
+  instrument_id: number;
+  action: OrderAction;
+  amount: number | null;
+  units: number | null;
+  stop_loss_rate: number | null;
+  take_profit_rate: number | null;
+  is_tsl_enabled: boolean;
+  leverage: number;
+}
+
+export interface ClosePositionRequest {
+  units_to_deduct: number | null;
+}
+
+export interface OrderResponse {
+  order_id: number;
+  status: string;
+  broker_order_ref: string | null;
+  filled_price: number | null;
+  filled_units: number | null;
+  fees: number;
+  explanation: string;
+}
+
+// ---------------------------------------------------------------------------
 // /recommendations (app/api/recommendations.py)
 // ---------------------------------------------------------------------------
 
