@@ -2660,35 +2660,39 @@ def raw_data_retention_sweep() -> None:
         with psycopg.connect(settings.database_url) as conn:
             for source in _RETENTION_POLICY:
                 # --- Compaction phase (throttled by staleness) ---
+                # A compaction error MUST NOT skip the sweep phase
+                # for the same source — they are independent
+                # operations. Bug caught in pre-merge review: the
+                # earlier `continue` on compaction raise silently
+                # suppressed every subsequent sweep for recurring
+                # compaction errors, defeating retention.
                 state = load_state(conn, source)
                 if needs_compaction(state):
                     try:
                         result = compact_source(source, dry_run=dry_run)
+                        if not dry_run:
+                            update_compaction_state(conn, source, result)
+                        logger.info(
+                            "raw_data_retention_sweep: source=%s phase=compact "
+                            "scanned=%d deleted=%d reclaimed=%d elapsed=%.2f "
+                            "dry_run=%s",
+                            source,
+                            result.files_scanned,
+                            result.files_deleted,
+                            result.bytes_reclaimed,
+                            result.elapsed_seconds,
+                            dry_run,
+                        )
+                        total_deleted += result.files_deleted
+                        total_bytes += result.bytes_reclaimed
                     except Exception:
-                        # Per-source isolation — one bad source must
-                        # not abort the rest of the sweep.
                         logger.exception(
-                            "raw_data_retention_sweep: compact raised for source=%s",
+                            "raw_data_retention_sweep: compact raised for source=%s — "
+                            "sweep phase still runs for this source",
                             source,
                         )
-                        continue
-                    if not dry_run:
-                        update_compaction_state(conn, source, result)
-                    logger.info(
-                        "raw_data_retention_sweep: source=%s phase=compact "
-                        "scanned=%d deleted=%d reclaimed=%d elapsed=%.2f "
-                        "dry_run=%s",
-                        source,
-                        result.files_scanned,
-                        result.files_deleted,
-                        result.bytes_reclaimed,
-                        result.elapsed_seconds,
-                        dry_run,
-                    )
-                    total_deleted += result.files_deleted
-                    total_bytes += result.bytes_reclaimed
 
-                # --- Sweep phase (daily, cheap) ---
+                # --- Sweep phase (daily, cheap, independent of compaction) ---
                 try:
                     sweep = sweep_source(source, dry_run=dry_run)
                 except Exception:

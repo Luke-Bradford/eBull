@@ -417,9 +417,55 @@ class TestEndToEnd:
 
         # Filesystem untouched.
         assert len(list(fmp_dir.iterdir())) == 2
-        # No state writes in dry-run mode — update_* helpers issue
-        # INSERT INTO raw_persistence_state; if we saw an execute with
-        # that SQL we failed.
+        # No INSERT / UPDATE at all in dry-run mode. Bot pre-merge
+        # review noted the previous "raw_persistence_state substring"
+        # check was vacuous because SELECT also contains it; asserting
+        # on INSERT specifically is the real property we care about.
         for call in fake_conn.execute.call_args_list:
             sql_text = str(call[0][0]) if call[0] else ""
-            assert "raw_persistence_state" not in sql_text or "SELECT" in sql_text
+            assert "INSERT" not in sql_text.upper(), f"dry-run must not write: {sql_text!r}"
+            assert "UPDATE" not in sql_text.upper(), f"dry-run must not write: {sql_text!r}"
+
+    def test_compact_raise_does_not_skip_sweep(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Bug caught pre-merge: scheduler's compact-phase exception
+        handler used to `continue`, which silently suppressed the
+        sweep phase for the same source. A recurring compaction
+        error on any source would thus defeat retention forever."""
+        from app.workers import scheduler as scheduler_module
+
+        monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
+        etoro_dir = tmp_path / "etoro"
+        # Age-expired file that sweep should delete (etoro retention=7d).
+        _seed(etoro_dir, "old_20260101T120000Z.json", {"x": 1}, age=timedelta(days=30))
+
+        fake_settings = MagicMock()
+        fake_settings.database_url = "postgresql://test"
+        fake_settings.raw_retention_dry_run = False  # enforce mode
+        monkeypatch.setattr(scheduler_module, "settings", fake_settings)
+        tracked = MagicMock()
+        monkeypatch.setattr(
+            scheduler_module,
+            "_tracked_job",
+            MagicMock(return_value=MagicMock(__enter__=lambda self: tracked, __exit__=lambda *a: None)),
+        )
+        fake_conn = MagicMock()
+        fake_conn.execute.return_value.fetchone.return_value = None
+        monkeypatch.setattr(
+            scheduler_module.psycopg,
+            "connect",
+            MagicMock(return_value=MagicMock(__enter__=lambda self: fake_conn, __exit__=lambda *a: None)),
+        )
+
+        # Monkeypatch compact_source to raise for every source.
+        import app.services.raw_persistence as rp
+
+        def boom(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("simulated compact failure")
+
+        monkeypatch.setattr(rp, "compact_source", boom)
+
+        scheduler_module.raw_data_retention_sweep()
+
+        # Despite the compact exception, sweep ran for etoro and
+        # deleted the age-expired file.
+        assert not (etoro_dir / "old_20260101T120000Z.json").exists()
