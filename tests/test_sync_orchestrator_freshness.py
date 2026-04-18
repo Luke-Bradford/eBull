@@ -224,6 +224,72 @@ class TestThesisIsFresh:
         fresh, _ = thesis_is_fresh(conn)
         assert fresh is True
 
+    def test_fresh_via_cascade_when_daily_thesis_refresh_stale(self, monkeypatch) -> None:
+        """K.4: if daily_thesis_refresh is stale/absent, a recent
+        successful cascade_refresh ingestion run is sufficient
+        audit evidence. Thesis is refreshed by either path."""
+        now = datetime.now(UTC)
+        # First fetchone: job_runs row is stale (48h old success).
+        stale_audit = (
+            now - timedelta(hours=48),
+            "success",
+            None,
+            timedelta(hours=48).total_seconds(),
+        )
+        # Second fetchone: cascade_refresh run finished 2h ago, success.
+        cascade_row = (now - timedelta(hours=2), "success")
+        conn = _mock_conn_with_rows([stale_audit, cascade_row])
+        monkeypatch.setattr(
+            "app.services.thesis.find_stale_instruments",
+            lambda _conn, tier: [],
+        )
+        fresh, detail = thesis_is_fresh(conn)
+        assert fresh is True
+        assert "cascade_refresh" in detail
+
+    def test_stale_when_both_audit_and_cascade_stale(self, monkeypatch) -> None:
+        """Both signals stale → thesis layer is stale."""
+        now = datetime.now(UTC)
+        stale_audit = (
+            now - timedelta(hours=48),
+            "success",
+            None,
+            timedelta(hours=48).total_seconds(),
+        )
+        # cascade_refresh last success 30h ago (outside 24h window).
+        cascade_row = (now - timedelta(hours=30), "success")
+        conn = _mock_conn_with_rows([stale_audit, cascade_row])
+        fresh, detail = thesis_is_fresh(conn)
+        assert fresh is False
+        assert "cascade_refresh last success" in detail
+
+    def test_stale_when_daily_stale_and_no_cascade_row(self, monkeypatch) -> None:
+        """daily_thesis_refresh stale AND no cascade row at all → stale."""
+        now = datetime.now(UTC)
+        stale_audit = (
+            now - timedelta(hours=48),
+            "success",
+            None,
+            timedelta(hours=48).total_seconds(),
+        )
+        conn = _mock_conn_with_rows([stale_audit, None])
+        fresh, _ = thesis_is_fresh(conn)
+        assert fresh is False
+
+    def test_stale_when_cascade_last_run_failed(self, monkeypatch) -> None:
+        """daily stale AND cascade last run within-window but status=failed → stale."""
+        now = datetime.now(UTC)
+        stale_audit = (
+            now - timedelta(hours=48),
+            "success",
+            None,
+            timedelta(hours=48).total_seconds(),
+        )
+        cascade_row = (now - timedelta(hours=1), "failed")
+        conn = _mock_conn_with_rows([stale_audit, cascade_row])
+        fresh, _ = thesis_is_fresh(conn)
+        assert fresh is False
+
 
 class TestScoringIsFresh:
     def test_stale_when_latest_score_older_than_thesis(self) -> None:
