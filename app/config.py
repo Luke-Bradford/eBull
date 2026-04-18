@@ -135,5 +135,18 @@ class Settings(BaseSettings):
     # expected reclaim volume.
     raw_retention_dry_run: bool = True
 
+    # Chunk L: dedupe SEC filings fetch. When True,
+    # ``daily_research_refresh`` skips its SEC EDGAR filings fetch
+    # entirely and relies on ``daily_financial_facts``'s master-index
+    # path (``_upsert_filing_from_master_index``) to populate
+    # ``filing_events``. Static audit confirms the master-index path
+    # is strictly broader in coverage (every form type, including
+    # amendments) — the only difference is ``primary_document_url``
+    # may be the generic index page rather than the specific document.
+    # Companies House filings path is unaffected.
+    # Ship as False (default) → operator flips True → observe ~1 week
+    # → follow-up PR deletes the guarded SEC block.
+    enable_filings_fetch_dedupe: bool = False
+
 
 settings = Settings()

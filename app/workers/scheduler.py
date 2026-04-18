@@ -1107,27 +1107,41 @@ def daily_research_refresh() -> None:
                 logger.warning("Enrichment refresh failed", exc_info=True)
 
         # Filings — SEC EDGAR
-        with (
-            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
-            psycopg.connect(settings.database_url) as conn,
-        ):
-            sec_summary = refresh_filings(
-                provider=sec,
-                provider_name="sec",
-                identifier_type="cik",
-                conn=conn,
-                instrument_ids=instrument_ids,
-                start_date=from_date,
-                end_date=to_date,
-                filing_types=["10-K", "10-Q", "8-K"],
+        # Chunk L: when ``enable_filings_fetch_dedupe`` is True, skip
+        # this call entirely. ``daily_financial_facts`` already upserts
+        # every master-index entry into ``filing_events`` via
+        # ``_upsert_filing_from_master_index`` — strictly broader
+        # coverage (all form types, including amendments) than this
+        # path's hardcoded {10-K, 10-Q, 8-K} filter. Companies House
+        # filings (below) are unaffected — CH has no analogous
+        # master-index path.
+        if settings.enable_filings_fetch_dedupe:
+            logger.info(
+                "SEC filings refresh: skipped (enable_filings_fetch_dedupe=True); "
+                "relying on daily_financial_facts master-index path for filing_events"
             )
-        total_rows += sec_summary.filings_upserted
-        logger.info(
-            "SEC filings refresh: attempted=%d upserted=%d skipped=%d",
-            sec_summary.instruments_attempted,
-            sec_summary.filings_upserted,
-            sec_summary.instruments_skipped,
-        )
+        else:
+            with (
+                SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+                psycopg.connect(settings.database_url) as conn,
+            ):
+                sec_summary = refresh_filings(
+                    provider=sec,
+                    provider_name="sec",
+                    identifier_type="cik",
+                    conn=conn,
+                    instrument_ids=instrument_ids,
+                    start_date=from_date,
+                    end_date=to_date,
+                    filing_types=["10-K", "10-Q", "8-K"],
+                )
+            total_rows += sec_summary.filings_upserted
+            logger.info(
+                "SEC filings refresh: attempted=%d upserted=%d skipped=%d",
+                sec_summary.instruments_attempted,
+                sec_summary.filings_upserted,
+                sec_summary.instruments_skipped,
+            )
 
         # Filings — Companies House
         if settings.companies_house_api_key:
