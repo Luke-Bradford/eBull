@@ -1219,6 +1219,16 @@ def daily_financial_facts() -> None:
                 if changed_ids:
                     cascade_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
                     cascade_outcome = cascade_refresh(conn, cascade_client, changed_ids)
+                    # Commit any cascade-side writes (in particular
+                    # compute_rankings' score rows, which write inside
+                    # a ``with conn.transaction():`` block that may be
+                    # nested as a savepoint under this connection's
+                    # implicit outer tx). Without this, the raise
+                    # below would propagate to psycopg.connect()'s CM
+                    # rollback and discard successful ranking writes.
+                    # Thesis rows are already safe because
+                    # generate_thesis commits before Claude per #293.
+                    conn.commit()
                     logger.info(
                         "cascade_refresh outcome: considered=%d thesis_refreshed=%d rankings=%s failed=%d",
                         cascade_outcome.instruments_considered,
@@ -1231,8 +1241,14 @@ def daily_financial_facts() -> None:
                     # rerank-sentinel. Without this, SEC watermarks
                     # would be committed while the cascade silently
                     # fell behind, and ops health would still show
-                    # status=success. Facts/normalization remain
-                    # durably committed (commit happened above).
+                    # status=success. Facts/normalization/cascade
+                    # writes remain durably committed (commits
+                    # happened above). Re-entry path on next run:
+                    # find_stale_instruments (#273) uses
+                    # filing_events.created_at > thesis_generated_at,
+                    # so any instrument whose thesis we failed to
+                    # refresh this run remains stale and re-enters
+                    # the cascade next run.
                     if cascade_outcome.failed:
                         raise RuntimeError(
                             f"cascade_refresh completed with {len(cascade_outcome.failed)} failures: "
