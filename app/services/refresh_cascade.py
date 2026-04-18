@@ -72,7 +72,11 @@ def changed_instruments_from_outcome(
     if not ciks:
         return []
 
-    # De-dupe preserving order.
+    # De-dupe by CIK (intentional — not by accession). Thesis
+    # staleness is keyed per instrument, not per filing, so if the
+    # same CIK filed twice in the window we still only need to map
+    # it once; the event predicate in find_stale_instruments will
+    # pick up the newest filing regardless.
     seen: set[str] = set()
     unique_ciks = [cik for cik in ciks if not (cik in seen or seen.add(cik))]
 

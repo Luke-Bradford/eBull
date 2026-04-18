@@ -1197,13 +1197,17 @@ def daily_financial_facts() -> None:
                 # remains the liveness signal.
                 tracker.row_count = 0
 
-            # Phase 3: cascade refresh (#276 Chunk K.1). Explicit
-            # conn.commit() BEFORE cascade so cascade's fresh reads
-            # see committed state from Phase 1 + Phase 2 —
-            # normalize_financial_periods uses savepoints and does not
-            # itself commit. Cascade runs even on submissions-only
-            # days (8-K thesis context update) as long as there were
-            # successful non-seed CIKs.
+            # Phase 3: cascade refresh (#276 Chunk K.1). The bare
+            # ``conn.commit()`` is reached only on the success path of
+            # Phase 1 + Phase 2 — Python exception propagation skips
+            # this line on any prior raise, and ``psycopg.connect()``
+            # as a context manager rolls back the connection on
+            # exception. The commit is required because
+            # ``normalize_financial_periods`` uses savepoints, not
+            # commit, and cascade reads must see committed state.
+            # Cascade runs even on submissions-only days (8-K thesis
+            # context update) as long as there were successful
+            # non-seed CIKs.
             conn.commit()
             if settings.anthropic_api_key:
                 from app.services.refresh_cascade import (
@@ -1222,6 +1226,18 @@ def daily_financial_facts() -> None:
                         cascade_outcome.rankings_recomputed,
                         len(cascade_outcome.failed),
                     )
+                    # Surface cascade failures to the tracked job —
+                    # per-instrument thesis failures AND the -1
+                    # rerank-sentinel. Without this, SEC watermarks
+                    # would be committed while the cascade silently
+                    # fell behind, and ops health would still show
+                    # status=success. Facts/normalization remain
+                    # durably committed (commit happened above).
+                    if cascade_outcome.failed:
+                        raise RuntimeError(
+                            f"cascade_refresh completed with {len(cascade_outcome.failed)} failures: "
+                            f"{cascade_outcome.failed}"
+                        )
             else:
                 logger.info(
                     "daily_financial_facts: ANTHROPIC_API_KEY not set — "
