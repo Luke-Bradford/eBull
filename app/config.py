@@ -128,5 +128,12 @@ class Settings(BaseSettings):
             raise ValueError(f"service_token must be at least {_MIN_SERVICE_TOKEN_LEN} characters")
         return v
 
+    # Raw-data retention sweep job (#268 follow-up Plan A).
+    # When True, ``raw_data_retention_sweep`` logs counts per source
+    # but does NOT delete any files. Operator flips to False only
+    # after observing one dry-run cycle's output and confirming the
+    # expected reclaim volume.
+    raw_retention_dry_run: bool = True
+
 
 settings = Settings()

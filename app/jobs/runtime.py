@@ -70,6 +70,7 @@ from app.workers.scheduler import (
     JOB_NIGHTLY_UNIVERSE_SYNC,
     JOB_ORCHESTRATOR_FULL_SYNC,
     JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
+    JOB_RAW_DATA_RETENTION_SWEEP,
     JOB_RETRY_DEFERRED,
     JOB_SEED_COST_MODELS,
     JOB_WEEKLY_COVERAGE_AUDIT,
@@ -96,6 +97,7 @@ from app.workers.scheduler import (
     nightly_universe_sync,
     orchestrator_full_sync,
     orchestrator_high_frequency_sync,
+    raw_data_retention_sweep,
     retry_deferred_recommendations_job,
     seed_cost_models,
     weekly_coverage_audit,
@@ -149,6 +151,7 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_MONTHLY_REPORT: monthly_report,
     JOB_ORCHESTRATOR_FULL_SYNC: orchestrator_full_sync,
     JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC: orchestrator_high_frequency_sync,
+    JOB_RAW_DATA_RETENTION_SWEEP: raw_data_retention_sweep,
 }
 
 

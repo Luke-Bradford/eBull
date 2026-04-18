@@ -229,6 +229,7 @@ JOB_WEEKLY_REPORT = "weekly_report"
 JOB_MONTHLY_REPORT = "monthly_report"
 JOB_SEED_COST_MODELS = "seed_cost_models"
 JOB_DAILY_FINANCIAL_FACTS = "daily_financial_facts"
+JOB_RAW_DATA_RETENTION_SWEEP = "raw_data_retention_sweep"
 JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
 JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC = "orchestrator_high_frequency_sync"
 
@@ -456,6 +457,20 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         description="Compute and persist rolling attribution summaries (30d, 90d, 365d).",
         cadence=Cadence.weekly(weekday=6, hour=6, minute=0),
         prerequisite=_has_attributions,
+        catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_RAW_DATA_RETENTION_SWEEP,
+        description=(
+            "Per-source compaction + age-based sweep of data/raw/**. Reclaims "
+            "disk from byte-identical duplicates and (per-source) ages-out old "
+            "files. Dry-run by default; operator flips settings.raw_retention_dry_run "
+            "after observing one cycle."
+        ),
+        cadence=Cadence.daily(hour=2, minute=0),  # 02:00 UTC, before orchestrator_full_sync at 03:00
+        # catch_up_on_boot=False so restarts don't trigger an expensive
+        # 225 GB rehash unnecessarily — a missed window waits for the
+        # next natural fire.
         catch_up_on_boot=False,
     ),
     # -- On-demand jobs are NOT listed here.  They stay in _INVOKERS
@@ -2599,4 +2614,106 @@ def orchestrator_high_frequency_sync() -> None:
         logger.info(
             "orchestrator_high_frequency_sync skipped: sync %s already running",
             exc.active_sync_run_id,
+        )
+
+
+def raw_data_retention_sweep() -> None:
+    """Daily compaction + age-based sweep across every registered
+    raw-data source (#268 follow-up Plan A PR 3).
+
+    Two phases per source:
+
+    - **Compaction** (expensive, content-hash scan). Runs only when
+      ``last_compacted_at`` is older than ``COMPACTION_STALENESS``
+      (7 days) or NULL. Without this throttle the job rehashes
+      225 GB daily.
+    - **Sweep** (cheap, mtime glob). Runs every day per source.
+      No-op when policy.max_age_days is None.
+
+    Dry-run mode (``settings.raw_retention_dry_run=True`` by default):
+    logs counts, makes zero filesystem mutations, does NOT update
+    ``raw_persistence_state``. Operator flips the flag after
+    observing one dry-run cycle's output.
+
+    Observability: per-source structured log lines cover source,
+    phase (compact/sweep), files_deleted, bytes_reclaimed. Job-level
+    row lands in ``job_runs`` via ``_tracked_job``.
+
+    ``catch_up_on_boot=False`` at the schedule registration so
+    restarts don't trigger an unnecessary rehash.
+    """
+    from app.services.raw_persistence import (
+        _RETENTION_POLICY,
+        compact_source,
+        load_state,
+        needs_compaction,
+        sweep_source,
+        update_compaction_state,
+        update_sweep_state,
+    )
+
+    dry_run = settings.raw_retention_dry_run
+    with _tracked_job(JOB_RAW_DATA_RETENTION_SWEEP) as tracker:
+        total_deleted = 0
+        total_bytes = 0
+
+        with psycopg.connect(settings.database_url) as conn:
+            for source in _RETENTION_POLICY:
+                # --- Compaction phase (throttled by staleness) ---
+                state = load_state(conn, source)
+                if needs_compaction(state):
+                    try:
+                        result = compact_source(source, dry_run=dry_run)
+                    except Exception:
+                        # Per-source isolation — one bad source must
+                        # not abort the rest of the sweep.
+                        logger.exception(
+                            "raw_data_retention_sweep: compact raised for source=%s",
+                            source,
+                        )
+                        continue
+                    if not dry_run:
+                        update_compaction_state(conn, source, result)
+                    logger.info(
+                        "raw_data_retention_sweep: source=%s phase=compact "
+                        "scanned=%d deleted=%d reclaimed=%d elapsed=%.2f "
+                        "dry_run=%s",
+                        source,
+                        result.files_scanned,
+                        result.files_deleted,
+                        result.bytes_reclaimed,
+                        result.elapsed_seconds,
+                        dry_run,
+                    )
+                    total_deleted += result.files_deleted
+                    total_bytes += result.bytes_reclaimed
+
+                # --- Sweep phase (daily, cheap) ---
+                try:
+                    sweep = sweep_source(source, dry_run=dry_run)
+                except Exception:
+                    logger.exception(
+                        "raw_data_retention_sweep: sweep raised for source=%s",
+                        source,
+                    )
+                    continue
+                if not dry_run:
+                    update_sweep_state(conn, source)
+                logger.info(
+                    "raw_data_retention_sweep: source=%s phase=sweep deleted=%d reclaimed=%d elapsed=%.2f dry_run=%s",
+                    source,
+                    sweep.files_deleted,
+                    sweep.bytes_reclaimed,
+                    sweep.elapsed_seconds,
+                    dry_run,
+                )
+                total_deleted += sweep.files_deleted
+                total_bytes += sweep.bytes_reclaimed
+
+        tracker.row_count = total_deleted
+        logger.info(
+            "raw_data_retention_sweep complete: total_deleted=%d total_bytes_reclaimed=%d dry_run=%s",
+            total_deleted,
+            total_bytes,
+            dry_run,
         )
