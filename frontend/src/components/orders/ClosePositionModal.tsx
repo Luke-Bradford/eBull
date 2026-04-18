@@ -92,6 +92,7 @@ export function ClosePositionModal({
     trade !== null &&
     !submitting &&
     !detail.error &&
+    !detail.loading &&
     (mode === "full" || partialValid);
 
   async function handleSubmit(): Promise<void> {
@@ -104,6 +105,10 @@ export function ClosePositionModal({
     setErrorMessage(null);
     try {
       await closePosition(positionId, { units_to_deduct: unitsToDeduct });
+      // Reset submitting before handing control to the parent so a
+      // caller that delays unmounting cannot leave the button stuck
+      // in "Closing…".
+      if (mountedRef.current) setSubmitting(false);
       // onFilled must run on server success even if the operator
       // unmounted us via Escape between submit and response — the
       // portfolio would otherwise stay stale while the server-side
@@ -193,10 +198,22 @@ export function ClosePositionModal({
                 </label>
               </div>
               {mode === "partial" ? (
-                <label className="flex flex-col gap-1">
-                  <span>Units to close (max {formatNumber(trade.units, 6)})</span>
+                <div className="flex flex-col gap-1">
+                  <div className="text-[11px] text-slate-500">
+                    Max {formatNumber(trade.units, 6)} units
+                  </div>
                   <div className="flex items-center gap-2">
+                    {/*
+                      Slider and numeric input are two separate,
+                      individually-labelled controls with distinct
+                      accessible names so tests (and screen readers)
+                      can address each one unambiguously.
+                    */}
+                    <label className="sr-only" htmlFor="close-units-slider">
+                      Units to close (slider)
+                    </label>
                     <input
+                      id="close-units-slider"
                       type="range"
                       min={Math.min(MIN_UNITS, trade.units)}
                       max={trade.units}
@@ -207,10 +224,13 @@ export function ClosePositionModal({
                           : Math.min(MIN_UNITS, trade.units)
                       }
                       onChange={(e) => setRawUnits(e.target.value)}
-                      aria-label="Units to close (slider)"
                       className="flex-1"
                     />
+                    <label className="sr-only" htmlFor="close-units-input">
+                      Units to close
+                    </label>
                     <input
+                      id="close-units-input"
                       type="number"
                       inputMode="decimal"
                       min={MIN_UNITS}
@@ -218,7 +238,6 @@ export function ClosePositionModal({
                       value={rawUnits}
                       onChange={(e) => setRawUnits(e.target.value)}
                       placeholder={formatNumber(trade.units, 6)}
-                      aria-label="Units to close"
                       className="w-28 rounded border border-slate-300 bg-white px-2 py-1 text-sm focus:border-blue-400 focus:outline-none"
                     />
                   </div>
@@ -231,7 +250,7 @@ export function ClosePositionModal({
                       Must be at least {MIN_UNITS} units (backend precision floor).
                     </span>
                   ) : null}
-                </label>
+                </div>
               ) : null}
             </fieldset>
 

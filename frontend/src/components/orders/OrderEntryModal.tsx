@@ -83,12 +83,14 @@ export function OrderEntryModal({
 
   const parsedValue = parsePositiveFinite(rawInput);
   const priceIsUsable =
-    detail.data?.current_price !== null &&
-    detail.data?.current_price !== undefined &&
-    detail.data.current_price > 0;
+    detail.data?.current_price != null && detail.data.current_price > 0;
   const detailLoaded = detail.data !== null;
   const canSubmit =
-    detailLoaded && parsedValue !== null && !submitting && !detail.error;
+    detailLoaded &&
+    !detail.loading &&
+    !detail.error &&
+    parsedValue !== null &&
+    !submitting;
 
   async function handleSubmit(): Promise<void> {
     if (parsedValue === null) return;
@@ -106,6 +108,11 @@ export function OrderEntryModal({
     };
     try {
       await placeOrder(body);
+      // Reset submitting before handing control to the parent. The
+      // parent normally unmounts us immediately via onRequestClose,
+      // but if a future caller delays that the button must not stay
+      // locked in "Placing…" indefinitely.
+      if (mountedRef.current) setSubmitting(false);
       // onFilled is owned by the parent page — we must call it on
       // success REGARDLESS of whether this modal is still mounted,
       // otherwise an operator who presses Escape between submit and

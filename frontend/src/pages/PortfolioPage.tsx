@@ -297,7 +297,7 @@ function PositionRow({
   const navigate = useNavigate();
   const pct = pnlPct(p.unrealized_pnl, p.cost_basis);
   const positive = p.unrealized_pnl >= 0;
-  const trades = p.trades ?? [];
+  const trades = p.trades;
   // Close is only exposed when a single broker position backs the
   // instrument. Aggregated positions defer to #314's detail panel,
   // where per-broker-position rows get their own Close buttons.
