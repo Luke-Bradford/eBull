@@ -212,8 +212,12 @@ def get_coverage_insufficient(
         # filing_date is SQL DATE → Python date. Preserved as date
         # in the response so frontend formats it as a calendar date
         # (no timezone coercion, no midnight-UTC drift).
+        # Explicit ``type(...) is date`` — ``isinstance(x, date)``
+        # also matches ``datetime`` instances since datetime subclasses
+        # date. psycopg3 returns a plain date for SQL DATE columns, so
+        # this check is belt-and-braces + clearer intent.
         raw_earliest = r[8]
-        earliest: date | None = raw_earliest if isinstance(raw_earliest, date) else None
+        earliest: date | None = raw_earliest if type(raw_earliest) is date else None
         out.append(
             InsufficientRow(
                 instrument_id=int(r[0]),

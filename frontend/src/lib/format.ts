@@ -38,10 +38,17 @@ const DATE = new Intl.DateTimeFormat("en-GB", {
   minute: "2-digit",
 });
 
+// UTC timezone pinned: backend date-only strings (``YYYY-MM-DD``)
+// parse as midnight UTC in JS. Without ``timeZone: "UTC"`` here,
+// Intl renders them in local TZ — a London operator sees "15 Jun
+// 2024" correctly, but a New York operator (UTC-5) sees "14 Jun
+// 2024" for the same input. Pin UTC so the calendar date is
+// stable regardless of viewer timezone.
 const DATE_ONLY = new Intl.DateTimeFormat("en-GB", {
   year: "numeric",
   month: "short",
   day: "2-digit",
+  timeZone: "UTC",
 });
 
 export function formatMoney(
