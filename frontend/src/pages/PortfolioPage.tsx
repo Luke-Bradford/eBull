@@ -309,8 +309,8 @@ export function PortfolioPage() {
                   focusedIdx={focusedIdx}
                   selectedId={selectedId}
                   onSelectRow={handleSelectRow}
-                  onAdd={setAddFor}
-                  onClose={setCloseFor}
+                  onAdd={(p) => setAddFor(p)}
+                  onClose={(t) => setCloseFor(t)}
                 />
                 {visible.length > PAGE_SIZE ? (
                   <PaginationBar
@@ -343,8 +343,8 @@ export function PortfolioPage() {
             <DetailPanel
               selectedPosition={selectedPosition}
               currency={currency}
-              onAdd={setAddFor}
-              onCloseTrade={setCloseFor}
+              onAdd={(p) => setAddFor(p)}
+              onCloseTrade={(t) => setCloseFor(t)}
             />
           </div>
         </div>

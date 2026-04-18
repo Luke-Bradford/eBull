@@ -495,8 +495,11 @@ describe("PortfolioPage — search + pagination edge cases", () => {
   });
 
   it("paginates when >50 positions exist", async () => {
+    // Distinct market_values guarantee deterministic sort order so
+    // the 51st position lands deterministically on page 2 regardless
+    // of engine sort stability for equal keys.
     const positions = Array.from({ length: 51 }, (_, i) =>
-      position(i + 1, `SYM${i + 1}`),
+      position(i + 1, `SYM${i + 1}`, { market_value: 1000 - i }),
     );
     mockedFetchPortfolio.mockResolvedValue(portfolioWith(positions));
     const user = userEvent.setup();
@@ -518,7 +521,7 @@ describe("PortfolioPage — search + pagination edge cases", () => {
 
   it("clamps page back when search shrinks results below the current page", async () => {
     const positions = Array.from({ length: 51 }, (_, i) =>
-      position(i + 1, `SYM${i + 1}`),
+      position(i + 1, `SYM${i + 1}`, { market_value: 1000 - i }),
     );
     mockedFetchPortfolio.mockResolvedValue(portfolioWith(positions));
     const user = userEvent.setup();
