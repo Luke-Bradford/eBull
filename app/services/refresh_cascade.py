@@ -42,12 +42,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class CascadeOutcome:
-    """Result of one ``cascade_refresh`` run."""
+    """Result of one ``cascade_refresh`` run.
+
+    ``failed`` is stored as a tuple to preserve the ``frozen=True``
+    immutability invariant — a ``list`` field would be attribute-
+    immutable but value-mutable, which is a well-known dataclass
+    footgun.
+    """
 
     instruments_considered: int
     thesis_refreshed: int
     rankings_recomputed: bool
-    failed: list[tuple[int, str]] = field(default_factory=list)
+    failed: tuple[tuple[int, str], ...] = field(default_factory=tuple)
 
 
 def changed_instruments_from_outcome(
@@ -77,8 +83,13 @@ def changed_instruments_from_outcome(
     # same CIK filed twice in the window we still only need to map
     # it once; the event predicate in find_stale_instruments will
     # pick up the newest filing regardless.
+    # CIK zero-padding: the planner (plan_refresh -> parse_master_index)
+    # already pads via _zero_pad_cik, but we pad again defensively
+    # here so a future caller that hands us a raw-integer CIK string
+    # doesn't silently miss rows against the zero-padded storage in
+    # external_identifiers.identifier_value.
     seen: set[str] = set()
-    unique_ciks = [cik for cik in ciks if not (cik in seen or seen.add(cik))]
+    unique_ciks = [str(int(cik)).zfill(10) for cik in ciks if not (cik in seen or seen.add(cik))]
 
     rows = conn.execute(
         """
@@ -200,5 +211,5 @@ def cascade_refresh(
         instruments_considered=len(instrument_ids),
         thesis_refreshed=thesis_refreshed,
         rankings_recomputed=rankings_recomputed,
-        failed=failed,
+        failed=tuple(failed),
     )

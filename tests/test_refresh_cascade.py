@@ -106,6 +106,17 @@ class TestChangedInstrumentsFromOutcome:
         result = changed_instruments_from_outcome(conn, plan, outcome)
         assert result == [102]
 
+    def test_unpadded_cik_normalized_to_zero_padded(self) -> None:
+        """Defensive zfill(10): if a future caller hands us a
+        raw-integer CIK string (e.g. '320193'), we still match the
+        zero-padded identifier_value stored in external_identifiers
+        ('0000320193'). Protects against silent zero-row misses."""
+        conn = _mock_conn_with_cik_lookup({"0000320193": 101})
+        plan = RefreshPlan(refreshes=[("320193", "ACCN-APPL")])
+        outcome = RefreshOutcome(refreshed=1)
+        result = changed_instruments_from_outcome(conn, plan, outcome)
+        assert result == [101]
+
 
 # ---------------------------------------------------------------------------
 # cascade_refresh
@@ -171,7 +182,7 @@ class TestCascadeRefresh:
         rank_mock.assert_called_once_with(conn)
         assert outcome.thesis_refreshed == 2
         assert outcome.rankings_recomputed is True
-        assert outcome.failed == []
+        assert outcome.failed == ()
 
     def test_per_instrument_failure_isolated_rerank_still_runs(self) -> None:
         """One instrument's thesis raising must not abort siblings,
