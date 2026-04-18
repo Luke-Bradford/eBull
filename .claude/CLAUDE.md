@@ -74,17 +74,17 @@ Follow this order unless the user explicitly says otherwise:
    - `fix/{issue-number}-short-description`
 2. Commit only on that branch.
 3. Push and open a PR.
-After every push, poll:
-- `gh pr view {pr_number} --comments`
-- `gh pr checks {pr_number}`
+   After every push, poll:
+   - `gh pr view {pr_number} --comments`
+   - `gh pr checks {pr_number}`
 
-Do not push again until:
-- the Claude review has posted
-- CI results are visible
-- all review comments have been read
+   Do not push again until:
+   - the Claude review has posted
+   - CI results are visible
+   - all review comments have been read
 
-Do not push a follow-up commit for CI alone without first reading the review comments on the latest commit.
-If the review has not posted yet, wait and poll again rather than continuing blindly.
+   Do not push a follow-up commit for CI alone without first reading the review comments on the latest commit.
+   If the review has not posted yet, wait and poll again rather than continuing blindly.
 4. Wait for Claude review and CI on the latest commit.
 5. Resolve every review comment explicitly.
 6. Re-run local checks before every follow-up push.
