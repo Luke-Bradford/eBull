@@ -1197,6 +1197,74 @@ def daily_financial_facts() -> None:
                 # remains the liveness signal.
                 tracker.row_count = 0
 
+            # Phase 3: cascade refresh (#276 Chunk K.1). The bare
+            # ``conn.commit()`` is reached only on the success path of
+            # Phase 1 + Phase 2 — Python exception propagation skips
+            # this line on any prior raise, and ``psycopg.connect()``
+            # as a context manager rolls back the connection on
+            # exception. The commit is required because
+            # ``normalize_financial_periods`` uses savepoints, not
+            # commit, and cascade reads must see committed state.
+            # Cascade runs even on submissions-only days (8-K thesis
+            # context update) as long as there were successful
+            # non-seed CIKs.
+            conn.commit()
+            if settings.anthropic_api_key:
+                from app.services.refresh_cascade import (
+                    cascade_refresh,
+                    changed_instruments_from_outcome,
+                )
+
+                changed_ids = changed_instruments_from_outcome(conn, plan, outcome)
+                if changed_ids:
+                    cascade_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+                    cascade_outcome = cascade_refresh(conn, cascade_client, changed_ids)
+                    # Persist any cascade-side writes before the
+                    # failure-surfacing raise below. compute_rankings
+                    # writes score rows inside a
+                    # ``with conn.transaction():`` block that may be
+                    # nested as a savepoint under this connection's
+                    # implicit outer tx — without this explicit
+                    # commit, the raise propagates to
+                    # psycopg.connect()'s CM rollback and discards
+                    # any successful ranking writes. On the failure
+                    # path where compute_rankings itself rolled back
+                    # (cascade_refresh's inner handler), this commit
+                    # is a no-op on clean state. Thesis rows are
+                    # already durably committed by generate_thesis
+                    # per #293 and are unaffected either way.
+                    conn.commit()
+                    logger.info(
+                        "cascade_refresh outcome: considered=%d thesis_refreshed=%d rankings=%s failed=%d",
+                        cascade_outcome.instruments_considered,
+                        cascade_outcome.thesis_refreshed,
+                        cascade_outcome.rankings_recomputed,
+                        len(cascade_outcome.failed),
+                    )
+                    # Surface cascade failures to the tracked job —
+                    # per-instrument thesis failures AND the -1
+                    # rerank-sentinel. Without this, SEC watermarks
+                    # would be committed while the cascade silently
+                    # fell behind, and ops health would still show
+                    # status=success. Facts/normalization/cascade
+                    # writes remain durably committed (commits
+                    # happened above). Re-entry path on next run:
+                    # find_stale_instruments (#273) uses
+                    # filing_events.created_at > thesis_generated_at,
+                    # so any instrument whose thesis we failed to
+                    # refresh this run remains stale and re-enters
+                    # the cascade next run.
+                    if cascade_outcome.failed:
+                        raise RuntimeError(
+                            f"cascade_refresh completed with {len(cascade_outcome.failed)} failures: "
+                            f"{cascade_outcome.failed}"
+                        )
+            else:
+                logger.info(
+                    "daily_financial_facts: ANTHROPIC_API_KEY not set — "
+                    "skipping cascade refresh (facts + normalization still committed)"
+                )
+
 
 def daily_news_refresh() -> None:
     """
