@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { fetchPortfolio } from "@/api/portfolio";
 import { useAsync } from "@/lib/useAsync";
@@ -108,11 +108,15 @@ export function PortfolioPage() {
   }, [selectedId, portfolio.data]);
 
   // Keep refs aligned with the current render so the window listener
-  // never reads a stale snapshot. Must run AFTER selectedPosition is
-  // derived.
-  focusedIdxRef.current = focusedIdx;
-  pageRowsRef.current = pageRows;
-  selectedPositionRef.current = selectedPosition;
+  // never reads a stale snapshot. Using useLayoutEffect (rather than
+  // assigning during render) avoids the "no side effects in render"
+  // rule so the same code is safe under React.StrictMode double-
+  // rendering and future concurrent-mode invariants.
+  useLayoutEffect(() => {
+    focusedIdxRef.current = focusedIdx;
+    pageRowsRef.current = pageRows;
+    selectedPositionRef.current = selectedPosition;
+  });
 
   // Clamp focusedIdx when pageRows.length changes.
   useEffect(() => {
