@@ -3,15 +3,23 @@
 After ``daily_financial_facts`` commits new fundamentals + normalizes
 periods, this service propagates the change to thesis and scoring:
 
-1. Map the refresh plan's successful CIKs (refreshes + submissions-
+1. Drain the durable retry outbox (K.2). Queued instruments bypass
+   the stale gate — the outbox IS the signal that a thesis refresh
+   is owed from a prior failure.
+2. Map the refresh plan's successful CIKs (refreshes + submissions-
    only, minus per-CIK failures) to instrument_ids.
-2. For each instrument, check ``find_stale_instruments`` — the event-
+3. For each instrument, check ``find_stale_instruments`` — the event-
    driven predicate shipped in #273 flags any whose thesis lags a
    qualifying filing.
-3. Generate a fresh thesis (Claude) for each stale instrument.
-4. If any thesis refreshed this cycle, re-run ``compute_rankings``
+4. Generate a fresh thesis (Claude) for each queued retry + each
+   stale instrument.
+5. If any thesis refreshed this cycle, re-run ``compute_rankings``
    once for the full pool — scoring reads thesis fields so fresh
    theses can move every score, not just the cascade's subset.
+6. Clear retry-queue rows for processed successes ONLY after the
+   rerank succeeds. Rerank failure leaves the rows (and marks new-
+   work successes with a RERANK_NEEDED marker) so the next cycle
+   has a durable "rankings recompute needed" signal.
 
 The full-pool rerank is the Option-α scoring approach from the
 master plan — subset scoring was ruled out because ``compute_rankings``
@@ -20,8 +28,7 @@ pool would have NULL / mismatched rank values.
 
 Per-instrument thesis failures are isolated — one bad CIK does not
 abort the loop or the subsequent rerank. Future K.3 adds session-
-level advisory locking against ``daily_thesis_refresh``; future K.2
-adds a durable retry outbox. K.1 (this module) is the basic wiring.
+level advisory locking against ``daily_thesis_refresh``.
 """
 
 from __future__ import annotations
@@ -39,6 +46,9 @@ from app.services.thesis import find_stale_instruments, generate_thesis
 
 logger = logging.getLogger(__name__)
 
+ATTEMPT_CAP: int = 5
+RERANK_MARKER: str = "RERANK_NEEDED"
+
 
 @dataclass(frozen=True)
 class CascadeOutcome:
@@ -53,6 +63,7 @@ class CascadeOutcome:
     instruments_considered: int
     thesis_refreshed: int
     rankings_recomputed: bool
+    retries_drained: int = 0
     failed: tuple[tuple[int, str], ...] = ()
 
 
@@ -112,61 +123,201 @@ def changed_instruments_from_outcome(
     return [int(r[0]) for r in rows]
 
 
+# ---------------------------------------------------------------------------
+# Retry outbox helpers (K.2)
+# ---------------------------------------------------------------------------
+
+
+def enqueue_retry(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+    error_type: str,
+) -> None:
+    """UPSERT a retry row after a thesis failure.
+
+    Caller MUST ``conn.rollback()`` before invoking this if the
+    connection is in INERROR state from the failing thesis call —
+    the helper wraps its own ``with conn.transaction()`` so the
+    outbox write commits independently of any outer transaction,
+    but it cannot succeed on an aborted connection.
+
+    ``attempt_count`` semantics: first enqueue sets 1. Subsequent
+    thesis failures increment by 1. A pre-existing RERANK_NEEDED
+    marker (attempt_count=0) transitions into the thesis-failure
+    path here — the UPDATE increments from 0 to 1 as expected.
+    """
+    with conn.transaction():
+        conn.execute(
+            """
+            INSERT INTO cascade_retry_queue
+                (instrument_id, attempt_count, last_error, last_attempted_at)
+            VALUES (%s, 1, %s, NOW())
+            ON CONFLICT (instrument_id) DO UPDATE SET
+                attempt_count = cascade_retry_queue.attempt_count + 1,
+                last_error = EXCLUDED.last_error,
+                last_attempted_at = NOW()
+            """,
+            (instrument_id, error_type),
+        )
+
+
+def enqueue_rerank_marker(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+) -> None:
+    """UPSERT a RERANK_NEEDED marker for a thesis-success-then-
+    rerank-failure instrument.
+
+    Sets ``attempt_count=0`` so rerank failures do NOT consume the
+    thesis retry budget. On CONFLICT, resets any prior thesis-
+    failure state (including at-cap rows) to RERANK_NEEDED /
+    attempt_count=0 — a thesis success this cycle means the prior
+    blocker is no longer current and the row must be drainable
+    again for the next rerank attempt.
+    """
+    with conn.transaction():
+        conn.execute(
+            """
+            INSERT INTO cascade_retry_queue
+                (instrument_id, attempt_count, last_error, last_attempted_at)
+            VALUES (%s, 0, %s, NOW())
+            ON CONFLICT (instrument_id) DO UPDATE SET
+                attempt_count = 0,
+                last_error = EXCLUDED.last_error,
+                last_attempted_at = NOW()
+            """,
+            (instrument_id, RERANK_MARKER),
+        )
+
+
+def clear_retry_success(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+) -> None:
+    """DELETE the retry row for an instrument whose cascade succeeded
+    this cycle (thesis refreshed + rerank succeeded). Idempotent —
+    no-op if the row is absent. Wraps its own transaction."""
+    with conn.transaction():
+        conn.execute(
+            "DELETE FROM cascade_retry_queue WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+
+
+def drain_retry_queue(
+    conn: psycopg.Connection[Any],
+    cap: int = ATTEMPT_CAP,
+) -> list[int]:
+    """Return instrument_ids eligible for retry — rows with
+    ``attempt_count < cap``, ordered by ``enqueued_at`` ASC (oldest
+    first). Rows at or above cap are left in place for admin
+    inspection (surfaced in Chunk H / K.4)."""
+    rows = conn.execute(
+        """
+        SELECT instrument_id
+        FROM cascade_retry_queue
+        WHERE attempt_count < %s
+        ORDER BY enqueued_at ASC
+        """,
+        (cap,),
+    ).fetchall()
+    return [int(r[0]) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# cascade_refresh
+# ---------------------------------------------------------------------------
+
+
 def cascade_refresh(
     conn: psycopg.Connection[Any],
     client: anthropic.Anthropic,
     instrument_ids: list[int],
 ) -> CascadeOutcome:
-    """Run the cascade for the given instrument_ids.
+    """Run the cascade.
 
-    For each instrument: ``find_stale_instruments`` (scoped via
-    ``tier=None`` + ``instrument_ids``) decides whether the thesis
-    needs refresh per #273's event-driven predicate. If stale,
-    ``generate_thesis`` is called — it commits its own read tx before
-    Claude per #293 + writes its own thesis row atomically.
-
-    After the thesis loop: if any thesis was refreshed, call
-    ``compute_rankings`` once for the full analysable pool. Scoring
-    reads thesis fields so any thesis change can move every score.
-
-    Per-instrument failures recorded in the outcome; one failure
-    does not abort siblings or the subsequent rerank.
+    Flow:
+    1. Drain the retry outbox — queued instrument_ids bypass the
+       stale gate. Regenerating a thesis that another path already
+       refreshed is idempotent-wasted, not incorrect.
+    2. Run the event-driven stale predicate on ``instrument_ids``.
+    3. For each (retry + stale) instrument, call ``generate_thesis``.
+       Successes accumulate in ``processed_ok`` for deferred clear.
+       Failures roll back first, then enqueue into the outbox in a
+       fresh transaction.
+    4. If any thesis refreshed, run ``compute_rankings`` once.
+       - On rerank success: clear each ``processed_ok`` queue row.
+       - On rerank failure: rollback, record (-1, ExcType) in
+         ``failed``, and UPSERT a RERANK_NEEDED marker for each
+         ``processed_ok`` id — the queue is the durable rankings-
+         recompute signal for the next cycle.
     """
-    if not instrument_ids:
-        return CascadeOutcome(instruments_considered=0, thesis_refreshed=0, rankings_recomputed=False)
+    retry_ids = drain_retry_queue(conn)
+    if retry_ids:
+        logger.info("cascade_refresh: drained %d retries from queue", len(retry_ids))
 
-    stale = find_stale_instruments(conn, tier=None, instrument_ids=instrument_ids)
-    if not stale:
+    stale = find_stale_instruments(conn, tier=None, instrument_ids=instrument_ids) if instrument_ids else []
+
+    if not retry_ids and not stale:
         logger.info(
-            "cascade_refresh: %d instruments considered, 0 stale — no thesis or score refresh",
+            "cascade_refresh: %d instruments considered, 0 stale, 0 retries — no thesis or score refresh",
             len(instrument_ids),
         )
         return CascadeOutcome(
             instruments_considered=len(instrument_ids),
             thesis_refreshed=0,
             rankings_recomputed=False,
+            retries_drained=0,
         )
 
     thesis_refreshed = 0
     failed: list[tuple[int, str]] = []
+    processed_ok: list[int] = []
 
-    for stale_instrument in stale:
+    # Retry path — bypass stale gate. Outbox IS the signal.
+    retry_set = set(retry_ids)
+    for iid in retry_ids:
         try:
-            generate_thesis(stale_instrument.instrument_id, conn, client)
+            generate_thesis(iid, conn, client)
             thesis_refreshed += 1
+            processed_ok.append(iid)
+            logger.info("cascade_refresh: retry thesis refreshed for instrument_id=%d", iid)
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except psycopg.Error:
+                logger.debug(
+                    "cascade_refresh: rollback suppressed after retry thesis exception",
+                    exc_info=True,
+                )
+            try:
+                enqueue_retry(conn, iid, type(exc).__name__)
+            except psycopg.Error:
+                logger.exception(
+                    "cascade_refresh: enqueue_retry failed for instrument_id=%d — retry signal lost",
+                    iid,
+                )
+            failed.append((iid, type(exc).__name__))
+            logger.exception("cascade_refresh: retry thesis failed for instrument_id=%d", iid)
+
+    # New-work (stale) path — skip any ids already processed in the
+    # retry loop so a queued CIK that also surfaces as stale is only
+    # generated once per cycle.
+    for stale_instrument in stale:
+        iid = stale_instrument.instrument_id
+        if iid in retry_set:
+            continue
+        try:
+            generate_thesis(iid, conn, client)
+            thesis_refreshed += 1
+            processed_ok.append(iid)
             logger.info(
                 "cascade_refresh: thesis refreshed for instrument_id=%d symbol=%s reason=%s",
-                stale_instrument.instrument_id,
+                iid,
                 stale_instrument.symbol,
                 stale_instrument.reason,
             )
         except Exception as exc:
-            # Attempt to roll back any half-open tx from generate_thesis
-            # before continuing to siblings. generate_thesis wraps its
-            # DB write in its own `with conn.transaction():` so the
-            # failing CIK's row was already rolled back — this is
-            # belt-and-braces for the pre-transaction reads that
-            # opened the implicit tx before the Claude call failed.
             try:
                 conn.rollback()
             except psycopg.Error:
@@ -174,10 +325,17 @@ def cascade_refresh(
                     "cascade_refresh: rollback suppressed after thesis exception",
                     exc_info=True,
                 )
-            failed.append((stale_instrument.instrument_id, type(exc).__name__))
+            try:
+                enqueue_retry(conn, iid, type(exc).__name__)
+            except psycopg.Error:
+                logger.exception(
+                    "cascade_refresh: enqueue_retry failed for instrument_id=%d — retry signal lost",
+                    iid,
+                )
+            failed.append((iid, type(exc).__name__))
             logger.exception(
                 "cascade_refresh: thesis failed for instrument_id=%d symbol=%s",
-                stale_instrument.instrument_id,
+                iid,
                 stale_instrument.symbol,
             )
 
@@ -190,7 +348,17 @@ def cascade_refresh(
                 "cascade_refresh: rankings recomputed — %d scored",
                 len(ranking_result.scored),
             )
+            # Clear processed queue rows AFTER successful rerank.
+            for iid in processed_ok:
+                try:
+                    clear_retry_success(conn, iid)
+                except psycopg.Error:
+                    logger.exception("cascade_refresh: clear_retry_success failed for instrument_id=%d", iid)
         except Exception as exc:
+            # Rollback FIRST — compute_rankings is SQL-heavy and
+            # can leave the connection in INERROR; the subsequent
+            # marker inserts would otherwise fail, losing the
+            # durable signal for exactly the path it must preserve.
             try:
                 conn.rollback()
             except psycopg.Error:
@@ -200,11 +368,24 @@ def cascade_refresh(
                 )
             failed.append((-1, type(exc).__name__))  # -1 sentinel for non-instrument failure
             logger.exception("cascade_refresh: compute_rankings failed after thesis refresh")
+            # UPSERT RERANK_NEEDED markers for each processed_ok id
+            # so the next cycle re-drains them even if there was no
+            # pre-existing row (new-work success path).
+            for iid in processed_ok:
+                try:
+                    enqueue_rerank_marker(conn, iid)
+                except psycopg.Error:
+                    logger.exception(
+                        "cascade_refresh: enqueue_rerank_marker failed for instrument_id=%d — "
+                        "rankings-recompute signal lost for this instrument",
+                        iid,
+                    )
 
     logger.info(
-        "cascade_refresh summary: considered=%d stale=%d thesis_refreshed=%d rankings=%s failed=%d",
+        "cascade_refresh summary: considered=%d stale=%d retries_drained=%d thesis_refreshed=%d rankings=%s failed=%d",
         len(instrument_ids),
         len(stale),
+        len(retry_ids),
         thesis_refreshed,
         rankings_recomputed,
         len(failed),
@@ -214,5 +395,6 @@ def cascade_refresh(
         instruments_considered=len(instrument_ids),
         thesis_refreshed=thesis_refreshed,
         rankings_recomputed=rankings_recomputed,
+        retries_drained=len(retry_ids),
         failed=tuple(failed),
     )

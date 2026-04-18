@@ -1215,50 +1215,57 @@ def daily_financial_facts() -> None:
                     changed_instruments_from_outcome,
                 )
 
+                # Cascade fires unconditionally when the API key is
+                # set so the retry outbox (K.2) gets drained even on
+                # days with zero new SEC work. ``cascade_refresh``
+                # returns the empty-noop CascadeOutcome when both
+                # the retry queue and instrument_ids are empty.
                 changed_ids = changed_instruments_from_outcome(conn, plan, outcome)
-                if changed_ids:
-                    cascade_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-                    cascade_outcome = cascade_refresh(conn, cascade_client, changed_ids)
-                    # Persist any cascade-side writes before the
-                    # failure-surfacing raise below. compute_rankings
-                    # writes score rows inside a
-                    # ``with conn.transaction():`` block that may be
-                    # nested as a savepoint under this connection's
-                    # implicit outer tx — without this explicit
-                    # commit, the raise propagates to
-                    # psycopg.connect()'s CM rollback and discards
-                    # any successful ranking writes. On the failure
-                    # path where compute_rankings itself rolled back
-                    # (cascade_refresh's inner handler), this commit
-                    # is a no-op on clean state. Thesis rows are
-                    # already durably committed by generate_thesis
-                    # per #293 and are unaffected either way.
-                    conn.commit()
-                    logger.info(
-                        "cascade_refresh outcome: considered=%d thesis_refreshed=%d rankings=%s failed=%d",
-                        cascade_outcome.instruments_considered,
-                        cascade_outcome.thesis_refreshed,
-                        cascade_outcome.rankings_recomputed,
-                        len(cascade_outcome.failed),
+                cascade_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+                cascade_outcome = cascade_refresh(conn, cascade_client, changed_ids)
+                # Persist any cascade-side writes before the
+                # failure-surfacing raise below. compute_rankings
+                # writes score rows inside a
+                # ``with conn.transaction():`` block that may be
+                # nested as a savepoint under this connection's
+                # implicit outer tx — without this explicit
+                # commit, the raise propagates to
+                # psycopg.connect()'s CM rollback and discards
+                # any successful ranking writes AND any retry-queue
+                # mutations made by cascade's deferred-clear /
+                # marker path. On the failure path where
+                # compute_rankings itself rolled back (cascade_refresh's
+                # inner handler), this commit is a no-op on clean
+                # state. Thesis rows are already durably committed
+                # by generate_thesis per #293 and are unaffected
+                # either way.
+                conn.commit()
+                logger.info(
+                    "cascade_refresh outcome: considered=%d retries_drained=%d "
+                    "thesis_refreshed=%d rankings=%s failed=%d",
+                    cascade_outcome.instruments_considered,
+                    cascade_outcome.retries_drained,
+                    cascade_outcome.thesis_refreshed,
+                    cascade_outcome.rankings_recomputed,
+                    len(cascade_outcome.failed),
+                )
+                # Surface cascade failures to the tracked job —
+                # per-instrument thesis failures AND the -1
+                # rerank-sentinel. Without this, SEC watermarks
+                # would be committed while the cascade silently
+                # fell behind, and ops health would still show
+                # status=success. Facts/normalization/cascade
+                # writes remain durably committed (commits
+                # happened above). Re-entry path on next run:
+                # the K.2 retry outbox durably flags any failed
+                # instrument so the next cycle re-drains it;
+                # rerank failures leave RERANK_NEEDED markers so
+                # the next run re-computes rankings too.
+                if cascade_outcome.failed:
+                    raise RuntimeError(
+                        f"cascade_refresh completed with {len(cascade_outcome.failed)} failures: "
+                        f"{cascade_outcome.failed}"
                     )
-                    # Surface cascade failures to the tracked job —
-                    # per-instrument thesis failures AND the -1
-                    # rerank-sentinel. Without this, SEC watermarks
-                    # would be committed while the cascade silently
-                    # fell behind, and ops health would still show
-                    # status=success. Facts/normalization/cascade
-                    # writes remain durably committed (commits
-                    # happened above). Re-entry path on next run:
-                    # find_stale_instruments (#273) uses
-                    # filing_events.created_at > thesis_generated_at,
-                    # so any instrument whose thesis we failed to
-                    # refresh this run remains stale and re-enters
-                    # the cascade next run.
-                    if cascade_outcome.failed:
-                        raise RuntimeError(
-                            f"cascade_refresh completed with {len(cascade_outcome.failed)} failures: "
-                            f"{cascade_outcome.failed}"
-                        )
             else:
                 logger.info(
                     "daily_financial_facts: ANTHROPIC_API_KEY not set — "

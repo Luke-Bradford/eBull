@@ -44,6 +44,7 @@ _SQL_DIR = Path(__file__).resolve().parents[2] / "sql"
 # Tables touched by the SEC incremental planner + executor tests.
 # TRUNCATE in dependency order with CASCADE to handle FKs cleanly.
 _PLANNER_TABLES: tuple[str, ...] = (
+    "cascade_retry_queue",
     "financial_facts_raw",
     "data_ingestion_runs",
     "external_identifiers",
