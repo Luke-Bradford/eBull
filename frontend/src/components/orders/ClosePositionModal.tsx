@@ -78,7 +78,7 @@ export function ClosePositionModal({
     };
   }, []);
 
-  const trade = findTrade(detail.data?.trades ?? null, positionId);
+  const trade = detail.data !== null ? findTrade(detail.data.trades, positionId) : null;
   const currency = detail.data?.currency ?? "";
   const symbol = detail.data?.symbol ?? "";
 
@@ -301,10 +301,9 @@ export function ClosePositionModal({
 }
 
 function findTrade(
-  trades: NativeTradeItem[] | null,
+  trades: NativeTradeItem[],
   positionId: number,
 ): NativeTradeItem | null {
-  if (trades === null) return null;
   return trades.find((t) => t.position_id === positionId) ?? null;
 }
 

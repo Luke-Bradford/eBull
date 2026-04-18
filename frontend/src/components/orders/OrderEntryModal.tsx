@@ -322,7 +322,7 @@ function PreviewBlock({
 }): JSX.Element {
   const price = detail?.current_price;
   let estimate = "—";
-  if (parsedValue !== null && priceIsUsable && price !== null && price !== undefined) {
+  if (parsedValue !== null && priceIsUsable && price != null) {
     if (mode === "amount") {
       estimate = `Estimated units: ${formatNumber(parsedValue / price, 6)}`;
     } else {
