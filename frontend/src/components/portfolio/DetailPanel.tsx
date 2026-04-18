@@ -47,7 +47,14 @@ import type {
 
 type ValuationSource = "quote" | "daily_close" | "cost_basis";
 
-export interface CloseTargetInPanel {
+/**
+ * Shared shape used by the portfolio page AND the detail panel when
+ * asking to close a specific broker position. Exported so both sides
+ * of the `onCloseTrade` wire see the same identity — avoids the
+ * latent drift of two structurally-identical-but-separately-declared
+ * types.
+ */
+export interface CloseTarget {
   readonly instrumentId: number;
   readonly trade: BrokerPositionItem;
   readonly valuationSource: ValuationSource;
@@ -57,7 +64,7 @@ export interface DetailPanelProps {
   readonly selectedPosition: PositionItem | null;
   readonly currency: string;
   readonly onAdd: (p: PositionItem) => void;
-  readonly onCloseTrade: (t: CloseTargetInPanel) => void;
+  readonly onCloseTrade: (t: CloseTarget) => void;
 }
 
 export function DetailPanel({
@@ -191,7 +198,7 @@ export function BrokerPositionsTable({
 }: {
   position: PositionItem;
   currency: string;
-  onCloseTrade: (t: CloseTargetInPanel) => void;
+  onCloseTrade: (t: CloseTarget) => void;
 }): JSX.Element {
   const trades = position.trades;
   if (trades.length === 0) {
@@ -241,7 +248,7 @@ function BrokerRow({
   instrumentId: number;
   valuationSource: ValuationSource;
   currency: string;
-  onCloseTrade: (t: CloseTargetInPanel) => void;
+  onCloseTrade: (t: CloseTarget) => void;
 }): JSX.Element {
   const positive = trade.unrealized_pnl >= 0;
   return (

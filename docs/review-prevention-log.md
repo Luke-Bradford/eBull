@@ -815,3 +815,30 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: A submit handler's early-return guard checked only a subset of the conditions that `canSubmit` already enforced — e.g. partial-close handler checked `units > 0` but not `units <= trade.units` or `units >= MIN_UNITS`. Under the current call site the submit button is always disabled when any of those fail, so the gap is invisible in practice. A programmatic call (test, future caller that reuses the submit path without the button), or a future refactor that inlines the handler into a different trigger, would skip those additional constraints and POST an invalid payload the backend rejects with a confusing message.
 - Prevention: In any handler whose validity is already computed as a `canSubmit` boolean for the button's `disabled` state, the handler's own early-return guard MUST be a strict superset of `canSubmit`'s conditions, OR use `if (!canSubmit) return` as a single gate. Defence-in-depth is cheap; divergence between the UI gate and the submit path is a class of bug that hides until a future caller lands. Grep `async function handleSubmit` in modal files and compare the return guards to the `canSubmit` expression at the top of the component.
 - Enforced in: this prevention log; `frontend/src/components/orders/ClosePositionModal.tsx` (`handleSubmit` now re-checks `MIN_UNITS` and `<= trade.units`)
+
+---
+
+### Duplicate structurally-identical types declared in sibling files
+
+- First seen in: #321
+- Symptom: `CloseTarget` was declared in `PortfolioPage.tsx` and a sibling `CloseTargetInPanel` interface was declared in `DetailPanel.tsx` with the same fields. The code compiled because TypeScript resolves matching structural shapes, but the two types could drift — adding a field to one without the other, or changing a type, would silently break the prop wire while `tsc` stayed green (until the actual divergent field was read).
+- Prevention: When two modules need to name the same shape — e.g. a page passes a target object to a child component and the child destructures it — export the interface from one file and import it in the other. Never declare the same shape twice. Before pushing any PR that adds a new cross-component type, `grep -rn "interface <Name>" frontend/src` should return exactly one match per unique name.
+- Enforced in: this prevention log; `frontend/src/components/portfolio/DetailPanel.tsx` exports `CloseTarget`; `frontend/src/pages/PortfolioPage.tsx` imports it.
+
+---
+
+### Hint / warning state with no clear-on-next-transition
+
+- First seen in: #321
+- Symptom: A `hint` state was set when the operator pressed `c` on a multi-trade position, displaying a one-line warning. It was never cleared on any subsequent transition (selection change, successful `b`/`c`, `Esc`), so the warning persisted through unrelated actions and looked live even when it was stale.
+- Prevention: Any transient operator-facing hint / toast / warning state must have a clear path tied to every transition that could invalidate it. For a hint tied to a keyboard action, clear it in: (a) the same action's success branch, (b) the opposite action's branch, (c) any selection change, (d) the `Esc` reset. Grep `setHint` / `setWarning` / `setNotice` in any new component and verify each state setter has corresponding clear calls — one set = at least one matching clear on every relevant transition.
+- Enforced in: this prevention log; `frontend/src/pages/PortfolioPage.tsx` (`setHint(null)` now fires on row click, `Esc`, successful `b`, successful single-trade `c`, and selection changes via keyboard).
+
+---
+
+### Stale closure over derived state in window-level keyboard handlers
+
+- First seen in: #321
+- Symptom: A `useEffect` attached a `keydown` listener to `window` and read both `pageRows` and `focusedIdx` from the closure. The deps array included both, so React re-ran the effect on every change — but a rapid key sequence (`j` then `Enter` in the same microtask, a future batched update, or a test harness that flushes without a render between events) could invoke the listener with a stale `pageRows[focusedIdx]` combination from an earlier render. `setState` updater form protects the *setter*, but `setState(prev => ...)` does nothing for *reading* other state in the same handler.
+- Prevention: In any `useEffect` that attaches a listener to a shared surface (`window`, `document`, a ref target), each piece of state the listener reads without using the updater form should be carried in a ref that is written on every render (`ref.current = value` at top level of the component body). The effect body then reads `ref.current`, which always has the freshest value. Grep `window.addEventListener` in components and verify every non-setter read of state goes through a ref.
+- Enforced in: this prevention log; `frontend/src/pages/PortfolioPage.tsx` (`focusedIdxRef` + `pageRowsRef` synced on every render).

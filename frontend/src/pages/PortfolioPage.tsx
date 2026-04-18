@@ -9,19 +9,12 @@ import { EmptyState } from "@/components/states/EmptyState";
 import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
 import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
 import { DetailPanel } from "@/components/portfolio/DetailPanel";
+import type { CloseTarget } from "@/components/portfolio/DetailPanel";
 import type {
   BrokerPositionItem,
   PositionItem,
   PortfolioMirrorItem,
 } from "@/api/types";
-
-type ValuationSource = "quote" | "daily_close" | "cost_basis";
-
-interface CloseTarget {
-  instrumentId: number;
-  trade: BrokerPositionItem;
-  valuationSource: ValuationSource;
-}
 
 type RowItem =
   | { kind: "position"; data: PositionItem }
@@ -61,6 +54,12 @@ export function PortfolioPage() {
 
   const searchRef = useRef<HTMLInputElement | null>(null);
 
+  // Refs track the freshest focus index + page rows so the window
+  // keyboard handler (which captures closures each effect run) always
+  // reads the current values, not a snapshot from an earlier render.
+  const focusedIdxRef = useRef(focusedIdx);
+  const pageRowsRef = useRef<RowItem[]>([]);
+
   // Derived: all rows (positions + mirrors, sorted by value), then
   // filtered by search, then sliced for the current page.
   const allRows: RowItem[] = useMemo(() => {
@@ -93,6 +92,11 @@ export function PortfolioPage() {
     const start = (page - 1) * PAGE_SIZE;
     return visible.slice(start, start + PAGE_SIZE);
   }, [visible, page]);
+
+  // Keep refs aligned with the current render so the window listener
+  // never reads a stale snapshot.
+  focusedIdxRef.current = focusedIdx;
+  pageRowsRef.current = pageRows;
 
   // Derive selectedPosition from the UNFILTERED positions so the
   // detail panel keeps rendering when the operator narrows search.
@@ -137,6 +141,9 @@ export function PortfolioPage() {
     if (row.kind === "position") {
       setSelectedId(row.data.instrument_id);
       setFocusedIdx(idxOnPage);
+      // Any stale multi-trade hint becomes irrelevant once the
+      // operator picks a new row — clear it.
+      setHint(null);
     }
     // Mirror rows intentionally do not set selection — the row itself
     // navigates via MirrorRow's onClick.
@@ -188,22 +195,26 @@ export function PortfolioPage() {
       }
 
       if (e.key === "j") {
-        if (pageRows.length === 0) return;
-        setFocusedIdx((i) => Math.min(i + 1, pageRows.length - 1));
+        const rows = pageRowsRef.current;
+        if (rows.length === 0) return;
+        setFocusedIdx((i) => Math.min(i + 1, rows.length - 1));
         e.preventDefault();
         return;
       }
       if (e.key === "k") {
-        if (pageRows.length === 0) return;
+        const rows = pageRowsRef.current;
+        if (rows.length === 0) return;
         setFocusedIdx((i) => Math.max(i - 1, 0));
         e.preventDefault();
         return;
       }
       if (e.key === "Enter") {
-        if (pageRows.length === 0) return;
-        const target = pageRows[focusedIdx];
+        const rows = pageRowsRef.current;
+        if (rows.length === 0) return;
+        const target = rows[focusedIdxRef.current];
         if (target !== undefined && target.kind === "position") {
           setSelectedId(target.data.instrument_id);
+          setHint(null);
         }
         e.preventDefault();
         return;
@@ -211,6 +222,7 @@ export function PortfolioPage() {
       if (e.key === "b") {
         if (selectedPosition === null) return;
         setAddFor(selectedPosition);
+        setHint(null);
         e.preventDefault();
         return;
       }
@@ -223,6 +235,7 @@ export function PortfolioPage() {
             trade: trades[0],
             valuationSource: selectedPosition.valuation_source,
           });
+          setHint(null);
         } else if (trades.length > 1) {
           setHint(
             "Close requires a single broker position — use the detail panel.",
@@ -235,7 +248,7 @@ export function PortfolioPage() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [addFor, closeFor, pageRows, focusedIdx, selectedPosition]);
+  }, [addFor, closeFor, selectedPosition]);
 
   return (
     <div className="space-y-4">
