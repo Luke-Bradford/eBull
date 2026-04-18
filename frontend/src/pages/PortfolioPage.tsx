@@ -20,7 +20,6 @@ interface CloseTarget {
   instrumentId: number;
   trade: BrokerPositionItem;
   valuationSource: ValuationSource;
-  symbol: string;
 }
 
 /**
@@ -357,7 +356,6 @@ function PositionRow({
                 instrumentId: p.instrument_id,
                 trade: singleTrade,
                 valuationSource: p.valuation_source,
-                symbol: p.symbol,
               });
             }}
             aria-label={`Close ${p.symbol}`}

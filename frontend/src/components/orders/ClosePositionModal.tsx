@@ -98,7 +98,18 @@ export function ClosePositionModal({
   async function handleSubmit(): Promise<void> {
     if (trade === null) return;
     const unitsToDeduct = mode === "full" ? null : parsedUnits;
-    if (mode === "partial" && (unitsToDeduct === null || unitsToDeduct <= 0)) {
+    // Belt-and-braces on the partial-close path: the button is
+    // disabled via `canSubmit` for any of these conditions, but we
+    // re-check here so a programmatic call (test, future caller)
+    // cannot bypass the bounds and POST an over-position or
+    // sub-precision value that the backend would 400 with a
+    // confusing message.
+    if (
+      mode === "partial" &&
+      (unitsToDeduct === null ||
+        unitsToDeduct < MIN_UNITS ||
+        unitsToDeduct > trade.units)
+    ) {
       return;
     }
     setSubmitting(true);
