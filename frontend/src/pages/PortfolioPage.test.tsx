@@ -261,16 +261,22 @@ describe("PortfolioPage — detail panel + selection", () => {
 
 describe("PortfolioPage — keyboard shortcuts", () => {
   it("j / k move the focus ring without any prior click", async () => {
+    // Distinct market_values give a stable sort: AAA=300 > BBB=200 > CCC=100.
+    // Row ordering is deterministic so the focused-row assertion does
+    // not rely on engine-specific equal-key sort behaviour.
     mockedFetchPortfolio.mockResolvedValue(
-      portfolioWith([position(1, "AAA"), position(2, "BBB"), position(3, "CCC")]),
+      portfolioWith([
+        position(1, "AAA", { market_value: 300 }),
+        position(2, "BBB", { market_value: 200 }),
+        position(3, "CCC", { market_value: 100 }),
+      ]),
     );
     const user = userEvent.setup();
     renderPage();
 
     await screen.findByTestId("position-row-1");
 
-    // Initially focused index 0 (AAA — sorted by value, but all equal,
-    // so array order holds). Press `j` twice → focus on index 2 (CCC).
+    // Initial focused index 0 = AAA. Press `j` twice → focus on CCC.
     await user.keyboard("jj");
     const cccRow = screen.getByTestId("position-row-3");
     expect(cccRow.className).toContain("border-l-slate-400");
@@ -289,8 +295,12 @@ describe("PortfolioPage — keyboard shortcuts", () => {
   });
 
   it("Enter promotes focused row to selected", async () => {
+    // Distinct market_values for deterministic sort order: AAA first, BBB second.
     mockedFetchPortfolio.mockResolvedValue(
-      portfolioWith([position(1, "AAA"), position(2, "BBB")]),
+      portfolioWith([
+        position(1, "AAA", { market_value: 200 }),
+        position(2, "BBB", { market_value: 100 }),
+      ]),
     );
     const user = userEvent.setup();
     renderPage();

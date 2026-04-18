@@ -54,11 +54,15 @@ export function PortfolioPage() {
 
   const searchRef = useRef<HTMLInputElement | null>(null);
 
-  // Refs track the freshest focus index + page rows so the window
-  // keyboard handler (which captures closures each effect run) always
-  // reads the current values, not a snapshot from an earlier render.
+  // Refs track the freshest focus index + page rows + selected
+  // position so the window keyboard handler (which captures closures
+  // each effect run) always reads the current values, not a snapshot
+  // from an earlier render. The refs also keep the effect's deps
+  // array small — re-binding the listener every time `portfolio.data`
+  // changes is wasteful when the handler only *reads* the position.
   const focusedIdxRef = useRef(focusedIdx);
   const pageRowsRef = useRef<RowItem[]>([]);
+  const selectedPositionRef = useRef<PositionItem | null>(null);
 
   // Derived: all rows (positions + mirrors, sorted by value), then
   // filtered by search, then sliced for the current page.
@@ -93,11 +97,6 @@ export function PortfolioPage() {
     return visible.slice(start, start + PAGE_SIZE);
   }, [visible, page]);
 
-  // Keep refs aligned with the current render so the window listener
-  // never reads a stale snapshot.
-  focusedIdxRef.current = focusedIdx;
-  pageRowsRef.current = pageRows;
-
   // Derive selectedPosition from the UNFILTERED positions so the
   // detail panel keeps rendering when the operator narrows search.
   const selectedPosition: PositionItem | null = useMemo(() => {
@@ -107,6 +106,13 @@ export function PortfolioPage() {
       null
     );
   }, [selectedId, portfolio.data]);
+
+  // Keep refs aligned with the current render so the window listener
+  // never reads a stale snapshot. Must run AFTER selectedPosition is
+  // derived.
+  focusedIdxRef.current = focusedIdx;
+  pageRowsRef.current = pageRows;
+  selectedPositionRef.current = selectedPosition;
 
   // Clamp focusedIdx when pageRows.length changes.
   useEffect(() => {
@@ -220,20 +226,22 @@ export function PortfolioPage() {
         return;
       }
       if (e.key === "b") {
-        if (selectedPosition === null) return;
-        setAddFor(selectedPosition);
+        const pos = selectedPositionRef.current;
+        if (pos === null) return;
+        setAddFor(pos);
         setHint(null);
         e.preventDefault();
         return;
       }
       if (e.key === "c") {
-        if (selectedPosition === null) return;
-        const trades = selectedPosition.trades;
+        const pos = selectedPositionRef.current;
+        if (pos === null) return;
+        const trades = pos.trades;
         if (trades.length === 1 && trades[0] !== undefined) {
           setCloseFor({
-            instrumentId: selectedPosition.instrument_id,
+            instrumentId: pos.instrument_id,
             trade: trades[0],
-            valuationSource: selectedPosition.valuation_source,
+            valuationSource: pos.valuation_source,
           });
           setHint(null);
         } else if (trades.length > 1) {
@@ -248,7 +256,10 @@ export function PortfolioPage() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [addFor, closeFor, selectedPosition]);
+    // Modal presence flags gate the handler; everything else the
+    // handler reads is carried by refs, so the listener does not need
+    // to re-bind on per-render state changes.
+  }, [addFor, closeFor]);
 
   return (
     <div className="space-y-4">
