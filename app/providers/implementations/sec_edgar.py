@@ -26,36 +26,24 @@ Provider contract:
 """
 
 import hashlib
-import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from pathlib import Path
 from types import TracebackType
 
 import httpx
 
 from app.providers.filings import FilingEvent, FilingNotFound, FilingSearchResult, FilingsProvider
 from app.providers.resilient_client import ResilientClient
+from app.services import raw_persistence
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://data.sec.gov"
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
-_RAW_PAYLOAD_DIR = Path("data/raw/sec")
 
 # SEC rate-limit: 10 req/s. We use a conservative inter-request floor.
 _MIN_REQUEST_INTERVAL_S = 0.11
-
-
-def _persist_raw(tag: str, payload: object) -> None:
-    try:
-        _RAW_PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        path = _RAW_PAYLOAD_DIR / f"{tag}_{ts}.json"
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        logger.warning("Failed to persist raw SEC payload for tag=%s", tag, exc_info=True)
 
 
 def _zero_pad_cik(cik: str | int) -> str:
@@ -261,7 +249,7 @@ class SecFilingsProvider(FilingsProvider):
             raise FilingNotFound(f"Filing not found: {provider_filing_id}")
         resp.raise_for_status()
         raw = resp.json()
-        _persist_raw(f"sec_filing_{provider_filing_id.replace('/', '_')}", raw)
+        raw_persistence.persist_raw_if_new("sec", f"sec_filing_{provider_filing_id.replace('/', '_')}", raw)
 
         return _normalise_filing_event(provider_filing_id, raw)
 
@@ -282,7 +270,7 @@ class SecFilingsProvider(FilingsProvider):
         resp = self._http_tickers.get(_TICKERS_URL)
         resp.raise_for_status()
         raw = resp.json()
-        _persist_raw("sec_tickers", raw)
+        raw_persistence.persist_raw_if_new("sec", "sec_tickers", raw)
         return _parse_cik_mapping(raw)
 
     def build_cik_mapping_conditional(
@@ -322,7 +310,7 @@ class SecFilingsProvider(FilingsProvider):
         # might mutate the content view.
         body_hash = hashlib.sha256(resp.content).hexdigest()
         raw = resp.json()
-        _persist_raw("sec_tickers", raw)
+        raw_persistence.persist_raw_if_new("sec", "sec_tickers", raw)
         return CikMappingResult(
             mapping=_parse_cik_mapping(raw),
             body_hash=body_hash,
@@ -392,7 +380,7 @@ class SecFilingsProvider(FilingsProvider):
             return None
         resp.raise_for_status()
         raw = resp.json()
-        _persist_raw(f"sec_submissions_page_{name}", raw)
+        raw_persistence.persist_raw_if_new("sec", f"sec_submissions_page_{name}", raw)
         return raw  # type: ignore[return-value]
 
     # ------------------------------------------------------------------
@@ -407,7 +395,7 @@ class SecFilingsProvider(FilingsProvider):
             return None
         resp.raise_for_status()
         raw = resp.json()
-        _persist_raw(f"sec_submissions_{cik_padded}", raw)
+        raw_persistence.persist_raw_if_new("sec", f"sec_submissions_{cik_padded}", raw)
         return raw  # type: ignore[return-value]
 
 

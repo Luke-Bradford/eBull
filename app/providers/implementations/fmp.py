@@ -26,13 +26,11 @@ fallback and the mismatch is logged.
 Raw responses are persisted before normalisation.
 """
 
-import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date
 from decimal import Decimal
-from pathlib import Path
 from types import TracebackType
 
 import httpx
@@ -45,26 +43,15 @@ from app.providers.enrichment import (
 )
 from app.providers.fundamentals import FundamentalsProvider, FundamentalsSnapshot
 from app.providers.resilient_client import ResilientClient
+from app.services import raw_persistence
 
 logger = logging.getLogger(__name__)
 
 _FMP_BASE_URL = "https://financialmodelingprep.com/api"
-_RAW_PAYLOAD_DIR = Path("data/raw/fmp")
 
 # FMP rate limit: ~250 req/min on Premium (plan-dependent).
 # 0.25s interval ≈ 240/min — ~4% headroom.
 _FMP_REQUEST_INTERVAL_S = 0.25
-
-
-def _persist_raw(tag: str, payload: object) -> None:
-    """Write raw API response to disk before normalisation."""
-    try:
-        _RAW_PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        path = _RAW_PAYLOAD_DIR / f"{tag}_{ts}.json"
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        logger.warning("Failed to persist raw FMP payload for tag=%s", tag, exc_info=True)
 
 
 @dataclass(frozen=True)
@@ -249,7 +236,7 @@ class FmpFundamentalsProvider(FundamentalsProvider, EnrichmentProvider):
             logger.warning("FMP earnings calendar fetch failed for %s: %s", symbol, resp.status_code)
             return []
         raw = resp.json()
-        _persist_raw(f"fmp_earnings_{symbol}", raw)
+        raw_persistence.persist_raw_if_new("fmp", f"fmp_earnings_{symbol}", raw)
         if not isinstance(raw, list):
             return []
         events: list[EarningsEvent] = []
@@ -277,7 +264,7 @@ class FmpFundamentalsProvider(FundamentalsProvider, EnrichmentProvider):
         estimates: list[dict[str, object]] = []
         if est_resp.status_code == 200:
             raw_est = est_resp.json()
-            _persist_raw(f"fmp_analyst_est_{symbol}", raw_est)
+            raw_persistence.persist_raw_if_new("fmp", f"fmp_analyst_est_{symbol}", raw_est)
             if isinstance(raw_est, list):
                 estimates = [row for row in raw_est if isinstance(row, dict)]
 
@@ -288,7 +275,7 @@ class FmpFundamentalsProvider(FundamentalsProvider, EnrichmentProvider):
         consensus: dict[str, object] | None = None
         if rec_resp.status_code == 200:
             raw_rec = rec_resp.json()
-            _persist_raw(f"fmp_analyst_rec_{symbol}", raw_rec)
+            raw_persistence.persist_raw_if_new("fmp", f"fmp_analyst_rec_{symbol}", raw_rec)
             if isinstance(raw_rec, list) and raw_rec and isinstance(raw_rec[0], dict):
                 consensus = raw_rec[0]
 
@@ -299,7 +286,7 @@ class FmpFundamentalsProvider(FundamentalsProvider, EnrichmentProvider):
         price_target: dict[str, object] | None = None
         if pt_resp.status_code == 200:
             raw_pt = pt_resp.json()
-            _persist_raw(f"fmp_price_target_{symbol}", raw_pt)
+            raw_persistence.persist_raw_if_new("fmp", f"fmp_price_target_{symbol}", raw_pt)
             if isinstance(raw_pt, list) and raw_pt and isinstance(raw_pt[0], dict):
                 price_target = raw_pt[0]
 
@@ -323,7 +310,7 @@ class FmpFundamentalsProvider(FundamentalsProvider, EnrichmentProvider):
             logger.warning("FMP profile fetch failed for %s: %s", symbol, resp.status_code)
             return None
         data = resp.json()
-        _persist_raw(f"fmp_profile_{symbol}", data)
+        raw_persistence.persist_raw_if_new("fmp", f"fmp_profile_{symbol}", data)
         if not isinstance(data, list) or not data:
             return None
         item = data[0]
@@ -336,7 +323,7 @@ class FmpFundamentalsProvider(FundamentalsProvider, EnrichmentProvider):
         )
         resp.raise_for_status()
         raw = resp.json()
-        _persist_raw(f"fmp_bs_{symbol}", raw)
+        raw_persistence.persist_raw_if_new("fmp", f"fmp_bs_{symbol}", raw)
         return raw if isinstance(raw, list) else []
 
     def _fetch_income(self, symbol: str, limit: int) -> list[dict[str, object]]:
@@ -346,7 +333,7 @@ class FmpFundamentalsProvider(FundamentalsProvider, EnrichmentProvider):
         )
         resp.raise_for_status()
         raw = resp.json()
-        _persist_raw(f"fmp_inc_{symbol}", raw)
+        raw_persistence.persist_raw_if_new("fmp", f"fmp_inc_{symbol}", raw)
         return raw if isinstance(raw, list) else []
 
     def _fetch_cashflow(self, symbol: str, limit: int) -> list[dict[str, object]]:
@@ -356,7 +343,7 @@ class FmpFundamentalsProvider(FundamentalsProvider, EnrichmentProvider):
         )
         resp.raise_for_status()
         raw = resp.json()
-        _persist_raw(f"fmp_cf_{symbol}", raw)
+        raw_persistence.persist_raw_if_new("fmp", f"fmp_cf_{symbol}", raw)
         return raw if isinstance(raw, list) else []
 
     def _fetch_ttm_income(self, symbol: str) -> dict[str, object] | None:
@@ -366,7 +353,7 @@ class FmpFundamentalsProvider(FundamentalsProvider, EnrichmentProvider):
         )
         resp.raise_for_status()
         raw = resp.json()
-        _persist_raw(f"fmp_inc_ttm_{symbol}", raw)
+        raw_persistence.persist_raw_if_new("fmp", f"fmp_inc_ttm_{symbol}", raw)
         if isinstance(raw, list) and raw:
             return raw[0]  # type: ignore[return-value]
         return None
@@ -378,7 +365,7 @@ class FmpFundamentalsProvider(FundamentalsProvider, EnrichmentProvider):
         )
         resp.raise_for_status()
         raw = resp.json()
-        _persist_raw(f"fmp_cf_ttm_{symbol}", raw)
+        raw_persistence.persist_raw_if_new("fmp", f"fmp_cf_ttm_{symbol}", raw)
         if isinstance(raw, list) and raw:
             return raw[0]  # type: ignore[return-value]
         return None

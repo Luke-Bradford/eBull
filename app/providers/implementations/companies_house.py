@@ -23,36 +23,24 @@ Endpoints used:
 Raw responses are persisted before normalisation.
 """
 
-import json
 import logging
 from datetime import UTC, date, datetime
-from pathlib import Path
 from types import TracebackType
 
 import httpx
 
 from app.providers.filings import FilingEvent, FilingNotFound, FilingSearchResult, FilingsProvider
 from app.providers.resilient_client import ResilientClient
+from app.services import raw_persistence
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.company-information.service.gov.uk"
-_RAW_PAYLOAD_DIR = Path("data/raw/companies_house")
 _PAGE_SIZE = 100
 
 # Companies House rate limit: 600 req/5 min (= 2 req/s avg).
 # 0.55s interval ≈ 109/min — ~9% headroom.
 _CH_REQUEST_INTERVAL_S = 0.55
-
-
-def _persist_raw(tag: str, payload: object) -> None:
-    try:
-        _RAW_PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        path = _RAW_PAYLOAD_DIR / f"{tag}_{ts}.json"
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        logger.warning("Failed to persist raw CH payload for tag=%s", tag, exc_info=True)
 
 
 class CompaniesHouseFilingsProvider(FilingsProvider):
@@ -141,7 +129,7 @@ class CompaniesHouseFilingsProvider(FilingsProvider):
             raise FilingNotFound(f"Filing not found: {provider_filing_id}")
         resp.raise_for_status()
         raw = resp.json()
-        _persist_raw(f"ch_filing_{company_number}_{transaction_id}", raw)
+        raw_persistence.persist_raw_if_new("companies_house", f"ch_filing_{company_number}_{transaction_id}", raw)
 
         return _normalise_filing_event(provider_filing_id, company_number, raw)
 
@@ -160,7 +148,7 @@ class CompaniesHouseFilingsProvider(FilingsProvider):
             return None
         resp.raise_for_status()
         raw = resp.json()
-        _persist_raw(f"ch_filings_{company_number}", raw)
+        raw_persistence.persist_raw_if_new("companies_house", f"ch_filings_{company_number}", raw)
 
         items = raw.get("items")
         if not isinstance(items, list):

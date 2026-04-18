@@ -14,9 +14,8 @@ from __future__ import annotations
 import decimal
 import logging
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
-from pathlib import Path
 from types import TracebackType
 from typing import Any
 
@@ -34,28 +33,9 @@ from app.providers.broker import (
     OrderStatus,
 )
 from app.providers.resilient_client import ResilientClient
+from app.services import raw_persistence
 
 logger = logging.getLogger(__name__)
-
-_RAW_PAYLOAD_DIR = Path("data/raw/etoro_broker")
-
-
-def _persist_raw(tag: str, payload: bytes) -> None:
-    """Write raw API response bytes to disk before normalisation.
-
-    Raises ``OSError`` on disk-level failures (permission denied, disk full)
-    so the caller can decide whether to abort or continue.  Non-OS exceptions
-    are logged and swallowed.
-    """
-    try:
-        _RAW_PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        path = _RAW_PAYLOAD_DIR / f"{tag}_{ts}.json"
-        path.write_bytes(payload)
-    except OSError:
-        raise
-    except Exception:
-        logger.warning("Failed to persist raw payload for tag=%s", tag, exc_info=True)
 
 
 # Actions the service layer is allowed to send to place_order.
@@ -421,13 +401,10 @@ class EtoroBrokerProvider(BrokerProvider):
             f"{self._info_prefix}/portfolio",
             headers=self._request_headers(),
         )
-        try:
-            _persist_raw("etoro_portfolio", response.content)
-        except OSError:
-            logger.error(
-                "Failed to persist raw portfolio payload — continuing with response",
-                exc_info=True,
-            )
+        # Best-effort raw persist. Helper swallows OSError internally
+        # (logs + returns None); sync must continue with parsed
+        # response regardless.
+        raw_persistence.persist_raw_if_new("etoro_broker", "etoro_portfolio", response.content)
         response.raise_for_status()
         raw = response.json()
 

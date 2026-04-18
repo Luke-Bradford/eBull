@@ -8,12 +8,10 @@ Auth: three-header scheme (x-api-key, x-user-key, x-request-id).
 Base URL: https://public-api.etoro.com (configurable via settings.etoro_base_url).
 """
 
-import json
 import logging
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from pathlib import Path
 from types import TracebackType
 from uuid import uuid4
 
@@ -22,11 +20,9 @@ import httpx
 from app.config import settings
 from app.providers.market_data import InstrumentRecord, MarketDataProvider, OHLCVBar, Quote
 from app.providers.resilient_client import ResilientClient
+from app.services import raw_persistence
 
 logger = logging.getLogger(__name__)
-
-# Directory for raw payload dumps (relative to process working directory)
-_RAW_PAYLOAD_DIR = Path("data/raw/etoro")
 
 # eToro rates endpoint accepts at most 100 instrument IDs per request
 # (OpenAPI spec maxItems: 100).  We use 50 to reduce blast radius when
@@ -36,18 +32,6 @@ _RATES_BATCH_SIZE = 50
 # eToro rate limit: 60 GET requests per minute (rolling window).
 # 1.1s inter-request interval ≈ 55 req/min — ~8% headroom.
 _ETORO_READ_INTERVAL_S = 1.1
-
-
-def _persist_raw(tag: str, payload: object) -> None:
-    """Write raw API response to disk before normalisation."""
-    try:
-        _RAW_PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        path = _RAW_PAYLOAD_DIR / f"{tag}_{ts}.json"
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        # Never let persistence failure block the sync
-        logger.warning("Failed to persist raw payload for tag=%s", tag, exc_info=True)
 
 
 class EtoroMarketDataProvider(MarketDataProvider):
@@ -109,7 +93,7 @@ class EtoroMarketDataProvider(MarketDataProvider):
         )
         response.raise_for_status()
         raw = response.json()
-        _persist_raw("instruments", raw)
+        raw_persistence.persist_raw_if_new("etoro", "instruments", raw)
         return _normalise_instruments(raw)
 
     # ------------------------------------------------------------------
@@ -128,7 +112,7 @@ class EtoroMarketDataProvider(MarketDataProvider):
         )
         response.raise_for_status()
         raw = response.json()
-        _persist_raw(f"candles_{instrument_id}", raw)
+        raw_persistence.persist_raw_if_new("etoro", f"candles_{instrument_id}", raw)
         return _normalise_candles(raw)
 
     # ------------------------------------------------------------------
@@ -171,7 +155,7 @@ class EtoroMarketDataProvider(MarketDataProvider):
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 # Persist the error response body for diagnosis.
-                _persist_raw(f"rates_batch{batch_num}_error", exc.response.text)
+                raw_persistence.persist_raw_if_new("etoro", f"rates_batch{batch_num}_error", exc.response.text)
                 logger.warning(
                     "Rates chunk %d failed (%d IDs, status %d), skipping",
                     batch_num,
@@ -192,7 +176,7 @@ class EtoroMarketDataProvider(MarketDataProvider):
                 failed_chunks += 1
                 continue
             raw = response.json()
-            _persist_raw(f"rates_batch{batch_num}", raw)
+            raw_persistence.persist_raw_if_new("etoro", f"rates_batch{batch_num}", raw)
             all_quotes.extend(_normalise_rates(raw))
 
         if failed_chunks:
