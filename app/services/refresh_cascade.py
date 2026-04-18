@@ -27,7 +27,7 @@ adds a durable retry outbox. K.1 (this module) is the basic wiring.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import anthropic
@@ -53,7 +53,7 @@ class CascadeOutcome:
     instruments_considered: int
     thesis_refreshed: int
     rankings_recomputed: bool
-    failed: tuple[tuple[int, str], ...] = field(default_factory=tuple)
+    failed: tuple[tuple[int, str], ...] = ()
 
 
 def changed_instruments_from_outcome(
@@ -84,10 +84,12 @@ def changed_instruments_from_outcome(
     # find_stale_instruments picks up the newest filing regardless.
     # Pre-pad closes the gap where both "320193" and "0000320193"
     # would pass an unpadded seen-check and emit a duplicate after
-    # padding. str.zfill(10) is total (no ValueError) — it pads
-    # short digit strings and leaves longer / non-digit values
-    # untouched; non-digit values simply miss the SELECT silently,
-    # matching the pre-existing behavior.
+    # padding. Invariant: every CIK reaching this function
+    # originates from _zero_pad_cik (parse_master_index or the
+    # external_identifiers store) and is already a 10-digit digit
+    # string. str.zfill(10) is therefore a belt-and-braces pad for
+    # any future caller that hands us a raw-integer CIK — it is
+    # total (no ValueError) and is a no-op on already-padded input.
     padded = [cik.zfill(10) for cik in ciks]
     seen: set[str] = set()
     unique_ciks = [cik for cik in padded if not (cik in seen or seen.add(cik))]
