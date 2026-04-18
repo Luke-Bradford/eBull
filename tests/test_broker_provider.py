@@ -645,7 +645,7 @@ FIXTURE_FULL_PORTFOLIO_RESPONSE = {
 }
 
 
-@patch("app.providers.implementations.etoro_broker._persist_raw")
+@patch("app.providers.implementations.etoro_broker.raw_persistence.persist_raw_if_new")
 class TestGetPortfolio:
     def test_returns_positions_and_cash(self, _mock_persist: MagicMock) -> None:
         mock_resp = MagicMock()

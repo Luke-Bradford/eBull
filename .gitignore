@@ -21,3 +21,8 @@ data/
 # Dev server PID tracking
 .dev-pids
 .playwright-mcp/
+
+# Codex scratch dirs
+.tmp/
+tmp_pytest/
+.superpowers/

@@ -129,6 +129,15 @@ def _canonicalise_for_hash(payload: object) -> bytes:
             return payload
         return json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
+    # JSON scalars (None, bool, int, float) — match the original
+    # ``_persist_raw`` per-provider behaviour which used plain
+    # ``json.dumps(payload)``. Upstream APIs sometimes return bare
+    # JSON ``null`` with a 200 response; pre-migration that would
+    # persist successfully. Scalars are already deterministic so no
+    # canonicalisation beyond ``json.dumps`` is needed.
+    if payload is None or isinstance(payload, bool | int | float):
+        return json.dumps(payload).encode("utf-8")
+
     raise TypeError(f"persist_raw_if_new: unsupported payload type {type(payload).__name__}")
 
 

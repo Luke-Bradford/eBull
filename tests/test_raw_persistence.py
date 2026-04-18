@@ -64,10 +64,19 @@ class TestCanonicalise:
         raw_json_str = '{"code":400,"error":"bad_request"}'
         assert _canonicalise_for_hash(raw_json_str) == _canonicalise_for_hash(d)
 
+    def test_scalar_json_values_accepted(self) -> None:
+        """JSON scalars (None, bool, int, float) are accepted — matches
+        original per-provider json.dumps(payload) behaviour so upstream
+        APIs returning bare JSON null don't crash the sync path."""
+        assert _canonicalise_for_hash(None) == b"null"
+        assert _canonicalise_for_hash(True) == b"true"
+        assert _canonicalise_for_hash(42) == b"42"
+        assert _canonicalise_for_hash(3.14) == b"3.14"
+
     def test_unsupported_type_raises(self) -> None:
-        """Numbers, sets, etc. are not supported payload types."""
+        """sets, custom objects, etc. are not supported."""
         with pytest.raises(TypeError, match="unsupported payload type"):
-            _canonicalise_for_hash(42)  # type: ignore[arg-type]
+            _canonicalise_for_hash({1, 2, 3})  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------

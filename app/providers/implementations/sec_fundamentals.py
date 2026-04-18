@@ -30,11 +30,9 @@ Provider contract:
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import UTC, date, datetime
+from datetime import date
 from decimal import Decimal
-from pathlib import Path
 from types import TracebackType
 from typing import Any
 
@@ -42,11 +40,11 @@ import httpx
 
 from app.providers.fundamentals import FundamentalsProvider, FundamentalsSnapshot, XbrlFact
 from app.providers.resilient_client import ResilientClient
+from app.services import raw_persistence
 
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://data.sec.gov"
-_RAW_PAYLOAD_DIR = Path("data/raw/sec_fundamentals")
 
 # SEC rate-limit: 10 req/s.  Shared with the filings provider if both are
 # running, but in practice they run in separate phases of daily_research_refresh
@@ -130,16 +128,6 @@ TRACKED_CONCEPTS: dict[str, tuple[str, ...]] = {
 }
 
 _ALL_TRACKED_TAGS: frozenset[str] = frozenset(tag for tags in TRACKED_CONCEPTS.values() for tag in tags)
-
-
-def _persist_raw(tag: str, payload: object) -> None:
-    try:
-        _RAW_PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        path = _RAW_PAYLOAD_DIR / f"{tag}_{ts}.json"
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        logger.warning("Failed to persist raw SEC fundamentals payload for tag=%s", tag, exc_info=True)
 
 
 def _zero_pad_cik(cik: str | int) -> str:
@@ -342,7 +330,7 @@ class SecFundamentalsProvider(FundamentalsProvider):
             return None
         # Persist raw response before raise — non-negotiable for auditability.
         raw = resp.json()
-        _persist_raw(f"sec_facts_{cik_padded}", raw)
+        raw_persistence.persist_raw_if_new("sec_fundamentals", f"sec_facts_{cik_padded}", raw)
         resp.raise_for_status()
         return raw  # type: ignore[no-any-return]
 
