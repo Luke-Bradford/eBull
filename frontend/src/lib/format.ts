@@ -38,6 +38,12 @@ const DATE = new Intl.DateTimeFormat("en-GB", {
   minute: "2-digit",
 });
 
+const DATE_ONLY = new Intl.DateTimeFormat("en-GB", {
+  year: "numeric",
+  month: "short",
+  day: "2-digit",
+});
+
 export function formatMoney(
   value: number | null | undefined,
   currency = "GBP",
@@ -65,6 +71,15 @@ export function formatDateTime(iso: string | null | undefined): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
   return DATE.format(d);
+}
+
+/** Format a YYYY-MM-DD date-only value (pydantic `date` serialisation).
+ *  Unlike formatDateTime, does NOT render hours/minutes. */
+export function formatDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return DATE_ONLY.format(d);
 }
 
 /** Compute unrealized P&L percentage from raw cost and PnL values. */

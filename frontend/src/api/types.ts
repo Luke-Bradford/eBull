@@ -613,3 +613,44 @@ export interface BudgetConfigResponse {
   updated_by: string;
   reason: string;
 }
+
+// ---------------------------------------------------------------------------
+// /coverage (app/api/coverage.py) — admin coverage surface (#268 Chunk H)
+// ---------------------------------------------------------------------------
+
+export type FilingsStatus =
+  | "analysable"
+  | "insufficient"
+  | "fpi"
+  | "no_primary_sec_cik"
+  | "structurally_young"
+  | "unknown";
+
+export interface CoverageSummaryResponse {
+  checked_at: string;
+  analysable: number;
+  insufficient: number;
+  fpi: number;
+  no_primary_sec_cik: number;
+  structurally_young: number;
+  unknown: number;
+  null_rows: number;
+  total_tradable: number;
+}
+
+export interface InsufficientRow {
+  instrument_id: number;
+  symbol: string;
+  company_name: string | null;
+  cik: string | null;
+  filings_status: "insufficient" | "structurally_young";
+  filings_backfill_attempts: number;
+  filings_backfill_last_at: string | null;
+  filings_backfill_reason: string | null;
+  earliest_sec_filing_date: string | null;
+}
+
+export interface InsufficientListResponse {
+  checked_at: string;
+  rows: InsufficientRow[];
+}

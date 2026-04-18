@@ -17,9 +17,14 @@
  */
 
 import { useCallback, useState } from "react";
+import { Link } from "react-router-dom";
 
+import { fetchCoverageSummary } from "@/api/coverage";
 import { fetchJobsOverview, runJob } from "@/api/jobs";
-import type { JobOverviewResponse } from "@/api/types";
+import type {
+  CoverageSummaryResponse,
+  JobOverviewResponse,
+} from "@/api/types";
 import { ApiError } from "@/api/client";
 import {
   Section,
@@ -53,6 +58,7 @@ const ORCHESTRATOR_OWNED = new Set([
 
 export function AdminPage() {
   const jobs = useAsync(fetchJobsOverview, []);
+  const coverage = useAsync(fetchCoverageSummary, []);
 
   const [rowState, setRowState] = useState<Record<string, RowState>>({});
 
@@ -90,6 +96,16 @@ export function AdminPage() {
     <div className="space-y-8">
       <SyncDashboard />
 
+      <Section title="Filings coverage">
+        {coverage.loading ? (
+          <SectionSkeleton rows={2} />
+        ) : coverage.error !== null ? (
+          <SectionError onRetry={coverage.refetch} />
+        ) : coverage.data ? (
+          <CoverageSummaryCard summary={coverage.data} />
+        ) : null}
+      </Section>
+
       <Section title="Background tasks">
         {jobs.loading ? (
           <SectionSkeleton rows={5} />
@@ -112,6 +128,75 @@ export function AdminPage() {
           </>
         )}
       </Section>
+    </div>
+  );
+}
+
+function CoverageSummaryCard({
+  summary,
+}: {
+  summary: CoverageSummaryResponse;
+}) {
+  const stuckTotal = summary.insufficient + summary.structurally_young;
+  const cells: Array<{
+    label: string;
+    value: number;
+    tone: string;
+  }> = [
+    { label: "Analysable", value: summary.analysable, tone: "text-emerald-700" },
+    { label: "Insufficient", value: summary.insufficient, tone: "text-amber-700" },
+    {
+      label: "Structurally young",
+      value: summary.structurally_young,
+      tone: "text-amber-700",
+    },
+    { label: "FPI", value: summary.fpi, tone: "text-slate-700" },
+    {
+      label: "No primary SEC CIK",
+      value: summary.no_primary_sec_cik,
+      tone: "text-slate-500",
+    },
+    { label: "Unknown", value: summary.unknown, tone: "text-slate-500" },
+    // Null rows surface a stalled audit job — any non-zero value is
+    // ops-actionable so we highlight red rather than neutral.
+    {
+      label: "Null (pre-audit)",
+      value: summary.null_rows,
+      tone: summary.null_rows === 0 ? "text-slate-400" : "text-red-600",
+    },
+    { label: "Total tradable", value: summary.total_tradable, tone: "text-slate-600" },
+  ];
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {cells.map((c) => (
+          <div
+            key={c.label}
+            className="rounded border border-slate-200 bg-slate-50 p-3"
+          >
+            <div className="text-xs uppercase tracking-wide text-slate-500">
+              {c.label}
+            </div>
+            <div className={`mt-1 text-2xl font-semibold ${c.tone}`}>
+              {c.value}
+            </div>
+          </div>
+        ))}
+      </div>
+      {stuckTotal > 0 ? (
+        <p className="text-xs text-slate-600">
+          <Link
+            to="/admin/coverage/insufficient"
+            className="font-medium text-blue-700 hover:underline"
+          >
+            Review {stuckTotal} stuck instrument{stuckTotal === 1 ? "" : "s"} →
+          </Link>
+        </p>
+      ) : (
+        <p className="text-xs text-slate-500">
+          No instruments currently stuck below the analysable bar.
+        </p>
+      )}
     </div>
   );
 }
