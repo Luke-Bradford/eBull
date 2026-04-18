@@ -78,18 +78,19 @@ def changed_instruments_from_outcome(
     if not ciks:
         return []
 
-    # De-dupe by CIK (intentional — not by accession). Thesis
-    # staleness is keyed per instrument, not per filing, so if the
-    # same CIK filed twice in the window we still only need to map
-    # it once; the event predicate in find_stale_instruments will
-    # pick up the newest filing regardless.
-    # CIK zero-padding: the planner (plan_refresh -> parse_master_index)
-    # already pads via _zero_pad_cik, but we pad again defensively
-    # here so a future caller that hands us a raw-integer CIK string
-    # doesn't silently miss rows against the zero-padded storage in
-    # external_identifiers.identifier_value.
+    # Pad first, then de-dupe. Thesis staleness is keyed per
+    # instrument, not per filing, so same-CIK double filings
+    # collapse to one mapping; the event predicate in
+    # find_stale_instruments picks up the newest filing regardless.
+    # Pre-pad closes the gap where both "320193" and "0000320193"
+    # would pass an unpadded seen-check and emit a duplicate after
+    # padding. str.zfill(10) is total (no ValueError) — it pads
+    # short digit strings and leaves longer / non-digit values
+    # untouched; non-digit values simply miss the SELECT silently,
+    # matching the pre-existing behavior.
+    padded = [cik.zfill(10) for cik in ciks]
     seen: set[str] = set()
-    unique_ciks = [str(int(cik)).zfill(10) for cik in ciks if not (cik in seen or seen.add(cik))]
+    unique_ciks = [cik for cik in padded if not (cik in seen or seen.add(cik))]
 
     rows = conn.execute(
         """

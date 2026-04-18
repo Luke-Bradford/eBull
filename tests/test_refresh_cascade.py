@@ -117,6 +117,17 @@ class TestChangedInstrumentsFromOutcome:
         result = changed_instruments_from_outcome(conn, plan, outcome)
         assert result == [101]
 
+    def test_mixed_padded_and_unpadded_cik_dedupe_after_padding(self) -> None:
+        """Both unpadded and padded forms of the same CIK collapse
+        to one mapping — de-dupe operates on the padded form."""
+        conn = _mock_conn_with_cik_lookup({"0000320193": 101})
+        plan = RefreshPlan(
+            refreshes=[("320193", "A"), ("0000320193", "B")],
+        )
+        outcome = RefreshOutcome(refreshed=2)
+        result = changed_instruments_from_outcome(conn, plan, outcome)
+        assert result == [101]
+
 
 # ---------------------------------------------------------------------------
 # cascade_refresh

@@ -1219,15 +1219,20 @@ def daily_financial_facts() -> None:
                 if changed_ids:
                     cascade_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
                     cascade_outcome = cascade_refresh(conn, cascade_client, changed_ids)
-                    # Commit any cascade-side writes (in particular
-                    # compute_rankings' score rows, which write inside
-                    # a ``with conn.transaction():`` block that may be
+                    # Persist any cascade-side writes before the
+                    # failure-surfacing raise below. compute_rankings
+                    # writes score rows inside a
+                    # ``with conn.transaction():`` block that may be
                     # nested as a savepoint under this connection's
-                    # implicit outer tx). Without this, the raise
-                    # below would propagate to psycopg.connect()'s CM
-                    # rollback and discard successful ranking writes.
-                    # Thesis rows are already safe because
-                    # generate_thesis commits before Claude per #293.
+                    # implicit outer tx — without this explicit
+                    # commit, the raise propagates to
+                    # psycopg.connect()'s CM rollback and discards
+                    # any successful ranking writes. On the failure
+                    # path where compute_rankings itself rolled back
+                    # (cascade_refresh's inner handler), this commit
+                    # is a no-op on clean state. Thesis rows are
+                    # already durably committed by generate_thesis
+                    # per #293 and are unaffected either way.
                     conn.commit()
                     logger.info(
                         "cascade_refresh outcome: considered=%d thesis_refreshed=%d rankings=%s failed=%d",
