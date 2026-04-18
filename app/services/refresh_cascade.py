@@ -136,10 +136,18 @@ def enqueue_retry(
     """UPSERT a retry row after a thesis failure.
 
     Caller MUST ``conn.rollback()`` before invoking this if the
-    connection is in INERROR state from the failing thesis call —
-    the helper wraps its own ``with conn.transaction()`` so the
-    outbox write commits independently of any outer transaction,
-    but it cannot succeed on an aborted connection.
+    connection is in INERROR state from the failing thesis call.
+
+    Transaction semantics: ``with conn.transaction():`` opens a
+    new transaction when the connection has no open tx, or a
+    savepoint when nested. In cascade_refresh's flow the outer
+    conn has read transactions from drain_retry_queue /
+    find_stale_instruments, so this write lands on a savepoint —
+    durable only after the scheduler's ``conn.commit()`` that
+    follows ``cascade_refresh`` returning. The scheduler commits
+    immediately after cascade_refresh returns and before the
+    failure-surfacing raise, so in practice the outbox write is
+    durable whenever cascade_refresh exits cleanly.
 
     ``attempt_count`` semantics: first enqueue sets 1. Subsequent
     thesis failures increment by 1. A pre-existing RERANK_NEEDED
@@ -292,7 +300,14 @@ def cascade_refresh(
                 )
             try:
                 enqueue_retry(conn, iid, type(exc).__name__)
-            except psycopg.Error:
+            except Exception:
+                # Broad catch intentional: any exception from the helper
+                # (psycopg error, programming bug, context manager
+                # machinery) must NOT break the per-instrument
+                # isolation guarantee and abort remaining siblings.
+                # The retry signal for this iid is lost this cycle;
+                # the instrument re-enters the cascade on the next run
+                # via the #273 event predicate.
                 logger.exception(
                     "cascade_refresh: enqueue_retry failed for instrument_id=%d — retry signal lost",
                     iid,
@@ -327,7 +342,14 @@ def cascade_refresh(
                 )
             try:
                 enqueue_retry(conn, iid, type(exc).__name__)
-            except psycopg.Error:
+            except Exception:
+                # Broad catch intentional: any exception from the helper
+                # (psycopg error, programming bug, context manager
+                # machinery) must NOT break the per-instrument
+                # isolation guarantee and abort remaining siblings.
+                # The retry signal for this iid is lost this cycle;
+                # the instrument re-enters the cascade on the next run
+                # via the #273 event predicate.
                 logger.exception(
                     "cascade_refresh: enqueue_retry failed for instrument_id=%d — retry signal lost",
                     iid,
@@ -352,7 +374,11 @@ def cascade_refresh(
             for iid in processed_ok:
                 try:
                     clear_retry_success(conn, iid)
-                except psycopg.Error:
+                except Exception:
+                    # Broad catch — see enqueue_retry rationale above.
+                    # A failed clear leaves the row for the next
+                    # cycle to re-process (idempotent / wasted-but-
+                    # safe thesis call), not an incorrect state.
                     logger.exception("cascade_refresh: clear_retry_success failed for instrument_id=%d", iid)
         except Exception as exc:
             # Rollback FIRST — compute_rankings is SQL-heavy and
@@ -374,7 +400,11 @@ def cascade_refresh(
             for iid in processed_ok:
                 try:
                     enqueue_rerank_marker(conn, iid)
-                except psycopg.Error:
+                except Exception:
+                    # Broad catch — non-psycopg failures from the
+                    # helper (programming bug, CM internals) must
+                    # not abort the marker loop and lose the signal
+                    # for the remaining processed_ok ids.
                     logger.exception(
                         "cascade_refresh: enqueue_rerank_marker failed for instrument_id=%d — "
                         "rankings-recompute signal lost for this instrument",

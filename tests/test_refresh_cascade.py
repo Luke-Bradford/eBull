@@ -190,15 +190,6 @@ class TestDrainRetryQueue:
 # ---------------------------------------------------------------------------
 
 
-def _patch_queue_helpers() -> dict[str, MagicMock]:
-    """Patch all four queue helpers so cascade_refresh runs without
-    hitting conn.execute for queue SQL. Caller enters the returned
-    patch objects' context via ExitStack or explicit patch.start/stop.
-    Returned by convention — prefer the `patch(...)` context managers
-    directly inside each test for clarity."""
-    raise NotImplementedError
-
-
 class TestCascadeRefresh:
     def test_empty_ids_and_empty_queue_noop(self) -> None:
         conn = MagicMock()
