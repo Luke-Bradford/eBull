@@ -63,18 +63,15 @@ def test_lock_acquired_generates_and_demotes(mocked_env) -> None:  # type: ignor
         yield True  # always acquire
 
     with (
-        patch(
-            "app.services.refresh_cascade.instrument_lock",
-            fake_lock,
-        ),
-        patch("app.services.refresh_cascade.demote_to_rerank_needed") as demote_mock,
-        patch("app.services.refresh_cascade.clear_retry_success") as clear_mock,
+        patch.object(scheduler, "instrument_lock", fake_lock),
+        patch.object(scheduler, "demote_to_rerank_needed") as demote_mock,
     ):
         scheduler.daily_thesis_refresh()
 
     mocked_env["generate_thesis"].assert_called_once()
     demote_mock.assert_called_once_with(mocked_env["conn"], 101)
-    clear_mock.assert_not_called()
+    # scheduler must NOT import clear_retry_success — only demote.
+    assert not hasattr(scheduler, "clear_retry_success")
     # tracker.row_count was set to 1 (generated)
     assert mocked_env["tracker"].row_count == 1
 
@@ -88,11 +85,8 @@ def test_lock_not_acquired_skips_without_generate(mocked_env) -> None:  # type: 
         yield False  # sibling holds
 
     with (
-        patch(
-            "app.services.refresh_cascade.instrument_lock",
-            fake_lock,
-        ),
-        patch("app.services.refresh_cascade.demote_to_rerank_needed") as demote_mock,
+        patch.object(scheduler, "instrument_lock", fake_lock),
+        patch.object(scheduler, "demote_to_rerank_needed") as demote_mock,
     ):
         scheduler.daily_thesis_refresh()
 

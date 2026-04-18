@@ -59,6 +59,10 @@ from app.services.order_client import execute_order
 from app.services.portfolio import run_portfolio_review
 from app.services.portfolio_sync import sync_portfolio
 from app.services.position_monitor import check_position_health
+from app.services.refresh_cascade import (
+    demote_to_rerank_needed,
+    instrument_lock,
+)
 from app.services.return_attribution import (
     SUMMARY_WINDOWS,
     compute_attribution_summary,
@@ -1339,13 +1343,6 @@ def daily_thesis_refresh() -> None:
         )
 
         claude_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-
-        # K.3: import lazily so the cascade module (which itself
-        # imports scoring) isn't hit at scheduler module import time.
-        from app.services.refresh_cascade import (
-            demote_to_rerank_needed,
-            instrument_lock,
-        )
 
         generated = 0
         skipped = 0

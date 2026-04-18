@@ -304,7 +304,7 @@ def demote_to_rerank_needed(
                last_error = %s,
                last_attempted_at = NOW()
          WHERE instrument_id = %s
-           AND last_error != %s
+           AND last_error IS DISTINCT FROM %s
         """,
         (RERANK_MARKER, instrument_id, RERANK_MARKER),
     )

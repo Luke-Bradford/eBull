@@ -220,7 +220,7 @@ class TestDemoteToRerankNeeded:
         sql = conn.execute.call_args.args[0]
         params = conn.execute.call_args.args[1]
         assert "UPDATE cascade_retry_queue" in sql
-        assert "last_error != %s" in sql
+        assert "last_error IS DISTINCT FROM %s" in sql
         assert "SET attempt_count = 0" in sql
         # (RERANK_MARKER for SET, instrument_id, RERANK_MARKER for WHERE filter)
         assert params == (RERANK_MARKER, 42, RERANK_MARKER)
