@@ -94,7 +94,9 @@ class TestDrainRetryQueue:
         enqueue_retry(ebull_test_conn, 2, "X")
         enqueue_retry(ebull_test_conn, 1, "X")
         enqueue_retry(ebull_test_conn, 3, "X")
-        # Force enqueued_at to differ deterministically.
+        # Force enqueued_at to differ deterministically. Explicit
+        # commit below so the drain SELECT reads the UPDATE from a
+        # committed snapshot, not implicit-tx ambiguity.
         ebull_test_conn.execute(
             "UPDATE cascade_retry_queue SET enqueued_at = "
             "  CASE instrument_id "

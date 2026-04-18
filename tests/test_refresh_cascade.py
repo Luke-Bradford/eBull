@@ -456,3 +456,51 @@ class TestCascadeRefresh:
         """Sanity: the marker string is importable and matches the
         spec wording used in admin surfaces (Chunk H)."""
         assert RERANK_MARKER == "RERANK_NEEDED"
+
+    def test_non_psycopg_exception_from_enqueue_retry_does_not_abort_loop(
+        self,
+    ) -> None:
+        """Fault isolation regression: a non-psycopg exception from
+        enqueue_retry (programming error, CM internals, AttributeError)
+        must be caught and logged — remaining stale instruments must
+        still be processed and the rerank must still run."""
+        conn = MagicMock()
+        client = MagicMock()
+        stale_rows = [
+            StaleInstrument(instrument_id=1, symbol="BAD", reason="event_new_10q"),
+            StaleInstrument(instrument_id=2, symbol="GOOD", reason="event_new_10q"),
+        ]
+
+        def gen_side_effect(iid, conn_, client_):  # type: ignore[no-untyped-def]
+            if iid == 1:
+                raise RuntimeError("thesis failed")
+            return MagicMock()
+
+        with (
+            patch("app.services.refresh_cascade.drain_retry_queue", return_value=[]),
+            patch(
+                "app.services.refresh_cascade.find_stale_instruments",
+                return_value=stale_rows,
+            ),
+            patch(
+                "app.services.refresh_cascade.generate_thesis",
+                side_effect=gen_side_effect,
+            ),
+            patch(
+                "app.services.refresh_cascade.enqueue_retry",
+                side_effect=AttributeError("helper internal bug"),
+            ),
+            patch(
+                "app.services.refresh_cascade.compute_rankings",
+                return_value=MagicMock(scored=[]),
+            ) as rank_mock,
+            patch("app.services.refresh_cascade.clear_retry_success"),
+        ):
+            outcome = cascade_refresh(conn, client, [1, 2])
+
+        # Non-psycopg helper failure didn't break isolation:
+        # GOOD (id=2) still processed + rerank still ran.
+        assert outcome.thesis_refreshed == 1
+        assert (1, "RuntimeError") in outcome.failed
+        rank_mock.assert_called_once()
+        assert outcome.rankings_recomputed is True

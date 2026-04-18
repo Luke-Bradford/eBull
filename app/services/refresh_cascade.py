@@ -176,12 +176,20 @@ def enqueue_rerank_marker(
     """UPSERT a RERANK_NEEDED marker for a thesis-success-then-
     rerank-failure instrument.
 
-    Sets ``attempt_count=0`` so rerank failures do NOT consume the
-    thesis retry budget. On CONFLICT, resets any prior thesis-
-    failure state (including at-cap rows) to RERANK_NEEDED /
+    Sets ``attempt_count=0`` so a pure rerank failure does NOT
+    consume the thesis retry budget. On CONFLICT, resets any prior
+    thesis-failure state (including at-cap rows) to RERANK_NEEDED /
     attempt_count=0 — a thesis success this cycle means the prior
     blocker is no longer current and the row must be drainable
     again for the next rerank attempt.
+
+    Note on budget accounting: if the NEXT cycle drains this row
+    and the thesis regeneration itself then fails, ``enqueue_retry``
+    transitions the row into the thesis-failure path and increments
+    attempt_count from 0 to 1. That is intentional — a genuine
+    thesis failure on retry IS a consumed thesis attempt. The zero
+    budget-cost guarantee covers the rerank-only failure event
+    itself, not arbitrary downstream thesis failures on retry.
     """
     with conn.transaction():
         conn.execute(
