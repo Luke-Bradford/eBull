@@ -217,6 +217,7 @@ JOB_DAILY_NEWS_REFRESH = "daily_news_refresh"
 JOB_DAILY_THESIS_REFRESH = "daily_thesis_refresh"
 JOB_MORNING_CANDIDATE_REVIEW = "morning_candidate_review"
 JOB_WEEKLY_COVERAGE_REVIEW = "weekly_coverage_review"
+JOB_WEEKLY_COVERAGE_AUDIT = "weekly_coverage_audit"
 JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
 JOB_DAILY_PORTFOLIO_SYNC = "daily_portfolio_sync"
 JOB_EXECUTE_APPROVED_ORDERS = "execute_approved_orders"
@@ -438,6 +439,16 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         name=JOB_WEEKLY_COVERAGE_REVIEW,
         description="Review coverage tier assignments; promote/demote instruments.",
         cadence=Cadence.weekly(weekday=0, hour=5, minute=0),
+        prerequisite=_has_any_coverage,
+    ),
+    ScheduledJob(
+        name=JOB_WEEKLY_COVERAGE_AUDIT,
+        description=(
+            "Re-classify every tradable instrument's coverage.filings_status "
+            "using the current filing_events set. Surfaces instruments that "
+            "drifted from analysable (insufficient, structurally_young, etc.)."
+        ),
+        cadence=Cadence.weekly(weekday=1, hour=4, minute=0),  # Tuesday 04:00 UTC
         prerequisite=_has_any_coverage,
     ),
     ScheduledJob(
@@ -2068,6 +2079,49 @@ def monitor_positions_job() -> None:
                 "monitor_positions: %d positions checked, no alerts",
                 result.positions_checked,
             )
+
+
+def weekly_coverage_audit() -> None:
+    """Re-classify every tradable instrument's ``coverage.filings_status``
+    using the current ``filing_events`` set (#268 Chunk F minimal).
+
+    Runs Tuesday 04:00 UTC. Scope is deliberately audit-only — the
+    master plan's full Chunk F includes historical backfill via
+    Chunk E's ``backfill_filings`` helper, which is not yet shipped.
+    Until E lands, this job surfaces drift (analysable → insufficient,
+    etc.) so ops can see it without auto-remediating.
+
+    Idempotent; uses the existing ``audit_all_instruments`` bulk-
+    UPDATE path which only touches rows whose status actually
+    changed.
+    """
+    with _tracked_job(JOB_WEEKLY_COVERAGE_AUDIT) as tracker:
+        from app.services.coverage_audit import audit_all_instruments
+
+        logger.info("weekly_coverage_audit: starting bulk classifier")
+        try:
+            with psycopg.connect(settings.database_url) as conn:
+                summary = audit_all_instruments(conn)
+        except Exception:
+            logger.error("weekly_coverage_audit: failed", exc_info=True)
+            raise
+
+        tracker.row_count = summary.total_updated
+        # Log inside the with so ``summary`` is always bound at the
+        # point of use. Hoisting the log after the with would leak
+        # a NameError if _tracked_job.__exit__ raises (tracker
+        # write-back failure, etc.) because ``summary`` would be
+        # bound only in a now-torn-down scope.
+        logger.info(
+            "weekly_coverage_audit complete: analysable=%d insufficient=%d "
+            "fpi=%d no_primary_sec_cik=%d total_updated=%d null_anomalies=%d",
+            summary.analysable,
+            summary.insufficient,
+            summary.fpi,
+            summary.no_primary_sec_cik,
+            summary.total_updated,
+            summary.null_anomalies,
+        )
 
 
 def weekly_coverage_review() -> None:

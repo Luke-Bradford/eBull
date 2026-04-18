@@ -72,6 +72,7 @@ from app.workers.scheduler import (
     JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
     JOB_RETRY_DEFERRED,
     JOB_SEED_COST_MODELS,
+    JOB_WEEKLY_COVERAGE_AUDIT,
     JOB_WEEKLY_COVERAGE_REVIEW,
     JOB_WEEKLY_REPORT,
     SCHEDULED_JOBS,
@@ -97,6 +98,7 @@ from app.workers.scheduler import (
     orchestrator_high_frequency_sync,
     retry_deferred_recommendations_job,
     seed_cost_models,
+    weekly_coverage_audit,
     weekly_coverage_review,
     weekly_report,
 )
@@ -136,6 +138,7 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_DAILY_PORTFOLIO_SYNC: daily_portfolio_sync,
     JOB_EXECUTE_APPROVED_ORDERS: execute_approved_orders,
     JOB_MORNING_CANDIDATE_REVIEW: morning_candidate_review,
+    JOB_WEEKLY_COVERAGE_AUDIT: weekly_coverage_audit,
     JOB_WEEKLY_COVERAGE_REVIEW: weekly_coverage_review,
     JOB_DAILY_TAX_RECONCILIATION: daily_tax_reconciliation,
     JOB_RETRY_DEFERRED: retry_deferred_recommendations_job,
