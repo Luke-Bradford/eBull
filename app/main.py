@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
@@ -180,7 +180,7 @@ app.include_router(theses_router)
 
 
 @app.get("/health")
-def health(conn: psycopg.Connection[object] = Depends(get_conn)) -> JSONResponse:
+def health(request: Request) -> JSONResponse:
     """Liveness + layer-state rollup.
 
     200 when every layer is HEALTHY / DEGRADED / RUNNING / RETRYING /
@@ -188,7 +188,10 @@ def health(conn: psycopg.Connection[object] = Depends(get_conn)) -> JSONResponse
     503 when ANY layer is ACTION_NEEDED or SECRET_MISSING — external
     monitoring should alert.
     Falls through to 503 with system_state="error" when the state
-    machine itself cannot be evaluated (DB outage, etc.).
+    machine itself cannot be evaluated (DB pool exhausted, DB down,
+    etc.). Acquires the connection inline rather than via
+    `Depends(get_conn)` so pool checkout failures map to the same
+    503 JSON shape instead of FastAPI's default 500 HTML.
 
     Trading-mode flags intentionally NOT returned here.  They live in
     runtime_config (DB-backed) and are exposed via /config — surfacing the
@@ -199,17 +202,15 @@ def health(conn: psycopg.Connection[object] = Depends(get_conn)) -> JSONResponse
         "etoro_env": settings.etoro_env,
     }
     try:
-        states = compute_layer_states_from_db(conn)
+        with request.app.state.db_pool.connection() as conn:
+            states = compute_layer_states_from_db(conn)
     except Exception:
         logger.exception("/health: compute_layer_states_from_db failed")
         return JSONResponse(
             {"status": "error", "system_state": "error", **base},
             status_code=503,
         )
-    needs_attention = any(
-        s in {LayerState.ACTION_NEEDED, LayerState.SECRET_MISSING}
-        for s in states.values()
-    )
+    needs_attention = any(s in {LayerState.ACTION_NEEDED, LayerState.SECRET_MISSING} for s in states.values())
     return JSONResponse(
         {
             "status": "ok",
