@@ -1,182 +1,281 @@
+import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 
-import { ProblemsPanel } from "@/components/admin/ProblemsPanel";
 import type {
   CoverageSummaryResponse,
   JobsListResponse,
+  SyncLayersV2Response,
 } from "@/api/types";
-import type { SyncLayer, SyncLayersResponse } from "@/api/sync";
 
-function coverageClean(): CoverageSummaryResponse {
+import { ProblemsPanel } from "./ProblemsPanel";
+
+
+function emptyV2(): SyncLayersV2Response {
   return {
-    checked_at: "2026-04-19T00:00:00Z",
-    analysable: 100,
+    generated_at: new Date().toISOString(),
+    system_state: "ok",
+    system_summary: "All layers healthy",
+    action_needed: [],
+    degraded: [],
+    secret_missing: [],
+    healthy: [],
+    disabled: [],
+    cascade_groups: [],
+    layers: [],
+  };
+}
+
+
+function emptyJobs(): JobsListResponse {
+  return { checked_at: new Date().toISOString(), jobs: [] };
+}
+
+
+function emptyCoverage(): CoverageSummaryResponse {
+  return {
+    checked_at: new Date().toISOString(),
+    total_tradable: 0,
+    analysable: 0,
     insufficient: 0,
     structurally_young: 0,
     fpi: 0,
     no_primary_sec_cik: 0,
     unknown: 0,
     null_rows: 0,
-    total_tradable: 100,
   };
 }
 
-function layer(overrides: Partial<SyncLayer> = {}): SyncLayer {
-  return {
-    name: "x",
-    display_name: "X",
-    tier: 1,
-    is_fresh: true,
-    freshness_detail: "ok",
-    last_success_at: "2026-04-19T00:00:00Z",
-    last_duration_seconds: 1,
-    last_error_category: null,
-    consecutive_failures: 0,
-    dependencies: [],
-    is_blocking: true,
-    ...overrides,
-  };
-}
 
-function jobs(): JobsListResponse {
-  return { checked_at: "2026-04-19T00:00:00Z", jobs: [] };
-}
-
-function render_(
-  props: Partial<React.ComponentProps<typeof ProblemsPanel>> = {},
-) {
-  const onOpenOrchestrator = vi.fn();
+function renderPanel(
+  props: Partial<React.ComponentProps<typeof ProblemsPanel>>,
+): ReturnType<typeof render> {
   const defaults: React.ComponentProps<typeof ProblemsPanel> = {
-    layers: { layers: [] } as SyncLayersResponse,
-    jobs: jobs(),
-    coverage: coverageClean(),
-    layersError: false,
+    v2: emptyV2(),
+    jobs: emptyJobs(),
+    coverage: emptyCoverage(),
+    v2Error: false,
     jobsError: false,
     coverageError: false,
-    onOpenOrchestrator,
+    onOpenOrchestrator: () => {},
   };
-  const result = render(<ProblemsPanel {...defaults} {...props} />);
-  return { onOpenOrchestrator, ...result };
+  return render(
+    <MemoryRouter>
+      <ProblemsPanel {...defaults} {...props} />
+    </MemoryRouter>,
+  );
 }
 
-describe("ProblemsPanel — rendering contract", () => {
-  it("renders nothing when all sources resolved clean", async () => {
-    const { container } = render_();
-    await waitFor(() => {
-      expect(container.querySelector("section")).toBeNull();
-    });
+
+describe("ProblemsPanel", () => {
+  it("renders nothing when all sources are clean", () => {
+    const { container } = renderPanel({});
+    expect(container).toBeEmptyDOMElement();
   });
 
-  it("shows 'Checking for problems…' when all sources are null", async () => {
-    render_({ layers: null, jobs: null, coverage: null });
-    expect(
-      await screen.findByText(/Checking for problems/i),
-    ).toBeInTheDocument();
-  });
-
-  it("renders resolved-source problems even while other sources are still null", async () => {
-    render_({
-      layers: {
-        layers: [
-          layer({
-            name: "cik_mapping",
-            display_name: "CIK mapping",
-            is_fresh: false,
-            consecutive_failures: 3,
-            last_error_category: "db_constraint",
-          }),
-        ],
+  it("renders a red row per action_needed entry", () => {
+    const v2 = emptyV2();
+    v2.system_state = "needs_attention";
+    v2.system_summary = "SEC CIK Mapping needs attention";
+    v2.action_needed = [
+      {
+        root_layer: "cik_mapping",
+        display_name: "SEC CIK Mapping",
+        category: "db_constraint",
+        operator_message: "Database constraint violated",
+        operator_fix: "Open orchestrator details and inspect the offending row",
+        self_heal: false,
+        consecutive_failures: 3,
+        affected_downstream: [],
       },
-      jobs: null, // still pending
-      coverage: null, // still pending
-    });
-    expect(
-      await screen.findByText(/CIK mapping — 3 consecutive failures/),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Checking 2 more sources/i)).toBeInTheDocument();
+    ];
+    renderPanel({ v2 });
+    // header contains "SEC CIK Mapping needs attention"; row also contains "SEC CIK Mapping"
+    expect(screen.getAllByText(/SEC CIK Mapping/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/Database constraint violated/)).toBeInTheDocument();
+    expect(screen.getByText(/3 consecutive failures/)).toBeInTheDocument();
   });
 
-  it("surfaces stale non-blocking layers as amber rows", async () => {
-    render_({
-      layers: {
-        layers: [
-          layer({
-            name: "news",
-            display_name: "News",
-            is_fresh: false,
-            is_blocking: false,
-          }),
-        ],
+  it("renders secret_missing row with a Link to /settings#providers", () => {
+    const v2 = emptyV2();
+    v2.system_state = "needs_attention";
+    v2.secret_missing = [
+      {
+        layer: "news",
+        display_name: "News & Sentiment",
+        missing_secret: "ANTHROPIC_API_KEY",
+        operator_fix: "Set ANTHROPIC_API_KEY in Settings → Providers",
       },
-    });
-    expect(
-      await screen.findByText(/News — stale \(non-blocking\)/),
-    ).toBeInTheDocument();
+    ];
+    renderPanel({ v2 });
+    const link = screen.getByRole("link", { name: /Set ANTHROPIC_API_KEY/i });
+    expect(link).toBeInTheDocument();
+    expect(link).toHaveAttribute("href", "/settings#providers");
   });
 
-  it("surfaces an amber 'could not re-check' line on source refetch error", async () => {
-    // Cached snapshot present → still renders last-good problems +
-    // amber notice.
+  it("renders action_needed operator_fix as Settings link when it mentions Settings", () => {
+    const v2 = emptyV2();
+    v2.system_state = "needs_attention";
+    v2.action_needed = [
+      {
+        root_layer: "x",
+        display_name: "Layer X",
+        category: "auth_expired",
+        operator_message: "Credential expired",
+        operator_fix: "Update the API key in Settings → Providers",
+        self_heal: false,
+        consecutive_failures: 1,
+        affected_downstream: [],
+      },
+    ];
+    renderPanel({ v2 });
+    const link = screen.getByRole("link", { name: /Update the API key/i });
+    expect(link).toBeInTheDocument();
+    expect(link).toHaveAttribute("href", "/settings#providers");
+  });
+
+  it("renders plain text for action_needed operator_fix when no Settings mention", () => {
+    const v2 = emptyV2();
+    v2.system_state = "needs_attention";
+    v2.action_needed = [
+      {
+        root_layer: "x",
+        display_name: "Layer X",
+        category: "db_constraint",
+        operator_message: "DB error",
+        operator_fix: "Open orchestrator details and inspect the offending row",
+        self_heal: false,
+        consecutive_failures: 1,
+        affected_downstream: [],
+      },
+    ];
+    renderPanel({ v2 });
+    expect(screen.queryByRole("link", { name: /Open orchestrator details and inspect/i })).toBeNull();
+    expect(screen.getByText(/Open orchestrator details and inspect the offending row/)).toBeInTheDocument();
+  });
+
+  it("expands cascade waiters when +N layers is clicked", async () => {
+    const v2 = emptyV2();
+    v2.system_state = "needs_attention";
+    v2.action_needed = [
+      {
+        root_layer: "cik_mapping",
+        display_name: "SEC CIK Mapping",
+        category: "db_constraint",
+        operator_message: "DB error",
+        operator_fix: null,
+        self_heal: false,
+        consecutive_failures: 3,
+        affected_downstream: ["financial_facts", "thesis", "scoring"],
+      },
+    ];
+    renderPanel({ v2 });
+    screen.getByText(/\+3 layers waiting/).click();
+    expect(await screen.findByText("financial_facts")).toBeInTheDocument();
+    expect(screen.getByText("thesis")).toBeInTheDocument();
+    expect(screen.getByText("scoring")).toBeInTheDocument();
+  });
+
+  it("renders Checking skeleton when v2 is null and has no cached snapshot", () => {
+    renderPanel({ v2: null, jobs: null, coverage: null });
+    expect(screen.getByText(/Checking for problems/i)).toBeInTheDocument();
+  });
+
+  it("keeps last-good snapshot rendered when v2 briefly goes null", () => {
+    const v2 = emptyV2();
+    v2.system_state = "needs_attention";
+    v2.action_needed = [
+      {
+        root_layer: "x",
+        display_name: "Layer X",
+        category: "source_down",
+        operator_message: "down",
+        operator_fix: null,
+        self_heal: true,
+        consecutive_failures: 1,
+        affected_downstream: [],
+      },
+    ];
     const { rerender } = render(
-      <ProblemsPanel
-        layers={{
-          layers: [
-            layer({
-              name: "cik",
-              display_name: "CIK",
-              is_fresh: false,
-              consecutive_failures: 2,
-              last_error_category: "db_constraint",
-            }),
-          ],
-        }}
-        jobs={jobs()}
-        coverage={coverageClean()}
-        layersError={false}
-        jobsError={false}
-        coverageError={false}
-        onOpenOrchestrator={() => undefined}
-      />,
+      <MemoryRouter>
+        <ProblemsPanel
+          v2={v2}
+          jobs={emptyJobs()}
+          coverage={emptyCoverage()}
+          v2Error={false}
+          jobsError={false}
+          coverageError={false}
+          onOpenOrchestrator={() => {}}
+        />
+      </MemoryRouter>,
     );
-    await screen.findByText(/CIK — 2 consecutive failures/);
-
-    // Refetch fails for layers — component re-renders with
-    // layers=null + layersError=true. Cache keeps the problem; panel
-    // adds the "could not re-check layers" amber line.
+    expect(screen.getByText(/Layer X/)).toBeInTheDocument();
     rerender(
-      <ProblemsPanel
-        layers={null}
-        jobs={jobs()}
-        coverage={coverageClean()}
-        layersError={true}
-        jobsError={false}
-        coverageError={false}
-        onOpenOrchestrator={() => undefined}
-      />,
+      <MemoryRouter>
+        <ProblemsPanel
+          v2={null}
+          jobs={emptyJobs()}
+          coverage={emptyCoverage()}
+          v2Error={false}
+          jobsError={false}
+          coverageError={false}
+          onOpenOrchestrator={() => {}}
+        />
+      </MemoryRouter>,
     );
-    expect(screen.getByText(/CIK — 2 consecutive failures/)).toBeInTheDocument();
-    expect(
-      screen.getByText(/Could not re-check layers/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Layer X/)).toBeInTheDocument();
   });
 
-  it("click on 'Open orchestrator details' action fires the callback", async () => {
-    const { onOpenOrchestrator } = render_({
-      layers: {
-        layers: [
-          layer({
-            is_fresh: false,
-            consecutive_failures: 1,
-            last_error_category: "network",
-          }),
-        ],
+  it("calls onOpenOrchestrator with the layer name when drill-through clicked", () => {
+    const onOpen = vi.fn();
+    const v2 = emptyV2();
+    v2.system_state = "needs_attention";
+    v2.action_needed = [
+      {
+        root_layer: "cik_mapping",
+        display_name: "SEC CIK Mapping",
+        category: "db_constraint",
+        operator_message: "err",
+        operator_fix: null,
+        self_heal: false,
+        consecutive_failures: 1,
+        affected_downstream: [],
       },
-    });
-    const btn = await screen.findByRole("button", {
-      name: /Open orchestrator details/,
-    });
-    btn.click();
-    expect(onOpenOrchestrator).toHaveBeenCalled();
+    ];
+    renderPanel({ v2, onOpenOrchestrator: onOpen });
+    screen.getByRole("button", { name: /Open orchestrator details for cik_mapping/ }).click();
+    expect(onOpen).toHaveBeenCalledWith("cik_mapping");
+  });
+
+  it("carries over failing jobs from v1 behaviour", () => {
+    const jobs: JobsListResponse = {
+      checked_at: new Date().toISOString(),
+      jobs: [
+        {
+          name: "test_job",
+          description: "test job",
+          cadence: "daily",
+          cadence_kind: "daily",
+          next_run_time: new Date().toISOString(),
+          next_run_time_source: "declared",
+          last_status: "failure",
+          last_started_at: null,
+          last_finished_at: new Date().toISOString(),
+          detail: "",
+        },
+      ],
+    };
+    renderPanel({ jobs });
+    expect(screen.getByText(/test_job/)).toBeInTheDocument();
+    expect(screen.getByText(/last run failed/i)).toBeInTheDocument();
+  });
+
+  it("carries over coverage null_rows from v1 behaviour", () => {
+    const coverage: CoverageSummaryResponse = {
+      ...emptyCoverage(),
+      null_rows: 12,
+    };
+    renderPanel({ coverage });
+    expect(screen.getByText(/12 instrument/)).toBeInTheDocument();
   });
 });
