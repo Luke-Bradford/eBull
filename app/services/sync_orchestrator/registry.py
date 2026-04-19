@@ -51,9 +51,9 @@ from app.services.sync_orchestrator.freshness import (
     weekly_reports_is_fresh,
 )
 from app.services.sync_orchestrator.layer_types import (
+    DEFAULT_RETRY_POLICY,
     Cadence,
     ContentPredicate,
-    DEFAULT_RETRY_POLICY,
     RetryPolicy,
     SecretRef,
 )

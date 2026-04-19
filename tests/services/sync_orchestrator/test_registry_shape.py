@@ -5,12 +5,10 @@ from app.services.sync_orchestrator.content_predicates import (
     fundamentals_content_ok,
 )
 from app.services.sync_orchestrator.layer_types import (
-    Cadence,
     DEFAULT_RETRY_POLICY,
-    RetryPolicy,
+    Cadence,
 )
 from app.services.sync_orchestrator.registry import LAYERS
-
 
 EXPECTED_CADENCES: dict[str, timedelta] = {
     "universe": timedelta(days=7),
