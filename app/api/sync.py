@@ -27,6 +27,7 @@ from app.services.sync_orchestrator import (
     SyncScope,
     submit_sync,
 )
+from app.services.sync_orchestrator.cascade import ProblemGroup, collapse_cascades
 from app.services.sync_orchestrator.layer_failure_history import all_layer_histories
 from app.services.sync_orchestrator.layer_state import compute_layer_states_from_db
 from app.services.sync_orchestrator.layer_types import (
@@ -329,40 +330,12 @@ def get_sync_layers_v2(
     healthy: list[LayerSummary] = []
     disabled: list[LayerSummary] = []
 
-    # Inline cascade-grouping shim. Chunk 6 replaces this with
-    # `collapse_cascades` from cascade.py (pure function + tests).
-    # The two implementations must agree on the descendant walk.
-    # Cached to guarantee action_needed.affected_downstream and
-    # cascade_groups[].affected stay byte-identical even if the BFS
-    # ever became order-sensitive.
-    _downstream_cache: dict[str, list[str]] = {}
-    # Pre-compute reverse adjacency once (O(N+E)) so BFS becomes O(E)
-    # per root instead of O(N*depth) re-scanning the whole registry
-    # each frontier step. Small registry today; scales gracefully.
-    _reverse_deps: dict[str, list[str]] = {n: [] for n in LAYERS}
-    for _n, _layer in LAYERS.items():
-        for _dep in _layer.dependencies:
-            _reverse_deps[_dep].append(_n)
-
-    def _downstream(root: str) -> list[str]:
-        if root in _downstream_cache:
-            return _downstream_cache[root]
-        affected: list[str] = []
-        frontier = {root}
-        visited = {root}
-        while frontier:
-            next_frontier: set[str] = set()
-            for parent in frontier:
-                for child in _reverse_deps.get(parent, ()):
-                    if child in visited:
-                        continue
-                    visited.add(child)
-                    if states.get(child) is LayerState.CASCADE_WAITING:
-                        affected.append(child)
-                    next_frontier.add(child)
-            frontier = next_frontier
-        _downstream_cache[root] = affected
-        return affected
+    # Build once per request using the extracted pure function.
+    deps_map: dict[str, tuple[str, ...]] = {
+        n: lay.dependencies for n, lay in LAYERS.items()
+    }
+    groups = collapse_cascades(deps_map, states)
+    groups_by_root: dict[str, list[str]] = {g.root: g.affected for g in groups}
 
     category_values = {c.value for c in FailureCategory}
 
@@ -386,7 +359,7 @@ def get_sync_layers_v2(
                     operator_fix=remedy.operator_fix,
                     self_heal=remedy.self_heal,
                     consecutive_failures=streaks.get(name, 0),
-                    affected_downstream=_downstream(name),
+                    affected_downstream=groups_by_root.get(name, []),
                 )
             )
         elif state is LayerState.SECRET_MISSING:
@@ -429,11 +402,7 @@ def get_sync_layers_v2(
         # RUNNING / RETRYING / CASCADE_WAITING feed into system_state
         # counts + cascade_groups; no top-level bucket.
 
-    cascade_groups = [
-        CascadeGroupModel(root=name, affected=_downstream(name))
-        for name, state in states.items()
-        if state in {LayerState.ACTION_NEEDED, LayerState.SECRET_MISSING}
-    ]
+    cascade_groups = [CascadeGroupModel(root=g.root, affected=g.affected) for g in groups]
 
     running_count = sum(1 for s in states.values() if s is LayerState.RUNNING)
     retrying_count = sum(1 for s in states.values() if s is LayerState.RETRYING)
