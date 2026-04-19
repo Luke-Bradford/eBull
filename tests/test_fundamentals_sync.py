@@ -181,7 +181,6 @@ def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
     tracker = MagicMock()
 
     phase1_conn = MagicMock()
-    phase2_conn = MagicMock()
 
     with (
         patch.object(scheduler, "settings", stub_settings),
@@ -194,7 +193,12 @@ def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
         ),
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        _stub_two_connect_ctxes(psycopg_mod, phase1_conn, phase2_conn)
+        # Only one connect() fires: audit raises before the eligible-rows
+        # query and before phase 2.
+        cm1 = MagicMock()
+        cm1.__enter__.return_value = phase1_conn
+        cm1.__exit__.return_value = None
+        psycopg_mod.connect.side_effect = [cm1]
 
         try:
             scheduler.fundamentals_sync()
@@ -204,6 +208,7 @@ def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
             raise AssertionError("expected RuntimeError to propagate")
 
     review_mock.assert_not_called()
+    assert psycopg_mod.connect.call_count == 1
 
 
 def test_fundamentals_sync_phase2_failure_preserves_phase1_success() -> None:
