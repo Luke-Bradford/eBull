@@ -17,9 +17,6 @@ from app.services.sync_orchestrator.layer_types import (
     SecretRef,
     cadence_display_string,
 )
-from app.services.sync_orchestrator.layer_types import (
-    FailureCategory as _FC,
-)
 
 
 def test_layer_state_has_eight_members() -> None:
@@ -100,19 +97,22 @@ def test_secret_ref_fields() -> None:
 
 
 def test_layer_refresh_failed_carries_category() -> None:
-    err = LayerRefreshFailed(category=_FC.SOURCE_DOWN, detail="finnhub 503")
-    assert err.category is _FC.SOURCE_DOWN
+    err = LayerRefreshFailed(category=FailureCategory.SOURCE_DOWN, detail="finnhub 503")
+    assert err.category is FailureCategory.SOURCE_DOWN
     assert err.detail == "finnhub 503"
-    assert "source_down" in str(err)
-    assert "finnhub" in str(err)
+    assert str(err) == "source_down: finnhub 503"
 
 
-def test_content_predicate_is_a_callable_protocol() -> None:
+def test_content_predicate_callable_returns_tuple() -> None:
+    from unittest.mock import MagicMock
+
     def my_pred(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
-        return True, "ok"
+        return True, "all clear"
 
-    _: ContentPredicate = my_pred
-    assert my_pred is not None
+    _: ContentPredicate = my_pred  # pyright-time assignability check
+    ok, detail = my_pred(MagicMock())
+    assert ok is True
+    assert detail == "all clear"
 
 
 def test_cadence_display_string() -> None:

@@ -126,14 +126,23 @@ class SecretRef:
 class ContentPredicate(Protocol):
     """Structural signature for a per-layer content check.
 
-    Returns (ok, detail). Pure SELECT; must not write.
+    Returns (ok, detail). `ok=True` means the layer's data is
+    considered content-current — for example, every Tier 1 ticker has a
+    candle for today. `detail` is an operator-visible sentence surfaced
+    when the predicate fails. Pure SELECT; must not write.
     """
 
     def __call__(self, conn: psycopg.Connection[Any]) -> tuple[bool, str]: ...
 
 
 class LayerRefreshFailed(Exception):
-    """Adapter-level failure carrying a categorisation."""
+    """Adapter-level failure carrying a categorisation.
+
+    Adapters raise this so the executor can persist the category
+    alongside the error message. Use this rather than `RuntimeError`
+    when failing from inside a refresh adapter so downstream logging
+    and the Admin UI can surface the taxonomy.
+    """
 
     def __init__(self, category: FailureCategory, detail: str) -> None:
         super().__init__(f"{category.value}: {detail}")
