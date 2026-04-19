@@ -27,7 +27,7 @@ from app.services.sync_orchestrator import (
     SyncScope,
     submit_sync,
 )
-from app.services.sync_orchestrator.cascade import ProblemGroup, collapse_cascades
+from app.services.sync_orchestrator.cascade import collapse_cascades
 from app.services.sync_orchestrator.layer_failure_history import all_layer_histories
 from app.services.sync_orchestrator.layer_state import compute_layer_states_from_db
 from app.services.sync_orchestrator.layer_types import (
@@ -333,9 +333,7 @@ def get_sync_layers_v2(
     disabled: list[LayerSummary] = []
 
     # Build once per request using the extracted pure function.
-    deps_map: dict[str, tuple[str, ...]] = {
-        n: lay.dependencies for n, lay in LAYERS.items()
-    }
+    deps_map: dict[str, tuple[str, ...]] = {n: lay.dependencies for n, lay in LAYERS.items()}
     groups = collapse_cascades(deps_map, states)
     groups_by_root: dict[str, list[str]] = {g.root: g.affected for g in groups}
 

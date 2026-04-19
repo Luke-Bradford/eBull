@@ -113,10 +113,7 @@ def _scope_to_candidate_jobs(
         if conn is None:
             raise ValueError("scope='behind' requires a live connection")
         states = compute_layer_states_from_db(conn)
-        target_layers = {
-            n for n, s in states.items()
-            if s in {LayerState.DEGRADED, LayerState.ACTION_NEEDED}
-        }
+        target_layers = {n for n, s in states.items() if s in {LayerState.DEGRADED, LayerState.ACTION_NEEDED}}
         if not target_layers:
             return []
         # Include any non-HEALTHY upstreams transitively, so a waiting
@@ -140,9 +137,7 @@ def _transitive_layer_closure(seed: set[str]) -> set[str]:
     return result
 
 
-def _transitive_upstreams_not_healthy(
-    seed: set[str], states: dict[str, LayerState]
-) -> set[str]:
+def _transitive_upstreams_not_healthy(seed: set[str], states: dict[str, LayerState]) -> set[str]:
     """Return all transitive upstream dependencies of seed layers that are
     not HEALTHY. Used by scope='behind' to include prerequisites that need
     refreshing before the target layers can be satisfied."""

@@ -24,9 +24,15 @@ def test_single_root_collapses_transitive_downstream() -> None:
     assert len(groups) == 1
     assert groups[0].root == "universe"
     assert set(groups[0].affected) == {
-        "cik_mapping", "candles", "financial_facts",
-        "financial_normalization", "fundamentals", "news",
-        "thesis", "scoring", "recommendations",
+        "cik_mapping",
+        "candles",
+        "financial_facts",
+        "financial_normalization",
+        "fundamentals",
+        "news",
+        "thesis",
+        "scoring",
+        "recommendations",
     }
 
 
