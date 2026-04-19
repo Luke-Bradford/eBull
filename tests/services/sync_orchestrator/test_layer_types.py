@@ -140,3 +140,4 @@ def test_cadence_display_string() -> None:
     assert cadence_display_string(Cadence(interval=timedelta(days=7))) == "7d"
     assert cadence_display_string(Cadence(interval=timedelta(hours=4))) == "4h"
     assert cadence_display_string(Cadence(interval=timedelta(minutes=5))) == "5m"
+    assert cadence_display_string(Cadence(interval=timedelta(seconds=30))) == "30s"
