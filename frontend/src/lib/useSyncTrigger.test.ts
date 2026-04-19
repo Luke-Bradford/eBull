@@ -134,4 +134,58 @@ describe("useSyncTrigger", () => {
     act(() => hook.result.current.clearQueued(true));
     expect(hook.result.current.kind).toBe("error");
   });
+
+  it("re-triggers after a successful cycle (trigger → queued → idle → trigger)", async () => {
+    // Regression: inFlightRef was previously reset manually in
+    // multiple paths; a missed reset (e.g. clearQueued(false) in
+    // the fast-run case) could leave the hook permanently refusing
+    // to trigger. Now driven by a useEffect on state.kind, so
+    // any transition back to idle releases the guard.
+    mockedTrigger.mockResolvedValueOnce({
+      sync_run_id: 1,
+      plan: { layers_to_refresh: [], layers_skipped: [] },
+    });
+    const { hook } = setup();
+
+    // First successful cycle.
+    await act(async () => {
+      await hook.result.current.trigger();
+    });
+    expect(hook.result.current.kind).toBe("queued");
+    act(() => hook.result.current.clearQueued(true));
+    expect(hook.result.current.kind).toBe("idle");
+
+    // Second trigger must go through.
+    mockedTrigger.mockResolvedValueOnce({
+      sync_run_id: 2,
+      plan: { layers_to_refresh: [], layers_skipped: [] },
+    });
+    await act(async () => {
+      await hook.result.current.trigger();
+    });
+    expect(mockedTrigger).toHaveBeenCalledTimes(2);
+    expect(hook.result.current.queuedRunId).toBe(2);
+  });
+
+  it("re-triggers after an error (retry flow)", async () => {
+    mockedTrigger.mockRejectedValueOnce(new ApiError(409, "conflict"));
+    const { hook } = setup();
+
+    await act(async () => {
+      await hook.result.current.trigger();
+    });
+    expect(hook.result.current.kind).toBe("error");
+
+    // An error transition drops the inFlight guard via the same
+    // useEffect — operator's retry click should dispatch a second
+    // POST.
+    mockedTrigger.mockResolvedValueOnce({
+      sync_run_id: 9,
+      plan: { layers_to_refresh: [], layers_skipped: [] },
+    });
+    await act(async () => {
+      await hook.result.current.trigger();
+    });
+    expect(mockedTrigger).toHaveBeenCalledTimes(2);
+  });
 });

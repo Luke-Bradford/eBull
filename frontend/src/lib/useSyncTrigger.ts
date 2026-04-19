@@ -20,7 +20,7 @@
  * calls `clearQueued(isRunning)` so the "Queued" badge resolves into
  * the plain "Running" disabled state the server now owns.
  */
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError } from "@/api/client";
 import { triggerSync } from "@/api/sync";
@@ -84,17 +84,7 @@ export function useSyncTrigger(
               : `Failed (HTTP ${err.status})`
           : "Failed";
       setState({ kind: "error", queuedRunId: null, message });
-      // Release the guard on the error branch so the operator can
-      // click Retry. The button's disabled state would also block a
-      // second click on the success branch, so no defensive early
-      // reset is needed there.
-      inFlightRef.current = false;
     }
-    // Deliberately no finally: when the POST succeeds, inFlightRef
-    // stays true through the running → queued window until
-    // clearQueued() transitions us back to idle. A second click in
-    // that window would otherwise slip past the guard while `kind`
-    // is still `queued`.
   }, [onTriggered]);
 
   const clearQueued = useCallback((isRunning: boolean) => {
@@ -105,13 +95,22 @@ export function useSyncTrigger(
       // because the caller also OR's with `isRunning` when wiring
       // `disabled`.
       if (prev.kind === "queued" && isRunning) {
-        inFlightRef.current = false;
         return { kind: "idle", queuedRunId: null, message: null };
       }
       // `error` has no auto-reset — caller must click again.
       return prev;
     });
   }, []);
+
+  // Single source of truth for inFlightRef: it's `true` iff the hook
+  // is in a running or queued state. Any transition to idle or error
+  // resets the ref. Avoids the previous manual-reset paths that could
+  // leave the ref out of sync with `kind` (e.g. fast-run fallback
+  // timer, caller-initiated reset, unexpected state path).
+  useEffect(() => {
+    inFlightRef.current =
+      state.kind === "running" || state.kind === "queued";
+  }, [state.kind]);
 
   return {
     kind: state.kind,
