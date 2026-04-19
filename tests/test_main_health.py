@@ -87,16 +87,18 @@ def test_health_503_when_pool_checkout_fails() -> None:
 
 
 def test_health_falls_back_to_ok_on_db_error() -> None:
-    # If compute_layer_states_from_db raises (e.g. DB unreachable),
-    # /health must still respond 200 with a degraded system_state so
-    # orchestrator outages do not mask as a healthy system but also
-    # do not cause liveness-probe pages to crash the app boot
-    # smoke test.
+    # If compute_layer_states_from_db raises (e.g. transient DB query
+    # failure while the pool is still up), /health must still respond
+    # 503 with system_state="error". The TestClient runs the real
+    # lifespan so app.state.db_pool exists; pool.connection() succeeds,
+    # then the patched compute_layer_states_from_db raises inside the
+    # `with` block. The assertion on .called pins that we reached the
+    # state-machine path rather than an earlier exception masking it.
     with (
         patch(
             "app.main.compute_layer_states_from_db",
             side_effect=RuntimeError("db down"),
-        ),
+        ) as patched,
         TestClient(app) as client,
     ):
         resp = client.get("/health")
@@ -104,6 +106,9 @@ def test_health_falls_back_to_ok_on_db_error() -> None:
     assert resp.status_code == 503, resp.text
     body = resp.json()
     assert body["system_state"] == "error"
+    # Guard: the test actually drove through the state-machine call,
+    # not a pool-checkout exception that happened to look the same.
+    assert patched.called, "compute_layer_states_from_db was not exercised"
 
 
 def test_health_still_no_auth_required() -> None:
