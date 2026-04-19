@@ -336,6 +336,13 @@ def get_sync_layers_v2(
     # cascade_groups[].affected stay byte-identical even if the BFS
     # ever became order-sensitive.
     _downstream_cache: dict[str, list[str]] = {}
+    # Pre-compute reverse adjacency once (O(N+E)) so BFS becomes O(E)
+    # per root instead of O(N*depth) re-scanning the whole registry
+    # each frontier step. Small registry today; scales gracefully.
+    _reverse_deps: dict[str, list[str]] = {n: [] for n in LAYERS}
+    for _n, _layer in LAYERS.items():
+        for _dep in _layer.dependencies:
+            _reverse_deps[_dep].append(_n)
 
     def _downstream(root: str) -> list[str]:
         if root in _downstream_cache:
@@ -345,14 +352,14 @@ def get_sync_layers_v2(
         visited = {root}
         while frontier:
             next_frontier: set[str] = set()
-            for n, layer in LAYERS.items():
-                if n in visited:
-                    continue
-                if any(dep in frontier for dep in layer.dependencies):
-                    visited.add(n)
-                    if states.get(n) is LayerState.CASCADE_WAITING:
-                        affected.append(n)
-                    next_frontier.add(n)
+            for parent in frontier:
+                for child in _reverse_deps.get(parent, ()):
+                    if child in visited:
+                        continue
+                    visited.add(child)
+                    if states.get(child) is LayerState.CASCADE_WAITING:
+                        affected.append(child)
+                    next_frontier.add(child)
             frontier = next_frontier
         _downstream_cache[root] = affected
         return affected
@@ -503,7 +510,7 @@ def _layer_last_updated_map(conn: psycopg.Connection[Any], names: list[str]) -> 
                 layer_name, finished_at,
                 ROW_NUMBER() OVER (
                     PARTITION BY layer_name
-                    ORDER BY finished_at DESC NULLS LAST, sync_run_id DESC
+                    ORDER BY finished_at DESC, sync_run_id DESC
                 ) AS rn
             FROM sync_layer_progress
             WHERE layer_name = ANY(%s)

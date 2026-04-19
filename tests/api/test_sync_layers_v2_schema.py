@@ -87,13 +87,45 @@ def test_v2_secret_missing_fallback_when_env_populated(clean_client: TestClient)
 def test_v2_cascade_groups_match_action_needed_downstream(clean_client: TestClient) -> None:
     # Pin the shared-cache invariant: cascade_groups[i].affected for
     # each action_needed root must match that root's
-    # affected_downstream exactly, in order.
-    resp = clean_client.get("/sync/layers/v2")
+    # affected_downstream exactly, in order. Patches the state map so
+    # the assertion exercises at least one ACTION_NEEDED + one
+    # CASCADE_WAITING descendant — no live-DB precondition required.
+    from unittest.mock import patch
+
+    from app.services.sync_orchestrator.layer_types import LayerState
+    from app.services.sync_orchestrator.registry import LAYERS
+
+    # Pick a root with at least one downstream dependent in the registry.
+    root = next(n for n, _ in LAYERS.items() if any(n in other.dependencies for other in LAYERS.values()))
+    # Every layer transitively downstream of `root` becomes CASCADE_WAITING.
+    fake = {n: LayerState.HEALTHY for n in LAYERS}
+    fake[root] = LayerState.ACTION_NEEDED
+    # Simple BFS in test to compute expected waiters.
+    reverse: dict[str, list[str]] = {n: [] for n in LAYERS}
+    for n, lay in LAYERS.items():
+        for dep in lay.dependencies:
+            reverse[dep].append(n)
+    frontier = {root}
+    visited = {root}
+    while frontier:
+        nxt = set()
+        for parent in frontier:
+            for child in reverse.get(parent, ()):
+                if child in visited:
+                    continue
+                visited.add(child)
+                fake[child] = LayerState.CASCADE_WAITING
+                nxt.add(child)
+        frontier = nxt
+
+    with patch("app.api.sync.compute_layer_states_from_db", return_value=fake):
+        resp = clean_client.get("/sync/layers/v2")
     body = resp.json()
     groups_by_root = {g["root"]: g["affected"] for g in body["cascade_groups"]}
-    for item in body["action_needed"]:
-        root = item["root_layer"]
-        assert groups_by_root.get(root) == item["affected_downstream"], body
+    action_items = body["action_needed"]
+    assert len(action_items) >= 1, body
+    for item in action_items:
+        assert groups_by_root.get(item["root_layer"]) == item["affected_downstream"], body
 
 
 def test_v2_summary_never_contradicts_state(clean_client: TestClient) -> None:
