@@ -66,6 +66,9 @@ class DataLayer:
     display_name: str
     tier: int
     cadence: Cadence
+    # Legacy combined audit-age + content predicate. Retained until chunk 7
+    # retires freshness.py; the new state machine (chunk 4) calls
+    # `content_predicate` + its own age check separately.
     is_fresh: Callable[[psycopg.Connection[Any]], tuple[bool, str]]
     refresh: LayerRefresh
     dependencies: tuple[str, ...] = ()
@@ -77,7 +80,7 @@ class DataLayer:
     plain_language_sla: str = ""
 
 
-_TIGHT_RETRY = RetryPolicy(max_attempts=5, backoff_seconds=(30, 60, 120, 300, 600))
+MINUTE_LAYER_RETRY = RetryPolicy(max_attempts=5, backoff_seconds=(30, 60, 120, 300, 600))
 
 LAYERS: dict[str, DataLayer] = {
     "universe": DataLayer(
@@ -194,7 +197,7 @@ LAYERS: dict[str, DataLayer] = {
         refresh=refresh_portfolio_sync,
         dependencies=(),
         is_blocking=False,
-        retry_policy=_TIGHT_RETRY,
+        retry_policy=MINUTE_LAYER_RETRY,
         plain_language_sla="Synced every 5 minutes against eToro.",
     ),
     "fx_rates": DataLayer(
@@ -206,7 +209,7 @@ LAYERS: dict[str, DataLayer] = {
         refresh=refresh_fx_rates,
         dependencies=(),
         is_blocking=False,
-        retry_policy=_TIGHT_RETRY,
+        retry_policy=MINUTE_LAYER_RETRY,
         plain_language_sla="Refreshed every 5 minutes for live valuation.",
     ),
     "cost_models": DataLayer(
