@@ -109,6 +109,23 @@ class CascadeGroupModel(BaseModel):
     affected: list[str]
 
 
+class LayerEntry(BaseModel):
+    layer: str
+    display_name: str
+    state: Literal[
+        "healthy",
+        "running",
+        "retrying",
+        "degraded",
+        "action_needed",
+        "secret_missing",
+        "cascade_waiting",
+        "disabled",
+    ]
+    last_updated: datetime | None
+    plain_language_sla: str
+
+
 class SyncLayersV2Response(BaseModel):
     generated_at: datetime
     system_state: Literal["ok", "catching_up", "needs_attention"]
@@ -119,6 +136,7 @@ class SyncLayersV2Response(BaseModel):
     healthy: list[LayerSummary]
     disabled: list[LayerSummary]
     cascade_groups: list[CascadeGroupModel]
+    layers: list[LayerEntry]
 
 
 def _scope_from(body: SyncRequest) -> SyncScope:
@@ -412,6 +430,17 @@ def get_sync_layers_v2(
     retrying_count = sum(1 for s in states.values() if s is LayerState.RETRYING)
     cascade_waiting_count = sum(1 for s in states.values() if s is LayerState.CASCADE_WAITING)
 
+    layers_entries = [
+        LayerEntry(
+            layer=name,
+            display_name=LAYERS[name].display_name,
+            state=states[name].value,
+            last_updated=last_updates.get(name),
+            plain_language_sla=LAYERS[name].plain_language_sla,
+        )
+        for name in sorted(states.keys())
+    ]
+
     return SyncLayersV2Response(
         generated_at=datetime.now(UTC),
         system_state=system_state,
@@ -429,6 +458,7 @@ def get_sync_layers_v2(
         healthy=healthy,
         disabled=disabled,
         cascade_groups=cascade_groups,
+        layers=layers_entries,
     )
 
 

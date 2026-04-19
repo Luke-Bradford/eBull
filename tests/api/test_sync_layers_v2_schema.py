@@ -15,6 +15,7 @@ def test_v2_endpoint_returns_expected_top_level_keys(clean_client: TestClient) -
         "healthy",
         "disabled",
         "cascade_groups",
+        "layers",
     }
 
 
@@ -142,6 +143,61 @@ def test_v2_summary_never_contradicts_state(clean_client: TestClient) -> None:
         assert "All layers healthy" not in summary, body
     if state == "ok":
         assert summary == "All layers healthy", body
+
+
+def test_v2_includes_canonical_layers_field(clean_client: TestClient) -> None:
+    resp = clean_client.get("/sync/layers/v2")
+    body = resp.json()
+    assert "layers" in body
+    assert isinstance(body["layers"], list)
+
+
+def test_v2_layers_contains_every_registered_layer_once(clean_client: TestClient) -> None:
+    from app.services.sync_orchestrator.registry import LAYERS
+
+    resp = clean_client.get("/sync/layers/v2")
+    body = resp.json()
+    returned = [entry["layer"] for entry in body["layers"]]
+    assert sorted(returned) == sorted(LAYERS.keys())
+    assert len(returned) == len(set(returned)), "duplicate layer in v2.layers"
+
+
+def test_v2_layer_entry_shape(clean_client: TestClient) -> None:
+    resp = clean_client.get("/sync/layers/v2")
+    for entry in resp.json()["layers"]:
+        assert set(entry.keys()) == {
+            "layer",
+            "display_name",
+            "state",
+            "last_updated",
+            "plain_language_sla",
+        }
+        assert entry["state"] in {
+            "healthy",
+            "running",
+            "retrying",
+            "degraded",
+            "action_needed",
+            "secret_missing",
+            "cascade_waiting",
+            "disabled",
+        }
+
+
+def test_v2_layer_entry_metadata_matches_registry(clean_client: TestClient) -> None:
+    from app.services.sync_orchestrator.registry import LAYERS
+
+    resp = clean_client.get("/sync/layers/v2")
+    for entry in resp.json()["layers"]:
+        layer = LAYERS[entry["layer"]]
+        assert entry["display_name"] == layer.display_name
+        assert entry["plain_language_sla"] == layer.plain_language_sla
+
+
+def test_v2_layers_sorted_by_name(clean_client: TestClient) -> None:
+    resp = clean_client.get("/sync/layers/v2")
+    names = [entry["layer"] for entry in resp.json()["layers"]]
+    assert names == sorted(names), "v2.layers must be sorted by layer name for determinism"
 
 
 def test_v2_requires_auth() -> None:
