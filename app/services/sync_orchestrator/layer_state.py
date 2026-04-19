@@ -20,6 +20,7 @@ from app.services.sync_orchestrator.layer_types import (
     FailureCategory,
     LayerState,
 )
+from app.services.sync_orchestrator.types import PREREQ_SKIP_MARKER
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +181,7 @@ def _latest_status_map(conn: psycopg.Connection[Any], names: list[str]) -> dict[
                 layer_name, status,
                 ROW_NUMBER() OVER (
                     PARTITION BY layer_name
-                    ORDER BY started_at DESC NULLS LAST, sync_run_id DESC
+                    ORDER BY COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC
                 ) AS rn
             FROM sync_layer_progress
             WHERE layer_name = ANY(%s)
@@ -199,6 +200,13 @@ def _latest_status_map(conn: psycopg.Connection[Any], names: list[str]) -> dict[
 
 
 def _latest_age_seconds_map(conn: psycopg.Connection[Any], names: list[str]) -> dict[str, float]:
+    # Counting rows anchor freshness age: complete/partial runs always
+    # count; skipped rows count ONLY when they were PREREQ_SKIP (layer
+    # intentionally did nothing because a prereq was missing). A
+    # DEP_SKIPPED row marks a layer that was prevented from running by
+    # an upstream failure — it is not evidence of freshness and must
+    # not make a downstream look HEALTHY after the upstream clears.
+    prereq_pattern = f"{PREREQ_SKIP_MARKER}%"
     rows = conn.execute(
         """
         WITH ranked AS (
@@ -207,15 +215,19 @@ def _latest_age_seconds_map(conn: psycopg.Connection[Any], names: list[str]) -> 
                 COALESCE(finished_at, started_at) AS anchor,
                 ROW_NUMBER() OVER (
                     PARTITION BY layer_name
-                    ORDER BY started_at DESC NULLS LAST, sync_run_id DESC
+                    ORDER BY COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC
                 ) AS rn
             FROM sync_layer_progress
-            WHERE layer_name = ANY(%s) AND status IN ('complete', 'partial', 'skipped')
+            WHERE layer_name = ANY(%s)
+              AND (
+                status IN ('complete', 'partial')
+                OR (status = 'skipped' AND skip_reason LIKE %s)
+              )
         )
         SELECT layer_name, EXTRACT(EPOCH FROM (now() - anchor)) AS age
         FROM ranked WHERE rn = 1 AND anchor IS NOT NULL
         """,
-        (names,),
+        (names, prereq_pattern),
     ).fetchall()
     return {str(r[0]): float(r[1]) for r in rows}
 
