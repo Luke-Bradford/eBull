@@ -1,11 +1,8 @@
 from fastapi.testclient import TestClient
 
-from app.main import app
 
-
-def test_v2_endpoint_returns_expected_top_level_keys() -> None:
-    with TestClient(app) as client:
-        resp = client.get("/sync/layers/v2")
+def test_v2_endpoint_returns_expected_top_level_keys(clean_client: TestClient) -> None:
+    resp = clean_client.get("/sync/layers/v2")
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert set(body.keys()) == {
@@ -21,15 +18,13 @@ def test_v2_endpoint_returns_expected_top_level_keys() -> None:
     }
 
 
-def test_v2_system_state_in_expected_set() -> None:
-    with TestClient(app) as client:
-        resp = client.get("/sync/layers/v2")
+def test_v2_system_state_in_expected_set(clean_client: TestClient) -> None:
+    resp = clean_client.get("/sync/layers/v2")
     assert resp.json()["system_state"] in {"ok", "catching_up", "needs_attention"}
 
 
-def test_v2_healthy_entries_shape() -> None:
-    with TestClient(app) as client:
-        resp = client.get("/sync/layers/v2")
+def test_v2_healthy_entries_shape(clean_client: TestClient) -> None:
+    resp = clean_client.get("/sync/layers/v2")
     for entry in resp.json()["healthy"]:
         assert set(entry.keys()) >= {"layer", "display_name", "last_updated"}
 

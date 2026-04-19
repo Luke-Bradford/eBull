@@ -362,11 +362,7 @@ def get_sync_layers_v2(
         )
         if state is LayerState.ACTION_NEEDED:
             raw_cat = categories.get(name) or "internal_error"
-            category = (
-                FailureCategory(raw_cat)
-                if raw_cat in category_values
-                else FailureCategory.INTERNAL_ERROR
-            )
+            category = FailureCategory(raw_cat) if raw_cat in category_values else FailureCategory.INTERNAL_ERROR
             remedy = REMEDIES[category]
             action_needed.append(
                 ActionNeededItem(
@@ -440,9 +436,7 @@ def _system_summary(
     return "All layers healthy"
 
 
-def _layer_last_updated_map(
-    conn: psycopg.Connection[object], names: list[str]
-) -> dict[str, datetime]:
+def _layer_last_updated_map(conn: psycopg.Connection[Any], names: list[str]) -> dict[str, datetime]:
     """Most recent complete/partial finished_at per layer."""
     rows = conn.execute(
         """

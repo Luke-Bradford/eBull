@@ -6,8 +6,6 @@ same PR that removes the endpoint.
 
 from fastapi.testclient import TestClient
 
-from app.main import app
-
 EXPECTED_LAYER_KEYS = {
     "name",
     "display_name",
@@ -23,17 +21,15 @@ EXPECTED_LAYER_KEYS = {
 }
 
 
-def test_v1_top_level_shape() -> None:
-    with TestClient(app) as client:
-        resp = client.get("/sync/layers")
+def test_v1_top_level_shape(clean_client: TestClient) -> None:
+    resp = clean_client.get("/sync/layers")
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert set(body.keys()) == {"layers"}
 
 
-def test_v1_layer_keys_unchanged() -> None:
-    with TestClient(app) as client:
-        resp = client.get("/sync/layers")
+def test_v1_layer_keys_unchanged(clean_client: TestClient) -> None:
+    resp = clean_client.get("/sync/layers")
     layers = resp.json()["layers"]
     assert len(layers) == 15
     for layer in layers:
