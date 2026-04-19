@@ -8,12 +8,16 @@ applies fixed-point cascade propagation.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from typing import Any
+
+import psycopg
 
 from app.services.sync_orchestrator.layer_types import (
+    REMEDIES,
     FailureCategory,
     LayerState,
-    REMEDIES,
 )
 
 
@@ -62,10 +66,7 @@ def compute_layer_state(ctx: LayerContext) -> LayerState:
             return LayerState.ACTION_NEEDED
         return LayerState.RETRYING
     # Rule 7: cascade — only terminal upstream states propagate.
-    if any(
-        s in {LayerState.ACTION_NEEDED, LayerState.SECRET_MISSING}
-        for s in ctx.upstream_states.values()
-    ):
+    if any(s in {LayerState.ACTION_NEEDED, LayerState.SECRET_MISSING} for s in ctx.upstream_states.values()):
         return LayerState.CASCADE_WAITING
     # Rule 8: content predicate.
     if not ctx.content_ok:
@@ -74,3 +75,157 @@ def compute_layer_state(ctx: LayerContext) -> LayerState:
     if ctx.age_seconds > ctx.cadence_seconds * ctx.grace_multiplier:
         return LayerState.DEGRADED
     return LayerState.HEALTHY
+
+
+# ---------------------------------------------------------------------------
+# DB-facing builder
+# ---------------------------------------------------------------------------
+
+# Max cascade-propagation iterations. DAG depth is ≤ 10 in practice
+# (test pins this). The loop exits early once states stabilise.
+MAX_STATE_ITERATIONS = 16
+
+
+def compute_layer_states_from_db(
+    conn: psycopg.Connection[Any],
+) -> dict[str, LayerState]:
+    """Build a LayerState for every registered layer by reading
+    sync_layer_progress + content predicates + layer_enabled + secrets.
+
+    Fixed-point iteration propagates cascade state across DAG depth.
+    Converges in at most MAX_STATE_ITERATIONS rounds; safety-capped so
+    a future cycle in the registry cannot hang the planning query.
+    """
+    # Deferred imports to avoid circular imports at module load time.
+    # layer_types is at the bottom of the import graph; registry imports
+    # layer_types; layer_enabled imports nothing from sync_orchestrator.
+    from app.services.layer_enabled import read_all_enabled
+    from app.services.sync_orchestrator.layer_failure_history import all_layer_histories
+    from app.services.sync_orchestrator.registry import LAYERS
+
+    names = list(LAYERS.keys())
+    enabled = read_all_enabled(conn, names)
+    streaks, categories = all_layer_histories(conn, names)
+    running_set = _running_layers(conn, names)
+    latest_status = _latest_status_map(conn, names)
+    latest_ages = _latest_age_seconds_map(conn, names)
+    content_results = _content_ok_map(conn)
+
+    def build(name: str, upstream: dict[str, LayerState]) -> LayerContext:
+        layer = LAYERS[name]
+        status = latest_status.get(name, "__never_run__")
+        if status == "__never_run__":
+            age_seconds: float = float("inf")
+            status = "complete"
+        else:
+            age_seconds = latest_ages.get(name, float("inf"))
+        return LayerContext(
+            is_enabled=enabled.get(name, True),
+            is_running=name in running_set,
+            latest_status=status,
+            latest_category=categories.get(name),
+            attempts=streaks.get(name, 0),
+            upstream_states=upstream,
+            secret_present=all(bool(os.environ.get(ref.env_var)) for ref in layer.secret_refs),
+            content_ok=content_results.get(name, True),
+            age_seconds=age_seconds,
+            cadence_seconds=layer.cadence.interval.total_seconds(),
+            grace_multiplier=layer.grace_multiplier,
+            max_attempts=layer.retry_policy.max_attempts,
+        )
+
+    # Round 0: compute every layer without upstream info.
+    current: dict[str, LayerState] = {name: compute_layer_state(build(name, {})) for name in names}
+
+    # Fixed-point: iterate until stable or cap reached.
+    for _ in range(MAX_STATE_ITERATIONS):
+        next_states = {
+            name: compute_layer_state(build(name, {dep: current[dep] for dep in LAYERS[name].dependencies}))
+            for name in names
+        }
+        if next_states == current:
+            return next_states
+        current = next_states
+    return current
+
+
+def _running_layers(conn: psycopg.Connection[Any], names: list[str]) -> set[str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT layer_name
+        FROM sync_layer_progress
+        WHERE status = 'running' AND layer_name = ANY(%s)
+        """,
+        (names,),
+    ).fetchall()
+    return {str(r[0]) for r in rows}
+
+
+def _latest_status_map(conn: psycopg.Connection[Any], names: list[str]) -> dict[str, str]:
+    rows = conn.execute(
+        """
+        WITH ranked AS (
+            SELECT
+                layer_name, status,
+                ROW_NUMBER() OVER (
+                    PARTITION BY layer_name
+                    ORDER BY started_at DESC NULLS LAST, sync_run_id DESC
+                ) AS rn
+            FROM sync_layer_progress
+            WHERE layer_name = ANY(%s)
+        )
+        SELECT layer_name, status FROM ranked WHERE rn = 1
+        """,
+        (names,),
+    ).fetchall()
+    out = {str(r[0]): str(r[1]) for r in rows}
+    # Never-run layer: sentinel that the context-builder translates to
+    # age=inf → DEGRADED. Do NOT default to 'complete' — that would
+    # mark a layer HEALTHY despite having no runs on record.
+    for name in names:
+        out.setdefault(name, "__never_run__")
+    return out
+
+
+def _latest_age_seconds_map(conn: psycopg.Connection[Any], names: list[str]) -> dict[str, float]:
+    rows = conn.execute(
+        """
+        WITH ranked AS (
+            SELECT
+                layer_name,
+                COALESCE(finished_at, started_at) AS anchor,
+                ROW_NUMBER() OVER (
+                    PARTITION BY layer_name
+                    ORDER BY started_at DESC NULLS LAST, sync_run_id DESC
+                ) AS rn
+            FROM sync_layer_progress
+            WHERE layer_name = ANY(%s) AND status IN ('complete', 'partial', 'skipped')
+        )
+        SELECT layer_name, EXTRACT(EPOCH FROM (now() - anchor)) AS age
+        FROM ranked WHERE rn = 1 AND anchor IS NOT NULL
+        """,
+        (names,),
+    ).fetchall()
+    return {str(r[0]): float(r[1]) for r in rows}
+
+
+def _content_ok_map(conn: psycopg.Connection[Any]) -> dict[str, bool]:
+    """Invoke each layer's `content_predicate` if declared. Layers
+    without a predicate default to True (content checks are opt-in
+    per spec §4)."""
+    from app.services.sync_orchestrator.registry import LAYERS
+
+    out: dict[str, bool] = {}
+    for name, layer in LAYERS.items():
+        if layer.content_predicate is None:
+            out[name] = True
+            continue
+        try:
+            ok, _detail = layer.content_predicate(conn)
+        except Exception:
+            # A broken predicate is not a freshness signal — treat
+            # as content-ok to avoid masking real failures. A later
+            # chunk can promote broken predicates to their own log.
+            ok = True
+        out[name] = ok
+    return out

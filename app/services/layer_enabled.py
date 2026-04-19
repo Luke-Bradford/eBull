@@ -41,9 +41,7 @@ def set_layer_enabled(
     conn.commit()
 
 
-def read_all_enabled(
-    conn: psycopg.Connection[Any], names: list[str]
-) -> dict[str, bool]:
+def read_all_enabled(conn: psycopg.Connection[Any], names: list[str]) -> dict[str, bool]:
     """Batched read for the state machine — one query for every layer."""
     if not names:
         return {}
