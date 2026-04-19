@@ -21,7 +21,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { fetchConfig } from "@/api/config";
 import { fetchCoverageSummary } from "@/api/coverage";
 import { fetchJobsOverview, runJob } from "@/api/jobs";
 import { fetchRecommendations } from "@/api/recommendations";
@@ -62,12 +61,6 @@ const ORCHESTRATOR_OWNED = new Set([
 ]);
 
 export function AdminPage() {
-  // /config is fetched independently by a handful of consumers today
-  // (tech-debt #320). We use it here to gate the live-trading warning
-  // in the Sync-now button label once live wiring arrives; for now we
-  // only need the fetch to catch changes.
-  void useAsync(fetchConfig, []);
-
   const layers = useAsync(fetchSyncLayers, []);
   const status = useAsync(fetchSyncStatus, []);
   const coverage = useAsync(fetchCoverageSummary, []);
@@ -82,14 +75,24 @@ export function AdminPage() {
     [],
   );
 
+  // Extract the refetch refs as local const bindings so ESLint can
+  // see their identity and verify the dep array without the suppression
+  // that previously papered over the stability contract. `useAsync`
+  // wraps refetch in `useCallback([], [])` — see useAsync.test.ts
+  // which pins that invariant.
+  const refetchLayers = layers.refetch;
+  const refetchStatus = status.refetch;
+  const refetchCoverage = coverage.refetch;
+  const refetchJobs = jobs.refetch;
+  const refetchRecs = recs.refetch;
+
   const refetchAll = useCallback(() => {
-    layers.refetch();
-    status.refetch();
-    coverage.refetch();
-    jobs.refetch();
-    recs.refetch();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layers.refetch, status.refetch, coverage.refetch, jobs.refetch, recs.refetch]);
+    refetchLayers();
+    refetchStatus();
+    refetchCoverage();
+    refetchJobs();
+    refetchRecs();
+  }, [refetchLayers, refetchStatus, refetchCoverage, refetchJobs, refetchRecs]);
 
   const isRunning = status.data?.is_running ?? false;
   const refreshInterval = isRunning ? 10_000 : 60_000;
@@ -133,7 +136,7 @@ export function AdminPage() {
       try {
         await runJob(name);
         setRowState((prev) => ({ ...prev, [name]: { kind: "queued" } }));
-        jobs.refetch();
+        refetchJobs();
       } catch (err) {
         const message =
           err instanceof ApiError
@@ -146,7 +149,7 @@ export function AdminPage() {
         setRowState((prev) => ({ ...prev, [name]: { kind: "error", message } }));
       }
     },
-    [jobs.refetch],
+    [refetchJobs],
   );
 
   // Stable callback so ProblemsPanel's useEffect on `layers` does

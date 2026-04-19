@@ -144,6 +144,13 @@ def all_layer_histories(
     # total row count for that layer if every row is 'failed'.
     streaks: dict[str, int] = {}
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # Single index scan: `ranked` adds both the row_number and the
+        # per-layer total via window functions. `first_non_failed`
+        # pulls the `rn` of the first non-failed row (streak = rn - 1),
+        # and `totals` is derived from the same CTE so Postgres does
+        # not re-scan the table. The LEFT JOIN falls back to `total`
+        # when a layer has no non-failed rows at all (pure-failure
+        # history).
         cur.execute(
             """
             WITH ranked AS (
@@ -153,7 +160,8 @@ def all_layer_histories(
                     ROW_NUMBER() OVER (
                         PARTITION BY layer_name
                         ORDER BY started_at DESC NULLS LAST, sync_run_id DESC
-                    ) AS rn
+                    ) AS rn,
+                    COUNT(*) OVER (PARTITION BY layer_name) AS total
                 FROM sync_layer_progress
                 WHERE layer_name = ANY(%s)
             ),
@@ -164,10 +172,8 @@ def all_layer_histories(
                 GROUP BY layer_name
             ),
             totals AS (
-                SELECT layer_name, COUNT(*) AS total
-                FROM sync_layer_progress
-                WHERE layer_name = ANY(%s)
-                GROUP BY layer_name
+                SELECT DISTINCT layer_name, total
+                FROM ranked
             )
             SELECT
                 t.layer_name,
@@ -175,7 +181,7 @@ def all_layer_histories(
             FROM totals t
             LEFT JOIN first_non_failed f USING (layer_name);
             """,
-            (names, names),
+            (names,),
         )
         for row in cur.fetchall():
             streaks[str(row["layer_name"])] = int(row["streak"])
