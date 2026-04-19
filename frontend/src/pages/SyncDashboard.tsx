@@ -12,14 +12,12 @@
  * Auto-refresh: polls every 10s when a sync is running, every 60s idle.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 
-import { ApiError } from "@/api/client";
 import {
   fetchSyncLayers,
   fetchSyncRuns,
   fetchSyncStatus,
-  triggerSync,
 } from "@/api/sync";
 import type { SyncLayer, SyncRun } from "@/api/sync";
 import {
@@ -29,6 +27,7 @@ import {
 } from "@/components/dashboard/Section";
 import { formatDateTime } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
+import type { SyncTriggerState } from "@/lib/useSyncTrigger";
 
 const TIER_LABEL: Record<number, string> = {
   0: "Tier 0 · Sources",
@@ -70,7 +69,17 @@ export function parseUtc(iso: string): Date {
   return new Date(hasOffset ? iso : `${iso}Z`);
 }
 
-export function SyncDashboard() {
+export interface SyncDashboardProps {
+  /**
+   * Shared sync-now trigger (from `useSyncTrigger`). Required so
+   * both AdminPage's top-level button and this dashboard's internal
+   * button reflect the same state and cannot fire two concurrent
+   * POSTs. See docs/superpowers/specs/2026-04-19-admin-triage-design.md §11.
+   */
+  readonly syncTrigger: SyncTriggerState;
+}
+
+export function SyncDashboard({ syncTrigger }: SyncDashboardProps) {
   const layers = useAsync(fetchSyncLayers, []);
   const status = useAsync(fetchSyncStatus, []);
   const runs = useAsync(() => fetchSyncRuns(20), []);
@@ -90,41 +99,27 @@ export function SyncDashboard() {
     return () => window.clearInterval(id);
   }, [refetchAll, interval]);
 
-  const [triggerState, setTriggerState] = useState<
-    | { kind: "idle" }
-    | { kind: "running" }
-    | { kind: "error"; message: string }
-    | { kind: "queued"; syncRunId: number }
-  >({ kind: "idle" });
+  // Destructure the stable callbacks from syncTrigger so useCallback
+  // deps below reference those (stable refs) instead of the outer
+  // object (new identity each render → handleSyncNow would be a new
+  // function every render, defeating the memo).
+  const { trigger: triggerSync_, clearQueued } = syncTrigger;
 
-  // Clear `queued` banner once the status poll confirms the trigger
-  // took effect (is_running=true). Depend on triggerState.kind (not
-  // the whole object) so setTriggerState calls don't retrigger this
-  // effect on every render — only on actual kind transitions.
+  // Drive the shared trigger's queued → idle transition off the
+  // same status poll we already have. No local trigger state here —
+  // everything is owned by `syncTrigger`.
   useEffect(() => {
-    if (triggerState.kind === "queued" && isRunning) {
-      setTriggerState({ kind: "idle" });
-    }
-  }, [triggerState.kind, isRunning]);
+    clearQueued(isRunning);
+  }, [clearQueued, isRunning]);
 
+  // SyncDashboard's own fetches are refreshed by the interval poll
+  // (10s while is_running=true). We do NOT also refetchAll here —
+  // trigger() is a no-op when the hook is already running/queued,
+  // so an unconditional refetchAll on click would fire spurious
+  // reads on a blocked second click.
   const handleSyncNow = useCallback(async () => {
-    setTriggerState({ kind: "running" });
-    try {
-      const result = await triggerSync({ scope: "full" });
-      setTriggerState({ kind: "queued", syncRunId: result.sync_run_id });
-      refetchAll();
-    } catch (err) {
-      const message =
-        err instanceof ApiError
-          ? err.status === 409
-            ? "Sync already running"
-            : err.status === 503
-              ? "Sync orchestrator disabled"
-              : `Failed (HTTP ${err.status})`
-          : "Failed";
-      setTriggerState({ kind: "error", message });
-    }
-  }, [refetchAll]);
+    await triggerSync_();
+  }, [triggerSync_]);
 
   const layerList: SyncLayer[] = layers.data?.layers ?? [];
   const stale = layerList.filter((l) => !l.is_fresh).length;
@@ -174,19 +169,18 @@ export function SyncDashboard() {
             disabled={
               // Disabled from click until either (a) the backend confirms
               // is_running=true via the next /sync/status poll, or (b)
-              // the trigger returned an error and we're back in idle.
-              // Without the "queued" guard, a second click between the
-              // POST returning 202 and the status poll could fire a
-              // second concurrent trigger.
-              triggerState.kind === "running" ||
-              triggerState.kind === "queued" ||
+              // the shared trigger transitions from `queued` back to
+              // `idle`. Any click path that bypasses this disabled
+              // state would otherwise fire a second concurrent POST.
+              syncTrigger.kind === "running" ||
+              syncTrigger.kind === "queued" ||
               isRunning
             }
             className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-white hover:bg-sky-700 disabled:bg-slate-300"
           >
-            {triggerState.kind === "running"
+            {syncTrigger.kind === "running"
               ? "Triggering…"
-              : triggerState.kind === "queued"
+              : syncTrigger.kind === "queued"
                 ? "Queued"
                 : isRunning
                   ? "Running"
@@ -198,14 +192,12 @@ export function SyncDashboard() {
           <span className={`text-sm font-medium ${banner.tone}`}>
             {banner.text}
           </span>
-          {triggerState.kind === "error" && (
-            <span className="text-sm text-red-600">
-              {triggerState.message}
-            </span>
+          {syncTrigger.kind === "error" && syncTrigger.message !== null && (
+            <span className="text-sm text-red-600">{syncTrigger.message}</span>
           )}
-          {triggerState.kind === "queued" && (
+          {syncTrigger.kind === "queued" && syncTrigger.queuedRunId !== null && (
             <span className="text-sm text-slate-500">
-              Queued as run #{triggerState.syncRunId}
+              Queued as run #{syncTrigger.queuedRunId}
             </span>
           )}
         </div>

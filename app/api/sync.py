@@ -169,6 +169,15 @@ def get_sync_layers(
 ) -> dict[str, Any]:
     """All 15 layers with freshness + last successful run."""
     from app.services.sync_orchestrator import LAYERS
+    from app.services.sync_orchestrator.layer_failure_history import (
+        all_layer_histories,
+    )
+
+    # One pair of queries instead of two-per-layer in the loop below.
+    # Was O(N) round-trips; now O(1). The layer name filter keeps both
+    # queries on an index seek regardless of how large the history
+    # table grows.
+    failure_streaks, persisted_errors = all_layer_histories(conn, list(LAYERS.keys()))
 
     # _LAYER_TO_JOB is built and asserted-disjoint at module import.
     out: list[dict[str, Any]] = []
@@ -205,6 +214,16 @@ def get_sync_layers(
             last = cur.fetchone()
         last_success_at = last["finished_at"] if last else None
         last_start = last["started_at"] if last else None
+        # Failure history comes from sync_layer_progress, not from
+        # job_runs. The in-request predicate_error above only fires
+        # when freshness evaluation itself raised; it does not cover
+        # "the layer has failed three runs in a row". Both callers
+        # are triage signals, so we prefer the in-request error when
+        # present and fall back to the most-recent-persisted category
+        # otherwise. Both values come from the two batched queries
+        # above — no per-layer round-trips.
+        consec = failure_streaks.get(name, 0)
+        persisted_error = persisted_errors.get(name)
         out.append(
             {
                 "name": name,
@@ -216,8 +235,8 @@ def get_sync_layers(
                 "last_duration_seconds": (
                     int((last_success_at - last_start).total_seconds()) if last_success_at and last_start else None
                 ),
-                "last_error_category": predicate_error,
-                "consecutive_failures": 0,
+                "last_error_category": predicate_error or persisted_error,
+                "consecutive_failures": consec,
                 "dependencies": list(layer.dependencies),
                 "is_blocking": layer.is_blocking,
             }
