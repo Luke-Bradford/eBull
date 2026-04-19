@@ -1,7 +1,7 @@
 import psycopg
 import pytest
 
-from tests.fixtures.ebull_test_db import test_database_url
+from tests.fixtures.ebull_test_db import test_database_url as _test_database_url
 
 
 def _run_tracked(job_name: str, raise_exc: Exception | None = None, row_count: int | None = None) -> None:
@@ -10,7 +10,7 @@ def _run_tracked(job_name: str, raise_exc: Exception | None = None, row_count: i
 
     from app.workers.scheduler import _tracked_job
 
-    url = test_database_url()
+    url = _test_database_url()
     with patch("app.workers.scheduler.settings") as mock_settings:
         mock_settings.database_url = url
         if raise_exc is not None:
@@ -31,7 +31,7 @@ def test_tracked_job_integrityerror_persists_db_constraint() -> None:
     unique_err = psycopg.errors.UniqueViolation("dup")
     _run_tracked("test_tracked_dbc", raise_exc=unique_err)
 
-    with psycopg.connect(test_database_url()) as conn:
+    with psycopg.connect(_test_database_url()) as conn:
         row = conn.execute(
             """
             SELECT status, error_category
@@ -54,7 +54,7 @@ def test_tracked_job_http_401_persists_auth_expired() -> None:
     err = httpx.HTTPStatusError("unauth", request=httpx.Request("GET", "https://x"), response=resp)
     _run_tracked("test_tracked_auth", raise_exc=err)
 
-    with psycopg.connect(test_database_url()) as conn:
+    with psycopg.connect(_test_database_url()) as conn:
         row = conn.execute(
             """
             SELECT status, error_category
@@ -73,7 +73,7 @@ def test_tracked_job_http_401_persists_auth_expired() -> None:
 def test_tracked_job_runtime_error_persists_internal_error() -> None:
     _run_tracked("test_tracked_runtime", raise_exc=RuntimeError("surprise"))
 
-    with psycopg.connect(test_database_url()) as conn:
+    with psycopg.connect(_test_database_url()) as conn:
         row = conn.execute(
             """
             SELECT status, error_category
@@ -92,7 +92,7 @@ def test_tracked_job_runtime_error_persists_internal_error() -> None:
 def test_tracked_job_success_leaves_error_category_null() -> None:
     _run_tracked("test_tracked_ok", row_count=42)
 
-    with psycopg.connect(test_database_url()) as conn:
+    with psycopg.connect(_test_database_url()) as conn:
         row = conn.execute(
             """
             SELECT status, error_category

@@ -11,7 +11,7 @@ import httpx
 import psycopg
 import psycopg.errors
 
-from app.services.sync_orchestrator.layer_types import FailureCategory
+from app.services.sync_orchestrator.layer_types import FailureCategory, LayerRefreshFailed
 
 
 def classify_exception(exc: BaseException) -> FailureCategory:
@@ -23,6 +23,12 @@ def classify_exception(exc: BaseException) -> FailureCategory:
     adapters that do detect drift should raise an explicit error with
     SCHEMA_DRIFT stored at the call site (out of scope for this helper).
     """
+    # LayerRefreshFailed already carries an explicit category — honour
+    # it instead of re-classifying. A caller that wraps a raw exception
+    # in LayerRefreshFailed(SCHEMA_DRIFT, ...) has strictly more
+    # information than this helper can recover from the exception type.
+    if isinstance(exc, LayerRefreshFailed):
+        return exc.category
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         if status in (401, 403):

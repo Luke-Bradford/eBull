@@ -69,6 +69,22 @@ def test_value_error_maps_to_internal_error() -> None:
     assert classify_exception(ValueError("bad")) is FailureCategory.INTERNAL_ERROR
 
 
+def test_layer_refresh_failed_passes_category_through() -> None:
+    # Adapter that knows exactly what failed should be honoured, not
+    # re-classified to INTERNAL_ERROR.
+    from app.services.sync_orchestrator.layer_types import LayerRefreshFailed
+
+    exc = LayerRefreshFailed(category=FailureCategory.SCHEMA_DRIFT, detail="payload changed")
+    assert classify_exception(exc) is FailureCategory.SCHEMA_DRIFT
+
+
+def test_layer_refresh_failed_data_gap_passes_through() -> None:
+    from app.services.sync_orchestrator.layer_types import LayerRefreshFailed
+
+    exc = LayerRefreshFailed(category=FailureCategory.DATA_GAP, detail="empty response")
+    assert classify_exception(exc) is FailureCategory.DATA_GAP
+
+
 def test_operational_error_maps_to_source_down() -> None:
     # Transient DB infrastructure (connection failure, lock timeout,
     # server shutdown) — self-heal via retry budget rather than
