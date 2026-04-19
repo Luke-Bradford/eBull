@@ -188,4 +188,16 @@ describe("useSyncTrigger", () => {
     });
     expect(mockedTrigger).toHaveBeenCalledTimes(2);
   });
+
+  it("POSTs with scope=behind, not full", async () => {
+    mockedTrigger.mockResolvedValueOnce({
+      sync_run_id: 1,
+      plan: { layers_to_refresh: [], layers_skipped: [] },
+    });
+    const { hook } = setup();
+    await act(async () => {
+      await hook.result.current.trigger();
+    });
+    expect(mockedTrigger).toHaveBeenCalledWith({ scope: "behind" });
+  });
 });

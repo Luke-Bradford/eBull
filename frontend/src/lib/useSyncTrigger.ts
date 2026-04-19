@@ -65,7 +65,7 @@ export function useSyncTrigger(
     if (inFlightRef.current) return;
     inFlightRef.current = true;
     setState({ kind: "running", queuedRunId: null, message: null });
-    const body: SyncTriggerRequest = { scope: "full" };
+    const body: SyncTriggerRequest = { scope: "behind" };
     try {
       const result = await triggerSync(body);
       setState({
