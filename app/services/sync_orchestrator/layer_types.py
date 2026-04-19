@@ -9,7 +9,11 @@ orchestrator import graph.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import StrEnum
+from typing import Any, Protocol
+
+import psycopg
 
 
 class LayerState(StrEnum):
@@ -83,3 +87,68 @@ REMEDIES: dict[FailureCategory, Remedy] = {
         self_heal=True,
     ),
 }
+
+
+@dataclass(frozen=True)
+class Cadence:
+    interval: timedelta
+
+    def __post_init__(self) -> None:
+        if self.interval <= timedelta(0):
+            raise ValueError("interval must be positive")
+
+    def grace_window(self, grace_multiplier: float) -> timedelta:
+        return self.interval * grace_multiplier
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    max_attempts: int = 3
+    backoff_seconds: tuple[int, ...] = (60, 600, 3600)
+
+    def __post_init__(self) -> None:
+        if len(self.backoff_seconds) != self.max_attempts:
+            raise ValueError(
+                "backoff_seconds must have exactly max_attempts entries "
+                f"(got {len(self.backoff_seconds)} for max_attempts={self.max_attempts})"
+            )
+
+
+DEFAULT_RETRY_POLICY = RetryPolicy()
+
+
+@dataclass(frozen=True)
+class SecretRef:
+    env_var: str
+    display_name: str
+
+
+class ContentPredicate(Protocol):
+    """Structural signature for a per-layer content check.
+
+    Returns (ok, detail). Pure SELECT; must not write.
+    """
+
+    def __call__(self, conn: psycopg.Connection[Any]) -> tuple[bool, str]: ...
+
+
+class LayerRefreshFailed(Exception):
+    """Adapter-level failure carrying a categorisation."""
+
+    def __init__(self, category: FailureCategory, detail: str) -> None:
+        super().__init__(f"{category.value}: {detail}")
+        self.category = category
+        self.detail = detail
+
+
+def cadence_display_string(cadence: Cadence) -> str:
+    """Short human label used by dashboards where a one-liner is enough."""
+    total = int(cadence.interval.total_seconds())
+    if total % 86400 == 0:
+        d = total // 86400
+        return f"{d}d" if d > 1 else "daily"
+    if total % 3600 == 0:
+        return f"{total // 3600}h"
+    if total % 60 == 0:
+        return f"{total // 60}m"
+    return f"{total}s"
