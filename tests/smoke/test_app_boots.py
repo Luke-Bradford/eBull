@@ -183,8 +183,13 @@ def test_app_lifespan_boots_and_state_is_coherent() -> None:
             # /health is the cheapest end-to-end probe that the
             # routing layer is also wired up -- if it 500s, lifespan
             # came up but the app object itself is broken.
+            # 200 = all layers healthy; 503 = one or more layers need
+            # attention (normal on a dev DB that has not run all syncs).
+            # Either is a valid liveness response; 500 would indicate
+            # the handler itself is broken.
             resp = client.get("/health")
-            assert resp.status_code == 200, resp.text
+            assert resp.status_code in {200, 503}, resp.text
+            assert resp.json().get("system_state") in {"ok", "needs_attention", "error"}, resp.text
 
             # /budget exercises the full SQL path in compute_budget_state
             # against the real schema. This catches column-name mismatches
