@@ -43,6 +43,11 @@ if TYPE_CHECKING:
     # the cycle; pyright still resolves the annotation correctly.
     from app.services.sync_orchestrator.layer_types import FailureCategory
 
+    # SpikeResult moved to row_count_spikes in chunk 7.  Import here so
+    # pyright resolves annotations that reference it from this module.
+    # No runtime import — the lazy shim below handles call-time resolution.
+    from app.services.sync_orchestrator.row_count_spikes import SpikeResult
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -137,21 +142,6 @@ class JobHealth:
     last_started_at: datetime | None = None
     last_finished_at: datetime | None = None
     detail: str = ""
-
-
-# SpikeResult: moved to app.services.sync_orchestrator.row_count_spikes.
-# Re-defined here as a forward-compatible alias using a lazy import shim so
-# the circular-import cycle (ops_monitor → sync_orchestrator.__init__ →
-# adapters → ops_monitor) is not triggered at module load time.
-# Remove after downstream callers have migrated.
-class SpikeResult:  # type: ignore[no-redef]
-    """Shim: delegates to sync_orchestrator.row_count_spikes.SpikeResult."""
-
-    def __new__(cls, *args: Any, **kwargs: Any) -> "SpikeResult":  # type: ignore[misc]
-        from app.services.sync_orchestrator.row_count_spikes import (
-            SpikeResult as _Real,
-        )
-        return _Real(*args, **kwargs)  # type: ignore[return-value]
 
 
 @dataclass
@@ -462,12 +452,9 @@ def fetch_latest_successful_runs(
 
 
 # ---------------------------------------------------------------------------
-# Row-count spike detection — re-export shim
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # Row-count spike detection — lazy shim (backward compat for one release)
 # ---------------------------------------------------------------------------
+
 
 # check_row_count_spike moved to app.services.sync_orchestrator.row_count_spikes.
 # A direct module-level re-export would trigger the sync_orchestrator.__init__
@@ -480,11 +467,12 @@ def check_row_count_spike(  # type: ignore[no-redef]
     current_count: int,
     *,
     exclude_run_id: int | None = None,
-) -> "SpikeResult":
+) -> SpikeResult:
     """Shim: delegates to sync_orchestrator.row_count_spikes.check_row_count_spike."""
     from app.services.sync_orchestrator.row_count_spikes import (
         check_row_count_spike as _real,
     )
+
     return _real(conn, job_name, current_count, exclude_run_id=exclude_run_id)  # type: ignore[return-value]
 
 

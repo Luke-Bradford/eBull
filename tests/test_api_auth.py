@@ -18,7 +18,7 @@ Browser-session login / logout / /auth/me coverage lives in
 from __future__ import annotations
 
 from collections.abc import Iterator
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -26,6 +26,7 @@ from app.api.auth import require_session_or_service_token
 from app.config import settings
 from app.db import get_conn
 from app.main import app
+from app.services.sync_orchestrator.layer_types import LayerState
 
 client = TestClient(app)
 
@@ -160,7 +161,12 @@ class TestPublicEndpointsRemainOpen:
         app.dependency_overrides.pop(get_conn, None)
 
     def test_health_is_public(self) -> None:
-        resp = client.get("/health")
+        all_healthy = {"candles": LayerState.HEALTHY}
+        with patch(
+            "app.main.compute_layer_states_from_db",
+            return_value=all_healthy,
+        ):
+            resp = client.get("/health")
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "ok"

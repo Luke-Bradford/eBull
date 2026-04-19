@@ -54,7 +54,6 @@ from app.services.ops_monitor import (
     record_job_skip,
     record_job_start,
 )
-from app.services.sync_orchestrator.row_count_spikes import check_row_count_spike
 from app.services.order_client import execute_order
 from app.services.portfolio import run_portfolio_review
 from app.services.portfolio_sync import sync_portfolio
@@ -71,6 +70,7 @@ from app.services.return_attribution import (
 from app.services.scoring import compute_rankings
 from app.services.sync_orchestrator import prereq_skip_reason
 from app.services.sync_orchestrator.progress import report_progress
+from app.services.sync_orchestrator.row_count_spikes import check_row_count_spike
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
 from app.services.thesis import find_stale_instruments, generate_thesis
 from app.services.universe import enrich_instrument_currencies, sync_universe
