@@ -20,12 +20,17 @@ def candles_content_ok(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     from app.services.market_data import _most_recent_trading_day
 
     trading_day = _most_recent_trading_day(date.today())
+    # `i.is_tradable = TRUE` matches the filter in `daily_candle_refresh`
+    # (app/workers/scheduler.py). Without it, a delisted instrument that
+    # still carries tier 1/2 coverage would permanently fail this
+    # content check, because the refresh job never re-fetches it.
     row = conn.execute(
         """
         SELECT COUNT(*) AS missing
         FROM instruments i
         JOIN coverage c USING (instrument_id)
         WHERE c.coverage_tier IN (1, 2)
+          AND i.is_tradable = TRUE
           AND COALESCE(
               (SELECT MAX(price_date) FROM price_daily p
                WHERE p.instrument_id = i.instrument_id),
