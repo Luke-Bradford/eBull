@@ -103,9 +103,17 @@ export function ProblemsPanel({
     return null;
   }
 
+  // `system_summary` from v2 only describes layer problems. If the total
+  // problem count comes from carried-over jobs / coverage rows too, use
+  // the combined count instead — otherwise a red panel with a failed
+  // job shown underneath would be topped by "All layers healthy".
+  const v2ProblemCount = actionNeeded.length + secretMissing.length;
   const headerText =
-    cache.v2?.system_summary ??
-    (totalProblems > 0 ? `${totalProblems} problem(s) need attention` : "No confirmed problems yet");
+    totalProblems === v2ProblemCount && cache.v2?.system_summary !== undefined
+      ? cache.v2.system_summary
+      : totalProblems > 0
+        ? `${totalProblems} problem(s) need attention`
+        : "No confirmed problems yet";
   const tone = totalProblems > 0 ? "red" : erroredSources.length > 0 ? "amber" : "neutral";
   const sectionTone =
     tone === "red"
@@ -232,6 +240,12 @@ function ActionNeededRow({ item, onOpen }: { item: ActionNeededItem; onOpen: () 
 
 
 function SecretMissingRow({ item }: { item: SecretMissingItem }): JSX.Element {
+  // Most secret_missing rows have a Settings → Providers fix. The
+  // backend has a defensive fallback path ("Check layer secret
+  // configuration") for layers with no declared secret_refs — apply
+  // the same link heuristic ActionNeededRow uses so a generic fix
+  // does not get a misleading Settings link.
+  const fixAsLink = mentionsSettings(item.operator_fix);
   return (
     <li className="px-4 py-2 text-sm">
       <div className="flex items-start gap-2">
@@ -239,9 +253,13 @@ function SecretMissingRow({ item }: { item: SecretMissingItem }): JSX.Element {
         <div className="flex-1">
           <div className="font-medium text-amber-800">{item.display_name} — credential needed</div>
           <div className="text-xs text-slate-700">
-            <Link to="/settings#providers" className="font-medium text-blue-700 hover:underline">
-              {item.operator_fix}
-            </Link>
+            {fixAsLink ? (
+              <Link to="/settings#providers" className="font-medium text-blue-700 hover:underline">
+                {item.operator_fix}
+              </Link>
+            ) : (
+              <span>{item.operator_fix}</span>
+            )}
           </div>
         </div>
       </div>

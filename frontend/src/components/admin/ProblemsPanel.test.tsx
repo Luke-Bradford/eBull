@@ -385,4 +385,50 @@ describe("ProblemsPanel", () => {
     expect(screen.getByRole("status")).not.toHaveTextContent(/layers/i);
     expect(screen.getByRole("status")).not.toHaveTextContent(/jobs/i);
   });
+
+  it("uses a combined-count header when carry-over rows contribute problems but v2 is clean", () => {
+    // Regression guard: previously the header text came from
+    // v2.system_summary ("All layers healthy") even when a failed
+    // job was rendered underneath. Must say "N problem(s) need
+    // attention" whenever jobs/coverage contribute.
+    const jobs: JobsListResponse = {
+      jobs: [
+        {
+          name: "test_job",
+          description: "test job",
+          cadence: "daily",
+          next_run_time: null,
+          last_status: "failure",
+          last_finished_at: new Date().toISOString(),
+        } as unknown as JobsListResponse["jobs"][number],
+      ],
+    };
+    renderPanel({ v2: emptyV2(), jobs });
+    // v2 is clean; v2.system_summary = "All layers healthy".
+    // Header MUST reflect the one failed job, not parrot the v2 summary.
+    expect(screen.queryByText(/All layers healthy/)).toBeNull();
+    expect(screen.getByText(/1 problem.*need.*attention/i)).toBeInTheDocument();
+  });
+
+  it("renders plain text for a SecretMissingItem whose operator_fix lacks Settings phrasing", () => {
+    // Regression guard: the backend has a defensive fallback
+    // operator_fix="Check layer secret configuration" for layers
+    // without declared secret_refs. That must render as plain text,
+    // not a misleading /settings#providers link.
+    const v2 = emptyV2();
+    v2.system_state = "needs_attention";
+    v2.secret_missing = [
+      {
+        layer: "some_layer",
+        display_name: "Some Layer",
+        missing_secret: "(unknown)",
+        operator_fix: "Check layer secret configuration",
+      },
+    ];
+    renderPanel({ v2 });
+    expect(screen.getByText(/Check layer secret configuration/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /Check layer secret configuration/i }),
+    ).toBeNull();
+  });
 });
