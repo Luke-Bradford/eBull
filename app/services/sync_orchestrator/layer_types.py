@@ -98,6 +98,10 @@ class Cadence:
             raise ValueError("interval must be positive")
 
     def grace_window(self, grace_multiplier: float) -> timedelta:
+        if grace_multiplier <= 0:
+            raise ValueError(
+                f"grace_multiplier must be positive (got {grace_multiplier})"
+            )
         return self.interval * grace_multiplier
 
 
@@ -107,10 +111,17 @@ class RetryPolicy:
     backoff_seconds: tuple[int, ...] = (60, 600, 3600)
 
     def __post_init__(self) -> None:
+        if self.max_attempts < 1:
+            raise ValueError("max_attempts must be >= 1")
         if len(self.backoff_seconds) != self.max_attempts:
             raise ValueError(
                 "backoff_seconds must have exactly max_attempts entries "
                 f"(got {len(self.backoff_seconds)} for max_attempts={self.max_attempts})"
+            )
+        if any(b <= 0 for b in self.backoff_seconds):
+            raise ValueError(
+                "backoff_seconds entries must all be positive "
+                f"(got {self.backoff_seconds})"
             )
 
 

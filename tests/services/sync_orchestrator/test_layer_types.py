@@ -115,6 +115,26 @@ def test_content_predicate_callable_returns_tuple() -> None:
     assert detail == "all clear"
 
 
+def test_retry_policy_rejects_non_positive_backoff() -> None:
+    with pytest.raises(ValueError, match="backoff_seconds"):
+        RetryPolicy(max_attempts=3, backoff_seconds=(0, 10, 20))
+    with pytest.raises(ValueError, match="backoff_seconds"):
+        RetryPolicy(max_attempts=3, backoff_seconds=(10, -1, 20))
+
+
+def test_retry_policy_rejects_zero_max_attempts() -> None:
+    with pytest.raises(ValueError, match="max_attempts"):
+        RetryPolicy(max_attempts=0, backoff_seconds=())
+
+
+def test_cadence_grace_window_rejects_non_positive_multiplier() -> None:
+    c = Cadence(interval=timedelta(hours=24))
+    with pytest.raises(ValueError, match="grace_multiplier"):
+        c.grace_window(grace_multiplier=0)
+    with pytest.raises(ValueError, match="grace_multiplier"):
+        c.grace_window(grace_multiplier=-0.5)
+
+
 def test_cadence_display_string() -> None:
     assert cadence_display_string(Cadence(interval=timedelta(hours=24))) == "daily"
     assert cadence_display_string(Cadence(interval=timedelta(days=7))) == "7d"
