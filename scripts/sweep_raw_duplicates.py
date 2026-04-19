@@ -92,11 +92,12 @@ def plan(groups: dict[tuple[str, ...], list[tuple[str, Path, int]]]):
 
 
 def fmt_bytes(n: int) -> str:
+    v: float = float(n)
     for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if n < 1024:
-            return f"{n:.1f}{unit}"
-        n = n // 1024 if unit == "B" else n / 1024
-    return f"{n:.1f}TB"
+        if v < 1024:
+            return f"{v:.1f}{unit}"
+        v = v / 1024
+    return f"{v:.1f}PB"
 
 
 def main() -> int:
