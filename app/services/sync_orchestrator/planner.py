@@ -34,13 +34,20 @@ def build_execution_plan(
     layers_to_refresh: list[LayerPlan] = []
     layers_skipped: list[LayerSkip] = []
 
+    # `behind` scope: candidates were already state-selected
+    # (DEGRADED / ACTION_NEEDED + non-HEALTHY upstreams). Skip the
+    # legacy is_fresh re-filter so the state machine's selection is
+    # authoritative — a DEGRADED layer must fire even if is_fresh
+    # says otherwise.
+    bypass_freshness_for_all = scope.kind == "behind" and scope.force
+
     for job_name in candidate_jobs:
         emits = JOB_TO_LAYERS[job_name]
         if not emits:  # outside-DAG job — should not be in candidates
             continue
 
         is_target = job_name == target_job
-        if is_target and scope.force:
+        if (is_target and scope.force) or bypass_freshness_for_all:
             include = True
             reason = f"forced by scope={scope.kind}"
         else:
@@ -150,7 +157,12 @@ def _transitive_upstreams_not_healthy(seed: set[str], states: dict[str, LayerSta
         for dep in LAYERS[name].dependencies:
             if dep in result:
                 continue
-            if states.get(dep) is LayerState.HEALTHY:
+            dep_state = states.get(dep)
+            # Skip HEALTHY (no work needed) and DISABLED (operator
+            # toggle wins — spec §3.2 rule 1). A disabled upstream
+            # leaves the target in CASCADE_WAITING by design; firing
+            # it anyway would bypass the operator's explicit off.
+            if dep_state in {LayerState.HEALTHY, LayerState.DISABLED}:
                 continue
             result.add(dep)
             stack.append(dep)

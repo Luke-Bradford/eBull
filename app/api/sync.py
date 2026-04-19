@@ -62,7 +62,11 @@ router = APIRouter(
 
 
 class SyncRequest(BaseModel):
-    scope: Literal["full", "layer", "high_frequency", "job", "behind"] = "full"
+    # Default `behind` — resync only layers the state machine says are
+    # DEGRADED / ACTION_NEEDED plus their non-HEALTHY upstreams. Full
+    # sync is available via explicit `scope: "full"` for rare operator
+    # overrides; the Admin UI no longer fires full by default.
+    scope: Literal["full", "layer", "high_frequency", "job", "behind"] = "behind"
     layer: str | None = None
     job: str | None = None
 

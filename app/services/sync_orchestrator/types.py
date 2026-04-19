@@ -147,7 +147,11 @@ class SyncScope:
 
     @classmethod
     def behind(cls) -> SyncScope:
-        return cls(kind="behind")
+        # `force=True`: target layers were already state-selected as
+        # DEGRADED / ACTION_NEEDED (and their non-HEALTHY upstreams).
+        # Legacy `is_fresh` re-filtering would drop jobs the state
+        # machine explicitly wants refreshed, so bypass it.
+        return cls(kind="behind", force=True)
 
 
 @dataclass(frozen=True)
