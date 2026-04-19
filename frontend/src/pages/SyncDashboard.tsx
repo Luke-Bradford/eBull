@@ -99,10 +99,15 @@ export function SyncDashboard({ syncTrigger }: SyncDashboardProps) {
     return () => window.clearInterval(id);
   }, [refetchAll, interval]);
 
+  // Destructure the stable callbacks from syncTrigger so useCallback
+  // deps below reference those (stable refs) instead of the outer
+  // object (new identity each render → handleSyncNow would be a new
+  // function every render, defeating the memo).
+  const { trigger: triggerSync_, clearQueued } = syncTrigger;
+
   // Drive the shared trigger's queued → idle transition off the
   // same status poll we already have. No local trigger state here —
   // everything is owned by `syncTrigger`.
-  const clearQueued = syncTrigger.clearQueued;
   useEffect(() => {
     clearQueued(isRunning);
   }, [clearQueued, isRunning]);
@@ -113,8 +118,8 @@ export function SyncDashboard({ syncTrigger }: SyncDashboardProps) {
   // so an unconditional refetchAll on click would fire spurious
   // reads on a blocked second click.
   const handleSyncNow = useCallback(async () => {
-    await syncTrigger.trigger();
-  }, [syncTrigger]);
+    await triggerSync_();
+  }, [triggerSync_]);
 
   const layerList: SyncLayer[] = layers.data?.layers ?? [];
   const stale = layerList.filter((l) => !l.is_fresh).length;

@@ -18,7 +18,7 @@
  * a second POST (spec §11).
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { fetchCoverageSummary } from "@/api/coverage";
@@ -96,10 +96,19 @@ export function AdminPage() {
 
   const isRunning = status.data?.is_running ?? false;
   const refreshInterval = isRunning ? 10_000 : 60_000;
+  // Keep `refetchAll` in a ref so the interval does not re-arm on
+  // every render — only when the cadence itself changes (running
+  // ↔ idle transition). Without this split, a cadence flip at
+  // second 59 of the 60s idle cycle would drop the elapsed window
+  // and fire an immediate refetch; this keeps the natural tick.
+  const refetchAllRef = useRef(refetchAll);
   useEffect(() => {
-    const id = window.setInterval(refetchAll, refreshInterval);
+    refetchAllRef.current = refetchAll;
+  }, [refetchAll]);
+  useEffect(() => {
+    const id = window.setInterval(() => refetchAllRef.current(), refreshInterval);
     return () => window.clearInterval(id);
-  }, [refetchAll, refreshInterval]);
+  }, [refreshInterval]);
 
   // Shared sync-trigger — single source of truth for both the
   // top-level button here and the inner button inside SyncDashboard.

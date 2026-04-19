@@ -288,6 +288,9 @@ class TestBatchedAllLayerHistories:
         assert streaks[a] == 3
         assert streaks[b] == 0
         assert categories[a] == "db_constraint"
+        # b recovered but the last-known category survives — that is
+        # the intentional "still show what the last break was" triage
+        # semantic (per spec §2 and the per-layer helper above).
         assert categories[b] == "network"
 
     def test_empty_layer_list_returns_empty_dicts(self, conn: psycopg.Connection[object]) -> None:

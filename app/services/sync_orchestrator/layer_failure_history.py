@@ -172,8 +172,17 @@ def all_layer_histories(
                 GROUP BY layer_name
             ),
             totals AS (
-                SELECT DISTINCT layer_name, total
+                -- MAX(total) is deterministic here because
+                -- COUNT(*) OVER (PARTITION BY layer_name) yields
+                -- the same value across every row within a partition.
+                -- GROUP BY ensures exactly one row per layer_name
+                -- even if a concurrent writer were somehow to let
+                -- the window see slightly different per-partition
+                -- counts — DISTINCT on a window-function column
+                -- would fan out in that (theoretical) case.
+                SELECT layer_name, MAX(total) AS total
                 FROM ranked
+                GROUP BY layer_name
             )
             SELECT
                 t.layer_name,
