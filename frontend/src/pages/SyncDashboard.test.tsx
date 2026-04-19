@@ -22,6 +22,17 @@ import {
   fetchSyncRuns,
   fetchSyncStatus,
 } from "@/api/sync";
+import type { SyncTriggerState } from "@/lib/useSyncTrigger";
+
+function fakeTrigger(): SyncTriggerState {
+  return {
+    kind: "idle",
+    queuedRunId: null,
+    message: null,
+    trigger: vi.fn(),
+    clearQueued: vi.fn(),
+  };
+}
 
 vi.mock("@/api/sync", () => ({
   fetchSyncLayers: vi.fn(),
@@ -115,7 +126,7 @@ describe("LayerProgressBar", () => {
     mockedStatus.mockResolvedValue(
       runningStatus({ itemsDone: null, itemsTotal: null }),
     );
-    render(<SyncDashboard />);
+    render(<SyncDashboard syncTrigger={fakeTrigger()} />);
     expect(await screen.findByText("starting…")).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).toBeNull();
   });
@@ -124,7 +135,7 @@ describe("LayerProgressBar", () => {
     mockedStatus.mockResolvedValue(
       runningStatus({ itemsDone: 42, itemsTotal: null }),
     );
-    render(<SyncDashboard />);
+    render(<SyncDashboard syncTrigger={fakeTrigger()} />);
     expect(await screen.findByText("42 items processed")).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).toBeNull();
   });
@@ -133,7 +144,7 @@ describe("LayerProgressBar", () => {
     mockedStatus.mockResolvedValue(
       runningStatus({ itemsDone: 25, itemsTotal: 100 }),
     );
-    render(<SyncDashboard />);
+    render(<SyncDashboard syncTrigger={fakeTrigger()} />);
     const bar = await screen.findByRole("progressbar", {
       name: "candles progress",
     });
@@ -150,7 +161,7 @@ describe("LayerProgressBar", () => {
     mockedStatus.mockResolvedValue(
       runningStatus({ itemsDone: 150, itemsTotal: 100 }),
     );
-    render(<SyncDashboard />);
+    render(<SyncDashboard syncTrigger={fakeTrigger()} />);
     const bar = await screen.findByRole("progressbar", {
       name: "candles progress",
     });

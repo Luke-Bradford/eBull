@@ -1,38 +1,46 @@
 /**
- * Admin page (issue #260 Phase 5).
+ * Admin page — triage-first rewrite (issue #323).
  *
- * Two sections:
- *   1. Sync dashboard — 15-layer freshness grid + recent sync runs +
- *      "Sync now" button. Owned by the orchestrator.
- *   2. Background tasks — the 5 scheduled jobs that live outside the
- *      orchestrator DAG (execute_approved_orders, monitor_positions,
- *      retry_deferred_recommendations, weekly_coverage_review,
- *      attribution_summary). Retained because the operator still needs
- *      Run-Now for them and they are not part of the data-sync flow.
+ * Three-section composition:
+ *   1. Problems panel — failing layers + failing jobs + coverage
+ *      anomalies (null rows). Hidden when all sources resolved and
+ *      combined problem list is empty.
+ *   2. Fund data row — four live cells + three pending placeholders
+ *      for summaries we don't yet have endpoints for.
+ *   3. Collapsed-by-default details: orchestrator (15-layer grid +
+ *      recent runs), background jobs, filings coverage.
  *
- * The prior "Recent runs" table is removed — the Sync dashboard's
- * recent-sync-runs table is the authoritative per-run view now, and
- * individual job runs for the background tasks can be retrieved via
- * the /jobs/runs API if needed (operator CLI, not UI).
+ * AdminPage owns the auto-refresh loop (10s when a sync is running,
+ * 60s otherwise) for its five top-level fetches. It also instantiates
+ * the shared `useSyncTrigger` hook and passes it to both the
+ * top-level Sync-now button and the inner `SyncDashboard`, so both
+ * buttons reflect one piece of state and a second click never fires
+ * a second POST (spec §11).
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
+import { fetchConfig } from "@/api/config";
 import { fetchCoverageSummary } from "@/api/coverage";
 import { fetchJobsOverview, runJob } from "@/api/jobs";
+import { fetchRecommendations } from "@/api/recommendations";
+import { fetchSyncLayers, fetchSyncStatus } from "@/api/sync";
+import { ApiError } from "@/api/client";
 import type {
   CoverageSummaryResponse,
   JobOverviewResponse,
 } from "@/api/types";
-import { ApiError } from "@/api/client";
+import { CollapsibleSection } from "@/components/admin/CollapsibleSection";
+import { FundDataRow } from "@/components/admin/FundDataRow";
+import { ProblemsPanel } from "@/components/admin/ProblemsPanel";
 import {
-  Section,
   SectionError,
   SectionSkeleton,
 } from "@/components/dashboard/Section";
 import { useAsync } from "@/lib/useAsync";
 import { formatDateTime } from "@/lib/format";
+import { useSyncTrigger } from "@/lib/useSyncTrigger";
 import { SyncDashboard } from "@/pages/SyncDashboard";
 
 type RowState =
@@ -48,28 +56,84 @@ const STATUS_TONE: Record<string, string> = {
   skipped: "text-slate-400",
 };
 
-// Orchestrator-owned scheduled jobs — surfaced by the Sync dashboard
-// above; not duplicated here. Every other SCHEDULED_JOBS entry is a
-// "background task" that remains outside the orchestrator DAG.
 const ORCHESTRATOR_OWNED = new Set([
   "orchestrator_full_sync",
   "orchestrator_high_frequency_sync",
 ]);
 
 export function AdminPage() {
-  const jobs = useAsync(fetchJobsOverview, []);
-  const coverage = useAsync(fetchCoverageSummary, []);
+  // /config is fetched independently by a handful of consumers today
+  // (tech-debt #320). We use it here to gate the live-trading warning
+  // in the Sync-now button label once live wiring arrives; for now we
+  // only need the fetch to catch changes.
+  void useAsync(fetchConfig, []);
 
+  const layers = useAsync(fetchSyncLayers, []);
+  const status = useAsync(fetchSyncStatus, []);
+  const coverage = useAsync(fetchCoverageSummary, []);
+  const jobs = useAsync(fetchJobsOverview, []);
+  const recs = useAsync(
+    () =>
+      fetchRecommendations(
+        { action: null, status: null, instrument_id: null },
+        0,
+        1,
+      ),
+    [],
+  );
+
+  const refetchAll = useCallback(() => {
+    layers.refetch();
+    status.refetch();
+    coverage.refetch();
+    jobs.refetch();
+    recs.refetch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layers.refetch, status.refetch, coverage.refetch, jobs.refetch, recs.refetch]);
+
+  const isRunning = status.data?.is_running ?? false;
+  const refreshInterval = isRunning ? 10_000 : 60_000;
+  useEffect(() => {
+    const id = window.setInterval(refetchAll, refreshInterval);
+    return () => window.clearInterval(id);
+  }, [refetchAll, refreshInterval]);
+
+  // Shared sync-trigger — single source of truth for both the
+  // top-level button here and the inner button inside SyncDashboard.
+  const syncTrigger = useSyncTrigger(refetchAll);
+
+  // Drive the `queued → idle` transition off the top-level status
+  // poll. Previously only SyncDashboard called clearQueued, which
+  // meant a click on the top button with the orchestrator section
+  // collapsed left the hook stuck in `queued` forever (button stays
+  // disabled until reload). With the top-level status fetch here we
+  // can advance the trigger state independently. Also clears via a
+  // one-off timer for the fast-run case where a sync finishes
+  // before the next /sync/status tick ever observes is_running=true.
+  const clearQueued = syncTrigger.clearQueued;
+  useEffect(() => {
+    clearQueued(isRunning);
+  }, [clearQueued, isRunning]);
+
+  useEffect(() => {
+    if (syncTrigger.kind !== "queued") return;
+    // Fallback: if the server-side sync finishes before we ever see
+    // is_running=true, recover the idle state after the next refresh
+    // tick. Otherwise the button would stay disabled indefinitely.
+    const id = window.setTimeout(() => clearQueued(true), refreshInterval + 2_000);
+    return () => window.clearTimeout(id);
+  }, [syncTrigger.kind, clearQueued, refreshInterval]);
+
+  const [orchestratorOpen, setOrchestratorOpen] = useState(false);
   const [rowState, setRowState] = useState<Record<string, RowState>>({});
 
-  const refetchJobs = jobs.refetch;
   const handleRun = useCallback(
     async (name: string) => {
       setRowState((prev) => ({ ...prev, [name]: { kind: "running" } }));
       try {
         await runJob(name);
         setRowState((prev) => ({ ...prev, [name]: { kind: "queued" } }));
-        refetchJobs();
+        jobs.refetch();
       } catch (err) {
         const message =
           err instanceof ApiError
@@ -79,34 +143,83 @@ export function AdminPage() {
                 ? "Unknown job"
                 : `Failed (HTTP ${err.status})`
             : "Failed";
-        setRowState((prev) => ({
-          ...prev,
-          [name]: { kind: "error", message },
-        }));
+        setRowState((prev) => ({ ...prev, [name]: { kind: "error", message } }));
       }
     },
-    [refetchJobs],
+    [jobs.refetch],
   );
+
+  function openOrchestrator() {
+    setOrchestratorOpen(true);
+    // Let the section mount before we scroll, so the target exists.
+    // scrollIntoView is undefined in jsdom so we guard defensively —
+    // the browser behaviour is unchanged.
+    requestAnimationFrame(() => {
+      const el = document.getElementById("admin-orchestrator-details");
+      if (el && typeof el.scrollIntoView === "function") {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+  }
 
   const backgroundJobs = (jobs.data?.jobs ?? []).filter(
     (j) => !ORCHESTRATOR_OWNED.has(j.name),
   );
 
+  const layerProblemCount =
+    (layers.data?.layers ?? []).filter(
+      (l) =>
+        (l.consecutive_failures >= 1 && l.last_error_category !== null) ||
+        (!l.is_fresh && l.is_blocking),
+    ).length;
+
   return (
-    <div className="space-y-8">
-      <SyncDashboard />
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-semibold text-slate-800">Admin</h1>
+        <SyncNowButton
+          triggerKind={syncTrigger.kind}
+          message={syncTrigger.message}
+          isRunning={isRunning}
+          onClick={() => void syncTrigger.trigger()}
+        />
+      </div>
 
-      <Section title="Filings coverage">
-        {coverage.loading ? (
-          <SectionSkeleton rows={2} />
-        ) : coverage.error !== null ? (
-          <SectionError onRetry={coverage.refetch} />
-        ) : coverage.data ? (
-          <CoverageSummaryCard summary={coverage.data} />
-        ) : null}
-      </Section>
+      <ProblemsPanel
+        layers={layers.data}
+        jobs={jobs.data}
+        coverage={coverage.data}
+        layersError={layers.error !== null}
+        jobsError={jobs.error !== null}
+        coverageError={coverage.error !== null}
+        onOpenOrchestrator={openOrchestrator}
+      />
 
-      <Section title="Background tasks">
+      <FundDataRow
+        coverage={coverage.data}
+        coverageError={coverage.error !== null}
+        recommendations={recs.data}
+        recommendationsError={recs.error !== null}
+      />
+
+      <CollapsibleSection
+        title="Orchestrator details"
+        summary={
+          layerProblemCount > 0
+            ? `${layerProblemCount} layer${layerProblemCount === 1 ? "" : "s"} need attention`
+            : "all layers healthy"
+        }
+        open={orchestratorOpen}
+        onOpenChange={setOrchestratorOpen}
+        sectionId="admin-orchestrator-details"
+      >
+        <SyncDashboard syncTrigger={syncTrigger} />
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        title="Background tasks"
+        summary={`${backgroundJobs.length} scheduled`}
+      >
         {jobs.loading ? (
           <SectionSkeleton rows={5} />
         ) : jobs.error !== null ? (
@@ -116,18 +229,67 @@ export function AdminPage() {
             <p className="mb-3 text-xs text-slate-500">
               Scheduled jobs that live outside the orchestrator DAG —
               transaction execution, position monitoring, deferred-rec
-              retries, and periodic governance. Data-pipeline jobs
-              (candles, theses, scoring, reports, etc.) are driven by
-              the orchestrator above.
+              retries, and periodic governance.
             </p>
-            <JobsTable
-              items={backgroundJobs}
-              rowState={rowState}
-              onRun={handleRun}
-            />
+            <JobsTable items={backgroundJobs} rowState={rowState} onRun={handleRun} />
           </>
         )}
-      </Section>
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        title="Filings coverage"
+        summary={
+          coverage.data
+            ? `${coverage.data.analysable} / ${coverage.data.total_tradable} analysable`
+            : undefined
+        }
+      >
+        {coverage.loading ? (
+          <SectionSkeleton rows={2} />
+        ) : coverage.error !== null ? (
+          <SectionError onRetry={coverage.refetch} />
+        ) : coverage.data ? (
+          <CoverageSummaryCard summary={coverage.data} />
+        ) : null}
+      </CollapsibleSection>
+    </div>
+  );
+}
+
+function SyncNowButton({
+  triggerKind,
+  message,
+  isRunning,
+  onClick,
+}: {
+  triggerKind: "idle" | "running" | "queued" | "error";
+  message: string | null;
+  isRunning: boolean;
+  onClick: () => void;
+}) {
+  const disabled =
+    triggerKind === "running" || triggerKind === "queued" || isRunning;
+  const label =
+    triggerKind === "running"
+      ? "Triggering…"
+      : triggerKind === "queued"
+        ? "Queued"
+        : isRunning
+          ? "Running"
+          : "Sync now";
+  return (
+    <div className="flex items-center gap-2">
+      {triggerKind === "error" && message !== null ? (
+        <span className="text-xs text-red-600">{message}</span>
+      ) : null}
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-white hover:bg-sky-700 disabled:bg-slate-300"
+      >
+        {label}
+      </button>
     </div>
   );
 }
@@ -138,11 +300,7 @@ function CoverageSummaryCard({
   summary: CoverageSummaryResponse;
 }) {
   const stuckTotal = summary.insufficient + summary.structurally_young;
-  const cells: Array<{
-    label: string;
-    value: number;
-    tone: string;
-  }> = [
+  const cells: Array<{ label: string; value: number; tone: string }> = [
     { label: "Analysable", value: summary.analysable, tone: "text-emerald-700" },
     { label: "Insufficient", value: summary.insufficient, tone: "text-amber-700" },
     {
@@ -157,8 +315,6 @@ function CoverageSummaryCard({
       tone: "text-slate-500",
     },
     { label: "Unknown", value: summary.unknown, tone: "text-slate-500" },
-    // Null rows surface a stalled audit job — any non-zero value is
-    // ops-actionable so we highlight red rather than neutral.
     {
       label: "Null (pre-audit)",
       value: summary.null_rows,
@@ -170,10 +326,7 @@ function CoverageSummaryCard({
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {cells.map((c) => (
-          <div
-            key={c.label}
-            className="rounded border border-slate-200 bg-slate-50 p-3"
-          >
+          <div key={c.label} className="rounded border border-slate-200 bg-slate-50 p-3">
             <div className="text-xs uppercase tracking-wide text-slate-500">
               {c.label}
             </div>
@@ -233,13 +386,9 @@ function JobsTable({
               <tr key={job.name} className="align-top">
                 <td className="py-2 pr-4">
                   <div className="font-medium text-slate-700">{job.name}</div>
-                  <div className="text-xs text-slate-500">
-                    {job.description}
-                  </div>
+                  <div className="text-xs text-slate-500">{job.description}</div>
                 </td>
-                <td className="py-2 pr-4 text-xs text-slate-600">
-                  {job.cadence}
-                </td>
+                <td className="py-2 pr-4 text-xs text-slate-600">{job.cadence}</td>
                 <td className="py-2 pr-4 text-xs text-slate-600">
                   {formatDateTime(job.next_run_time)}
                 </td>
