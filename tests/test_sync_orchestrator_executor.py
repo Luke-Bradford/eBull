@@ -205,15 +205,26 @@ class TestRunLayersLoopContract:
 
 
 class TestCategorizeError:
+    # _categorize_error replaced by classify_exception from exception_classifier.
+    # Tests updated to FailureCategory values (behaviour change notes below):
+    # - "db_constraint" → FailureCategory.DB_CONSTRAINT (same semantics)
+    # - "unknown" → FailureCategory.INTERNAL_ERROR (KeyError was previously
+    #   "unknown"; now bucketed as INTERNAL_ERROR — retriable, same effect)
     def test_integrity_error(self) -> None:
         import psycopg
 
+        from app.services.sync_orchestrator.exception_classifier import classify_exception
+        from app.services.sync_orchestrator.layer_types import FailureCategory
+
         exc = psycopg.errors.IntegrityError("fk violation")
-        assert executor._categorize_error(exc) == "db_constraint"
+        assert classify_exception(exc) is FailureCategory.DB_CONSTRAINT
 
     def test_unknown_fallback(self) -> None:
+        from app.services.sync_orchestrator.exception_classifier import classify_exception
+        from app.services.sync_orchestrator.layer_types import FailureCategory
+
         exc = KeyError("nope")
-        assert executor._categorize_error(exc) == "unknown"
+        assert classify_exception(exc) is FailureCategory.INTERNAL_ERROR
 
 
 class TestSetExecutor:

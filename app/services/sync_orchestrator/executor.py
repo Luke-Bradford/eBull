@@ -27,6 +27,7 @@ from typing import Any, Protocol
 import psycopg
 
 from app.config import settings
+from app.services.sync_orchestrator.exception_classifier import classify_exception
 from app.services.sync_orchestrator.planner import build_execution_plan
 from app.services.sync_orchestrator.registry import JOB_TO_LAYERS
 from app.services.sync_orchestrator.types import (
@@ -432,7 +433,7 @@ def _record_layer_failed(
                     error_category = %s
                 WHERE sync_run_id = %s AND layer_name = %s
                 """,
-                (_categorize_error(error), sync_run_id, layer_name),
+                (classify_exception(error).value, sync_run_id, layer_name),
             )
 
 
@@ -557,30 +558,3 @@ def _make_progress_callback(sync_run_id: int, emits: tuple[str, ...]):
                     )
 
     return _callback
-
-
-# ---------------------------------------------------------------------------
-# Error categorization (sanitized, stable set per spec §3.4)
-# ---------------------------------------------------------------------------
-
-
-def _categorize_error(exc: BaseException) -> str:
-    """Map an exception to a stable sanitized category.
-
-    Full detail stays in logs (exc_info). The DB column holds only a
-    coarse category string — never SQL fragments or driver internals.
-    """
-    name = type(exc).__name__.lower()
-    if isinstance(exc, psycopg.errors.IntegrityError):
-        return "db_constraint"
-    if isinstance(exc, psycopg.OperationalError):
-        return "db_connection"
-    if "auth" in name or "credential" in name or "token" in name:
-        return "provider_auth"
-    if "rate" in name or "throttle" in name:
-        return "provider_rate_limit"
-    if "timeout" in name or "unavailable" in name:
-        return "provider_unavailable"
-    if "validation" in name or "value" in name:
-        return "validation"
-    return "unknown"

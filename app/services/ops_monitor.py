@@ -28,12 +28,20 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import psycopg
 import psycopg.rows
 
 from app.services.runtime_config import write_kill_switch_audit
+
+if TYPE_CHECKING:
+    # layer_types sits at the bottom of the orchestrator import graph, but
+    # the sync_orchestrator package __init__ re-exports executor/planner/
+    # registry/adapters which all import back from ops_monitor, creating a
+    # cycle if we import at module level. Guarding under TYPE_CHECKING breaks
+    # the cycle; pyright still resolves the annotation correctly.
+    from app.services.sync_orchestrator.layer_types import FailureCategory
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +303,7 @@ def record_job_finish(
     status: Literal["success", "failure"],
     row_count: int | None = None,
     error_msg: str | None = None,
+    error_category: FailureCategory | None = None,
     now: datetime | None = None,
 ) -> None:
     """Record the completion of a scheduled job."""
@@ -302,10 +311,11 @@ def record_job_finish(
     conn.execute(
         """
         UPDATE job_runs
-        SET finished_at = %(finished)s,
-            status      = %(status)s,
-            row_count   = %(row_count)s,
-            error_msg   = %(error_msg)s
+        SET finished_at    = %(finished)s,
+            status         = %(status)s,
+            row_count      = %(row_count)s,
+            error_msg      = %(error_msg)s,
+            error_category = %(error_category)s
         WHERE run_id = %(run_id)s
         """,
         {
@@ -313,6 +323,7 @@ def record_job_finish(
             "status": status,
             "row_count": row_count,
             "error_msg": error_msg,
+            "error_category": error_category.value if error_category else None,
             "run_id": run_id,
         },
     )
