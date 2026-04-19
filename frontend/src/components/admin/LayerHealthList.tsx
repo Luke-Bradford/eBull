@@ -11,6 +11,8 @@ import { useEffect, useRef, useState } from "react";
 
 import type { LayerEntry, LayerStateStr } from "@/api/types";
 
+const SAFETY_CRITICAL_LAYERS = new Set(["fx_rates", "portfolio_sync"]);
+
 
 export interface LayerHealthListProps {
   readonly layers: readonly LayerEntry[];
@@ -119,7 +121,20 @@ export function LayerHealthList({ layers, onToggle }: LayerHealthListProps): JSX
                   <button
                     type="button"
                     onClick={() => {
-                      onToggle(entry.layer, isDisabled);
+                      const nextEnabled = isDisabled; // currently disabled → enabling; else disabling
+                      if (
+                        !nextEnabled &&
+                        SAFETY_CRITICAL_LAYERS.has(entry.layer)
+                      ) {
+                        const ok = window.confirm(
+                          `Disable ${entry.display_name}? Valuations will drift until re-enabled.`,
+                        );
+                        if (!ok) {
+                          setMenuOpen(null);
+                          return;
+                        }
+                      }
+                      onToggle(entry.layer, nextEnabled);
                       setMenuOpen(null);
                     }}
                     className="block w-full px-3 py-1 text-left text-xs text-slate-700 hover:bg-slate-50"

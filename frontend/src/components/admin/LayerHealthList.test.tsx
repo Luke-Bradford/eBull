@@ -171,3 +171,56 @@ describe("LayerHealthList", () => {
     expect(screen.getAllByText(/Disable layer/)).toHaveLength(1);
   });
 });
+
+describe("LayerHealthList safety-critical confirm", () => {
+  it("prompts window.confirm when disabling fx_rates", () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const onToggle = vi.fn();
+    const layers: LayerEntry[] = [
+      mk({ layer: "fx_rates", state: "healthy", display_name: "FX Rates" }),
+    ];
+    render(<LayerHealthList layers={layers} onToggle={onToggle} />);
+    fireEvent.click(screen.getByLabelText("fx_rates actions"));
+    fireEvent.click(screen.getByText(/Disable layer/));
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(onToggle).toHaveBeenCalledWith("fx_rates", false);
+    confirmSpy.mockRestore();
+  });
+
+  it("does not call onToggle when safety-critical confirm is declined", () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const onToggle = vi.fn();
+    const layers: LayerEntry[] = [
+      mk({ layer: "portfolio_sync", state: "healthy", display_name: "Portfolio Sync" }),
+    ];
+    render(<LayerHealthList layers={layers} onToggle={onToggle} />);
+    fireEvent.click(screen.getByLabelText("portfolio_sync actions"));
+    fireEvent.click(screen.getByText(/Disable layer/));
+    expect(onToggle).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("does not prompt confirm for non-safety-critical layers", () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const onToggle = vi.fn();
+    const layers: LayerEntry[] = [mk({ layer: "candles", state: "healthy" })];
+    render(<LayerHealthList layers={layers} onToggle={onToggle} />);
+    fireEvent.click(screen.getByLabelText("candles actions"));
+    fireEvent.click(screen.getByText(/Disable layer/));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(onToggle).toHaveBeenCalledWith("candles", false);
+    confirmSpy.mockRestore();
+  });
+
+  it("skips confirm when re-enabling a safety-critical layer", () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const onToggle = vi.fn();
+    const layers: LayerEntry[] = [mk({ layer: "fx_rates", state: "disabled" })];
+    render(<LayerHealthList layers={layers} onToggle={onToggle} />);
+    fireEvent.click(screen.getByLabelText("fx_rates actions"));
+    fireEvent.click(screen.getByText(/Enable layer/));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(onToggle).toHaveBeenCalledWith("fx_rates", true);
+    confirmSpy.mockRestore();
+  });
+});

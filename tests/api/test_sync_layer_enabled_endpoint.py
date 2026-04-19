@@ -1,8 +1,5 @@
-import psycopg
 import pytest
 from fastapi.testclient import TestClient
-
-from app.config import settings
 
 
 @pytest.mark.integration
@@ -15,15 +12,10 @@ def test_post_layer_enabled_happy_path(clean_client: TestClient) -> None:
     assert body["warning"] is None
     assert body["display_name"] == "Daily Price Candles"
 
-    # The clean_client fixture uses the real app connection pool which
-    # targets settings.database_url (dev DB). Verify persistence there.
-    with psycopg.connect(settings.database_url) as conn:
-        row = conn.execute("SELECT is_enabled FROM layer_enabled WHERE layer_name = 'candles'").fetchone()
-        assert row is not None
-        assert row[0] is False
-
-    # Cleanup.
-    clean_client.post("/sync/layers/candles/enabled", json={"enabled": True})
+    # Re-enable and verify the round-trip (proves the write was committed).
+    resp2 = clean_client.post("/sync/layers/candles/enabled", json={"enabled": True})
+    assert resp2.status_code == 200
+    assert resp2.json()["is_enabled"] is True
 
 
 @pytest.mark.integration

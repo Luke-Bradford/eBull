@@ -757,3 +757,14 @@ export interface SyncLayersV2Response {
   cascade_groups: CascadeGroup[];
   layers: LayerEntry[];
 }
+
+// ---------------------------------------------------------------------------
+// /sync/layers/{name}/enabled (app/api/sync.py — A.5 chunk 2)
+// ---------------------------------------------------------------------------
+
+export interface LayerEnabledResponse {
+  layer: string;
+  display_name: string;
+  is_enabled: boolean;
+  warning: string | null;
+}
