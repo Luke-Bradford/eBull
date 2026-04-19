@@ -2,15 +2,13 @@ import httpx
 import psycopg.errors
 import pytest
 
-from app.services.sync_orchestrator.layer_types import FailureCategory
 from app.services.sync_orchestrator.exception_classifier import classify_exception
+from app.services.sync_orchestrator.layer_types import FailureCategory
 
 
 def _http_error(status: int) -> httpx.HTTPStatusError:
     resp = httpx.Response(status_code=status, text="error")
-    return httpx.HTTPStatusError(
-        "err", request=httpx.Request("GET", "https://example"), response=resp
-    )
+    return httpx.HTTPStatusError("err", request=httpx.Request("GET", "https://example"), response=resp)
 
 
 @pytest.mark.parametrize(

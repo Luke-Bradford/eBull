@@ -572,8 +572,17 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
         yield tracker
     except Exception as exc:
         try:
+            # Function-local import: scheduler is above classify_exception in the orchestrator graph.
+            from app.services.sync_orchestrator.exception_classifier import classify_exception
+
             with psycopg.connect(settings.database_url) as conn:
-                record_job_finish(conn, tracker.run_id, status="failure", error_msg=str(exc))
+                record_job_finish(
+                    conn,
+                    tracker.run_id,
+                    status="failure",
+                    error_msg=str(exc),
+                    error_category=classify_exception(exc),
+                )
         except Exception:
             logger.error("Failed to record job failure for %s", job_name, exc_info=True)
         raise
