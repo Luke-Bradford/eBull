@@ -130,6 +130,33 @@ def test_cik_reassigned_to_different_instrument(ebull_test_conn: psycopg.Connect
     assert _primary_cik(conn, 2) == "0000555555"
 
 
+def test_cik_reassigned_to_instrument_with_existing_different_cik(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Combined conflict: target instrument already holds a different primary CIK,
+    and the incoming CIK is currently primary on a different instrument.
+
+    Exercises both conflict paths in one call: the demote UPDATE must fire for
+    the target instrument's stale primary row, and the ON CONFLICT must fire on
+    the (provider, identifier_type, identifier_value) triple to move the
+    existing row to the target.
+    """
+    conn = ebull_test_conn
+    _seed_instrument(conn, instrument_id=1, symbol="OLD")
+    _seed_instrument(conn, instrument_id=2, symbol="NEW")
+
+    upsert_cik_mapping(conn, {"OLD": "0000555555"}, [("OLD", "1")])
+    upsert_cik_mapping(conn, {"NEW": "0000999999"}, [("NEW", "2")])
+    upsert_cik_mapping(conn, {"NEW": "0000555555"}, [("NEW", "2")])
+
+    assert _primary_cik(conn, 1) is None
+    assert _primary_cik(conn, 2) == "0000555555"
+    assert _all_rows(conn, 2) == [
+        ("0000555555", True),
+        ("0000999999", False),
+    ]
+
+
 def test_symbol_missing_from_mapping_is_skipped(ebull_test_conn: psycopg.Connection[tuple]) -> None:
     conn = ebull_test_conn
     _seed_instrument(conn, instrument_id=1, symbol="AAPL")
