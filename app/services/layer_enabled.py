@@ -38,7 +38,6 @@ def set_layer_enabled(
         """,
         (layer_name, enabled),
     )
-    conn.commit()
 
 
 def read_all_enabled(conn: psycopg.Connection[Any], names: list[str]) -> dict[str, bool]:

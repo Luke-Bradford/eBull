@@ -15,8 +15,8 @@ def _ctx(**overrides):
         upstream_states={},
         secret_present=True,
         content_ok=True,
-        age_seconds=60,
-        cadence_seconds=86400,
+        age_seconds=60.0,
+        cadence_seconds=86400.0,
         grace_multiplier=1.25,
         max_attempts=3,
     )
@@ -131,3 +131,16 @@ def test_local_failure_beats_cascade() -> None:
         )
         is LayerState.ACTION_NEEDED
     )
+
+
+def test_cascade_propagates_transitively() -> None:
+    # A -> B -> C. A=ACTION_NEEDED, B=CASCADE_WAITING => C must also
+    # CASCADE_WAITING so a multi-hop chain does not leave mid-depth
+    # layers looking healthy.
+    assert compute_layer_state(_ctx(upstream_states={"B": LayerState.CASCADE_WAITING})) is LayerState.CASCADE_WAITING
+
+
+def test_degraded_upstream_still_does_not_cascade_after_transitive_fix() -> None:
+    # Regression guard: the transitive-cascade fix must not start
+    # propagating DEGRADED (self-healing) — only CASCADE_WAITING.
+    assert compute_layer_state(_ctx(upstream_states={"B": LayerState.DEGRADED})) is LayerState.HEALTHY

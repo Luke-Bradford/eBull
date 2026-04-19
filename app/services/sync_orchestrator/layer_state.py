@@ -8,6 +8,7 @@ applies fixed-point cascade propagation.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -19,6 +20,8 @@ from app.services.sync_orchestrator.layer_types import (
     FailureCategory,
     LayerState,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -65,8 +68,16 @@ def compute_layer_state(ctx: LayerContext) -> LayerState:
         if ctx.attempts >= ctx.max_attempts:
             return LayerState.ACTION_NEEDED
         return LayerState.RETRYING
-    # Rule 7: cascade — only terminal upstream states propagate.
-    if any(s in {LayerState.ACTION_NEEDED, LayerState.SECRET_MISSING} for s in ctx.upstream_states.values()):
+    # Rule 7: cascade. Terminal upstream states (ACTION_NEEDED,
+    # SECRET_MISSING) originate a cascade; CASCADE_WAITING upstream
+    # propagates it transitively so every layer downstream of a root
+    # failure is visible to the collapse_cascades grouper (spec §6).
+    # DEGRADED, RUNNING, RETRYING are self-healing and do NOT cascade
+    # (spec §3.3).
+    if any(
+        s in {LayerState.ACTION_NEEDED, LayerState.SECRET_MISSING, LayerState.CASCADE_WAITING}
+        for s in ctx.upstream_states.values()
+    ):
         return LayerState.CASCADE_WAITING
     # Rule 8: content predicate.
     if not ctx.content_ok:
@@ -223,9 +234,15 @@ def _content_ok_map(conn: psycopg.Connection[Any]) -> dict[str, bool]:
         try:
             ok, _detail = layer.content_predicate(conn)
         except Exception:
-            # A broken predicate is not a freshness signal — treat
-            # as content-ok to avoid masking real failures. A later
-            # chunk can promote broken predicates to their own log.
+            # Broken content predicate is not a freshness signal —
+            # treat as content-ok to avoid masking real failures, but
+            # surface the exception so operators can see when a
+            # predicate is wedged (bad SQL, missing table, etc.).
+            logger.warning(
+                "content_predicate for %s raised; treating content_ok=True",
+                name,
+                exc_info=True,
+            )
             ok = True
         out[name] = ok
     return out

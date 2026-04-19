@@ -21,8 +21,10 @@ def test_default_missing_row_is_enabled() -> None:
 def test_set_and_read_back() -> None:
     with psycopg.connect(_test_database_url()) as conn:
         set_layer_enabled(conn, "candles", enabled=False)
+        conn.commit()
         assert is_layer_enabled(conn, "candles") is False
         set_layer_enabled(conn, "candles", enabled=True)
+        conn.commit()
         assert is_layer_enabled(conn, "candles") is True
 
 
@@ -32,5 +34,6 @@ def test_read_all_enabled_batched() -> None:
         conn.execute("DELETE FROM layer_enabled WHERE layer_name = ANY(%s)", (["news", "thesis", "fx_rates"],))
         conn.commit()
         set_layer_enabled(conn, "news", enabled=False)
+        conn.commit()
         result = read_all_enabled(conn, ["news", "thesis", "fx_rates"])
     assert result == {"news": False, "thesis": True, "fx_rates": True}
