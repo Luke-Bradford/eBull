@@ -410,6 +410,23 @@ def place_order(
     """Place a manual BUY/ADD order with optional SL/TP."""
     # Safety checks first — kill switch blocks everything.
     _check_kill_switch(conn)
+
+    # Second-line defence: manual orders also honour safety_layers_enabled.
+    # BUY/ADD is already enforced by the Literal type, but guard here so
+    # any live-trading path added later inherits the check automatically.
+    if body.action in ("BUY", "ADD"):
+        from app.services.layer_enabled import is_layer_enabled
+
+        disabled = [name for name in ("fx_rates", "portfolio_sync") if not is_layer_enabled(conn, name)]
+        if disabled:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"{' + '.join(disabled)} disabled — BUY/ADD blocked; "
+                    "re-enable the layer in Admin → Layer health to proceed."
+                ),
+            )
+
     config = get_runtime_config(conn)
 
     # Validation

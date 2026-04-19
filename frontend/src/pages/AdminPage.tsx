@@ -24,7 +24,7 @@ import { Link } from "react-router-dom";
 import { fetchCoverageSummary } from "@/api/coverage";
 import { fetchJobsOverview, runJob } from "@/api/jobs";
 import { fetchRecommendations } from "@/api/recommendations";
-import { fetchSyncLayersV2, fetchSyncStatus } from "@/api/sync";
+import { fetchSyncLayersV2, fetchSyncStatus, setLayerEnabled } from "@/api/sync";
 import { ApiError } from "@/api/client";
 import type {
   CoverageSummaryResponse,
@@ -153,6 +153,25 @@ export function AdminPage() {
 
   const [orchestratorOpen, setOrchestratorOpen] = useState(false);
   const [rowState, setRowState] = useState<Record<string, RowState>>({});
+  const [toast, setToast] = useState<string | null>(null);
+
+  const handleLayerToggle = useCallback(
+    async (layerName: string, enabled: boolean) => {
+      try {
+        const resp = await setLayerEnabled(layerName, enabled);
+        refetchV2();
+        if (resp.warning !== null) {
+          setToast(resp.warning);
+          window.setTimeout(() => setToast(null), 6000);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setToast(`Failed to update ${layerName}: ${msg}`);
+        window.setTimeout(() => setToast(null), 6000);
+      }
+    },
+    [refetchV2],
+  );
 
   const handleRun = useCallback(
     async (name: string) => {
@@ -214,6 +233,15 @@ export function AdminPage() {
         />
       </div>
 
+      {toast !== null ? (
+        <div
+          role="status"
+          className="rounded-md border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800"
+        >
+          {toast}
+        </div>
+      ) : null}
+
       <ProblemsPanel
         v2={v2.data}
         jobs={jobs.data}
@@ -248,9 +276,7 @@ export function AdminPage() {
         ) : v2.data ? (
           <LayerHealthList
             layers={v2.data.layers}
-            onToggle={() => {
-              /* wired in chunk 2 */
-            }}
+            onToggle={handleLayerToggle}
           />
         ) : null}
       </CollapsibleSection>

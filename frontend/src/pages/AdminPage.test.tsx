@@ -22,6 +22,8 @@ import { ApiError } from "@/api/client";
 import type {
   CoverageSummaryResponse,
   JobsListResponse,
+  LayerEnabledResponse,
+  LayerEntry,
   RecommendationsListResponse,
   ConfigResponse,
   SyncLayersV2Response,
@@ -34,6 +36,7 @@ vi.mock("@/api/sync", () => ({
   fetchSyncStatus: vi.fn(),
   fetchSyncRuns: vi.fn(),
   triggerSync: vi.fn(),
+  setLayerEnabled: vi.fn(),
 }));
 vi.mock("@/api/coverage", () => ({ fetchCoverageSummary: vi.fn() }));
 vi.mock("@/api/recommendations", () => ({ fetchRecommendations: vi.fn() }));
@@ -45,6 +48,7 @@ import {
   fetchSyncLayersV2,
   fetchSyncRuns,
   fetchSyncStatus,
+  setLayerEnabled,
 } from "@/api/sync";
 import { fetchCoverageSummary } from "@/api/coverage";
 import { fetchRecommendations } from "@/api/recommendations";
@@ -59,6 +63,7 @@ const mockedSyncRuns = vi.mocked(fetchSyncRuns);
 const mockedCoverage = vi.mocked(fetchCoverageSummary);
 const mockedRecs = vi.mocked(fetchRecommendations);
 const mockedConfig = vi.mocked(fetchConfig);
+const mockedSetLayerEnabled = vi.mocked(setLayerEnabled);
 
 function demoConfig(): ConfigResponse {
   return {
@@ -168,6 +173,7 @@ beforeEach(() => {
   mockedCoverage.mockReset();
   mockedRecs.mockReset();
   mockedConfig.mockReset();
+  mockedSetLayerEnabled.mockReset();
 
   mockedConfig.mockResolvedValue(demoConfig());
   mockedJobs.mockResolvedValue(jobsResponse());
@@ -395,6 +401,107 @@ describe("AdminPage — Background tasks collapsible", () => {
     });
     await user.click(btn);
     expect(btn).toHaveTextContent("Unknown job");
+  });
+});
+
+describe("AdminPage — layer toggle wire", () => {
+  function mkLayer(overrides: Partial<LayerEntry>): LayerEntry {
+    return {
+      layer: overrides.layer ?? "candles",
+      display_name: overrides.display_name ?? "Daily Price Candles",
+      state: overrides.state ?? "healthy",
+      last_updated: overrides.last_updated ?? null,
+      plain_language_sla: overrides.plain_language_sla ?? "Refreshed nightly.",
+    };
+  }
+
+  function v2WithLayers(layers: LayerEntry[]): SyncLayersV2Response {
+    return {
+      generated_at: new Date().toISOString(),
+      system_state: "ok",
+      system_summary: "All layers healthy",
+      action_needed: [],
+      degraded: [],
+      secret_missing: [],
+      healthy: [],
+      disabled: [],
+      cascade_groups: [],
+      layers,
+    };
+  }
+
+  it("wires LayerHealthList onToggle to setLayerEnabled + refetches when no warning", async () => {
+    const user = userEvent.setup();
+    mockedV2.mockResolvedValue(v2WithLayers([mkLayer({ layer: "candles" })]));
+    const resp: LayerEnabledResponse = {
+      layer: "candles",
+      display_name: "Daily Price Candles",
+      is_enabled: false,
+      warning: null,
+    };
+    mockedSetLayerEnabled.mockResolvedValue(resp);
+
+    renderPage();
+    // Expand Layer health section.
+    await user.click(await screen.findByRole("button", { name: /Layer health/ }));
+    // Open ⋯ menu and click Disable layer.
+    await user.click(await screen.findByLabelText("candles actions"));
+    await user.click(await screen.findByText("Disable layer"));
+
+    await waitFor(() => {
+      expect(mockedSetLayerEnabled).toHaveBeenCalledWith("candles", false);
+    });
+    // v2.refetch fires — mockedV2 should be called again.
+    await waitFor(() => {
+      expect(mockedV2.mock.calls.length).toBeGreaterThan(1);
+    });
+    // No toast when warning is null.
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("shows warning toast when backend returns a warning", async () => {
+    const user = userEvent.setup();
+    mockedV2.mockResolvedValue(
+      v2WithLayers([mkLayer({ layer: "fx_rates", display_name: "FX Rates" })]),
+    );
+    const resp: LayerEnabledResponse = {
+      layer: "fx_rates",
+      display_name: "FX Rates",
+      is_enabled: false,
+      warning: "FX rates disabled — portfolio valuations and P&L will drift.",
+    };
+    mockedSetLayerEnabled.mockResolvedValue(resp);
+
+    // Auto-accept the safety-critical confirm.
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /Layer health/ }));
+    await user.click(await screen.findByLabelText("fx_rates actions"));
+    await user.click(await screen.findByText("Disable layer"));
+
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(/drift/i);
+
+    confirmSpy.mockRestore();
+  });
+
+  it("shows error toast when setLayerEnabled rejects", async () => {
+    const user = userEvent.setup();
+    mockedV2.mockResolvedValue(v2WithLayers([mkLayer({ layer: "candles" })]));
+    mockedSetLayerEnabled.mockRejectedValue(new Error("Network error"));
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /Layer health/ }));
+    await user.click(await screen.findByLabelText("candles actions"));
+    await user.click(await screen.findByText("Disable layer"));
+
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(/Failed to update candles/);
   });
 });
 

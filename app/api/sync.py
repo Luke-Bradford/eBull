@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from app.api.auth import require_session_or_service_token
 from app.config import settings
 from app.db import get_conn
+from app.services.layer_enabled import set_layer_enabled
 from app.services.sync_orchestrator import (
     ExecutionPlan,
     SyncAlreadyRunning,
@@ -136,6 +137,27 @@ class SyncLayersV2Response(BaseModel):
     disabled: list[LayerSummary]
     cascade_groups: list[CascadeGroupModel]
     layers: list[LayerEntry]
+
+
+class LayerEnabledRequest(BaseModel):
+    enabled: bool
+
+
+class LayerEnabledResponse(BaseModel):
+    layer: str
+    display_name: str
+    is_enabled: bool
+    warning: str | None = None
+
+
+def _safety_warning(layer_name: str, enabled: bool) -> str | None:
+    if enabled:
+        return None
+    if layer_name == "fx_rates":
+        return "FX rates disabled — portfolio valuations and P&L will drift. Re-enable before resuming live operation."
+    if layer_name == "portfolio_sync":
+        return "Portfolio sync disabled — broker positions will not refresh. Re-enable before resuming live operation."
+    return None
 
 
 def _scope_from(body: SyncRequest) -> SyncScope:
@@ -458,6 +480,31 @@ def get_sync_layers_v2(
         disabled=disabled,
         cascade_groups=cascade_groups,
         layers=layers_entries,
+    )
+
+
+@router.post("/layers/{layer_name}/enabled", response_model=LayerEnabledResponse)
+def post_layer_enabled(
+    layer_name: str,
+    body: LayerEnabledRequest,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> LayerEnabledResponse:
+    """Toggle a layer's operator-enabled flag.
+
+    Any layer can be toggled. Safety-critical layers (fx_rates,
+    portfolio_sync) surface a warning the UI shows as a toast; actual
+    BUY/ADD blocking lives in the execution_guard
+    safety_layers_enabled rule (chunk 2 task 2.2).
+    """
+    if layer_name not in LAYERS:
+        raise HTTPException(status_code=404, detail=f"unknown layer: {layer_name}")
+    set_layer_enabled(conn, layer_name, enabled=body.enabled)
+    conn.commit()
+    return LayerEnabledResponse(
+        layer=layer_name,
+        display_name=LAYERS[layer_name].display_name,
+        is_enabled=body.enabled,
+        warning=_safety_warning(layer_name, body.enabled),
     )
 
 
