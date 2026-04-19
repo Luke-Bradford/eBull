@@ -38,7 +38,13 @@ def classify_exception(exc: BaseException) -> FailureCategory:
         if 500 <= status < 600:
             return FailureCategory.SOURCE_DOWN
         return FailureCategory.INTERNAL_ERROR
-    if isinstance(exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout)):
+    # httpx.TransportError is the base for ConnectError, ReadTimeout,
+    # ConnectTimeout, WriteTimeout, PoolTimeout, RemoteProtocolError,
+    # and other network-layer faults. The base-class check catches
+    # future TransportError subclasses without this file needing an
+    # update. HTTPStatusError is NOT a TransportError subclass, so the
+    # preceding branch still owns status-code classification.
+    if isinstance(exc, httpx.TransportError):
         return FailureCategory.SOURCE_DOWN
     if isinstance(exc, psycopg.errors.IntegrityError):
         return FailureCategory.DB_CONSTRAINT

@@ -34,6 +34,12 @@ def test_httpx_status_errors(status: int, expected: FailureCategory) -> None:
         httpx.ConnectError("unreachable"),
         httpx.ConnectTimeout("timeout"),
         httpx.ReadTimeout("read timeout"),
+        # Base-class dispatch must also catch less common TransportError
+        # subclasses — regression guard so a future narrowing doesn't
+        # silently shove these into INTERNAL_ERROR.
+        httpx.WriteTimeout("write timeout"),
+        httpx.PoolTimeout("pool timeout"),
+        httpx.RemoteProtocolError("peer hung up"),
     ],
 )
 def test_httpx_transport_errors_map_to_source_down(exc: Exception) -> None:
