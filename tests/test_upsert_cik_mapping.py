@@ -126,8 +126,10 @@ def test_cik_reassigned_to_different_instrument(ebull_test_conn: psycopg.Connect
     upsert_cik_mapping(conn, {"OLD": "0000555555"}, [("OLD", "1")])
     upsert_cik_mapping(conn, {"NEW": "0000555555"}, [("NEW", "2")])
 
-    assert _primary_cik(conn, 1) is None
-    assert _primary_cik(conn, 2) == "0000555555"
+    # Instrument 1 must have no rows at all — the ON CONFLICT path rewrites
+    # the single (sec, cik, 0000555555) row in place from instrument 1 to 2.
+    assert _all_rows(conn, 1) == []
+    assert _all_rows(conn, 2) == [("0000555555", True)]
 
 
 def test_cik_reassigned_to_instrument_with_existing_different_cik(
