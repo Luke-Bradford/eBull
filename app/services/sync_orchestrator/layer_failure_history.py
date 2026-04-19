@@ -1,5 +1,10 @@
 """Failure-history helpers for `/sync/layers`.
 
+Also exposes `all_layer_histories(conn)` for the `/sync/layers`
+endpoint so the per-layer loop can share a single pair of queries
+instead of issuing two round-trips per layer (30 total for 15 layers).
+
+
 The endpoint's response model declares `consecutive_failures` and
 `last_error_category`, but the legacy implementation hardcoded
 `consecutive_failures=0` and only populated `last_error_category` from
@@ -105,3 +110,88 @@ def last_error_category(
         return None
     category = row["error_category"]
     return str(category) if category is not None else None
+
+
+def all_layer_histories(
+    conn: psycopg.Connection[Any],
+) -> tuple[dict[str, int], dict[str, str | None]]:
+    """Batched equivalent of (consecutive_failures, last_error_category).
+
+    Returns a pair of dicts keyed by layer_name:
+      - consecutive failure streaks (layer -> int, 0 if no failures at head)
+      - last non-null error category (layer -> str | None)
+
+    Each map is computed with a single query using window functions,
+    replacing the 15 * 2 = 30 per-request round-trips that the
+    per-layer helpers would issue when called in a loop.
+    """
+    # consecutive_failures: for each layer, count the head-streak of
+    # status='failed' rows when ordered by (started_at DESC NULLS LAST,
+    # sync_run_id DESC). We compute a row_number per layer in that
+    # ordering and count how many of the first N rows are 'failed'
+    # before hitting a non-failed one.
+    #
+    # SQL pattern: find the row_number of the FIRST non-failed row
+    # per layer; the streak length is (that row_number - 1), or the
+    # total row count for that layer if every row is 'failed'.
+    streaks: dict[str, int] = {}
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    layer_name,
+                    status,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY layer_name
+                        ORDER BY started_at DESC NULLS LAST, sync_run_id DESC
+                    ) AS rn
+                FROM sync_layer_progress
+            ),
+            first_non_failed AS (
+                SELECT layer_name, MIN(rn) AS rn
+                FROM ranked
+                WHERE status <> 'failed'
+                GROUP BY layer_name
+            ),
+            totals AS (
+                SELECT layer_name, COUNT(*) AS total
+                FROM sync_layer_progress
+                GROUP BY layer_name
+            )
+            SELECT
+                t.layer_name,
+                COALESCE(f.rn - 1, t.total) AS streak
+            FROM totals t
+            LEFT JOIN first_non_failed f USING (layer_name);
+            """
+        )
+        for row in cur.fetchall():
+            streaks[str(row["layer_name"])] = int(row["streak"])
+
+    categories: dict[str, str | None] = {}
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    layer_name,
+                    error_category,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY layer_name
+                        ORDER BY started_at DESC NULLS LAST, sync_run_id DESC
+                    ) AS rn
+                FROM sync_layer_progress
+                WHERE error_category IS NOT NULL
+            )
+            SELECT layer_name, error_category
+            FROM ranked
+            WHERE rn = 1;
+            """
+        )
+        for row in cur.fetchall():
+            categories[str(row["layer_name"])] = (
+                str(row["error_category"]) if row["error_category"] is not None else None
+            )
+
+    return streaks, categories

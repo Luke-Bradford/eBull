@@ -84,14 +84,17 @@ export function useSyncTrigger(
               : `Failed (HTTP ${err.status})`
           : "Failed";
       setState({ kind: "error", queuedRunId: null, message });
-    } finally {
-      // Release the in-flight guard so an operator can retry after
-      // an error, or click again once the queued badge clears. The
-      // disabled state on the button prevents a second click while
-      // the hook is still `running`/`queued`; the ref only adds a
-      // race-proof backup guard for the concurrent-invocation case.
+      // Release the guard on the error branch so the operator can
+      // click Retry. The button's disabled state would also block a
+      // second click on the success branch, so no defensive early
+      // reset is needed there.
       inFlightRef.current = false;
     }
+    // Deliberately no finally: when the POST succeeds, inFlightRef
+    // stays true through the running → queued window until
+    // clearQueued() transitions us back to idle. A second click in
+    // that window would otherwise slip past the guard while `kind`
+    // is still `queued`.
   }, [onTriggered]);
 
   const clearQueued = useCallback((isRunning: boolean) => {
@@ -102,6 +105,7 @@ export function useSyncTrigger(
       // because the caller also OR's with `isRunning` when wiring
       // `disabled`.
       if (prev.kind === "queued" && isRunning) {
+        inFlightRef.current = false;
         return { kind: "idle", queuedRunId: null, message: null };
       }
       // `error` has no auto-reset — caller must click again.

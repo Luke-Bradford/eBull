@@ -151,16 +151,35 @@ function renderPanel(
   erroredSources: string[],
 ): JSX.Element {
 
+  // When there are zero confirmed problems but some sources are
+  // still loading or errored, render neutral/amber — not red. Alarm
+  // tone is reserved for known-problems.
+  const hasProblems = problems.length > 0;
+  const sectionTone = hasProblems
+    ? "border-red-200 bg-red-50"
+    : erroredSources.length > 0
+      ? "border-amber-200 bg-amber-50"
+      : "border-slate-200 bg-slate-50";
+  const headerTone = hasProblems
+    ? "border-red-200 text-red-800"
+    : erroredSources.length > 0
+      ? "border-amber-200 text-amber-800"
+      : "border-slate-200 text-slate-700";
   return (
     <section
       role="region"
       aria-label="Current problems"
-      className="rounded-md border border-red-200 bg-red-50 shadow-sm"
+      className={`rounded-md border shadow-sm ${sectionTone}`}
     >
-      <header className="flex items-center justify-between border-b border-red-200 px-4 py-2 text-sm font-semibold text-red-800">
+      <header
+        className={`flex items-center justify-between border-b px-4 py-2 text-sm font-semibold ${headerTone}`}
+      >
         <span>
-          {problems.length} problem{problems.length === 1 ? "" : "s"} need
-          {problems.length === 1 ? "s" : ""} attention
+          {hasProblems
+            ? `${problems.length} problem${problems.length === 1 ? "" : "s"} need${problems.length === 1 ? "s" : ""} attention`
+            : erroredSources.length > 0
+              ? "No confirmed problems yet"
+              : "Checking for problems…"}
         </span>
         <span className="flex items-center gap-3 text-xs font-normal">
           {pendingSources.length > 0 ? (

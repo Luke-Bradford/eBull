@@ -107,10 +107,14 @@ export function SyncDashboard({ syncTrigger }: SyncDashboardProps) {
     clearQueued(isRunning);
   }, [clearQueued, isRunning]);
 
+  // SyncDashboard's own fetches are refreshed by the interval poll
+  // (10s while is_running=true). We do NOT also refetchAll here —
+  // trigger() is a no-op when the hook is already running/queued,
+  // so an unconditional refetchAll on click would fire spurious
+  // reads on a blocked second click.
   const handleSyncNow = useCallback(async () => {
     await syncTrigger.trigger();
-    refetchAll();
-  }, [syncTrigger, refetchAll]);
+  }, [syncTrigger]);
 
   const layerList: SyncLayer[] = layers.data?.layers ?? [];
   const stale = layerList.filter((l) => !l.is_fresh).length;

@@ -170,9 +170,12 @@ def get_sync_layers(
     """All 15 layers with freshness + last successful run."""
     from app.services.sync_orchestrator import LAYERS
     from app.services.sync_orchestrator.layer_failure_history import (
-        consecutive_failures,
-        last_error_category,
+        all_layer_histories,
     )
+
+    # One pair of queries instead of two-per-layer in the loop below.
+    # Was O(N) round-trips; now O(1).
+    failure_streaks, persisted_errors = all_layer_histories(conn)
 
     # _LAYER_TO_JOB is built and asserted-disjoint at module import.
     out: list[dict[str, Any]] = []
@@ -215,9 +218,10 @@ def get_sync_layers(
         # "the layer has failed three runs in a row". Both callers
         # are triage signals, so we prefer the in-request error when
         # present and fall back to the most-recent-persisted category
-        # otherwise.
-        consec = consecutive_failures(conn, name)
-        persisted_error = last_error_category(conn, name)
+        # otherwise. Both values come from the two batched queries
+        # above — no per-layer round-trips.
+        consec = failure_streaks.get(name, 0)
+        persisted_error = persisted_errors.get(name)
         out.append(
             {
                 "name": name,

@@ -22,6 +22,7 @@ import psycopg
 import pytest
 
 from app.services.sync_orchestrator.layer_failure_history import (
+    all_layer_histories,
     consecutive_failures,
     last_error_category,
 )
@@ -172,15 +173,6 @@ class TestNullStartedAtOrdering:
         # Three failures, plus a later null-started pending row
         # inserted with a NULL started_at (simulating a row frozen
         # mid-planning by the reaper).
-        _seed_progress_rows(
-            conn,
-            f"test-layer-{uuid4()}",
-            [
-                ("failed", 90, "db_constraint"),
-                ("failed", 60, "db_constraint"),
-                ("failed", 30, "db_constraint"),
-            ],
-        )
         layer = f"test-layer-null-{uuid4()}"
         # Insert the failures first.
         _seed_progress_rows(
@@ -266,3 +258,34 @@ class TestLastErrorCategory:
         # Survives the recovery — the category from the failed run is
         # still "last known", which is what a triage panel wants.
         assert last_error_category(conn, layer) == "network_timeout"
+
+
+class TestBatchedAllLayerHistories:
+    """Batched equivalent called once by /sync/layers instead of
+    30 round-trips. Must agree with the per-layer helpers."""
+
+    def test_returns_streak_and_category_per_layer(self, conn: psycopg.Connection[object]) -> None:
+        a = f"test-layer-a-{uuid4()}"
+        b = f"test-layer-b-{uuid4()}"
+        _seed_progress_rows(
+            conn,
+            a,
+            [
+                ("failed", 60, "db_constraint"),
+                ("failed", 30, "db_constraint"),
+                ("failed", 10, "db_constraint"),  # head is 3 failures
+            ],
+        )
+        _seed_progress_rows(
+            conn,
+            b,
+            [
+                ("failed", 120, "network"),
+                ("complete", 10, None),  # latest success → streak 0
+            ],
+        )
+        streaks, categories = all_layer_histories(conn)
+        assert streaks[a] == 3
+        assert streaks[b] == 0
+        assert categories[a] == "db_constraint"
+        assert categories[b] == "network"
