@@ -4,21 +4,21 @@ from typing import Any
 import psycopg
 import pytest
 
-from app.services.sync_orchestrator.layer_types import LayerState
 from app.services.sync_orchestrator.layer_types import (
-    FailureCategory,
+    DEFAULT_RETRY_POLICY,
     REMEDIES,
-    Remedy,
-)
-from app.services.sync_orchestrator.layer_types import (
     Cadence,
     ContentPredicate,
-    DEFAULT_RETRY_POLICY,
-    FailureCategory as _FC,  # avoid redef shadow; OK to remove alias if not needed
+    FailureCategory,
     LayerRefreshFailed,
+    LayerState,
+    Remedy,
     RetryPolicy,
     SecretRef,
     cadence_display_string,
+)
+from app.services.sync_orchestrator.layer_types import (
+    FailureCategory as _FC,
 )
 
 
@@ -110,6 +110,7 @@ def test_layer_refresh_failed_carries_category() -> None:
 def test_content_predicate_is_a_callable_protocol() -> None:
     def my_pred(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
         return True, "ok"
+
     _: ContentPredicate = my_pred
     assert my_pred is not None
 
