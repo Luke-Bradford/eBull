@@ -927,7 +927,7 @@ Apply idempotently — rerun to confirm.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add sql/034_job_runs_error_category.sql
+git add sql/039_job_runs_error_category.sql
 git commit -m "feat(#328): add error_category column to job_runs"
 ```
 
