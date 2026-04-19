@@ -1,3 +1,5 @@
+from typing import Any
+
 from app.services.sync_orchestrator.layer_state import (
     LayerContext,
     compute_layer_state,
@@ -5,23 +7,43 @@ from app.services.sync_orchestrator.layer_state import (
 from app.services.sync_orchestrator.layer_types import LayerState
 
 
-def _ctx(**overrides):
-    defaults = dict(
-        is_enabled=True,
-        is_running=False,
-        latest_status="complete",
-        latest_category=None,
-        attempts=0,
-        upstream_states={},
-        secret_present=True,
-        content_ok=True,
-        age_seconds=60.0,
-        cadence_seconds=86400.0,
-        grace_multiplier=1.25,
-        max_attempts=3,
+def _ctx(**overrides: Any) -> LayerContext:
+    """Build a LayerContext from defaults + overrides. Keyword-only.
+
+    Typed-Any overrides because pyright (strict) otherwise narrows the
+    unpacked defaults-dict to the widest field union and flags every
+    kwarg. The LayerContext constructor still validates the types at
+    runtime via its dataclass annotations.
+    """
+    params: dict[str, Any] = {
+        "is_enabled": True,
+        "is_running": False,
+        "latest_status": "complete",
+        "latest_category": None,
+        "attempts": 0,
+        "upstream_states": {},
+        "secret_present": True,
+        "content_ok": True,
+        "age_seconds": 60.0,
+        "cadence_seconds": 86400.0,
+        "grace_multiplier": 1.25,
+        "max_attempts": 3,
+    }
+    params.update(overrides)
+    return LayerContext(
+        is_enabled=params["is_enabled"],
+        is_running=params["is_running"],
+        latest_status=params["latest_status"],
+        latest_category=params["latest_category"],
+        attempts=params["attempts"],
+        upstream_states=params["upstream_states"],
+        secret_present=params["secret_present"],
+        content_ok=params["content_ok"],
+        age_seconds=params["age_seconds"],
+        cadence_seconds=params["cadence_seconds"],
+        grace_multiplier=params["grace_multiplier"],
+        max_attempts=params["max_attempts"],
     )
-    defaults.update(overrides)
-    return LayerContext(**defaults)
 
 
 def test_disabled_overrides_everything() -> None:
