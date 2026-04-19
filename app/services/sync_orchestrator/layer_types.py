@@ -11,9 +11,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-import psycopg
+if TYPE_CHECKING:
+    # psycopg is only used in ContentPredicate's type annotation. Guarding
+    # under TYPE_CHECKING keeps this bottom-of-graph module importable in
+    # contexts that need only the enums + dataclasses.
+    import psycopg
 
 
 class LayerState(StrEnum):
@@ -161,6 +165,7 @@ def cadence_display_string(cadence: Cadence) -> str:
     total = int(cadence.interval.total_seconds())
     if total % 86400 == 0:
         d = total // 86400
+        # d == 1 → "daily" (spoken word); d > 1 → "Nd" (compact label).
         return f"{d}d" if d > 1 else "daily"
     if total % 3600 == 0:
         return f"{total // 3600}h"
