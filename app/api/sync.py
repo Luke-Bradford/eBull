@@ -174,8 +174,10 @@ def get_sync_layers(
     )
 
     # One pair of queries instead of two-per-layer in the loop below.
-    # Was O(N) round-trips; now O(1).
-    failure_streaks, persisted_errors = all_layer_histories(conn)
+    # Was O(N) round-trips; now O(1). The layer name filter keeps both
+    # queries on an index seek regardless of how large the history
+    # table grows.
+    failure_streaks, persisted_errors = all_layer_histories(conn, list(LAYERS.keys()))
 
     # _LAYER_TO_JOB is built and asserted-disjoint at module import.
     out: list[dict[str, Any]] = []

@@ -284,8 +284,41 @@ class TestBatchedAllLayerHistories:
                 ("complete", 10, None),  # latest success → streak 0
             ],
         )
-        streaks, categories = all_layer_histories(conn)
+        streaks, categories = all_layer_histories(conn, [a, b])
         assert streaks[a] == 3
         assert streaks[b] == 0
         assert categories[a] == "db_constraint"
         assert categories[b] == "network"
+
+    def test_empty_layer_list_returns_empty_dicts(self, conn: psycopg.Connection[object]) -> None:
+        streaks, categories = all_layer_histories(conn, [])
+        assert streaks == {}
+        assert categories == {}
+
+    def test_unknown_layer_name_not_in_result(self, conn: psycopg.Connection[object]) -> None:
+        # Layer has no rows — neither dict should contain it.
+        fresh = f"test-layer-never-{uuid4()}"
+        streaks, categories = all_layer_histories(conn, [fresh])
+        assert fresh not in streaks
+        assert fresh not in categories
+
+    def test_filter_excludes_other_layers(self, conn: psycopg.Connection[object]) -> None:
+        # Two layers exist in the DB but only one is requested —
+        # the filter must keep the other out.
+        included = f"test-layer-inc-{uuid4()}"
+        excluded = f"test-layer-exc-{uuid4()}"
+        _seed_progress_rows(
+            conn,
+            included,
+            [("failed", 20, "cat1"), ("failed", 10, "cat1")],
+        )
+        _seed_progress_rows(
+            conn,
+            excluded,
+            [("failed", 20, "cat2"), ("failed", 10, "cat2")],
+        )
+        streaks, categories = all_layer_histories(conn, [included])
+        assert streaks.get(included) == 2
+        assert included in categories
+        assert excluded not in streaks
+        assert excluded not in categories

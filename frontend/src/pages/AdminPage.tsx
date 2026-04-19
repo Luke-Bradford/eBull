@@ -149,7 +149,9 @@ export function AdminPage() {
     [jobs.refetch],
   );
 
-  function openOrchestrator() {
+  // Stable callback so ProblemsPanel's useEffect on `layers` does
+  // not re-run (and re-compute problems) every AdminPage render.
+  const openOrchestrator = useCallback(() => {
     setOrchestratorOpen(true);
     // Let the section mount before we scroll, so the target exists.
     // scrollIntoView is undefined in jsdom so we guard defensively —
@@ -160,7 +162,7 @@ export function AdminPage() {
         el.scrollIntoView({ behavior: "smooth", block: "start" });
       }
     });
-  }
+  }, []);
 
   const backgroundJobs = (jobs.data?.jobs ?? []).filter(
     (j) => !ORCHESTRATOR_OWNED.has(j.name),

@@ -114,6 +114,7 @@ def last_error_category(
 
 def all_layer_histories(
     conn: psycopg.Connection[Any],
+    layer_names: list[str] | tuple[str, ...],
 ) -> tuple[dict[str, int], dict[str, str | None]]:
     """Batched equivalent of (consecutive_failures, last_error_category).
 
@@ -124,7 +125,14 @@ def all_layer_histories(
     Each map is computed with a single query using window functions,
     replacing the 15 * 2 = 30 per-request round-trips that the
     per-layer helpers would issue when called in a loop.
+
+    Both queries filter to the supplied ``layer_names`` list so
+    `sync_layer_progress` is indexed-scanned by layer name rather
+    than full-scanned — bounded cost as the table grows.
     """
+    if not layer_names:
+        return {}, {}
+    names = list(layer_names)
     # consecutive_failures: for each layer, count the head-streak of
     # status='failed' rows when ordered by (started_at DESC NULLS LAST,
     # sync_run_id DESC). We compute a row_number per layer in that
@@ -147,6 +155,7 @@ def all_layer_histories(
                         ORDER BY started_at DESC NULLS LAST, sync_run_id DESC
                     ) AS rn
                 FROM sync_layer_progress
+                WHERE layer_name = ANY(%s)
             ),
             first_non_failed AS (
                 SELECT layer_name, MIN(rn) AS rn
@@ -157,6 +166,7 @@ def all_layer_histories(
             totals AS (
                 SELECT layer_name, COUNT(*) AS total
                 FROM sync_layer_progress
+                WHERE layer_name = ANY(%s)
                 GROUP BY layer_name
             )
             SELECT
@@ -164,7 +174,8 @@ def all_layer_histories(
                 COALESCE(f.rn - 1, t.total) AS streak
             FROM totals t
             LEFT JOIN first_non_failed f USING (layer_name);
-            """
+            """,
+            (names, names),
         )
         for row in cur.fetchall():
             streaks[str(row["layer_name"])] = int(row["streak"])
@@ -182,16 +193,18 @@ def all_layer_histories(
                         ORDER BY started_at DESC NULLS LAST, sync_run_id DESC
                     ) AS rn
                 FROM sync_layer_progress
-                WHERE error_category IS NOT NULL
+                WHERE error_category IS NOT NULL AND layer_name = ANY(%s)
             )
             SELECT layer_name, error_category
             FROM ranked
             WHERE rn = 1;
-            """
+            """,
+            (names,),
         )
         for row in cur.fetchall():
-            categories[str(row["layer_name"])] = (
-                str(row["error_category"]) if row["error_category"] is not None else None
-            )
+            # WHERE error_category IS NOT NULL in the CTE already
+            # guarantees we never see a NULL here — the cast is just
+            # for mypy/pyright's benefit on `object` columns.
+            categories[str(row["layer_name"])] = str(row["error_category"])
 
     return streaks, categories
