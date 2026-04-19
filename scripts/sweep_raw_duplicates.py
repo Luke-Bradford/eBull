@@ -31,12 +31,22 @@ from pathlib import Path
 RAW_ROOT = Path("data/raw")
 
 # Each entry: (subdir, filename regex with `ident` group, key tuple builder)
+_TS = r"(?P<ts>\d{8}T\d{6}Z)"
 PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("sec_fundamentals", re.compile(r"^sec_facts_(?P<ident>\d+)_(?P<ts>\d{8}T\d{6}Z)\.json$")),
-    ("sec", re.compile(r"^sec_submissions_(?P<ident>\d+)_(?P<ts>\d{8}T\d{6}Z)\.json$")),
-    ("fmp", re.compile(r"^fmp_(?P<endpoint>[a-z_]+)_(?P<ident>[A-Z0-9.\-]+)_(?P<ts>\d{8}T\d{6}Z)\.json$")),
-    ("etoro", re.compile(r"^(?P<endpoint>candles|quotes|positions|instruments)_(?P<ident>[\w\-]+)_(?P<ts>\d{8}T\d{6}Z)\.json$")),
-    ("etoro_broker", re.compile(r"^(?P<endpoint>[a-z_]+)_(?P<ident>[\w\-]+)_(?P<ts>\d{8}T\d{6}Z)\.json$")),
+    ("sec_fundamentals", re.compile(rf"^sec_facts_(?P<ident>\d+)_{_TS}\.json$")),
+    ("sec", re.compile(rf"^sec_submissions_(?P<ident>\d+)_{_TS}\.json$")),
+    ("fmp", re.compile(rf"^fmp_(?P<endpoint>[a-z_]+)_(?P<ident>[A-Z0-9.\-]+)_{_TS}\.json$")),
+    (
+        "etoro",
+        re.compile(
+            rf"^(?P<endpoint>candles|quotes|positions|instruments)"
+            rf"_(?P<ident>[\w\-]+)_{_TS}\.json$",
+        ),
+    ),
+    (
+        "etoro_broker",
+        re.compile(rf"^(?P<endpoint>[a-z_]+)_(?P<ident>[\w\-]+)_{_TS}\.json$"),
+    ),
 ]
 
 
