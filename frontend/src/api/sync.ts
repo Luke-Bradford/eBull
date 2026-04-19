@@ -35,7 +35,7 @@ export type SyncStatus = "running" | "complete" | "partial" | "failed";
 
 export interface SyncRun {
   sync_run_id: number;
-  scope: "full" | "layer" | "high_frequency" | "job";
+  scope: "full" | "layer" | "high_frequency" | "job" | "behind";
   scope_detail: string | null;
   trigger: "manual" | "scheduled" | "catch_up";
   started_at: string;
@@ -71,7 +71,7 @@ export interface SyncStatusResponse {
   } | null;
 }
 
-export type SyncScopeKind = "full" | "layer" | "high_frequency" | "job";
+export type SyncScopeKind = "full" | "layer" | "high_frequency" | "job" | "behind";
 
 export interface SyncTriggerRequest {
   scope: SyncScopeKind;

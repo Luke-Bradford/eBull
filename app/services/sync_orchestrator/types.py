@@ -125,7 +125,7 @@ SyncTrigger = Literal["manual", "scheduled", "catch_up"]
 
 @dataclass(frozen=True)
 class SyncScope:
-    kind: Literal["full", "layer", "high_frequency", "job"]
+    kind: Literal["full", "layer", "high_frequency", "job", "behind"]
     detail: str | None = None
     force: bool = False
 
@@ -144,6 +144,14 @@ class SyncScope:
     @classmethod
     def high_frequency(cls) -> SyncScope:
         return cls(kind="high_frequency")
+
+    @classmethod
+    def behind(cls) -> SyncScope:
+        # `force=True`: target layers were already state-selected as
+        # DEGRADED / ACTION_NEEDED (and their non-HEALTHY upstreams).
+        # Legacy `is_fresh` re-filtering would drop jobs the state
+        # machine explicitly wants refreshed, so bypass it.
+        return cls(kind="behind", force=True)
 
 
 @dataclass(frozen=True)
