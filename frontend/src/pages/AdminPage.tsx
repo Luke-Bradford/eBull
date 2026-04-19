@@ -24,7 +24,7 @@ import { Link } from "react-router-dom";
 import { fetchCoverageSummary } from "@/api/coverage";
 import { fetchJobsOverview, runJob } from "@/api/jobs";
 import { fetchRecommendations } from "@/api/recommendations";
-import { fetchSyncLayers, fetchSyncStatus } from "@/api/sync";
+import { fetchSyncLayersV2, fetchSyncStatus } from "@/api/sync";
 import { ApiError } from "@/api/client";
 import type {
   CoverageSummaryResponse,
@@ -32,6 +32,7 @@ import type {
 } from "@/api/types";
 import { CollapsibleSection } from "@/components/admin/CollapsibleSection";
 import { FundDataRow } from "@/components/admin/FundDataRow";
+import { LayerHealthList } from "@/components/admin/LayerHealthList";
 import { ProblemsPanel } from "@/components/admin/ProblemsPanel";
 import {
   SectionError,
@@ -61,7 +62,7 @@ const ORCHESTRATOR_OWNED = new Set([
 ]);
 
 export function AdminPage() {
-  const layers = useAsync(fetchSyncLayers, []);
+  const v2 = useAsync(fetchSyncLayersV2, []);
   const status = useAsync(fetchSyncStatus, []);
   const coverage = useAsync(fetchCoverageSummary, []);
   const jobs = useAsync(fetchJobsOverview, []);
@@ -80,19 +81,19 @@ export function AdminPage() {
   // that previously papered over the stability contract. `useAsync`
   // wraps refetch in `useCallback([], [])` — see useAsync.test.ts
   // which pins that invariant.
-  const refetchLayers = layers.refetch;
+  const refetchV2 = v2.refetch;
   const refetchStatus = status.refetch;
   const refetchCoverage = coverage.refetch;
   const refetchJobs = jobs.refetch;
   const refetchRecs = recs.refetch;
 
   const refetchAll = useCallback(() => {
-    refetchLayers();
+    refetchV2();
     refetchStatus();
     refetchCoverage();
     refetchJobs();
     refetchRecs();
-  }, [refetchLayers, refetchStatus, refetchCoverage, refetchJobs, refetchRecs]);
+  }, [refetchV2, refetchStatus, refetchCoverage, refetchJobs, refetchRecs]);
 
   const isRunning = status.data?.is_running ?? false;
   const refreshInterval = isRunning ? 10_000 : 60_000;
@@ -175,17 +176,20 @@ export function AdminPage() {
     [refetchJobs],
   );
 
-  // Stable callback so ProblemsPanel's useEffect on `layers` does
-  // not re-run (and re-compute problems) every AdminPage render.
-  const openOrchestrator = useCallback(() => {
+  const openOrchestratorFor = useCallback((layerName: string) => {
     setOrchestratorOpen(true);
     // Let the section mount before we scroll, so the target exists.
     // scrollIntoView is undefined in jsdom so we guard defensively —
     // the browser behaviour is unchanged.
     requestAnimationFrame(() => {
-      const el = document.getElementById("admin-orchestrator-details");
-      if (el && typeof el.scrollIntoView === "function") {
-        el.scrollIntoView({ behavior: "smooth", block: "start" });
+      const layerEl = document.getElementById(`admin-layer-${layerName}`);
+      if (layerEl && typeof layerEl.scrollIntoView === "function") {
+        layerEl.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+      const sectionEl = document.getElementById("admin-orchestrator-details");
+      if (sectionEl && typeof sectionEl.scrollIntoView === "function") {
+        sectionEl.scrollIntoView({ behavior: "smooth", block: "start" });
       }
     });
   }, []);
@@ -194,12 +198,9 @@ export function AdminPage() {
     (j) => !ORCHESTRATOR_OWNED.has(j.name),
   );
 
-  const layerProblemCount =
-    (layers.data?.layers ?? []).filter(
-      (l) =>
-        (l.consecutive_failures >= 1 && l.last_error_category !== null) ||
-        (!l.is_fresh && l.is_blocking),
-    ).length;
+  const unhealthyLayerCount = (v2.data?.layers ?? []).filter(
+    (l) => l.state !== "healthy" && l.state !== "disabled",
+  ).length;
 
   return (
     <div className="space-y-4">
@@ -214,13 +215,13 @@ export function AdminPage() {
       </div>
 
       <ProblemsPanel
-        layers={layers.data}
+        v2={v2.data}
         jobs={jobs.data}
         coverage={coverage.data}
-        layersError={layers.error !== null}
+        v2Error={v2.error !== null}
         jobsError={jobs.error !== null}
         coverageError={coverage.error !== null}
-        onOpenOrchestrator={openOrchestrator}
+        onOpenOrchestrator={openOrchestratorFor}
       />
 
       <FundDataRow
@@ -231,12 +232,32 @@ export function AdminPage() {
       />
 
       <CollapsibleSection
-        title="Orchestrator details"
+        title="Layer health"
         summary={
-          layerProblemCount > 0
-            ? `${layerProblemCount} layer${layerProblemCount === 1 ? "" : "s"} need attention`
-            : "all layers healthy"
+          v2.data === null
+            ? undefined
+            : unhealthyLayerCount > 0
+              ? `${unhealthyLayerCount} layer${unhealthyLayerCount === 1 ? "" : "s"} catching up or need attention`
+              : "all layers healthy"
         }
+      >
+        {v2.loading ? (
+          <SectionSkeleton rows={15} />
+        ) : v2.error !== null ? (
+          <SectionError onRetry={v2.refetch} />
+        ) : v2.data ? (
+          <LayerHealthList
+            layers={v2.data.layers}
+            onToggle={() => {
+              /* wired in chunk 2 */
+            }}
+          />
+        ) : null}
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        title="Orchestrator details"
+        summary="sync history"
         open={orchestratorOpen}
         onOpenChange={setOrchestratorOpen}
         sectionId="admin-orchestrator-details"
