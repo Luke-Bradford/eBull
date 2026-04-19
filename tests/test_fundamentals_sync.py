@@ -16,6 +16,23 @@ from app.services.filings_backfill import BackfillOutcome, BackfillResult
 from app.workers import scheduler
 
 
+def _stub_two_connect_ctxes(psycopg_mod: MagicMock, phase1_conn: MagicMock, phase2_conn: MagicMock) -> None:
+    """Wire psycopg.connect to return two distinct ``with``-context-manager
+    connections in sequence (phase 1 then phase 2).
+
+    fundamentals_sync calls ``psycopg.connect(...)`` twice — once per phase —
+    and a shared MagicMock would alias both calls to the same connection,
+    hiding any test that a phase uses the wrong one.
+    """
+    cm1 = MagicMock()
+    cm1.__enter__.return_value = phase1_conn
+    cm1.__exit__.return_value = None
+    cm2 = MagicMock()
+    cm2.__enter__.return_value = phase2_conn
+    cm2.__exit__.return_value = None
+    psycopg_mod.connect.side_effect = [cm1, cm2]
+
+
 def _stub_backfill_result(
     instrument_id: int,
     outcome: BackfillOutcome = BackfillOutcome.COMPLETE_OK,
@@ -62,6 +79,10 @@ def test_fundamentals_sync_runs_audit_backfill_then_review() -> None:
 
     eligible_rows = [(101, "0000000101"), (102, "0000000102")]
 
+    phase1_conn = MagicMock()
+    phase1_conn.execute.return_value.fetchall.return_value = eligible_rows
+    phase2_conn = MagicMock()
+
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
@@ -78,16 +99,15 @@ def test_fundamentals_sync_runs_audit_backfill_then_review() -> None:
         ) as backfill_mock,
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        conn_mock = MagicMock()
-        conn_mock.execute.return_value.fetchall.return_value = eligible_rows
-        psycopg_mod.connect.return_value.__enter__.return_value = conn_mock
+        _stub_two_connect_ctxes(psycopg_mod, phase1_conn, phase2_conn)
         provider_cls.return_value.__enter__.return_value = MagicMock()
 
         scheduler.fundamentals_sync()
 
-    audit_mock.assert_called_once_with(conn_mock)
+    # Each phase uses its own connection — no aliasing.
+    audit_mock.assert_called_once_with(phase1_conn)
+    review_mock.assert_called_once_with(phase2_conn)
     assert backfill_mock.call_count == 2
-    review_mock.assert_called_once()
     # audit.total_updated (7) + 2 × COMPLETE_OK (2) + promotions+demotions (3)
     assert tracker.row_count == 12
 
@@ -112,6 +132,10 @@ def test_fundamentals_sync_per_instrument_error_is_isolated() -> None:
 
     eligible_rows = [(201, "0000000201"), (202, "0000000202"), (203, "0000000203")]
 
+    phase1_conn = MagicMock()
+    phase1_conn.execute.return_value.fetchall.return_value = eligible_rows
+    phase2_conn = MagicMock()
+
     def flaky_backfill(conn: object, provider: object, cik: str, iid: int) -> BackfillResult:
         if iid == 202:
             raise RuntimeError("simulated provider crash")
@@ -133,18 +157,17 @@ def test_fundamentals_sync_per_instrument_error_is_isolated() -> None:
         ) as backfill_mock,
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        conn_mock = MagicMock()
-        conn_mock.execute.return_value.fetchall.return_value = eligible_rows
-        psycopg_mod.connect.return_value.__enter__.return_value = conn_mock
+        _stub_two_connect_ctxes(psycopg_mod, phase1_conn, phase2_conn)
         provider_cls.return_value.__enter__.return_value = MagicMock()
 
         scheduler.fundamentals_sync()
 
     assert backfill_mock.call_count == 3
-    conn_mock.rollback.assert_called()
+    # Rollback is the phase-1 connection's — phase-2 should not have been touched.
+    phase1_conn.rollback.assert_called()
     # Review still runs even after a per-instrument backfill error — we
     # completed phase 1 (not phase-fatal).
-    review_mock.assert_called_once()
+    review_mock.assert_called_once_with(phase2_conn)
 
 
 def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
@@ -157,6 +180,9 @@ def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
 
     tracker = MagicMock()
 
+    phase1_conn = MagicMock()
+    phase2_conn = MagicMock()
+
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
@@ -168,7 +194,7 @@ def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
         ),
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        psycopg_mod.connect.return_value.__enter__.return_value = MagicMock()
+        _stub_two_connect_ctxes(psycopg_mod, phase1_conn, phase2_conn)
 
         try:
             scheduler.fundamentals_sync()
@@ -178,3 +204,64 @@ def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
             raise AssertionError("expected RuntimeError to propagate")
 
     review_mock.assert_not_called()
+
+
+def test_fundamentals_sync_phase2_failure_preserves_phase1_success() -> None:
+    """review_coverage raising must NOT fail the whole job — phase 1 audit +
+    backfill writes already committed, and the tracker row_count still
+    reflects them. Mirrors the old weekly_coverage_review's try/except/return
+    semantics."""
+    summary = AuditSummary(
+        analysable=10,
+        insufficient=2,
+        fpi=0,
+        no_primary_sec_cik=0,
+        total_updated=4,
+        null_anomalies=0,
+    )
+
+    stub_settings = MagicMock()
+    stub_settings.database_url = "postgresql://test"
+    stub_settings.sec_user_agent = "test-agent@example.com"
+
+    tracker = MagicMock()
+    tracker.row_count = None
+
+    eligible_rows = [(301, "0000000301")]
+
+    phase1_conn = MagicMock()
+    phase1_conn.execute.return_value.fetchall.return_value = eligible_rows
+    phase2_conn = MagicMock()
+
+    with (
+        patch.object(scheduler, "settings", stub_settings),
+        patch.object(scheduler, "_tracked_job") as tracked_cm,
+        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "SecFilingsProvider") as provider_cls,
+        patch.object(
+            scheduler,
+            "review_coverage",
+            side_effect=RuntimeError("review crashed"),
+        ) as review_mock,
+        patch(
+            "app.services.coverage_audit.audit_all_instruments",
+            return_value=summary,
+        ),
+        patch(
+            "app.services.filings_backfill.backfill_filings",
+            side_effect=lambda conn, provider, cik, iid: _stub_backfill_result(iid),
+        ) as backfill_mock,
+    ):
+        tracked_cm.return_value.__enter__.return_value = tracker
+        _stub_two_connect_ctxes(psycopg_mod, phase1_conn, phase2_conn)
+        provider_cls.return_value.__enter__.return_value = MagicMock()
+
+        # Must not raise — phase 2 failures are swallowed so the
+        # committed phase-1 writes still mark the job succeeded.
+        scheduler.fundamentals_sync()
+
+    review_mock.assert_called_once_with(phase2_conn)
+    assert backfill_mock.call_count == 1
+    # Only phase-1 contribution: total_updated (4) + 1 × COMPLETE_OK (1).
+    # review_rows stays 0 because the review raised.
+    assert tracker.row_count == 5

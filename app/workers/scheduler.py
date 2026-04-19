@@ -2220,17 +2220,24 @@ def fundamentals_sync() -> None:
         )
 
         # --- Phase 2: coverage tier review --------------------------------
-        with psycopg.connect(settings.database_url) as conn:
-            review_result = review_coverage(conn)
-
-        review_rows = len(review_result.promotions) + len(review_result.demotions)
-        logger.info(
-            "fundamentals_sync phase 2 (review) complete: promotions=%d demotions=%d blocked=%d unchanged=%d",
-            len(review_result.promotions),
-            len(review_result.demotions),
-            len(review_result.blocked),
-            review_result.unchanged,
-        )
+        # Isolate phase 2 failures from phase 1 success: if review_coverage
+        # raises, log and continue so the committed audit+backfill writes
+        # from phase 1 still mark the job as succeeded. Mirrors the
+        # "try/except + return" semantics of the retired weekly_coverage_review.
+        review_rows = 0
+        try:
+            with psycopg.connect(settings.database_url) as conn:
+                review_result = review_coverage(conn)
+            review_rows = len(review_result.promotions) + len(review_result.demotions)
+            logger.info(
+                "fundamentals_sync phase 2 (review) complete: promotions=%d demotions=%d blocked=%d unchanged=%d",
+                len(review_result.promotions),
+                len(review_result.demotions),
+                len(review_result.blocked),
+                review_result.unchanged,
+            )
+        except Exception:
+            logger.error("fundamentals_sync phase 2 (review) failed", exc_info=True)
 
         tracker.row_count = audit_rows + review_rows
 
