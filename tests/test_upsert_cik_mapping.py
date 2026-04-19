@@ -37,8 +37,7 @@ def _seed_instrument(
     symbol: str,
 ) -> None:
     conn.execute(
-        "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
-        "VALUES (%s, %s, %s, TRUE)",
+        "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) VALUES (%s, %s, %s, TRUE)",
         (instrument_id, symbol, symbol),
     )
     conn.commit()
