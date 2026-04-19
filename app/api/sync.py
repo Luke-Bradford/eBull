@@ -27,7 +27,14 @@ from app.services.sync_orchestrator import (
     SyncScope,
     submit_sync,
 )
-from app.services.sync_orchestrator.registry import JOB_TO_LAYERS
+from app.services.sync_orchestrator.layer_failure_history import all_layer_histories
+from app.services.sync_orchestrator.layer_state import compute_layer_states_from_db
+from app.services.sync_orchestrator.layer_types import (
+    REMEDIES,
+    FailureCategory,
+    LayerState,
+)
+from app.services.sync_orchestrator.registry import JOB_TO_LAYERS, LAYERS
 
 # Registry invariant: every layer is emitted by at most one legacy job.
 # Built once at import time; a duplicate emit fails loudly at startup
@@ -220,11 +227,6 @@ def get_sync_layers(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> dict[str, Any]:
     """All 15 layers with freshness + last successful run."""
-    from app.services.sync_orchestrator import LAYERS
-    from app.services.sync_orchestrator.layer_failure_history import (
-        all_layer_histories,
-    )
-
     # One pair of queries instead of two-per-layer in the loop below.
     # Was O(N) round-trips; now O(1). The layer name filter keeps both
     # queries on an index seek regardless of how large the history
@@ -306,19 +308,6 @@ def get_sync_layers_v2(
     system_summary. Designed as the sole feed for the new Admin UI
     (sub-project C). v1 /sync/layers is unchanged.
     """
-    from app.services.sync_orchestrator import LAYERS
-    from app.services.sync_orchestrator.layer_failure_history import (
-        all_layer_histories,
-    )
-    from app.services.sync_orchestrator.layer_state import (
-        compute_layer_states_from_db,
-    )
-    from app.services.sync_orchestrator.layer_types import (
-        REMEDIES,
-        FailureCategory,
-        LayerState,
-    )
-
     states = compute_layer_states_from_db(conn)
     names = list(states.keys())
     streaks, categories = all_layer_histories(conn, names)
@@ -500,7 +489,13 @@ def _system_summary(
 
 
 def _layer_last_updated_map(conn: psycopg.Connection[Any], names: list[str]) -> dict[str, datetime]:
-    """Most recent complete/partial finished_at per layer."""
+    """Most recent complete/partial finished_at per layer.
+
+    Orders by `finished_at DESC` — this map selects the *latest
+    update time* the UI shows, not the latest start. A long-running
+    layer whose started_at precedes finished_at on a quicker sibling
+    run must still surface the most recent completion.
+    """
     rows = conn.execute(
         """
         WITH ranked AS (
@@ -508,10 +503,12 @@ def _layer_last_updated_map(conn: psycopg.Connection[Any], names: list[str]) -> 
                 layer_name, finished_at,
                 ROW_NUMBER() OVER (
                     PARTITION BY layer_name
-                    ORDER BY COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC
+                    ORDER BY finished_at DESC NULLS LAST, sync_run_id DESC
                 ) AS rn
             FROM sync_layer_progress
-            WHERE layer_name = ANY(%s) AND status IN ('complete', 'partial')
+            WHERE layer_name = ANY(%s)
+              AND status IN ('complete', 'partial')
+              AND finished_at IS NOT NULL
         )
         SELECT layer_name, finished_at FROM ranked WHERE rn = 1
         """,
