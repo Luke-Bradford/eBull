@@ -12,6 +12,8 @@ from typing import Any
 
 import psycopg
 
+from app.services.sync_orchestrator.layer_state import compute_layer_states_from_db
+from app.services.sync_orchestrator.layer_types import LayerState
 from app.services.sync_orchestrator.registry import JOB_TO_LAYERS, LAYERS
 from app.services.sync_orchestrator.types import (
     ExecutionPlan,
@@ -26,7 +28,7 @@ def build_execution_plan(
     scope: SyncScope,
 ) -> ExecutionPlan:
     """Build the plan for a sync run per spec §2.6."""
-    candidate_jobs = _scope_to_candidate_jobs(scope)
+    candidate_jobs = _scope_to_candidate_jobs(scope, conn=conn)
     target_job = scope.detail if scope.kind == "job" else None
 
     layers_to_refresh: list[LayerPlan] = []
@@ -65,7 +67,10 @@ def build_execution_plan(
 # ---------------------------------------------------------------------------
 
 
-def _scope_to_candidate_jobs(scope: SyncScope) -> list[str]:
+def _scope_to_candidate_jobs(
+    scope: SyncScope,
+    conn: psycopg.Connection[Any] | None = None,
+) -> list[str]:
     """Return the ordered list of legacy job names to consider for the
     given scope. Returns all in-DAG jobs (empty-tuple outside-DAG entries
     excluded). Per-scope filtering:
@@ -75,6 +80,8 @@ def _scope_to_candidate_jobs(scope: SyncScope) -> list[str]:
     - layer(name): only jobs whose emits include the named layer + jobs
       emitting any of its transitive dependencies
     - job(legacy_name): that job + jobs emitting any of its deps
+    - behind: DEGRADED + ACTION_NEEDED layers plus transitive non-HEALTHY
+      upstreams; requires a live conn
     """
     in_dag = [name for name, emits in JOB_TO_LAYERS.items() if emits]
 
@@ -102,6 +109,21 @@ def _scope_to_candidate_jobs(scope: SyncScope) -> list[str]:
         needed_layers = _transitive_layer_closure(target_emits)
         return [job for job in in_dag if any(e in needed_layers for e in JOB_TO_LAYERS[job])]
 
+    if scope.kind == "behind":
+        if conn is None:
+            raise ValueError("scope='behind' requires a live connection")
+        states = compute_layer_states_from_db(conn)
+        target_layers = {
+            n for n, s in states.items()
+            if s in {LayerState.DEGRADED, LayerState.ACTION_NEEDED}
+        }
+        if not target_layers:
+            return []
+        # Include any non-HEALTHY upstreams transitively, so a waiting
+        # layer's prerequisites get refreshed first.
+        target_layers |= _transitive_upstreams_not_healthy(target_layers, states)
+        return [job for job in in_dag if any(e in target_layers for e in JOB_TO_LAYERS[job])]
+
     raise ValueError(f"unknown scope kind: {scope.kind}")
 
 
@@ -115,6 +137,28 @@ def _transitive_layer_closure(seed: set[str]) -> set[str]:
             if dep not in result:
                 result.add(dep)
                 stack.append(dep)
+    return result
+
+
+def _transitive_upstreams_not_healthy(
+    seed: set[str], states: dict[str, LayerState]
+) -> set[str]:
+    """Return all transitive upstream dependencies of seed layers that are
+    not HEALTHY. Used by scope='behind' to include prerequisites that need
+    refreshing before the target layers can be satisfied."""
+    result: set[str] = set()
+    stack = list(seed)
+    while stack:
+        name = stack.pop()
+        if name not in LAYERS:
+            continue
+        for dep in LAYERS[name].dependencies:
+            if dep in result:
+                continue
+            if states.get(dep) is LayerState.HEALTHY:
+                continue
+            result.add(dep)
+            stack.append(dep)
     return result
 
 

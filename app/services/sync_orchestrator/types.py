@@ -125,7 +125,7 @@ SyncTrigger = Literal["manual", "scheduled", "catch_up"]
 
 @dataclass(frozen=True)
 class SyncScope:
-    kind: Literal["full", "layer", "high_frequency", "job"]
+    kind: Literal["full", "layer", "high_frequency", "job", "behind"]
     detail: str | None = None
     force: bool = False
 
@@ -144,6 +144,10 @@ class SyncScope:
     @classmethod
     def high_frequency(cls) -> SyncScope:
         return cls(kind="high_frequency")
+
+    @classmethod
+    def behind(cls) -> SyncScope:
+        return cls(kind="behind")
 
 
 @dataclass(frozen=True)

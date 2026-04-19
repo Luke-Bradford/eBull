@@ -62,7 +62,7 @@ router = APIRouter(
 
 
 class SyncRequest(BaseModel):
-    scope: Literal["full", "layer", "high_frequency", "job"] = "full"
+    scope: Literal["full", "layer", "high_frequency", "job", "behind"] = "full"
     layer: str | None = None
     job: str | None = None
 
@@ -122,6 +122,8 @@ def _scope_from(body: SyncRequest) -> SyncScope:
         return SyncScope.full()
     if body.scope == "high_frequency":
         return SyncScope.high_frequency()
+    if body.scope == "behind":
+        return SyncScope.behind()
     if body.scope == "layer":
         if not body.layer:
             raise HTTPException(status_code=422, detail="layer required when scope='layer'")
