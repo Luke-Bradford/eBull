@@ -188,15 +188,15 @@ def get_sync_layers(
         #
         # Exception type names are NEVER exposed raw — they leak Python
         # internals and violate spec §3.4 sanitized-category contract.
-        # Route through _categorize_error so the response only carries a
+        # Route through classify_exception so the response only carries a
         # stable, documented category.
         try:
             fresh, detail = layer.is_fresh(conn)
             predicate_error: str | None = None
         except Exception as exc:
-            from app.services.sync_orchestrator.executor import _categorize_error
+            from app.services.sync_orchestrator.exception_classifier import classify_exception
 
-            predicate_error = _categorize_error(exc)
+            predicate_error = classify_exception(exc).value
             fresh = False
             detail = f"freshness predicate error ({predicate_error})"
         job_name = _LAYER_TO_JOB[name]
