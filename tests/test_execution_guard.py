@@ -974,13 +974,21 @@ class TestEvaluateRecommendation:
         assert result.decision_id == 55
 
     def test_status_update_execute_called(self) -> None:
-        """conn.execute() must fire the UPDATE — ensures the status write cannot be silently dropped."""
+        """conn.execute() must fire the UPDATE — ensures the status write cannot be silently dropped.
+
+        The safety_layers_enabled rule also calls conn.execute() twice (once
+        per safety-critical layer), so we assert the UPDATE was called at all
+        rather than exactly once. The SQL check pinpoints the correct call via
+        call_args_list.
+        """
         conn = _make_conn(_buy_cursors(decision_id=99))
         with patch("app.services.execution_guard._utcnow", return_value=_NOW):
             evaluate_recommendation(conn, 42)
-        conn.execute.assert_called_once()
-        call_sql: str = conn.execute.call_args[0][0]
-        assert "UPDATE trade_recommendations" in call_sql
+        conn.execute.assert_called()
+        # Verify the UPDATE was among the calls (last non-is_layer_enabled call).
+        update_calls = [c for c in conn.execute.call_args_list if "UPDATE trade_recommendations" in str(c)]
+        assert update_calls, "UPDATE trade_recommendations was not called"
+        call_sql: str = update_calls[0][0][0]
         assert "status" in call_sql
 
     def test_db_write_and_return_decision_id_match(self) -> None:

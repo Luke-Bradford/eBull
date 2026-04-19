@@ -103,6 +103,7 @@ RuleName = Literal[
     "instrument_missing",
     "sector_missing",
     "concentration_breach",
+    "safety_layers_enabled",
 ]
 
 
@@ -351,6 +352,28 @@ def _check_live_trading(enabled: bool) -> RuleResult:
             detail="runtime_config.enable_live_trading is False",
         )
     return RuleResult(rule="live_trading", passed=True)
+
+
+def _check_safety_layers_enabled(
+    conn: psycopg.Connection[Any],
+) -> RuleResult:
+    """Refuse BUY/ADD when fx_rates or portfolio_sync is operator-disabled.
+
+    FX disabled → USD valuations + budget drift silently.
+    Portfolio sync disabled → position baseline goes stale, exposure
+    and concentration checks lie. Blocking only BUY/ADD preserves the
+    emergency-EXIT path operators need when intentionally de-risking.
+    """
+    from app.services.layer_enabled import is_layer_enabled
+
+    disabled = [name for name in ("fx_rates", "portfolio_sync") if not is_layer_enabled(conn, name)]
+    if disabled:
+        return RuleResult(
+            rule="safety_layers_enabled",
+            passed=False,
+            detail=(f"{' + '.join(disabled)} disabled — BUY/ADD blocked; re-enable the layer to clear."),
+        )
+    return RuleResult(rule="safety_layers_enabled", passed=True)
 
 
 def _check_coverage(coverage: dict[str, Any] | None) -> RuleResult:
@@ -722,6 +745,7 @@ def evaluate_recommendation(
 
     # Rules that apply to BUY / ADD only
     if action in ("BUY", "ADD"):
+        rule_results.append(_check_safety_layers_enabled(conn))
         coverage_result = _check_coverage(coverage)
         rule_results.append(coverage_result)
 
