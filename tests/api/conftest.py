@@ -9,6 +9,8 @@ fixture so it starts with a clean slate.
 
 from __future__ import annotations
 
+from collections.abc import Generator
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -18,7 +20,7 @@ from app.main import app
 
 
 @pytest.fixture
-def clean_client() -> TestClient:
+def clean_client() -> Generator[TestClient, None, None]:
     """TestClient with auth bypassed and get_conn override cleared.
 
     Mirrors the pattern in tests/test_sync_orchestrator_api.py. Removing
