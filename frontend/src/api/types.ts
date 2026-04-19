@@ -685,3 +685,75 @@ export interface InsufficientListResponse {
   checked_at: string;
   rows: InsufficientRow[];
 }
+
+// ---------------------------------------------------------------------------
+// /sync/layers/v2 (app/api/sync.py — A.5 chunk 0+)
+// ---------------------------------------------------------------------------
+
+export type LayerStateStr =
+  | "healthy"
+  | "running"
+  | "retrying"
+  | "degraded"
+  | "action_needed"
+  | "secret_missing"
+  | "cascade_waiting"
+  | "disabled";
+
+export interface LayerEntry {
+  layer: string;
+  display_name: string;
+  state: LayerStateStr;
+  last_updated: string | null;
+  plain_language_sla: string;
+}
+
+export interface ActionNeededItem {
+  root_layer: string;
+  display_name: string;
+  category:
+    | "auth_expired"
+    | "rate_limited"
+    | "source_down"
+    | "schema_drift"
+    | "db_constraint"
+    | "data_gap"
+    | "upstream_waiting"
+    | "internal_error";
+  operator_message: string;
+  operator_fix: string | null;
+  self_heal: boolean;
+  consecutive_failures: number;
+  affected_downstream: string[];
+}
+
+export interface SecretMissingItem {
+  layer: string;
+  display_name: string;
+  missing_secret: string;
+  operator_fix: string;
+}
+
+export interface LayerSummaryV2 {
+  layer: string;
+  display_name: string;
+  last_updated: string | null;
+}
+
+export interface CascadeGroup {
+  root: string;
+  affected: string[];
+}
+
+export interface SyncLayersV2Response {
+  generated_at: string;
+  system_state: "ok" | "catching_up" | "needs_attention";
+  system_summary: string;
+  action_needed: ActionNeededItem[];
+  degraded: LayerSummaryV2[];
+  secret_missing: SecretMissingItem[];
+  healthy: LayerSummaryV2[];
+  disabled: LayerSummaryV2[];
+  cascade_groups: CascadeGroup[];
+  layers: LayerEntry[];
+}

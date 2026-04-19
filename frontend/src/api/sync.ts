@@ -10,6 +10,7 @@
  */
 
 import { apiFetch } from "@/api/client";
+import type { SyncLayersV2Response } from "@/api/types";
 
 export type LayerTier = 0 | 1 | 2 | 3;
 
@@ -121,4 +122,8 @@ export function triggerSync(
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+export function fetchSyncLayersV2(): Promise<SyncLayersV2Response> {
+  return apiFetch<SyncLayersV2Response>("/sync/layers/v2");
 }
