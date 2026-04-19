@@ -75,4 +75,13 @@ def test_returns_frozen_problem_group() -> None:
     groups = collapse_cascades({"a": ()}, states)
     assert isinstance(groups[0], ProblemGroup)
     assert groups[0].root == "a"
-    assert groups[0].affected == []
+    assert groups[0].affected == ()
+
+
+def test_affected_is_immutable_tuple() -> None:
+    # Regression guard: the frozen-dataclass contract relies on
+    # `affected` being an immutable sequence, so callers who share
+    # the returned reference cannot corrupt other consumers.
+    states = {"a": LayerState.ACTION_NEEDED}
+    groups = collapse_cascades({"a": ()}, states)
+    assert isinstance(groups[0].affected, tuple)

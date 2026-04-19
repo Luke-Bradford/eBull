@@ -38,8 +38,11 @@ def build_execution_plan(
     # (DEGRADED / ACTION_NEEDED + non-HEALTHY upstreams). Skip the
     # legacy is_fresh re-filter so the state machine's selection is
     # authoritative — a DEGRADED layer must fire even if is_fresh
-    # says otherwise.
-    bypass_freshness_for_all = scope.kind == "behind" and scope.force
+    # says otherwise. Keys on `kind` alone (not compound with
+    # `scope.force`) so this cannot accidentally bypass freshness for
+    # an unrelated `job` scope whose `force=True` target happens to
+    # coincide with a behind candidate.
+    bypass_freshness_for_all = scope.kind == "behind"
 
     for job_name in candidate_jobs:
         emits = JOB_TO_LAYERS[job_name]

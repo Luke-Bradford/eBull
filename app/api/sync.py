@@ -339,7 +339,7 @@ def get_sync_layers_v2(
     # Build once per request using the extracted pure function.
     deps_map: dict[str, tuple[str, ...]] = {n: lay.dependencies for n, lay in LAYERS.items()}
     groups = collapse_cascades(deps_map, states)
-    groups_by_root: dict[str, list[str]] = {g.root: g.affected for g in groups}
+    groups_by_root: dict[str, list[str]] = {g.root: list(g.affected) for g in groups}
 
     category_values = {c.value for c in FailureCategory}
 
@@ -406,7 +406,7 @@ def get_sync_layers_v2(
         # RUNNING / RETRYING / CASCADE_WAITING feed into system_state
         # counts + cascade_groups; no top-level bucket.
 
-    cascade_groups = [CascadeGroupModel(root=g.root, affected=g.affected) for g in groups]
+    cascade_groups = [CascadeGroupModel(root=g.root, affected=list(g.affected)) for g in groups]
 
     running_count = sum(1 for s in states.values() if s is LayerState.RUNNING)
     retrying_count = sum(1 for s in states.values() if s is LayerState.RETRYING)

@@ -15,7 +15,10 @@ from app.services.sync_orchestrator.layer_types import LayerState
 @dataclass(frozen=True)
 class ProblemGroup:
     root: str
-    affected: list[str]
+    # Tuple, not list: matches the frozen-dataclass contract and
+    # prevents callers from mutating shared state through a returned
+    # reference.
+    affected: tuple[str, ...]
 
 
 def collapse_cascades(
@@ -54,5 +57,5 @@ def collapse_cascades(
                         affected.append(child)
                     next_frontier.add(child)
             frontier = next_frontier
-        groups.append(ProblemGroup(root=root, affected=affected))
+        groups.append(ProblemGroup(root=root, affected=tuple(affected)))
     return groups
