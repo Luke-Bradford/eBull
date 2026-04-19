@@ -110,18 +110,17 @@ class CascadeGroupModel(BaseModel):
 
 
 class LayerEntry(BaseModel):
+    """Per-layer UI row. Canonical source for LayerHealthList in chunk 1.
+
+    `state` is typed against the `LayerState` enum directly so future
+    additions (e.g. new states) propagate to this contract at type-check
+    time — no silent drift between the enum's source of truth and a
+    hand-copied Literal.
+    """
+
     layer: str
     display_name: str
-    state: Literal[
-        "healthy",
-        "running",
-        "retrying",
-        "degraded",
-        "action_needed",
-        "secret_missing",
-        "cascade_waiting",
-        "disabled",
-    ]
+    state: LayerState
     last_updated: datetime | None
     plain_language_sla: str
 
@@ -434,7 +433,7 @@ def get_sync_layers_v2(
         LayerEntry(
             layer=name,
             display_name=LAYERS[name].display_name,
-            state=states[name].value,
+            state=states[name],
             last_updated=last_updates.get(name),
             plain_language_sla=LAYERS[name].plain_language_sla,
         )

@@ -172,16 +172,9 @@ def test_v2_layer_entry_shape(clean_client: TestClient) -> None:
             "last_updated",
             "plain_language_sla",
         }
-        assert entry["state"] in {
-            "healthy",
-            "running",
-            "retrying",
-            "degraded",
-            "action_needed",
-            "secret_missing",
-            "cascade_waiting",
-            "disabled",
-        }
+        from app.services.sync_orchestrator.layer_types import LayerState
+
+        assert entry["state"] in {s.value for s in LayerState}
 
 
 def test_v2_layer_entry_metadata_matches_registry(clean_client: TestClient) -> None:
