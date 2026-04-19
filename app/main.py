@@ -202,7 +202,14 @@ def health(request: Request) -> JSONResponse:
         "etoro_env": settings.etoro_env,
     }
     try:
-        with request.app.state.db_pool.connection() as conn:
+        pool = getattr(request.app.state, "db_pool", None)
+        if pool is None:
+            # No pool on app.state — either the lifespan hasn't run
+            # (test harness) or the app booted into a degraded mode.
+            # Treat as "cannot evaluate" and fall through to the
+            # 503 error branch so external monitoring sees it.
+            raise RuntimeError("db_pool not initialised on app.state")
+        with pool.connection() as conn:
             states = compute_layer_states_from_db(conn)
     except Exception:
         logger.exception("/health: compute_layer_states_from_db failed")

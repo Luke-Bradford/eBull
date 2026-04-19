@@ -161,12 +161,39 @@ class TestPublicEndpointsRemainOpen:
         app.dependency_overrides.pop(get_conn, None)
 
     def test_health_is_public(self) -> None:
-        all_healthy = {"candles": LayerState.HEALTHY}
-        with patch(
-            "app.main.compute_layer_states_from_db",
-            return_value=all_healthy,
-        ):
-            resp = client.get("/health")
+        # /health acquires its own connection via app.state.db_pool
+        # (chunk 7). Stub the pool to yield a mock conn so the handler's
+        # inline checkout succeeds; compute_layer_states_from_db is
+        # patched separately.
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _stub_conn_cm():
+            yield _mock_conn()
+
+        class _StubPool:
+            def connection(self):
+                return _stub_conn_cm()
+
+        from app.main import app as _app
+
+        original = getattr(_app.state, "db_pool", None)
+        _app.state.db_pool = _StubPool()
+        try:
+            all_healthy = {"candles": LayerState.HEALTHY}
+            with patch(
+                "app.main.compute_layer_states_from_db",
+                return_value=all_healthy,
+            ):
+                resp = client.get("/health")
+        finally:
+            if original is None:
+                try:
+                    delattr(_app.state, "db_pool")
+                except AttributeError:
+                    pass
+            else:
+                _app.state.db_pool = original
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "ok"
