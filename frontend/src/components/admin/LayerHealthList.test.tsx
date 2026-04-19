@@ -66,10 +66,31 @@ describe("LayerHealthList", () => {
   });
 
   it("renders relative last_updated when present", () => {
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const layers: LayerEntry[] = [mk({ layer: "universe", last_updated: oneHourAgo })];
-    render(<LayerHealthList layers={layers} onToggle={() => {}} />);
-    expect(screen.getByText(/1h ago/i)).toBeInTheDocument();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-19T12:00:00Z"));
+    try {
+      const layers: LayerEntry[] = [
+        mk({ layer: "universe", last_updated: "2026-04-19T11:00:00Z" }),
+      ];
+      render(<LayerHealthList layers={layers} onToggle={() => {}} />);
+      expect(screen.getByText(/1h ago/i)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("renders 'just now' when last_updated is less than a minute ago", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-19T12:00:00Z"));
+    try {
+      const layers: LayerEntry[] = [
+        mk({ layer: "universe", last_updated: "2026-04-19T11:59:45Z" }),
+      ];
+      render(<LayerHealthList layers={layers} onToggle={() => {}} />);
+      expect(screen.getByText(/just now/i)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("renders 'never' when last_updated is null", () => {
@@ -108,5 +129,45 @@ describe("LayerHealthList", () => {
     fireEvent.click(screen.getByLabelText("candles actions"));
     fireEvent.click(screen.getByText(/Enable layer/));
     expect(onToggle).toHaveBeenCalledWith("candles", true);
+  });
+
+  it("closes the open menu when clicking outside", () => {
+    const onToggle = vi.fn();
+    const layers: LayerEntry[] = [mk({ layer: "candles", state: "healthy" })];
+    render(
+      <div>
+        <LayerHealthList layers={layers} onToggle={onToggle} />
+        <div data-testid="outside">outside content</div>
+      </div>
+    );
+    fireEvent.click(screen.getByLabelText("candles actions"));
+    expect(screen.getByText(/Disable layer/)).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByTestId("outside"));
+    expect(screen.queryByText(/Disable layer/)).toBeNull();
+  });
+
+  it("closes the open menu on Escape key", () => {
+    const onToggle = vi.fn();
+    const layers: LayerEntry[] = [mk({ layer: "candles", state: "healthy" })];
+    render(<LayerHealthList layers={layers} onToggle={onToggle} />);
+    fireEvent.click(screen.getByLabelText("candles actions"));
+    expect(screen.getByText(/Disable layer/)).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByText(/Disable layer/)).toBeNull();
+  });
+
+  it("opening a second row's menu closes the first", () => {
+    const onToggle = vi.fn();
+    const layers: LayerEntry[] = [
+      mk({ layer: "candles", state: "healthy" }),
+      mk({ layer: "universe", state: "healthy" }),
+    ];
+    render(<LayerHealthList layers={layers} onToggle={onToggle} />);
+    fireEvent.click(screen.getByLabelText("candles actions"));
+    // Both "Disable layer" buttons render the same text, so count menu items.
+    expect(screen.getAllByText(/Disable layer/)).toHaveLength(1);
+    fireEvent.click(screen.getByLabelText("universe actions"));
+    // First menu is closed; second is open; total remains exactly 1 dropdown.
+    expect(screen.getAllByText(/Disable layer/)).toHaveLength(1);
   });
 });

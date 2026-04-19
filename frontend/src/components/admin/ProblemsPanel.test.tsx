@@ -278,4 +278,111 @@ describe("ProblemsPanel", () => {
     renderPanel({ coverage });
     expect(screen.getByText(/12 instrument/)).toBeInTheDocument();
   });
+
+  it("renders plain text when operator_fix mentions Settings only as context, not as a destination", () => {
+    const v2 = emptyV2();
+    v2.system_state = "needs_attention";
+    v2.action_needed = [
+      {
+        root_layer: "x",
+        display_name: "Layer X",
+        category: "db_constraint",
+        operator_message: "DB error",
+        operator_fix: "Nothing to do with Settings or Providers — inspect the offending row manually",
+        self_heal: false,
+        consecutive_failures: 1,
+        affected_downstream: [],
+      },
+    ];
+    renderPanel({ v2 });
+    expect(
+      screen.queryByRole("link", { name: /Nothing to do with Settings/i }),
+    ).toBeNull();
+    expect(
+      screen.getByText(/Nothing to do with Settings or Providers/),
+    ).toBeInTheDocument();
+  });
+
+  it("renders a Settings link when operator_fix says 'Update the API key in Settings'", () => {
+    const v2 = emptyV2();
+    v2.system_state = "needs_attention";
+    v2.action_needed = [
+      {
+        root_layer: "x",
+        display_name: "Layer X",
+        category: "auth_expired",
+        operator_message: "Credential expired",
+        operator_fix: "Update the API key in Settings",
+        self_heal: false,
+        consecutive_failures: 1,
+        affected_downstream: [],
+      },
+    ];
+    renderPanel({ v2 });
+    const link = screen.getByRole("link", { name: /Update the API key in Settings/i });
+    expect(link).toBeInTheDocument();
+    expect(link).toHaveAttribute("href", "/settings#providers");
+  });
+
+  it("keeps last-good coverage visible when coverage errors while v2 updates", () => {
+    // Initial render: both sources succeed, coverage has 5 null rows.
+    const initialV2 = emptyV2();
+    initialV2.system_state = "ok";
+    const initialCoverage: CoverageSummaryResponse = {
+      ...emptyCoverage(),
+      null_rows: 5,
+    };
+    const { rerender } = render(
+      <MemoryRouter>
+        <ProblemsPanel
+          v2={initialV2}
+          jobs={emptyJobs()}
+          coverage={initialCoverage}
+          v2Error={false}
+          jobsError={false}
+          coverageError={false}
+          onOpenOrchestrator={() => {}}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText(/5 instrument/)).toBeInTheDocument();
+
+    // Simultaneous transition: v2 flips to needs_attention with a new
+    // action_needed row; coverage refetch errors (data stays as the
+    // last-good value). Assert (a) v2 update visible, (b) amber banner
+    // lists coverage only, (c) the 5 null_rows still render from cache.
+    const updatedV2 = emptyV2();
+    updatedV2.system_state = "needs_attention";
+    updatedV2.action_needed = [
+      {
+        root_layer: "cik_mapping",
+        display_name: "SEC CIK Mapping",
+        category: "db_constraint",
+        operator_message: "Database error",
+        operator_fix: null,
+        self_heal: false,
+        consecutive_failures: 2,
+        affected_downstream: [],
+      },
+    ];
+    rerender(
+      <MemoryRouter>
+        <ProblemsPanel
+          v2={updatedV2}
+          jobs={emptyJobs()}
+          coverage={initialCoverage}
+          v2Error={false}
+          jobsError={false}
+          coverageError={true}
+          onOpenOrchestrator={() => {}}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText(/SEC CIK Mapping/)).toBeInTheDocument();
+    expect(screen.getByText(/5 instrument/)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(/coverage/i);
+    expect(screen.getByRole("status")).not.toHaveTextContent(/layers/i);
+    expect(screen.getByRole("status")).not.toHaveTextContent(/jobs/i);
+  });
 });

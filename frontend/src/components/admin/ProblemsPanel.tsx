@@ -43,7 +43,12 @@ interface SourceCache {
 
 
 function mentionsSettings(text: string): boolean {
-  return /settings/i.test(text) || /providers/i.test(text);
+  // Match the canonical remedy phrasings emitted by the backend REMEDIES
+  // table — e.g. "Set X in Settings → Providers", "Update the API key in
+  // Settings". Narrow enough that a remedy mentioning settings/providers
+  // in passing (e.g. "nothing to do with Settings — inspect the row
+  // manually") stays plain text rather than becoming a misleading link.
+  return /\bin\s+Settings\b/i.test(text) || /\bSettings\s*[→>]\s*Providers\b/i.test(text);
 }
 
 

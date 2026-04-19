@@ -7,7 +7,7 @@
  * whose Enable / Disable item emits `onToggle(name, enabled)` for the
  * parent to wire to the backend endpoint (chunk 2).
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { LayerEntry, LayerStateStr } from "@/api/types";
 
@@ -60,9 +60,29 @@ function relativeAgo(iso: string | null): string {
 
 export function LayerHealthList({ layers, onToggle }: LayerHealthListProps): JSX.Element {
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+
+  useEffect(() => {
+    if (menuOpen === null) return;
+    const handleDown = (ev: MouseEvent) => {
+      const target = ev.target as Node | null;
+      if (listRef.current !== null && target !== null && !listRef.current.contains(target)) {
+        setMenuOpen(null);
+      }
+    };
+    const handleKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setMenuOpen(null);
+    };
+    document.addEventListener("mousedown", handleDown);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleDown);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [menuOpen]);
 
   return (
-    <ul className="divide-y divide-slate-100">
+    <ul ref={listRef} className="divide-y divide-slate-100">
       {layers.map((entry) => {
         const pill = pillFor(entry.state);
         const isDisabled = entry.state === "disabled";
