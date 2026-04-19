@@ -6,7 +6,7 @@ Responsibilities:
   - Track job executions (start, finish, success/failure, row count).
   - Detect row-count spikes (broken-source indicator).
   - Manage the kill switch (activate / deactivate).
-  - Produce a unified system health report for the health endpoint.
+  - Produce per-layer and per-job health checks consumed by /system/status.
 
 Data layers monitored:
   - universe   — instruments.last_seen_at
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -142,15 +142,6 @@ class JobHealth:
     last_started_at: datetime | None = None
     last_finished_at: datetime | None = None
     detail: str = ""
-
-
-@dataclass
-class SystemHealth:
-    checked_at: datetime
-    layers: list[LayerHealth] = field(default_factory=list)
-    jobs: list[JobHealth] = field(default_factory=list)
-    kill_switch_active: bool = False
-    kill_switch_detail: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -634,43 +625,3 @@ def get_kill_switch_status(
             "reason": "kill_switch row missing — configuration corrupt",
         }
     return dict(row)
-
-
-# ---------------------------------------------------------------------------
-# Unified system health
-# ---------------------------------------------------------------------------
-
-
-def get_system_health(
-    conn: psycopg.Connection[Any],
-    job_names: list[str] | None = None,
-) -> SystemHealth:
-    """
-    Build a full system health report: layer staleness, job health, kill switch.
-
-    job_names: list of job names to check health for.  If None, only layer
-    staleness and kill switch are included.
-    """
-    now = _utcnow()
-
-    layers = check_all_layers(conn, now=now)
-
-    jobs: list[JobHealth] = []
-    if job_names:
-        jobs = [check_job_health(conn, name) for name in job_names]
-
-    ks = get_kill_switch_status(conn)
-
-    ks_detail = ""
-    if ks["is_active"]:
-        ks_detail = "kill switch active"
-        if ks.get("reason"):
-            ks_detail += f"; reason: {ks['reason']}"
-
-    return SystemHealth(
-        checked_at=now,
-        layers=layers,
-        jobs=jobs,
-        kill_switch_active=bool(ks["is_active"]),
-        kill_switch_detail=ks_detail,
-    )

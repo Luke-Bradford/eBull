@@ -136,8 +136,10 @@ class TestServiceTokenPath(_AuthTestBase):
             resp = client.get(path)
             assert resp.status_code == 401, f"{path} should require auth"
 
-    def test_health_data_requires_auth(self) -> None:
-        resp = client.get("/health/data")
+    def test_protected_endpoints_require_auth(self) -> None:
+        # /health/data retired in A.5 chunk 3 (#342). /system/status is
+        # the protected canary — same auth dependency.
+        resp = client.get("/system/status")
         assert resp.status_code == 401
 
 

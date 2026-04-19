@@ -44,11 +44,9 @@ from app.security import master_key
 from app.security.secrets_crypto import set_active_key as set_broker_encryption_key
 from app.services.coverage import override_tier
 from app.services.operator_setup import ensure_startup_token, operators_empty
-from app.services.ops_monitor import get_system_health
 from app.services.sync_orchestrator.layer_state import compute_layer_states_from_db
 from app.services.sync_orchestrator.layer_types import LayerState
 from app.services.sync_orchestrator.reaper import reap_orphaned_syncs
-from app.workers.scheduler import SCHEDULED_JOBS
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -296,62 +294,6 @@ def coverage_override(
         "new_tier": change.new_tier,
         "change_type": change.change_type,
         "rationale": change.rationale,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Data health
-# ---------------------------------------------------------------------------
-
-# Deprecated: superseded by GET /system/status (issue #57). The new router
-# carries the canonical operator visibility surface (per-layer freshness, job
-# health, kill switch). This route is kept temporarily so any existing
-# operator scripts continue to work; remove once the admin page (#64) ships.
-
-
-@app.get("/health/data", dependencies=[Depends(require_session_or_service_token)], deprecated=True, tags=["system"])
-def health_data(conn: psycopg.Connection[object] = Depends(get_conn)) -> dict:
-    """Deprecated alias for ``GET /system/status``.
-
-    Job names are sourced from ``SCHEDULED_JOBS`` so this endpoint cannot
-    drift from the registry — both /health/data and /system/status report on
-    the same job set.
-    """
-    try:
-        report = get_system_health(conn, job_names=[job.name for job in SCHEDULED_JOBS])
-    except Exception as exc:
-        # Fixed-string detail; full exception text goes to logger only.
-        # See review-prevention-log entry on 5xx HTTPException leaks.
-        logger.exception("/health/data: failed to build system health report")
-        raise HTTPException(status_code=503, detail="health data unavailable") from exc
-
-    return {
-        "checked_at": report.checked_at.isoformat(),
-        "kill_switch": {
-            "active": report.kill_switch_active,
-            "detail": report.kill_switch_detail,
-        },
-        "layers": [
-            {
-                "layer": lh.layer,
-                "status": lh.status,
-                "latest": lh.latest.isoformat() if lh.latest else None,
-                "max_age_seconds": lh.max_age.total_seconds() if lh.max_age else None,
-                "age_seconds": lh.age.total_seconds() if lh.age else None,
-                "detail": lh.detail,
-            }
-            for lh in report.layers
-        ],
-        "jobs": [
-            {
-                "job_name": jh.job_name,
-                "last_status": jh.last_status,
-                "last_started_at": jh.last_started_at.isoformat() if jh.last_started_at else None,
-                "last_finished_at": jh.last_finished_at.isoformat() if jh.last_finished_at else None,
-                "detail": jh.detail,
-            }
-            for jh in report.jobs
-        ],
     }
 
 
