@@ -50,7 +50,6 @@ from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 from app.services.ops_monitor import (
-    check_row_count_spike,
     record_job_finish,
     record_job_skip,
     record_job_start,
@@ -71,6 +70,7 @@ from app.services.return_attribution import (
 from app.services.scoring import compute_rankings
 from app.services.sync_orchestrator import prereq_skip_reason
 from app.services.sync_orchestrator.progress import report_progress
+from app.services.sync_orchestrator.row_count_spikes import check_row_count_spike
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
 from app.services.thesis import find_stale_instruments, generate_thesis
 from app.services.universe import enrich_instrument_currencies, sync_universe

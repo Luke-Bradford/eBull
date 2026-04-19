@@ -43,6 +43,11 @@ if TYPE_CHECKING:
     # the cycle; pyright still resolves the annotation correctly.
     from app.services.sync_orchestrator.layer_types import FailureCategory
 
+    # SpikeResult moved to row_count_spikes in chunk 7.  Import here so
+    # pyright resolves annotations that reference it from this module.
+    # No runtime import — the lazy shim below handles call-time resolution.
+    from app.services.sync_orchestrator.row_count_spikes import SpikeResult
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -105,10 +110,6 @@ _LAYER_QUERIES: dict[LayerName, str] = {
     "scores": "SELECT MAX(scored_at) AS latest FROM scores",
 }
 
-# Minimum expected row count ratio.  If a job run produces fewer than
-# (previous_count * threshold), it is flagged as a potential broken source.
-_SPIKE_RATIO_THRESHOLD: float = 0.5
-
 JobStatus = Literal["running", "success", "failure", "skipped"]
 
 LayerStatus = Literal["ok", "stale", "empty", "error"]
@@ -140,15 +141,6 @@ class JobHealth:
     last_status: JobStatus | None = None
     last_started_at: datetime | None = None
     last_finished_at: datetime | None = None
-    detail: str = ""
-
-
-@dataclass(frozen=True)
-class SpikeResult:
-    job_name: str
-    flagged: bool
-    current_count: int
-    previous_count: int | None = None
     detail: str = ""
 
 
@@ -460,82 +452,28 @@ def fetch_latest_successful_runs(
 
 
 # ---------------------------------------------------------------------------
-# Row-count spike detection
+# Row-count spike detection — lazy shim (backward compat for one release)
 # ---------------------------------------------------------------------------
 
 
-def check_row_count_spike(
-    conn: psycopg.Connection[Any],
+# check_row_count_spike moved to app.services.sync_orchestrator.row_count_spikes.
+# A direct module-level re-export would trigger the sync_orchestrator.__init__
+# which creates a circular import (adapters → ops_monitor). A lazy wrapper
+# breaks the cycle while keeping the old call path working.
+# Remove this shim and its callers in the tech-debt cleanup (see linked issue).
+def check_row_count_spike(  # type: ignore[no-redef]
+    conn: Any,
     job_name: str,
     current_count: int,
     *,
     exclude_run_id: int | None = None,
 ) -> SpikeResult:
-    """
-    Compare current_count against the previous successful run's row_count.
-
-    Flags when current_count < previous_count * _SPIKE_RATIO_THRESHOLD.
-    This detects broken data sources that silently return fewer rows than
-    expected.
-
-    exclude_run_id: if provided, excludes this run from the comparison query
-    so the current run does not compare against itself.
-    """
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT row_count
-            FROM job_runs
-            WHERE job_name = %(name)s
-              AND status = 'success'
-              AND row_count IS NOT NULL
-              AND (%(exclude_id)s IS NULL OR run_id != %(exclude_id)s)
-            ORDER BY started_at DESC
-            LIMIT 1
-            """,
-            {"name": job_name, "exclude_id": exclude_run_id},
-        )
-        row = cur.fetchone()
-
-    if row is None or row["row_count"] is None:
-        # No prior successful run with a row count — nothing to compare.
-        return SpikeResult(
-            job_name=job_name,
-            flagged=False,
-            current_count=current_count,
-            detail=f"{job_name}: no prior row_count to compare",
-        )
-
-    previous_count: int = int(row["row_count"])
-    if previous_count == 0:
-        # Previous run also had zero rows — not a spike.
-        return SpikeResult(
-            job_name=job_name,
-            flagged=False,
-            current_count=current_count,
-            previous_count=previous_count,
-            detail=f"{job_name}: previous count was 0, skip comparison",
-        )
-
-    ratio = current_count / previous_count
-    if ratio < _SPIKE_RATIO_THRESHOLD:
-        return SpikeResult(
-            job_name=job_name,
-            flagged=True,
-            current_count=current_count,
-            previous_count=previous_count,
-            detail=(
-                f"{job_name}: row_count dropped from {previous_count} to "
-                f"{current_count} (ratio={ratio:.2f} < threshold={_SPIKE_RATIO_THRESHOLD})"
-            ),
-        )
-
-    return SpikeResult(
-        job_name=job_name,
-        flagged=False,
-        current_count=current_count,
-        previous_count=previous_count,
+    """Shim: delegates to sync_orchestrator.row_count_spikes.check_row_count_spike."""
+    from app.services.sync_orchestrator.row_count_spikes import (
+        check_row_count_spike as _real,
     )
+
+    return _real(conn, job_name, current_count, exclude_run_id=exclude_run_id)  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------

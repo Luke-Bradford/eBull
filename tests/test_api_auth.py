@@ -18,7 +18,7 @@ Browser-session login / logout / /auth/me coverage lives in
 from __future__ import annotations
 
 from collections.abc import Iterator
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -26,6 +26,7 @@ from app.api.auth import require_session_or_service_token
 from app.config import settings
 from app.db import get_conn
 from app.main import app
+from app.services.sync_orchestrator.layer_types import LayerState
 
 client = TestClient(app)
 
@@ -160,7 +161,39 @@ class TestPublicEndpointsRemainOpen:
         app.dependency_overrides.pop(get_conn, None)
 
     def test_health_is_public(self) -> None:
-        resp = client.get("/health")
+        # /health acquires its own connection via app.state.db_pool
+        # (chunk 7). Stub the pool to yield a mock conn so the handler's
+        # inline checkout succeeds; compute_layer_states_from_db is
+        # patched separately.
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _stub_conn_cm():
+            yield _mock_conn()
+
+        class _StubPool:
+            def connection(self):
+                return _stub_conn_cm()
+
+        from app.main import app as _app
+
+        original = getattr(_app.state, "db_pool", None)
+        _app.state.db_pool = _StubPool()
+        try:
+            all_healthy = {"candles": LayerState.HEALTHY}
+            with patch(
+                "app.main.compute_layer_states_from_db",
+                return_value=all_healthy,
+            ):
+                resp = client.get("/health")
+        finally:
+            if original is None:
+                try:
+                    delattr(_app.state, "db_pool")
+                except AttributeError:
+                    pass
+            else:
+                _app.state.db_pool = original
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "ok"

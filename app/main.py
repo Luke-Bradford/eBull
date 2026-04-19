@@ -6,7 +6,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
@@ -44,6 +45,8 @@ from app.security.secrets_crypto import set_active_key as set_broker_encryption_
 from app.services.coverage import override_tier
 from app.services.operator_setup import ensure_startup_token, operators_empty
 from app.services.ops_monitor import get_system_health
+from app.services.sync_orchestrator.layer_state import compute_layer_states_from_db
+from app.services.sync_orchestrator.layer_types import LayerState
 from app.services.sync_orchestrator.reaper import reap_orphaned_syncs
 from app.workers.scheduler import SCHEDULED_JOBS
 
@@ -177,15 +180,52 @@ app.include_router(theses_router)
 
 
 @app.get("/health")
-def health() -> dict:
-    # Trading-mode flags intentionally NOT returned here.  They live in
-    # runtime_config (DB-backed) and are exposed via /config — surfacing the
-    # env-backed values would be misleading and stale (issue #56).
-    return {
-        "status": "ok",
+def health(request: Request) -> JSONResponse:
+    """Liveness + layer-state rollup.
+
+    200 when every layer is HEALTHY / DEGRADED / RUNNING / RETRYING /
+    CASCADE_WAITING / DISABLED (self-healing or operator-gated states).
+    503 when ANY layer is ACTION_NEEDED or SECRET_MISSING — external
+    monitoring should alert.
+    Falls through to 503 with system_state="error" when the state
+    machine itself cannot be evaluated (DB pool exhausted, DB down,
+    etc.). Acquires the connection inline rather than via
+    `Depends(get_conn)` so pool checkout failures map to the same
+    503 JSON shape instead of FastAPI's default 500 HTML.
+
+    Trading-mode flags intentionally NOT returned here.  They live in
+    runtime_config (DB-backed) and are exposed via /config — surfacing the
+    env-backed values would be misleading and stale (issue #56).
+    """
+    base: dict[str, object] = {
         "env": settings.app_env,
         "etoro_env": settings.etoro_env,
     }
+    try:
+        pool = getattr(request.app.state, "db_pool", None)
+        if pool is None:
+            # No pool on app.state — either the lifespan hasn't run
+            # (test harness) or the app booted into a degraded mode.
+            # Treat as "cannot evaluate" and fall through to the
+            # 503 error branch so external monitoring sees it.
+            raise RuntimeError("db_pool not initialised on app.state")
+        with pool.connection() as conn:
+            states = compute_layer_states_from_db(conn)
+    except Exception:
+        logger.exception("/health: compute_layer_states_from_db failed")
+        return JSONResponse(
+            {"status": "error", "system_state": "error", **base},
+            status_code=503,
+        )
+    needs_attention = any(s in {LayerState.ACTION_NEEDED, LayerState.SECRET_MISSING} for s in states.values())
+    return JSONResponse(
+        {
+            "status": "ok",
+            "system_state": "needs_attention" if needs_attention else "ok",
+            **base,
+        },
+        status_code=503 if needs_attention else 200,
+    )
 
 
 @app.get("/health/db")
