@@ -62,7 +62,16 @@ class SyncRequest(BaseModel):
 class ActionNeededItem(BaseModel):
     root_layer: str
     display_name: str
-    category: str
+    category: Literal[
+        "auth_expired",
+        "rate_limited",
+        "source_down",
+        "schema_drift",
+        "db_constraint",
+        "data_gap",
+        "upstream_waiting",
+        "internal_error",
+    ]
     operator_message: str
     operator_fix: str | None
     self_heal: bool
@@ -90,7 +99,7 @@ class CascadeGroupModel(BaseModel):
 
 class SyncLayersV2Response(BaseModel):
     generated_at: datetime
-    system_state: str  # 'ok' | 'catching_up' | 'needs_attention'
+    system_state: Literal["ok", "catching_up", "needs_attention"]
     system_summary: str
     action_needed: list[ActionNeededItem]
     degraded: list[LayerSummary]
@@ -405,10 +414,21 @@ def get_sync_layers_v2(
         if state in {LayerState.ACTION_NEEDED, LayerState.SECRET_MISSING}
     ]
 
+    running_count = sum(1 for s in states.values() if s is LayerState.RUNNING)
+    retrying_count = sum(1 for s in states.values() if s is LayerState.RETRYING)
+    cascade_waiting_count = sum(1 for s in states.values() if s is LayerState.CASCADE_WAITING)
+
     return SyncLayersV2Response(
         generated_at=datetime.now(UTC),
         system_state=system_state,
-        system_summary=_system_summary(action_needed, secret_missing, degraded),
+        system_summary=_system_summary(
+            action_needed=action_needed,
+            secret_missing=secret_missing,
+            degraded=degraded,
+            running_count=running_count,
+            retrying_count=retrying_count,
+            cascade_waiting_count=cascade_waiting_count,
+        ),
         action_needed=action_needed,
         degraded=degraded,
         secret_missing=secret_missing,
@@ -419,10 +439,22 @@ def get_sync_layers_v2(
 
 
 def _system_summary(
+    *,
     action_needed: list[ActionNeededItem],
     secret_missing: list[SecretMissingItem],
     degraded: list[LayerSummary],
+    running_count: int,
+    retrying_count: int,
+    cascade_waiting_count: int,
 ) -> str:
+    """One-line human summary of system state (spec §8).
+
+    Order is deliberate: ACTION_NEEDED > SECRET_MISSING > DEGRADED >
+    RUNNING/RETRYING > healthy. RUNNING/RETRYING count is only
+    surfaced when nothing ahead of them in priority matches, so the
+    summary never contradicts the bucketed response (e.g. a red
+    action_needed banner will never be drowned by "2 layers running").
+    """
     if action_needed:
         first = action_needed[0].display_name
         count = len(action_needed)
@@ -433,6 +465,12 @@ def _system_summary(
         return f"{len(secret_missing)} layer(s) missing credentials"
     if degraded:
         return f"{len(degraded)} layer(s) catching up"
+    # RUNNING / RETRYING / CASCADE_WAITING share the catching_up
+    # system_state — surface them here so the summary stays consistent
+    # with system_state for a fire-in-flight or self-heal round.
+    transient = running_count + retrying_count + cascade_waiting_count
+    if transient:
+        return f"{transient} layer(s) catching up"
     return "All layers healthy"
 
 

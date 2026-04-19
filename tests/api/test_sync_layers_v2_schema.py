@@ -29,6 +29,22 @@ def test_v2_healthy_entries_shape(clean_client: TestClient) -> None:
         assert set(entry.keys()) >= {"layer", "display_name", "last_updated"}
 
 
+def test_v2_summary_never_contradicts_state(clean_client: TestClient) -> None:
+    # Regression guard: catching_up system_state implies summary
+    # names a non-healthy cohort (degraded/running/retrying/cascade).
+    # needs_attention implies action_needed or secret_missing text.
+    resp = clean_client.get("/sync/layers/v2")
+    body = resp.json()
+    state = body["system_state"]
+    summary = body["system_summary"]
+    if state == "catching_up":
+        assert "All layers healthy" not in summary, body
+    if state == "needs_attention":
+        assert "All layers healthy" not in summary, body
+    if state == "ok":
+        assert summary == "All layers healthy", body
+
+
 def test_v2_requires_auth() -> None:
     # /sync/layers/v2 must inherit the same require_session_or_service_token
     # dependency as /sync/layers. A no-auth TestClient using a bare app
