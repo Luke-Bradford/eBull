@@ -417,8 +417,9 @@ class TestExecuteOrderDemoMode:
         assert result.broker_order_ref == "DEMO-1-BUY"
         assert "order filled" in result.explanation
 
-        # conn.execute: position upsert, broker_positions, cash_ledger, rec status, audit = 5
-        assert conn.execute.call_count == 5
+        # conn.execute: safety-layer checks (fx_rates + portfolio_sync = 2),
+        # position upsert, broker_positions, cash_ledger, rec status, audit = 7
+        assert conn.execute.call_count == 7
 
     @patch("app.services.order_client._maybe_trigger_attribution")
     @patch("app.services.order_client._utcnow", return_value=_NOW)
@@ -471,8 +472,9 @@ class TestExecuteOrderDemoMode:
         assert result.order_id == 9
         assert "zero units" in result.explanation
 
-        # conn.execute: rec status update, audit = 2 (no fill/position/cash)
-        assert conn.execute.call_count == 2
+        # conn.execute: safety-layer checks (fx_rates + portfolio_sync = 2),
+        # rec status update, audit = 4 (no fill/position/cash)
+        assert conn.execute.call_count == 4
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_demo_mode_never_calls_broker(self, _mock_now: MagicMock) -> None:
@@ -817,8 +819,9 @@ class TestExecuteOrderFailures:
         assert result.order_id == 12
         assert "failed" in result.explanation
 
-        # conn.execute: rec status update + audit = 2 (no fill/position/cash)
-        assert conn.execute.call_count == 2
+        # conn.execute: safety-layer checks (fx_rates + portfolio_sync = 2),
+        # rec status update + audit = 4 (no fill/position/cash)
+        assert conn.execute.call_count == 4
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_broker_pending_persists_order_with_pending_status(self, _mock_now: MagicMock) -> None:

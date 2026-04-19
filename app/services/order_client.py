@@ -634,6 +634,32 @@ def _write_execution_audit(
 # ---------------------------------------------------------------------------
 
 
+class SafetyLayerDisabledError(RuntimeError):
+    """Raised when BUY/ADD execution is attempted with a safety-critical
+    layer (fx_rates or portfolio_sync) disabled by the operator."""
+
+
+def _assert_safety_layers_enabled_for_buy_add(
+    conn: psycopg.Connection[Any],
+    action: str,
+) -> None:
+    """Second-line defence: execute_order re-checks safety_layers_enabled
+    for BUY/ADD. The guard rule at evaluate_recommendation time is the
+    first line; this catches the window where a rec is approved, then
+    the operator disables a safety layer before execution fires.
+    EXIT is never gated — emergency de-risk must always be possible.
+    """
+    if action not in ("BUY", "ADD"):
+        return
+    from app.services.layer_enabled import is_layer_enabled
+
+    disabled = [name for name in ("fx_rates", "portfolio_sync") if not is_layer_enabled(conn, name)]
+    if disabled:
+        raise SafetyLayerDisabledError(
+            f"{' + '.join(disabled)} disabled — BUY/ADD execution aborted; re-enable the layer to proceed.",
+        )
+
+
 def _utcnow() -> datetime:
     return datetime.now(tz=UTC)
 
@@ -669,6 +695,7 @@ def execute_order(
     rec = _load_approved_recommendation(conn, recommendation_id)
     instrument_id: int = int(rec["instrument_id"])
     action: str = str(rec["action"])
+    _assert_safety_layers_enabled_for_buy_add(conn, action)
 
     # --- Step 2: determine order parameters ---
     # requested_amount is the dollar amount to invest.
