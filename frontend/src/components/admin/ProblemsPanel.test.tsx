@@ -392,6 +392,7 @@ describe("ProblemsPanel", () => {
     // job was rendered underneath. Must say "N problem(s) need
     // attention" whenever jobs/coverage contribute.
     const jobs: JobsListResponse = {
+      checked_at: new Date().toISOString(),
       jobs: [
         {
           name: "test_job",
