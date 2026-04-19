@@ -1,4 +1,5 @@
 import httpx
+import psycopg
 import psycopg.errors
 import pytest
 
@@ -66,3 +67,10 @@ def test_value_error_maps_to_internal_error() -> None:
     # is a higher-level decision that requires payload-shape evidence
     # the classifier does not see.
     assert classify_exception(ValueError("bad")) is FailureCategory.INTERNAL_ERROR
+
+
+def test_operational_error_maps_to_source_down() -> None:
+    # Transient DB infrastructure (connection failure, lock timeout,
+    # server shutdown) — self-heal via retry budget rather than
+    # surfacing as ACTION_NEEDED on first miss.
+    assert classify_exception(psycopg.OperationalError("conn refused")) is FailureCategory.SOURCE_DOWN

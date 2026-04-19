@@ -8,6 +8,7 @@ taxonomy.
 from __future__ import annotations
 
 import httpx
+import psycopg
 import psycopg.errors
 
 from app.services.sync_orchestrator.layer_types import FailureCategory
@@ -35,4 +36,9 @@ def classify_exception(exc: BaseException) -> FailureCategory:
         return FailureCategory.SOURCE_DOWN
     if isinstance(exc, psycopg.errors.IntegrityError):
         return FailureCategory.DB_CONSTRAINT
+    # OperationalError covers connection failures, lock timeouts, server
+    # shutdowns — transient infrastructure, not logic bugs. SOURCE_DOWN
+    # is self_heal=True so the retry budget kicks in.
+    if isinstance(exc, psycopg.OperationalError):
+        return FailureCategory.SOURCE_DOWN
     return FailureCategory.INTERNAL_ERROR
