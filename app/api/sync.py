@@ -8,6 +8,8 @@ Auth: same dependency as /jobs — require_session_or_service_token.
 
 from __future__ import annotations
 
+import os
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import psycopg
@@ -55,6 +57,47 @@ class SyncRequest(BaseModel):
     scope: Literal["full", "layer", "high_frequency", "job"] = "full"
     layer: str | None = None
     job: str | None = None
+
+
+class ActionNeededItem(BaseModel):
+    root_layer: str
+    display_name: str
+    category: str
+    operator_message: str
+    operator_fix: str | None
+    self_heal: bool
+    consecutive_failures: int
+    affected_downstream: list[str]
+
+
+class SecretMissingItem(BaseModel):
+    layer: str
+    display_name: str
+    missing_secret: str
+    operator_fix: str
+
+
+class LayerSummary(BaseModel):
+    layer: str
+    display_name: str
+    last_updated: datetime | None
+
+
+class CascadeGroupModel(BaseModel):
+    root: str
+    affected: list[str]
+
+
+class SyncLayersV2Response(BaseModel):
+    generated_at: datetime
+    system_state: str  # 'ok' | 'catching_up' | 'needs_attention'
+    system_summary: str
+    action_needed: list[ActionNeededItem]
+    degraded: list[LayerSummary]
+    secret_missing: list[SecretMissingItem]
+    healthy: list[LayerSummary]
+    disabled: list[LayerSummary]
+    cascade_groups: list[CascadeGroupModel]
 
 
 def _scope_from(body: SyncRequest) -> SyncScope:
@@ -242,6 +285,182 @@ def get_sync_layers(
             }
         )
     return {"layers": out}
+
+
+@router.get("/layers/v2", response_model=SyncLayersV2Response)
+def get_sync_layers_v2(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> SyncLayersV2Response:
+    """v2: structured triage payload (spec §8).
+
+    Returns one bucket per LayerState, plus cascade groups + a one-line
+    system_summary. Designed as the sole feed for the new Admin UI
+    (sub-project C). v1 /sync/layers is unchanged.
+    """
+    from app.services.sync_orchestrator import LAYERS
+    from app.services.sync_orchestrator.layer_failure_history import (
+        all_layer_histories,
+    )
+    from app.services.sync_orchestrator.layer_state import (
+        compute_layer_states_from_db,
+    )
+    from app.services.sync_orchestrator.layer_types import (
+        REMEDIES,
+        FailureCategory,
+        LayerState,
+    )
+
+    states = compute_layer_states_from_db(conn)
+    names = list(states.keys())
+    streaks, categories = all_layer_histories(conn, names)
+    last_updates = _layer_last_updated_map(conn, names)
+
+    if any(s in {LayerState.ACTION_NEEDED, LayerState.SECRET_MISSING} for s in states.values()):
+        system_state = "needs_attention"
+    elif any(
+        s in {LayerState.DEGRADED, LayerState.RUNNING, LayerState.RETRYING, LayerState.CASCADE_WAITING}
+        for s in states.values()
+    ):
+        system_state = "catching_up"
+    else:
+        system_state = "ok"
+
+    action_needed: list[ActionNeededItem] = []
+    secret_missing: list[SecretMissingItem] = []
+    degraded: list[LayerSummary] = []
+    healthy: list[LayerSummary] = []
+    disabled: list[LayerSummary] = []
+
+    # Inline cascade-grouping shim. Chunk 6 replaces this with
+    # `collapse_cascades` from cascade.py (pure function + tests).
+    # The two implementations must agree on the descendant walk.
+    def _downstream(root: str) -> list[str]:
+        affected: list[str] = []
+        frontier = {root}
+        visited = {root}
+        while frontier:
+            next_frontier: set[str] = set()
+            for n, layer in LAYERS.items():
+                if n in visited:
+                    continue
+                if any(dep in frontier for dep in layer.dependencies):
+                    visited.add(n)
+                    if states.get(n) is LayerState.CASCADE_WAITING:
+                        affected.append(n)
+                    next_frontier.add(n)
+            frontier = next_frontier
+        return affected
+
+    category_values = {c.value for c in FailureCategory}
+
+    for name, state in states.items():
+        layer = LAYERS[name]
+        summary = LayerSummary(
+            layer=name,
+            display_name=layer.display_name,
+            last_updated=last_updates.get(name),
+        )
+        if state is LayerState.ACTION_NEEDED:
+            raw_cat = categories.get(name) or "internal_error"
+            category = (
+                FailureCategory(raw_cat)
+                if raw_cat in category_values
+                else FailureCategory.INTERNAL_ERROR
+            )
+            remedy = REMEDIES[category]
+            action_needed.append(
+                ActionNeededItem(
+                    root_layer=name,
+                    display_name=layer.display_name,
+                    category=category.value,
+                    operator_message=remedy.message,
+                    operator_fix=remedy.operator_fix,
+                    self_heal=remedy.self_heal,
+                    consecutive_failures=streaks.get(name, 0),
+                    affected_downstream=_downstream(name),
+                )
+            )
+        elif state is LayerState.SECRET_MISSING:
+            missing = next(
+                (ref for ref in layer.secret_refs if not os.environ.get(ref.env_var)),
+                None,
+            )
+            if missing is not None:
+                secret_missing.append(
+                    SecretMissingItem(
+                        layer=name,
+                        display_name=layer.display_name,
+                        missing_secret=missing.env_var,
+                        operator_fix=f"Set {missing.env_var} in Settings → Providers",
+                    )
+                )
+        elif state is LayerState.DEGRADED:
+            degraded.append(summary)
+        elif state is LayerState.HEALTHY:
+            healthy.append(summary)
+        elif state is LayerState.DISABLED:
+            disabled.append(summary)
+        # RUNNING / RETRYING / CASCADE_WAITING feed into system_state
+        # counts + cascade_groups; no top-level bucket.
+
+    cascade_groups = [
+        CascadeGroupModel(root=name, affected=_downstream(name))
+        for name, state in states.items()
+        if state in {LayerState.ACTION_NEEDED, LayerState.SECRET_MISSING}
+    ]
+
+    return SyncLayersV2Response(
+        generated_at=datetime.now(UTC),
+        system_state=system_state,
+        system_summary=_system_summary(action_needed, secret_missing, degraded),
+        action_needed=action_needed,
+        degraded=degraded,
+        secret_missing=secret_missing,
+        healthy=healthy,
+        disabled=disabled,
+        cascade_groups=cascade_groups,
+    )
+
+
+def _system_summary(
+    action_needed: list[ActionNeededItem],
+    secret_missing: list[SecretMissingItem],
+    degraded: list[LayerSummary],
+) -> str:
+    if action_needed:
+        first = action_needed[0].display_name
+        count = len(action_needed)
+        if count == 1:
+            return f"{first} needs attention"
+        return f"{count} layer(s) need attention ({first})"
+    if secret_missing:
+        return f"{len(secret_missing)} layer(s) missing credentials"
+    if degraded:
+        return f"{len(degraded)} layer(s) catching up"
+    return "All layers healthy"
+
+
+def _layer_last_updated_map(
+    conn: psycopg.Connection[object], names: list[str]
+) -> dict[str, datetime]:
+    """Most recent complete/partial finished_at per layer."""
+    rows = conn.execute(
+        """
+        WITH ranked AS (
+            SELECT
+                layer_name, finished_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY layer_name
+                    ORDER BY COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC
+                ) AS rn
+            FROM sync_layer_progress
+            WHERE layer_name = ANY(%s) AND status IN ('complete', 'partial')
+        )
+        SELECT layer_name, finished_at FROM ranked WHERE rn = 1
+        """,
+        (names,),
+    ).fetchall()
+    return {str(r[0]): r[1] for r in rows if r[1] is not None}
 
 
 @router.get("/runs")
