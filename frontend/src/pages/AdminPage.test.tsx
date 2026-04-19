@@ -24,11 +24,13 @@ import type {
   JobsListResponse,
   RecommendationsListResponse,
   ConfigResponse,
+  SyncLayersV2Response,
 } from "@/api/types";
 
 vi.mock("@/api/jobs", () => ({ fetchJobsOverview: vi.fn(), runJob: vi.fn() }));
 vi.mock("@/api/sync", () => ({
   fetchSyncLayers: vi.fn(),
+  fetchSyncLayersV2: vi.fn(),
   fetchSyncStatus: vi.fn(),
   fetchSyncRuns: vi.fn(),
   triggerSync: vi.fn(),
@@ -40,6 +42,7 @@ vi.mock("@/api/config", () => ({ fetchConfig: vi.fn() }));
 import { fetchJobsOverview, runJob } from "@/api/jobs";
 import {
   fetchSyncLayers,
+  fetchSyncLayersV2,
   fetchSyncRuns,
   fetchSyncStatus,
 } from "@/api/sync";
@@ -50,6 +53,7 @@ import { fetchConfig } from "@/api/config";
 const mockedJobs = vi.mocked(fetchJobsOverview);
 const mockedRun = vi.mocked(runJob);
 const mockedLayers = vi.mocked(fetchSyncLayers);
+const mockedV2 = vi.mocked(fetchSyncLayersV2);
 const mockedStatus = vi.mocked(fetchSyncStatus);
 const mockedSyncRuns = vi.mocked(fetchSyncRuns);
 const mockedCoverage = vi.mocked(fetchCoverageSummary);
@@ -139,10 +143,26 @@ function jobsResponse(): JobsListResponse {
   };
 }
 
+function emptyV2(): SyncLayersV2Response {
+  return {
+    generated_at: new Date().toISOString(),
+    system_state: "ok",
+    system_summary: "All layers healthy",
+    action_needed: [],
+    degraded: [],
+    secret_missing: [],
+    healthy: [],
+    disabled: [],
+    cascade_groups: [],
+    layers: [],
+  };
+}
+
 beforeEach(() => {
   mockedJobs.mockReset();
   mockedRun.mockReset();
   mockedLayers.mockReset();
+  mockedV2.mockReset();
   mockedStatus.mockReset();
   mockedSyncRuns.mockReset();
   mockedCoverage.mockReset();
@@ -152,6 +172,7 @@ beforeEach(() => {
   mockedConfig.mockResolvedValue(demoConfig());
   mockedJobs.mockResolvedValue(jobsResponse());
   mockedLayers.mockResolvedValue({ layers: [] });
+  mockedV2.mockResolvedValue(emptyV2());
   mockedStatus.mockResolvedValue({
     is_running: false,
     current_run: null,
@@ -216,7 +237,7 @@ describe("AdminPage — top-level composition", () => {
     renderPage();
     // Wait for all three sources to resolve.
     await waitFor(() => {
-      expect(mockedLayers).toHaveBeenCalled();
+      expect(mockedV2).toHaveBeenCalled();
       expect(mockedJobs).toHaveBeenCalled();
       expect(mockedCoverage).toHaveBeenCalled();
     });
@@ -237,24 +258,22 @@ describe("AdminPage — top-level composition", () => {
   });
 
   it("shows problems panel when a layer has consecutive failures", async () => {
-    mockedLayers.mockReset();
-    mockedLayers.mockResolvedValue({
-      layers: [
-        {
-          name: "cik_mapping",
-          display_name: "CIK mapping",
-          tier: 1,
-          is_fresh: false,
-          freshness_detail: "failed",
-          last_success_at: null,
-          last_duration_seconds: null,
-          last_error_category: "db_constraint",
-          consecutive_failures: 3,
-          dependencies: [],
-          is_blocking: true,
-        },
-      ],
-    });
+    const v2WithProblem = emptyV2();
+    v2WithProblem.system_state = "needs_attention";
+    v2WithProblem.action_needed = [
+      {
+        root_layer: "cik_mapping",
+        display_name: "CIK mapping",
+        category: "db_constraint",
+        operator_message: "3 consecutive failures",
+        operator_fix: null,
+        self_heal: false,
+        consecutive_failures: 3,
+        affected_downstream: [],
+      },
+    ];
+    mockedV2.mockReset();
+    mockedV2.mockResolvedValue(v2WithProblem);
     renderPage();
     expect(
       await screen.findByText(/CIK mapping — 3 consecutive failures/),
@@ -283,29 +302,27 @@ describe("AdminPage — collapsible sections", () => {
   });
 
   it("expands Orchestrator details when a layer problem's action fires", async () => {
-    mockedLayers.mockReset();
-    mockedLayers.mockResolvedValue({
-      layers: [
-        {
-          name: "cik_mapping",
-          display_name: "CIK mapping",
-          tier: 1,
-          is_fresh: false,
-          freshness_detail: "failed",
-          last_success_at: null,
-          last_duration_seconds: null,
-          last_error_category: "db_constraint",
-          consecutive_failures: 3,
-          dependencies: [],
-          is_blocking: true,
-        },
-      ],
-    });
+    const v2WithProblem = emptyV2();
+    v2WithProblem.system_state = "needs_attention";
+    v2WithProblem.action_needed = [
+      {
+        root_layer: "cik_mapping",
+        display_name: "CIK mapping",
+        category: "db_constraint",
+        operator_message: "3 consecutive failures",
+        operator_fix: null,
+        self_heal: false,
+        consecutive_failures: 3,
+        affected_downstream: [],
+      },
+    ];
+    mockedV2.mockReset();
+    mockedV2.mockResolvedValue(v2WithProblem);
     const user = userEvent.setup();
     renderPage();
     await user.click(
       await screen.findByRole("button", {
-        name: /Open orchestrator details/,
+        name: /Open orchestrator details for cik_mapping/,
       }),
     );
     await waitFor(() => {
@@ -378,5 +395,66 @@ describe("AdminPage — Background tasks collapsible", () => {
     });
     await user.click(btn);
     expect(btn).toHaveTextContent("Unknown job");
+  });
+});
+
+describe("AdminPage v2 integration", () => {
+  it("renders ProblemsPanel hidden and LayerHealthList rows when v2 is ok", async () => {
+    const mockV2: SyncLayersV2Response = {
+      generated_at: new Date().toISOString(),
+      system_state: "ok",
+      system_summary: "All layers healthy",
+      action_needed: [],
+      degraded: [],
+      secret_missing: [],
+      healthy: [],
+      disabled: [],
+      cascade_groups: [],
+      layers: [
+        {
+          layer: "universe",
+          display_name: "Tradable Universe",
+          state: "healthy",
+          last_updated: new Date().toISOString(),
+          plain_language_sla: "Refreshed weekly.",
+        },
+        {
+          layer: "candles",
+          display_name: "Daily Price Candles",
+          state: "healthy",
+          last_updated: new Date().toISOString(),
+          plain_language_sla: "Refreshed every trading day after market close.",
+        },
+      ],
+    };
+    mockedV2.mockReset();
+    mockedV2.mockResolvedValue(mockV2);
+    // All other sources clean to ensure ProblemsPanel hides.
+    mockedJobs.mockReset();
+    mockedJobs.mockResolvedValue({
+      checked_at: new Date().toISOString(),
+      jobs: [],
+    });
+
+    const user = userEvent.setup();
+    renderPage();
+
+    // Wait for v2 fetch to complete.
+    await waitFor(() => {
+      expect(mockedV2).toHaveBeenCalled();
+    });
+
+    // ProblemsPanel must be hidden (no error banner text).
+    await waitFor(() => {
+      expect(screen.queryByRole("region", { name: "Current problems" })).toBeNull();
+    });
+
+    // Expand Layer health section to see LayerHealthList rows.
+    await user.click(await screen.findByRole("button", { name: /Layer health/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Tradable Universe")).toBeInTheDocument();
+      expect(screen.getByText("Daily Price Candles")).toBeInTheDocument();
+    });
   });
 });
