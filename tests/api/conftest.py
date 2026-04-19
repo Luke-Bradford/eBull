@@ -20,7 +20,7 @@ from app.main import app
 
 
 @pytest.fixture
-def clean_client() -> Generator[TestClient, None, None]:
+def clean_client() -> Generator[TestClient]:
     """TestClient with auth bypassed and get_conn override cleared.
 
     Mirrors the pattern in tests/test_sync_orchestrator_api.py. Removing
