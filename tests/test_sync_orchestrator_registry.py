@@ -91,8 +91,7 @@ class TestJobToLayers:
         assert JOB_TO_LAYERS["execute_approved_orders"] == ()
         assert JOB_TO_LAYERS["monitor_positions"] == ()
         assert JOB_TO_LAYERS["retry_deferred_recommendations"] == ()
-        assert JOB_TO_LAYERS["weekly_coverage_review"] == ()
-        assert JOB_TO_LAYERS["weekly_coverage_audit"] == ()
+        assert JOB_TO_LAYERS["fundamentals_sync"] == ()
         assert JOB_TO_LAYERS["attribution_summary"] == ()
         assert JOB_TO_LAYERS["daily_tax_reconciliation"] == ()
 

@@ -99,7 +99,7 @@ def get_coverage_summary(
     disabled) don't inflate the null-row count. ``null_rows``
     captures tradable instruments whose coverage row exists but
     whose ``filings_status`` is NULL — a pre-audit placeholder that
-    should only persist until the first ``weekly_coverage_audit``
+    should only persist until the first ``fundamentals_sync``
     run. Any non-zero ``null_rows`` in steady state is an ops
     signal that the audit job is wedged.
     """
