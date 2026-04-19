@@ -343,7 +343,14 @@ def get_sync_layers_v2(
     # Inline cascade-grouping shim. Chunk 6 replaces this with
     # `collapse_cascades` from cascade.py (pure function + tests).
     # The two implementations must agree on the descendant walk.
+    # Cached to guarantee action_needed.affected_downstream and
+    # cascade_groups[].affected stay byte-identical even if the BFS
+    # ever became order-sensitive.
+    _downstream_cache: dict[str, list[str]] = {}
+
     def _downstream(root: str) -> list[str]:
+        if root in _downstream_cache:
+            return _downstream_cache[root]
         affected: list[str] = []
         frontier = {root}
         visited = {root}
@@ -358,6 +365,7 @@ def get_sync_layers_v2(
                         affected.append(n)
                     next_frontier.add(n)
             frontier = next_frontier
+        _downstream_cache[root] = affected
         return affected
 
     category_values = {c.value for c in FailureCategory}
@@ -386,11 +394,28 @@ def get_sync_layers_v2(
                 )
             )
         elif state is LayerState.SECRET_MISSING:
+            # Use the first env var that is currently missing as the
+            # displayed one. Fall back to the first declared secret_ref
+            # if none look missing (a race with env-set between state
+            # computation and this loop) — the layer still shows up in
+            # the response rather than silently disappearing.
             missing = next(
                 (ref for ref in layer.secret_refs if not os.environ.get(ref.env_var)),
-                None,
+                layer.secret_refs[0] if layer.secret_refs else None,
             )
-            if missing is not None:
+            if missing is None:
+                # A layer without any secret_refs should never reach
+                # SECRET_MISSING (state machine wouldn't emit it), but
+                # if it does, keep it visible via a generic row.
+                secret_missing.append(
+                    SecretMissingItem(
+                        layer=name,
+                        display_name=layer.display_name,
+                        missing_secret="(unknown)",
+                        operator_fix="Check layer secret configuration",
+                    )
+                )
+            else:
                 secret_missing.append(
                     SecretMissingItem(
                         layer=name,

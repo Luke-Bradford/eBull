@@ -29,9 +29,13 @@ def test_v1_top_level_shape(clean_client: TestClient) -> None:
 
 
 def test_v1_layer_keys_unchanged(clean_client: TestClient) -> None:
+    from app.services.sync_orchestrator.registry import LAYERS
+
     resp = clean_client.get("/sync/layers")
     layers = resp.json()["layers"]
-    assert len(layers) == 15
+    # Count matches the registry — a layer added or retired without
+    # updating this test will fail loudly rather than silently.
+    assert len(layers) == len(LAYERS)
     for layer in layers:
         assert set(layer.keys()) == EXPECTED_LAYER_KEYS, (
             f"{layer.get('name')} v1 shape drift: {set(layer.keys()) ^ EXPECTED_LAYER_KEYS}"

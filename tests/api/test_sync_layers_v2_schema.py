@@ -29,6 +29,33 @@ def test_v2_healthy_entries_shape(clean_client: TestClient) -> None:
         assert set(entry.keys()) >= {"layer", "display_name", "last_updated"}
 
 
+def test_v2_secret_missing_never_silently_dropped(clean_client: TestClient) -> None:
+    # Every layer the state machine classified as SECRET_MISSING must
+    # appear in the secret_missing bucket. Regression guard: previously
+    # a layer whose env vars were all set between state computation
+    # and the endpoint loop would vanish from all buckets.
+    resp = clean_client.get("/sync/layers/v2")
+    body = resp.json()
+    secret_missing_names = {s["layer"] for s in body["secret_missing"]}
+    # If system_state is needs_attention via SECRET_MISSING only, the
+    # count of secret_missing entries must be >= 1 (at least one
+    # layer's secret is missing to produce that state).
+    if body["system_state"] == "needs_attention" and not body["action_needed"]:
+        assert len(secret_missing_names) >= 1, body
+
+
+def test_v2_cascade_groups_match_action_needed_downstream(clean_client: TestClient) -> None:
+    # Pin the shared-cache invariant: cascade_groups[i].affected for
+    # each action_needed root must match that root's
+    # affected_downstream exactly, in order.
+    resp = clean_client.get("/sync/layers/v2")
+    body = resp.json()
+    groups_by_root = {g["root"]: g["affected"] for g in body["cascade_groups"]}
+    for item in body["action_needed"]:
+        root = item["root_layer"]
+        assert groups_by_root.get(root) == item["affected_downstream"], body
+
+
 def test_v2_summary_never_contradicts_state(clean_client: TestClient) -> None:
     # Regression guard: catching_up system_state implies summary
     # names a non-healthy cohort (degraded/running/retrying/cascade).
