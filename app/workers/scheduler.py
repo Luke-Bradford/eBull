@@ -50,11 +50,11 @@ from app.services.fundamentals import refresh_fundamentals
 from app.services.market_data import refresh_market_data
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 from app.services.ops_monitor import (
-    check_row_count_spike,
     record_job_finish,
     record_job_skip,
     record_job_start,
 )
+from app.services.sync_orchestrator.row_count_spikes import check_row_count_spike
 from app.services.order_client import execute_order
 from app.services.portfolio import run_portfolio_review
 from app.services.portfolio_sync import sync_portfolio
