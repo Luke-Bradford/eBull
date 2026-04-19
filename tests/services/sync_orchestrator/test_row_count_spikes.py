@@ -22,4 +22,5 @@ def test_imports_resolve() -> None:
     # Regression guard: no other orchestrator module should import
     # check_row_count_spike from ops_monitor after this chunk.
     from app.services.sync_orchestrator import row_count_spikes
+
     assert hasattr(row_count_spikes, "check_row_count_spike")
