@@ -113,6 +113,18 @@ export function AdminPage() {
   // Shared sync-trigger — single source of truth for both the
   // top-level button here and the inner button inside SyncDashboard.
   const syncTrigger = useSyncTrigger(refetchAll);
+  // Destructure once — `useSyncTrigger` returns a plain object
+  // literal, so the outer reference changes every render. Using
+  // the stable member refs in hook deps below prevents effects
+  // from re-arming on every render (most visibly: the fallback
+  // timer below, which would otherwise reset every render and
+  // could never actually fire).
+  const {
+    kind: triggerKind,
+    message: triggerMessage,
+    trigger: triggerSync_,
+    clearQueued: triggerClearQueued,
+  } = syncTrigger;
 
   // Drive the `queued → idle` transition off the top-level status
   // poll. Previously only SyncDashboard called clearQueued, which
@@ -122,19 +134,21 @@ export function AdminPage() {
   // can advance the trigger state independently. Also clears via a
   // one-off timer for the fast-run case where a sync finishes
   // before the next /sync/status tick ever observes is_running=true.
-  const clearQueued = syncTrigger.clearQueued;
   useEffect(() => {
-    clearQueued(isRunning);
-  }, [clearQueued, isRunning]);
+    triggerClearQueued(isRunning);
+  }, [triggerClearQueued, isRunning]);
 
   useEffect(() => {
-    if (syncTrigger.kind !== "queued") return;
+    if (triggerKind !== "queued") return;
     // Fallback: if the server-side sync finishes before we ever see
     // is_running=true, recover the idle state after the next refresh
     // tick. Otherwise the button would stay disabled indefinitely.
-    const id = window.setTimeout(() => clearQueued(true), refreshInterval + 2_000);
+    const id = window.setTimeout(
+      () => triggerClearQueued(true),
+      refreshInterval + 2_000,
+    );
     return () => window.clearTimeout(id);
-  }, [syncTrigger.kind, clearQueued, refreshInterval]);
+  }, [triggerKind, triggerClearQueued, refreshInterval]);
 
   const [orchestratorOpen, setOrchestratorOpen] = useState(false);
   const [rowState, setRowState] = useState<Record<string, RowState>>({});
@@ -192,10 +206,10 @@ export function AdminPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-slate-800">Admin</h1>
         <SyncNowButton
-          triggerKind={syncTrigger.kind}
-          message={syncTrigger.message}
+          triggerKind={triggerKind}
+          message={triggerMessage}
           isRunning={isRunning}
-          onClick={() => void syncTrigger.trigger()}
+          onClick={() => void triggerSync_()}
         />
       </div>
 
