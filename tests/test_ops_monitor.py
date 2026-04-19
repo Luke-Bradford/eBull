@@ -9,7 +9,6 @@ Structure:
   - TestCheckJobHealth      — job health status
   - TestCheckRowCountSpike  — row-count spike detection
   - TestKillSwitch          — activate / deactivate / status
-  - TestGetSystemHealth     — unified health report
 
 Mock DB approach: same cursor/connection pattern as other test files.
 """
@@ -32,7 +31,6 @@ from app.services.ops_monitor import (
     check_row_count_spike,
     deactivate_kill_switch,
     get_kill_switch_status,
-    get_system_health,
     record_job_finish,
     record_job_skip,
     record_job_start,
@@ -643,86 +641,3 @@ class TestKillSwitch:
         status = get_kill_switch_status(conn)
         assert status["is_active"] is True
         assert "corrupt" in status["reason"]
-
-
-# ---------------------------------------------------------------------------
-# TestGetSystemHealth
-# ---------------------------------------------------------------------------
-
-
-class TestGetSystemHealth:
-    """Test unified health report."""
-
-    @patch("app.services.ops_monitor._utcnow", return_value=_NOW)
-    def test_report_includes_all_layers(self, mock_now: MagicMock) -> None:
-        # 8 layer cursors (all empty) + 1 kill switch cursor
-        cursors = [_make_cursor([{"latest": None}]) for _ in range(8)]
-        cursors.append(
-            _make_cursor(
-                [
-                    {
-                        "is_active": False,
-                        "activated_at": None,
-                        "activated_by": None,
-                        "reason": None,
-                    }
-                ]
-            )
-        )
-        conn = _make_conn(cursors)
-        report = get_system_health(conn)
-        assert len(report.layers) == 8
-        assert report.kill_switch_active is False
-
-    @patch("app.services.ops_monitor._utcnow", return_value=_NOW)
-    def test_report_includes_job_health(self, mock_now: MagicMock) -> None:
-        # 8 layer cursors + 1 job health cursor + 1 kill switch cursor
-        cursors = [_make_cursor([{"latest": None}]) for _ in range(8)]
-        cursors.append(
-            _make_cursor(
-                [
-                    {
-                        "status": "success",
-                        "started_at": _NOW,
-                        "finished_at": _NOW,
-                        "error_msg": None,
-                    }
-                ]
-            )
-        )
-        cursors.append(
-            _make_cursor(
-                [
-                    {
-                        "is_active": False,
-                        "activated_at": None,
-                        "activated_by": None,
-                        "reason": None,
-                    }
-                ]
-            )
-        )
-        conn = _make_conn(cursors)
-        report = get_system_health(conn, job_names=["test_job"])
-        assert len(report.jobs) == 1
-        assert report.jobs[0].last_status == "success"
-
-    @patch("app.services.ops_monitor._utcnow", return_value=_NOW)
-    def test_kill_switch_active_in_report(self, mock_now: MagicMock) -> None:
-        cursors = [_make_cursor([{"latest": None}]) for _ in range(8)]
-        cursors.append(
-            _make_cursor(
-                [
-                    {
-                        "is_active": True,
-                        "activated_at": _NOW,
-                        "activated_by": "ops",
-                        "reason": "emergency halt",
-                    }
-                ]
-            )
-        )
-        conn = _make_conn(cursors)
-        report = get_system_health(conn)
-        assert report.kill_switch_active is True
-        assert "emergency halt" in report.kill_switch_detail

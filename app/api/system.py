@@ -11,8 +11,8 @@ Endpoints:
       * each row carries the declared cadence + computed ``next_run_time``
         plus the most recent ``job_runs`` row for that job
 
-Distinct from ``/health`` (liveness) and from the deprecated ``/health/data``
-(which served the same purpose pre-#57). The frontend admin page (#64) polls
+Distinct from ``/health`` (liveness) and from the retired ``/health/data``
+(removed in #342; served the same purpose pre-#57). The frontend admin page (#64) polls
 ``/system/status``; the scheduled-job table on the same page polls
 ``/system/jobs``.
 

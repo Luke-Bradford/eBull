@@ -19,7 +19,6 @@ from fastapi.testclient import TestClient
 
 from app.db import get_conn
 from app.main import app
-from app.services.ops_monitor import SystemHealth
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -58,54 +57,6 @@ def _cleanup() -> None:
 app.dependency_overrides.setdefault(get_conn, _fallback_conn)
 
 client = TestClient(app)
-
-
-# ---------------------------------------------------------------------------
-# TestHealthData — proves pooled access for an existing main.py endpoint
-# ---------------------------------------------------------------------------
-
-
-class TestHealthData:
-    """GET /health/data — system health via pooled connection."""
-
-    def teardown_method(self) -> None:
-        _cleanup()
-
-    def test_returns_health_report_via_pooled_conn(self) -> None:
-        """The endpoint receives its connection from get_conn, not raw psycopg.connect."""
-        conn = _mock_conn()
-        _setup(conn)
-
-        report = SystemHealth(checked_at=_NOW, kill_switch_active=False, kill_switch_detail="")
-
-        with patch("app.main.get_system_health", return_value=report) as mock_health:
-            resp = client.get("/health/data")
-
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["kill_switch"]["active"] is False
-        assert body["layers"] == []
-        assert body["jobs"] == []
-
-        # Verify get_system_health was called with the injected mock connection
-        mock_health.assert_called_once()
-        call_conn = mock_health.call_args[0][0]
-        assert call_conn is conn
-
-    def test_service_error_returns_503_without_leaking_internals(self) -> None:
-        conn = _mock_conn()
-        _setup(conn)
-
-        secret_marker = "secret-table-name-do-not-leak"
-        with patch("app.main.get_system_health", side_effect=RuntimeError(secret_marker)):
-            resp = client.get("/health/data")
-
-        assert resp.status_code == 503
-        # Detail must be a fixed string; full exception text goes to
-        # logger.exception only. See review-prevention-log entry on
-        # internal exception text leaking into HTTP response bodies.
-        assert resp.json()["detail"] == "health data unavailable"
-        assert secret_marker not in resp.text
 
 
 # ---------------------------------------------------------------------------
