@@ -216,8 +216,6 @@ JOB_DAILY_RESEARCH_REFRESH = "daily_research_refresh"
 JOB_DAILY_NEWS_REFRESH = "daily_news_refresh"
 JOB_DAILY_THESIS_REFRESH = "daily_thesis_refresh"
 JOB_MORNING_CANDIDATE_REVIEW = "morning_candidate_review"
-JOB_WEEKLY_COVERAGE_REVIEW = "weekly_coverage_review"
-JOB_WEEKLY_COVERAGE_AUDIT = "weekly_coverage_audit"
 JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
 JOB_DAILY_PORTFOLIO_SYNC = "daily_portfolio_sync"
 JOB_EXECUTE_APPROVED_ORDERS = "execute_approved_orders"
@@ -226,12 +224,16 @@ JOB_RETRY_DEFERRED = "retry_deferred_recommendations"
 JOB_MONITOR_POSITIONS = "monitor_positions"
 JOB_ATTRIBUTION_SUMMARY = "attribution_summary"
 JOB_WEEKLY_REPORT = "weekly_report"
+# JOB_WEEKLY_COVERAGE_AUDIT + JOB_WEEKLY_COVERAGE_REVIEW retired in Chunk 2 of
+# the 2026-04-19 research-tool refocus; their work is now part of
+# JOB_FUNDAMENTALS_SYNC. See docs/superpowers/specs/2026-04-19-research-tool-refocus.md.
 JOB_MONTHLY_REPORT = "monthly_report"
 JOB_SEED_COST_MODELS = "seed_cost_models"
 JOB_DAILY_FINANCIAL_FACTS = "daily_financial_facts"
 JOB_RAW_DATA_RETENTION_SWEEP = "raw_data_retention_sweep"
 JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
 JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC = "orchestrator_high_frequency_sync"
+JOB_FUNDAMENTALS_SYNC = "fundamentals_sync"
 
 
 # ---------------------------------------------------------------------------
@@ -437,19 +439,16 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         catch_up_on_boot=False,
     ),
     ScheduledJob(
-        name=JOB_WEEKLY_COVERAGE_REVIEW,
-        description="Review coverage tier assignments; promote/demote instruments.",
-        cadence=Cadence.weekly(weekday=0, hour=5, minute=0),
-        prerequisite=_has_any_coverage,
-    ),
-    ScheduledJob(
-        name=JOB_WEEKLY_COVERAGE_AUDIT,
+        name=JOB_FUNDAMENTALS_SYNC,
         description=(
-            "Re-classify every tradable instrument's coverage.filings_status "
-            "using the current filing_events set. Surfaces instruments that "
-            "drifted from analysable (insufficient, structurally_young, etc.)."
+            "Weekly fundamentals research refresh: re-classify every "
+            "tradable instrument's coverage.filings_status, backfill "
+            "eligible instruments via SEC EDGAR, then re-evaluate "
+            "coverage tier promote/demote rules. Collapses the previous "
+            "weekly_coverage_audit + weekly_coverage_review pair into a "
+            "single job per the 2026-04-19 research-tool refocus."
         ),
-        cadence=Cadence.weekly(weekday=1, hour=4, minute=0),  # Tuesday 04:00 UTC
+        cadence=Cadence.weekly(weekday=0, hour=5, minute=0),  # Monday 05:00 UTC
         prerequisite=_has_any_coverage,
     ),
     ScheduledJob(
@@ -2119,85 +2118,76 @@ def monitor_positions_job() -> None:
             )
 
 
-def weekly_coverage_audit() -> None:
-    """Classify every tradable SEC-covered instrument via the bulk
-    audit, then drive any non-terminal one toward terminal state
-    via ``backfill_filings``.
+def fundamentals_sync() -> None:
+    """Weekly fundamentals research refresh.
 
-    Eligibility for backfill: ``filings_status IN ('insufficient',
-    'unknown', 'structurally_young')``. Including ``structurally_young``
-    lets aging young issuers re-promote to ``analysable`` once they
-    have filed past the 18-month bar (master plan line 184). ``fpi``
-    and ``no_primary_sec_cik`` are terminal and not eligible.
+    Collapses the previous ``weekly_coverage_audit`` + ``weekly_coverage_review``
+    pair into a single tracked job per the 2026-04-19 research-tool refocus
+    (docs/superpowers/specs/2026-04-19-research-tool-refocus.md §1.1). Phase-4
+    orchestrator still handles the SEC XBRL / CIK refresh legs daily; a
+    follow-up chunk moves those under this job's umbrella and retires the
+    orchestrator's SEC layers.
 
-    No post-audit re-sweep: ``backfill_filings`` writes the terminal
-    ``filings_status`` for each instrument it touches. A post-audit
-    would risk publishing ``analysable`` for instruments whose 8-K
-    window was not verified by backfill (audit's bar is 10-K/10-Q
-    only), which is the exact invariant Chunk E exists to protect
-    (design v3 C1).
+    Two phases, in order:
 
-    Runs Tuesday 04:00 UTC.
+    1. **Audit + backfill.** Re-classify every tradable instrument's
+       ``coverage.filings_status`` via the bulk audit, then drive any
+       non-terminal one toward terminal state via ``backfill_filings``.
+    2. **Tier review.** Evaluate all instruments with coverage rows
+       against the deterministic promote/demote rules and enforce the
+       Tier 1 cap.
+
+    Runs Monday 05:00 UTC. Fails closed: if phase 1 raises, phase 2 is
+    skipped and the job is recorded failed.
     """
-    with _tracked_job(JOB_WEEKLY_COVERAGE_AUDIT) as tracker:
+    with _tracked_job(JOB_FUNDAMENTALS_SYNC) as tracker:
         from app.services.coverage_audit import audit_all_instruments
         from app.services.filings_backfill import BackfillOutcome, backfill_filings
 
+        logger.info("fundamentals_sync: starting")
+
+        # --- Phase 1: coverage audit + eligibility-gated backfill ---------
         outcomes: dict[BackfillOutcome, int] = {o: 0 for o in BackfillOutcome}
         eligible_count = 0
-        logger.info("weekly_coverage_audit: starting bulk classifier")
-        try:
-            with psycopg.connect(settings.database_url) as conn:
-                pre_audit = audit_all_instruments(conn)
+        with psycopg.connect(settings.database_url) as conn:
+            pre_audit = audit_all_instruments(conn)
 
-                eligible_rows = conn.execute(
-                    """
-                    SELECT c.instrument_id, ei.identifier_value AS cik
-                    FROM coverage c
-                    JOIN external_identifiers ei
-                        ON ei.instrument_id = c.instrument_id
-                       AND ei.provider = 'sec'
-                       AND ei.identifier_type = 'cik'
-                       AND ei.is_primary = TRUE
-                    WHERE c.filings_status IN ('insufficient', 'unknown', 'structurally_young')
-                    """
-                ).fetchall()
-                conn.commit()  # close implicit read tx before mutation.
-                eligible_count = len(eligible_rows)
+            eligible_rows = conn.execute(
+                """
+                SELECT c.instrument_id, ei.identifier_value AS cik
+                FROM coverage c
+                JOIN external_identifiers ei
+                    ON ei.instrument_id = c.instrument_id
+                   AND ei.provider = 'sec'
+                   AND ei.identifier_type = 'cik'
+                   AND ei.is_primary = TRUE
+                WHERE c.filings_status IN ('insufficient', 'unknown', 'structurally_young')
+                """
+            ).fetchall()
+            conn.commit()
+            eligible_count = len(eligible_rows)
 
-                with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
-                    for row in eligible_rows:
-                        iid, cik = int(row[0]), str(row[1])
+            with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+                for row in eligible_rows:
+                    iid, cik = int(row[0]), str(row[1])
+                    try:
+                        result = backfill_filings(conn, provider, cik, iid)
+                    except Exception:
+                        logger.exception(
+                            "fundamentals_sync: backfill raised for instrument_id=%d",
+                            iid,
+                        )
                         try:
-                            result = backfill_filings(conn, provider, cik, iid)
+                            conn.rollback()
                         except Exception:
-                            # K.1 round 1 gotcha — ``except psycopg.Error``
-                            # too narrow for per-instrument isolation.
                             logger.exception(
-                                "weekly_coverage_audit: backfill raised for instrument_id=%d",
+                                "fundamentals_sync: rollback failed after "
+                                "instrument_id=%d — later instruments may fail",
                                 iid,
                             )
-                            # Shared connection may be in failed-tx state
-                            # after an escaped psycopg error. Roll back so
-                            # later instruments aren't poisoned.
-                            try:
-                                conn.rollback()
-                            except Exception:
-                                logger.exception(
-                                    "weekly_coverage_audit: rollback failed after "
-                                    "instrument_id=%d — later instruments may fail",
-                                    iid,
-                                )
-                            continue
-                        outcomes[result.outcome] += 1
-        except Exception:
-            logger.error("weekly_coverage_audit: failed", exc_info=True)
-            raise
+                        continue
+                    outcomes[result.outcome] += 1
 
-        # Per design v5: audit row count + every non-skipped backfill that
-        # wrote coverage (includes EXHAUSTED / STRUCTURALLY_YOUNG / HTTP /
-        # PARSE, which all UPDATE the coverage row even when filings_status
-        # is preserved).
         non_skipped_backfill_writes = sum(
             outcomes[o]
             for o in (
@@ -2209,9 +2199,9 @@ def weekly_coverage_audit() -> None:
                 BackfillOutcome.STILL_INSUFFICIENT_PARSE_ERROR,
             )
         )
-        tracker.row_count = pre_audit.total_updated + non_skipped_backfill_writes
+        audit_rows = pre_audit.total_updated + non_skipped_backfill_writes
         logger.info(
-            "weekly_coverage_audit complete: "
+            "fundamentals_sync phase 1 (audit) complete: "
             "pre_analysable=%d eligible=%d "
             "complete_ok=%d complete_fpi=%d structurally_young=%d "
             "exhausted=%d http_err=%d parse_err=%d "
@@ -2229,33 +2219,20 @@ def weekly_coverage_audit() -> None:
             pre_audit.null_anomalies,
         )
 
+        # --- Phase 2: coverage tier review --------------------------------
+        with psycopg.connect(settings.database_url) as conn:
+            review_result = review_coverage(conn)
 
-def weekly_coverage_review() -> None:
-    """
-    Review coverage tier assignments; promote/demote instruments.
+        review_rows = len(review_result.promotions) + len(review_result.demotions)
+        logger.info(
+            "fundamentals_sync phase 2 (review) complete: promotions=%d demotions=%d blocked=%d unchanged=%d",
+            len(review_result.promotions),
+            len(review_result.demotions),
+            len(review_result.blocked),
+            review_result.unchanged,
+        )
 
-    Runs weekly. Evaluates all instruments with coverage rows against
-    deterministic promotion/demotion rules. Enforces Tier 1 cap.
-    All changes are recorded in coverage_audit.
-    """
-    with _tracked_job(JOB_WEEKLY_COVERAGE_REVIEW) as tracker:
-        logger.info("weekly_coverage_review: starting coverage tier review")
-        try:
-            with psycopg.connect(settings.database_url) as conn:
-                result = review_coverage(conn)
-        except Exception:
-            logger.error("weekly_coverage_review: failed", exc_info=True)
-            return
-
-        tracker.row_count = len(result.promotions) + len(result.demotions)
-
-    logger.info(
-        "weekly_coverage_review complete: promotions=%d demotions=%d blocked=%d unchanged=%d",
-        len(result.promotions),
-        len(result.demotions),
-        len(result.blocked),
-        result.unchanged,
-    )
+        tracker.row_count = audit_rows + review_rows
 
 
 def fx_rates_refresh() -> None:

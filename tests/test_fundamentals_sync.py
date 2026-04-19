@@ -1,16 +1,16 @@
-"""Tests for weekly_coverage_audit scheduler job (#268 Chunk E + F).
+"""Tests for fundamentals_sync scheduler job.
 
-Full Chunk F body now: audit_all_instruments → query eligible
-instruments → per-instrument backfill_filings → log outcome counts.
-No post-backfill audit re-sweep (design v3 C1).
+Successor to the retired weekly_coverage_audit + weekly_coverage_review
+jobs: phase 1 runs audit_all_instruments + per-eligible-instrument
+backfill_filings, phase 2 runs review_coverage. See
+docs/superpowers/specs/2026-04-19-research-tool-refocus.md §1.1.
 """
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import app.services.coverage_audit  # noqa: F401
-import app.services.filings_backfill  # noqa: F401
+from app.services.coverage import ReviewResult
 from app.services.coverage_audit import AuditSummary
 from app.services.filings_backfill import BackfillOutcome, BackfillResult
 from app.workers import scheduler
@@ -30,9 +30,19 @@ def _stub_backfill_result(
     )
 
 
-def test_weekly_coverage_audit_runs_audit_and_backfills_eligible() -> None:
-    """Full path: audit runs, eligible set queried, each instrument
-    is backfilled, tracker.row_count reflects audit total_updated."""
+def _stub_review_result(promotions: int = 0, demotions: int = 0) -> ReviewResult:
+    return ReviewResult(
+        promotions=[MagicMock() for _ in range(promotions)],
+        demotions=[MagicMock() for _ in range(demotions)],
+        blocked=[],
+        unchanged=0,
+    )
+
+
+def test_fundamentals_sync_runs_audit_backfill_then_review() -> None:
+    """Full happy path: audit runs, eligible set backfilled, review runs,
+    tracker.row_count reflects audit total_updated + backfill writes
+    + review promotions+demotions."""
     summary = AuditSummary(
         analysable=42,
         insufficient=5,
@@ -41,6 +51,7 @@ def test_weekly_coverage_audit_runs_audit_and_backfills_eligible() -> None:
         total_updated=7,
         null_anomalies=0,
     )
+    review = _stub_review_result(promotions=2, demotions=1)
 
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://test"
@@ -49,7 +60,6 @@ def test_weekly_coverage_audit_runs_audit_and_backfills_eligible() -> None:
     tracker = MagicMock()
     tracker.row_count = None
 
-    # Two eligible rows — both backfill to COMPLETE_OK.
     eligible_rows = [(101, "0000000101"), (102, "0000000102")]
 
     with (
@@ -57,6 +67,7 @@ def test_weekly_coverage_audit_runs_audit_and_backfills_eligible() -> None:
         patch.object(scheduler, "_tracked_job") as tracked_cm,
         patch.object(scheduler, "psycopg") as psycopg_mod,
         patch.object(scheduler, "SecFilingsProvider") as provider_cls,
+        patch.object(scheduler, "review_coverage", return_value=review) as review_mock,
         patch(
             "app.services.coverage_audit.audit_all_instruments",
             return_value=summary,
@@ -72,17 +83,17 @@ def test_weekly_coverage_audit_runs_audit_and_backfills_eligible() -> None:
         psycopg_mod.connect.return_value.__enter__.return_value = conn_mock
         provider_cls.return_value.__enter__.return_value = MagicMock()
 
-        scheduler.weekly_coverage_audit()
+        scheduler.fundamentals_sync()
 
     audit_mock.assert_called_once_with(conn_mock)
     assert backfill_mock.call_count == 2
-    # Row count = audit.total_updated + non-skipped backfill writes
-    # (2 × COMPLETE_OK = 2). Per design v5.
-    assert tracker.row_count == 9
+    review_mock.assert_called_once()
+    # audit.total_updated (7) + 2 × COMPLETE_OK (2) + promotions+demotions (3)
+    assert tracker.row_count == 12
 
 
-def test_weekly_coverage_audit_per_instrument_error_is_isolated() -> None:
-    """One backfill raising must not abort the whole batch."""
+def test_fundamentals_sync_per_instrument_error_is_isolated() -> None:
+    """One backfill raising must not abort the whole batch or block review."""
     summary = AuditSummary(
         analysable=0,
         insufficient=3,
@@ -91,6 +102,8 @@ def test_weekly_coverage_audit_per_instrument_error_is_isolated() -> None:
         total_updated=3,
         null_anomalies=0,
     )
+    review = _stub_review_result()
+
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test-agent@example.com"
@@ -109,6 +122,7 @@ def test_weekly_coverage_audit_per_instrument_error_is_isolated() -> None:
         patch.object(scheduler, "_tracked_job") as tracked_cm,
         patch.object(scheduler, "psycopg") as psycopg_mod,
         patch.object(scheduler, "SecFilingsProvider") as provider_cls,
+        patch.object(scheduler, "review_coverage", return_value=review) as review_mock,
         patch(
             "app.services.coverage_audit.audit_all_instruments",
             return_value=summary,
@@ -124,19 +138,19 @@ def test_weekly_coverage_audit_per_instrument_error_is_isolated() -> None:
         psycopg_mod.connect.return_value.__enter__.return_value = conn_mock
         provider_cls.return_value.__enter__.return_value = MagicMock()
 
-        # Must not raise — the middle instrument errors but the
-        # others still get processed.
-        scheduler.weekly_coverage_audit()
+        scheduler.fundamentals_sync()
 
     assert backfill_mock.call_count == 3
-    # Rollback is called after the erroring instrument so the
-    # shared connection isn't poisoned for the next iteration.
     conn_mock.rollback.assert_called()
+    # Review still runs even after a per-instrument backfill error — we
+    # completed phase 1 (not phase-fatal).
+    review_mock.assert_called_once()
 
 
-def test_weekly_coverage_audit_propagates_audit_failure() -> None:
-    """audit_all_instruments raising must propagate so _tracked_job
-    records status=failure. No silent swallow."""
+def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
+    """audit_all_instruments raising must propagate (so _tracked_job records
+    failure) and review_coverage must NOT run — phase 2 is gated on phase 1
+    completing."""
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test-agent@example.com"
@@ -147,6 +161,7 @@ def test_weekly_coverage_audit_propagates_audit_failure() -> None:
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job") as tracked_cm,
         patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "review_coverage") as review_mock,
         patch(
             "app.services.coverage_audit.audit_all_instruments",
             side_effect=RuntimeError("classifier broke"),
@@ -156,8 +171,10 @@ def test_weekly_coverage_audit_propagates_audit_failure() -> None:
         psycopg_mod.connect.return_value.__enter__.return_value = MagicMock()
 
         try:
-            scheduler.weekly_coverage_audit()
+            scheduler.fundamentals_sync()
         except RuntimeError as exc:
             assert "classifier broke" in str(exc)
         else:
             raise AssertionError("expected RuntimeError to propagate")
+
+    review_mock.assert_not_called()
