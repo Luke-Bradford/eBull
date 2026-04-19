@@ -56,15 +56,19 @@ def consecutive_failures(
     # skipped-by-reaper rows only set finished_at (executor.py:448).
     # Without NULLS LAST, an old row with null started_at can sit
     # ahead of fresh failures and falsely zero the streak.
+    # COALESCE(started_at, finished_at) ensures that skipped rows
+    # written with only finished_at (e.g. _record_layer_skipped) sort
+    # by their finished_at and therefore appear ahead of older rows —
+    # a dep-skipped run after a failure correctly resets the streak.
     # `sync_run_id DESC` is a stable tiebreak when two rows share a
-    # `started_at` timestamp.
+    # timestamp.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
             SELECT status
             FROM sync_layer_progress
             WHERE layer_name = %s
-            ORDER BY started_at DESC NULLS LAST, sync_run_id DESC
+            ORDER BY COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC
             LIMIT 50
             """,
             (layer_name,),
@@ -92,15 +96,16 @@ def last_error_category(
     writes `error_category` on non-success paths, so this is a
     defensive allowance rather than an observed case.
     """
-    # NULLS LAST + sync_run_id tiebreak for the same reason as
-    # `consecutive_failures` — see that function for the rationale.
+    # COALESCE(started_at, finished_at) + sync_run_id tiebreak for the
+    # same reason as `consecutive_failures` — see that function for the
+    # rationale (skipped rows with only finished_at must sort correctly).
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
             SELECT error_category
             FROM sync_layer_progress
             WHERE layer_name = %s AND error_category IS NOT NULL
-            ORDER BY started_at DESC NULLS LAST, sync_run_id DESC
+            ORDER BY COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC
             LIMIT 1
             """,
             (layer_name,),
@@ -134,10 +139,14 @@ def all_layer_histories(
         return {}, {}
     names = list(layer_names)
     # consecutive_failures: for each layer, count the head-streak of
-    # status='failed' rows when ordered by (started_at DESC NULLS LAST,
-    # sync_run_id DESC). We compute a row_number per layer in that
-    # ordering and count how many of the first N rows are 'failed'
-    # before hitting a non-failed one.
+    # status='failed' rows when ordered by
+    # (COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC).
+    # COALESCE is required so that skipped rows written with only
+    # finished_at (e.g. _record_layer_skipped in executor.py) sort by
+    # their finished_at and appear ahead of older rows — a dep-skipped
+    # run after a failure correctly resets the streak.
+    # We compute a row_number per layer in that ordering and count how
+    # many of the first N rows are 'failed' before hitting a non-failed one.
     #
     # SQL pattern: find the row_number of the FIRST non-failed row
     # per layer; the streak length is (that row_number - 1), or the
@@ -159,7 +168,7 @@ def all_layer_histories(
                     status,
                     ROW_NUMBER() OVER (
                         PARTITION BY layer_name
-                        ORDER BY started_at DESC NULLS LAST, sync_run_id DESC
+                        ORDER BY COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC
                     ) AS rn,
                     COUNT(*) OVER (PARTITION BY layer_name) AS total
                 FROM sync_layer_progress
@@ -205,7 +214,7 @@ def all_layer_histories(
                     error_category,
                     ROW_NUMBER() OVER (
                         PARTITION BY layer_name
-                        ORDER BY started_at DESC NULLS LAST, sync_run_id DESC
+                        ORDER BY COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC
                     ) AS rn
                 FROM sync_layer_progress
                 WHERE error_category IS NOT NULL AND layer_name = ANY(%s)

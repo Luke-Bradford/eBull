@@ -44,10 +44,14 @@ from app.services.sync_orchestrator.types import (
 # ---------------------------------------------------------------------------
 
 
-def _latest_job_outcome(job_name: str) -> tuple[LayerOutcome, int]:
+def _latest_job_outcome(job_name: str) -> tuple[LayerOutcome, int, str | None]:
     """Read the most recent job_runs row for `job_name` and map to
-    LayerOutcome. Called INSIDE the JobLock context so a concurrent
-    cron-triggered run cannot race a newer row in between.
+    LayerOutcome. Returns (outcome, row_count, error_category). The
+    category is always None for success + PREREQ_SKIP, and reflects
+    whatever chunk 3's _tracked_job classified for failure.
+
+    Called INSIDE the JobLock context so a concurrent cron-triggered
+    run cannot race a newer row in between.
 
     autocommit=True so the SELECT does not leave an idle transaction
     open on the connection — consistent with every other orchestrator
@@ -58,7 +62,7 @@ def _latest_job_outcome(job_name: str) -> tuple[LayerOutcome, int]:
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         row = conn.execute(
             """
-            SELECT status, row_count, error_msg
+            SELECT status, row_count, error_msg, error_category
             FROM job_runs
             WHERE job_name = %s
             ORDER BY started_at DESC
@@ -67,23 +71,24 @@ def _latest_job_outcome(job_name: str) -> tuple[LayerOutcome, int]:
             (job_name,),
         ).fetchone()
     if row is None:
-        return LayerOutcome.FAILED, 0
-    status, row_count, error_msg = row
+        return LayerOutcome.FAILED, 0, None
+    status, row_count, error_msg, error_category = row
     if status == "success":
         return (
             LayerOutcome.SUCCESS if (row_count or 0) else LayerOutcome.NO_WORK,
             row_count or 0,
+            None,
         )
     if status == "skipped" and error_msg is not None and error_msg.startswith(PREREQ_SKIP_MARKER):
-        return LayerOutcome.PREREQ_SKIP, 0
-    return LayerOutcome.FAILED, row_count or 0
+        return LayerOutcome.PREREQ_SKIP, 0, None
+    return LayerOutcome.FAILED, row_count or 0, (str(error_category) if error_category else None)
 
 
 def _run_with_lock(
     job_name: str,
     legacy_fn: Any,
     progress: ProgressCallback | None = None,
-) -> tuple[LayerOutcome, int] | str:
+) -> tuple[LayerOutcome, int, str | None] | str:
     """Run legacy_fn() under JobLock. Returns (outcome, row_count) on
     success-or-handled-failure; returns a PREREQ_SKIP reason string on
     JobAlreadyRunning contention.
@@ -122,6 +127,7 @@ def _single_emit_result(
     outcome: LayerOutcome,
     row_count: int,
     detail: str,
+    error_category: str | None = None,
 ) -> list[tuple[str, RefreshResult]]:
     return [
         (
@@ -132,7 +138,7 @@ def _single_emit_result(
                 items_processed=row_count,
                 items_total=None,
                 detail=detail,
-                error_category=None,
+                error_category=error_category,
             ),
         )
     ]
@@ -154,8 +160,14 @@ def _wrap_single(
     result = _run_with_lock(job_name, legacy_fn, progress=progress)
     if isinstance(result, str):
         return _single_emit_result(layer_name, LayerOutcome.PREREQ_SKIP, 0, result)
-    outcome, row_count = result
-    return _single_emit_result(layer_name, outcome, row_count, f"{job_name}: {outcome.value}")
+    outcome, row_count, error_category = result
+    return _single_emit_result(
+        layer_name,
+        outcome,
+        row_count,
+        f"{job_name}: {outcome.value}",
+        error_category=error_category,
+    )
 
 
 def refresh_universe(
@@ -352,7 +364,7 @@ def refresh_financial_facts_and_normalization(
         )
         return [("financial_facts", skip), ("financial_normalization", skip)]
 
-    outcome, row_count = result
+    outcome, row_count, error_category = result
     return [
         (
             "financial_facts",
@@ -362,7 +374,7 @@ def refresh_financial_facts_and_normalization(
                 items_processed=row_count,
                 items_total=None,
                 detail="xbrl fetch",
-                error_category=None,
+                error_category=error_category,
             ),
         ),
         (
@@ -373,7 +385,7 @@ def refresh_financial_facts_and_normalization(
                 items_processed=0,
                 items_total=None,
                 detail="normalization pass",
-                error_category=None,
+                error_category=error_category,
             ),
         ),
     ]
@@ -415,7 +427,7 @@ def refresh_scoring_and_recommendations(
                 )
             # Reading outcome INSIDE the JobLock context ensures a
             # concurrent cron-triggered fire cannot race a newer row in.
-            outcome, _ = _latest_job_outcome(job_name)
+            outcome, _, error_category = _latest_job_outcome(job_name)
     except JobAlreadyRunning:
         # JobAlreadyRunning raises from `__enter__` BEFORE the body
         # executes, so no result/outcome variables are in scope here.
@@ -456,7 +468,7 @@ def refresh_scoring_and_recommendations(
                 items_processed=scoring_count,
                 items_total=None,
                 detail="scoring pass",
-                error_category=None,
+                error_category=error_category,
             ),
         ),
         (
@@ -467,7 +479,7 @@ def refresh_scoring_and_recommendations(
                 items_processed=rec_count,
                 items_total=None,
                 detail=rec_detail,
-                error_category=None,
+                error_category=error_category if rec_outcome is outcome else None,
             ),
         ),
     ]
