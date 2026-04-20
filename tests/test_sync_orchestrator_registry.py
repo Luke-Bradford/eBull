@@ -7,13 +7,13 @@ from app.services.sync_orchestrator.registry import JOB_TO_LAYERS, LAYERS
 
 
 class TestLayerRegistry:
-    def test_all_15_layers_present(self) -> None:
+    def test_all_12_layers_present(self) -> None:
+        # cik_mapping, financial_facts, financial_normalization retired in
+        # Chunk 3 of the 2026-04-19 research-tool refocus; their work now
+        # lives inside fundamentals_sync.
         expected = {
             "universe",
-            "cik_mapping",
             "candles",
-            "financial_facts",
-            "financial_normalization",
             "fundamentals",
             "news",
             "thesis",
@@ -76,10 +76,6 @@ class TestJobToLayers:
                 assert layer in LAYERS, f"{job_name} emits unknown layer {layer}"
 
     def test_expected_mappings(self) -> None:
-        assert JOB_TO_LAYERS["daily_financial_facts"] == (
-            "financial_facts",
-            "financial_normalization",
-        )
         assert JOB_TO_LAYERS["morning_candidate_review"] == (
             "scoring",
             "recommendations",

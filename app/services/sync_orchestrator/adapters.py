@@ -185,21 +185,6 @@ def refresh_universe(
     )
 
 
-def refresh_cik_mapping(
-    *,
-    sync_run_id: int,
-    progress: ProgressCallback,
-    upstream_outcomes: Mapping[str, LayerOutcome],
-) -> Sequence[tuple[str, RefreshResult]]:
-    from app.workers.scheduler import daily_cik_refresh
-
-    return _wrap_single(
-        job_name="daily_cik_refresh",
-        layer_name="cik_mapping",
-        legacy_fn=daily_cik_refresh,
-    )
-
-
 def refresh_candles(
     *,
     sync_run_id: int,
@@ -340,55 +325,6 @@ def refresh_monthly_reports(
 # ---------------------------------------------------------------------------
 # Composite adapters (spec §2.3.1)
 # ---------------------------------------------------------------------------
-
-
-def refresh_financial_facts_and_normalization(
-    *,
-    sync_run_id: int,
-    progress: ProgressCallback,
-    upstream_outcomes: Mapping[str, LayerOutcome],
-) -> Sequence[tuple[str, RefreshResult]]:
-    """Composite: daily_financial_facts emits (financial_facts,
-    financial_normalization). Atomic — both emits share one outcome."""
-    from app.workers.scheduler import daily_financial_facts
-
-    result = _run_with_lock("daily_financial_facts", daily_financial_facts, progress=progress)
-    if isinstance(result, str):
-        skip = RefreshResult(
-            outcome=LayerOutcome.PREREQ_SKIP,
-            row_count=0,
-            items_processed=0,
-            items_total=None,
-            detail=result,
-            error_category=None,
-        )
-        return [("financial_facts", skip), ("financial_normalization", skip)]
-
-    outcome, row_count, error_category = result
-    return [
-        (
-            "financial_facts",
-            RefreshResult(
-                outcome=outcome,
-                row_count=row_count,
-                items_processed=row_count,
-                items_total=None,
-                detail="xbrl fetch",
-                error_category=error_category,
-            ),
-        ),
-        (
-            "financial_normalization",
-            RefreshResult(
-                outcome=outcome,
-                row_count=0,
-                items_processed=0,
-                items_total=None,
-                detail="normalization pass",
-                error_category=error_category,
-            ),
-        ),
-    ]
 
 
 def refresh_scoring_and_recommendations(

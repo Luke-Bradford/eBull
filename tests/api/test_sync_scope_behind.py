@@ -38,9 +38,9 @@ def test_post_sync_behind_with_all_healthy_returns_empty_plan(clean_client: Test
 
 
 def test_post_sync_behind_includes_non_healthy_upstream(clean_client: TestClient) -> None:
-    # thesis is ACTION_NEEDED, all its upstreams (fundamentals,
-    # financial_normalization, news) are healthy so only thesis fires.
-    # Verify the candidate job set contains daily_thesis_refresh.
+    # thesis is ACTION_NEEDED, all its upstreams (fundamentals, news) are
+    # healthy so only thesis fires. Verify the candidate job set contains
+    # daily_thesis_refresh.
     from app.services.sync_orchestrator.layer_types import LayerState
     from app.services.sync_orchestrator.registry import LAYERS
 
@@ -79,9 +79,9 @@ def test_post_sync_behind_skips_disabled_upstream(clean_client: TestClient) -> N
     from app.services.sync_orchestrator.registry import LAYERS
 
     states = {n: LayerState.HEALTHY for n in LAYERS}
-    # cik_mapping is an upstream of financial_facts.
-    states["financial_facts"] = LayerState.DEGRADED
-    states["cik_mapping"] = LayerState.DISABLED
+    # universe is an upstream of candles.
+    states["candles"] = LayerState.DEGRADED
+    states["universe"] = LayerState.DISABLED
 
     with patch(
         "app.services.sync_orchestrator.planner.compute_layer_states_from_db",
@@ -91,8 +91,8 @@ def test_post_sync_behind_skips_disabled_upstream(clean_client: TestClient) -> N
     body = resp.json()
     assert resp.status_code == 202, body
     planned = [lp["name"] for lp in body["plan"]["layers_to_refresh"]]
-    assert "daily_cik_refresh" not in planned, body
-    assert "daily_financial_facts" in planned, body
+    assert "nightly_universe_sync" not in planned, body
+    assert "daily_candle_refresh" in planned, body
 
 
 def test_post_sync_behind_bypasses_legacy_freshness_filter(clean_client: TestClient) -> None:

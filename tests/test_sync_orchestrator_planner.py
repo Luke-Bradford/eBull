@@ -49,10 +49,7 @@ def _restore_layer_predicates():
 
     originals = {
         "universe": freshness.universe_is_fresh,
-        "cik_mapping": freshness.cik_mapping_is_fresh,
         "candles": freshness.candles_is_fresh,
-        "financial_facts": freshness.financial_facts_is_fresh,
-        "financial_normalization": freshness.financial_normalization_is_fresh,
         "fundamentals": freshness.fundamentals_is_fresh,
         "news": freshness.news_is_fresh,
         "thesis": freshness.thesis_is_fresh,
@@ -90,17 +87,6 @@ class TestBuildLayerPlan:
         assert "scoring" not in plan.dependencies
         assert "recommendations" not in plan.dependencies
 
-    def test_composite_financial_facts_drops_intra_edge(self) -> None:
-        """daily_financial_facts emits (financial_facts,
-        financial_normalization). normalization.deps = (financial_facts,).
-        external = {cik_mapping, financial_facts} - emits = {cik_mapping}."""
-        plan = _build_layer_plan(
-            "daily_financial_facts",
-            ("financial_facts", "financial_normalization"),
-            "stale",
-        )
-        assert plan.dependencies == ("cik_mapping",)
-
 
 class TestBuildExecutionPlanFull:
     def test_all_fresh_yields_empty_refresh_set(self) -> None:
@@ -109,13 +95,13 @@ class TestBuildExecutionPlanFull:
         _make_conn_with_freshness(set(LAYERS.keys()))
         plan = build_execution_plan(MagicMock(), SyncScope.full())
         assert plan.layers_to_refresh == ()
-        assert len(plan.layers_skipped) == 15
+        assert len(plan.layers_skipped) == 12
 
     def test_all_stale_yields_every_in_dag_layer(self) -> None:
         _make_conn_with_freshness(set())
         plan = build_execution_plan(MagicMock(), SyncScope.full())
-        # 13 in-DAG jobs → 13 LayerPlan entries.
-        assert len(plan.layers_to_refresh) == 13
+        # 11 in-DAG jobs → 11 LayerPlan entries.
+        assert len(plan.layers_to_refresh) == 11
 
     def test_topological_order_roots_first(self) -> None:
         _make_conn_with_freshness(set())
@@ -187,7 +173,7 @@ class TestBuildExecutionPlanJobForce:
         from app.services.sync_orchestrator.registry import LAYERS
 
         _make_conn_with_freshness(set(LAYERS.keys()))
-        plan = build_execution_plan(MagicMock(), SyncScope.job("daily_financial_facts", force=True))
-        morning_plans = [lp for lp in plan.layers_to_refresh if lp.name == "daily_financial_facts"]
+        plan = build_execution_plan(MagicMock(), SyncScope.job("morning_candidate_review", force=True))
+        morning_plans = [lp for lp in plan.layers_to_refresh if lp.name == "morning_candidate_review"]
         assert len(morning_plans) == 1
-        assert morning_plans[0].emits == ("financial_facts", "financial_normalization")
+        assert morning_plans[0].emits == ("scoring", "recommendations")

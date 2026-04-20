@@ -118,10 +118,6 @@ def universe_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     return _fresh_by_audit(conn, "nightly_universe_sync", timedelta(days=7))
 
 
-def cik_mapping_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
-    return _fresh_by_audit(conn, "daily_cik_refresh", timedelta(hours=24))
-
-
 def candles_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     audit_fresh, audit_detail = _fresh_by_audit(conn, "daily_candle_refresh", timedelta(hours=24))
     if not audit_fresh:
@@ -153,18 +149,6 @@ def candles_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
             f"{missing} T1/T2 instruments missing candle for {trading_day.isoformat()}",
         )
     return True, audit_detail
-
-
-def financial_facts_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
-    return _fresh_by_audit(conn, "daily_financial_facts", timedelta(hours=24))
-
-
-def financial_normalization_is_fresh(
-    conn: psycopg.Connection[Any],
-) -> tuple[bool, str]:
-    # Same source job as financial_facts — the legacy
-    # daily_financial_facts runs both fetch + normalization atomically.
-    return _fresh_by_audit(conn, "daily_financial_facts", timedelta(hours=24))
 
 
 def fundamentals_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:

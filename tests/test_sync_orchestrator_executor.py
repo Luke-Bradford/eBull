@@ -76,11 +76,10 @@ class TestBlockingDependencyFailed:
         plan = _lp(
             "daily_thesis_refresh",
             ("thesis",),
-            deps=("fundamentals", "financial_normalization", "news"),
+            deps=("fundamentals", "news"),
         )
         upstream: Mapping[str, LayerOutcome] = {
             "fundamentals": LayerOutcome.SUCCESS,
-            "financial_normalization": LayerOutcome.SUCCESS,
             "news": LayerOutcome.FAILED,  # non-blocking
         }
         reason = executor._blocking_dependency_failed(plan, upstream)
@@ -111,9 +110,12 @@ class TestRunLayersLoopContract:
     """_run_layers_loop adapter-contract guards."""
 
     def test_adapter_returning_empty_list_marks_all_emits_failed(self, monkeypatch) -> None:
+        # morning_candidate_review is the surviving composite job emitting
+        # (scoring, recommendations) — same contract as the retired
+        # daily_financial_facts composite.
         plan_item = _lp(
-            "daily_financial_facts",
-            emits=("financial_facts", "financial_normalization"),
+            "morning_candidate_review",
+            emits=("scoring", "recommendations"),
             deps=(),
         )
         exec_plan = ExecutionPlan(
@@ -133,8 +135,8 @@ class TestRunLayersLoopContract:
 
         monkeypatch.setitem(
             registry.LAYERS,
-            "financial_facts",
-            replace(registry.LAYERS["financial_facts"], refresh=bad_adapter),
+            "scoring",
+            replace(registry.LAYERS["scoring"], refresh=bad_adapter),
         )
 
         # Patch audit writers to no-op.
@@ -154,14 +156,14 @@ class TestRunLayersLoopContract:
         executor._run_layers_loop(sync_run_id=1, plan=exec_plan, outcomes=outcomes)
 
         assert outcomes == {
-            "financial_facts": LayerOutcome.FAILED,
-            "financial_normalization": LayerOutcome.FAILED,
+            "scoring": LayerOutcome.FAILED,
+            "recommendations": LayerOutcome.FAILED,
         }
 
     def test_adapter_raising_marks_all_emits_failed(self, monkeypatch) -> None:
         plan_item = _lp(
-            "daily_financial_facts",
-            emits=("financial_facts", "financial_normalization"),
+            "morning_candidate_review",
+            emits=("scoring", "recommendations"),
             deps=(),
         )
         exec_plan = ExecutionPlan(
@@ -180,8 +182,8 @@ class TestRunLayersLoopContract:
 
         monkeypatch.setitem(
             registry.LAYERS,
-            "financial_facts",
-            replace(registry.LAYERS["financial_facts"], refresh=raising_adapter),
+            "scoring",
+            replace(registry.LAYERS["scoring"], refresh=raising_adapter),
         )
         for writer in (
             "_record_layer_started",
@@ -199,8 +201,8 @@ class TestRunLayersLoopContract:
         executor._run_layers_loop(sync_run_id=1, plan=exec_plan, outcomes=outcomes)
 
         assert outcomes == {
-            "financial_facts": LayerOutcome.FAILED,
-            "financial_normalization": LayerOutcome.FAILED,
+            "scoring": LayerOutcome.FAILED,
+            "recommendations": LayerOutcome.FAILED,
         }
 
 

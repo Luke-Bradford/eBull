@@ -2121,24 +2121,32 @@ def monitor_positions_job() -> None:
 def fundamentals_sync() -> None:
     """Weekly fundamentals research refresh.
 
-    Collapses the previous ``weekly_coverage_audit`` + ``weekly_coverage_review``
-    pair into a single tracked job per the 2026-04-19 research-tool refocus
-    (docs/superpowers/specs/2026-04-19-research-tool-refocus.md §1.1). Phase-4
-    orchestrator still handles the SEC XBRL / CIK refresh legs daily; a
-    follow-up chunk moves those under this job's umbrella and retires the
-    orchestrator's SEC layers.
+    Per the 2026-04-19 research-tool refocus
+    (docs/superpowers/specs/2026-04-19-research-tool-refocus.md §1.1), this
+    job owns the SEC research data pipeline end-to-end. Runs Monday 05:00 UTC.
 
-    Two phases, in order:
+    Four phases, in order:
 
-    1. **Audit + backfill.** Re-classify every tradable instrument's
-       ``coverage.filings_status`` via the bulk audit, then drive any
-       non-terminal one toward terminal state via ``backfill_filings``.
-    2. **Tier review.** Evaluate all instruments with coverage rows
+    0. **CIK refresh.** Pull SEC ticker→CIK mapping and upsert into
+       ``external_identifiers`` (via the legacy ``daily_cik_refresh``
+       helper). Runs even if the map is unchanged — the conditional-fetch
+       path short-circuits to a no-op on 304/identical-body.
+    1. **SEC XBRL facts + normalization.** Pull 10-K/10-Q XBRL facts for
+       eligible instruments and normalize them into ``financial_periods``
+       (via the legacy ``daily_financial_facts`` helper).
+    2. **Coverage audit + backfill.** Re-classify every tradable
+       instrument's ``coverage.filings_status`` via the bulk audit, then
+       drive any non-terminal one toward terminal state via
+       ``backfill_filings``.
+    3. **Tier review.** Evaluate all instruments with coverage rows
        against the deterministic promote/demote rules and enforce the
        Tier 1 cap.
 
-    Runs Monday 05:00 UTC. Fails closed: if phase 1 raises, phase 2 is
-    skipped and the job is recorded failed.
+    Failure isolation: phase 0 and phase 1 wrap their legacy-helper calls
+    in ``try/except`` so a CIK pull blip or XBRL outage does not
+    cannibalise the audit/review work. If phase 2 raises, the whole job
+    fails. Phase 3 is isolated too — a transient review error leaves
+    phase-2 writes committed and the job succeeded.
     """
     with _tracked_job(JOB_FUNDAMENTALS_SYNC) as tracker:
         from app.services.coverage_audit import audit_all_instruments
@@ -2146,7 +2154,42 @@ def fundamentals_sync() -> None:
 
         logger.info("fundamentals_sync: starting")
 
-        # --- Phase 1: coverage audit + eligibility-gated backfill ---------
+        # Track phase 0/1 failures so we can raise at the end — the outer
+        # _tracked_job then records the job as failed so the health
+        # surfaces (/system/status, Admin UI) see the problem. Without
+        # this, a CIK/XBRL outage writes an internal job_runs failure
+        # but fundamentals_sync would still mark itself succeeded, and
+        # there is no orchestrator SEC layer left to surface the state.
+        failed_phases: list[str] = []
+
+        # --- Phase 0: CIK refresh ----------------------------------------
+        # Isolated so a failure here does not prevent the audit/review
+        # from running on whatever CIK map was previously persisted.
+        try:
+            daily_cik_refresh()
+        except Exception:
+            logger.error(
+                "fundamentals_sync phase 0 (CIK refresh) failed — continuing "
+                "with stale CIK map; later phases may skip instruments without "
+                "a mapping",
+                exc_info=True,
+            )
+            failed_phases.append("phase 0 (CIK refresh)")
+
+        # --- Phase 1: SEC XBRL facts + normalization ---------------------
+        # Isolated for the same reason — stale XBRL still beats skipping
+        # the audit and leaving the UI blind to coverage state drift.
+        try:
+            daily_financial_facts()
+        except Exception:
+            logger.error(
+                "fundamentals_sync phase 1 (XBRL + normalization) failed — "
+                "continuing to audit/review so coverage state still advances",
+                exc_info=True,
+            )
+            failed_phases.append("phase 1 (XBRL + normalization)")
+
+        # --- Phase 2: coverage audit + eligibility-gated backfill --------
         outcomes: dict[BackfillOutcome, int] = {o: 0 for o in BackfillOutcome}
         eligible_count = 0
         with psycopg.connect(settings.database_url) as conn:
@@ -2201,7 +2244,7 @@ def fundamentals_sync() -> None:
         )
         audit_rows = pre_audit.total_updated + non_skipped_backfill_writes
         logger.info(
-            "fundamentals_sync phase 1 (audit) complete: "
+            "fundamentals_sync phase 2 (audit) complete: "
             "pre_analysable=%d eligible=%d "
             "complete_ok=%d complete_fpi=%d structurally_young=%d "
             "exhausted=%d http_err=%d parse_err=%d "
@@ -2219,10 +2262,10 @@ def fundamentals_sync() -> None:
             pre_audit.null_anomalies,
         )
 
-        # --- Phase 2: coverage tier review --------------------------------
-        # Isolate phase 2 failures from phase 1 success: if review_coverage
+        # --- Phase 3: coverage tier review -------------------------------
+        # Isolate phase 3 failures from phase 2 success: if review_coverage
         # raises, log and continue so the committed audit+backfill writes
-        # from phase 1 still mark the job as succeeded. Mirrors the
+        # from phase 2 still mark the job as succeeded. Mirrors the
         # "try/except + return" semantics of the retired weekly_coverage_review.
         review_rows = 0
         try:
@@ -2230,16 +2273,36 @@ def fundamentals_sync() -> None:
                 review_result = review_coverage(conn)
             review_rows = len(review_result.promotions) + len(review_result.demotions)
             logger.info(
-                "fundamentals_sync phase 2 (review) complete: promotions=%d demotions=%d blocked=%d unchanged=%d",
+                "fundamentals_sync phase 3 (review) complete: promotions=%d demotions=%d blocked=%d unchanged=%d",
                 len(review_result.promotions),
                 len(review_result.demotions),
                 len(review_result.blocked),
                 review_result.unchanged,
             )
         except Exception:
-            logger.error("fundamentals_sync phase 2 (review) failed", exc_info=True)
+            logger.error("fundamentals_sync phase 3 (review) failed", exc_info=True)
+            failed_phases.append("phase 3 (review)")
 
         tracker.row_count = audit_rows + review_rows
+
+        # Raise at the end so all phases ran first, but the outer
+        # _tracked_job marks the job failed and the health surfaces
+        # pick it up. Phases 0, 1, 3 are isolated by try/except; phase 2
+        # (audit) propagates immediately so it never reaches here if it
+        # failed.
+        #
+        # Each failing phase has already logged its own exc_info=True
+        # traceback. The message below names the subsystems so alerting
+        # rules can distinguish SEC-upstream outages (phases 0/1) from
+        # coverage-review logic failures (phase 3); operators grep the
+        # logs by phase name to find the captured traceback.
+        if failed_phases:
+            raise RuntimeError(
+                "fundamentals_sync completed with phase failures: "
+                + "; ".join(failed_phases)
+                + " (individual tracebacks logged at ERROR level; "
+                + "grep logs for 'fundamentals_sync phase <N>')"
+            )
 
 
 def fx_rates_refresh() -> None:

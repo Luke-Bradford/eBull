@@ -38,18 +38,25 @@ class TestRegistryShape:
             assert job.description.strip(), f"job {job.name} has empty description"
 
     def test_every_job_constant_is_scheduled_or_on_demand(self) -> None:
-        # Every JOB_* constant must be either in SCHEDULED_JOBS or in the
-        # documented on-demand set.  On-demand jobs have a constant and
-        # an invoker but are not registered with APScheduler.
+        # Every JOB_* constant must be either in SCHEDULED_JOBS, _INVOKERS,
+        # or the internal-only set. Internal-only constants name jobs that
+        # are called from within another scheduled job's body (via
+        # _tracked_job for the audit row) but are not themselves exposed
+        # to the scheduler or manual trigger UI.
         from app.jobs.runtime import _INVOKERS
+
+        # Internal-only job names — called from within fundamentals_sync
+        # (Chunk 3 of the 2026-04-19 research-tool refocus). They retain
+        # JOB_* constants because the legacy function bodies still write
+        # job_runs rows under those names for the audit trail.
+        INTERNAL_ONLY = {"daily_cik_refresh", "daily_financial_facts"}
 
         constants = {
             value for name, value in vars(scheduler).items() if name.startswith("JOB_") and isinstance(value, str)
         }
         registry_names = {job.name for job in SCHEDULED_JOBS}
         invoker_names = set(_INVOKERS.keys())
-        # Every constant must appear in at least one of the two sets.
-        unaccounted = constants - registry_names - invoker_names
+        unaccounted = constants - registry_names - invoker_names - INTERNAL_ONLY
         assert not unaccounted, f"JOB_* constants not in SCHEDULED_JOBS or _INVOKERS: {sorted(unaccounted)}"
 
 

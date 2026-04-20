@@ -17,10 +17,7 @@ from app.services.sync_orchestrator.freshness import (
     _format_age,
     _fresh_by_audit,
     candles_is_fresh,
-    cik_mapping_is_fresh,
     cost_models_is_fresh,
-    financial_facts_is_fresh,
-    financial_normalization_is_fresh,
     fundamentals_is_fresh,
     fx_rates_is_fresh,
     monthly_reports_is_fresh,
@@ -118,21 +115,13 @@ class TestFormatAge:
 
 
 class TestSimpleAuditOnlyPredicates:
-    """Layers with no content check — cik_mapping, financial_facts,
-    financial_normalization, news, portfolio_sync, fx_rates, cost_models,
-    weekly_reports, monthly_reports, universe."""
+    """Layers with no content check — news, portfolio_sync, fx_rates,
+    cost_models, weekly_reports, monthly_reports, universe."""
 
     @pytest.mark.parametrize(
         "predicate,job_name,window",
         [
             (universe_is_fresh, "nightly_universe_sync", timedelta(days=7)),
-            (cik_mapping_is_fresh, "daily_cik_refresh", timedelta(hours=24)),
-            (financial_facts_is_fresh, "daily_financial_facts", timedelta(hours=24)),
-            (
-                financial_normalization_is_fresh,
-                "daily_financial_facts",
-                timedelta(hours=24),
-            ),
             (news_is_fresh, "daily_news_refresh", timedelta(hours=4)),
             (portfolio_sync_is_fresh, "daily_portfolio_sync", timedelta(minutes=5)),
             (fx_rates_is_fresh, "fx_rates_refresh", timedelta(minutes=5)),
