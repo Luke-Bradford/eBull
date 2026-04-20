@@ -11,6 +11,7 @@ No writes. No schema changes.
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal
@@ -22,6 +23,8 @@ from pydantic import BaseModel
 
 from app.db import get_conn
 from app.providers.implementations.yfinance_provider import YFinanceKeyStats, YFinanceProvider
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/instruments", tags=["instruments"])
 
@@ -518,31 +521,42 @@ def _fetch_local_fundamentals(
     ROA, revenue growth — data the snapshot table doesn't carry.
     """
     out: dict[str, Decimal | None] = {}
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT eps, book_value, shares_outstanding, cash, debt, net_debt, revenue_ttm
-            FROM fundamentals_snapshot
-            WHERE instrument_id = %(iid)s
-            ORDER BY as_of_date DESC
-            LIMIT 1
-            """,
-            {"iid": instrument_id},
+    try:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT eps, book_value, shares_outstanding, cash, debt, net_debt, revenue_ttm
+                FROM fundamentals_snapshot
+                WHERE instrument_id = %(iid)s
+                ORDER BY as_of_date DESC
+                LIMIT 1
+                """,
+                {"iid": instrument_id},
+            )
+            snap = cur.fetchone()
+            cur.execute(
+                """
+                SELECT net_income, shareholders_equity, total_assets, total_liabilities, revenue
+                FROM financial_periods
+                WHERE instrument_id = %(iid)s
+                  AND superseded_at IS NULL
+                  AND period_type IN ('Q1', 'Q2', 'Q3', 'Q4', 'FY')
+                ORDER BY period_end_date DESC
+                LIMIT 1
+                """,
+                {"iid": instrument_id},
+            )
+            fp = cur.fetchone()
+    except psycopg.Error:
+        # DB errors masquerading as "no local data" would be invisible
+        # in the source map. Log the failure loudly; caller treats the
+        # empty dict as fall-through to yfinance.
+        logger.warning(
+            "_fetch_local_fundamentals: DB query failed for instrument_id=%d",
+            instrument_id,
+            exc_info=True,
         )
-        snap = cur.fetchone()
-        cur.execute(
-            """
-            SELECT net_income, shareholders_equity, total_assets, total_liabilities, revenue
-            FROM financial_periods
-            WHERE instrument_id = %(iid)s
-              AND superseded_at IS NULL
-              AND period_type IN ('Q1', 'Q2', 'Q3', 'Q4', 'FY')
-            ORDER BY period_end_date DESC
-            LIMIT 1
-            """,
-            {"iid": instrument_id},
-        )
-        fp = cur.fetchone()
+        return {}
     if snap is not None:
         out["eps"] = snap.get("eps")  # type: ignore[union-attr]
         out["book_value"] = snap.get("book_value")  # type: ignore[union-attr]
@@ -604,36 +618,55 @@ def _merge_stats_with_local(
     local_roe = _safe_div(local.get("net_income"), local.get("shareholders_equity"))
     local_roa = _safe_div(local.get("net_income"), local.get("total_assets"))
 
+    # When local EPS / book_value are present but current_price is not,
+    # pe/pb remain unresolvable — but that's "waiting on price", not
+    # "no local data". Surface that distinction in field_source so the
+    # UI can render a "price missing" hint instead of an ambiguous em-dash.
+    price_blocked_pe = local_pe is None and current_price is None and local.get("eps") is not None
+    price_blocked_pb = local_pb is None and current_price is None and local.get("book_value") is not None
+
+    pe_final = _pick("pe_ratio", local_pe, yfinance_stats.pe_ratio if yfinance_stats else None)
+    pb_final = _pick("pb_ratio", local_pb, yfinance_stats.pb_ratio if yfinance_stats else None)
+    div_final = _pick("dividend_yield", None, yfinance_stats.dividend_yield if yfinance_stats else None)
+    payout_final = _pick("payout_ratio", None, yfinance_stats.payout_ratio if yfinance_stats else None)
+    roe_final = _pick("roe", local_roe, yfinance_stats.roe if yfinance_stats else None)
+    roa_final = _pick("roa", local_roa, yfinance_stats.roa if yfinance_stats else None)
+    de_final = _pick(
+        "debt_to_equity",
+        local_de,
+        yfinance_stats.debt_to_equity if yfinance_stats else None,
+    )
+    rev_growth_final = _pick(
+        "revenue_growth_yoy",
+        None,
+        yfinance_stats.revenue_growth_yoy if yfinance_stats else None,
+    )
+    earn_growth_final = _pick(
+        "earnings_growth_yoy",
+        None,
+        yfinance_stats.earnings_growth_yoy if yfinance_stats else None,
+    )
+
+    # Rewrite field_source for pe/pb when local SEC data exists but the
+    # current price is missing — distinguishes "waiting on price" from
+    # "genuinely unavailable" so the UI can render an actionable hint.
+    # Rewrite BEFORE constructing the Pydantic model since Pydantic v2
+    # copies the dict into the field, severing post-construction mutation.
+    if price_blocked_pe and pe_final is None:
+        field_source["pe_ratio"] = "sec_xbrl_price_missing"
+    if price_blocked_pb and pb_final is None:
+        field_source["pb_ratio"] = "sec_xbrl_price_missing"
+
     return InstrumentKeyStats(
-        pe_ratio=_pick("pe_ratio", local_pe, yfinance_stats.pe_ratio if yfinance_stats else None),
-        pb_ratio=_pick("pb_ratio", local_pb, yfinance_stats.pb_ratio if yfinance_stats else None),
-        dividend_yield=_pick(
-            "dividend_yield",
-            None,
-            yfinance_stats.dividend_yield if yfinance_stats else None,
-        ),
-        payout_ratio=_pick(
-            "payout_ratio",
-            None,
-            yfinance_stats.payout_ratio if yfinance_stats else None,
-        ),
-        roe=_pick("roe", local_roe, yfinance_stats.roe if yfinance_stats else None),
-        roa=_pick("roa", local_roa, yfinance_stats.roa if yfinance_stats else None),
-        debt_to_equity=_pick(
-            "debt_to_equity",
-            local_de,
-            yfinance_stats.debt_to_equity if yfinance_stats else None,
-        ),
-        revenue_growth_yoy=_pick(
-            "revenue_growth_yoy",
-            None,
-            yfinance_stats.revenue_growth_yoy if yfinance_stats else None,
-        ),
-        earnings_growth_yoy=_pick(
-            "earnings_growth_yoy",
-            None,
-            yfinance_stats.earnings_growth_yoy if yfinance_stats else None,
-        ),
+        pe_ratio=pe_final,
+        pb_ratio=pb_final,
+        dividend_yield=div_final,
+        payout_ratio=payout_final,
+        roe=roe_final,
+        roa=roa_final,
+        debt_to_equity=de_final,
+        revenue_growth_yoy=rev_growth_final,
+        earnings_growth_yoy=earn_growth_final,
         field_source=field_source,
     )
 

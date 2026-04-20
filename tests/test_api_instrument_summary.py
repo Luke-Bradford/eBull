@@ -410,6 +410,72 @@ def test_summary_prefers_local_sec_xbrl_for_us_ticker(client: TestClient) -> Non
     assert fs["revenue_growth_yoy"] == "yfinance"
 
 
+def test_summary_sec_preference_reports_price_missing_when_quote_absent(
+    client: TestClient,
+) -> None:
+    """US ticker with local fundamentals but no live quote → pe/pb can't be
+    computed, but field_source distinguishes 'sec_xbrl_price_missing' from
+    'unavailable' so the UI can render an actionable 'waiting on price' hint."""
+    from decimal import Decimal
+    from unittest.mock import MagicMock
+
+    from app.db import get_conn
+
+    stub_provider = MagicMock()
+    stub_provider.get_snapshot.return_value = YFinanceSnapshot(
+        profile=_stub_profile("AAPL"),
+        quote=None,  # No live price
+        key_stats=None,  # No yfinance stats either
+    )
+    _install_stub_provider(stub_provider)
+
+    def _db_conn() -> Iterator[MagicMock]:
+        conn_mock = MagicMock()
+        cur_mock = MagicMock()
+        cur_mock.__enter__.return_value = cur_mock
+        cur_mock.__exit__.return_value = None
+        cur_mock.fetchone.side_effect = [
+            {
+                "instrument_id": 42,
+                "symbol": "AAPL",
+                "company_name": "Apple Inc.",
+                "exchange": "NMS",
+                "currency": "USD",
+                "sector": "Technology",
+                "industry": None,
+                "country": "United States",
+                "is_tradable": True,
+                "coverage_tier": 1,
+            },
+            (1,),
+            {
+                "eps": Decimal("6.50"),
+                "book_value": Decimal("4.20"),
+                "shares_outstanding": None,
+                "cash": None,
+                "debt": None,
+                "net_debt": None,
+                "revenue_ttm": None,
+            },
+            None,
+        ]
+        conn_mock.cursor.return_value = cur_mock
+        yield conn_mock
+
+    app.dependency_overrides[get_conn] = _db_conn
+    try:
+        resp = client.get("/instruments/AAPL/summary")
+    finally:
+        app.dependency_overrides.pop(get_conn, None)
+
+    assert resp.status_code == 200, resp.text
+    ks = resp.json()["key_stats"]
+    assert ks["pe_ratio"] is None
+    assert ks["pb_ratio"] is None
+    assert ks["field_source"]["pe_ratio"] == "sec_xbrl_price_missing"
+    assert ks["field_source"]["pb_ratio"] == "sec_xbrl_price_missing"
+
+
 def test_summary_sec_preference_missing_local_falls_through_to_yfinance(
     client: TestClient,
 ) -> None:
