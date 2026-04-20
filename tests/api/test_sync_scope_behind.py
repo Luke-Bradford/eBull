@@ -38,15 +38,14 @@ def test_post_sync_behind_with_all_healthy_returns_empty_plan(clean_client: Test
 
 
 def test_post_sync_behind_includes_non_healthy_upstream(clean_client: TestClient) -> None:
-    # thesis is ACTION_NEEDED, all its upstreams (fundamentals, news) are
-    # healthy so only thesis fires. Verify the candidate job set contains
-    # daily_thesis_refresh.
+    # scoring is ACTION_NEEDED, all its upstreams (candles, fundamentals)
+    # are healthy so only scoring fires. Verify the candidate job set
+    # contains morning_candidate_review (the job that emits scoring).
     from app.services.sync_orchestrator.layer_types import LayerState
     from app.services.sync_orchestrator.registry import LAYERS
 
     states = {n: LayerState.HEALTHY for n in LAYERS}
-    states["thesis"] = LayerState.ACTION_NEEDED
-    # Keep thesis's upstreams healthy so only thesis itself fires.
+    states["scoring"] = LayerState.ACTION_NEEDED
     with patch(
         "app.services.sync_orchestrator.planner.compute_layer_states_from_db",
         return_value=states,
@@ -55,7 +54,7 @@ def test_post_sync_behind_includes_non_healthy_upstream(clean_client: TestClient
     body = resp.json()
     assert resp.status_code == 202, body
     planned = [lp["name"] for lp in body["plan"]["layers_to_refresh"]]
-    assert "daily_thesis_refresh" in planned
+    assert "morning_candidate_review" in planned
 
 
 def test_post_sync_empty_body_defaults_to_behind(clean_client: TestClient) -> None:
@@ -104,7 +103,7 @@ def test_post_sync_behind_bypasses_legacy_freshness_filter(clean_client: TestCli
     from app.services.sync_orchestrator.registry import LAYERS
 
     states = {n: LayerState.HEALTHY for n in LAYERS}
-    states["thesis"] = LayerState.ACTION_NEEDED
+    states["scoring"] = LayerState.ACTION_NEEDED
 
     # Patch is_fresh to always return True — if the freshness filter
     # leaked through, the plan would be empty. force=True on the
@@ -123,4 +122,4 @@ def test_post_sync_behind_bypasses_legacy_freshness_filter(clean_client: TestCli
     body = resp.json()
     assert resp.status_code == 202, body
     planned = [lp["name"] for lp in body["plan"]["layers_to_refresh"]]
-    assert "daily_thesis_refresh" in planned, body
+    assert "morning_candidate_review" in planned, body

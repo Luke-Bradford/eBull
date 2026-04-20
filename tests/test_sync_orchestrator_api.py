@@ -52,12 +52,12 @@ class TestPostSyncDisabled:
 
 
 class TestGetSyncLayersShape:
-    def test_returns_12_layers_with_schema(self, client, auth_headers) -> None:
+    def test_returns_10_layers_with_schema(self, client, auth_headers) -> None:
         """Read-only against dev DB — pre-existing runs/freshness OK."""
         r = client.get("/sync/layers", headers=auth_headers)
         assert r.status_code == 200
         data = r.json()
-        assert len(data["layers"]) == 12
+        assert len(data["layers"]) == 10
         names = {layer["name"] for layer in data["layers"]}
         assert "universe" in names
         assert "monthly_reports" in names

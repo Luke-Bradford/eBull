@@ -72,16 +72,16 @@ class TestBlockingDependencyFailed:
         assert reason is None
 
     def test_failed_non_blocking_dep_does_not_block(self) -> None:
-        """news is non-blocking; thesis can still run with news=FAILED."""
+        """A FAILED non-blocking dep must not block downstream. Post-Phase 1.2
+        no scheduled layer declares a non-blocking dep naturally, but the
+        contract is still enforced — exercise it by fabricating a plan with
+        fx_rates (is_blocking=False) as a dep."""
         plan = _lp(
-            "daily_thesis_refresh",
-            ("thesis",),
-            deps=("fundamentals", "news"),
+            "synthetic_downstream",
+            ("synthetic_downstream",),
+            deps=("fx_rates",),
         )
-        upstream: Mapping[str, LayerOutcome] = {
-            "fundamentals": LayerOutcome.SUCCESS,
-            "news": LayerOutcome.FAILED,  # non-blocking
-        }
+        upstream: Mapping[str, LayerOutcome] = {"fx_rates": LayerOutcome.FAILED}
         reason = executor._blocking_dependency_failed(plan, upstream)
         assert reason is None
 

@@ -216,37 +216,6 @@ def refresh_fundamentals(
     )
 
 
-def refresh_news(
-    *,
-    sync_run_id: int,
-    progress: ProgressCallback,
-    upstream_outcomes: Mapping[str, LayerOutcome],
-) -> Sequence[tuple[str, RefreshResult]]:
-    from app.workers.scheduler import daily_news_refresh
-
-    return _wrap_single(
-        job_name="daily_news_refresh",
-        layer_name="news",
-        legacy_fn=daily_news_refresh,
-    )
-
-
-def refresh_thesis(
-    *,
-    sync_run_id: int,
-    progress: ProgressCallback,
-    upstream_outcomes: Mapping[str, LayerOutcome],
-) -> Sequence[tuple[str, RefreshResult]]:
-    from app.workers.scheduler import daily_thesis_refresh
-
-    return _wrap_single(
-        job_name="daily_thesis_refresh",
-        layer_name="thesis",
-        legacy_fn=daily_thesis_refresh,
-        progress=progress,
-    )
-
-
 def refresh_portfolio_sync(
     *,
     sync_run_id: int,
