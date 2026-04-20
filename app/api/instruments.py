@@ -12,7 +12,7 @@ No writes. No schema changes.
 from __future__ import annotations
 
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Literal
 
 import psycopg
@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.db import get_conn
-from app.providers.implementations.yfinance_provider import YFinanceProvider
+from app.providers.implementations.yfinance_provider import YFinanceKeyStats, YFinanceProvider
 
 router = APIRouter(prefix="/instruments", tags=["instruments"])
 
@@ -113,6 +113,9 @@ class InstrumentKeyStats(BaseModel):
     debt_to_equity: Decimal | None
     revenue_growth_yoy: Decimal | None
     earnings_growth_yoy: Decimal | None
+    # Per-field provenance map — present only when stats came from a mixed
+    # local+yfinance merge. None when the whole block is yfinance-only.
+    field_source: dict[str, str] | None = None
 
 
 class InstrumentFinancialRow(BaseModel):
@@ -483,6 +486,158 @@ def get_instrument_financials(
     )
 
 
+def _has_sec_cik(conn: psycopg.Connection[object], instrument_id: int) -> bool:
+    """True if the instrument has a primary SEC CIK — the US-ticker signal
+    that gates the local-SEC-XBRL preference path."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM external_identifiers "
+            "WHERE instrument_id = %(iid)s AND provider = 'sec' "
+            "AND identifier_type = 'cik' AND is_primary = TRUE "
+            "LIMIT 1",
+            {"iid": instrument_id},
+        )
+        return cur.fetchone() is not None
+
+
+def _fetch_local_fundamentals(
+    conn: psycopg.Connection[object],
+    instrument_id: int,
+) -> dict[str, Decimal | None]:
+    """Return the latest fundamentals_snapshot row as a dict of derivable
+    fields. Missing rows yield an empty dict — callers treat it as
+    'no local fundamentals'.
+
+    Pulls:
+      - eps (for PE ratio with current price)
+      - book_value (per-share, for PB ratio with current price)
+      - net_debt / cash / debt (for debt_to_equity with equity from
+        financial_periods)
+
+    Complemented by the latest financial_periods row (TTM-ish) for ROE,
+    ROA, revenue growth — data the snapshot table doesn't carry.
+    """
+    out: dict[str, Decimal | None] = {}
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT eps, book_value, shares_outstanding, cash, debt, net_debt, revenue_ttm
+            FROM fundamentals_snapshot
+            WHERE instrument_id = %(iid)s
+            ORDER BY as_of_date DESC
+            LIMIT 1
+            """,
+            {"iid": instrument_id},
+        )
+        snap = cur.fetchone()
+        cur.execute(
+            """
+            SELECT net_income, shareholders_equity, total_assets, total_liabilities, revenue
+            FROM financial_periods
+            WHERE instrument_id = %(iid)s
+              AND superseded_at IS NULL
+              AND period_type IN ('Q1', 'Q2', 'Q3', 'Q4', 'FY')
+            ORDER BY period_end_date DESC
+            LIMIT 1
+            """,
+            {"iid": instrument_id},
+        )
+        fp = cur.fetchone()
+    if snap is not None:
+        out["eps"] = snap.get("eps")  # type: ignore[union-attr]
+        out["book_value"] = snap.get("book_value")  # type: ignore[union-attr]
+        out["shares_outstanding"] = snap.get("shares_outstanding")  # type: ignore[union-attr]
+        out["net_debt"] = snap.get("net_debt")  # type: ignore[union-attr]
+        out["debt"] = snap.get("debt")  # type: ignore[union-attr]
+    if fp is not None:
+        out["net_income"] = fp.get("net_income")  # type: ignore[union-attr]
+        out["shareholders_equity"] = fp.get("shareholders_equity")  # type: ignore[union-attr]
+        out["total_assets"] = fp.get("total_assets")  # type: ignore[union-attr]
+        out["total_liabilities"] = fp.get("total_liabilities")  # type: ignore[union-attr]
+        out["revenue"] = fp.get("revenue")  # type: ignore[union-attr]
+    return out
+
+
+def _merge_stats_with_local(
+    yfinance_stats: YFinanceKeyStats | None,
+    local: dict[str, Decimal | None],
+    current_price: Decimal | None,
+) -> InstrumentKeyStats | None:
+    """Merge local SEC-derived stats onto a yfinance KeyStats object.
+
+    Local data wins per-field when present:
+      - pe_ratio    = current_price / eps
+      - pb_ratio    = current_price / book_value
+      - debt_to_equity = debt / shareholders_equity
+      - roe         = net_income / shareholders_equity
+      - roa         = net_income / total_assets
+
+    Fields the local snapshot can't produce (dividend yield, payout ratio,
+    revenue_growth_yoy, earnings_growth_yoy) always fall back to yfinance.
+    """
+    if yfinance_stats is None and not local:
+        return None
+
+    field_source: dict[str, str] = {}
+
+    def _pick(field: str, local_value: Decimal | None, yfinance_value: Decimal | None) -> Decimal | None:
+        if local_value is not None:
+            field_source[field] = "sec_xbrl"
+            return local_value
+        if yfinance_value is not None:
+            field_source[field] = "yfinance"
+            return yfinance_value
+        field_source[field] = "unavailable"
+        return None
+
+    def _safe_div(num: Decimal | None, denom: Decimal | None) -> Decimal | None:
+        if num is None or denom is None or denom == 0:
+            return None
+        try:
+            return num / denom
+        except ArithmeticError, InvalidOperation:
+            return None
+
+    local_pe = _safe_div(current_price, local.get("eps"))
+    local_pb = _safe_div(current_price, local.get("book_value"))
+    local_de = _safe_div(local.get("debt"), local.get("shareholders_equity"))
+    local_roe = _safe_div(local.get("net_income"), local.get("shareholders_equity"))
+    local_roa = _safe_div(local.get("net_income"), local.get("total_assets"))
+
+    return InstrumentKeyStats(
+        pe_ratio=_pick("pe_ratio", local_pe, yfinance_stats.pe_ratio if yfinance_stats else None),
+        pb_ratio=_pick("pb_ratio", local_pb, yfinance_stats.pb_ratio if yfinance_stats else None),
+        dividend_yield=_pick(
+            "dividend_yield",
+            None,
+            yfinance_stats.dividend_yield if yfinance_stats else None,
+        ),
+        payout_ratio=_pick(
+            "payout_ratio",
+            None,
+            yfinance_stats.payout_ratio if yfinance_stats else None,
+        ),
+        roe=_pick("roe", local_roe, yfinance_stats.roe if yfinance_stats else None),
+        roa=_pick("roa", local_roa, yfinance_stats.roa if yfinance_stats else None),
+        debt_to_equity=_pick(
+            "debt_to_equity",
+            local_de,
+            yfinance_stats.debt_to_equity if yfinance_stats else None,
+        ),
+        revenue_growth_yoy=_pick(
+            "revenue_growth_yoy",
+            None,
+            yfinance_stats.revenue_growth_yoy if yfinance_stats else None,
+        ),
+        earnings_growth_yoy=_pick(
+            "earnings_growth_yoy",
+            None,
+            yfinance_stats.earnings_growth_yoy if yfinance_stats else None,
+        ),
+        field_source=field_source,
+    )
+
+
 @router.get("/{symbol}/summary", response_model=InstrumentSummary)
 def get_instrument_summary(
     symbol: str,
@@ -551,8 +706,27 @@ def get_instrument_summary(
         else None
     )
 
-    stats_block = (
-        InstrumentKeyStats(
+    # Prefer local SEC XBRL fields for US tickers (#357). Local values
+    # override yfinance per-field; fields the snapshot can't compute
+    # (dividend yield, growth) fall back to yfinance cleanly.
+    instrument_id_int = int(row["instrument_id"])  # type: ignore[arg-type]
+    local_fundamentals: dict[str, Decimal | None] = {}
+    use_local_sec = _has_sec_cik(conn, instrument_id_int)
+    if use_local_sec:
+        local_fundamentals = _fetch_local_fundamentals(conn, instrument_id_int)
+
+    # Treat a dict of all-None as "no local data" — the fundamentals_snapshot
+    # table may exist with sparse rows during bootstrap.
+    has_local_values = any(v is not None for v in local_fundamentals.values())
+    if use_local_sec and has_local_values:
+        stats_block = _merge_stats_with_local(
+            stats,
+            local_fundamentals,
+            current_price=(quote.price if quote is not None else None),
+        )
+        key_stats_source = "local_sec_xbrl+yfinance"
+    elif stats is not None:
+        stats_block = InstrumentKeyStats(
             pe_ratio=stats.pe_ratio,
             pb_ratio=stats.pb_ratio,
             dividend_yield=stats.dividend_yield,
@@ -562,15 +736,17 @@ def get_instrument_summary(
             debt_to_equity=stats.debt_to_equity,
             revenue_growth_yoy=stats.revenue_growth_yoy,
             earnings_growth_yoy=stats.earnings_growth_yoy,
+            field_source=None,
         )
-        if stats is not None
-        else None
-    )
+        key_stats_source = "yfinance"
+    else:
+        stats_block = None
+        key_stats_source = "unavailable"
 
     source = {
         "identity": "local_db+yfinance",
         "price": "yfinance" if quote is not None else "unavailable",
-        "key_stats": "yfinance" if stats is not None else "unavailable",
+        "key_stats": key_stats_source,
     }
 
     return InstrumentSummary(

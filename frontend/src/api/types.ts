@@ -222,6 +222,7 @@ export interface InstrumentKeyStats {
   debt_to_equity: string | null;
   revenue_growth_yoy: string | null;
   earnings_growth_yoy: string | null;
+  field_source?: Record<string, string> | null;
 }
 
 export interface InstrumentSummary {

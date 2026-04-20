@@ -320,6 +320,150 @@ def test_summary_numeric_symbol_routes_to_summary_not_detail(client: TestClient)
     assert body["identity"]["symbol"] == "7203"
 
 
+def test_summary_prefers_local_sec_xbrl_for_us_ticker(client: TestClient) -> None:
+    """#357: a US ticker (primary SEC CIK present) with local
+    fundamentals_snapshot + financial_periods data uses those values
+    over yfinance, reports key_stats source='local_sec_xbrl+yfinance',
+    and surfaces per-field provenance."""
+    from decimal import Decimal
+    from unittest.mock import MagicMock
+
+    from app.db import get_conn
+
+    stub_provider = MagicMock()
+    stub_provider.get_snapshot.return_value = YFinanceSnapshot(
+        profile=_stub_profile("AAPL"),
+        quote=_stub_quote("AAPL"),
+        key_stats=_stub_stats("AAPL"),  # yfinance has all stats
+    )
+    _install_stub_provider(stub_provider)
+
+    def _db_conn() -> Iterator[MagicMock]:
+        conn_mock = MagicMock()
+        cur_mock = MagicMock()
+        cur_mock.__enter__.return_value = cur_mock
+        cur_mock.__exit__.return_value = None
+        # Sequence: instrument lookup, has_sec_cik lookup, fundamentals_snapshot,
+        # financial_periods.
+        cur_mock.fetchone.side_effect = [
+            {
+                "instrument_id": 42,
+                "symbol": "AAPL",
+                "company_name": "Apple Inc.",
+                "exchange": "NMS",
+                "currency": "USD",
+                "sector": "Technology",
+                "industry": None,
+                "country": "United States",
+                "is_tradable": True,
+                "coverage_tier": 1,
+            },
+            (1,),  # has_sec_cik
+            {
+                "eps": Decimal("6.50"),
+                "book_value": Decimal("4.20"),
+                "shares_outstanding": Decimal("15000000000"),
+                "cash": Decimal("50000000000"),
+                "debt": Decimal("120000000000"),
+                "net_debt": Decimal("70000000000"),
+                "revenue_ttm": Decimal("400000000000"),
+            },
+            {
+                "net_income": Decimal("100000000000"),
+                "shareholders_equity": Decimal("63000000000"),
+                "total_assets": Decimal("350000000000"),
+                "total_liabilities": Decimal("287000000000"),
+                "revenue": Decimal("400000000000"),
+            },
+        ]
+        conn_mock.cursor.return_value = cur_mock
+        yield conn_mock
+
+    app.dependency_overrides[get_conn] = _db_conn
+    try:
+        resp = client.get("/instruments/AAPL/summary")
+    finally:
+        app.dependency_overrides.pop(get_conn, None)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["source"]["key_stats"] == "local_sec_xbrl+yfinance"
+
+    ks = body["key_stats"]
+    # PE = 200.50 / 6.50 ≈ 30.85 (overrides yfinance's 28.5)
+    assert Decimal(ks["pe_ratio"]) == Decimal("200.50") / Decimal("6.50")
+    # PB = 200.50 / 4.20 ≈ 47.74 (overrides yfinance's 40.2)
+    assert Decimal(ks["pb_ratio"]) == Decimal("200.50") / Decimal("4.20")
+    # debt/equity = 120B / 63B ≈ 1.904 (overrides yfinance's 195.0)
+    assert Decimal(ks["debt_to_equity"]) == Decimal("120000000000") / Decimal("63000000000")
+    # ROE = 100B / 63B ≈ 1.587
+    assert Decimal(ks["roe"]) == Decimal("100000000000") / Decimal("63000000000")
+    # Field source map reports SEC origin for computed fields,
+    # yfinance for dividend/payout/growth.
+    fs = ks["field_source"]
+    assert fs["pe_ratio"] == "sec_xbrl"
+    assert fs["pb_ratio"] == "sec_xbrl"
+    assert fs["debt_to_equity"] == "sec_xbrl"
+    assert fs["roe"] == "sec_xbrl"
+    assert fs["roa"] == "sec_xbrl"
+    assert fs["dividend_yield"] == "yfinance"
+    assert fs["revenue_growth_yoy"] == "yfinance"
+
+
+def test_summary_sec_preference_missing_local_falls_through_to_yfinance(
+    client: TestClient,
+) -> None:
+    """A US ticker (CIK present) but no local fundamentals rows — must
+    cleanly fall through to the pure-yfinance path."""
+    from unittest.mock import MagicMock
+
+    from app.db import get_conn
+
+    stub_provider = MagicMock()
+    stub_provider.get_snapshot.return_value = YFinanceSnapshot(
+        profile=_stub_profile("AAPL"),
+        quote=_stub_quote("AAPL"),
+        key_stats=_stub_stats("AAPL"),
+    )
+    _install_stub_provider(stub_provider)
+
+    def _db_conn() -> Iterator[MagicMock]:
+        conn_mock = MagicMock()
+        cur_mock = MagicMock()
+        cur_mock.__enter__.return_value = cur_mock
+        cur_mock.__exit__.return_value = None
+        cur_mock.fetchone.side_effect = [
+            {
+                "instrument_id": 42,
+                "symbol": "AAPL",
+                "company_name": "Apple Inc.",
+                "exchange": "NMS",
+                "currency": "USD",
+                "sector": "Technology",
+                "industry": None,
+                "country": "United States",
+                "is_tradable": True,
+                "coverage_tier": 1,
+            },
+            (1,),  # has_sec_cik → True
+            None,  # no fundamentals_snapshot row
+            None,  # no financial_periods row
+        ]
+        conn_mock.cursor.return_value = cur_mock
+        yield conn_mock
+
+    app.dependency_overrides[get_conn] = _db_conn
+    try:
+        resp = client.get("/instruments/AAPL/summary")
+    finally:
+        app.dependency_overrides.pop(get_conn, None)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["source"]["key_stats"] == "yfinance"
+    assert body["key_stats"]["pe_ratio"] == "28.5"  # yfinance value
+
+
 def test_summary_empty_symbol_returns_400(client: TestClient) -> None:
     # Whitespace-only symbol should reject with 400 rather than a DB probe.
     stub_provider = MagicMock()
