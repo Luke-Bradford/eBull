@@ -19,7 +19,7 @@ from typing import Literal
 import psycopg
 import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.db import get_conn
 from app.providers.implementations.yfinance_provider import YFinanceKeyStats, YFinanceProvider
@@ -142,6 +142,30 @@ class InstrumentFinancials(BaseModel):
     currency: str | None
     source: str  # "financial_periods" (local SEC XBRL) | "yfinance"
     rows: list[InstrumentFinancialRow]
+
+
+class CandleBar(BaseModel):
+    """One daily OHLCV bar — the minimal shape a chart library needs."""
+
+    date: date
+    open: Decimal | None
+    high: Decimal | None
+    low: Decimal | None
+    close: Decimal | None
+    volume: Decimal | None
+
+
+class InstrumentCandles(BaseModel):
+    # Allow `range` as the wire name without shadowing the Python
+    # builtin at the attribute level.
+    model_config = ConfigDict(populate_by_name=True)
+
+    symbol: str
+    # Range token the caller asked for; echoed so the client can cache
+    # by range key. `days` is the resolved lookback the server applied.
+    range_: Literal["1w", "1m", "3m", "6m", "1y", "5y", "max"] = Field(..., alias="range", serialization_alias="range")
+    days: int | None  # None when range="max"
+    rows: list[CandleBar]
 
 
 class InstrumentSummary(BaseModel):
@@ -502,6 +526,96 @@ def get_instrument_financials(
         currency=y_fin.currency,
         source="yfinance",
         rows=yf_rows,
+    )
+
+
+_CANDLE_RANGE_DAYS: dict[str, int | None] = {
+    "1w": 7,
+    "1m": 30,
+    "3m": 90,
+    "6m": 180,
+    "1y": 365,
+    "5y": 365 * 5,
+    "max": None,
+}
+
+
+@router.get("/{symbol}/candles", response_model=InstrumentCandles)
+def get_instrument_candles(
+    symbol: str,
+    range_: Literal["1w", "1m", "3m", "6m", "1y", "5y", "max"] = Query(default="1m", alias="range"),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InstrumentCandles:
+    """Daily OHLCV bars for `symbol` over the requested lookback.
+
+    Reads from `price_daily` (populated by the market-data refresh
+    job). No provider fallback here — if we don't have local bars,
+    return an empty row list and let the chart render an empty state.
+    A 404 is reserved for an unknown symbol.
+
+    Range resolution is the server's responsibility: the caller passes
+    a range token (`1m`, `1y`, ...) and the server maps it to a day
+    lookback. `max` returns every stored bar.
+
+    Bars are returned oldest-first so chart libraries can feed the
+    array directly without re-sorting.
+    """
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    # Symbol → instrument_id (primary-listing tiebreaker, see #357).
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    days = _CANDLE_RANGE_DAYS[range_]
+    params: dict[str, object] = {"iid": inst_row["instrument_id"]}
+    if days is None:
+        where = "WHERE instrument_id = %(iid)s"
+    else:
+        where = "WHERE instrument_id = %(iid)s AND price_date >= CURRENT_DATE - make_interval(days => %(days)s)"
+        params["days"] = days
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT price_date, open, high, low, close, volume
+            FROM price_daily
+            {where}
+            ORDER BY price_date ASC
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+
+    bars = [
+        CandleBar(
+            date=r["price_date"],  # type: ignore[arg-type]
+            open=r["open"],  # type: ignore[arg-type]
+            high=r["high"],  # type: ignore[arg-type]
+            low=r["low"],  # type: ignore[arg-type]
+            close=r["close"],  # type: ignore[arg-type]
+            volume=r["volume"],  # type: ignore[arg-type]
+        )
+        for r in rows
+    ]
+    return InstrumentCandles(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        range_=range_,
+        days=days,
+        rows=bars,
     )
 
 
