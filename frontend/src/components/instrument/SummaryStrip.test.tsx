@@ -285,6 +285,24 @@ describe("SummaryStrip — action gating", () => {
     expect(screen.queryByTestId("action-close")).not.toBeInTheDocument();
   });
 
+  it("keeps stance badge visible when thesisError=true but thesis data is non-null", () => {
+    // Previously-fetched thesis data must not be silently dropped
+    // during a sticky-error window (Codex slice-1 round-4 finding).
+    render(
+      <SummaryStrip
+        summary={summary()}
+        thesis={freshThesis()}
+        position={null}
+        {...noopProps()}
+        thesisError
+        thesisLoaded={false}
+      />,
+    );
+    expect(screen.getByTestId("thesis-badge").textContent).toContain("BUY");
+    // Error signal is additive, not a replacement.
+    expect(screen.getByTestId("thesis-badge-error")).toBeInTheDocument();
+  });
+
   it("shows error badge + keeps Generate thesis reachable on thesisError", () => {
     // Non-404 thesis errors used to silently blank the strip. Now
     // the error is surfaced and the retry affordance remains visible

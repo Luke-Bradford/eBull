@@ -166,14 +166,12 @@ export function SummaryStrip({
 
       {/* Row 3: badges + actions */}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        {thesisError ? (
-          <span
-            data-testid="thesis-badge-error"
-            className="inline-flex items-center rounded border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700"
-          >
-            Thesis unavailable
-          </span>
-        ) : thesisLoaded && thesis !== null ? (
+        {/* Show stance badge whenever we have thesis data, even when
+            the sticky error flag is set — dropping the last-known
+            stance/confidence would lose useful operator context
+            during a refetch hiccup. Add a stale/errored qualifier
+            inline. */}
+        {thesis !== null ? (
           <span
             data-testid="thesis-badge"
             className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${thesisTone(thesis.stance)}`}
@@ -192,6 +190,15 @@ export function SummaryStrip({
             className="inline-flex items-center rounded border border-slate-300 bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-500"
           >
             No thesis yet
+          </span>
+        ) : null}
+
+        {thesisError ? (
+          <span
+            data-testid="thesis-badge-error"
+            className="inline-flex items-center rounded border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700"
+          >
+            Thesis unavailable
           </span>
         ) : null}
 
