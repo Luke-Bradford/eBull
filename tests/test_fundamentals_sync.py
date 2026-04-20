@@ -317,9 +317,13 @@ def test_fundamentals_sync_phase0_cik_failure_isolated() -> None:
 
     tracker = MagicMock()
 
-    phase1_conn = MagicMock()
-    phase1_conn.execute.return_value.fetchall.return_value = []
-    phase2_conn = MagicMock()
+    # Phase 0 + phase 1 don't open psycopg connections; the first connect()
+    # is phase 2 (audit), the second is phase 3 (review). Name the locals
+    # after their consumer to avoid confusing readers with "phase1_conn =
+    # audit connection".
+    audit_conn = MagicMock()
+    audit_conn.execute.return_value.fetchall.return_value = []
+    review_conn = MagicMock()
 
     with (
         patch.object(scheduler, "settings", stub_settings),
@@ -335,7 +339,7 @@ def test_fundamentals_sync_phase0_cik_failure_isolated() -> None:
         ) as audit_mock,
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        _stub_two_connect_ctxes(psycopg_mod, phase1_conn, phase2_conn)
+        _stub_two_connect_ctxes(psycopg_mod, audit_conn, review_conn)
         provider_cls.return_value.__enter__.return_value = MagicMock()
 
         # Raises at the end — phase 0 failure is isolated but surfaced.
@@ -344,8 +348,8 @@ def test_fundamentals_sync_phase0_cik_failure_isolated() -> None:
 
     cik_mock.assert_called_once()
     facts_mock.assert_called_once()
-    audit_mock.assert_called_once_with(phase1_conn)
-    review_mock.assert_called_once_with(phase2_conn)
+    audit_mock.assert_called_once_with(audit_conn)
+    review_mock.assert_called_once_with(review_conn)
 
 
 def test_fundamentals_sync_phase1_xbrl_failure_isolated() -> None:
@@ -367,9 +371,11 @@ def test_fundamentals_sync_phase1_xbrl_failure_isolated() -> None:
 
     tracker = MagicMock()
 
-    phase1_conn = MagicMock()
-    phase1_conn.execute.return_value.fetchall.return_value = []
-    phase2_conn = MagicMock()
+    # Phase 0 + phase 1 don't open psycopg connections; the first connect()
+    # is phase 2 (audit), the second is phase 3 (review).
+    audit_conn = MagicMock()
+    audit_conn.execute.return_value.fetchall.return_value = []
+    review_conn = MagicMock()
 
     with (
         patch.object(scheduler, "settings", stub_settings),
@@ -385,7 +391,7 @@ def test_fundamentals_sync_phase1_xbrl_failure_isolated() -> None:
         ) as audit_mock,
     ):
         tracked_cm.return_value.__enter__.return_value = tracker
-        _stub_two_connect_ctxes(psycopg_mod, phase1_conn, phase2_conn)
+        _stub_two_connect_ctxes(psycopg_mod, audit_conn, review_conn)
         provider_cls.return_value.__enter__.return_value = MagicMock()
 
         with pytest.raises(RuntimeError, match="phase 1"):
@@ -393,5 +399,5 @@ def test_fundamentals_sync_phase1_xbrl_failure_isolated() -> None:
 
     cik_mock.assert_called_once()
     facts_mock.assert_called_once()
-    audit_mock.assert_called_once_with(phase1_conn)
-    review_mock.assert_called_once_with(phase2_conn)
+    audit_mock.assert_called_once_with(audit_conn)
+    review_mock.assert_called_once_with(review_conn)
