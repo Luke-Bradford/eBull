@@ -3,6 +3,14 @@ import { Link } from "react-router-dom";
 import type { WatchlistItem } from "@/api/watchlist";
 import { EmptyState } from "@/components/states/EmptyState";
 
+function formatAddedAt(raw: string): string {
+  // Parse the added_at timestamp through Date rather than assuming an
+  // ISO 8601 YYYY-MM-DD prefix shape on the raw string.
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  return d.toLocaleDateString();
+}
+
 interface Props {
   items: WatchlistItem[];
   onRemove?: (symbol: string) => void;
@@ -50,7 +58,7 @@ export function WatchlistPanel({ items, onRemove }: Props) {
                 {item.notes ?? ""}
               </td>
               <td className="px-2 py-1 text-xs text-slate-400">
-                {item.added_at.slice(0, 10)}
+                {formatAddedAt(item.added_at)}
               </td>
               {onRemove && (
                 <td className="px-2 py-1 text-right">

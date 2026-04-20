@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import { fetchBudget } from "@/api/budget";
 import { fetchPortfolio } from "@/api/portfolio";
 import { fetchRecommendations } from "@/api/recommendations";
@@ -40,13 +42,20 @@ export function DashboardPage() {
   const config = useAsync(fetchConfig, []);
   const budget = useAsync(fetchBudget, []);
   const watchlist = useAsync(fetchWatchlist, []);
+  const [watchlistError, setWatchlistError] = useState<string | null>(null);
 
   const handleRemove = async (symbol: string) => {
+    setWatchlistError(null);
     try {
       await removeFromWatchlist(symbol);
       watchlist.refetch();
-    } catch {
-      // Surface via the existing error slot on next render; for now no-op.
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : `Failed to remove ${symbol}`;
+      setWatchlistError(message);
+      // Refetch anyway so the UI reflects server state (e.g. another
+      // session already removed the row).
+      watchlist.refetch();
     }
   };
 
@@ -135,6 +144,18 @@ export function DashboardPage() {
       </div>
 
       <Section title={`Watchlist${watchlist.data ? ` (${watchlist.data.total})` : ""}`}>
+        {watchlistError !== null && (
+          <div className="mb-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+            {watchlistError}
+            <button
+              type="button"
+              className="ml-2 underline"
+              onClick={() => setWatchlistError(null)}
+            >
+              dismiss
+            </button>
+          </div>
+        )}
         {watchlist.loading ? (
           <SectionSkeleton rows={3} />
         ) : watchlist.error !== null ? (
