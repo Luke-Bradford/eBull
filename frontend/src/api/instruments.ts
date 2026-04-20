@@ -1,5 +1,7 @@
 import { apiFetch } from "@/api/client";
 import type {
+  CandleRange,
+  InstrumentCandles,
   InstrumentDetail,
   InstrumentFinancials,
   InstrumentListResponse,
@@ -61,5 +63,15 @@ export function fetchInstrumentFinancials(
   });
   return apiFetch<InstrumentFinancials>(
     `/instruments/${encodeURIComponent(symbol)}/financials?${params.toString()}`,
+  );
+}
+
+export function fetchInstrumentCandles(
+  symbol: string,
+  range: CandleRange,
+): Promise<InstrumentCandles> {
+  const params = new URLSearchParams({ range });
+  return apiFetch<InstrumentCandles>(
+    `/instruments/${encodeURIComponent(symbol)}/candles?${params.toString()}`,
   );
 }
