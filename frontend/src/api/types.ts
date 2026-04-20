@@ -250,6 +250,33 @@ export interface InstrumentSummary {
   source: Record<string, string>;
 }
 
+// #316 Slice A — daily OHLCV bars
+export type CandleRange =
+  | "1w"
+  | "1m"
+  | "3m"
+  | "6m"
+  | "1y"
+  | "5y"
+  | "max";
+
+export interface CandleBar {
+  date: string;
+  open: string | null;
+  high: string | null;
+  low: string | null;
+  close: string | null;
+  volume: string | null;
+}
+
+export interface InstrumentCandles {
+  symbol: string;
+  range: CandleRange;
+  /** Resolved lookback in days; null when range="max". */
+  days: number | null;
+  rows: CandleBar[];
+}
+
 // Phase 2.3 — financials
 export interface InstrumentFinancialRow {
   period_end: string;
