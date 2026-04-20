@@ -28,14 +28,13 @@ vi.mock("@/api/portfolio", () => ({
   fetchPortfolio: vi.fn(),
   fetchInstrumentPositions: vi.fn(),
 }));
-vi.mock("@/api/config", () => ({ fetchConfig: vi.fn() }));
 vi.mock("@/api/theses", () => ({ fetchLatestThesis: vi.fn() }));
 vi.mock("@/api/filings", () => ({ fetchFilings: vi.fn() }));
 vi.mock("@/api/scoreHistory", () => ({ fetchScoreHistory: vi.fn() }));
 vi.mock("@/api/orders", () => ({ placeOrder: vi.fn(), closePosition: vi.fn() }));
 
+import { TestConfigProvider } from "@/lib/ConfigContext";
 import { fetchPortfolio, fetchInstrumentPositions } from "@/api/portfolio";
-import { fetchConfig } from "@/api/config";
 import { fetchLatestThesis } from "@/api/theses";
 import { fetchFilings } from "@/api/filings";
 import { fetchScoreHistory } from "@/api/scoreHistory";
@@ -43,7 +42,6 @@ import { placeOrder, closePosition } from "@/api/orders";
 
 const mockedFetchPortfolio = vi.mocked(fetchPortfolio);
 const mockedFetchInstrumentPositions = vi.mocked(fetchInstrumentPositions);
-const mockedFetchConfig = vi.mocked(fetchConfig);
 const mockedFetchThesis = vi.mocked(fetchLatestThesis);
 const mockedFetchFilings = vi.mocked(fetchFilings);
 const mockedFetchScores = vi.mocked(fetchScoreHistory);
@@ -202,14 +200,15 @@ function emptyInstrumentDetail(): InstrumentPositionDetail {
 
 function renderPage() {
   return render(
-    <MemoryRouter initialEntries={["/portfolio"]}>
-      <PortfolioPage />
-    </MemoryRouter>,
+    <TestConfigProvider value={{ data: demoConfig(), loading: false }}>
+      <MemoryRouter initialEntries={["/portfolio"]}>
+        <PortfolioPage />
+      </MemoryRouter>
+    </TestConfigProvider>,
   );
 }
 
 beforeEach(() => {
-  mockedFetchConfig.mockResolvedValue(demoConfig());
   mockedFetchThesis.mockResolvedValue(emptyThesis());
   mockedFetchFilings.mockResolvedValue(emptyFilings());
   mockedFetchScores.mockResolvedValue(emptyScores());

@@ -17,6 +17,7 @@ import userEvent from "@testing-library/user-event";
 
 import { ApiError } from "@/api/client";
 import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
+import { TestConfigProvider } from "@/lib/ConfigContext";
 import type {
   ConfigResponse,
   InstrumentPositionDetail,
@@ -24,9 +25,6 @@ import type {
   OrderResponse,
 } from "@/api/types";
 
-vi.mock("@/api/config", () => ({
-  fetchConfig: vi.fn(),
-}));
 vi.mock("@/api/portfolio", () => ({
   fetchInstrumentPositions: vi.fn(),
 }));
@@ -34,11 +32,9 @@ vi.mock("@/api/orders", () => ({
   closePosition: vi.fn(),
 }));
 
-import { fetchConfig } from "@/api/config";
 import { fetchInstrumentPositions } from "@/api/portfolio";
 import { closePosition } from "@/api/orders";
 
-const mockedFetchConfig = vi.mocked(fetchConfig);
 const mockedFetchDetail = vi.mocked(fetchInstrumentPositions);
 const mockedClosePosition = vi.mocked(closePosition);
 
@@ -115,7 +111,6 @@ function orderFilled(): OrderResponse {
 }
 
 beforeEach(() => {
-  mockedFetchConfig.mockResolvedValue(demoConfig());
   mockedFetchDetail.mockResolvedValue(detailWith([tradeFor(555)]));
   mockedClosePosition.mockReset();
 });
@@ -130,15 +125,17 @@ function renderModal(
   const onFilled = vi.fn();
   const onRequestClose = vi.fn();
   const result = render(
-    <ClosePositionModal
-      isOpen
-      instrumentId={7}
-      positionId={555}
-      valuationSource="quote"
-      onFilled={onFilled}
-      onRequestClose={onRequestClose}
-      {...overrides}
-    />,
+    <TestConfigProvider value={{ data: demoConfig(), loading: false }}>
+      <ClosePositionModal
+        isOpen
+        instrumentId={7}
+        positionId={555}
+        valuationSource="quote"
+        onFilled={onFilled}
+        onRequestClose={onRequestClose}
+        {...overrides}
+      />
+    </TestConfigProvider>,
   );
   return { onFilled, onRequestClose, ...result };
 }

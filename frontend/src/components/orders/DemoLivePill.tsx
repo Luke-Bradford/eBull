@@ -15,11 +15,10 @@
  */
 import { useEffect, useState } from "react";
 
-import { fetchConfig } from "@/api/config";
-import { useAsync } from "@/lib/useAsync";
+import { useConfig } from "@/lib/ConfigContext";
 
 export function DemoLivePill(): JSX.Element {
-  const config = useAsync(fetchConfig, []);
+  const config = useConfig();
   const liveFlag: boolean | null =
     config.data?.runtime?.enable_live_trading ?? null;
 
