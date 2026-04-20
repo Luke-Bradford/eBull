@@ -318,9 +318,12 @@ describe("PortfolioPage — keyboard", () => {
   });
 
   it("Enter drills a focused mirror row to /copy-trading/:id", async () => {
-    // Override the keyboard-describe beforeEach with a mixed fixture so
-    // the second sorted row is a mirror.
-    mockedFetchPortfolio.mockResolvedValue(
+    // Use `mockResolvedValueOnce` so the describe-level
+    // `mockResolvedValue(...)` default from `beforeEach` is not
+    // permanently replaced — subsequent tests in the block keep
+    // seeing the three-position fixture.
+    mockedFetchPortfolio.mockReset();
+    mockedFetchPortfolio.mockResolvedValueOnce(
       portfolioWith(
         [position(1, "AAA", { market_value: 300 })],
         [mirror(42, "@gurutrader", { mirror_equity: 200 })],
