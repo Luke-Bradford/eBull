@@ -12,6 +12,7 @@ Issue: #207
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -590,8 +591,6 @@ def _load_prior_snapshot(
     # JSON string — decode it so a valid prior snapshot isn't
     # silently dropped (Codex slice-4 round-2 note).
     if isinstance(snapshot_json, str):
-        import json
-
         try:
             snapshot_json = json.loads(snapshot_json)
         except json.JSONDecodeError:
