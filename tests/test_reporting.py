@@ -558,7 +558,16 @@ class TestComputeContributors:
 
     def test_top_n_caps_each_list(self) -> None:
         """Only top_n contributors + top_n drags surface — keeps the
-        UI list short and the operator focused on biggest movers."""
+        UI list short and the operator focused on biggest movers.
+
+        Fixture uses i=1..10 so no zero-delta row silently drops
+        (i=0 would produce pnl=0 and be omitted, giving fragile
+        "passes by accident" coverage — Codex round-2 note).
+        Even i → positive delta (+i*10); odd i → negative (-i*10).
+        Positives: [+20, +40, +60, +80, +100] — top 3 = S10, S8, S6.
+        Negatives: [-10, -30, -50, -70, -90] — top 3 = S9, S7, S5
+        (most-negative first).
+        """
         prior = [
             {
                 "instrument_id": i,
@@ -566,22 +575,21 @@ class TestComputeContributors:
                 "unrealized_pnl": "0",
                 "cost_basis": "100",
             }
-            for i in range(10)
+            for i in range(1, 11)
         ]
         current = [
             {
                 "instrument_id": i,
                 "symbol": f"S{i}",
-                # Even i: positive delta (i * 10). Odd i: negative (-i * 10).
                 "unrealized_pnl": str((i if i % 2 == 0 else -i) * 10),
                 "cost_basis": "100",
             }
-            for i in range(10)
+            for i in range(1, 11)
         ]
         result = _compute_contributors(current, prior, top_n=3)
         assert len(result["contributors"]) == 3
         assert len(result["drags"]) == 3
-        # Contributors sorted by delta descending — biggest gainer first.
-        assert result["contributors"][0]["symbol"] == "S8"
-        # Drags: most negative first after reversal.
-        assert result["drags"][0]["symbol"] == "S9"
+        # Contributors sorted descending by delta — biggest gainer first.
+        assert [r["symbol"] for r in result["contributors"]] == ["S10", "S8", "S6"]
+        # Drags sorted ascending by delta — most-negative first.
+        assert [r["symbol"] for r in result["drags"]] == ["S9", "S7", "S5"]

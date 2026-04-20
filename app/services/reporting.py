@@ -585,6 +585,17 @@ def _load_prior_snapshot(
     # possible under test mocks) degrades to "no prior snapshot"
     # rather than raising KeyError.
     snapshot_json = row.get("snapshot_json")
+    # psycopg3 with the default JSONB adapter returns a dict. Some
+    # driver configurations or downstream adapters return the raw
+    # JSON string — decode it so a valid prior snapshot isn't
+    # silently dropped (Codex slice-4 round-2 note).
+    if isinstance(snapshot_json, str):
+        import json
+
+        try:
+            snapshot_json = json.loads(snapshot_json)
+        except json.JSONDecodeError:
+            return None
     return snapshot_json if isinstance(snapshot_json, dict) else None
 
 
@@ -616,7 +627,10 @@ def _compute_contributors(
         return {"contributors": [], "drags": []}
 
     prior_by_id = {p["instrument_id"]: p for p in prior}
-    deltas: list[dict[str, Any]] = []
+    # Keep the raw Decimal delta alongside the serialised string so
+    # sort + filter never round-trip through `Decimal(str)` re-parsing
+    # (Codex slice-4 round-2 note).
+    entries: list[tuple[Decimal, dict[str, Any]]] = []
     for curr in current:
         iid = curr["instrument_id"]
         prior_row = prior_by_id.get(iid)
@@ -627,24 +641,27 @@ def _compute_contributors(
             continue
         prior_cost = Decimal(prior_row["cost_basis"] or "0") if prior_row is not None else Decimal("0")
         pnl_pct: Decimal | None = delta / prior_cost if prior_cost > 0 else None
-        deltas.append(
-            {
-                "instrument_id": iid,
-                "symbol": curr["symbol"],
-                "pnl_delta": _dec(delta),
-                "pnl_pct": _dec(pnl_pct),
-            }
+        entries.append(
+            (
+                delta,
+                {
+                    "instrument_id": iid,
+                    "symbol": curr["symbol"],
+                    "pnl_delta": _dec(delta),
+                    "pnl_pct": _dec(pnl_pct),
+                },
+            )
         )
 
-    # Sort by signed delta: contributors are the top gainers, drags
-    # are the most-negative losers. Using Decimal for correctness on
-    # the delta comparison.
-    deltas.sort(key=lambda r: Decimal(r["pnl_delta"] or "0"), reverse=True)
-    contributors = [r for r in deltas if Decimal(r["pnl_delta"] or "0") > 0][:top_n]
-    drags = [r for r in deltas if Decimal(r["pnl_delta"] or "0") < 0][-top_n:]
-    # `drags` is ascending (most negative last after [::-1] below); the
-    # UI expects "most dragging first", so reverse here.
-    drags = list(reversed(drags))
+    # Contributors: positive deltas, descending (biggest gainer first).
+    # Drags: negative deltas, ascending (most-negative first). Both
+    # sort on the raw Decimal and slice from the head so the ordering
+    # intent is unambiguous and doesn't depend on which end of the
+    # combined list we slice from.
+    positives = sorted((e for e in entries if e[0] > 0), key=lambda e: e[0], reverse=True)
+    negatives = sorted((e for e in entries if e[0] < 0), key=lambda e: e[0])
+    contributors = [row for _, row in positives[:top_n]]
+    drags = [row for _, row in negatives[:top_n]]
     return {"contributors": contributors, "drags": drags}
 
 
@@ -734,11 +751,7 @@ def generate_weekly_report(
     # `_compute_contributors` degrades to empty lists. Passing `[]`
     # here would treat every current holding as a brand-new
     # contributor. Codex slice-4 finding.
-    prior_positions = (
-        prior.get("positions")
-        if isinstance(prior, dict) and "positions" in prior
-        else None
-    )
+    prior_positions = prior.get("positions") if isinstance(prior, dict) and "positions" in prior else None
     period_contribution = _compute_contributors(positions_now, prior_positions)
 
     return {
@@ -793,11 +806,7 @@ def generate_monthly_report(
     # `_compute_contributors` degrades to empty lists. Passing `[]`
     # here would treat every current holding as a brand-new
     # contributor. Codex slice-4 finding.
-    prior_positions = (
-        prior.get("positions")
-        if isinstance(prior, dict) and "positions" in prior
-        else None
-    )
+    prior_positions = prior.get("positions") if isinstance(prior, dict) and "positions" in prior else None
     period_contribution = _compute_contributors(positions_now, prior_positions)
 
     return {
