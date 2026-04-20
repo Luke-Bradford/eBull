@@ -51,8 +51,6 @@ def _restore_layer_predicates():
         "universe": freshness.universe_is_fresh,
         "candles": freshness.candles_is_fresh,
         "fundamentals": freshness.fundamentals_is_fresh,
-        "news": freshness.news_is_fresh,
-        "thesis": freshness.thesis_is_fresh,
         "scoring": freshness.scoring_is_fresh,
         "recommendations": freshness.recommendations_is_fresh,
         "portfolio_sync": freshness.portfolio_sync_is_fresh,
@@ -75,15 +73,15 @@ class TestBuildLayerPlan:
 
     def test_composite_drops_intra_emit_edges(self) -> None:
         """morning_candidate_review emits (scoring, recommendations).
-        scoring.deps = (thesis, candles); recommendations.deps = (scoring,).
-        external = {thesis, candles, scoring} - {scoring, recommendations}
-        = {thesis, candles}."""
+        scoring.deps = (candles, fundamentals); recommendations.deps = (scoring,).
+        external = {candles, fundamentals, scoring} - {scoring, recommendations}
+        = {candles, fundamentals}."""
         plan = _build_layer_plan(
             "morning_candidate_review",
             ("scoring", "recommendations"),
             "stale",
         )
-        assert set(plan.dependencies) == {"thesis", "candles"}
+        assert set(plan.dependencies) == {"candles", "fundamentals"}
         assert "scoring" not in plan.dependencies
         assert "recommendations" not in plan.dependencies
 
@@ -95,13 +93,13 @@ class TestBuildExecutionPlanFull:
         _make_conn_with_freshness(set(LAYERS.keys()))
         plan = build_execution_plan(MagicMock(), SyncScope.full())
         assert plan.layers_to_refresh == ()
-        assert len(plan.layers_skipped) == 12
+        assert len(plan.layers_skipped) == 10
 
     def test_all_stale_yields_every_in_dag_layer(self) -> None:
         _make_conn_with_freshness(set())
         plan = build_execution_plan(MagicMock(), SyncScope.full())
         # 11 in-DAG jobs → 11 LayerPlan entries.
-        assert len(plan.layers_to_refresh) == 11
+        assert len(plan.layers_to_refresh) == 9
 
     def test_topological_order_roots_first(self) -> None:
         _make_conn_with_freshness(set())

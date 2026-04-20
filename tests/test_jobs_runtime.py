@@ -336,10 +336,8 @@ class TestProductionInvokerRegistry:
             "nightly_universe_sync",
             # Phase-4 moved from SCHEDULED_JOBS to orchestrator-driven:
             "daily_candle_refresh",
-            "daily_news_refresh",
             "daily_portfolio_sync",
             "daily_research_refresh",
-            "daily_thesis_refresh",
             "fx_rates_refresh",
             "monthly_report",
             "morning_candidate_review",
@@ -348,6 +346,10 @@ class TestProductionInvokerRegistry:
             # daily_cik_refresh + daily_financial_facts retired from _INVOKERS
             # in Chunk 3 of the 2026-04-19 research-tool refocus; they are
             # now called from inside fundamentals_sync.
+            # daily_news_refresh + daily_thesis_refresh retired from _INVOKERS
+            # in Phase 1.2 — thesis is now on-demand via
+            # POST /instruments/{symbol}/thesis; news is deferred pending
+            # a concrete NewsProvider wiring.
         }
         assert on_demand == expected_on_demand, (
             f"Unexpected on-demand invokers (update this test if intentional): "

@@ -71,19 +71,14 @@ class TestBlockingDependencyFailed:
         reason = executor._blocking_dependency_failed(plan, upstream)
         assert reason is None
 
-    def test_failed_non_blocking_dep_does_not_block(self) -> None:
-        """news is non-blocking; thesis can still run with news=FAILED."""
-        plan = _lp(
-            "daily_thesis_refresh",
-            ("thesis",),
-            deps=("fundamentals", "news"),
-        )
-        upstream: Mapping[str, LayerOutcome] = {
-            "fundamentals": LayerOutcome.SUCCESS,
-            "news": LayerOutcome.FAILED,  # non-blocking
-        }
-        reason = executor._blocking_dependency_failed(plan, upstream)
-        assert reason is None
+    # Phase 1.2: news + thesis retired from orchestrator layers. No
+    # remaining scheduled layer has a non-blocking dep (all surviving
+    # deps are on blocking producers like universe/candles/fundamentals),
+    # so the "failed non-blocking dep does not block downstream" contract
+    # no longer has a natural test case. The invariant is still enforced
+    # in _blocking_dependency_failed at executor.py:300 — guarded by
+    # LAYERS[dep].is_blocking — and will re-exercise once a future layer
+    # declares is_blocking=False as a dep of another layer.
 
 
 class TestBuildUpstreamOutcomes:

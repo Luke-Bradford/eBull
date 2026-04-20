@@ -33,18 +33,19 @@ def test_v2_healthy_entries_shape(clean_client: TestClient) -> None:
 def test_v2_secret_missing_never_silently_dropped(clean_client: TestClient) -> None:
     # Regression guard: every layer the state machine classifies as
     # SECRET_MISSING must appear in the secret_missing bucket.
-    # Cross-checks states directly (patches compute_layer_states_from_db)
-    # so this catches the silent-drop bug even in a mixed
-    # ACTION_NEEDED + SECRET_MISSING response.
+    # Phase 1.2 retired the only secret-declaring layers (news + thesis
+    # moved to on-demand endpoints), so this test now fabricates a
+    # SECRET_MISSING state on a regular layer to exercise the bucket
+    # routing contract — the endpoint must NOT gate on secret_refs
+    # being present in the LAYERS registry for the classification.
     from unittest.mock import patch
 
     from app.services.sync_orchestrator.layer_types import LayerState
     from app.services.sync_orchestrator.registry import LAYERS
 
-    # Pick a layer with declared secret_refs plus a different layer to
-    # simulate an ACTION_NEEDED root alongside SECRET_MISSING.
-    secret_layer = next(n for n, lay in LAYERS.items() if lay.secret_refs)
-    action_layer = next(n for n, lay in LAYERS.items() if not lay.secret_refs and n != secret_layer)
+    layer_names = list(LAYERS.keys())
+    secret_layer = layer_names[0]
+    action_layer = layer_names[1]
 
     fake = {n: LayerState.HEALTHY for n in LAYERS}
     fake[secret_layer] = LayerState.SECRET_MISSING
@@ -57,7 +58,6 @@ def test_v2_secret_missing_never_silently_dropped(clean_client: TestClient) -> N
         resp = clean_client.get("/sync/layers/v2")
     body = resp.json()
     secret_names = {s["layer"] for s in body["secret_missing"]}
-    # Direct cross-check: every SECRET_MISSING in states must appear.
     expected = {n for n, s in fake.items() if s is LayerState.SECRET_MISSING}
     assert secret_names >= expected, body
 
@@ -66,20 +66,18 @@ def test_v2_secret_missing_fallback_when_env_populated(clean_client: TestClient)
     # If compute_layer_states_from_db says SECRET_MISSING but os.environ
     # has every secret set by the time the endpoint loop runs, the
     # layer must still appear (with fallback display), not vanish.
+    # Phase 1.2: no layer declares secret_refs; fake the state on a
+    # regular layer to exercise the bucketing without env dependencies.
     from unittest.mock import patch
 
     from app.services.sync_orchestrator.layer_types import LayerState
     from app.services.sync_orchestrator.registry import LAYERS
 
-    secret_layer = next(n for n, lay in LAYERS.items() if lay.secret_refs)
-    env_vars = {ref.env_var: "populated" for ref in LAYERS[secret_layer].secret_refs}
+    secret_layer = next(iter(LAYERS.keys()))
     fake = {n: LayerState.HEALTHY for n in LAYERS}
     fake[secret_layer] = LayerState.SECRET_MISSING
 
-    with (
-        patch.dict("os.environ", env_vars, clear=False),
-        patch("app.api.sync.compute_layer_states_from_db", return_value=fake),
-    ):
+    with patch("app.api.sync.compute_layer_states_from_db", return_value=fake):
         resp = clean_client.get("/sync/layers/v2")
     body = resp.json()
     assert any(s["layer"] == secret_layer for s in body["secret_missing"]), body

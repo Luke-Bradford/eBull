@@ -14,8 +14,6 @@ EXPECTED_CADENCES: dict[str, timedelta] = {
     "universe": timedelta(days=7),
     "candles": timedelta(hours=24),
     "fundamentals": timedelta(days=90),
-    "news": timedelta(hours=4),
-    "thesis": timedelta(hours=24),
     "scoring": timedelta(hours=24),
     "recommendations": timedelta(hours=24),
     "portfolio_sync": timedelta(minutes=5),
@@ -46,7 +44,7 @@ def test_minute_cadence_layers_have_tighter_retry_policy() -> None:
 
 
 def test_daily_layers_use_default_retry_policy() -> None:
-    for name in ("candles", "fundamentals", "thesis"):
+    for name in ("candles", "fundamentals", "scoring"):
         assert LAYERS[name].retry_policy == DEFAULT_RETRY_POLICY
 
 
@@ -60,11 +58,11 @@ def test_grace_multiplier_default() -> None:
         assert layer.grace_multiplier == 1.25
 
 
-def test_llm_layers_declare_anthropic_secret() -> None:
-    news = {s.env_var for s in LAYERS["news"].secret_refs}
-    thesis = {s.env_var for s in LAYERS["thesis"].secret_refs}
-    assert "ANTHROPIC_API_KEY" in news
-    assert "ANTHROPIC_API_KEY" in thesis
+# News + thesis retired from orchestrator layers in Phase 1.2 — they
+# are now on-demand endpoints (POST /instruments/{symbol}/thesis) that
+# check ANTHROPIC_API_KEY at request time via a FastAPI dependency
+# (app.api.theses.get_anthropic_client). No remaining scheduled layer
+# declares the secret; the former test is no longer applicable.
 
 
 def test_market_data_layers_declare_no_env_secrets() -> None:
@@ -81,5 +79,5 @@ def test_fundamentals_has_content_predicate() -> None:
 
 
 def test_layers_without_content_predicate_have_none() -> None:
-    for name in ("universe", "news", "scoring", "portfolio_sync", "thesis"):
+    for name in ("universe", "scoring", "portfolio_sync", "recommendations"):
         assert LAYERS[name].content_predicate is None

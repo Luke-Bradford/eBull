@@ -49,7 +49,17 @@ class TestRegistryShape:
         # (Chunk 3 of the 2026-04-19 research-tool refocus). They retain
         # JOB_* constants because the legacy function bodies still write
         # job_runs rows under those names for the audit trail.
-        INTERNAL_ONLY = {"daily_cik_refresh", "daily_financial_facts"}
+        INTERNAL_ONLY = {
+            "daily_cik_refresh",
+            "daily_financial_facts",
+            # Phase 1.2: news + thesis are on-demand; both functions
+            # remain as internal helpers (news is a no-op stub pending
+            # a concrete NewsProvider; thesis body is called from the
+            # POST /instruments/{symbol}/thesis endpoint via
+            # generate_thesis).
+            "daily_news_refresh",
+            "daily_thesis_refresh",
+        }
 
         constants = {
             value for name, value in vars(scheduler).items() if name.startswith("JOB_") and isinstance(value, str)

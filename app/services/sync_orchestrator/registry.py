@@ -20,10 +20,8 @@ from app.services.sync_orchestrator.adapters import (
     refresh_fundamentals,
     refresh_fx_rates,
     refresh_monthly_reports,
-    refresh_news,
     refresh_portfolio_sync,
     refresh_scoring_and_recommendations,
-    refresh_thesis,
     refresh_universe,
     refresh_weekly_reports,
 )
@@ -37,11 +35,9 @@ from app.services.sync_orchestrator.freshness import (
     fundamentals_is_fresh,
     fx_rates_is_fresh,
     monthly_reports_is_fresh,
-    news_is_fresh,
     portfolio_sync_is_fresh,
     recommendations_is_fresh,
     scoring_is_fresh,
-    thesis_is_fresh,
     universe_is_fresh,
     weekly_reports_is_fresh,
 )
@@ -110,29 +106,6 @@ LAYERS: dict[str, DataLayer] = {
         content_predicate=fundamentals_content_ok,
         plain_language_sla="Refreshed quarterly alongside earnings.",
     ),
-    "news": DataLayer(
-        name="news",
-        display_name="News & Sentiment",
-        tier=1,
-        cadence=Cadence(interval=timedelta(hours=4)),
-        is_fresh=news_is_fresh,
-        refresh=refresh_news,
-        dependencies=("universe",),
-        is_blocking=False,
-        secret_refs=(SecretRef(env_var="ANTHROPIC_API_KEY", display_name="Anthropic API key"),),
-        plain_language_sla="Refreshed every 4h — news + sentiment scoring.",
-    ),
-    "thesis": DataLayer(
-        name="thesis",
-        display_name="Investment Thesis",
-        tier=2,
-        cadence=Cadence(interval=timedelta(hours=24)),
-        is_fresh=thesis_is_fresh,
-        refresh=refresh_thesis,
-        dependencies=("fundamentals", "news"),
-        secret_refs=(SecretRef(env_var="ANTHROPIC_API_KEY", display_name="Anthropic API key"),),
-        plain_language_sla="Refreshed nightly for stale Tier 1 tickers.",
-    ),
     "scoring": DataLayer(
         name="scoring",
         display_name="Ranking Scores",
@@ -140,7 +113,7 @@ LAYERS: dict[str, DataLayer] = {
         cadence=Cadence(interval=timedelta(hours=24)),
         is_fresh=scoring_is_fresh,
         refresh=refresh_scoring_and_recommendations,
-        dependencies=("thesis", "candles"),
+        dependencies=("candles", "fundamentals"),
         plain_language_sla="Refreshed every morning pre-market.",
     ),
     "recommendations": DataLayer(
@@ -216,12 +189,10 @@ LAYERS: dict[str, DataLayer] = {
 # to tuple of emitted layer names. Empty tuple = outside-DAG job (stays
 # as-is in Phase 1–3, dashboard shows in "Background tasks" panel).
 JOB_TO_LAYERS: dict[str, tuple[str, ...]] = {
-    # In-DAG (11 entries, non-empty tuples):
+    # In-DAG (9 entries, non-empty tuples):
     "nightly_universe_sync": ("universe",),
     "daily_candle_refresh": ("candles",),
     "daily_research_refresh": ("fundamentals",),
-    "daily_news_refresh": ("news",),
-    "daily_thesis_refresh": ("thesis",),
     "daily_portfolio_sync": ("portfolio_sync",),
     "morning_candidate_review": ("scoring", "recommendations"),
     "seed_cost_models": ("cost_models",),
