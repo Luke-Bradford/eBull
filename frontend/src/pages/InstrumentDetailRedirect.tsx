@@ -1,11 +1,13 @@
 /**
- * Route shim at `/instruments/:instrumentId` (Slice 3 of per-stock
- * research page spec).
+ * Route shim at `/instruments/:instrumentId` (introduced in Slice 3 of
+ * the per-stock research page spec; kept after Slice 5 retirement of
+ * `InstrumentDetailPage` + `PositionDetailPage`).
  *
  * Fetches the instrument's symbol by id, then `Navigate`s to the
- * canonical `/instrument/:symbol` research page. Keeps legacy
- * bookmarks warm for one release after the old InstrumentDetailPage
- * retires; delete in Slice 5 once operator bookmarks have migrated.
+ * canonical `/instrument/:symbol` research page. Cost is one DB lookup
+ * per legacy bookmark; keeps operator bookmarks working without a
+ * 404 dead-end. Delete once bookmark traffic on this path is zero
+ * (check access logs before removing).
  */
 import { Navigate, useParams } from "react-router-dom";
 
