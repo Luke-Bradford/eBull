@@ -220,8 +220,12 @@ describe("RightRail", () => {
     await waitFor(() => {
       expect(screen.getByText("MSFT")).toBeInTheDocument();
     });
-    // AAPL (the current instrument) must not appear in the peer list.
-    expect(screen.queryByText(/^AAPL$/)).not.toBeInTheDocument();
+    // AAPL (the current instrument) must not appear as a peer link.
+    // Scoping via the link href avoids false positives against any
+    // future heading / breadcrumb that also renders "AAPL" text.
+    expect(
+      screen.queryByRole("link", { name: /^AAPL$/ }),
+    ).not.toBeInTheDocument();
 
     const msftLink = screen
       .getByText("MSFT")

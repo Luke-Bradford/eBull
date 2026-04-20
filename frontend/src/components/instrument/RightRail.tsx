@@ -130,20 +130,26 @@ function PeerSnapshot({
     );
   }
 
-  const peers: RankingItem[] = (data?.items ?? [])
-    .filter((r) => r.symbol !== currentSymbol)
-    .slice(0, 5);
+  // Gate the derivation on `data !== null` rather than `?? []` so
+  // empty state only flashes when we've actually fetched an empty
+  // ranking set, not during a sector-change transition where
+  // `useAsync`'s effect hasn't flipped loading=true yet (Codex
+  // slice-2 round-1 caveat).
+  const peers: RankingItem[] | null =
+    data === null
+      ? null
+      : data.items.filter((r) => r.symbol !== currentSymbol).slice(0, 5);
 
   return (
     <Section title={`Peer snapshot · ${sector}`}>
       {loading && <SectionSkeleton rows={3} />}
       {error !== null && <SectionError onRetry={refetch} />}
-      {!loading && error === null && peers.length === 0 && (
+      {!loading && error === null && peers !== null && peers.length === 0 && (
         <div className="text-xs text-slate-500">
           No other ranked peers in this sector.
         </div>
       )}
-      {!loading && error === null && peers.length > 0 && (
+      {!loading && error === null && peers !== null && peers.length > 0 && (
         <ul className="space-y-1.5 text-xs">
           {peers.map((p) => (
             <li
