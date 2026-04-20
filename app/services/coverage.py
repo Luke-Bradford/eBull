@@ -1588,7 +1588,13 @@ def backfill_filings(
             outcome=BackfillOutcome.STILL_INSUFFICIENT_HTTP_ERROR,
             status=None,
         )
-    except json.JSONDecodeError, TypeError, KeyError:
+    except json.JSONDecodeError, TypeError:
+        # `fetch_submissions` only decodes JSON (`resp.json()`) and returns
+        # the dict — it does no dict-key access here. `KeyError` would mean
+        # a dict-access bug in the provider code that raised during decode;
+        # misclassifying that as a retryable PARSE error would hide it behind
+        # backoff. Let any `KeyError` propagate so operators see the
+        # traceback instead of silent retry (#355).
         logger.warning(
             "backfill_filings: PARSE error on fetch_submissions cik=%s",
             cik_padded,
@@ -1702,9 +1708,12 @@ def backfill_filings(
                 pages_fetched=pages_fetched,
                 filings_upserted=filings_upserted,
             )
-        except json.JSONDecodeError, TypeError, KeyError:
-            # ``fetch_submissions_page`` calls ``resp.json()`` internally
-            # which can raise on malformed bytes. Classify retryable.
+        except json.JSONDecodeError, TypeError:
+            # `fetch_submissions_page` calls `resp.json()` internally — JSON
+            # decode + basic type coercion are the only failure modes. A
+            # `KeyError` at this scope would signal a dict-access bug inside
+            # the provider, not a malformed payload; let it propagate so
+            # operators see the traceback instead of silent retry (#355).
             logger.warning(
                 "backfill_filings: PARSE error on page cik=%s name=%s",
                 cik_padded,

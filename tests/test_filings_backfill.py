@@ -631,6 +631,25 @@ class TestTerminalOutcomes:
 
         assert result.outcome == BackfillOutcome.STILL_INSUFFICIENT_PARSE_ERROR
 
+    def test_15b_keyerror_from_provider_propagates(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """#355: a `KeyError` raised by the provider's `fetch_submissions`
+        is a dict-access bug in the provider, not a malformed-payload
+        condition. It must propagate instead of being misclassified as a
+        retryable PARSE error — otherwise real programming errors hide
+        behind exponential backoff."""
+        _seed(ebull_test_conn, instrument_id=1, cik="0000000001", filings_status="insufficient")
+        provider = FakeSecProvider(
+            _FakeResponse(
+                primary=None,
+                pages={},
+                filings={},
+                submissions_raises=KeyError("filings"),
+            )
+        )
+
+        with pytest.raises(KeyError, match="filings"):
+            backfill_filings(ebull_test_conn, provider, "0000000001", 1)  # type: ignore[arg-type]
+
 
 # ---------------------------------------------------------------------
 # 8-K gap check (16-17)
