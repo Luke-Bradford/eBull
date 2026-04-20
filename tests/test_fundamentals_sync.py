@@ -12,9 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.services.coverage import ReviewResult
-from app.services.coverage_audit import AuditSummary
-from app.services.filings_backfill import BackfillOutcome, BackfillResult
+from app.services.coverage import AuditSummary, BackfillOutcome, BackfillResult, ReviewResult
 from app.workers import scheduler
 
 
@@ -94,11 +92,11 @@ def test_fundamentals_sync_runs_audit_backfill_then_review() -> None:
         patch.object(scheduler, "daily_cik_refresh") as cik_mock,
         patch.object(scheduler, "daily_financial_facts") as facts_mock,
         patch(
-            "app.services.coverage_audit.audit_all_instruments",
+            "app.services.coverage.audit_all_instruments",
             return_value=summary,
         ) as audit_mock,
         patch(
-            "app.services.filings_backfill.backfill_filings",
+            "app.services.coverage.backfill_filings",
             side_effect=lambda conn, provider, cik, iid: _stub_backfill_result(iid),
         ) as backfill_mock,
     ):
@@ -157,11 +155,11 @@ def test_fundamentals_sync_per_instrument_error_is_isolated() -> None:
         patch.object(scheduler, "daily_cik_refresh") as cik_mock,
         patch.object(scheduler, "daily_financial_facts") as facts_mock,
         patch(
-            "app.services.coverage_audit.audit_all_instruments",
+            "app.services.coverage.audit_all_instruments",
             return_value=summary,
         ),
         patch(
-            "app.services.filings_backfill.backfill_filings",
+            "app.services.coverage.backfill_filings",
             side_effect=flaky_backfill,
         ) as backfill_mock,
     ):
@@ -202,7 +200,7 @@ def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
         patch.object(scheduler, "daily_cik_refresh") as cik_mock,
         patch.object(scheduler, "daily_financial_facts") as facts_mock,
         patch(
-            "app.services.coverage_audit.audit_all_instruments",
+            "app.services.coverage.audit_all_instruments",
             side_effect=RuntimeError("classifier broke"),
         ),
     ):
@@ -269,11 +267,11 @@ def test_fundamentals_sync_phase2_failure_preserves_phase1_success() -> None:
         patch.object(scheduler, "daily_cik_refresh") as cik_mock,
         patch.object(scheduler, "daily_financial_facts") as facts_mock,
         patch(
-            "app.services.coverage_audit.audit_all_instruments",
+            "app.services.coverage.audit_all_instruments",
             return_value=summary,
         ),
         patch(
-            "app.services.filings_backfill.backfill_filings",
+            "app.services.coverage.backfill_filings",
             side_effect=lambda conn, provider, cik, iid: _stub_backfill_result(iid),
         ) as backfill_mock,
     ):
@@ -334,7 +332,7 @@ def test_fundamentals_sync_phase0_cik_failure_isolated() -> None:
         patch.object(scheduler, "daily_cik_refresh", side_effect=RuntimeError("cik pull failed")) as cik_mock,
         patch.object(scheduler, "daily_financial_facts") as facts_mock,
         patch(
-            "app.services.coverage_audit.audit_all_instruments",
+            "app.services.coverage.audit_all_instruments",
             return_value=summary,
         ) as audit_mock,
     ):
@@ -386,7 +384,7 @@ def test_fundamentals_sync_phase1_xbrl_failure_isolated() -> None:
         patch.object(scheduler, "daily_cik_refresh") as cik_mock,
         patch.object(scheduler, "daily_financial_facts", side_effect=RuntimeError("xbrl outage")) as facts_mock,
         patch(
-            "app.services.coverage_audit.audit_all_instruments",
+            "app.services.coverage.audit_all_instruments",
             return_value=summary,
         ) as audit_mock,
     ):

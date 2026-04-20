@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from app.services.financial_normalization import (
+from app.services.fundamentals import (
     FactRow,
     _derive_periods_from_facts,
 )

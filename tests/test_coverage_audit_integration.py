@@ -11,7 +11,7 @@ from datetime import date, timedelta
 import psycopg
 import pytest
 
-from app.services.coverage_audit import (
+from app.services.coverage import (
     audit_all_instruments,
     audit_instrument,
     probe_status,

@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 import psycopg
 import pytest
 
-from app.services.sec_incremental import LOOKBACK_DAYS
+from app.services.fundamentals import LOOKBACK_DAYS
 from app.services.watermarks import get_watermark
 from tests.fixtures.ebull_test_db import (
     ebull_test_conn,

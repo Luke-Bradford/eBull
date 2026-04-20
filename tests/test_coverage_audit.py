@@ -6,7 +6,7 @@ against ``ebull_test`` live in a separate file.
 
 from __future__ import annotations
 
-from app.services.coverage_audit import AuditCounts, _classify
+from app.services.coverage import AuditCounts, _classify
 
 
 def _counts(

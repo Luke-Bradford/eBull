@@ -42,9 +42,8 @@ from typing import Any
 import anthropic
 import psycopg
 
-from app.services.financial_facts import finish_ingestion_run, start_ingestion_run
+from app.services.fundamentals import RefreshOutcome, RefreshPlan, finish_ingestion_run, start_ingestion_run
 from app.services.scoring import compute_rankings
-from app.services.sec_incremental import RefreshOutcome, RefreshPlan
 from app.services.thesis import find_stale_instruments, generate_thesis
 
 CASCADE_RUN_SOURCE: str = "cascade_refresh"

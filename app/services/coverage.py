@@ -1,5 +1,17 @@
-"""
-Coverage tier management service.
+"""Coverage pipeline — consolidated service module.
+
+Per the 2026-04-19 research-tool refocus §1.1 (Chunk 4), this module merges:
+
+- coverage.py — tier promote/demote rules + review_coverage() (Section 1)
+- coverage_audit.py — filings_status classifier (Section 2)
+- filings_backfill.py — backfill_filings() pager + 8-K gap fill (Section 3)
+
+External import contract: everything previously importable from the three
+retired modules is now importable from ``app.services.coverage``.
+
+---
+
+Section 1 — Coverage tier management:
 
 Responsibilities:
   - Evaluate instruments for promotion (T3→T2, T2→T1) and demotion (T1→T2, T2→T3).
@@ -22,20 +34,53 @@ Tier 1 required data (all must be present):
   - current quote available
 
 Promotion is one step per review cycle (T3→T2 or T2→T1, never T3→T1).
+
+Section 2 — filings_status classifier:
+
+Outputs (one of four; ``unknown`` is a pre-audit placeholder written
+elsewhere and ``structurally_young`` is assigned by Section 3, not here):
+
+- ``analysable`` — US domestic issuer, 10-K count >= 2 in 3y AND
+  10-Q count >= 4 in 18mo.
+- ``insufficient`` — has primary SEC CIK but below the bar.
+- ``fpi`` — Foreign Private Issuer.
+- ``no_primary_sec_cik`` — no primary ``sec``/``cik`` row.
+
+Section 3 — Filings backfill:
+
+Drives every tradable SEC-covered instrument toward a terminal
+``coverage.filings_status`` by paging SEC ``submissions.json`` history
+plus 8-K gap-fill inside the 365-day window.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from enum import StrEnum
 from typing import Any, Literal
 
+import httpx
 import psycopg
 import psycopg.rows
 from psycopg.types.json import Jsonb
 
+from app.providers.filings import FilingNotFound, FilingSearchResult
+from app.providers.implementations.sec_edgar import (
+    SecFilingsProvider,
+    _normalise_submissions_block,
+    _zero_pad_cik,
+)
+from app.services.filings import _upsert_filing, _upsert_filing_event
+
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Section 1: Tier management (was coverage.py)
+# ============================================================================
 
 # ---------------------------------------------------------------------------
 # Tunable thresholds
@@ -814,3 +859,1010 @@ def bootstrap_missing_coverage_rows(
             bootstrapped,
         )
         return BootstrapResult(bootstrapped=bootstrapped)
+
+
+# ============================================================================
+# Section 2: filings_status classifier (was coverage_audit.py)
+# ============================================================================
+
+
+@dataclass(frozen=True)
+class AuditCounts:
+    """Per-instrument row returned by the audit aggregate."""
+
+    instrument_id: int
+    ten_k_in_3y: int
+    ten_q_in_18m: int
+    us_base_or_amend_total: int
+    fpi_total: int
+
+
+@dataclass(frozen=True)
+class AuditSummary:
+    """Run result for ``audit_all_instruments``.
+
+    ``null_anomalies`` is the count from a post-update query over
+    tradable instruments left-joined to ``coverage`` — captures both
+    missing coverage rows (Chunk B regression) AND rows whose
+    ``filings_status`` remained NULL after the bulk UPDATE. Either is
+    a data-integrity bug and is logged at WARNING.
+    """
+
+    analysable: int
+    insufficient: int
+    fpi: int
+    no_primary_sec_cik: int
+    total_updated: int
+    null_anomalies: int
+
+
+def _classify(agg: AuditCounts | None, has_sec_cik: bool) -> str:
+    """Pure classification — windows/counts pre-computed in SQL.
+
+    ``agg`` is ``None`` when the instrument has zero SEC filings in the
+    filing_events table. ``has_sec_cik`` comes from the cohort query.
+    """
+    if not has_sec_cik:
+        return "no_primary_sec_cik"
+
+    if agg is None:
+        # SEC CIK present but no SEC filings yet — typical for a
+        # newly-added cohort member before Chunk E backfills history.
+        return "insufficient"
+
+    # FPI check FIRST: SEC CIK, zero US base-or-amend filings, at
+    # least one 20-F/40-F/6-K family filing.
+    if agg.us_base_or_amend_total == 0 and agg.fpi_total > 0:
+        return "fpi"
+
+    # US history bar — base forms only. Amendments do NOT count
+    # toward distinct-period depth (a 10-K/A restates the same year,
+    # not an additional one).
+    if agg.ten_k_in_3y >= 2 and agg.ten_q_in_18m >= 4:
+        return "analysable"
+
+    return "insufficient"
+
+
+def _load_aggregates(conn: psycopg.Connection[Any]) -> dict[int, AuditCounts]:
+    """Return per-instrument SEC filing counts for the four dimensions
+    the classifier needs.
+
+    Windows computed in SQL via ``COUNT(*) FILTER`` so the Python
+    side doesn't re-derive dates. Amendments are counted toward
+    ``us_base_or_amend_total`` (for FPI detection) but NOT toward the
+    history-depth thresholds ``ten_k_in_3y`` / ``ten_q_in_18m``.
+
+    Only covered SEC CIKs (primary) are joined in, so rows for
+    instruments without a primary ``sec``/``cik`` row are naturally
+    excluded.
+    """
+    rows = conn.execute(
+        """
+        SELECT
+            fe.instrument_id,
+            COUNT(*) FILTER (
+                WHERE fe.filing_type = '10-K'
+                  AND fe.filing_date >= (CURRENT_DATE - INTERVAL '3 years')
+            ) AS ten_k_in_3y,
+            COUNT(*) FILTER (
+                WHERE fe.filing_type = '10-Q'
+                  AND fe.filing_date >= (CURRENT_DATE - INTERVAL '18 months')
+            ) AS ten_q_in_18m,
+            COUNT(*) FILTER (
+                WHERE fe.filing_type IN ('10-K','10-K/A','10-Q','10-Q/A')
+            ) AS us_base_or_amend_total,
+            COUNT(*) FILTER (
+                WHERE fe.filing_type IN ('20-F','20-F/A','40-F','40-F/A','6-K','6-K/A')
+            ) AS fpi_total
+        FROM filing_events fe
+        JOIN external_identifiers ei
+            ON ei.instrument_id = fe.instrument_id
+           AND ei.provider = 'sec'
+           AND ei.identifier_type = 'cik'
+           AND ei.is_primary = TRUE
+        WHERE fe.provider = 'sec'
+        GROUP BY fe.instrument_id
+        """
+    ).fetchall()
+
+    return {
+        int(r[0]): AuditCounts(
+            instrument_id=int(r[0]),
+            ten_k_in_3y=int(r[1]),
+            ten_q_in_18m=int(r[2]),
+            us_base_or_amend_total=int(r[3]),
+            fpi_total=int(r[4]),
+        )
+        for r in rows
+    }
+
+
+def _load_cohort(
+    conn: psycopg.Connection[Any],
+) -> list[tuple[int, bool]]:
+    """Every tradable instrument + whether it has a primary SEC CIK."""
+    rows = conn.execute(
+        """
+        SELECT
+            i.instrument_id,
+            EXISTS (
+                SELECT 1 FROM external_identifiers ei
+                WHERE ei.instrument_id = i.instrument_id
+                  AND ei.provider = 'sec'
+                  AND ei.identifier_type = 'cik'
+                  AND ei.is_primary = TRUE
+            ) AS has_sec_cik
+        FROM instruments i
+        WHERE i.is_tradable = TRUE
+        ORDER BY i.instrument_id
+        """
+    ).fetchall()
+    return [(int(r[0]), bool(r[1])) for r in rows]
+
+
+def _count_null_anomalies(conn: psycopg.Connection[Any]) -> int:
+    """Tradable instruments missing a coverage row OR with NULL filings_status."""
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM instruments i
+        LEFT JOIN coverage c ON c.instrument_id = i.instrument_id
+        WHERE i.is_tradable = TRUE
+          AND (c.instrument_id IS NULL OR c.filings_status IS NULL)
+        """
+    ).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+def audit_all_instruments(conn: psycopg.Connection[Any]) -> AuditSummary:
+    """Full-universe audit. Writes ``filings_status`` for every tradable
+    instrument via a single bulk UPDATE. Wrapped in ``conn.transaction()``
+    so a mid-flight failure rolls back the whole audit rather than
+    leaving the table in a partial state.
+
+    Does NOT touch ``filings_backfill_*`` columns (Chunk E owns those)
+    and never assigns ``structurally_young`` (Chunk E owns that too).
+    """
+    with conn.transaction():
+        aggregates = _load_aggregates(conn)
+        cohort = _load_cohort(conn)
+
+        classifications: list[tuple[int, str]] = []
+        counts = {
+            "analysable": 0,
+            "insufficient": 0,
+            "fpi": 0,
+            "no_primary_sec_cik": 0,
+        }
+        for instrument_id, has_sec_cik in cohort:
+            status = _classify(aggregates.get(instrument_id), has_sec_cik)
+            classifications.append((instrument_id, status))
+            counts[status] += 1
+
+        total_updated = 0
+        if classifications:
+            instrument_ids = [c[0] for c in classifications]
+            statuses = [c[1] for c in classifications]
+            # Demote-guard: preserve ``structurally_young`` on an
+            # ``insufficient`` classifier output. Chunk E owns that
+            # value — the post-backfill signal must survive until
+            # either backfill itself demotes (issuer aged out, clean
+            # EXHAUSTED run) or promotes (enough base forms now).
+            result = conn.execute(
+                """
+                UPDATE coverage c
+                SET filings_status = CASE
+                        WHEN c.filings_status = 'structurally_young'
+                             AND v.status = 'insufficient'
+                        THEN c.filings_status
+                        ELSE v.status
+                    END,
+                    filings_audit_at = NOW()
+                FROM unnest(%s::bigint[], %s::text[]) AS v(instrument_id, status)
+                WHERE c.instrument_id = v.instrument_id
+                """,
+                (instrument_ids, statuses),
+            )
+            if result.rowcount == -1:
+                raise RuntimeError("audit_all_instruments UPDATE: server did not report a command tag (rowcount=-1)")
+            total_updated = result.rowcount
+
+    # Null-anomaly check runs AFTER the transaction commits so the
+    # count reflects durable state. Running it inside the `with` block
+    # would count uncommitted rows; on commit failure those counts
+    # would be stale. Post-commit makes the check unambiguous.
+    null_anomalies = _count_null_anomalies(conn)
+
+    if null_anomalies > 0:
+        logger.warning(
+            "coverage_audit: %d null_anomalies detected — either tradable "
+            "instruments without a coverage row (Chunk B regression) or "
+            "coverage rows whose filings_status remained NULL after UPDATE. "
+            "Investigate before the next thesis/scoring cycle.",
+            null_anomalies,
+        )
+
+    logger.info(
+        "coverage_audit: analysable=%d insufficient=%d fpi=%d no_primary_sec_cik=%d total_updated=%d",
+        counts["analysable"],
+        counts["insufficient"],
+        counts["fpi"],
+        counts["no_primary_sec_cik"],
+        total_updated,
+    )
+
+    return AuditSummary(
+        analysable=counts["analysable"],
+        insufficient=counts["insufficient"],
+        fpi=counts["fpi"],
+        no_primary_sec_cik=counts["no_primary_sec_cik"],
+        total_updated=total_updated,
+        null_anomalies=null_anomalies,
+    )
+
+
+def audit_instrument(conn: psycopg.Connection[Any], instrument_id: int) -> str:
+    """Single-instrument version of ``audit_all_instruments``.
+
+    Returns the classified status. Used by Chunk G's universe-sync
+    hook when a new instrument needs an immediate audit pass, and by
+    Chunk E's post-backfill re-audit loop.
+
+    Wrapped in a savepoint so the SELECT + UPDATE are atomic even
+    when called inside an outer transaction.
+    """
+    with conn.transaction():
+        agg_rows = conn.execute(
+            """
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE fe.filing_type = '10-K'
+                      AND fe.filing_date >= (CURRENT_DATE - INTERVAL '3 years')
+                ),
+                COUNT(*) FILTER (
+                    WHERE fe.filing_type = '10-Q'
+                      AND fe.filing_date >= (CURRENT_DATE - INTERVAL '18 months')
+                ),
+                COUNT(*) FILTER (
+                    WHERE fe.filing_type IN ('10-K','10-K/A','10-Q','10-Q/A')
+                ),
+                COUNT(*) FILTER (
+                    WHERE fe.filing_type IN ('20-F','20-F/A','40-F','40-F/A','6-K','6-K/A')
+                )
+            FROM filing_events fe
+            JOIN external_identifiers ei
+                ON ei.instrument_id = fe.instrument_id
+               AND ei.provider = 'sec'
+               AND ei.identifier_type = 'cik'
+               AND ei.is_primary = TRUE
+            WHERE fe.provider = 'sec'
+              AND fe.instrument_id = %s
+            """,
+            (instrument_id,),
+        ).fetchone()
+
+        has_cik_row = conn.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM external_identifiers ei
+                WHERE ei.instrument_id = %s
+                  AND ei.provider = 'sec'
+                  AND ei.identifier_type = 'cik'
+                  AND ei.is_primary = TRUE
+            )
+            """,
+            (instrument_id,),
+        ).fetchone()
+        has_sec_cik = bool(has_cik_row[0]) if has_cik_row is not None else False
+
+        agg: AuditCounts | None
+        if agg_rows is None or all(v == 0 for v in agg_rows):
+            # No SEC filings for this instrument.
+            agg = None
+        else:
+            agg = AuditCounts(
+                instrument_id=instrument_id,
+                ten_k_in_3y=int(agg_rows[0]),
+                ten_q_in_18m=int(agg_rows[1]),
+                us_base_or_amend_total=int(agg_rows[2]),
+                fpi_total=int(agg_rows[3]),
+            )
+
+        status = _classify(agg, has_sec_cik)
+
+        # Demote-guard: preserve ``structurally_young`` on an
+        # ``insufficient`` classifier output. See module docstring.
+        # Use named params so the guard's two references to ``status``
+        # can't silently desynchronise under a future refactor.
+        result = conn.execute(
+            """
+            UPDATE coverage
+            SET filings_status = CASE
+                    WHEN filings_status = 'structurally_young'
+                         AND %(status)s = 'insufficient'
+                    THEN filings_status
+                    ELSE %(status)s
+                END,
+                filings_audit_at = NOW()
+            WHERE instrument_id = %(instrument_id)s
+            RETURNING filings_status
+            """,
+            {"status": status, "instrument_id": instrument_id},
+        )
+        row = result.fetchone()
+        if row is None:
+            # No coverage row for this instrument. Post-#292 this
+            # should never happen — universe sync + the weekly backfill
+            # together guarantee coverage rows for every tradable
+            # instrument. Raise loudly rather than return a status
+            # string that was never persisted.
+            raise RuntimeError(
+                f"audit_instrument: no coverage row for instrument_id={instrument_id}; "
+                f"classifier returned {status!r} but UPDATE matched zero rows. "
+                f"Check coverage bootstrap (#292) + universe sync wiring."
+            )
+        # Return what the DB actually holds post-guard, not the raw
+        # classifier output — otherwise a preserved young row would
+        # report as 'insufficient' to callers (Chunk E's probe path).
+        return str(row[0])
+
+
+def probe_status(conn: psycopg.Connection[Any], instrument_id: int) -> str:
+    """Read-only classifier probe (#268 Chunk E).
+
+    Identical aggregate + ``_classify`` logic to ``audit_instrument``,
+    but does NOT UPDATE coverage. Backfill uses this inside its
+    pagination loop so a later retryable error cannot leave a
+    premature ``'analysable'`` in coverage (Chunk E design v3 C1).
+
+    Returns the classifier output (never reads current
+    ``filings_status``). Commits after the SELECTs to close the
+    implicit transaction per the backfill durability invariant.
+    """
+    agg_rows = conn.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (
+                WHERE fe.filing_type = '10-K'
+                  AND fe.filing_date >= (CURRENT_DATE - INTERVAL '3 years')
+            ),
+            COUNT(*) FILTER (
+                WHERE fe.filing_type = '10-Q'
+                  AND fe.filing_date >= (CURRENT_DATE - INTERVAL '18 months')
+            ),
+            COUNT(*) FILTER (
+                WHERE fe.filing_type IN ('10-K','10-K/A','10-Q','10-Q/A')
+            ),
+            COUNT(*) FILTER (
+                WHERE fe.filing_type IN ('20-F','20-F/A','40-F','40-F/A','6-K','6-K/A')
+            )
+        FROM filing_events fe
+        JOIN external_identifiers ei
+            ON ei.instrument_id = fe.instrument_id
+           AND ei.provider = 'sec'
+           AND ei.identifier_type = 'cik'
+           AND ei.is_primary = TRUE
+        WHERE fe.provider = 'sec'
+          AND fe.instrument_id = %s
+        """,
+        (instrument_id,),
+    ).fetchone()
+
+    has_cik_row = conn.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM external_identifiers ei
+            WHERE ei.instrument_id = %s
+              AND ei.provider = 'sec'
+              AND ei.identifier_type = 'cik'
+              AND ei.is_primary = TRUE
+        )
+        """,
+        (instrument_id,),
+    ).fetchone()
+    has_sec_cik = bool(has_cik_row[0]) if has_cik_row is not None else False
+
+    agg: AuditCounts | None
+    if agg_rows is None or all(v == 0 for v in agg_rows):
+        agg = None
+    else:
+        agg = AuditCounts(
+            instrument_id=instrument_id,
+            ten_k_in_3y=int(agg_rows[0]),
+            ten_q_in_18m=int(agg_rows[1]),
+            us_base_or_amend_total=int(agg_rows[2]),
+            fpi_total=int(agg_rows[3]),
+        )
+
+    conn.commit()  # close implicit tx per backfill durability invariant.
+    return _classify(agg, has_sec_cik)
+
+
+# ============================================================================
+# Section 3: Filings backfill (was filings_backfill.py)
+# ============================================================================
+
+
+# ---------------------------------------------------------------------
+# Outcome enum + result dataclass
+# ---------------------------------------------------------------------
+
+
+class BackfillOutcome(StrEnum):
+    """Terminal classification for one backfill pass.
+
+    Values are persisted into ``coverage.filings_backfill_reason``.
+    See design doc §BackfillOutcome for the semantics of each value.
+    """
+
+    COMPLETE_OK = "COMPLETE_OK"
+    COMPLETE_FPI = "COMPLETE_FPI"
+    STILL_INSUFFICIENT_EXHAUSTED = "STILL_INSUFFICIENT_EXHAUSTED"
+    STILL_INSUFFICIENT_STRUCTURALLY_YOUNG = "STILL_INSUFFICIENT_STRUCTURALLY_YOUNG"
+    STILL_INSUFFICIENT_HTTP_ERROR = "STILL_INSUFFICIENT_HTTP_ERROR"
+    STILL_INSUFFICIENT_PARSE_ERROR = "STILL_INSUFFICIENT_PARSE_ERROR"
+    SKIPPED_ATTEMPTS_CAP = "SKIPPED_ATTEMPTS_CAP"
+    SKIPPED_BACKOFF_WINDOW = "SKIPPED_BACKOFF_WINDOW"
+
+
+_RETRYABLE_REASONS: frozenset[str] = frozenset(
+    {
+        BackfillOutcome.STILL_INSUFFICIENT_HTTP_ERROR.value,
+        BackfillOutcome.STILL_INSUFFICIENT_PARSE_ERROR.value,
+    }
+)
+
+
+@dataclass(frozen=True)
+class BackfillResult:
+    instrument_id: int
+    outcome: BackfillOutcome
+    pages_fetched: int
+    filings_upserted: int
+    eight_k_gap_filled: int
+    final_status: str
+
+
+# Tunables (module-level for test override).
+ATTEMPTS_CAP: int = 3
+BACKOFF_DAYS: int = 7
+EIGHT_K_WINDOW_DAYS: int = 365
+
+
+# ---------------------------------------------------------------------
+# Pure helpers
+# ---------------------------------------------------------------------
+
+
+def _is_structurally_young(conn: psycopg.Connection[Any], instrument_id: int) -> bool:
+    """True iff the instrument's earliest SEC filing is strictly
+    newer than today - 18 months (calendar-correct via SQL INTERVAL).
+
+    False when no filings exist at all — we can't prove youth
+    without an earliest filing, so classify those as EXHAUSTED,
+    not YOUNG (design doc v2-H3).
+
+    Step 3 upserts every fetched filing to ``filing_events`` before
+    step 5 calls this helper, so the DB query is the authoritative
+    union of DB + just-fetched.
+    """
+    row = conn.execute(
+        """
+        SELECT MIN(filing_date) > (CURRENT_DATE - INTERVAL '18 months')
+        FROM filing_events
+        WHERE instrument_id = %s AND provider = 'sec'
+        """,
+        (instrument_id,),
+    ).fetchone()
+    conn.commit()  # M1 invariant.
+    return bool(row[0]) if row is not None and row[0] is not None else False
+
+
+# ---------------------------------------------------------------------
+# Single coverage-write sink
+# ---------------------------------------------------------------------
+
+
+def _finalise(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+    *,
+    outcome: BackfillOutcome,
+    status: str | None,
+    pages_fetched: int = 0,
+    filings_upserted: int = 0,
+    eight_k_gap_filled: int = 0,
+) -> BackfillResult:
+    """Single coverage-write path shared by all terminal outcomes.
+
+    attempts delta by outcome:
+
+    - ``COMPLETE_OK`` / ``COMPLETE_FPI``           -> set 0
+    - ``HTTP_ERROR`` / ``PARSE_ERROR``             -> += 1
+    - ``EXHAUSTED`` / ``STRUCTURALLY_YOUNG``       -> unchanged
+    - ``SKIPPED_*``                                 -> no write at all
+
+    ``status`` semantics:
+
+    - ``None`` = preserve current ``filings_status``. Used by
+      retryable errors so a correctly-classified
+      ``structurally_young`` row is not demoted on transient
+      failure (design doc v4-H2).
+    - otherwise the UPDATE writes this value into ``filings_status``.
+
+    Commits before the UPDATE (M1 invariant) and after (K.2/K.3
+    durability pattern).
+    """
+    if outcome in (
+        BackfillOutcome.SKIPPED_ATTEMPTS_CAP,
+        BackfillOutcome.SKIPPED_BACKOFF_WINDOW,
+    ):
+        # Gating path — no mutation at all.
+        return BackfillResult(
+            instrument_id=instrument_id,
+            outcome=outcome,
+            pages_fetched=0,
+            filings_upserted=0,
+            eight_k_gap_filled=0,
+            final_status="",
+        )
+
+    # attempts delta is one of three shapes — parameterising the
+    # SQL keeps the query a ``LiteralString`` (pyright strict).
+    reset_attempts = outcome in (
+        BackfillOutcome.COMPLETE_OK,
+        BackfillOutcome.COMPLETE_FPI,
+    )
+    increment_attempts = outcome in (
+        BackfillOutcome.STILL_INSUFFICIENT_HTTP_ERROR,
+        BackfillOutcome.STILL_INSUFFICIENT_PARSE_ERROR,
+    )
+    # EXHAUSTED / STRUCTURALLY_YOUNG leave attempts unchanged.
+
+    conn.commit()  # M1 invariant before mutation.
+    if status is not None and reset_attempts:
+        result = conn.execute(
+            """
+            UPDATE coverage
+            SET filings_status            = %s,
+                filings_backfill_attempts = 0,
+                filings_backfill_last_at  = NOW(),
+                filings_backfill_reason   = %s,
+                filings_audit_at          = NOW()
+            WHERE instrument_id = %s
+            RETURNING filings_status
+            """,
+            (status, outcome.value, instrument_id),
+        )
+    elif status is not None and increment_attempts:
+        result = conn.execute(
+            """
+            UPDATE coverage
+            SET filings_status            = %s,
+                filings_backfill_attempts = filings_backfill_attempts + 1,
+                filings_backfill_last_at  = NOW(),
+                filings_backfill_reason   = %s,
+                filings_audit_at          = NOW()
+            WHERE instrument_id = %s
+            RETURNING filings_status
+            """,
+            (status, outcome.value, instrument_id),
+        )
+    elif status is not None:
+        # EXHAUSTED / STRUCTURALLY_YOUNG.
+        result = conn.execute(
+            """
+            UPDATE coverage
+            SET filings_status            = %s,
+                filings_backfill_last_at  = NOW(),
+                filings_backfill_reason   = %s,
+                filings_audit_at          = NOW()
+            WHERE instrument_id = %s
+            RETURNING filings_status
+            """,
+            (status, outcome.value, instrument_id),
+        )
+    elif increment_attempts:
+        # status=None preservation path for HTTP/PARSE errors
+        # (design doc v4-H2 — never demote structurally_young on
+        # transient failure).
+        result = conn.execute(
+            """
+            UPDATE coverage
+            SET filings_backfill_attempts = filings_backfill_attempts + 1,
+                filings_backfill_last_at  = NOW(),
+                filings_backfill_reason   = %s
+            WHERE instrument_id = %s
+            RETURNING filings_status
+            """,
+            (outcome.value, instrument_id),
+        )
+    else:
+        # status=None and no attempts change — currently unused
+        # but keep the branch explicit for future outcomes.
+        result = conn.execute(
+            """
+            UPDATE coverage
+            SET filings_backfill_last_at = NOW(),
+                filings_backfill_reason  = %s
+            WHERE instrument_id = %s
+            RETURNING filings_status
+            """,
+            (outcome.value, instrument_id),
+        )
+    row = result.fetchone()
+    final = str(row[0]) if row is not None and row[0] is not None else ""
+    conn.commit()  # K.2/K.3 durability.
+
+    return BackfillResult(
+        instrument_id=instrument_id,
+        outcome=outcome,
+        pages_fetched=pages_fetched,
+        filings_upserted=filings_upserted,
+        eight_k_gap_filled=eight_k_gap_filled,
+        final_status=final,
+    )
+
+
+# ---------------------------------------------------------------------
+# Gating
+# ---------------------------------------------------------------------
+
+
+def _check_gating(conn: psycopg.Connection[Any], instrument_id: int) -> BackfillOutcome | None:
+    """Return a gating outcome or ``None`` to proceed.
+
+    Cap rule exempts ``structurally_young`` rows (design doc v5-H1)
+    so an aged-out young issuer can be demoted to ``insufficient``
+    once backfill completes cleanly.
+    """
+    row = conn.execute(
+        """
+        SELECT filings_backfill_attempts, filings_backfill_last_at,
+               filings_backfill_reason, filings_status
+        FROM coverage
+        WHERE instrument_id = %s
+        """,
+        (instrument_id,),
+    ).fetchone()
+    conn.commit()  # M1 invariant.
+
+    if row is None:
+        # Bootstrap invariant violation — raise loudly.
+        raise RuntimeError(f"backfill_filings: no coverage row for instrument_id={instrument_id}")
+
+    attempts = int(row[0]) if row[0] is not None else 0
+    last_at: datetime | None = row[1]
+    last_reason: str | None = row[2]
+    filings_status: str | None = row[3]
+
+    if last_at is not None:
+        # Backoff check. Use UTC-naive-aware comparison: psycopg3 returns
+        # tz-aware datetime; compare against tz-aware now.
+        cutoff = datetime.now(last_at.tzinfo) - timedelta(days=BACKOFF_DAYS)
+        if last_at > cutoff:
+            return BackfillOutcome.SKIPPED_BACKOFF_WINDOW
+
+    if attempts >= ATTEMPTS_CAP and last_reason in _RETRYABLE_REASONS and filings_status != "structurally_young":
+        return BackfillOutcome.SKIPPED_ATTEMPTS_CAP
+
+    return None
+
+
+# ---------------------------------------------------------------------
+# Main entry
+# ---------------------------------------------------------------------
+
+
+def backfill_filings(
+    conn: psycopg.Connection[Any],
+    provider: SecFilingsProvider,
+    cik: str,
+    instrument_id: int,
+) -> BackfillResult:
+    """Page SEC submissions history for ``cik`` + reconcile 8-K gaps,
+    then write one terminal ``coverage.filings_status`` row.
+
+    See ``docs/superpowers/specs/2026-04-18-chunk-e-filings-backfill-design.md``
+    for the full flow + outcome table.
+    """
+    gated = _check_gating(conn, instrument_id)
+    if gated is not None:
+        return _finalise(conn, instrument_id, outcome=gated, status=None)
+
+    cik_padded = _zero_pad_cik(cik)
+
+    # Step 2: fetch primary submissions.json.
+    try:
+        submissions = provider.fetch_submissions(cik_padded)
+    except httpx.HTTPError:
+        logger.warning(
+            "backfill_filings: HTTP error on fetch_submissions cik=%s",
+            cik_padded,
+            exc_info=True,
+        )
+        return _finalise(
+            conn,
+            instrument_id,
+            outcome=BackfillOutcome.STILL_INSUFFICIENT_HTTP_ERROR,
+            status=None,
+        )
+    except json.JSONDecodeError, TypeError, KeyError:
+        logger.warning(
+            "backfill_filings: PARSE error on fetch_submissions cik=%s",
+            cik_padded,
+            exc_info=True,
+        )
+        return _finalise(
+            conn,
+            instrument_id,
+            outcome=BackfillOutcome.STILL_INSUFFICIENT_PARSE_ERROR,
+            status=None,
+        )
+
+    if submissions is None:
+        # 404 — CIK valid in external_identifiers but SEC has no
+        # submissions for it. Classify retryable.
+        return _finalise(
+            conn,
+            instrument_id,
+            outcome=BackfillOutcome.STILL_INSUFFICIENT_HTTP_ERROR,
+            status=None,
+        )
+
+    window_cutoff = date.today() - timedelta(days=EIGHT_K_WINDOW_DAYS)
+    pages_fetched = 0
+    filings_upserted = 0
+    eight_k_gap_filled = 0
+    seen_filings: list[FilingSearchResult] = []
+    bar_met = False
+    eight_k_window_covered = False
+
+    # Phase A: inline `recent` block.
+    try:
+        filings_outer = submissions["filings"]
+        if not isinstance(filings_outer, dict):
+            raise TypeError("filings block not a dict")
+        recent_block = filings_outer["recent"]
+        if not isinstance(recent_block, dict):
+            raise TypeError("recent block not a dict")
+        recent_results = _normalise_submissions_block(recent_block, cik_padded)
+    except KeyError, TypeError, ValueError, AttributeError:
+        logger.warning(
+            "backfill_filings: PARSE error on recent block cik=%s",
+            cik_padded,
+            exc_info=True,
+        )
+        return _finalise(
+            conn,
+            instrument_id,
+            outcome=BackfillOutcome.STILL_INSUFFICIENT_PARSE_ERROR,
+            status=None,
+        )
+
+    conn.commit()  # M1 invariant before mutation block.
+    with conn.transaction():
+        for r in recent_results:
+            _upsert_filing(conn, str(instrument_id), "sec", r)
+    seen_filings.extend(recent_results)
+    pages_fetched += 1
+    filings_upserted += len(recent_results)
+
+    bar_met = probe_status(conn, instrument_id) in ("analysable", "fpi")
+    if recent_results:
+        oldest_recent = min(r.filed_at.date() for r in recent_results)
+        if oldest_recent <= window_cutoff:
+            eight_k_window_covered = True
+
+    # Phase B: files[] pagination.
+    files_meta = filings_outer.get("files") or []
+    if not isinstance(files_meta, list):
+        files_meta = []
+
+    def _entry_filing_to(e: object) -> date:
+        """Per-entry key resolver. Returns ``date.min`` for entries
+        whose ``filingTo`` is missing/malformed so a single bad entry
+        sinks to the back of the sort rather than aborting the whole
+        ordering (pre-v4 fallback silently demoted all pages to
+        oldest-first, wasting HTTP budget on unnecessary old pages).
+        """
+        if not isinstance(e, dict):
+            return date.min
+        raw = e.get("filingTo")
+        try:
+            return date.fromisoformat(str(raw))
+        except TypeError, ValueError:
+            return date.min
+
+    entries = sorted(files_meta, key=_entry_filing_to, reverse=True)
+
+    for entry in entries:
+        if bar_met and eight_k_window_covered:
+            break  # nothing further to fetch (design doc v4-H1)
+
+        entry_name = entry.get("name") if isinstance(entry, dict) else None
+        if not entry_name:
+            continue
+
+        try:
+            page_raw = provider.fetch_submissions_page(str(entry_name))
+        except httpx.HTTPError:
+            logger.warning(
+                "backfill_filings: HTTP error on page cik=%s name=%s",
+                cik_padded,
+                entry_name,
+                exc_info=True,
+            )
+            return _finalise(
+                conn,
+                instrument_id,
+                outcome=BackfillOutcome.STILL_INSUFFICIENT_HTTP_ERROR,
+                status=None,
+                pages_fetched=pages_fetched,
+                filings_upserted=filings_upserted,
+            )
+        except json.JSONDecodeError, TypeError, KeyError:
+            # ``fetch_submissions_page`` calls ``resp.json()`` internally
+            # which can raise on malformed bytes. Classify retryable.
+            logger.warning(
+                "backfill_filings: PARSE error on page cik=%s name=%s",
+                cik_padded,
+                entry_name,
+                exc_info=True,
+            )
+            return _finalise(
+                conn,
+                instrument_id,
+                outcome=BackfillOutcome.STILL_INSUFFICIENT_PARSE_ERROR,
+                status=None,
+                pages_fetched=pages_fetched,
+                filings_upserted=filings_upserted,
+            )
+        if page_raw is None:
+            # 404 on a page the primary response claimed exists — data
+            # integrity; classify retryable.
+            logger.warning(
+                "backfill_filings: 404 on page cik=%s name=%s",
+                cik_padded,
+                entry_name,
+            )
+            return _finalise(
+                conn,
+                instrument_id,
+                outcome=BackfillOutcome.STILL_INSUFFICIENT_HTTP_ERROR,
+                status=None,
+                pages_fetched=pages_fetched,
+                filings_upserted=filings_upserted,
+            )
+
+        try:
+            page_results = _normalise_submissions_block(page_raw, cik_padded)
+        except KeyError, TypeError, ValueError, AttributeError:
+            logger.warning(
+                "backfill_filings: PARSE error on page cik=%s name=%s",
+                cik_padded,
+                entry_name,
+                exc_info=True,
+            )
+            return _finalise(
+                conn,
+                instrument_id,
+                outcome=BackfillOutcome.STILL_INSUFFICIENT_PARSE_ERROR,
+                status=None,
+                pages_fetched=pages_fetched,
+                filings_upserted=filings_upserted,
+            )
+
+        conn.commit()  # M1 invariant.
+        with conn.transaction():
+            for r in page_results:
+                _upsert_filing(conn, str(instrument_id), "sec", r)
+        seen_filings.extend(page_results)
+        pages_fetched += 1
+        filings_upserted += len(page_results)
+
+        if not bar_met:
+            bar_met = probe_status(conn, instrument_id) in ("analysable", "fpi")
+
+        if page_results:
+            page_oldest = min(r.filed_at.date() for r in page_results)
+            if page_oldest <= window_cutoff:
+                eight_k_window_covered = True
+
+    # Step 4: 8-K gap reconciliation.
+    conn.commit()  # M1 invariant.
+    db_rows = conn.execute(
+        """
+        SELECT provider_filing_id
+        FROM filing_events
+        WHERE instrument_id = %s
+          AND provider = 'sec'
+          AND filing_type = '8-K'
+          AND filing_date >= %s
+        """,
+        (instrument_id, window_cutoff),
+    ).fetchall()
+    conn.commit()  # M1 invariant.
+    db_eight_ks = {str(r[0]) for r in db_rows}
+
+    fetched_eight_ks = {
+        r.provider_filing_id for r in seen_filings if r.filing_type == "8-K" and r.filed_at.date() >= window_cutoff
+    }
+
+    for missing_accession in sorted(fetched_eight_ks - db_eight_ks):
+        try:
+            event = provider.get_filing(missing_accession)
+        except FilingNotFound:
+            continue  # SEC deleted between pages; skip.
+        except httpx.HTTPError:
+            logger.warning(
+                "backfill_filings: HTTP error on get_filing accession=%s",
+                missing_accession,
+                exc_info=True,
+            )
+            return _finalise(
+                conn,
+                instrument_id,
+                outcome=BackfillOutcome.STILL_INSUFFICIENT_HTTP_ERROR,
+                status=None,
+                pages_fetched=pages_fetched,
+                filings_upserted=filings_upserted,
+                eight_k_gap_filled=eight_k_gap_filled,
+            )
+
+        conn.commit()  # M1 invariant.
+        with conn.transaction():
+            _upsert_filing_event(conn, instrument_id, "sec", event)
+        eight_k_gap_filled += 1
+
+    # Step 5: terminal classification + single coverage write.
+    final_status = probe_status(conn, instrument_id)
+
+    if final_status == "analysable":
+        return _finalise(
+            conn,
+            instrument_id,
+            outcome=BackfillOutcome.COMPLETE_OK,
+            status="analysable",
+            pages_fetched=pages_fetched,
+            filings_upserted=filings_upserted,
+            eight_k_gap_filled=eight_k_gap_filled,
+        )
+    if final_status == "fpi":
+        return _finalise(
+            conn,
+            instrument_id,
+            outcome=BackfillOutcome.COMPLETE_FPI,
+            status="fpi",
+            pages_fetched=pages_fetched,
+            filings_upserted=filings_upserted,
+            eight_k_gap_filled=eight_k_gap_filled,
+        )
+    if final_status == "insufficient":
+        if _is_structurally_young(conn, instrument_id):
+            return _finalise(
+                conn,
+                instrument_id,
+                outcome=BackfillOutcome.STILL_INSUFFICIENT_STRUCTURALLY_YOUNG,
+                status="structurally_young",
+                pages_fetched=pages_fetched,
+                filings_upserted=filings_upserted,
+                eight_k_gap_filled=eight_k_gap_filled,
+            )
+        return _finalise(
+            conn,
+            instrument_id,
+            outcome=BackfillOutcome.STILL_INSUFFICIENT_EXHAUSTED,
+            status="insufficient",
+            pages_fetched=pages_fetched,
+            filings_upserted=filings_upserted,
+            eight_k_gap_filled=eight_k_gap_filled,
+        )
+    if final_status == "no_primary_sec_cik":
+        raise RuntimeError(
+            f"backfill_filings: unexpected no_primary_sec_cik for "
+            f"instrument_id={instrument_id}; eligibility filter should "
+            f"have excluded this row"
+        )
+    raise RuntimeError(f"backfill_filings: unknown classifier status: {final_status!r}")
