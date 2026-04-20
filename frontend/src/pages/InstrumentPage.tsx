@@ -1,16 +1,19 @@
 /**
- * /instrument/:symbol — per-ticker research page (Phase 2.5).
+ * /instrument/:symbol — per-stock research page.
  *
- * Six tabs per the 2026-04-19 research-tool refocus §2.5:
- *   1. Overview    — identity + price + key stats
- *   2. Financials  — income / balance / cashflow, quarterly / annual
- *   3. Analysis    — AI thesis (fetched on-demand)
- *   4. Positions   — held position (units + cost + PnL) or "not held" badge
- *   5. News        — instrument news feed with sentiment badge
- *   6. Filings     — filing events list
+ * Layout after Slice 1 of the per-stock research page spec
+ * (docs/superpowers/specs/2026-04-20-per-stock-research-page.md):
+ *   - Sticky SummaryStrip (identity + price + thesis/score/held badges + actions)
+ *   - Tabs: Research (default) · Financials · Positions · News · Filings
+ *   - Research tab replaces the old Overview tab; key stats + thesis memo
+ *     live there so the operator lands on "is this worth owning?".
+ *   - The old Analysis tab is gone — its Generate-thesis button moved
+ *     into the SummaryStrip and the memo renders inside Research.
+ *
+ * The right rail (filings + peer + news preview) ships in Slice 2.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import { fetchFilings } from "@/api/filings";
@@ -20,17 +23,25 @@ import {
 } from "@/api/instruments";
 import { fetchNews } from "@/api/news";
 import { fetchInstrumentPositions } from "@/api/portfolio";
-import { generateInstrumentThesis } from "@/api/theses";
+import {
+  fetchLatestThesis,
+  generateInstrumentThesis,
+} from "@/api/theses";
+import { ApiError } from "@/api/client";
 import type {
   FilingsListResponse,
-  GenerateThesisResponse,
   InstrumentFinancials,
   InstrumentPositionDetail,
   InstrumentSummary,
   NewsListResponse,
+  ThesisDetail,
 } from "@/api/types";
+import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
+import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
 import { Section, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
+import { ResearchTab } from "@/components/instrument/ResearchTab";
+import { SummaryStrip } from "@/components/instrument/SummaryStrip";
 import { useAsync } from "@/lib/useAsync";
 
 function ErrorView({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
@@ -51,12 +62,11 @@ function ErrorView({ error, onRetry }: { error: unknown; onRetry?: () => void })
   );
 }
 
-type TabId = "overview" | "financials" | "analysis" | "positions" | "news" | "filings";
+type TabId = "research" | "financials" | "positions" | "news" | "filings";
 
 const TABS: { id: TabId; label: string }[] = [
-  { id: "overview", label: "Overview" },
+  { id: "research", label: "Research" },
   { id: "financials", label: "Financials" },
-  { id: "analysis", label: "Analysis" },
   { id: "positions", label: "Positions" },
   { id: "news", label: "News" },
   { id: "filings", label: "Filings" },
@@ -76,120 +86,11 @@ function formatDecimal(
   return options.currency ? `${options.currency} ${formatted}` : formatted;
 }
 
-function formatMarketCap(value: string | null): string {
-  if (value === null) return "—";
-  const num = Number(value);
-  if (!Number.isFinite(num)) return "—";
-  if (num >= 1e12) return `${(num / 1e12).toFixed(2)}T`;
-  if (num >= 1e9) return `${(num / 1e9).toFixed(2)}B`;
-  if (num >= 1e6) return `${(num / 1e6).toFixed(2)}M`;
-  return num.toLocaleString();
-}
-
-// ---------------------------------------------------------------------------
-// Header
-// ---------------------------------------------------------------------------
-
-function Header({ summary }: { summary: InstrumentSummary }) {
-  const { identity, price } = summary;
-  const changePct = price?.day_change_pct ?? null;
-  const changeNum = changePct !== null ? Number(changePct) : null;
-  const changeColor =
-    changeNum === null
-      ? "text-slate-500"
-      : changeNum >= 0
-        ? "text-emerald-600"
-        : "text-red-600";
-  return (
-    <div className="border-b border-slate-200 pb-4">
-      <div className="flex items-baseline gap-3">
-        <h1 className="text-2xl font-semibold">{identity.symbol}</h1>
-        <span className="text-lg text-slate-600">
-          {identity.display_name ?? "—"}
-        </span>
-        {summary.coverage_tier !== null && (
-          <span className="rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700">
-            Tier {summary.coverage_tier}
-          </span>
-        )}
-      </div>
-      <div className="mt-1 text-xs text-slate-500">
-        {identity.sector ?? "—"}
-        {identity.industry ? ` · ${identity.industry}` : ""}
-        {identity.exchange ? ` · ${identity.exchange}` : ""}
-        {identity.country ? ` · ${identity.country}` : ""}
-      </div>
-      {price && (
-        <div className="mt-3 flex items-baseline gap-4">
-          <span className="text-3xl font-semibold">
-            {formatDecimal(price.current, { currency: price.currency })}
-          </span>
-          {price.day_change !== null && price.day_change_pct !== null && (
-            <span className={`text-sm ${changeColor}`}>
-              {Number(price.day_change) >= 0 ? "+" : ""}
-              {formatDecimal(price.day_change)} (
-              {formatDecimal(price.day_change_pct, { percent: true })})
-            </span>
-          )}
-          <span className="text-xs text-slate-500">
-            52w: {formatDecimal(price.week_52_low)} –{" "}
-            {formatDecimal(price.week_52_high)}
-          </span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Overview tab
-// ---------------------------------------------------------------------------
-
-function OverviewTab({ summary }: { summary: InstrumentSummary }) {
-  const stats = summary.key_stats;
-  return (
-    <div className="grid gap-4 md:grid-cols-2">
-      <Section title="Key statistics">
-        {stats === null ? (
-          <EmptyState title="No key stats" description="No provider returned key stats for this ticker." />
-        ) : (
-          <dl className="grid grid-cols-2 gap-y-2 text-sm">
-            <dt className="text-slate-500">Market cap</dt>
-            <dd>{formatMarketCap(summary.identity.market_cap)}</dd>
-            <dt className="text-slate-500">P/E ratio</dt>
-            <dd>{formatDecimal(stats.pe_ratio)}</dd>
-            <dt className="text-slate-500">P/B ratio</dt>
-            <dd>{formatDecimal(stats.pb_ratio)}</dd>
-            <dt className="text-slate-500">Dividend yield</dt>
-            <dd>{formatDecimal(stats.dividend_yield, { percent: true })}</dd>
-            <dt className="text-slate-500">Payout ratio</dt>
-            <dd>{formatDecimal(stats.payout_ratio, { percent: true })}</dd>
-            <dt className="text-slate-500">ROE</dt>
-            <dd>{formatDecimal(stats.roe, { percent: true })}</dd>
-            <dt className="text-slate-500">ROA</dt>
-            <dd>{formatDecimal(stats.roa, { percent: true })}</dd>
-            <dt className="text-slate-500">Debt / Equity</dt>
-            <dd>{formatDecimal(stats.debt_to_equity)}</dd>
-            <dt className="text-slate-500">Revenue growth (YoY)</dt>
-            <dd>{formatDecimal(stats.revenue_growth_yoy, { percent: true })}</dd>
-            <dt className="text-slate-500">Earnings growth (YoY)</dt>
-            <dd>{formatDecimal(stats.earnings_growth_yoy, { percent: true })}</dd>
-          </dl>
-        )}
-      </Section>
-
-      <Section title="Source attribution">
-        <ul className="space-y-1 text-xs text-slate-600">
-          {Object.entries(summary.source).map(([section, provider]) => (
-            <li key={section}>
-              <span className="font-medium">{section}</span>: {provider}
-            </li>
-          ))}
-        </ul>
-      </Section>
-    </div>
-  );
-}
+// Header + Overview tab removed in Slice 1 — replaced by
+// `components/instrument/SummaryStrip.tsx` (sticky strip) and
+// `components/instrument/ResearchTab.tsx` (Research tab content).
+// `formatDecimal` is still used by the Financials tab below;
+// `formatMarketCap` moved to ResearchTab.
 
 // ---------------------------------------------------------------------------
 // Financials tab
@@ -288,84 +189,9 @@ function FinancialsTab({ symbol }: { symbol: string }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Analysis (thesis) tab
-// ---------------------------------------------------------------------------
-
-function AnalysisTab({ symbol }: { symbol: string }) {
-  const [thesis, setThesis] = useState<GenerateThesisResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function generate() {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await generateInstrumentThesis(symbol);
-      setThesis(result);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <Section title="AI thesis">
-      <div className="mb-3 flex items-center gap-3">
-        <button
-          type="button"
-          className="rounded bg-blue-600 px-3 py-1 text-sm text-white disabled:opacity-50"
-          onClick={generate}
-          disabled={loading}
-        >
-          {loading ? "Generating…" : "Generate thesis"}
-        </button>
-        {thesis && (
-          <span className="text-xs text-slate-500">
-            {thesis.cached ? "Cached (24h window)" : "Freshly generated"}
-          </span>
-        )}
-      </div>
-      {error !== null && <ErrorView error={new Error(error)} />}
-      {thesis && (
-        <div className="space-y-3 text-sm">
-          <div className="flex gap-2 text-xs">
-            <span className="rounded bg-slate-100 px-2 py-0.5">
-              stance: {thesis.thesis.stance}
-            </span>
-            <span className="rounded bg-slate-100 px-2 py-0.5">
-              confidence: {thesis.thesis.confidence_score ?? "—"}
-            </span>
-            <span className="rounded bg-slate-100 px-2 py-0.5">
-              v{thesis.thesis.thesis_version}
-            </span>
-          </div>
-          <pre className="whitespace-pre-wrap rounded border border-slate-200 bg-slate-50 p-3 text-xs">
-            {thesis.thesis.memo_markdown}
-          </pre>
-          {thesis.thesis.critic_json && (
-            <details>
-              <summary className="cursor-pointer text-xs text-slate-500">
-                Critic output
-              </summary>
-              <pre className="mt-2 whitespace-pre-wrap rounded border border-slate-200 bg-slate-50 p-3 text-xs">
-                {JSON.stringify(thesis.thesis.critic_json, null, 2)}
-              </pre>
-            </details>
-          )}
-        </div>
-      )}
-      {!thesis && error === null && !loading && (
-        <p className="text-xs text-slate-500">
-          Click "Generate thesis" to produce an AI-written bull / bear analysis.
-          Results are cached for 24h per ticker so repeat clicks don't spend
-          on the LLM.
-        </p>
-      )}
-    </Section>
-  );
-}
+// Analysis tab retired in Slice 1. The Generate-thesis button moved to
+// `SummaryStrip`; the memo renders inside `ResearchTab`. Thesis history
+// lives in a dedicated Thesis tab (landing in a follow-up slice).
 
 // ---------------------------------------------------------------------------
 // Stub tabs (positions / news / filings) — deferred to follow-up work
@@ -599,20 +425,152 @@ function FilingsTab({ instrumentId }: { instrumentId: number }) {
 
 export function InstrumentPage() {
   const { symbol = "" } = useParams<{ symbol: string }>();
-  const [activeTab, setActiveTab] = useState<TabId>("overview");
 
-  const { data: summary, error, loading } = useAsync<InstrumentSummary>(
+  const summaryAsync = useAsync<InstrumentSummary>(
     () => fetchInstrumentSummary(symbol),
     [symbol],
   );
 
-  if (loading) return <SectionSkeleton rows={4} />;
-  if (error !== null) return <ErrorView error={error} />;
-  if (!summary) return <EmptyState title="No data" description={`No data for ${symbol}.`} />;
+  if (summaryAsync.loading) return <SectionSkeleton rows={4} />;
+  if (summaryAsync.error !== null) return <ErrorView error={summaryAsync.error} />;
+  if (!summaryAsync.data)
+    return <EmptyState title="No data" description={`No data for ${symbol}.`} />;
+
+  // Per-instrument state (thesis, position, tab, modals) lives in a
+  // child so its useAsync hooks only fire when we have a real
+  // `instrument_id`. Without this split, the parent's hooks would run
+  // once with `instrumentId=null` and settle (data=null, loading=false)
+  // before the id became known, creating a brief "loaded + null"
+  // window where the Generate-thesis gate would misfire (Codex slice-1
+  // round-2 feedback).
+  return <InstrumentPageBody summary={summaryAsync.data} symbol={symbol} />;
+}
+
+function InstrumentPageBody({
+  summary,
+  symbol,
+}: {
+  summary: InstrumentSummary;
+  symbol: string;
+}): JSX.Element {
+  const instrumentId = summary.instrument_id;
+  const [activeTab, setActiveTab] = useState<TabId>("research");
+
+  const thesisAsync = useAsync<ThesisDetail | null>(
+    async () => {
+      try {
+        return await fetchLatestThesis(instrumentId);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) return null;
+        throw err;
+      }
+    },
+    [instrumentId],
+  );
+
+  const positionAsync = useAsync<InstrumentPositionDetail | null>(
+    async () => {
+      try {
+        return await fetchInstrumentPositions(instrumentId);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) return null;
+        throw err;
+      }
+    },
+    [instrumentId],
+  );
+
+  const [addOpen, setAddOpen] = useState(false);
+  const [closeOpen, setCloseOpen] = useState(false);
+  // Capture the close target at click time so a mid-flight refetch
+  // clearing `positionAsync.data` can't unmount an open modal
+  // (Codex slice-1 round-3 finding).
+  const [closeTarget, setCloseTarget] = useState<{
+    positionId: number;
+  } | null>(null);
+  const [thesisBusy, setThesisBusy] = useState(false);
+  const [thesisErr, setThesisErr] = useState<string | null>(null);
+
+  // Sticky error flags. `useAsync.refetch()` clears `error` to null at
+  // the start of the next run, which would briefly hide the error
+  // badge + retry affordance. Keep a sticky bit that only clears when
+  // the next fetch settles cleanly (non-loading + non-error).
+  const [thesisErrSticky, setThesisErrSticky] = useState(false);
+  const [positionErrSticky, setPositionErrSticky] = useState(false);
+  useEffect(() => {
+    if (thesisAsync.error !== null) setThesisErrSticky(true);
+    else if (!thesisAsync.loading) setThesisErrSticky(false);
+  }, [thesisAsync.error, thesisAsync.loading]);
+  useEffect(() => {
+    if (positionAsync.error !== null) setPositionErrSticky(true);
+    else if (!positionAsync.loading) setPositionErrSticky(false);
+  }, [positionAsync.error, positionAsync.loading]);
+
+  async function handleGenerateThesis() {
+    setThesisBusy(true);
+    setThesisErr(null);
+    try {
+      await generateInstrumentThesis(symbol);
+      thesisAsync.refetch();
+    } catch (err) {
+      setThesisErr(err instanceof Error ? err.message : String(err));
+    } finally {
+      setThesisBusy(false);
+    }
+  }
+
+  function handleFilled() {
+    setAddOpen(false);
+    setCloseOpen(false);
+    setCloseTarget(null);
+    positionAsync.refetch();
+  }
+
+  const position = positionAsync.data;
+  const singleTrade =
+    position !== null && position.trades.length === 1
+      ? position.trades[0]
+      : null;
+
+  function handleCloseClick() {
+    if (singleTrade === null || singleTrade === undefined) return;
+    setCloseTarget({ positionId: singleTrade.position_id });
+    setCloseOpen(true);
+  }
 
   return (
     <div className="space-y-4">
-      <Header summary={summary} />
+      <SummaryStrip
+        summary={summary}
+        thesis={thesisAsync.data}
+        // `thesisLoaded=true` iff fetch settled cleanly (not errored,
+        // even historically) AND not currently reloading.
+        thesisLoaded={
+          !thesisAsync.loading &&
+          thesisAsync.error === null &&
+          !thesisErrSticky
+        }
+        thesisError={thesisErrSticky}
+        position={position}
+        positionLoaded={
+          !positionAsync.loading &&
+          positionAsync.error === null &&
+          !positionErrSticky
+        }
+        positionError={positionErrSticky}
+        onAdd={() => setAddOpen(true)}
+        onClose={handleCloseClick}
+        onGenerateThesis={handleGenerateThesis}
+        generatingThesis={thesisBusy}
+      />
+      {thesisErr !== null ? (
+        <div
+          role="status"
+          className="rounded border border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-700"
+        >
+          Thesis generation failed: {thesisErr}
+        </div>
+      ) : null}
       <nav className="flex gap-1 border-b border-slate-200">
         {TABS.map((tab) => (
           <button
@@ -630,14 +588,45 @@ export function InstrumentPage() {
         ))}
       </nav>
 
-      {activeTab === "overview" && <OverviewTab summary={summary} />}
+      {activeTab === "research" && (
+        <ResearchTab
+          summary={summary}
+          thesis={thesisAsync.data}
+          thesisErrored={thesisErrSticky}
+        />
+      )}
       {activeTab === "financials" && <FinancialsTab symbol={symbol} />}
-      {activeTab === "analysis" && <AnalysisTab symbol={symbol} />}
       {activeTab === "positions" && (
         <PositionsTab symbol={symbol} instrumentId={summary.instrument_id} />
       )}
       {activeTab === "news" && <NewsTab instrumentId={summary.instrument_id} />}
       {activeTab === "filings" && <FilingsTab instrumentId={summary.instrument_id} />}
+
+      {addOpen ? (
+        <OrderEntryModal
+          isOpen
+          instrumentId={summary.instrument_id}
+          symbol={summary.identity.symbol}
+          companyName={summary.identity.display_name ?? summary.identity.symbol}
+          valuationSource="quote"
+          onRequestClose={() => setAddOpen(false)}
+          onFilled={handleFilled}
+        />
+      ) : null}
+
+      {closeOpen && closeTarget !== null ? (
+        <ClosePositionModal
+          isOpen
+          instrumentId={summary.instrument_id}
+          positionId={closeTarget.positionId}
+          valuationSource="quote"
+          onRequestClose={() => {
+            setCloseOpen(false);
+            setCloseTarget(null);
+          }}
+          onFilled={handleFilled}
+        />
+      ) : null}
     </div>
   );
 }
