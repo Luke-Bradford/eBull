@@ -7,6 +7,7 @@ import { DashboardPage } from "@/pages/DashboardPage";
 import { RankingsPage } from "@/pages/RankingsPage";
 import { InstrumentDetailPage } from "@/pages/InstrumentDetailPage";
 import { InstrumentPage } from "@/pages/InstrumentPage";
+import { ReportsPage } from "@/pages/ReportsPage";
 import { RecommendationsPage } from "@/pages/RecommendationsPage";
 import { AdminPage } from "@/pages/AdminPage";
 import { CoverageInsufficientPage } from "@/pages/CoverageInsufficientPage";
@@ -46,6 +47,7 @@ export function App() {
           <Route path="instrument/:symbol" element={<InstrumentPage />} />
           <Route path="copy-trading/:mirrorId" element={<CopyTradingPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />
+          <Route path="reports" element={<ReportsPage />} />
           <Route path="admin" element={<AdminPage />} />
           <Route
             path="admin/coverage/insufficient"
