@@ -17,28 +17,49 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def _make_cursor_sequence(fetchone_per_cursor: list[list[object]]) -> MagicMock:
-    """Per-cursor fetchone isolation: each `cursor(...)` call gets its
-    own mock with its own `fetchone`/`fetchall` queue.
+class FetchOne:
+    """Cursor fixture: returns `row` from `fetchone`. `fetchall` returns []."""
+
+    __slots__ = ("row",)
+
+    def __init__(self, row: object) -> None:
+        self.row = row
+
+
+class FetchAll:
+    """Cursor fixture: returns `rows` from `fetchall`. `fetchone` returns None."""
+
+    __slots__ = ("rows",)
+
+    def __init__(self, rows: list[object]) -> None:
+        self.rows = rows
+
+
+def _make_cursor_sequence(
+    per_cursor: list[FetchOne | FetchAll],
+) -> MagicMock:
+    """Per-cursor isolation: each `cursor(...)` call returns a fresh
+    mock whose `fetchone`/`fetchall` behaviour is determined by an
+    explicit FetchOne / FetchAll tag (avoids the len-based heuristic
+    that the Codex slice-A round-2 review flagged as fragile).
 
     The candles endpoint opens two cursors:
-      1. Symbol → instrument_id lookup (`fetchone`).
-      2. Candle fetch (`fetchall`).
+      1. Symbol → instrument_id lookup (FetchOne).
+      2. Candle row fetch (FetchAll).
     """
-    cursors = iter(fetchone_per_cursor)
+    cursors = iter(per_cursor)
 
     def _next_cursor(*_args: object, **_kwargs: object) -> MagicMock:
         cur = MagicMock()
         cur.__enter__.return_value = cur
         cur.__exit__.return_value = None
-        results = next(cursors)
-        if len(results) == 1:
-            cur.fetchone.return_value = results[0]
+        spec = next(cursors)
+        if isinstance(spec, FetchOne):
+            cur.fetchone.return_value = spec.row
             cur.fetchall.return_value = []
         else:
-            # First entry = fetchone; rest = fetchall rows.
-            cur.fetchone.return_value = results[0]
-            cur.fetchall.return_value = list(results[1:])
+            cur.fetchone.return_value = None
+            cur.fetchall.return_value = list(spec.rows)
         return cur
 
     conn = MagicMock()
@@ -51,7 +72,7 @@ def test_candles_unknown_symbol_returns_404(client: TestClient) -> None:
     from app.db import get_conn
 
     def _db_conn() -> Iterator[MagicMock]:
-        yield _make_cursor_sequence([[None]])
+        yield _make_cursor_sequence([FetchOne(None)])
 
     app.dependency_overrides[get_conn] = _db_conn
     try:
@@ -83,28 +104,27 @@ def test_candles_happy_path_returns_ohlcv_rows(client: TestClient) -> None:
     def _db_conn() -> Iterator[MagicMock]:
         yield _make_cursor_sequence(
             [
-                # Cursor 1: instrument lookup.
-                [{"instrument_id": 42, "symbol": "AAPL"}],
-                # Cursor 2: fetchone (unused on fetchall path) + rows.
-                [
-                    None,
-                    {
-                        "price_date": date(2026, 4, 10),
-                        "open": Decimal("180.00"),
-                        "high": Decimal("182.50"),
-                        "low": Decimal("179.80"),
-                        "close": Decimal("181.25"),
-                        "volume": Decimal("1000000"),
-                    },
-                    {
-                        "price_date": date(2026, 4, 11),
-                        "open": Decimal("181.25"),
-                        "high": Decimal("183.00"),
-                        "low": Decimal("180.75"),
-                        "close": Decimal("182.60"),
-                        "volume": Decimal("950000"),
-                    },
-                ],
+                FetchOne({"instrument_id": 42, "symbol": "AAPL"}),
+                FetchAll(
+                    [
+                        {
+                            "price_date": date(2026, 4, 10),
+                            "open": Decimal("180.00"),
+                            "high": Decimal("182.50"),
+                            "low": Decimal("179.80"),
+                            "close": Decimal("181.25"),
+                            "volume": Decimal("1000000"),
+                        },
+                        {
+                            "price_date": date(2026, 4, 11),
+                            "open": Decimal("181.25"),
+                            "high": Decimal("183.00"),
+                            "low": Decimal("180.75"),
+                            "close": Decimal("182.60"),
+                            "volume": Decimal("950000"),
+                        },
+                    ]
+                ),
             ]
         )
 
@@ -132,8 +152,8 @@ def test_candles_max_range_has_null_days(client: TestClient) -> None:
     def _db_conn() -> Iterator[MagicMock]:
         yield _make_cursor_sequence(
             [
-                [{"instrument_id": 42, "symbol": "AAPL"}],
-                [None],  # No candle rows for this edge case.
+                FetchOne({"instrument_id": 42, "symbol": "AAPL"}),
+                FetchAll([]),
             ]
         )
 
@@ -172,8 +192,8 @@ def test_candles_default_range_is_1m(client: TestClient) -> None:
     def _db_conn() -> Iterator[MagicMock]:
         yield _make_cursor_sequence(
             [
-                [{"instrument_id": 42, "symbol": "AAPL"}],
-                [None],
+                FetchOne({"instrument_id": 42, "symbol": "AAPL"}),
+                FetchAll([]),
             ]
         )
 
