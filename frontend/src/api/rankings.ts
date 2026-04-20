@@ -26,9 +26,10 @@ export const RANKINGS_PAGE_LIMIT = 200;
 
 export async function fetchRankings(
   query: RankingsQuery,
+  limit: number = RANKINGS_PAGE_LIMIT,
 ): Promise<RankingsListResponse> {
   const params = new URLSearchParams();
-  params.set("limit", String(RANKINGS_PAGE_LIMIT));
+  params.set("limit", String(limit));
   if (query.coverage_tier !== null) {
     params.set("coverage_tier", String(query.coverage_tier));
   }
