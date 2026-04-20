@@ -511,6 +511,12 @@ def test_summary_sec_preference_reports_price_missing_when_quote_absent(
     assert ks["pb_ratio"] is None
     assert ks["field_source"]["pe_ratio"] == "sec_xbrl_price_missing"
     assert ks["field_source"]["pb_ratio"] == "sec_xbrl_price_missing"
+    # Non-price fields have no supporting local data (no financial_periods
+    # row in this scenario), so they must stay "unavailable" — a regression
+    # that silently mis-attributes them to SEC would fail here.
+    assert ks["field_source"]["debt_to_equity"] == "unavailable"
+    assert ks["field_source"]["roe"] == "unavailable"
+    assert ks["field_source"]["roa"] == "unavailable"
 
 
 def test_summary_sec_preference_missing_local_falls_through_to_yfinance(
