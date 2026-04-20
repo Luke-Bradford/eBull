@@ -338,7 +338,7 @@ class YFinanceProvider:
         for col in frame.columns:
             # yfinance columns are pandas Timestamp; .date() extracts date.
             try:
-                period_end = col.date()
+                period_end = col.date()  # type: ignore[union-attr]
             except AttributeError:
                 # Already a date, or malformed — skip.
                 continue
@@ -374,7 +374,7 @@ class YFinanceProvider:
         results: list[YFinanceDividend] = []
         for ts, amount_raw in series.items():
             try:
-                ex_date = ts.date()
+                ex_date = ts.date()  # type: ignore[union-attr]
             except AttributeError:
                 continue
             decimal_amount = _to_decimal(amount_raw)
@@ -438,7 +438,7 @@ class YFinanceProvider:
         bars: list[YFinancePriceBar] = []
         for ts, row in frame.iterrows():
             try:
-                bar_date = ts.date()
+                bar_date = ts.date()  # type: ignore[union-attr]
             except AttributeError:
                 continue
             bars.append(
