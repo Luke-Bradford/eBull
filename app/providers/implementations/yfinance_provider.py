@@ -321,7 +321,6 @@ class YFinanceProvider:
                     "balance": ticker.balance_sheet,
                     "cashflow": ticker.cashflow,
                 }[statement]
-            info = ticker.info
         except Exception:
             logger.warning(
                 "yfinance.get_financials(statement=%s, period=%s) failed for %s",
@@ -333,6 +332,19 @@ class YFinanceProvider:
             return None
         if frame is None or frame.empty:
             return None
+        # Currency comes from .info which is a separate Yahoo call that
+        # can fail independently of the statement frame. Failing to fetch
+        # currency must NOT discard the valid statement data — fall back
+        # to None and let the UI render without a currency badge.
+        try:
+            info = ticker.info
+        except Exception:
+            logger.warning(
+                "yfinance.get_financials: .info fetch failed for %s — returning statement without currency",
+                symbol,
+                exc_info=True,
+            )
+            info = None
         currency = _to_str(info.get("financialCurrency")) if info else None
         rows: list[YFinanceFinancialRow] = []
         for col in frame.columns:

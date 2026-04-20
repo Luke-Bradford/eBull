@@ -376,6 +376,28 @@ def test_profile_filters_nan_string_fields() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_financials_info_failure_does_not_discard_frame() -> None:
+    """If .info raises after the frame was fetched, we must still return
+    the statement — currency is just display metadata, not gating data.
+    Regression for PR #356 round-2 review."""
+
+    class _RaisingInfoTicker:
+        quarterly_financials = _sample_financials_frame()
+        quarterly_balance_sheet = pd.DataFrame()
+        quarterly_cashflow = pd.DataFrame()
+
+        @property
+        def info(self) -> dict[str, Any]:
+            raise RuntimeError("info endpoint flaky")
+
+    provider = YFinanceProvider()
+    provider._ticker = lambda _symbol: _RaisingInfoTicker()  # type: ignore[method-assign,return-value]
+    financials = provider.get_financials("AAPL", statement="income", period="quarterly")
+    assert financials is not None
+    assert financials.currency is None
+    assert len(financials.rows) == 2
+
+
 def test_financials_invalid_period_returns_none() -> None:
     ticker = _StubTicker(
         info={"financialCurrency": "USD"},
