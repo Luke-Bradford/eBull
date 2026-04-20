@@ -268,13 +268,16 @@ function CopyExposure({ instrumentId }: { instrumentId: number }) {
     () => fetchCopyTrading(),
     [],
   );
-  // Hide the section entirely on loading/error/no-exposure so the rail
-  // doesn't nag about empty state when no copy traders hold the
-  // instrument. The mirrors endpoint is already exercised on
-  // /copy-trading surfaces; we opt for silent-when-empty here.
+  // Silent-when-empty: if no active copy-trader holds the
+  // instrument we render nothing so the rail isn't padded with an
+  // empty state on the common case (operator with no mirrors, or
+  // mirrors holding other stocks).
+  //
+  // Loading + error DO render so the operator (a) sees the fetch is
+  // in flight rather than a silent gap, and (b) can retry on a
+  // transient failure. The "hidden" condition is specifically the
+  // resolved-empty path below.
   if (loading) {
-    // Still render a skeleton on cold start so a slow fetch isn't a
-    // jarring content-shift when it resolves.
     return (
       <Section title="Copy-trader exposure">
         <SectionSkeleton rows={1} />
