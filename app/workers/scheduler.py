@@ -451,13 +451,10 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.weekly(weekday=0, hour=5, minute=0),  # Monday 05:00 UTC
         prerequisite=_has_any_coverage,
     ),
-    ScheduledJob(
-        name=JOB_ATTRIBUTION_SUMMARY,
-        description="Compute and persist rolling attribution summaries (30d, 90d, 365d).",
-        cadence=Cadence.weekly(weekday=6, hour=6, minute=0),
-        prerequisite=_has_attributions,
-        catch_up_on_boot=False,
-    ),
+    # attribution_summary retired from scheduling in Phase 1.4 of the
+    # 2026-04-19 research-tool refocus — no UI consumer today. The
+    # function body stays in scheduler.py + _INVOKERS so the operator
+    # can still manually fire it from Admin "Run now" if needed.
     ScheduledJob(
         name=JOB_RAW_DATA_RETENTION_SWEEP,
         description=(
