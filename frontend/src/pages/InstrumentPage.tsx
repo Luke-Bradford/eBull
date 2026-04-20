@@ -19,15 +19,15 @@ import {
   fetchInstrumentSummary,
 } from "@/api/instruments";
 import { fetchNews } from "@/api/news";
-import { fetchPortfolio } from "@/api/portfolio";
+import { fetchInstrumentPositions } from "@/api/portfolio";
 import { generateInstrumentThesis } from "@/api/theses";
 import type {
   FilingsListResponse,
   GenerateThesisResponse,
   InstrumentFinancials,
+  InstrumentPositionDetail,
   InstrumentSummary,
   NewsListResponse,
-  PortfolioResponse,
 } from "@/api/types";
 import { Section, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
@@ -376,21 +376,20 @@ function AnalysisTab({ symbol }: { symbol: string }) {
 // ---------------------------------------------------------------------------
 
 function PositionsTab({ symbol, instrumentId }: { symbol: string; instrumentId: number }) {
-  const { data, error, loading } = useAsync<PortfolioResponse>(
-    () => fetchPortfolio(),
+  // Use the per-instrument endpoint so we never silently false-negative on a
+  // paginated portfolio list (Codex review feedback on PR #366).
+  const { data, error, loading } = useAsync<InstrumentPositionDetail>(
+    () => fetchInstrumentPositions(instrumentId),
     [instrumentId],
   );
 
   if (loading) return <SectionSkeleton rows={3} />;
   if (error !== null) return <ErrorView error={error} />;
-  if (!data) return <EmptyState title="No portfolio data" description="" />;
-
-  const held = data.positions.find((p) => p.instrument_id === instrumentId);
-  if (!held) {
+  if (!data || data.total_units === 0) {
     return (
       <Section title="Position">
         <EmptyState
-          title={`Not held`}
+          title="Not held"
           description={`You don't currently hold ${symbol}.`}
         />
       </Section>
@@ -398,9 +397,9 @@ function PositionsTab({ symbol, instrumentId }: { symbol: string; instrumentId: 
   }
 
   const pnlColor =
-    held.unrealized_pnl > 0
+    data.total_pnl > 0
       ? "text-emerald-600"
-      : held.unrealized_pnl < 0
+      : data.total_pnl < 0
         ? "text-red-600"
         : "text-slate-600";
 
@@ -408,24 +407,24 @@ function PositionsTab({ symbol, instrumentId }: { symbol: string; instrumentId: 
     <Section title="Position">
       <dl className="grid grid-cols-2 gap-y-2 text-sm md:grid-cols-4">
         <dt className="text-slate-500">Units</dt>
-        <dd>{held.current_units.toLocaleString()}</dd>
-        <dt className="text-slate-500">Avg cost</dt>
-        <dd>{held.avg_cost !== null ? held.avg_cost.toFixed(2) : "—"}</dd>
+        <dd>{data.total_units.toLocaleString()}</dd>
+        <dt className="text-slate-500">Avg entry</dt>
+        <dd>{data.avg_entry !== null ? data.avg_entry.toFixed(2) : "—"}</dd>
         <dt className="text-slate-500">Current price</dt>
-        <dd>{held.current_price !== null ? held.current_price.toFixed(2) : "—"}</dd>
-        <dt className="text-slate-500">Valuation</dt>
-        <dd className="text-xs text-slate-500">{held.valuation_source}</dd>
-        <dt className="text-slate-500">Cost basis</dt>
-        <dd>{held.cost_basis.toFixed(2)}</dd>
+        <dd>{data.current_price !== null ? data.current_price.toFixed(2) : "—"}</dd>
+        <dt className="text-slate-500">Currency</dt>
+        <dd className="text-xs text-slate-500">{data.currency}</dd>
+        <dt className="text-slate-500">Total invested</dt>
+        <dd>{data.total_invested.toFixed(2)}</dd>
         <dt className="text-slate-500">Market value</dt>
-        <dd>{held.market_value.toFixed(2)}</dd>
+        <dd>{data.total_value.toFixed(2)}</dd>
         <dt className="text-slate-500">Unrealised P&amp;L</dt>
         <dd className={pnlColor}>
-          {held.unrealized_pnl >= 0 ? "+" : ""}
-          {held.unrealized_pnl.toFixed(2)}
+          {data.total_pnl >= 0 ? "+" : ""}
+          {data.total_pnl.toFixed(2)}
         </dd>
-        <dt className="text-slate-500">Open date</dt>
-        <dd>{held.open_date ?? "—"}</dd>
+        <dt className="text-slate-500">Trades</dt>
+        <dd>{data.trades.length}</dd>
       </dl>
     </Section>
   );
@@ -437,15 +436,19 @@ function PositionsTab({ symbol, instrumentId }: { symbol: string; instrumentId: 
 
 function sentimentBadge(score: number | null) {
   if (score === null) return null;
-  const color =
-    score > 0.2
-      ? "bg-emerald-100 text-emerald-700"
-      : score < -0.2
-        ? "bg-red-100 text-red-700"
-        : "bg-slate-100 text-slate-600";
+  // Match sign prefix to colour bucket so a neutral-grey badge never
+  // shows a "+" prefix (Codex feedback).
+  const positive = score > 0.2;
+  const negative = score < -0.2;
+  const color = positive
+    ? "bg-emerald-100 text-emerald-700"
+    : negative
+      ? "bg-red-100 text-red-700"
+      : "bg-slate-100 text-slate-600";
+  const prefix = positive ? "+" : negative ? "" : "";
   return (
     <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${color}`}>
-      {score >= 0 ? "+" : ""}
+      {prefix}
       {score.toFixed(2)}
     </span>
   );
