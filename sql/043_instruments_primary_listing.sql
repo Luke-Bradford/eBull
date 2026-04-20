@@ -26,13 +26,18 @@ ALTER TABLE instruments
 
 -- Demote collisions: within each (UPPER(symbol)) group, keep the row
 -- with the lowest instrument_id as primary, mark the rest secondary.
+-- Guarded with `AND i.is_primary_listing = TRUE` so a re-run of this
+-- migration does not undo an operator's manual promotion of a
+-- non-minimum instrument_id.
 UPDATE instruments AS i
 SET is_primary_listing = FALSE
-WHERE EXISTS (
+WHERE i.is_primary_listing = TRUE
+  AND EXISTS (
     SELECT 1
     FROM instruments AS j
     WHERE UPPER(j.symbol) = UPPER(i.symbol)
       AND j.instrument_id < i.instrument_id
+      AND j.is_primary_listing = TRUE
 );
 
 -- NOT adding a partial-unique index on `UPPER(symbol) WHERE

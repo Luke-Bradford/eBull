@@ -692,7 +692,7 @@ def get_instrument_summary(
     symbol: str,
     conn: psycopg.Connection[object] = Depends(get_conn),
     yfinance_provider: YFinanceProvider = Depends(get_yfinance_provider),
-    id: int | None = Query(default=None, ge=1),
+    instrument_id: int | None = Query(default=None, ge=1, alias="id"),
 ) -> InstrumentSummary:
     """Per-ticker research summary (Phase 2.2 of the 2026-04-19 refocus).
 
@@ -714,7 +714,9 @@ def get_instrument_summary(
     # ORDER BY `is_primary_listing DESC, instrument_id ASC` makes the
     # winner deterministic when two listings share a ticker. See
     # docs/superpowers/specs/2026-04-20-per-stock-research-page.md §2.
-    if id is not None:
+    if instrument_id is not None:
+        # instrument_id is the PK so the lookup is already unique; no
+        # ORDER BY / LIMIT needed.
         lookup_sql = """
             SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
                    i.currency, i.sector, i.industry, i.country,
@@ -722,9 +724,8 @@ def get_instrument_summary(
             FROM instruments i
             LEFT JOIN coverage c USING (instrument_id)
             WHERE i.instrument_id = %(id)s AND UPPER(i.symbol) = %(symbol)s
-            LIMIT 1
         """
-        params: dict[str, object] = {"id": id, "symbol": symbol_clean}
+        params: dict[str, object] = {"id": instrument_id, "symbol": symbol_clean}
     else:
         lookup_sql = """
             SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
