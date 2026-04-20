@@ -12,6 +12,7 @@ Issue: #207
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -522,6 +523,147 @@ def _tax_provision_snapshot(conn: psycopg.Connection[Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _positions_snapshot(conn: psycopg.Connection[Any]) -> list[dict[str, Any]]:
+    """Per-instrument open-position P&L at snapshot time.
+
+    Stored on each `report_snapshots.snapshot_json["positions"]` so the
+    next snapshot can diff against it to surface period contributors
+    (Slice 4 of the per-stock research page spec).
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT p.instrument_id,
+                   i.symbol,
+                   i.company_name,
+                   p.unrealized_pnl,
+                   p.cost_basis
+            FROM positions p
+            JOIN instruments i USING (instrument_id)
+            WHERE p.current_units > 0
+            ORDER BY p.instrument_id
+            """
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "instrument_id": r["instrument_id"],
+            "symbol": r["symbol"],
+            "company_name": r["company_name"],
+            "unrealized_pnl": _dec(r["unrealized_pnl"]),
+            "cost_basis": _dec(r["cost_basis"]),
+        }
+        for r in rows
+    ]
+
+
+def _load_prior_snapshot(
+    conn: psycopg.Connection[Any],
+    *,
+    report_type: str,
+    period_start: date,
+) -> dict[str, Any] | None:
+    """Return the `snapshot_json` of the most recent snapshot of the
+    given `report_type` whose `period_start` is strictly BEFORE the
+    supplied `period_start`, or None if there isn't one.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT snapshot_json
+            FROM report_snapshots
+            WHERE report_type = %(report_type)s
+              AND period_start < %(period_start)s
+            ORDER BY period_start DESC
+            LIMIT 1
+            """,
+            {"report_type": report_type, "period_start": period_start},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    # `.get` rather than `[]` so a row shape missing the column (only
+    # possible under test mocks) degrades to "no prior snapshot"
+    # rather than raising KeyError.
+    snapshot_json = row.get("snapshot_json")
+    # psycopg3 with the default JSONB adapter returns a dict. Some
+    # driver configurations or downstream adapters return the raw
+    # JSON string — decode it so a valid prior snapshot isn't
+    # silently dropped (Codex slice-4 round-2 note).
+    if isinstance(snapshot_json, str):
+        try:
+            snapshot_json = json.loads(snapshot_json)
+        except json.JSONDecodeError:
+            return None
+    return snapshot_json if isinstance(snapshot_json, dict) else None
+
+
+def _compute_contributors(
+    current: list[dict[str, Any]],
+    prior: list[dict[str, Any]] | None,
+    *,
+    top_n: int = 5,
+) -> dict[str, list[dict[str, Any]]]:
+    """Diff per-instrument unrealised P&L between two position snapshots.
+
+    Returns `{contributors: [...top_n gainers...], drags: [...top_n losers...]}`
+    where each row is `{instrument_id, symbol, pnl_delta, pnl_pct}`.
+
+    - `pnl_delta` = current unrealized_pnl - prior unrealized_pnl (Decimal → str).
+    - `pnl_pct`   = pnl_delta / prior_cost_basis (None if no prior row or
+      prior cost_basis is zero — avoids div/0 and the misleading "∞%"
+      for a brand-new position).
+    - New positions (in `current`, absent from `prior`) surface with
+      their full unrealized_pnl as the delta and `pnl_pct = null`.
+    - Closed positions (in `prior`, absent from `current`) are NOT
+      reported here — their contribution lives in the realised-P&L
+      aggregate, which the existing `pnl` section already covers.
+    - When `prior is None` (first snapshot, or backfilled historical
+      snapshots with no `positions` key), both lists are empty so the
+      UI gracefully degrades.
+    """
+    if prior is None:
+        return {"contributors": [], "drags": []}
+
+    prior_by_id = {p["instrument_id"]: p for p in prior}
+    # Keep the raw Decimal delta alongside the serialised string so
+    # sort + filter never round-trip through `Decimal(str)` re-parsing
+    # (Codex slice-4 round-2 note).
+    entries: list[tuple[Decimal, dict[str, Any]]] = []
+    for curr in current:
+        iid = curr["instrument_id"]
+        prior_row = prior_by_id.get(iid)
+        curr_pnl = Decimal(curr["unrealized_pnl"] or "0")
+        prior_pnl = Decimal(prior_row["unrealized_pnl"] or "0") if prior_row is not None else Decimal("0")
+        delta = curr_pnl - prior_pnl
+        if delta == 0:
+            continue
+        prior_cost = Decimal(prior_row["cost_basis"] or "0") if prior_row is not None else Decimal("0")
+        pnl_pct: Decimal | None = delta / prior_cost if prior_cost > 0 else None
+        entries.append(
+            (
+                delta,
+                {
+                    "instrument_id": iid,
+                    "symbol": curr["symbol"],
+                    "pnl_delta": _dec(delta),
+                    "pnl_pct": _dec(pnl_pct),
+                },
+            )
+        )
+
+    # Contributors: positive deltas, descending (biggest gainer first).
+    # Drags: negative deltas, ascending (most-negative first). Both
+    # sort on the raw Decimal and slice from the head so the ordering
+    # intent is unambiguous and doesn't depend on which end of the
+    # combined list we slice from.
+    positives = sorted((e for e in entries if e[0] > 0), key=lambda e: e[0], reverse=True)
+    negatives = sorted((e for e in entries if e[0] < 0), key=lambda e: e[0])
+    contributors = [row for _, row in positives[:top_n]]
+    drags = [row for _, row in negatives[:top_n]]
+    return {"contributors": contributors, "drags": drags}
+
+
 def persist_report_snapshot(
     conn: psycopg.Connection[Any],
     *,
@@ -601,6 +743,15 @@ def generate_weekly_report(
     upcoming_earnings = _upcoming_earnings(conn)
     score_changes = _score_changes(conn, period_start, period_end)
     budget = _budget_snapshot(conn)
+    positions_now = _positions_snapshot(conn)
+    prior = _load_prior_snapshot(conn, report_type="weekly", period_start=period_start)
+    # When `prior` is absent OR lacks the `positions` key (pre-feature
+    # snapshots from before Slice 4), pass `None` so
+    # `_compute_contributors` degrades to empty lists. Passing `[]`
+    # here would treat every current holding as a brand-new
+    # contributor. Codex slice-4 finding.
+    prior_positions = prior.get("positions") if isinstance(prior, dict) and "positions" in prior else None
+    period_contribution = _compute_contributors(positions_now, prior_positions)
 
     return {
         "report_type": "weekly",
@@ -615,6 +766,14 @@ def generate_weekly_report(
         "upcoming_earnings": upcoming_earnings,
         "score_changes": score_changes,
         "budget": budget,
+        # Per-instrument position snapshot so the *next* weekly
+        # snapshot can compute period contribution against it.
+        "positions": positions_now,
+        # Contributors + drags computed against the prior snapshot.
+        # Slice 4 of per-stock research page spec. Empty arrays when
+        # there is no prior snapshot yet (fresh install or backfilled
+        # historicals with no `positions` key).
+        "period_contribution": period_contribution,
     }
 
 
@@ -639,6 +798,15 @@ def generate_monthly_report(
     attribution_summary = _period_attribution(conn, period_start, period_end)
     thesis_accuracy = _thesis_accuracy(conn, period_start, period_end)
     tax_provision = _tax_provision_snapshot(conn)
+    positions_now = _positions_snapshot(conn)
+    prior = _load_prior_snapshot(conn, report_type="monthly", period_start=period_start)
+    # When `prior` is absent OR lacks the `positions` key (pre-feature
+    # snapshots from before Slice 4), pass `None` so
+    # `_compute_contributors` degrades to empty lists. Passing `[]`
+    # here would treat every current holding as a brand-new
+    # contributor. Codex slice-4 finding.
+    prior_positions = prior.get("positions") if isinstance(prior, dict) and "positions" in prior else None
+    period_contribution = _compute_contributors(positions_now, prior_positions)
 
     return {
         "report_type": "monthly",
@@ -654,4 +822,6 @@ def generate_monthly_report(
         "attribution_summary": attribution_summary,
         "thesis_accuracy": thesis_accuracy,
         "tax_provision": tax_provision,
+        "positions": positions_now,
+        "period_contribution": period_contribution,
     }

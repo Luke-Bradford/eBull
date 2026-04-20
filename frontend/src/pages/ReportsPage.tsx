@@ -8,12 +8,40 @@
  */
 
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { fetchMonthlyReports, fetchWeeklyReports } from "@/api/reports";
 import type { ReportSnapshot } from "@/api/reports";
 import { Section, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
+
+interface ContributorRow {
+  instrument_id: number;
+  symbol: string;
+  pnl_delta: string | null;
+  pnl_pct: string | null;
+}
+
+function formatSignedPnl(raw: string | null | undefined): string {
+  if (raw === null || raw === undefined) return "—";
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return "—";
+  const sign = num > 0 ? "+" : "";
+  return `${sign}${num.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  })}`;
+}
+
+function formatSignedPct(raw: string | null | undefined): string {
+  if (raw === null || raw === undefined) return "—";
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return "—";
+  const sign = num > 0 ? "+" : "";
+  return `${sign}${(num * 100).toFixed(2)}%`;
+}
 
 type TabId = "weekly" | "monthly";
 
@@ -79,6 +107,15 @@ function ReportDetail({ report }: { report: ReportSnapshot }) {
   const thesisAccuracy = json["thesis_accuracy"] as
     | Record<string, unknown>
     | undefined;
+  // Slice 4 of per-stock research page spec: top contributors /
+  // drags vs the prior snapshot, each row linking to the research
+  // page so the Reports view becomes an entry point into per-stock
+  // analysis rather than a terminal JSON dump.
+  const periodContribution = json["period_contribution"] as
+    | { contributors?: ContributorRow[]; drags?: ContributorRow[] }
+    | undefined;
+  const contributors = periodContribution?.contributors ?? [];
+  const drags = periodContribution?.drags ?? [];
 
   return (
     <div className="space-y-4">
@@ -120,6 +157,28 @@ function ReportDetail({ report }: { report: ReportSnapshot }) {
             <dt className="text-slate-500">Avg holding (days)</dt>
             <dd>{avgHoldingDays !== undefined ? String(avgHoldingDays) : "—"}</dd>
           </dl>
+        </div>
+      )}
+
+      {(contributors.length > 0 || drags.length > 0) && (
+        <div>
+          <h3 className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">
+            Period contribution (vs prior snapshot)
+          </h3>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase text-emerald-700">
+                Top contributors
+              </div>
+              <ContributorList rows={contributors} tone="positive" />
+            </div>
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase text-red-700">
+                Top drags
+              </div>
+              <ContributorList rows={drags} tone="negative" />
+            </div>
+          </div>
         </div>
       )}
 
@@ -212,6 +271,44 @@ function ReportDetail({ report }: { report: ReportSnapshot }) {
         </pre>
       </details>
     </div>
+  );
+}
+
+function ContributorList({
+  rows,
+  tone,
+}: {
+  rows: ContributorRow[];
+  tone: "positive" | "negative";
+}): JSX.Element {
+  if (rows.length === 0) {
+    return <div className="text-xs text-slate-500">—</div>;
+  }
+  const toneClass = tone === "positive" ? "text-emerald-600" : "text-red-600";
+  return (
+    <ul className="space-y-1 text-sm">
+      {rows.map((r) => (
+        <li
+          key={r.instrument_id}
+          className="flex items-baseline justify-between gap-3"
+        >
+          <Link
+            to={`/instrument/${encodeURIComponent(r.symbol)}`}
+            className="font-medium text-blue-700 hover:underline"
+          >
+            {r.symbol}
+          </Link>
+          <span className={`tabular-nums ${toneClass}`}>
+            {formatSignedPnl(r.pnl_delta)}
+            {r.pnl_pct !== null ? (
+              <span className="ml-2 text-xs">
+                ({formatSignedPct(r.pnl_pct)})
+              </span>
+            ) : null}
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
