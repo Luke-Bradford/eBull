@@ -259,8 +259,13 @@ class YFinanceProvider:
             return None
         if not info:
             return None
-        price = _to_decimal(info.get("regularMarketPrice") or info.get("currentPrice"))
-        prev_close = _to_decimal(info.get("regularMarketPreviousClose") or info.get("previousClose"))
+        # Explicit None-check for falsy-zero preservation — a legitimate
+        # zero price from regularMarketPrice must not silently fall through
+        # to currentPrice due to `or` short-circuit on falsy values.
+        regular_price = info.get("regularMarketPrice")
+        price = _to_decimal(regular_price if regular_price is not None else info.get("currentPrice"))
+        regular_prev = info.get("regularMarketPreviousClose")
+        prev_close = _to_decimal(regular_prev if regular_prev is not None else info.get("previousClose"))
         day_change: Decimal | None = None
         day_change_pct: Decimal | None = None
         if price is not None and prev_close is not None and prev_close != 0:
@@ -464,8 +469,13 @@ class YFinanceProvider:
             long_business_summary=_to_str(info.get("longBusinessSummary")),
         )
 
-        price = _to_decimal(info.get("regularMarketPrice") or info.get("currentPrice"))
-        prev_close = _to_decimal(info.get("regularMarketPreviousClose") or info.get("previousClose"))
+        # Explicit None-check for falsy-zero preservation — a legitimate
+        # zero price from regularMarketPrice must not silently fall through
+        # to currentPrice due to `or` short-circuit on falsy values.
+        regular_price = info.get("regularMarketPrice")
+        price = _to_decimal(regular_price if regular_price is not None else info.get("currentPrice"))
+        regular_prev = info.get("regularMarketPreviousClose")
+        prev_close = _to_decimal(regular_prev if regular_prev is not None else info.get("previousClose"))
         day_change: Decimal | None = None
         day_change_pct: Decimal | None = None
         if price is not None and prev_close is not None and prev_close != 0:

@@ -572,3 +572,40 @@ def test_get_snapshot_info_with_all_null_price_fields_returns_null_quote() -> No
     snapshot = provider.get_snapshot("GHOST")
     assert snapshot.quote is None
     assert snapshot.key_stats is None
+
+
+def test_to_decimal_nan_returns_none() -> None:
+    """Direct invariant: _to_decimal(float('nan')) -> None, not Decimal('NaN').
+    Pins the NaN filter that _NullPriceTicker relies on."""
+    from app.providers.implementations.yfinance_provider import _to_decimal
+
+    assert _to_decimal(float("nan")) is None
+    assert _to_decimal(Decimal("NaN")) is None
+
+
+def test_get_snapshot_preserves_zero_price() -> None:
+    """A legitimate zero price must NOT fall through via `or` short-circuit
+    to currentPrice. Addresses PR #358 BLOCKING review."""
+
+    class _ZeroPriceTicker:
+        info = {
+            "longName": "Zero Co",
+            # regularMarketPrice = 0 is legitimate (halted stock, distressed
+            # delisted ticker); it's falsy but not missing.
+            "regularMarketPrice": 0,
+            "currentPrice": 5.0,  # would shadow the real price under `or`
+            "regularMarketPreviousClose": 10.0,
+            "fiftyTwoWeekHigh": 100.0,
+            "fiftyTwoWeekLow": 0.0,
+        }
+
+    provider = YFinanceProvider()
+    provider._ticker = lambda _symbol: _ZeroPriceTicker()  # type: ignore[method-assign,return-value]
+    snapshot = provider.get_snapshot("ZERO")
+    assert snapshot.quote is not None
+    # Real zero price must survive, NOT be replaced by currentPrice=5.0.
+    assert snapshot.quote.price == Decimal("0")
+    # day_change = 0 - 10 = -10.
+    assert snapshot.quote.day_change == Decimal("-10")
+    # week_52_low=0 preserved too.
+    assert snapshot.quote.week_52_low == Decimal("0")
