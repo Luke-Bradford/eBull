@@ -1332,27 +1332,39 @@ def daily_financial_facts() -> None:
                     cascade_outcome.rankings_recomputed,
                     len(cascade_outcome.failed),
                 )
-                # Surface cascade failures to the tracked job —
-                # per-instrument thesis failures AND the -1
-                # rerank-sentinel. Without this, SEC watermarks
-                # would be committed while the cascade silently
-                # fell behind, and ops health would still show
-                # status=success. Facts/normalization/cascade
-                # writes remain durably committed (commits
-                # happened above). Re-entry path on next run:
-                # the K.2 retry outbox durably flags any failed
-                # instrument so the next cycle re-drains it;
-                # rerank failures leave RERANK_NEEDED markers so
-                # the next run re-computes rankings too.
-                if cascade_outcome.failed:
-                    raise RuntimeError(
-                        f"cascade_refresh completed with {len(cascade_outcome.failed)} failures: "
-                        f"{cascade_outcome.failed}"
-                    )
+                cascade_failures: list[tuple[int, str]] = list(cascade_outcome.failed)
             else:
                 logger.info(
                     "daily_financial_facts: ANTHROPIC_API_KEY not set — "
                     "skipping cascade refresh (facts + normalization still committed)"
+                )
+                cascade_failures = []
+
+            # Surface every partial-failure channel in a single combined raise
+            # AFTER all commits so successful CIKs' facts, rankings, and
+            # retry-queue mutations all land durably. Channels:
+            #   - outcome.failed        — per-CIK XBRL extract failures (#353)
+            #   - plan.failed_plan_ciks — planner-phase skips (transient
+            #                             submissions.json fetches that never
+            #                             reached the executor)
+            #   - cascade_failures      — per-instrument thesis failures AND
+            #                             the -1 rerank sentinel
+            # Without a combined raise, a day where 20% of CIKs fail XBRL but
+            # cascade succeeds leaves tracker status='success', phase-1
+            # failed_phases empty, and Admin health green — masking a real
+            # partial outage. Re-entry path: the K.2 retry outbox re-queues
+            # failed executor CIKs, un-advanced master-index watermarks
+            # re-plan the planner-skipped CIKs, RERANK_NEEDED markers retry
+            # rankings — so all three failure channels converge back to
+            # green without manual intervention once the upstream source
+            # recovers.
+            if outcome.failed or plan.failed_plan_ciks or cascade_failures:
+                raise RuntimeError(
+                    "daily_financial_facts: "
+                    f"xbrl_failed={len(outcome.failed)} ({outcome.failed}); "
+                    f"planner_skipped={len(plan.failed_plan_ciks)} ({plan.failed_plan_ciks}); "
+                    f"cascade_failed={len(cascade_failures)} ({cascade_failures}); "
+                    "facts/normalization/cascade writes for successful CIKs were committed"
                 )
 
 
