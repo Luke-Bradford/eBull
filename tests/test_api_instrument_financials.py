@@ -163,6 +163,8 @@ def test_financials_yfinance_fallback(client: TestClient) -> None:
     assert body["currency"] == "GBP"
     assert len(body["rows"]) == 1
     assert body["rows"][0]["values"]["Total Revenue"] == "9000000000"
+    # period_type inferred from the fiscal-quarter-end month (Mar → Q1).
+    assert body["rows"][0]["period_type"] == "Q1"
     stub_provider.get_financials.assert_called_once_with("VOD.L", statement="income", period="quarterly")
 
 

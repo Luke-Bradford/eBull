@@ -352,25 +352,24 @@ def _fetch_local_financials(
     Returns (rows, currency). Empty rows = no local data, let caller fall
     back to yfinance.
     """
-    if period == "quarterly":
-        type_clause = "period_type IN ('Q1','Q2','Q3','Q4')"
-    else:
-        type_clause = "period_type = 'FY'"
+    period_types: list[str] = ["Q1", "Q2", "Q3", "Q4"] if period == "quarterly" else ["FY"]
 
-    # Columns whitelisted above — safe to format into SQL.
+    # Columns whitelisted above — safe to format into SQL. period_types
+    # is bound as a parameter, not formatted, so a future value added to
+    # the CHECK constraint won't silently match.
     select_cols = ", ".join(columns)
     sql = f"""
         SELECT period_end_date, period_type, reported_currency, {select_cols}
         FROM financial_periods
         WHERE instrument_id = %(iid)s
           AND superseded_at IS NULL
-          AND {type_clause}
+          AND period_type = ANY(%(types)s::text[])
         ORDER BY period_end_date DESC
         LIMIT 20
-    """  # noqa: S608 — columns and type_clause are hardcoded whitelists
+    """  # noqa: S608 — columns are a hardcoded whitelist; period_types is bound
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(sql, {"iid": instrument_id})  # type: ignore[arg-type]  # SQL built from hardcoded whitelists
+        cur.execute(sql, {"iid": instrument_id, "types": period_types})  # type: ignore[arg-type]  # SQL built from hardcoded whitelist
         db_rows = cur.fetchall()
 
     if not db_rows:
@@ -455,13 +454,21 @@ def get_instrument_financials(
             source="yfinance",
             rows=[],
         )
+    # yfinance statement rows don't carry a period_type label. For the
+    # quarterly path we infer Q1-Q4 from the period_end month (fiscal
+    # quarters end Mar/Jun/Sep/Dec for the vast majority of issuers).
+    # Annual rows are tagged "FY". This matches the local-path labels so
+    # the frontend treats both sources uniformly.
+    def _yf_period_type(d: date) -> str:
+        if period == "annual":
+            return "FY"
+        return {3: "Q1", 6: "Q2", 9: "Q3", 12: "Q4"}.get(d.month, "Q?")
+
     yf_rows = [
         InstrumentFinancialRow(
             period_end=row.period_end,
-            # yfinance rows have no period_type label; encode as statement-date
-            period_type=period[0].upper() + row.period_end.strftime("%Y"),
-            # Cast values dict to the Decimal | None shape of InstrumentFinancialRow
-            values={k: v for k, v in row.values.items()},
+            period_type=_yf_period_type(row.period_end),
+            values=dict(row.values.items()),
         )
         for row in y_fin.rows
     ]
