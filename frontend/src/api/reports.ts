@@ -10,10 +10,10 @@ export interface ReportSnapshot {
 }
 
 export function fetchWeeklyReports(limit = 10): Promise<ReportSnapshot[]> {
-  return apiFetch<ReportSnapshot[]>(`/api/reports/weekly?limit=${limit}`);
+  return apiFetch<ReportSnapshot[]>(`/reports/weekly?limit=${limit}`);
 }
 
 export function fetchMonthlyReports(limit = 10): Promise<ReportSnapshot[]> {
-  return apiFetch<ReportSnapshot[]>(`/api/reports/monthly?limit=${limit}`);
+  return apiFetch<ReportSnapshot[]>(`/reports/monthly?limit=${limit}`);
 }
 

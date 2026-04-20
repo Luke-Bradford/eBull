@@ -12,7 +12,7 @@ from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 
 router = APIRouter(
-    prefix="/api/reports",
+    prefix="/reports",
     tags=["reports"],
     dependencies=[Depends(require_session_or_service_token)],
 )
