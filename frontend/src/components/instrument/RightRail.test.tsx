@@ -22,6 +22,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import { RightRail } from "@/components/instrument/RightRail";
 import type {
+  CopyTradingResponse,
   FilingsListResponse,
   NewsListResponse,
   RankingsListResponse,
@@ -33,14 +34,17 @@ vi.mock("@/api/rankings", () => ({
   fetchRankings: vi.fn(),
   RANKINGS_PAGE_LIMIT: 200,
 }));
+vi.mock("@/api/copyTrading", () => ({ fetchCopyTrading: vi.fn() }));
 
 import { fetchFilings } from "@/api/filings";
 import { fetchNews } from "@/api/news";
 import { fetchRankings } from "@/api/rankings";
+import { fetchCopyTrading } from "@/api/copyTrading";
 
 const mockedFilings = vi.mocked(fetchFilings);
 const mockedNews = vi.mocked(fetchNews);
 const mockedRankings = vi.mocked(fetchRankings);
+const mockedCopyTrading = vi.mocked(fetchCopyTrading);
 
 function filingsEmpty(instrumentId: number): FilingsListResponse {
   return {
@@ -153,13 +157,23 @@ function rankingsWith(currentSymbol: string): RankingsListResponse {
   };
 }
 
+function copyTradingEmpty(): CopyTradingResponse {
+  return {
+    traders: [],
+    total_mirror_equity: 0,
+    display_currency: "GBP",
+  };
+}
+
 beforeEach(() => {
   mockedFilings.mockReset();
   mockedNews.mockReset();
   mockedRankings.mockReset();
+  mockedCopyTrading.mockReset();
   mockedFilings.mockResolvedValue(filingsEmpty(42));
   mockedNews.mockResolvedValue(newsEmpty(42));
   mockedRankings.mockResolvedValue(rankingsEmpty());
+  mockedCopyTrading.mockResolvedValue(copyTradingEmpty());
 });
 
 function renderRail(props: {
@@ -284,5 +298,189 @@ describe("RightRail", () => {
     const [query, limit] = mockedRankings.mock.calls[0]!;
     expect(query).toMatchObject({ sector: "Healthcare" });
     expect(limit).toBe(6);
+  });
+});
+
+describe("RightRail — copy-trader exposure (Slice 6)", () => {
+  it("hides exposure section when no copy traders hold the instrument", async () => {
+    renderRail();
+    // Wait for the copy-trading fetch to settle before asserting
+    // absence — otherwise the section's loading-skeleton would still
+    // be in the DOM and the assertion would falsely pass on a
+    // later render.
+    await waitFor(() => {
+      expect(mockedCopyTrading).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(
+        screen.queryByText(/Copy-trader exposure/i),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it("lists each mirror holding the instrument + links to /copy-trading/:mirror_id", async () => {
+    mockedCopyTrading.mockResolvedValue({
+      traders: [
+        {
+          parent_cid: 1,
+          parent_username: "@gurutrader",
+          total_equity: 10000,
+          mirrors: [
+            {
+              mirror_id: 42,
+              active: true,
+              initial_investment: 5000,
+              deposit_summary: 5000,
+              withdrawal_summary: 0,
+              available_amount: 200,
+              closed_positions_net_profit: 0,
+              mirror_equity: 5500,
+              position_count: 3,
+              positions: [
+                {
+                  position_id: 1,
+                  instrument_id: 42,
+                  symbol: "AAPL",
+                  company_name: "Apple Inc.",
+                  is_buy: true,
+                  units: 4,
+                  amount: 800,
+                  open_rate: 200,
+                  open_conversion_rate: 1.0,
+                  open_date_time: "2026-03-01T10:00:00Z",
+                  current_price: 210,
+                  market_value: 840,
+                  unrealized_pnl: 40,
+                },
+              ],
+              started_copy_date: "2026-02-01",
+              closed_at: null,
+            },
+          ],
+        },
+      ],
+      total_mirror_equity: 5500,
+      display_currency: "GBP",
+    });
+    renderRail({ instrumentId: 42 });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Copy-trader exposure/i)).toBeInTheDocument();
+    });
+    const link = screen.getByText("@gurutrader").closest("a") as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("/copy-trading/42");
+  });
+
+  it("filters mirrors that don't hold the current instrument", async () => {
+    mockedCopyTrading.mockResolvedValue({
+      traders: [
+        {
+          parent_cid: 1,
+          parent_username: "@other",
+          total_equity: 1000,
+          mirrors: [
+            {
+              mirror_id: 99,
+              active: true,
+              initial_investment: 500,
+              deposit_summary: 500,
+              withdrawal_summary: 0,
+              available_amount: 0,
+              closed_positions_net_profit: 0,
+              mirror_equity: 500,
+              position_count: 1,
+              positions: [
+                {
+                  position_id: 7,
+                  instrument_id: 999, // different instrument
+                  symbol: "TSLA",
+                  company_name: "Tesla",
+                  is_buy: true,
+                  units: 1,
+                  amount: 100,
+                  open_rate: 100,
+                  open_conversion_rate: 1.0,
+                  open_date_time: "2026-03-01T10:00:00Z",
+                  current_price: 100,
+                  market_value: 100,
+                  unrealized_pnl: 0,
+                },
+              ],
+              started_copy_date: "2026-02-01",
+              closed_at: null,
+            },
+          ],
+        },
+      ],
+      total_mirror_equity: 500,
+      display_currency: "GBP",
+    });
+    renderRail({ instrumentId: 42 });
+
+    await waitFor(() => {
+      expect(mockedCopyTrading).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      // @other holds TSLA, not AAPL — exposure section stays hidden.
+      expect(
+        screen.queryByText(/Copy-trader exposure/i),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it("ignores closed mirrors even when they retain the position", async () => {
+    mockedCopyTrading.mockResolvedValue({
+      traders: [
+        {
+          parent_cid: 1,
+          parent_username: "@closedone",
+          total_equity: 0,
+          mirrors: [
+            {
+              mirror_id: 77,
+              active: false, // closed — must not contribute
+              initial_investment: 500,
+              deposit_summary: 500,
+              withdrawal_summary: 500,
+              available_amount: 0,
+              closed_positions_net_profit: 0,
+              mirror_equity: 0,
+              position_count: 1,
+              positions: [
+                {
+                  position_id: 42,
+                  instrument_id: 42,
+                  symbol: "AAPL",
+                  company_name: "Apple",
+                  is_buy: true,
+                  units: 1,
+                  amount: 200,
+                  open_rate: 200,
+                  open_conversion_rate: 1.0,
+                  open_date_time: "2026-01-01T10:00:00Z",
+                  current_price: 210,
+                  market_value: 210,
+                  unrealized_pnl: 10,
+                },
+              ],
+              started_copy_date: "2025-11-01",
+              closed_at: "2026-02-01",
+            },
+          ],
+        },
+      ],
+      total_mirror_equity: 0,
+      display_currency: "GBP",
+    });
+    renderRail({ instrumentId: 42 });
+
+    await waitFor(() => {
+      expect(mockedCopyTrading).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(
+        screen.queryByText(/Copy-trader exposure/i),
+      ).not.toBeInTheDocument();
+    });
   });
 });
