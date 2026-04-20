@@ -41,6 +41,7 @@ import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
 import { Section, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { ResearchTab } from "@/components/instrument/ResearchTab";
+import { RightRail } from "@/components/instrument/RightRail";
 import { SummaryStrip } from "@/components/instrument/SummaryStrip";
 import { useAsync } from "@/lib/useAsync";
 
@@ -571,36 +572,52 @@ function InstrumentPageBody({
           Thesis generation failed: {thesisErr}
         </div>
       ) : null}
-      <nav className="flex gap-1 border-b border-slate-200">
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            className={`px-3 py-2 text-sm ${
-              activeTab === tab.id
-                ? "border-b-2 border-blue-600 font-medium text-blue-700"
-                : "text-slate-500 hover:text-slate-700"
-            }`}
-            onClick={() => setActiveTab(tab.id)}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </nav>
+      {/* 8/12 + 4/12 split: tab content left, right rail right. Right
+          rail is persistent across tab changes per the spec — filings
+          / peer / news are always in the operator's peripheral view. */}
+      <div className="grid gap-4 lg:grid-cols-12">
+        <div className="space-y-4 lg:col-span-8">
+          <nav className="flex gap-1 border-b border-slate-200">
+            {TABS.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                className={`px-3 py-2 text-sm ${
+                  activeTab === tab.id
+                    ? "border-b-2 border-blue-600 font-medium text-blue-700"
+                    : "text-slate-500 hover:text-slate-700"
+                }`}
+                onClick={() => setActiveTab(tab.id)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
 
-      {activeTab === "research" && (
-        <ResearchTab
-          summary={summary}
-          thesis={thesisAsync.data}
-          thesisErrored={thesisErrSticky}
-        />
-      )}
-      {activeTab === "financials" && <FinancialsTab symbol={symbol} />}
-      {activeTab === "positions" && (
-        <PositionsTab symbol={symbol} instrumentId={summary.instrument_id} />
-      )}
-      {activeTab === "news" && <NewsTab instrumentId={summary.instrument_id} />}
-      {activeTab === "filings" && <FilingsTab instrumentId={summary.instrument_id} />}
+          {activeTab === "research" && (
+            <ResearchTab
+              summary={summary}
+              thesis={thesisAsync.data}
+              thesisErrored={thesisErrSticky}
+            />
+          )}
+          {activeTab === "financials" && <FinancialsTab symbol={symbol} />}
+          {activeTab === "positions" && (
+            <PositionsTab symbol={symbol} instrumentId={summary.instrument_id} />
+          )}
+          {activeTab === "news" && <NewsTab instrumentId={summary.instrument_id} />}
+          {activeTab === "filings" && (
+            <FilingsTab instrumentId={summary.instrument_id} />
+          )}
+        </div>
+        <div className="lg:col-span-4">
+          <RightRail
+            instrumentId={summary.instrument_id}
+            sector={summary.identity.sector}
+            currentSymbol={summary.identity.symbol}
+          />
+        </div>
+      </div>
 
       {addOpen ? (
         <OrderEntryModal
