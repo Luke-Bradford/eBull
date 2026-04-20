@@ -1,23 +1,25 @@
 /**
- * RightRail — peripheral-vision column of the per-stock research page
- * (Slice 2 of docs/superpowers/specs/2026-04-20-per-stock-research-page.md).
+ * RightRail — peripheral-vision column of the per-stock research page.
+ * Slices 2 + 6 of docs/superpowers/specs/2026-04-20-per-stock-research-page.md.
  *
- * Three stacked sections, always visible regardless of which tab the
- * operator is on:
+ * Sections (independent fetches; one failure does not blank others):
  *   1. Recent filings (last 3) — link out to filings tab + documents
  *   2. Peer snapshot (top 5 ranked within same sector) — clickable
  *      rows drill into each peer's research page
- *   3. Recent news (last 3) — headline + sentiment badge
- *
- * Each section fetches independently so one failing endpoint does not
- * blank the others (per `frontend/async-data-loading.md`).
+ *   3. Copy-trader exposure (Slice 6) — parent traders the operator
+ *      mirrors who hold this instrument. Hidden when there's no
+ *      exposure. Placeholder scaffold; deeper design deferred to a
+ *      follow-up spec if scope grows.
+ *   4. Recent news (last 3) — headline + sentiment badge
  */
 import { Link } from "react-router-dom";
 
+import { fetchCopyTrading } from "@/api/copyTrading";
 import { fetchFilings } from "@/api/filings";
 import { fetchNews } from "@/api/news";
 import { fetchRankings } from "@/api/rankings";
 import type {
+  CopyTraderSummary,
   FilingItem,
   NewsItem,
   RankingItem,
@@ -49,6 +51,7 @@ export function RightRail({
         sector={sector}
         currentSymbol={currentSymbol}
       />
+      <CopyExposure instrumentId={instrumentId} />
       <RecentNews instrumentId={instrumentId} />
     </aside>
   );
@@ -217,6 +220,105 @@ function sentimentTone(score: number | null): string {
   if (score >= 0.3) return "bg-emerald-50 text-emerald-700";
   if (score <= -0.3) return "bg-red-50 text-red-700";
   return "bg-slate-100 text-slate-600";
+}
+
+// ---------------------------------------------------------------------------
+// Copy-trader exposure (Slice 6)
+// ---------------------------------------------------------------------------
+
+interface MirrorHolding {
+  mirrorId: number;
+  parentUsername: string;
+  units: number;
+  marketValue: number;
+}
+
+/** Aggregate `CopyTradingResponse` into one row per mirror holding
+ *  the instrument. Filters on `active === true` so closed mirrors
+ *  (which can retain historical positions in the response) don't
+ *  surface stale exposure. If a parent-trader has multiple active
+ *  mirrors both holding it, each mirror surfaces as its own row —
+ *  the operator cares about mirror-level actions (pause / stop),
+ *  not parent-level aggregation. */
+function extractHoldings(
+  traders: CopyTraderSummary[],
+  instrumentId: number,
+): MirrorHolding[] {
+  const out: MirrorHolding[] = [];
+  for (const trader of traders) {
+    for (const mirror of trader.mirrors) {
+      if (!mirror.active) continue;
+      const match = mirror.positions.filter(
+        (p) => p.instrument_id === instrumentId,
+      );
+      if (match.length === 0) continue;
+      out.push({
+        mirrorId: mirror.mirror_id,
+        parentUsername: trader.parent_username,
+        units: match.reduce((s, p) => s + p.units, 0),
+        marketValue: match.reduce((s, p) => s + p.market_value, 0),
+      });
+    }
+  }
+  return out;
+}
+
+function CopyExposure({ instrumentId }: { instrumentId: number }) {
+  const { data, error, loading, refetch } = useAsync(
+    () => fetchCopyTrading(),
+    [],
+  );
+  // Silent-when-empty: if no active copy-trader holds the
+  // instrument we render nothing so the rail isn't padded with an
+  // empty state on the common case (operator with no mirrors, or
+  // mirrors holding other stocks).
+  //
+  // Loading + error DO render so the operator (a) sees the fetch is
+  // in flight rather than a silent gap, and (b) can retry on a
+  // transient failure. The "hidden" condition is specifically the
+  // resolved-empty path below.
+  if (loading) {
+    return (
+      <Section title="Copy-trader exposure">
+        <SectionSkeleton rows={1} />
+      </Section>
+    );
+  }
+  if (error !== null) {
+    return (
+      <Section title="Copy-trader exposure">
+        <SectionError onRetry={refetch} />
+      </Section>
+    );
+  }
+  const holdings = data ? extractHoldings(data.traders, instrumentId) : [];
+  if (holdings.length === 0) return null;
+
+  return (
+    <Section title={`Copy-trader exposure · ${holdings.length}`}>
+      <ul className="space-y-1.5 text-xs">
+        {holdings.map((h) => (
+          <li
+            key={h.mirrorId}
+            className="flex items-baseline justify-between gap-2"
+          >
+            <Link
+              to={`/copy-trading/${h.mirrorId}`}
+              className="truncate font-medium text-blue-700 hover:underline"
+            >
+              {h.parentUsername}
+            </Link>
+            <span className="shrink-0 tabular-nums text-slate-500">
+              {h.units.toLocaleString(undefined, {
+                maximumFractionDigits: 2,
+              })}
+              u
+            </span>
+          </li>
+        ))}
+      </ul>
+    </Section>
+  );
 }
 
 function NewsRow({ n }: { n: NewsItem }) {
