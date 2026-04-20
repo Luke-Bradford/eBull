@@ -51,6 +51,10 @@ def _make_cursor_sequence(fetchone_per_cursor: list[list[object]]) -> MagicMock:
 
     `fetchone_per_cursor[i]` is the list of `fetchone` return values for
     the i-th `cursor(...)` call in dispatch order (one entry per execute).
+    Always uses `side_effect`, even for single-element lists — a
+    `return_value` would silently replay the same row on an unexpected
+    second `fetchone()` call and mask a test-construction bug (Codex
+    finding on PR #370 round 2).
     """
     cursors_iter = iter(fetchone_per_cursor)
 
@@ -59,10 +63,8 @@ def _make_cursor_sequence(fetchone_per_cursor: list[list[object]]) -> MagicMock:
         cur.__enter__.return_value = cur
         cur.__exit__.return_value = None
         results = next(cursors_iter)
-        if len(results) == 1:
-            cur.fetchone.return_value = results[0]
-        else:
-            cur.fetchone.side_effect = list(results)
+        assert results, "each cursor must declare at least one fetchone result"
+        cur.fetchone.side_effect = list(results)
         return cur
 
     conn_mock = MagicMock()
