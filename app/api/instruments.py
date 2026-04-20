@@ -11,8 +11,9 @@ No writes. No schema changes.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 
 import psycopg
 import psycopg.rows
@@ -112,6 +113,21 @@ class InstrumentKeyStats(BaseModel):
     debt_to_equity: Decimal | None
     revenue_growth_yoy: Decimal | None
     earnings_growth_yoy: Decimal | None
+
+
+class InstrumentFinancialRow(BaseModel):
+    period_end: date
+    period_type: str  # Q1/Q2/Q3/Q4/FY (from financial_periods) or yfinance label
+    values: dict[str, Decimal | None]
+
+
+class InstrumentFinancials(BaseModel):
+    symbol: str
+    statement: str  # "income" | "balance" | "cashflow"
+    period: str  # "quarterly" | "annual"
+    currency: str | None
+    source: str  # "financial_periods" (local SEC XBRL) | "yfinance"
+    rows: list[InstrumentFinancialRow]
 
 
 class InstrumentSummary(BaseModel):
@@ -268,6 +284,195 @@ def list_instruments(
     ]
 
     return InstrumentListResponse(items=items, total=total, offset=offset, limit=limit)
+
+
+# Column sets per statement for the local financial_periods read path.
+# Tuple order is the preferred display order for each statement.
+_INCOME_COLUMNS: tuple[str, ...] = (
+    "revenue",
+    "cost_of_revenue",
+    "gross_profit",
+    "operating_income",
+    "net_income",
+    "eps_basic",
+    "eps_diluted",
+    "research_and_dev",
+    "sga_expense",
+    "depreciation_amort",
+    "interest_expense",
+    "income_tax",
+    "shares_basic",
+    "shares_diluted",
+    "sbc_expense",
+)
+
+_BALANCE_COLUMNS: tuple[str, ...] = (
+    "total_assets",
+    "total_liabilities",
+    "shareholders_equity",
+    "cash",
+    "long_term_debt",
+    "short_term_debt",
+    "shares_outstanding",
+    "inventory",
+    "receivables",
+    "payables",
+    "goodwill",
+    "ppe_net",
+)
+
+_CASHFLOW_COLUMNS: tuple[str, ...] = (
+    "operating_cf",
+    "investing_cf",
+    "financing_cf",
+    "capex",
+    "dividends_paid",
+    "dps_declared",
+    "buyback_spend",
+)
+
+_STATEMENT_COLUMNS: dict[str, tuple[str, ...]] = {
+    "income": _INCOME_COLUMNS,
+    "balance": _BALANCE_COLUMNS,
+    "cashflow": _CASHFLOW_COLUMNS,
+}
+
+
+def _fetch_local_financials(
+    conn: psycopg.Connection[object],
+    instrument_id: int,
+    columns: tuple[str, ...],
+    period: str,
+) -> tuple[list[InstrumentFinancialRow], str | None]:
+    """Read rows from ``financial_periods`` for the given statement's columns.
+
+    ``period == 'quarterly'`` matches period_type IN ('Q1','Q2','Q3','Q4').
+    ``period == 'annual'`` matches period_type = 'FY'.
+
+    Returns (rows, currency). Empty rows = no local data, let caller fall
+    back to yfinance.
+    """
+    if period == "quarterly":
+        type_clause = "period_type IN ('Q1','Q2','Q3','Q4')"
+    else:
+        type_clause = "period_type = 'FY'"
+
+    # Columns whitelisted above — safe to format into SQL.
+    select_cols = ", ".join(columns)
+    sql = f"""
+        SELECT period_end_date, period_type, reported_currency, {select_cols}
+        FROM financial_periods
+        WHERE instrument_id = %(iid)s
+          AND superseded_at IS NULL
+          AND {type_clause}
+        ORDER BY period_end_date DESC
+        LIMIT 20
+    """  # noqa: S608 — columns and type_clause are hardcoded whitelists
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(sql, {"iid": instrument_id})  # type: ignore[arg-type]  # SQL built from hardcoded whitelists
+        db_rows = cur.fetchall()
+
+    if not db_rows:
+        return [], None
+
+    currency = db_rows[0].get("reported_currency") if db_rows else None  # type: ignore[union-attr]
+    rows: list[InstrumentFinancialRow] = [
+        InstrumentFinancialRow(
+            period_end=r["period_end_date"],  # type: ignore[arg-type]
+            period_type=str(r["period_type"]),  # type: ignore[index]
+            values={col: r.get(col) for col in columns},  # type: ignore[union-attr]
+        )
+        for r in db_rows
+    ]
+    return rows, str(currency) if currency is not None else None
+
+
+@router.get("/{symbol}/financials", response_model=InstrumentFinancials)
+def get_instrument_financials(
+    symbol: str,
+    period: Literal["quarterly", "annual"] = Query(default="quarterly"),
+    statement: Literal["income", "balance", "cashflow"] = Query(default="income"),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+    yfinance_provider: YFinanceProvider = Depends(get_yfinance_provider),
+) -> InstrumentFinancials:
+    """Per-ticker financial statement (Phase 2.3 of the 2026-04-19 refocus).
+
+    Pull priority:
+      1. Local ``financial_periods`` rows (SEC XBRL-sourced) if the
+         instrument has them.
+      2. yfinance fallback otherwise.
+
+    Returns an empty row list (not 500, not 404) when neither source has
+    data — the UI shows "no statement data available".
+    """
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    columns = _STATEMENT_COLUMNS[statement]
+
+    # Resolve symbol -> instrument_id for the local read.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT instrument_id, symbol FROM instruments WHERE UPPER(symbol) = %(s)s LIMIT 1",
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    # Try local first.
+    local_rows, local_currency = _fetch_local_financials(
+        conn,
+        int(inst_row["instrument_id"]),  # type: ignore[arg-type]
+        columns,
+        period,
+    )
+    if local_rows:
+        return InstrumentFinancials(
+            symbol=str(inst_row["symbol"]),  # type: ignore[index]
+            statement=statement,
+            period=period,
+            currency=local_currency,
+            source="financial_periods",
+            rows=local_rows,
+        )
+
+    # Fallback to yfinance.
+    y_fin = yfinance_provider.get_financials(
+        str(inst_row["symbol"]),  # type: ignore[index]
+        statement=statement,
+        period=period,
+    )
+    if y_fin is None:
+        return InstrumentFinancials(
+            symbol=str(inst_row["symbol"]),  # type: ignore[index]
+            statement=statement,
+            period=period,
+            currency=None,
+            source="yfinance",
+            rows=[],
+        )
+    yf_rows = [
+        InstrumentFinancialRow(
+            period_end=row.period_end,
+            # yfinance rows have no period_type label; encode as statement-date
+            period_type=period[0].upper() + row.period_end.strftime("%Y"),
+            # Cast values dict to the Decimal | None shape of InstrumentFinancialRow
+            values={k: v for k, v in row.values.items()},
+        )
+        for row in y_fin.rows
+    ]
+    return InstrumentFinancials(
+        symbol=str(inst_row["symbol"]),  # type: ignore[index]
+        statement=statement,
+        period=period,
+        currency=y_fin.currency,
+        source="yfinance",
+        rows=yf_rows,
+    )
 
 
 @router.get("/{symbol}/summary", response_model=InstrumentSummary)
