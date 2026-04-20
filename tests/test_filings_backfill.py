@@ -21,7 +21,7 @@ import psycopg
 import pytest
 
 from app.providers.filings import FilingEvent, FilingNotFound
-from app.services.filings_backfill import (
+from app.services.coverage import (
     BackfillOutcome,
     backfill_filings,
 )
@@ -740,7 +740,7 @@ class TestEightKGap:
         #
         # Cleanest: patch _upsert_filing at module level to skip 8-Ks
         # (simulates a silent ON CONFLICT block).
-        import app.services.filings_backfill as backfill_module
+        import app.services.coverage as backfill_module
 
         orig_upsert = backfill_module._upsert_filing
 

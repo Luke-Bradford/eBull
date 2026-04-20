@@ -7,7 +7,7 @@ from decimal import Decimal
 from unittest.mock import MagicMock
 
 from app.providers.fundamentals import XbrlFact
-from app.services.financial_facts import (
+from app.services.fundamentals import (
     finish_ingestion_run,
     start_ingestion_run,
     upsert_facts_for_instrument,

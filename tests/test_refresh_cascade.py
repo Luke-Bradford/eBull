@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.services.fundamentals import RefreshOutcome, RefreshPlan
 from app.services.refresh_cascade import (
     ATTEMPT_CAP,
     LOCKED_BY_SIBLING,
@@ -26,7 +27,6 @@ from app.services.refresh_cascade import (
     enqueue_retry,
     instrument_lock,
 )
-from app.services.sec_incremental import RefreshOutcome, RefreshPlan
 from app.services.thesis import StaleInstrument
 
 # ---------------------------------------------------------------------------

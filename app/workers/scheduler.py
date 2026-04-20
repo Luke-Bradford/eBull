@@ -1182,7 +1182,7 @@ def daily_financial_facts() -> None:
     + per-CIK watermarks. See app.services.sec_incremental."""
     with _tracked_job(JOB_DAILY_FINANCIAL_FACTS) as tracker:
         with psycopg.connect(settings.database_url) as conn:
-            from app.services.sec_incremental import execute_refresh, plan_refresh
+            from app.services.fundamentals import execute_refresh, plan_refresh
 
             today = datetime.now(UTC).date()
             with (
@@ -1213,7 +1213,7 @@ def daily_financial_facts() -> None:
             touched_ciks = list(plan.seeds) + [cik for cik, _ in plan.refreshes]
             if outcome.seeded + outcome.refreshed > 0 and touched_ciks:
                 # Phase 2: normalization for CIKs we actually touched this run.
-                from app.services.financial_normalization import normalize_financial_periods
+                from app.services.fundamentals import normalize_financial_periods
 
                 cur = conn.execute(
                     """
@@ -2149,8 +2149,7 @@ def fundamentals_sync() -> None:
     phase-2 writes committed and the job succeeded.
     """
     with _tracked_job(JOB_FUNDAMENTALS_SYNC) as tracker:
-        from app.services.coverage_audit import audit_all_instruments
-        from app.services.filings_backfill import BackfillOutcome, backfill_filings
+        from app.services.coverage import BackfillOutcome, audit_all_instruments, backfill_filings
 
         logger.info("fundamentals_sync: starting")
 

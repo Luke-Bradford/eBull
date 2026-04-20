@@ -15,7 +15,7 @@ from app.providers.implementations.sec_edgar import (
     MasterIndexFetchResult,
     SecFilingsProvider,
 )
-from app.services.sec_incremental import (
+from app.services.fundamentals import (
     FUNDAMENTALS_FORMS,
     LOOKBACK_DAYS,
     plan_refresh,

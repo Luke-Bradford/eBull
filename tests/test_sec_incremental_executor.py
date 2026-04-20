@@ -13,7 +13,7 @@ import pytest
 from app.providers.fundamentals import XbrlFact
 from app.providers.implementations.sec_edgar import MasterIndexEntry, SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
-from app.services.sec_incremental import (
+from app.services.fundamentals import (
     RefreshOutcome,
     RefreshPlan,
     execute_refresh,
