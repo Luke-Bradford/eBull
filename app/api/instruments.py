@@ -581,23 +581,31 @@ def get_instrument_candles(
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
 
     days = _CANDLE_RANGE_DAYS[range_]
-    params: dict[str, object] = {"iid": inst_row["instrument_id"]}
-    if days is None:
-        where = "WHERE instrument_id = %(iid)s"
-    else:
-        where = "WHERE instrument_id = %(iid)s AND price_date >= CURRENT_DATE - make_interval(days => %(days)s)"
-        params["days"] = days
-
+    # Two fixed queries rather than f-string-composing a WHERE clause,
+    # so there's no structural-injection footgun if the range-token
+    # set grows later. `max` omits the date filter entirely.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            f"""
-            SELECT price_date, open, high, low, close, volume
-            FROM price_daily
-            {where}
-            ORDER BY price_date ASC
-            """,
-            params,
-        )
+        if days is None:
+            cur.execute(
+                """
+                SELECT price_date, open, high, low, close, volume
+                FROM price_daily
+                WHERE instrument_id = %(iid)s
+                ORDER BY price_date ASC
+                """,
+                {"iid": inst_row["instrument_id"]},
+            )
+        else:
+            cur.execute(
+                """
+                SELECT price_date, open, high, low, close, volume
+                FROM price_daily
+                WHERE instrument_id = %(iid)s
+                  AND price_date >= CURRENT_DATE - make_interval(days => %(days)s)
+                ORDER BY price_date ASC
+                """,
+                {"iid": inst_row["instrument_id"], "days": days},
+            )
         rows = cur.fetchall()
 
     bars = [
