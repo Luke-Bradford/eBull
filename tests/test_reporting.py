@@ -265,31 +265,35 @@ class TestReportJobsAvailability:
 
 class TestReportsAPI:
     def test_reports_router_exists(self) -> None:
-        """The reports router should have the correct prefix."""
+        """The reports router should have the correct prefix.
+
+        The Vite dev proxy strips ``/api`` before forwarding to the
+        backend, so the FastAPI router prefix must NOT include ``/api``
+        — otherwise browser calls to ``/api/reports/...`` resolve to
+        ``/reports/...`` on the backend and 404. Keep this prefix
+        consistent with other routers (filings, news, instruments).
+        """
         from app.api.reports import router
 
-        assert router.prefix == "/api/reports"
+        assert router.prefix == "/reports"
 
     def test_list_weekly_endpoint_exists(self) -> None:
-        """GET /api/reports/weekly should be a registered route."""
         from app.api.reports import router
 
         paths = [r.path for r in router.routes if hasattr(r, "path")]  # type: ignore[union-attr]
-        assert "/api/reports/weekly" in paths
+        assert "/reports/weekly" in paths
 
     def test_list_monthly_endpoint_exists(self) -> None:
-        """GET /api/reports/monthly should be a registered route."""
         from app.api.reports import router
 
         paths = [r.path for r in router.routes if hasattr(r, "path")]  # type: ignore[union-attr]
-        assert "/api/reports/monthly" in paths
+        assert "/reports/monthly" in paths
 
     def test_latest_endpoint_exists(self) -> None:
-        """GET /api/reports/latest should be a registered route."""
         from app.api.reports import router
 
         paths = [r.path for r in router.routes if hasattr(r, "path")]  # type: ignore[union-attr]
-        assert "/api/reports/latest" in paths
+        assert "/reports/latest" in paths
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ from app.api.auth import require_session_or_service_token
 from app.config import settings
 
 router = APIRouter(
-    prefix="/api/attribution",
+    prefix="/attribution",
     tags=["attribution"],
     dependencies=[Depends(require_session_or_service_token)],
 )
