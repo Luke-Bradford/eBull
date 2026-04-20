@@ -36,7 +36,7 @@ export function RecentRecommendations({ items }: { items: RecommendationListItem
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <Link
-                to={`/instruments/${r.instrument_id}`}
+                to={`/instrument/${encodeURIComponent(r.symbol)}`}
                 className="font-medium text-blue-600 hover:underline"
               >
                 {r.symbol}

@@ -154,7 +154,7 @@ describe("InstrumentsPage — data rendering", () => {
       expect(screen.getByText("AAPL")).toBeInTheDocument();
     });
     const link = screen.getByText("AAPL").closest("a");
-    expect(link).toHaveAttribute("href", "/instruments/1");
+    expect(link).toHaveAttribute("href", "/instrument/AAPL");
   });
 });
 

@@ -6,7 +6,7 @@ import { ConfigProvider } from "@/lib/ConfigContext";
 import { DisplayCurrencyProvider } from "@/lib/DisplayCurrencyContext";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { RankingsPage } from "@/pages/RankingsPage";
-import { InstrumentDetailPage } from "@/pages/InstrumentDetailPage";
+import { InstrumentDetailRedirect } from "@/pages/InstrumentDetailRedirect";
 import { InstrumentPage } from "@/pages/InstrumentPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { RecommendationsPage } from "@/pages/RecommendationsPage";
@@ -21,7 +21,6 @@ import { OperatorsPage } from "@/pages/OperatorsPage";
 import { CopyTradingPage } from "@/pages/CopyTradingPage";
 import { InstrumentsPage } from "@/pages/InstrumentsPage";
 import { PortfolioPage } from "@/pages/PortfolioPage";
-import { PositionDetailPage } from "@/pages/PositionDetailPage";
 
 export function App() {
   return (
@@ -43,10 +42,20 @@ export function App() {
         >
           <Route index element={<DashboardPage />} />
           <Route path="portfolio" element={<PortfolioPage />} />
-          <Route path="portfolio/:instrumentId" element={<PositionDetailPage />} />
+          {/* Legacy per-instrument routes redirect to the canonical
+              `/instrument/:symbol` research page. Slice 3 of the
+              per-stock research spec — shims stay for one release so
+              operator bookmarks migrate; Slice 5 deletes them. */}
+          <Route
+            path="portfolio/:instrumentId"
+            element={<InstrumentDetailRedirect search="?tab=positions" />}
+          />
           <Route path="rankings" element={<RankingsPage />} />
           <Route path="instruments" element={<InstrumentsPage />} />
-          <Route path="instruments/:instrumentId" element={<InstrumentDetailPage />} />
+          <Route
+            path="instruments/:instrumentId"
+            element={<InstrumentDetailRedirect />}
+          />
           <Route path="instrument/:symbol" element={<InstrumentPage />} />
           <Route path="copy-trading/:mirrorId" element={<CopyTradingPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />

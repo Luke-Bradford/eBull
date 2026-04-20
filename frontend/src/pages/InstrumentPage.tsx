@@ -13,8 +13,8 @@
  * The right rail (filings + peer + news preview) ships in Slice 2.
  */
 
-import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useCallback, useEffect, useState } from "react";
+import { useParams, useSearchParams } from "react-router-dom";
 
 import { fetchFilings } from "@/api/filings";
 import {
@@ -455,7 +455,28 @@ function InstrumentPageBody({
   symbol: string;
 }): JSX.Element {
   const instrumentId = summary.instrument_id;
-  const [activeTab, setActiveTab] = useState<TabId>("research");
+
+  // Tab state lives in the URL so dashboard/portfolio drill-ins can
+  // preselect the Positions tab via `?tab=positions` (Slice 3 of
+  // per-stock research spec). `replace: true` on the setter so
+  // tab-switching doesn't spam browser history.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab");
+  const activeTab: TabId = TABS.some((t) => t.id === tabParam)
+    ? (tabParam as TabId)
+    : "research";
+  const setActiveTab = useCallback(
+    (next: TabId) => {
+      const params = new URLSearchParams(searchParams);
+      if (next === "research") {
+        params.delete("tab");
+      } else {
+        params.set("tab", next);
+      }
+      setSearchParams(params, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
 
   const thesisAsync = useAsync<ThesisDetail | null>(
     async () => {

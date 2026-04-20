@@ -200,7 +200,7 @@ function RankingRow({ item }: { item: RankingItem }) {
       </td>
       <td className="px-2 py-2">
         <Link
-          to={`/instruments/${item.instrument_id}`}
+          to={`/instrument/${encodeURIComponent(item.symbol)}`}
           className="font-medium text-blue-600 hover:underline"
         >
           {item.symbol}

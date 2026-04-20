@@ -93,7 +93,7 @@ function AuditRow({ item }: { item: AuditListItem }) {
         <td className="px-2 py-2">
           {item.instrument_id !== null && item.symbol ? (
             <Link
-              to={`/instruments/${item.instrument_id}`}
+              to={`/instrument/${encodeURIComponent(item.symbol)}`}
               className="font-medium text-blue-600 hover:underline"
               onClick={(e) => e.stopPropagation()}
             >
