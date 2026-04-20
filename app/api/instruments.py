@@ -454,6 +454,7 @@ def get_instrument_financials(
             source="yfinance",
             rows=[],
         )
+
     # yfinance statement rows don't carry a period_type label. For the
     # quarterly path we infer Q1-Q4 from the period_end month (fiscal
     # quarters end Mar/Jun/Sep/Dec for the vast majority of issuers).
