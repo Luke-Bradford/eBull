@@ -343,6 +343,10 @@ class TestProductionInvokerRegistry:
             "morning_candidate_review",
             "seed_cost_models",
             "weekly_report",
+            # Phase 1.4: attribution_summary retired from SCHEDULED_JOBS
+            # (no UI consumer). Function stays in _INVOKERS for manual
+            # trigger from Admin "Run now".
+            "attribution_summary",
             # daily_cik_refresh + daily_financial_facts retired from _INVOKERS
             # in Chunk 3 of the 2026-04-19 research-tool refocus; they are
             # now called from inside fundamentals_sync.
