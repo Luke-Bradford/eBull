@@ -104,11 +104,12 @@ def test_daily_financial_facts_raises_when_planner_has_skipped_ciks() -> None:
     broken and Admin health would still be green."""
     from app.workers import scheduler
 
-    # Plan has no seeds / refreshes — production-code guard
-    # `if outcome.seeded + outcome.refreshed > 0 and touched_ciks:` in
-    # scheduler.daily_financial_facts() short-circuits, so
-    # `normalize_financial_periods` is never reached. No patch needed
-    # for that function here.
+    # Plan has no seeds / refreshes — production-code guard at
+    # app/workers/scheduler.py:1245
+    #   `if outcome.seeded + outcome.refreshed > 0 and touched_ciks:`
+    # short-circuits because `outcome.seeded == 0` and
+    # `outcome.refreshed == 0`, so `normalize_financial_periods` is
+    # never reached. No patch needed for that function here.
     plan = RefreshPlan(
         seeds=[],
         refreshes=[],
