@@ -138,12 +138,12 @@ def add_to_watchlist(
             {"op": operator_id, "iid": int(inst["instrument_id"]), "notes": req.notes},  # type: ignore[arg-type]
         )
         wl_row = cur.fetchone()
-    conn.commit()
     if wl_row is None:
         # RETURNING must produce a row — if it didn't, the INSERT/UPDATE
-        # path is broken and we should surface that instead of crashing
-        # under python -O (where bare ``assert`` is compiled away).
+        # path is broken. Raise BEFORE committing so a broken response
+        # path doesn't leave a committed row the caller can't confirm.
         raise HTTPException(status_code=500, detail="watchlist upsert returned no row")
+    conn.commit()
 
     return WatchlistItem(
         instrument_id=int(inst["instrument_id"]),  # type: ignore[arg-type]
