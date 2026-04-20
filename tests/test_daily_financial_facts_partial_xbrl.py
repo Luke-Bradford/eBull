@@ -38,9 +38,9 @@ def test_daily_financial_facts_raises_when_outcome_has_failures() -> None:
     # Plan: one seed + one refresh. Outcome: one succeeded refresh + one
     # XBRL failure in the seed.
     plan = RefreshPlan(
-        seeds=("0000000001",),
-        refreshes=(("0000000002", "2026-04-18"),),
-        submissions_only_advances=(),
+        seeds=["0000000001"],
+        refreshes=[("0000000002", "2026-04-18")],
+        submissions_only_advances=[],
     )
     outcome = RefreshOutcome(
         seeded=0,
@@ -104,9 +104,9 @@ def test_daily_financial_facts_raises_when_planner_has_skipped_ciks() -> None:
     from app.workers import scheduler
 
     plan = RefreshPlan(
-        seeds=(),
-        refreshes=(),
-        submissions_only_advances=(),
+        seeds=[],
+        refreshes=[],
+        submissions_only_advances=[],
         failed_plan_ciks=["0000000009"],
     )
     outcome = RefreshOutcome(seeded=0, refreshed=0, submissions_advanced=0, failed=[])
@@ -146,9 +146,9 @@ def test_daily_financial_facts_combines_xbrl_and_cascade_failures() -> None:
     from app.workers import scheduler
 
     plan = RefreshPlan(
-        seeds=(),
-        refreshes=(("0000000002", "2026-04-18"),),
-        submissions_only_advances=(),
+        seeds=[],
+        refreshes=[("0000000002", "2026-04-18")],
+        submissions_only_advances=[],
     )
     outcome = RefreshOutcome(
         seeded=0,
@@ -214,7 +214,7 @@ def test_daily_financial_facts_no_raise_when_outcome_clean() -> None:
     path and the regression guard against a too-eager raise condition."""
     from app.workers import scheduler
 
-    plan = RefreshPlan(seeds=(), refreshes=(), submissions_only_advances=())
+    plan = RefreshPlan(seeds=[], refreshes=[], submissions_only_advances=[])
     outcome = RefreshOutcome(seeded=0, refreshed=0, submissions_advanced=0, failed=[])
 
     conn = MagicMock()
