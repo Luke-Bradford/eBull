@@ -184,9 +184,17 @@ export function PriceChart({
     [symbol, range],
   );
 
+  // Between a range click and useAsync's effect firing, React renders
+  // one frame with `loading=false` and the prior range's `data` still
+  // in state. Gate chart rendering on `data.range === range` so the
+  // old chart doesn't flash under the new range label (Codex slice-B
+  // round-2 finding).
+  const dataMatchesRange = data?.range === range;
+  const effectivelyLoading = loading || !dataMatchesRange;
+
   const geom = useMemo<ChartGeometry | null>(
-    () => (data ? geometry(data.rows) : null),
-    [data],
+    () => (dataMatchesRange && data ? geometry(data.rows) : null),
+    [data, dataMatchesRange],
   );
 
   return (
@@ -223,16 +231,22 @@ export function PriceChart({
         ) : null}
       </div>
 
-      {loading ? <SectionSkeleton rows={6} /> : null}
+      {effectivelyLoading && error === null ? (
+        <SectionSkeleton rows={6} />
+      ) : null}
       {error !== null ? <SectionError onRetry={refetch} /> : null}
-      {!loading && error === null && geom === null ? (
+      {/* Empty state fires ONLY when a fetch for the current range has
+          settled with zero valid rows. `dataMatchesRange` ensures we
+          don't mis-label "no data yet" as "no data at all" during a
+          range-switch transition. */}
+      {!effectivelyLoading && error === null && dataMatchesRange && geom === null ? (
         <EmptyState
           title="No price data"
           description="No candles in the local price_daily store for this range. Widen the range or wait for the next market-data refresh."
         />
       ) : null}
 
-      {geom !== null ? (
+      {geom !== null && dataMatchesRange ? (
         <ChartSvg
           geom={geom}
           onHover={setHoverIdx}

@@ -122,6 +122,43 @@ describe("PriceChart — data states", () => {
     expect(screen.queryByText(/No price data/i)).not.toBeInTheDocument();
   });
 
+  it("hides the stale chart while a new-range fetch is in flight", async () => {
+    // Resolve returns a response whose `range !== requested range` —
+    // simulates the one-frame window after a range click but before
+    // useAsync's effect clears data. Chart must NOT render because
+    // `data.range` no longer matches the component's `range`.
+    mockedFetch.mockResolvedValue({
+      ...candles([
+        {
+          date: "2026-04-10",
+          open: "100",
+          high: "102",
+          low: "99",
+          close: "101",
+          volume: "1000",
+        },
+        {
+          date: "2026-04-11",
+          open: "101",
+          high: "104",
+          low: "100",
+          close: "103",
+          volume: "1500",
+        },
+      ]),
+      range: "5y", // mismatch: component defaults to 1m
+      days: 1825,
+    });
+    render(<MemoryRouter><PriceChart symbol="AAPL" /></MemoryRouter>);
+    await waitFor(() => {
+      expect(mockedFetch).toHaveBeenCalled();
+    });
+    // Data arrived for a different range; chart stays hidden because
+    // data.range !== component range. Skeleton remains visible.
+    expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
+    expect(screen.queryByText(/No price data/i)).not.toBeInTheDocument();
+  });
+
   it("propagates fetch errors via SectionError + shows a retry button", async () => {
     mockedFetch.mockRejectedValue(new Error("network down"));
     render(<MemoryRouter><PriceChart symbol="AAPL" /></MemoryRouter>);
