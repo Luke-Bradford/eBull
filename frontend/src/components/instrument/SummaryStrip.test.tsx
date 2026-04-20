@@ -110,7 +110,9 @@ function heldPosition(): InstrumentPositionDetail {
 function noopProps() {
   return {
     thesisLoaded: true,
+    thesisError: false,
     positionLoaded: true,
+    positionError: false,
     onAdd: vi.fn(),
     onClose: vi.fn(),
     onGenerateThesis: vi.fn(),
@@ -280,6 +282,41 @@ describe("SummaryStrip — action gating", () => {
       />,
     );
     expect(screen.queryByTestId("held-badge")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("action-close")).not.toBeInTheDocument();
+  });
+
+  it("shows error badge + keeps Generate thesis reachable on thesisError", () => {
+    // Non-404 thesis errors used to silently blank the strip. Now
+    // the error is surfaced and the retry affordance remains visible
+    // (Codex slice-1 round-3 finding).
+    render(
+      <SummaryStrip
+        summary={summary()}
+        thesis={null}
+        position={null}
+        {...noopProps()}
+        thesisError
+        thesisLoaded={false}
+      />,
+    );
+    expect(screen.getByTestId("thesis-badge-error")).toBeInTheDocument();
+    expect(screen.getByTestId("action-generate-thesis")).toBeInTheDocument();
+  });
+
+  it("shows position error badge + hides Close on positionError", () => {
+    render(
+      <SummaryStrip
+        summary={summary()}
+        thesis={freshThesis()}
+        position={null}
+        {...noopProps()}
+        positionError
+        positionLoaded={false}
+      />,
+    );
+    expect(screen.getByTestId("position-badge-error")).toBeInTheDocument();
+    // Close button must stay hidden when holdings are unknown —
+    // offering Close against unresolved position data is unsafe.
     expect(screen.queryByTestId("action-close")).not.toBeInTheDocument();
   });
 

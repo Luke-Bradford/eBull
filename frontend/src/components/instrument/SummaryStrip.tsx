@@ -70,9 +70,13 @@ export interface SummaryStripProps {
   thesis: ThesisDetail | null;
   /** True iff the thesis fetch has settled (resolved or legitimate 404). */
   thesisLoaded: boolean;
+  /** True iff the thesis fetch errored on a non-404 failure. */
+  thesisError: boolean;
   position: InstrumentPositionDetail | null;
   /** True iff the position fetch has settled. */
   positionLoaded: boolean;
+  /** True iff the position fetch errored on a non-404 failure. */
+  positionError: boolean;
   onAdd: () => void;
   onClose: () => void;
   onGenerateThesis: () => void;
@@ -83,8 +87,10 @@ export function SummaryStrip({
   summary,
   thesis,
   thesisLoaded,
+  thesisError,
   position,
   positionLoaded,
+  positionError,
   onAdd,
   onClose,
   onGenerateThesis,
@@ -103,18 +109,19 @@ export function SummaryStrip({
   const isHeld = heldUnits > 0;
   // Multi-trade positions can't be closed from this strip because
   // ClosePositionModal needs one specific position_id. The operator
-  // goes to the Positions tab instead. Hide the button rather than
-  // offer a dead-end click.
+  // goes to the Positions tab instead. Also gate on `positionLoaded`
+  // (NOT errored) so a stale/unresolved fetch doesn't offer a
+  // dead-end click.
   const canCloseFromStrip =
     positionLoaded &&
+    !positionError &&
+    isHeld &&
     position !== null &&
-    position.total_units > 0 &&
     position.trades.length === 1;
   const thesisStale = isThesisStale(thesis);
-  // Only gate on staleness AFTER the fetch settles; otherwise a
-  // pre-resolution `null` would flash "Generate thesis" and could
-  // trigger a needless generation.
-  const showGenerateThesis = thesisLoaded && thesisStale;
+  // Still offer Generate thesis on errored thesis state — gives the
+  // operator a retry affordance instead of silent lockout.
+  const showGenerateThesis = (thesisLoaded && thesisStale) || thesisError;
 
   return (
     <div
@@ -159,7 +166,14 @@ export function SummaryStrip({
 
       {/* Row 3: badges + actions */}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        {thesisLoaded && thesis !== null ? (
+        {thesisError ? (
+          <span
+            data-testid="thesis-badge-error"
+            className="inline-flex items-center rounded border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700"
+          >
+            Thesis unavailable
+          </span>
+        ) : thesisLoaded && thesis !== null ? (
           <span
             data-testid="thesis-badge"
             className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${thesisTone(thesis.stance)}`}
@@ -181,7 +195,14 @@ export function SummaryStrip({
           </span>
         ) : null}
 
-        {positionLoaded && isHeld ? (
+        {positionError ? (
+          <span
+            data-testid="position-badge-error"
+            className="inline-flex items-center rounded border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700"
+          >
+            Holdings unavailable
+          </span>
+        ) : positionLoaded && isHeld ? (
           <span
             data-testid="held-badge"
             className="inline-flex items-center rounded border border-blue-300 bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700"

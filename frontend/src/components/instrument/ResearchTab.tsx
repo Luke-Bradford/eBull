@@ -83,7 +83,21 @@ function KeyStat({
   );
 }
 
-function ThesisPanel({ thesis }: { thesis: ThesisDetail | null }) {
+function ThesisPanel({
+  thesis,
+  errored,
+}: {
+  thesis: ThesisDetail | null;
+  errored: boolean;
+}) {
+  if (errored) {
+    return (
+      <EmptyState
+        title="Thesis temporarily unavailable"
+        description="Failed to fetch the latest thesis. Retry via the Generate thesis button in the strip above."
+      />
+    );
+  }
   if (thesis === null) {
     return (
       <EmptyState
@@ -141,9 +155,14 @@ function ThesisPanel({ thesis }: { thesis: ThesisDetail | null }) {
 export interface ResearchTabProps {
   summary: InstrumentSummary;
   thesis: ThesisDetail | null;
+  thesisErrored?: boolean;
 }
 
-export function ResearchTab({ summary, thesis }: ResearchTabProps): JSX.Element {
+export function ResearchTab({
+  summary,
+  thesis,
+  thesisErrored = false,
+}: ResearchTabProps): JSX.Element {
   const stats = summary.key_stats;
   const fs = stats?.field_source ?? undefined;
 
@@ -172,7 +191,7 @@ export function ResearchTab({ summary, thesis }: ResearchTabProps): JSX.Element 
       </Section>
 
       <Section title="Thesis">
-        <ThesisPanel thesis={thesis} />
+        <ThesisPanel thesis={thesis} errored={thesisErrored} />
       </Section>
     </div>
   );

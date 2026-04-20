@@ -516,8 +516,10 @@ function InstrumentPageBody({
         summary={summary}
         thesis={thesisAsync.data}
         thesisLoaded={!thesisAsync.loading && thesisAsync.error === null}
+        thesisError={thesisAsync.error !== null}
         position={position}
         positionLoaded={!positionAsync.loading && positionAsync.error === null}
+        positionError={positionAsync.error !== null}
         onAdd={() => setAddOpen(true)}
         onClose={() => setCloseOpen(true)}
         onGenerateThesis={handleGenerateThesis}
@@ -549,7 +551,11 @@ function InstrumentPageBody({
       </nav>
 
       {activeTab === "research" && (
-        <ResearchTab summary={summary} thesis={thesisAsync.data} />
+        <ResearchTab
+          summary={summary}
+          thesis={thesisAsync.data}
+          thesisErrored={thesisAsync.error !== null}
+        />
       )}
       {activeTab === "financials" && <FinancialsTab symbol={symbol} />}
       {activeTab === "positions" && (
