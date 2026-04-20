@@ -19,8 +19,9 @@ import pytest
 from app.services.fundamentals import RefreshOutcome, RefreshPlan
 
 
-def _install_tracked_job_cm(mod: object) -> MagicMock:
-    """Replace _tracked_job with a context manager yielding a tracker mock."""
+def _install_tracked_job_cm() -> MagicMock:
+    """Build a context-manager mock that yields a tracker mock. Callers
+    install it via `patch.object(scheduler, "_tracked_job", return_value=cm)`."""
     tracker = MagicMock()
     tracker.row_count = 0
     tracked_cm = MagicMock()
@@ -57,7 +58,7 @@ def test_daily_financial_facts_raises_when_outcome_has_failures() -> None:
     fake_connect_cm.__enter__.return_value = conn
     fake_connect_cm.__exit__.return_value = None
 
-    tracked_cm = _install_tracked_job_cm(scheduler)
+    tracked_cm = _install_tracked_job_cm()
 
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://stub/"
@@ -103,6 +104,11 @@ def test_daily_financial_facts_raises_when_planner_has_skipped_ciks() -> None:
     broken and Admin health would still be green."""
     from app.workers import scheduler
 
+    # Plan has no seeds / refreshes — production-code guard
+    # `if outcome.seeded + outcome.refreshed > 0 and touched_ciks:` in
+    # scheduler.daily_financial_facts() short-circuits, so
+    # `normalize_financial_periods` is never reached. No patch needed
+    # for that function here.
     plan = RefreshPlan(
         seeds=[],
         refreshes=[],
@@ -116,7 +122,7 @@ def test_daily_financial_facts_raises_when_planner_has_skipped_ciks() -> None:
     fake_connect_cm.__enter__.return_value = conn
     fake_connect_cm.__exit__.return_value = None
 
-    tracked_cm = _install_tracked_job_cm(scheduler)
+    tracked_cm = _install_tracked_job_cm()
 
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://stub/"
@@ -163,7 +169,7 @@ def test_daily_financial_facts_combines_xbrl_and_cascade_failures() -> None:
     fake_connect_cm.__enter__.return_value = conn
     fake_connect_cm.__exit__.return_value = None
 
-    tracked_cm = _install_tracked_job_cm(scheduler)
+    tracked_cm = _install_tracked_job_cm()
 
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://stub/"
@@ -222,7 +228,7 @@ def test_daily_financial_facts_no_raise_when_outcome_clean() -> None:
     fake_connect_cm.__enter__.return_value = conn
     fake_connect_cm.__exit__.return_value = None
 
-    tracked_cm = _install_tracked_job_cm(scheduler)
+    tracked_cm = _install_tracked_job_cm()
 
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://stub/"
