@@ -318,11 +318,11 @@ describe("PortfolioPage — keyboard", () => {
   });
 
   it("Enter drills a focused mirror row to /copy-trading/:id", async () => {
-    // Use `mockResolvedValueOnce` so the describe-level
-    // `mockResolvedValue(...)` default from `beforeEach` is not
-    // permanently replaced — subsequent tests in the block keep
-    // seeing the three-position fixture.
-    mockedFetchPortfolio.mockReset();
+    // Use `mockResolvedValueOnce` so only THIS test sees the mixed
+    // fixture — subsequent keyboard tests keep the describe-level
+    // three-position default (vi stacks `Once` queue first, falls
+    // back to `mockResolvedValue` default for any extra calls, so
+    // no `mockReset()` needed).
     mockedFetchPortfolio.mockResolvedValueOnce(
       portfolioWith(
         [position(1, "AAA", { market_value: 300 })],
