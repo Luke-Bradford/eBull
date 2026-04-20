@@ -37,6 +37,7 @@ from app.api.sync import router as sync_router
 from app.api.system import router as system_router
 from app.api.theses import instrument_thesis_router
 from app.api.theses import router as theses_router
+from app.api.watchlist import router as watchlist_router
 from app.config import settings
 from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
@@ -177,6 +178,7 @@ app.include_router(sync_router)
 app.include_router(system_router)
 app.include_router(theses_router)
 app.include_router(instrument_thesis_router)
+app.include_router(watchlist_router)
 
 
 @app.get("/health")
