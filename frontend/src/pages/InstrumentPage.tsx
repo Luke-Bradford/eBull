@@ -592,7 +592,7 @@ function InstrumentPageBody({
         <ResearchTab
           summary={summary}
           thesis={thesisAsync.data}
-          thesisErrored={thesisAsync.error !== null}
+          thesisErrored={thesisErrSticky}
         />
       )}
       {activeTab === "financials" && <FinancialsTab symbol={symbol} />}
