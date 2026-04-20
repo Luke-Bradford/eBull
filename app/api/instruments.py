@@ -19,7 +19,7 @@ from typing import Literal
 import psycopg
 import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel
 
 from app.db import get_conn
 from app.providers.implementations.yfinance_provider import YFinanceKeyStats, YFinanceProvider
@@ -156,14 +156,14 @@ class CandleBar(BaseModel):
 
 
 class InstrumentCandles(BaseModel):
-    # Allow `range` as the wire name without shadowing the Python
-    # builtin at the attribute level.
-    model_config = ConfigDict(populate_by_name=True)
-
     symbol: str
     # Range token the caller asked for; echoed so the client can cache
     # by range key. `days` is the resolved lookback the server applied.
-    range_: Literal["1w", "1m", "3m", "6m", "1y", "5y", "max"] = Field(..., alias="range", serialization_alias="range")
+    # Field named `range` even though it shadows the Python builtin at
+    # class scope — pydantic v2's alias+populate_by_name wiring kept
+    # tripping pyright, and the shadow is safe inside a BaseModel
+    # (the builtin is still reachable as `builtins.range`).
+    range: Literal["1w", "1m", "3m", "6m", "1y", "5y", "max"]  # noqa: A003
     days: int | None  # None when range="max"
     rows: list[CandleBar]
 
@@ -621,7 +621,7 @@ def get_instrument_candles(
     ]
     return InstrumentCandles(
         symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
-        range_=range_,
+        range=range_,
         days=days,
         rows=bars,
     )
