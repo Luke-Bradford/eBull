@@ -43,9 +43,11 @@ export function App() {
           <Route index element={<DashboardPage />} />
           <Route path="portfolio" element={<PortfolioPage />} />
           {/* Legacy per-instrument routes redirect to the canonical
-              `/instrument/:symbol` research page. Slice 3 of the
-              per-stock research spec — shims stay for one release so
-              operator bookmarks migrate; Slice 5 deletes them. */}
+              `/instrument/:symbol` research page. Introduced in Slice 3
+              of the per-stock research spec; Slice 5 deleted
+              `InstrumentDetailPage`/`PositionDetailPage` but kept
+              these shims so operator bookmarks still resolve. Remove
+              once access logs show zero traffic on these paths. */}
           <Route
             path="portfolio/:instrumentId"
             element={<InstrumentDetailRedirect search="?tab=positions" />}
