@@ -191,6 +191,65 @@ export interface InstrumentDetail {
   external_identifiers: ExternalIdentifier[];
 }
 
+// Phase 2.2 — per-ticker research summary
+export interface InstrumentIdentity {
+  symbol: string;
+  display_name: string | null;
+  sector: string | null;
+  industry: string | null;
+  exchange: string | null;
+  country: string | null;
+  currency: string | null;
+  market_cap: string | null;
+}
+
+export interface InstrumentPrice {
+  current: string | null;
+  day_change: string | null;
+  day_change_pct: string | null;
+  week_52_high: string | null;
+  week_52_low: string | null;
+  currency: string | null;
+}
+
+export interface InstrumentKeyStats {
+  pe_ratio: string | null;
+  pb_ratio: string | null;
+  dividend_yield: string | null;
+  payout_ratio: string | null;
+  roe: string | null;
+  roa: string | null;
+  debt_to_equity: string | null;
+  revenue_growth_yoy: string | null;
+  earnings_growth_yoy: string | null;
+}
+
+export interface InstrumentSummary {
+  instrument_id: number;
+  is_tradable: boolean;
+  coverage_tier: number | null;
+  identity: InstrumentIdentity;
+  price: InstrumentPrice | null;
+  key_stats: InstrumentKeyStats | null;
+  source: Record<string, string>;
+}
+
+// Phase 2.3 — financials
+export interface InstrumentFinancialRow {
+  period_end: string;
+  period_type: string;
+  values: Record<string, string | null>;
+}
+
+export interface InstrumentFinancials {
+  symbol: string;
+  statement: "income" | "balance" | "cashflow";
+  period: "quarterly" | "annual";
+  currency: string | null;
+  source: "financial_periods" | "yfinance";
+  rows: InstrumentFinancialRow[];
+}
+
 // ---------------------------------------------------------------------------
 // /portfolio (app/api/portfolio.py)
 // ---------------------------------------------------------------------------
@@ -499,6 +558,12 @@ export interface ThesisHistoryResponse {
   total: number;
   offset: number;
   limit: number;
+}
+
+// Phase 2.4 — POST /instruments/{symbol}/thesis
+export interface GenerateThesisResponse {
+  cached: boolean;
+  thesis: ThesisDetail;
 }
 
 // ---------------------------------------------------------------------------

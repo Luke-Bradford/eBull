@@ -6,6 +6,7 @@ import { DisplayCurrencyProvider } from "@/lib/DisplayCurrencyContext";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { RankingsPage } from "@/pages/RankingsPage";
 import { InstrumentDetailPage } from "@/pages/InstrumentDetailPage";
+import { InstrumentPage } from "@/pages/InstrumentPage";
 import { RecommendationsPage } from "@/pages/RecommendationsPage";
 import { AdminPage } from "@/pages/AdminPage";
 import { CoverageInsufficientPage } from "@/pages/CoverageInsufficientPage";
@@ -42,6 +43,7 @@ export function App() {
           <Route path="rankings" element={<RankingsPage />} />
           <Route path="instruments" element={<InstrumentsPage />} />
           <Route path="instruments/:instrumentId" element={<InstrumentDetailPage />} />
+          <Route path="instrument/:symbol" element={<InstrumentPage />} />
           <Route path="copy-trading/:mirrorId" element={<CopyTradingPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />
           <Route path="admin" element={<AdminPage />} />

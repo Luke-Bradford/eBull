@@ -1,5 +1,9 @@
 import { apiFetch } from "@/api/client";
-import type { ThesisDetail, ThesisHistoryResponse } from "@/api/types";
+import type {
+  GenerateThesisResponse,
+  ThesisDetail,
+  ThesisHistoryResponse,
+} from "@/api/types";
 
 export function fetchLatestThesis(
   instrumentId: number,
@@ -18,5 +22,14 @@ export function fetchThesisHistory(
   });
   return apiFetch<ThesisHistoryResponse>(
     `/theses/${instrumentId}/history?${params.toString()}`,
+  );
+}
+
+export function generateInstrumentThesis(
+  symbol: string,
+): Promise<GenerateThesisResponse> {
+  return apiFetch<GenerateThesisResponse>(
+    `/instruments/${encodeURIComponent(symbol)}/thesis`,
+    { method: "POST" },
   );
 }
