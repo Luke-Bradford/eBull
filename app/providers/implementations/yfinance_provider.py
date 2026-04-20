@@ -140,6 +140,20 @@ class YFinancePriceBar:
     volume: int | None
 
 
+@dataclass(frozen=True)
+class YFinanceSnapshot:
+    """Bundle returned by :meth:`YFinanceProvider.get_snapshot`.
+
+    Fetches :attr:`Ticker.info` exactly once and derives profile / quote /
+    key_stats from the same payload — saves two redundant network round
+    trips compared to calling the three accessor methods back-to-back.
+    """
+
+    profile: YFinanceProfile | None
+    quote: YFinanceQuote | None
+    key_stats: YFinanceKeyStats | None
+
+
 # ---------------------------------------------------------------------------
 # Coercion helpers
 # ---------------------------------------------------------------------------
@@ -245,8 +259,13 @@ class YFinanceProvider:
             return None
         if not info:
             return None
-        price = _to_decimal(info.get("regularMarketPrice") or info.get("currentPrice"))
-        prev_close = _to_decimal(info.get("regularMarketPreviousClose") or info.get("previousClose"))
+        # Explicit None-check for falsy-zero preservation — a legitimate
+        # zero price from regularMarketPrice must not silently fall through
+        # to currentPrice due to `or` short-circuit on falsy values.
+        regular_price = info.get("regularMarketPrice")
+        price = _to_decimal(regular_price if regular_price is not None else info.get("currentPrice"))
+        regular_prev = info.get("regularMarketPreviousClose")
+        prev_close = _to_decimal(regular_prev if regular_prev is not None else info.get("previousClose"))
         day_change: Decimal | None = None
         day_change_pct: Decimal | None = None
         if price is not None and prev_close is not None and prev_close != 0:
@@ -414,6 +433,99 @@ class YFinanceProvider:
             recommendation_mean=_to_decimal(info.get("recommendationMean")),
             num_analysts=_to_int(info.get("numberOfAnalystOpinions")),
         )
+
+    # -- Consolidated snapshot -----------------------------------------
+
+    def get_snapshot(self, symbol: str) -> YFinanceSnapshot:
+        """Fetch profile + quote + key_stats in a single ``.info`` call.
+
+        yfinance performs a network fetch on every ``.info`` access; the
+        three separate accessor methods each trigger their own fetch. The
+        research-page summary endpoint needs all three for a single
+        ticker, so it calls this method instead of three.
+
+        Returns a :class:`YFinanceSnapshot` with ``None`` sections where
+        ``.info`` failed or the ticker has no data — never raises.
+        """
+        try:
+            info = self._ticker(symbol).info
+        except Exception:
+            logger.warning("yfinance.get_snapshot failed for %s", symbol, exc_info=True)
+            return YFinanceSnapshot(profile=None, quote=None, key_stats=None)
+        if not info:
+            return YFinanceSnapshot(profile=None, quote=None, key_stats=None)
+
+        profile = YFinanceProfile(
+            symbol=symbol,
+            display_name=_to_str(info.get("longName")) or _to_str(info.get("shortName")),
+            sector=_to_str(info.get("sector")),
+            industry=_to_str(info.get("industry")),
+            exchange=_to_str(info.get("exchange")),
+            country=_to_str(info.get("country")),
+            currency=_to_str(info.get("currency")),
+            market_cap=_to_decimal(info.get("marketCap")),
+            employees=_to_int(info.get("fullTimeEmployees")),
+            website=_to_str(info.get("website")),
+            long_business_summary=_to_str(info.get("longBusinessSummary")),
+        )
+
+        # Explicit None-check for falsy-zero preservation — a legitimate
+        # zero price from regularMarketPrice must not silently fall through
+        # to currentPrice due to `or` short-circuit on falsy values.
+        regular_price = info.get("regularMarketPrice")
+        price = _to_decimal(regular_price if regular_price is not None else info.get("currentPrice"))
+        regular_prev = info.get("regularMarketPreviousClose")
+        prev_close = _to_decimal(regular_prev if regular_prev is not None else info.get("previousClose"))
+        day_change: Decimal | None = None
+        day_change_pct: Decimal | None = None
+        if price is not None and prev_close is not None and prev_close != 0:
+            day_change = price - prev_close
+            day_change_pct = day_change / prev_close
+        week_52_high = _to_decimal(info.get("fiftyTwoWeekHigh"))
+        week_52_low = _to_decimal(info.get("fiftyTwoWeekLow"))
+        # If .info returned no price-related data at all, report the section
+        # as null rather than an all-None dataclass. Matches the contract
+        # that "unavailable" sections stay null in the API response, so the
+        # UI doesn't render an empty price pane labeled as "from yfinance".
+        if price is None and week_52_high is None and week_52_low is None:
+            quote: YFinanceQuote | None = None
+        else:
+            quote = YFinanceQuote(
+                symbol=symbol,
+                price=price,
+                day_change=day_change,
+                day_change_pct=day_change_pct,
+                week_52_high=week_52_high,
+                week_52_low=week_52_low,
+                currency=_to_str(info.get("currency")),
+            )
+
+        pe = _to_decimal(info.get("trailingPE"))
+        pb = _to_decimal(info.get("priceToBook"))
+        div_yield = _to_decimal(info.get("dividendYield"))
+        payout = _to_decimal(info.get("payoutRatio"))
+        roe = _to_decimal(info.get("returnOnEquity"))
+        roa = _to_decimal(info.get("returnOnAssets"))
+        d_to_e = _to_decimal(info.get("debtToEquity"))
+        rev_growth = _to_decimal(info.get("revenueGrowth"))
+        earn_growth = _to_decimal(info.get("earningsGrowth"))
+        if all(v is None for v in (pe, pb, div_yield, payout, roe, roa, d_to_e, rev_growth, earn_growth)):
+            key_stats: YFinanceKeyStats | None = None
+        else:
+            key_stats = YFinanceKeyStats(
+                symbol=symbol,
+                pe_ratio=pe,
+                pb_ratio=pb,
+                dividend_yield=div_yield,
+                payout_ratio=payout,
+                roe=roe,
+                roa=roa,
+                debt_to_equity=d_to_e,
+                revenue_growth_yoy=rev_growth,
+                earnings_growth_yoy=earn_growth,
+            )
+
+        return YFinanceSnapshot(profile=profile, quote=quote, key_stats=key_stats)
 
     # -- Price history --------------------------------------------------
 

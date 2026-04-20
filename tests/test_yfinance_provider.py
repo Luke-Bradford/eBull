@@ -19,6 +19,7 @@ from app.providers.implementations.yfinance_provider import (
     YFinancePriceBar,
     YFinanceProfile,
     YFinanceProvider,
+    YFinanceSnapshot,
 )
 
 
@@ -474,3 +475,137 @@ def test_price_history_returns_none_on_exception() -> None:
     provider = YFinanceProvider()
     with patch.object(provider, "_ticker", side_effect=RuntimeError("yahoo is down")):
         assert provider.get_price_history("AAPL") is None
+
+
+# ---------------------------------------------------------------------------
+# Consolidated snapshot (one .info fetch for all 3 dataclasses)
+# ---------------------------------------------------------------------------
+
+
+def test_get_snapshot_single_info_fetch_builds_all_three() -> None:
+    """Snapshot triggers exactly one .info access and derives profile +
+    quote + key_stats from that single payload. Addresses Codex review
+    concern that separate accessors triple Yahoo scrape pressure."""
+    access_count = 0
+
+    class _CountingTicker:
+        @property
+        def info(self) -> dict[str, Any]:
+            nonlocal access_count
+            access_count += 1
+            return {
+                "longName": "Apple Inc.",
+                "sector": "Technology",
+                "marketCap": 3_000_000_000_000,
+                "regularMarketPrice": 200.5,
+                "regularMarketPreviousClose": 199.0,
+                "fiftyTwoWeekHigh": 250.0,
+                "fiftyTwoWeekLow": 140.0,
+                "currency": "USD",
+                "trailingPE": 28.5,
+                "priceToBook": 40.2,
+            }
+
+    provider = YFinanceProvider()
+    provider._ticker = lambda _symbol: _CountingTicker()  # type: ignore[method-assign,return-value]
+    snapshot = provider.get_snapshot("AAPL")
+    assert access_count == 1
+    assert isinstance(snapshot, YFinanceSnapshot)
+    assert snapshot.profile is not None and snapshot.profile.display_name == "Apple Inc."
+    assert snapshot.quote is not None and snapshot.quote.price == Decimal("200.5")
+    assert snapshot.quote.day_change == Decimal("1.5")
+    assert snapshot.key_stats is not None and snapshot.key_stats.pe_ratio == Decimal("28.5")
+
+
+def test_get_snapshot_info_raise_returns_all_nones() -> None:
+    provider = YFinanceProvider()
+    with patch.object(provider, "_ticker", side_effect=RuntimeError("yahoo is down")):
+        snapshot = provider.get_snapshot("AAPL")
+    assert snapshot == YFinanceSnapshot(profile=None, quote=None, key_stats=None)
+
+
+def test_get_snapshot_empty_info_returns_all_nones() -> None:
+    class _EmptyTicker:
+        info: dict[str, Any] = {}
+
+    provider = YFinanceProvider()
+    provider._ticker = lambda _symbol: _EmptyTicker()  # type: ignore[method-assign,return-value]
+    snapshot = provider.get_snapshot("AAPL")
+    assert snapshot == YFinanceSnapshot(profile=None, quote=None, key_stats=None)
+
+
+def test_get_snapshot_info_with_only_identity_returns_null_quote_and_stats() -> None:
+    """If .info has identity fields but no price or stats keys, quote and
+    key_stats sections must be None — not all-None dataclasses. Addresses
+    PR #358 review WARNING: contract says null sections, not shells."""
+
+    class _IdentityOnlyTicker:
+        info = {
+            "longName": "Tiny Co",
+            "sector": "Consumer",
+        }
+
+    provider = YFinanceProvider()
+    provider._ticker = lambda _symbol: _IdentityOnlyTicker()  # type: ignore[method-assign,return-value]
+    snapshot = provider.get_snapshot("TINY")
+    assert snapshot.profile is not None
+    assert snapshot.profile.display_name == "Tiny Co"
+    assert snapshot.quote is None
+    assert snapshot.key_stats is None
+
+
+def test_get_snapshot_info_with_all_null_price_fields_returns_null_quote() -> None:
+    """Explicit NaN or None values in price fields must collapse to quote=None."""
+
+    class _NullPriceTicker:
+        info = {
+            "longName": "Ghost Co",
+            "regularMarketPrice": float("nan"),
+            "regularMarketPreviousClose": None,
+            "fiftyTwoWeekHigh": None,
+            "fiftyTwoWeekLow": float("nan"),
+            # Stats still all null
+        }
+
+    provider = YFinanceProvider()
+    provider._ticker = lambda _symbol: _NullPriceTicker()  # type: ignore[method-assign,return-value]
+    snapshot = provider.get_snapshot("GHOST")
+    assert snapshot.quote is None
+    assert snapshot.key_stats is None
+
+
+def test_to_decimal_nan_returns_none() -> None:
+    """Direct invariant: _to_decimal(float('nan')) -> None, not Decimal('NaN').
+    Pins the NaN filter that _NullPriceTicker relies on."""
+    from app.providers.implementations.yfinance_provider import _to_decimal
+
+    assert _to_decimal(float("nan")) is None
+    assert _to_decimal(Decimal("NaN")) is None
+
+
+def test_get_snapshot_preserves_zero_price() -> None:
+    """A legitimate zero price must NOT fall through via `or` short-circuit
+    to currentPrice. Addresses PR #358 BLOCKING review."""
+
+    class _ZeroPriceTicker:
+        info = {
+            "longName": "Zero Co",
+            # regularMarketPrice = 0 is legitimate (halted stock, distressed
+            # delisted ticker); it's falsy but not missing.
+            "regularMarketPrice": 0,
+            "currentPrice": 5.0,  # would shadow the real price under `or`
+            "regularMarketPreviousClose": 10.0,
+            "fiftyTwoWeekHigh": 100.0,
+            "fiftyTwoWeekLow": 0.0,
+        }
+
+    provider = YFinanceProvider()
+    provider._ticker = lambda _symbol: _ZeroPriceTicker()  # type: ignore[method-assign,return-value]
+    snapshot = provider.get_snapshot("ZERO")
+    assert snapshot.quote is not None
+    # Real zero price must survive, NOT be replaced by currentPrice=5.0.
+    assert snapshot.quote.price == Decimal("0")
+    # day_change = 0 - 10 = -10.
+    assert snapshot.quote.day_change == Decimal("-10")
+    # week_52_low=0 preserved too.
+    assert snapshot.quote.week_52_low == Decimal("0")
