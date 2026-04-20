@@ -117,6 +117,32 @@ def test_add_happy_path(client: TestClient) -> None:
     assert body["notes"] == "watch for earnings"
 
 
+def test_add_without_notes_preserves_existing_notes(client: TestClient) -> None:
+    """A re-add without notes must NOT overwrite the stored note with NULL.
+    Covered by the ON CONFLICT DO UPDATE ... COALESCE clause."""
+    fetchones = [
+        {
+            "instrument_id": 42,
+            "symbol": "AAPL",
+            "company_name": "Apple Inc.",
+            "exchange": "NMS",
+            "currency": "USD",
+            "sector": "Technology",
+        },
+        # Server returns the PRESERVED note, not NULL.
+        {"added_at": datetime(2026, 4, 10), "notes": "core holding"},
+    ]
+    with patch("app.api.watchlist.sole_operator_id", return_value=uuid4()):
+        cur = _install_conn(fetchones)
+        resp = client.post("/watchlist", json={"symbol": "AAPL"})
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["notes"] == "core holding"
+    # Verify the SQL contains COALESCE (pin the notes-preservation fix).
+    upsert_call = cur.execute.call_args_list[1]
+    assert "COALESCE(EXCLUDED.notes" in upsert_call[0][0]
+
+
 def test_add_unknown_symbol_returns_404(client: TestClient) -> None:
     with patch("app.api.watchlist.sole_operator_id", return_value=uuid4()):
         _install_conn([None])
@@ -141,9 +167,27 @@ def test_delete_happy_path(client: TestClient) -> None:
     assert resp.status_code == 204
 
 
-def test_delete_not_on_watchlist_returns_404(client: TestClient) -> None:
+def test_delete_not_on_watchlist_returns_404_without_commit(client: TestClient) -> None:
+    """404 on a missing watchlist entry must NOT trigger a no-op commit —
+    rowcount check must precede the commit call. Pin this by making the
+    stub conn raise if commit() is called; if the handler still 404s,
+    the commit wasn't invoked."""
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.__enter__.return_value = cur
+    cur.__exit__.return_value = None
+    cur.rowcount = 0
+    conn.cursor.return_value = cur
+    conn.commit.side_effect = AssertionError("commit must NOT be called on 404 path")
+
+    def _dep():
+        yield conn
+
+    from app.db import get_conn
+
+    app.dependency_overrides[get_conn] = _dep
     with patch("app.api.watchlist.sole_operator_id", return_value=uuid4()):
-        cur = _install_conn([])
-        cur.rowcount = 0
         resp = client.delete("/watchlist/AAPL")
+
     assert resp.status_code == 404
+    conn.commit.assert_not_called()

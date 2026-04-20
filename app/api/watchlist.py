@@ -127,14 +127,23 @@ def add_to_watchlist(
             INSERT INTO watchlist (operator_id, instrument_id, notes)
             VALUES (%(op)s, %(iid)s, %(notes)s)
             ON CONFLICT (operator_id, instrument_id)
-            DO UPDATE SET notes = EXCLUDED.notes
+            DO UPDATE SET
+                -- Preserve existing notes when the caller omits notes
+                -- on a re-add; only overwrite on an explicit new note.
+                notes = COALESCE(EXCLUDED.notes, watchlist.notes)
+                -- added_at intentionally NOT updated — 'first added'
+                -- semantics must survive idempotent re-adds.
             RETURNING added_at, notes
             """,
             {"op": operator_id, "iid": int(inst["instrument_id"]), "notes": req.notes},  # type: ignore[arg-type]
         )
         wl_row = cur.fetchone()
     conn.commit()
-    assert wl_row is not None
+    if wl_row is None:
+        # RETURNING must produce a row — if it didn't, the INSERT/UPDATE
+        # path is broken and we should surface that instead of crashing
+        # under python -O (where bare ``assert`` is compiled away).
+        raise HTTPException(status_code=500, detail="watchlist upsert returned no row")
 
     return WatchlistItem(
         instrument_id=int(inst["instrument_id"]),  # type: ignore[arg-type]
@@ -170,10 +179,13 @@ def remove_from_watchlist(
             {"op": operator_id, "s": symbol_clean},
         )
         rows_deleted = cur.rowcount
-    conn.commit()
 
+    # Check rowcount BEFORE commit — a 404 (nothing deleted) must not
+    # commit a no-op transaction (cosmetic, but noisy in audit logs
+    # and confusing to clients that retry on 404).
     if rows_deleted == 0:
         raise HTTPException(
             status_code=404,
             detail=f"Instrument {symbol} not on watchlist",
         )
+    conn.commit()
