@@ -4,7 +4,8 @@ Reads from:
   - theses       (append-only versioned thesis rows per instrument)
   - instruments   (existence check for 404 on history endpoint)
 
-No writes. No schema changes.
+Writes from POST /instruments/{symbol}/thesis (Phase 2.4) via the
+existing ``generate_thesis`` service — 24h-cached per-ticker.
 
 Note: the issue (#52) mentions ``conviction_score`` but the theses table
 has ``confidence_score``.  This module uses the actual schema column name.
@@ -12,16 +13,44 @@ has ``confidence_score``.  This module uses the actual schema column name.
 
 from __future__ import annotations
 
-from datetime import datetime
+import logging
+import os
+from datetime import UTC, datetime, timedelta
 
+import anthropic
 import psycopg
 import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.db import get_conn
+from app.services.thesis import generate_thesis
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/theses", tags=["theses"])
+
+
+# Separate router for the symbol-based POST; kept under /instruments so
+# the research page can POST to a single resource prefix.
+instrument_thesis_router = APIRouter(prefix="/instruments", tags=["instruments"])
+
+
+def get_anthropic_client() -> anthropic.Anthropic:
+    """FastAPI dependency: constructs an Anthropic client per request.
+
+    Raises ``HTTPException(503)`` when ANTHROPIC_API_KEY is unset — the
+    thesis endpoint is the only caller that needs it, so failing here
+    keeps the rest of the API unaffected by missing credentials.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="ANTHROPIC_API_KEY not configured — thesis generation unavailable",
+        )
+    return anthropic.Anthropic(api_key=api_key)
+
 
 MAX_PAGE_LIMIT = 200
 
@@ -203,3 +232,114 @@ def get_thesis_history(
         offset=offset,
         limit=limit,
     )
+
+
+# ---------------------------------------------------------------------------
+# Symbol-keyed thesis endpoint (Phase 2.4)
+# ---------------------------------------------------------------------------
+
+
+THESIS_CACHE_WINDOW = timedelta(hours=24)
+
+
+class GenerateThesisResponse(BaseModel):
+    """Result of POST /instruments/{symbol}/thesis.
+
+    ``cached`` reports whether the returned thesis came from the 24h
+    cache (no Anthropic spend for this request) or was freshly
+    generated this call.
+    """
+
+    cached: bool
+    thesis: ThesisDetail
+
+
+@instrument_thesis_router.post("/{symbol}/thesis", response_model=GenerateThesisResponse)
+def generate_instrument_thesis(
+    symbol: str,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+    client: anthropic.Anthropic = Depends(get_anthropic_client),
+) -> GenerateThesisResponse:
+    """Generate or return the cached thesis for a ticker.
+
+    Phase 2.4 of the 2026-04-19 research-tool refocus. On-demand only —
+    no scheduled thesis refresh. Cache window is 24h per ticker: a POST
+    within 24h of the last thesis returns the cached row without
+    calling Anthropic; after 24h the endpoint regenerates.
+
+    Returns:
+      - 404 if the symbol is not in the local instruments table
+      - 503 if ANTHROPIC_API_KEY is not configured
+      - 200 with the thesis (cached or fresh)
+    """
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT instrument_id FROM instruments WHERE UPPER(symbol) = %(s)s LIMIT 1",
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+
+    # Cache check: latest thesis for this instrument within 24h.
+    latest_sql = f"""
+        SELECT {_THESIS_COLUMNS}
+        FROM theses t
+        WHERE t.instrument_id = %(iid)s
+          AND t.created_at >= %(since)s
+        ORDER BY t.created_at DESC, t.thesis_version DESC
+        LIMIT 1
+    """  # noqa: S608 — _THESIS_COLUMNS is a module-level constant
+    now = datetime.now(UTC)
+    cache_cutoff = now - THESIS_CACHE_WINDOW
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(latest_sql, {"iid": instrument_id, "since": cache_cutoff})
+        cached_row = cur.fetchone()
+
+    if cached_row is not None:
+        logger.info(
+            "POST /instruments/%s/thesis: cache hit (created_at=%s)",
+            symbol_clean,
+            cached_row["created_at"],  # type: ignore[index]
+        )
+        return GenerateThesisResponse(cached=True, thesis=_parse_thesis(cached_row))
+
+    # Cache miss — call the existing generate_thesis service. It handles
+    # its own DB transaction + Anthropic calls. We must NOT wrap this in
+    # our own transaction (see generate_thesis caller contract).
+    logger.info("POST /instruments/%s/thesis: cache miss, generating", symbol_clean)
+    try:
+        generate_thesis(instrument_id, conn, client)
+    except Exception as exc:
+        logger.exception("POST /instruments/%s/thesis: generation failed", symbol_clean)
+        raise HTTPException(
+            status_code=502,
+            detail=f"thesis generation failed: {type(exc).__name__}",
+        ) from exc
+
+    # Re-read the just-inserted thesis via the same columns shape so the
+    # response format is stable.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT {_THESIS_COLUMNS}
+            FROM theses t
+            WHERE t.instrument_id = %(iid)s
+            ORDER BY t.created_at DESC, t.thesis_version DESC
+            LIMIT 1
+            """,  # noqa: S608
+            {"iid": instrument_id},
+        )
+        fresh_row = cur.fetchone()
+
+    if fresh_row is None:
+        # Shouldn't happen — generate_thesis just inserted. Defensive.
+        raise HTTPException(status_code=500, detail="thesis row missing after generation")
+
+    return GenerateThesisResponse(cached=False, thesis=_parse_thesis(fresh_row))
