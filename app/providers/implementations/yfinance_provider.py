@@ -140,6 +140,20 @@ class YFinancePriceBar:
     volume: int | None
 
 
+@dataclass(frozen=True)
+class YFinanceSnapshot:
+    """Bundle returned by :meth:`YFinanceProvider.get_snapshot`.
+
+    Fetches :attr:`Ticker.info` exactly once and derives profile / quote /
+    key_stats from the same payload — saves two redundant network round
+    trips compared to calling the three accessor methods back-to-back.
+    """
+
+    profile: YFinanceProfile | None
+    quote: YFinanceQuote | None
+    key_stats: YFinanceKeyStats | None
+
+
 # ---------------------------------------------------------------------------
 # Coercion helpers
 # ---------------------------------------------------------------------------
@@ -414,6 +428,73 @@ class YFinanceProvider:
             recommendation_mean=_to_decimal(info.get("recommendationMean")),
             num_analysts=_to_int(info.get("numberOfAnalystOpinions")),
         )
+
+    # -- Consolidated snapshot -----------------------------------------
+
+    def get_snapshot(self, symbol: str) -> YFinanceSnapshot:
+        """Fetch profile + quote + key_stats in a single ``.info`` call.
+
+        yfinance performs a network fetch on every ``.info`` access; the
+        three separate accessor methods each trigger their own fetch. The
+        research-page summary endpoint needs all three for a single
+        ticker, so it calls this method instead of three.
+
+        Returns a :class:`YFinanceSnapshot` with ``None`` sections where
+        ``.info`` failed or the ticker has no data — never raises.
+        """
+        try:
+            info = self._ticker(symbol).info
+        except Exception:
+            logger.warning("yfinance.get_snapshot failed for %s", symbol, exc_info=True)
+            return YFinanceSnapshot(profile=None, quote=None, key_stats=None)
+        if not info:
+            return YFinanceSnapshot(profile=None, quote=None, key_stats=None)
+
+        profile = YFinanceProfile(
+            symbol=symbol,
+            display_name=_to_str(info.get("longName")) or _to_str(info.get("shortName")),
+            sector=_to_str(info.get("sector")),
+            industry=_to_str(info.get("industry")),
+            exchange=_to_str(info.get("exchange")),
+            country=_to_str(info.get("country")),
+            currency=_to_str(info.get("currency")),
+            market_cap=_to_decimal(info.get("marketCap")),
+            employees=_to_int(info.get("fullTimeEmployees")),
+            website=_to_str(info.get("website")),
+            long_business_summary=_to_str(info.get("longBusinessSummary")),
+        )
+
+        price = _to_decimal(info.get("regularMarketPrice") or info.get("currentPrice"))
+        prev_close = _to_decimal(info.get("regularMarketPreviousClose") or info.get("previousClose"))
+        day_change: Decimal | None = None
+        day_change_pct: Decimal | None = None
+        if price is not None and prev_close is not None and prev_close != 0:
+            day_change = price - prev_close
+            day_change_pct = day_change / prev_close
+        quote = YFinanceQuote(
+            symbol=symbol,
+            price=price,
+            day_change=day_change,
+            day_change_pct=day_change_pct,
+            week_52_high=_to_decimal(info.get("fiftyTwoWeekHigh")),
+            week_52_low=_to_decimal(info.get("fiftyTwoWeekLow")),
+            currency=_to_str(info.get("currency")),
+        )
+
+        key_stats = YFinanceKeyStats(
+            symbol=symbol,
+            pe_ratio=_to_decimal(info.get("trailingPE")),
+            pb_ratio=_to_decimal(info.get("priceToBook")),
+            dividend_yield=_to_decimal(info.get("dividendYield")),
+            payout_ratio=_to_decimal(info.get("payoutRatio")),
+            roe=_to_decimal(info.get("returnOnEquity")),
+            roa=_to_decimal(info.get("returnOnAssets")),
+            debt_to_equity=_to_decimal(info.get("debtToEquity")),
+            revenue_growth_yoy=_to_decimal(info.get("revenueGrowth")),
+            earnings_growth_yoy=_to_decimal(info.get("earningsGrowth")),
+        )
+
+        return YFinanceSnapshot(profile=profile, quote=quote, key_stats=key_stats)
 
     # -- Price history --------------------------------------------------
 

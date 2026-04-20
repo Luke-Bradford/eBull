@@ -12,6 +12,7 @@ No writes. No schema changes.
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
 import psycopg
 import psycopg.rows
@@ -19,8 +20,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.db import get_conn
+from app.providers.implementations.yfinance_provider import YFinanceProvider
 
 router = APIRouter(prefix="/instruments", tags=["instruments"])
+
+
+def get_yfinance_provider() -> YFinanceProvider:
+    """FastAPI dependency: constructs a fresh YFinanceProvider per request.
+
+    The provider is stateless, so there is no pooling concern. Tests
+    override this via ``app.dependency_overrides`` to inject a stub.
+    """
+    return YFinanceProvider()
+
 
 # ---------------------------------------------------------------------------
 # Response models
@@ -68,6 +80,60 @@ class InstrumentListResponse(BaseModel):
     total: int
     offset: int
     limit: int
+
+
+class InstrumentIdentity(BaseModel):
+    symbol: str
+    display_name: str | None
+    sector: str | None
+    industry: str | None
+    exchange: str | None
+    country: str | None
+    currency: str | None
+    market_cap: Decimal | None
+
+
+class InstrumentPrice(BaseModel):
+    current: Decimal | None
+    day_change: Decimal | None
+    day_change_pct: Decimal | None
+    week_52_high: Decimal | None
+    week_52_low: Decimal | None
+    currency: str | None
+
+
+class InstrumentKeyStats(BaseModel):
+    pe_ratio: Decimal | None
+    pb_ratio: Decimal | None
+    dividend_yield: Decimal | None
+    payout_ratio: Decimal | None
+    roe: Decimal | None
+    roa: Decimal | None
+    debt_to_equity: Decimal | None
+    revenue_growth_yoy: Decimal | None
+    earnings_growth_yoy: Decimal | None
+
+
+class InstrumentSummary(BaseModel):
+    """Per-ticker research summary (Phase 2.2).
+
+    Identity comes from the local ``instruments`` row; price + key stats
+    come from yfinance. All leaf fields are nullable so the UI can render
+    partial data when a provider degrades.
+
+    ``source`` reports which provider populated each section so the
+    future-spec per-field attribution (SEC EDGAR / Finnhub / yfinance)
+    has a landing spot — right now everything non-identity is yfinance,
+    so the map is simple; phase 2.3 will expand it.
+    """
+
+    instrument_id: int
+    is_tradable: bool
+    coverage_tier: int | None
+    identity: InstrumentIdentity
+    price: InstrumentPrice | None
+    key_stats: InstrumentKeyStats | None
+    source: dict[str, str]
 
 
 class InstrumentDetail(BaseModel):
@@ -202,6 +268,107 @@ def list_instruments(
     ]
 
     return InstrumentListResponse(items=items, total=total, offset=offset, limit=limit)
+
+
+@router.get("/{symbol}/summary", response_model=InstrumentSummary)
+def get_instrument_summary(
+    symbol: str,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+    yfinance_provider: YFinanceProvider = Depends(get_yfinance_provider),
+) -> InstrumentSummary:
+    """Per-ticker research summary (Phase 2.2 of the 2026-04-19 refocus).
+
+    Merges local identity/tier data with yfinance-sourced price + key
+    stats. A missing symbol returns 404. yfinance failures return null
+    sections rather than 500 — the UI renders what it has.
+    """
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    lookup_sql = """
+        SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
+               i.currency, i.sector, i.industry, i.country,
+               i.is_tradable, c.coverage_tier
+        FROM instruments i
+        LEFT JOIN coverage c USING (instrument_id)
+        WHERE UPPER(i.symbol) = %(symbol)s
+        LIMIT 1
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(lookup_sql, {"symbol": symbol_clean})
+        row = cur.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    # One yfinance .info call instead of three — Codex review caught that
+    # get_profile / get_quote / get_key_stats each triggered their own
+    # network fetch. get_snapshot fetches .info once and derives all three.
+    snapshot = yfinance_provider.get_snapshot(row["symbol"])  # type: ignore[arg-type]
+    profile = snapshot.profile
+    quote = snapshot.quote
+    stats = snapshot.key_stats
+
+    # Local DB is authoritative for every identity field that has a non-null
+    # value — yfinance fills only the gaps. company_name is schema-non-null,
+    # so display_name falls to yfinance only if the local row somehow has an
+    # empty string (defence-in-depth).
+    identity = InstrumentIdentity(
+        symbol=row["symbol"],  # type: ignore[arg-type]
+        display_name=row["company_name"] or (profile.display_name if profile is not None else None),  # type: ignore[arg-type]
+        sector=row["sector"] or (profile.sector if profile is not None else None),  # type: ignore[arg-type]
+        industry=row["industry"] or (profile.industry if profile is not None else None),  # type: ignore[arg-type]
+        exchange=row["exchange"] or (profile.exchange if profile is not None else None),  # type: ignore[arg-type]
+        country=row["country"] or (profile.country if profile is not None else None),  # type: ignore[arg-type]
+        currency=row["currency"] or (profile.currency if profile is not None else None),  # type: ignore[arg-type]
+        market_cap=profile.market_cap if profile is not None else None,
+    )
+
+    price_block = (
+        InstrumentPrice(
+            current=quote.price,
+            day_change=quote.day_change,
+            day_change_pct=quote.day_change_pct,
+            week_52_high=quote.week_52_high,
+            week_52_low=quote.week_52_low,
+            currency=quote.currency,
+        )
+        if quote is not None
+        else None
+    )
+
+    stats_block = (
+        InstrumentKeyStats(
+            pe_ratio=stats.pe_ratio,
+            pb_ratio=stats.pb_ratio,
+            dividend_yield=stats.dividend_yield,
+            payout_ratio=stats.payout_ratio,
+            roe=stats.roe,
+            roa=stats.roa,
+            debt_to_equity=stats.debt_to_equity,
+            revenue_growth_yoy=stats.revenue_growth_yoy,
+            earnings_growth_yoy=stats.earnings_growth_yoy,
+        )
+        if stats is not None
+        else None
+    )
+
+    source = {
+        "identity": "local_db+yfinance",
+        "price": "yfinance" if quote is not None else "unavailable",
+        "key_stats": "yfinance" if stats is not None else "unavailable",
+    }
+
+    return InstrumentSummary(
+        instrument_id=row["instrument_id"],  # type: ignore[arg-type]
+        is_tradable=row["is_tradable"],  # type: ignore[arg-type]
+        coverage_tier=row["coverage_tier"],  # type: ignore[arg-type]
+        identity=identity,
+        price=price_block,
+        key_stats=stats_block,
+        source=source,
+    )
 
 
 @router.get("/{instrument_id}", response_model=InstrumentDetail)

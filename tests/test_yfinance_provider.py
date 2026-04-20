@@ -19,6 +19,7 @@ from app.providers.implementations.yfinance_provider import (
     YFinancePriceBar,
     YFinanceProfile,
     YFinanceProvider,
+    YFinanceSnapshot,
 )
 
 
@@ -474,3 +475,60 @@ def test_price_history_returns_none_on_exception() -> None:
     provider = YFinanceProvider()
     with patch.object(provider, "_ticker", side_effect=RuntimeError("yahoo is down")):
         assert provider.get_price_history("AAPL") is None
+
+
+# ---------------------------------------------------------------------------
+# Consolidated snapshot (one .info fetch for all 3 dataclasses)
+# ---------------------------------------------------------------------------
+
+
+def test_get_snapshot_single_info_fetch_builds_all_three() -> None:
+    """Snapshot triggers exactly one .info access and derives profile +
+    quote + key_stats from that single payload. Addresses Codex review
+    concern that separate accessors triple Yahoo scrape pressure."""
+    access_count = 0
+
+    class _CountingTicker:
+        @property
+        def info(self) -> dict[str, Any]:
+            nonlocal access_count
+            access_count += 1
+            return {
+                "longName": "Apple Inc.",
+                "sector": "Technology",
+                "marketCap": 3_000_000_000_000,
+                "regularMarketPrice": 200.5,
+                "regularMarketPreviousClose": 199.0,
+                "fiftyTwoWeekHigh": 250.0,
+                "fiftyTwoWeekLow": 140.0,
+                "currency": "USD",
+                "trailingPE": 28.5,
+                "priceToBook": 40.2,
+            }
+
+    provider = YFinanceProvider()
+    provider._ticker = lambda _symbol: _CountingTicker()  # type: ignore[method-assign,return-value]
+    snapshot = provider.get_snapshot("AAPL")
+    assert access_count == 1
+    assert isinstance(snapshot, YFinanceSnapshot)
+    assert snapshot.profile is not None and snapshot.profile.display_name == "Apple Inc."
+    assert snapshot.quote is not None and snapshot.quote.price == Decimal("200.5")
+    assert snapshot.quote.day_change == Decimal("1.5")
+    assert snapshot.key_stats is not None and snapshot.key_stats.pe_ratio == Decimal("28.5")
+
+
+def test_get_snapshot_info_raise_returns_all_nones() -> None:
+    provider = YFinanceProvider()
+    with patch.object(provider, "_ticker", side_effect=RuntimeError("yahoo is down")):
+        snapshot = provider.get_snapshot("AAPL")
+    assert snapshot == YFinanceSnapshot(profile=None, quote=None, key_stats=None)
+
+
+def test_get_snapshot_empty_info_returns_all_nones() -> None:
+    class _EmptyTicker:
+        info: dict[str, Any] = {}
+
+    provider = YFinanceProvider()
+    provider._ticker = lambda _symbol: _EmptyTicker()  # type: ignore[method-assign,return-value]
+    snapshot = provider.get_snapshot("AAPL")
+    assert snapshot == YFinanceSnapshot(profile=None, quote=None, key_stats=None)
