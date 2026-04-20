@@ -5,27 +5,29 @@
  *   1. Overview    — identity + price + key stats
  *   2. Financials  — income / balance / cashflow, quarterly / annual
  *   3. Analysis    — AI thesis (fetched on-demand)
- *   4. Positions   — held position or add-to-watchlist placeholder
- *   5. News        — recent news feed (reuses existing component)
- *   6. Filings     — SEC filings list (reuses existing component)
- *
- * MVP scope: tabs 1-3 fully wired. Positions/News/Filings show
- * placeholder messages pointing at existing pages — Phase 2.5 follow-up
- * work integrates them here once the data-loading patterns are settled.
+ *   4. Positions   — held position (units + cost + PnL) or "not held" badge
+ *   5. News        — instrument news feed with sentiment badge
+ *   6. Filings     — filing events list
  */
 
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 
+import { fetchFilings } from "@/api/filings";
 import {
   fetchInstrumentFinancials,
   fetchInstrumentSummary,
 } from "@/api/instruments";
+import { fetchNews } from "@/api/news";
+import { fetchInstrumentPositions } from "@/api/portfolio";
 import { generateInstrumentThesis } from "@/api/theses";
 import type {
-  InstrumentFinancials,
-  InstrumentSummary,
+  FilingsListResponse,
   GenerateThesisResponse,
+  InstrumentFinancials,
+  InstrumentPositionDetail,
+  InstrumentSummary,
+  NewsListResponse,
 } from "@/api/types";
 import { Section, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
@@ -369,13 +371,224 @@ function AnalysisTab({ symbol }: { symbol: string }) {
 // Stub tabs (positions / news / filings) — deferred to follow-up work
 // ---------------------------------------------------------------------------
 
-function StubTab({ label, symbol }: { label: string; symbol: string }) {
+// ---------------------------------------------------------------------------
+// Positions tab
+// ---------------------------------------------------------------------------
+
+function PositionsTab({ symbol, instrumentId }: { symbol: string; instrumentId: number }) {
+  // Use the per-instrument endpoint so we never silently false-negative on a
+  // paginated portfolio list (Codex review feedback on PR #366).
+  const { data, error, loading } = useAsync<InstrumentPositionDetail>(
+    () => fetchInstrumentPositions(instrumentId),
+    [instrumentId],
+  );
+
+  if (loading) return <SectionSkeleton rows={3} />;
+  if (error !== null) return <ErrorView error={error} />;
+  if (!data || data.total_units === 0) {
+    return (
+      <Section title="Position">
+        <EmptyState
+          title="Not held"
+          description={`You don't currently hold ${symbol}.`}
+        />
+      </Section>
+    );
+  }
+
+  const pnlColor =
+    data.total_pnl > 0
+      ? "text-emerald-600"
+      : data.total_pnl < 0
+        ? "text-red-600"
+        : "text-slate-600";
+
   return (
-    <Section title={label}>
-      <EmptyState
-        title={`${label} — coming soon`}
-        description={`${label} for ${symbol} will surface here once the data-loading patterns are wired in a follow-up. See the existing pages under /instruments/:id and /filings for the current source of truth.`}
-      />
+    <Section title="Position">
+      <dl className="grid grid-cols-2 gap-y-2 text-sm md:grid-cols-4">
+        <dt className="text-slate-500">Units</dt>
+        <dd>{data.total_units.toLocaleString()}</dd>
+        <dt className="text-slate-500">Avg entry</dt>
+        <dd>{data.avg_entry !== null ? data.avg_entry.toFixed(2) : "—"}</dd>
+        <dt className="text-slate-500">Current price</dt>
+        <dd>{data.current_price !== null ? data.current_price.toFixed(2) : "—"}</dd>
+        <dt className="text-slate-500">Currency</dt>
+        <dd className="text-xs text-slate-500">{data.currency}</dd>
+        <dt className="text-slate-500">Total invested</dt>
+        <dd>{data.total_invested.toFixed(2)}</dd>
+        <dt className="text-slate-500">Market value</dt>
+        <dd>{data.total_value.toFixed(2)}</dd>
+        <dt className="text-slate-500">Unrealised P&amp;L</dt>
+        <dd className={pnlColor}>
+          {data.total_pnl >= 0 ? "+" : ""}
+          {data.total_pnl.toFixed(2)}
+        </dd>
+        <dt className="text-slate-500">Trades</dt>
+        <dd>{data.trades.length}</dd>
+      </dl>
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// News tab
+// ---------------------------------------------------------------------------
+
+function sentimentBadge(score: number | null) {
+  if (score === null) return null;
+  // Match sign prefix to colour bucket so a neutral-grey badge never
+  // shows a "+" prefix (Codex feedback).
+  const positive = score > 0.2;
+  const negative = score < -0.2;
+  const color = positive
+    ? "bg-emerald-100 text-emerald-700"
+    : negative
+      ? "bg-red-100 text-red-700"
+      : "bg-slate-100 text-slate-600";
+  const prefix = positive ? "+" : negative ? "" : "";
+  return (
+    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${color}`}>
+      {prefix}
+      {score.toFixed(2)}
+    </span>
+  );
+}
+
+function NewsTab({ instrumentId }: { instrumentId: number }) {
+  const { data, error, loading } = useAsync<NewsListResponse>(
+    () => fetchNews(instrumentId, 0, 25),
+    [instrumentId],
+  );
+
+  if (loading) return <SectionSkeleton rows={5} />;
+  if (error !== null) return <ErrorView error={error} />;
+  if (!data || data.items.length === 0) {
+    return (
+      <Section title="News">
+        <EmptyState
+          title="No news yet"
+          description="News events appear once the news feed has been ingested for this instrument."
+        />
+      </Section>
+    );
+  }
+
+  return (
+    <Section title={`News (${data.total})`}>
+      <ul className="space-y-3 text-sm">
+        {data.items.map((n) => (
+          <li key={n.news_event_id} className="border-b border-slate-100 pb-2 last:border-0">
+            <div className="flex items-baseline gap-2">
+              <span className="text-xs text-slate-500">{n.event_time.slice(0, 10)}</span>
+              {n.source && <span className="text-xs text-slate-500">· {n.source}</span>}
+              {sentimentBadge(n.sentiment_score)}
+              {n.category && (
+                <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600">
+                  {n.category}
+                </span>
+              )}
+            </div>
+            <div className="mt-0.5">
+              {n.url ? (
+                <a
+                  href={n.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-medium text-blue-700 hover:underline"
+                >
+                  {n.headline}
+                </a>
+              ) : (
+                <span className="font-medium">{n.headline}</span>
+              )}
+            </div>
+            {n.snippet && <p className="text-xs text-slate-600">{n.snippet}</p>}
+          </li>
+        ))}
+      </ul>
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Filings tab
+// ---------------------------------------------------------------------------
+
+function redFlagBadge(score: number | null) {
+  if (score === null) return null;
+  const color =
+    score > 0.5
+      ? "bg-red-100 text-red-700"
+      : score > 0.2
+        ? "bg-amber-100 text-amber-700"
+        : "bg-slate-100 text-slate-600";
+  return (
+    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${color}`}>
+      red-flag {score.toFixed(2)}
+    </span>
+  );
+}
+
+function FilingsTab({ instrumentId }: { instrumentId: number }) {
+  const { data, error, loading } = useAsync<FilingsListResponse>(
+    () => fetchFilings(instrumentId, 0, 25),
+    [instrumentId],
+  );
+
+  if (loading) return <SectionSkeleton rows={5} />;
+  if (error !== null) return <ErrorView error={error} />;
+  if (!data || data.items.length === 0) {
+    return (
+      <Section title="Filings">
+        <EmptyState
+          title="No filings"
+          description="Filings appear once SEC EDGAR or Companies House has been crawled for this instrument."
+        />
+      </Section>
+    );
+  }
+
+  return (
+    <Section title={`Filings (${data.total})`}>
+      <ul className="space-y-3 text-sm">
+        {data.items.map((f) => (
+          <li key={f.filing_event_id} className="border-b border-slate-100 pb-2 last:border-0">
+            <div className="flex items-baseline gap-2">
+              <span className="text-xs text-slate-500">{f.filing_date}</span>
+              <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600">
+                {f.filing_type ?? "?"}
+              </span>
+              <span className="text-xs text-slate-500">{f.provider}</span>
+              {redFlagBadge(f.red_flag_score)}
+            </div>
+            {f.extracted_summary && (
+              <p className="mt-1 text-xs text-slate-600">{f.extracted_summary}</p>
+            )}
+            <div className="mt-1 flex gap-3 text-xs">
+              {f.primary_document_url && (
+                <a
+                  href={f.primary_document_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-700 hover:underline"
+                >
+                  document
+                </a>
+              )}
+              {f.source_url && f.source_url !== f.primary_document_url && (
+                <a
+                  href={f.source_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-700 hover:underline"
+                >
+                  index
+                </a>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
     </Section>
   );
 }
@@ -420,9 +633,11 @@ export function InstrumentPage() {
       {activeTab === "overview" && <OverviewTab summary={summary} />}
       {activeTab === "financials" && <FinancialsTab symbol={symbol} />}
       {activeTab === "analysis" && <AnalysisTab symbol={symbol} />}
-      {activeTab === "positions" && <StubTab label="Positions" symbol={symbol} />}
-      {activeTab === "news" && <StubTab label="News" symbol={symbol} />}
-      {activeTab === "filings" && <StubTab label="Filings" symbol={symbol} />}
+      {activeTab === "positions" && (
+        <PositionsTab symbol={symbol} instrumentId={summary.instrument_id} />
+      )}
+      {activeTab === "news" && <NewsTab instrumentId={summary.instrument_id} />}
+      {activeTab === "filings" && <FilingsTab instrumentId={summary.instrument_id} />}
     </div>
   );
 }
