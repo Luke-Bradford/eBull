@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -437,3 +438,150 @@ class TestJsonSerializability:
         serialized = json.dumps(report)
         assert isinstance(serialized, str)
         assert "monthly" in serialized
+
+
+# ---------------------------------------------------------------------------
+# Contributors computation (Slice 4 of per-stock research page spec)
+# ---------------------------------------------------------------------------
+
+from app.services.reporting import _compute_contributors  # noqa: E402
+
+
+class TestComputeContributors:
+    def test_no_prior_snapshot_returns_empty_lists(self) -> None:
+        """First snapshot or backfilled historical (no `positions`) must
+        degrade gracefully — empty contributors + drags, not None."""
+        current = [
+            {
+                "instrument_id": 1,
+                "symbol": "AAPL",
+                "unrealized_pnl": "100",
+                "cost_basis": "1000",
+            }
+        ]
+        result = _compute_contributors(current, None)
+        assert result == {"contributors": [], "drags": []}
+
+    def test_computes_positive_and_negative_deltas(self) -> None:
+        prior = [
+            {
+                "instrument_id": 1,
+                "symbol": "AAPL",
+                "unrealized_pnl": "50",
+                "cost_basis": "1000",
+            },
+            {
+                "instrument_id": 2,
+                "symbol": "MSFT",
+                "unrealized_pnl": "80",
+                "cost_basis": "2000",
+            },
+        ]
+        current = [
+            {
+                "instrument_id": 1,
+                "symbol": "AAPL",
+                "unrealized_pnl": "150",  # +100 gainer
+                "cost_basis": "1000",
+            },
+            {
+                "instrument_id": 2,
+                "symbol": "MSFT",
+                "unrealized_pnl": "20",  # -60 drag
+                "cost_basis": "2000",
+            },
+        ]
+        result = _compute_contributors(current, prior)
+        assert len(result["contributors"]) == 1
+        assert result["contributors"][0]["symbol"] == "AAPL"
+        assert result["contributors"][0]["pnl_delta"] == "100"
+        # pct = 100 / 1000 = 0.1
+        assert result["contributors"][0]["pnl_pct"] == "0.1"
+
+        assert len(result["drags"]) == 1
+        assert result["drags"][0]["symbol"] == "MSFT"
+        assert result["drags"][0]["pnl_delta"] == "-60"
+
+    def test_new_position_with_zero_prior_cost_gets_null_pct(self) -> None:
+        """Fresh position (not in prior snapshot) surfaces with full
+        current P&L as delta but null pct — prevents misleading '∞%'."""
+        current = [
+            {
+                "instrument_id": 99,
+                "symbol": "NEW",
+                "unrealized_pnl": "50",
+                "cost_basis": "500",
+            }
+        ]
+        prior: list[dict[str, Any]] = []
+        result = _compute_contributors(current, prior)
+        assert result["contributors"][0]["symbol"] == "NEW"
+        assert result["contributors"][0]["pnl_delta"] == "50"
+        assert result["contributors"][0]["pnl_pct"] is None
+
+    def test_unchanged_position_not_in_either_list(self) -> None:
+        """Zero delta means the position didn't contribute — omit."""
+        prior = [
+            {
+                "instrument_id": 1,
+                "symbol": "FLAT",
+                "unrealized_pnl": "42",
+                "cost_basis": "100",
+            }
+        ]
+        current = [
+            {
+                "instrument_id": 1,
+                "symbol": "FLAT",
+                "unrealized_pnl": "42",
+                "cost_basis": "100",
+            }
+        ]
+        result = _compute_contributors(current, prior)
+        assert result == {"contributors": [], "drags": []}
+
+    def test_legacy_prior_without_positions_key_degrades_to_empty(self) -> None:
+        """Pre-feature snapshots (backfilled without the `positions`
+        key) must NOT be interpreted as 'prior had zero positions' —
+        that would label every current holding as a fresh contributor.
+        Passing None signals 'no comparison possible' cleanly."""
+        current = [
+            {
+                "instrument_id": 1,
+                "symbol": "AAPL",
+                "unrealized_pnl": "100",
+                "cost_basis": "1000",
+            }
+        ]
+        result = _compute_contributors(current, None)
+        assert result == {"contributors": [], "drags": []}
+
+    def test_top_n_caps_each_list(self) -> None:
+        """Only top_n contributors + top_n drags surface — keeps the
+        UI list short and the operator focused on biggest movers."""
+        prior = [
+            {
+                "instrument_id": i,
+                "symbol": f"S{i}",
+                "unrealized_pnl": "0",
+                "cost_basis": "100",
+            }
+            for i in range(10)
+        ]
+        current = [
+            {
+                "instrument_id": i,
+                "symbol": f"S{i}",
+                # Even i: positive delta (i * 10). Odd i: negative (-i * 10).
+                "unrealized_pnl": str((i if i % 2 == 0 else -i) * 10),
+                "cost_basis": "100",
+            }
+            for i in range(10)
+        ]
+        result = _compute_contributors(current, prior, top_n=3)
+        assert len(result["contributors"]) == 3
+        assert len(result["drags"]) == 3
+        # Contributors sorted by delta descending — biggest gainer first.
+        assert result["contributors"][0]["symbol"] == "S8"
+        # Drags: most negative first after reversal.
+        assert result["drags"][0]["symbol"] == "S9"
