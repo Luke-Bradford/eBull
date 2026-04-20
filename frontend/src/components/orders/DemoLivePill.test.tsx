@@ -6,20 +6,16 @@
  *   2. When /config transiently returns null (e.g. a refetch
  *      in flight), the pill stays on the last confirmed value
  *      and a `(stale)` marker appears.
+ *
+ * Uses `TestConfigProvider` to inject config state directly — bypasses
+ * the shared ConfigProvider's `fetchConfig` call entirely (#320).
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import { render, screen } from "@testing-library/react";
 
 import { DemoLivePill } from "@/components/orders/DemoLivePill";
+import { TestConfigProvider } from "@/lib/ConfigContext";
 import type { ConfigResponse } from "@/api/types";
-
-vi.mock("@/api/config", () => ({
-  fetchConfig: vi.fn(),
-}));
-
-import { fetchConfig } from "@/api/config";
-
-const mockedFetchConfig = vi.mocked(fetchConfig);
 
 function configWith(enableLive: boolean): ConfigResponse {
   return {
@@ -42,34 +38,36 @@ function configWith(enableLive: boolean): ConfigResponse {
   };
 }
 
-beforeEach(() => {
-  mockedFetchConfig.mockReset();
-});
-
 describe("DemoLivePill", () => {
-  it("shows DEMO MODE when enable_live_trading=false (fresh, no stale marker)", async () => {
-    mockedFetchConfig.mockResolvedValueOnce(configWith(false));
-    render(<DemoLivePill />);
-    const pill = await screen.findByTestId("demo-live-pill");
+  it("shows DEMO MODE when enable_live_trading=false (fresh, no stale marker)", () => {
+    render(
+      <TestConfigProvider value={{ data: configWith(false), loading: false }}>
+        <DemoLivePill />
+      </TestConfigProvider>,
+    );
+    const pill = screen.getByTestId("demo-live-pill");
     expect(pill).toHaveAttribute("data-live", "false");
     expect(pill.textContent).toContain("DEMO MODE");
     expect(pill.textContent).not.toContain("stale");
   });
 
-  it("shows LIVE when enable_live_trading=true", async () => {
-    mockedFetchConfig.mockResolvedValueOnce(configWith(true));
-    render(<DemoLivePill />);
-    const pill = await screen.findByTestId("demo-live-pill");
-    await waitFor(() => {
-      expect(pill).toHaveAttribute("data-live", "true");
-    });
+  it("shows LIVE when enable_live_trading=true", () => {
+    render(
+      <TestConfigProvider value={{ data: configWith(true), loading: false }}>
+        <DemoLivePill />
+      </TestConfigProvider>,
+    );
+    const pill = screen.getByTestId("demo-live-pill");
+    expect(pill).toHaveAttribute("data-live", "true");
     expect(pill.textContent).toContain("LIVE");
   });
 
   it("on cold start with no response yet, defaults to DEMO MODE with no stale marker", () => {
-    // Resolve never — simulate an infinite in-flight request.
-    mockedFetchConfig.mockReturnValue(new Promise(() => {}));
-    render(<DemoLivePill />);
+    render(
+      <TestConfigProvider value={{ data: null, loading: true }}>
+        <DemoLivePill />
+      </TestConfigProvider>,
+    );
     const pill = screen.getByTestId("demo-live-pill");
     expect(pill).toHaveAttribute("data-live", "false");
     expect(pill.textContent).toContain("DEMO MODE");

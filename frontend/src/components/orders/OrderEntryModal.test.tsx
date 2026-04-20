@@ -22,9 +22,6 @@ import type {
   OrderResponse,
 } from "@/api/types";
 
-vi.mock("@/api/config", () => ({
-  fetchConfig: vi.fn(),
-}));
 vi.mock("@/api/portfolio", () => ({
   fetchInstrumentPositions: vi.fn(),
 }));
@@ -32,11 +29,10 @@ vi.mock("@/api/orders", () => ({
   placeOrder: vi.fn(),
 }));
 
-import { fetchConfig } from "@/api/config";
+import { TestConfigProvider } from "@/lib/ConfigContext";
 import { fetchInstrumentPositions } from "@/api/portfolio";
 import { placeOrder } from "@/api/orders";
 
-const mockedFetchConfig = vi.mocked(fetchConfig);
 const mockedFetchDetail = vi.mocked(fetchInstrumentPositions);
 const mockedPlaceOrder = vi.mocked(placeOrder);
 
@@ -107,7 +103,6 @@ function orderFilled(): OrderResponse {
 }
 
 beforeEach(() => {
-  mockedFetchConfig.mockResolvedValue(demoConfig());
   mockedFetchDetail.mockResolvedValue(detailFor(7));
   mockedPlaceOrder.mockReset();
 });
@@ -122,16 +117,18 @@ function renderModal(
   const onFilled = vi.fn();
   const onRequestClose = vi.fn();
   const result = render(
-    <OrderEntryModal
-      isOpen
-      instrumentId={7}
-      symbol="AAPL"
-      companyName="Apple Inc."
-      valuationSource="quote"
-      onFilled={onFilled}
-      onRequestClose={onRequestClose}
-      {...overrides}
-    />,
+    <TestConfigProvider value={{ data: demoConfig(), loading: false }}>
+      <OrderEntryModal
+        isOpen
+        instrumentId={7}
+        symbol="AAPL"
+        companyName="Apple Inc."
+        valuationSource="quote"
+        onFilled={onFilled}
+        onRequestClose={onRequestClose}
+        {...overrides}
+      />
+    </TestConfigProvider>,
   );
   return { onFilled, onRequestClose, ...result };
 }

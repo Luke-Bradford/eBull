@@ -1,6 +1,6 @@
 import { createContext, useContext, type ReactNode } from "react";
-import { useAsync } from "@/lib/useAsync";
-import { fetchConfig } from "@/api/config";
+
+import { useConfig } from "@/lib/ConfigContext";
 
 interface DisplayCurrencyContextValue {
   displayCurrency: string;
@@ -15,7 +15,7 @@ export function useDisplayCurrency(): string {
 }
 
 export function DisplayCurrencyProvider({ children }: { children: ReactNode }) {
-  const { data } = useAsync(() => fetchConfig(), []);
+  const { data } = useConfig();
   const displayCurrency = data?.runtime?.display_currency ?? "GBP";
   return (
     <DisplayCurrencyContext.Provider value={{ displayCurrency }}>

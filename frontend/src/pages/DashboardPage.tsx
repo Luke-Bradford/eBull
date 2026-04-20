@@ -4,8 +4,8 @@ import { fetchBudget } from "@/api/budget";
 import { fetchPortfolio } from "@/api/portfolio";
 import { fetchRecommendations } from "@/api/recommendations";
 import { fetchSystemStatus } from "@/api/system";
-import { fetchConfig } from "@/api/config";
 import { fetchWatchlist, removeFromWatchlist } from "@/api/watchlist";
+import { useConfig } from "@/lib/ConfigContext";
 import { useAsync } from "@/lib/useAsync";
 import { ErrorBanner } from "@/components/states/ErrorBanner";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
@@ -39,7 +39,7 @@ export function DashboardPage() {
     [],
   );
   const system = useAsync(fetchSystemStatus, []);
-  const config = useAsync(fetchConfig, []);
+  const config = useConfig();
   const budget = useAsync(fetchBudget, []);
   const watchlist = useAsync(fetchWatchlist, []);
   const [watchlistError, setWatchlistError] = useState<string | null>(null);
