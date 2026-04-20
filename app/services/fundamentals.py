@@ -519,16 +519,6 @@ _BALANCE_SHEET_COLUMNS: frozenset[str] = frozenset(
     }
 )
 
-# All financial columns on PeriodRow
-_ALL_FINANCIAL_COLUMNS: frozenset[str] = (
-    _FLOW_COLUMNS
-    | _BALANCE_SHEET_COLUMNS
-    | {
-        "shares_basic",
-        "shares_diluted",
-    }
-)
-
 # Fiscal period label -> (period_type, fiscal_quarter)
 _FP_MAP: dict[str, tuple[str, int | None]] = {
     "Q1": ("Q1", 1),
@@ -900,10 +890,6 @@ def _upsert_period_raw(
         },
     )
     return cur.rowcount > 0
-
-
-# -- Source priority for canonical merge ------------------------------------
-_SOURCE_PRIORITY = {"sec_edgar": 1, "companies_house": 2, "fmp": 3}
 
 
 def _canonical_merge_instrument(
