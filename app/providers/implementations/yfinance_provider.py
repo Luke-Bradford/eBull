@@ -471,28 +471,49 @@ class YFinanceProvider:
         if price is not None and prev_close is not None and prev_close != 0:
             day_change = price - prev_close
             day_change_pct = day_change / prev_close
-        quote = YFinanceQuote(
-            symbol=symbol,
-            price=price,
-            day_change=day_change,
-            day_change_pct=day_change_pct,
-            week_52_high=_to_decimal(info.get("fiftyTwoWeekHigh")),
-            week_52_low=_to_decimal(info.get("fiftyTwoWeekLow")),
-            currency=_to_str(info.get("currency")),
-        )
+        week_52_high = _to_decimal(info.get("fiftyTwoWeekHigh"))
+        week_52_low = _to_decimal(info.get("fiftyTwoWeekLow"))
+        # If .info returned no price-related data at all, report the section
+        # as null rather than an all-None dataclass. Matches the contract
+        # that "unavailable" sections stay null in the API response, so the
+        # UI doesn't render an empty price pane labeled as "from yfinance".
+        if price is None and week_52_high is None and week_52_low is None:
+            quote: YFinanceQuote | None = None
+        else:
+            quote = YFinanceQuote(
+                symbol=symbol,
+                price=price,
+                day_change=day_change,
+                day_change_pct=day_change_pct,
+                week_52_high=week_52_high,
+                week_52_low=week_52_low,
+                currency=_to_str(info.get("currency")),
+            )
 
-        key_stats = YFinanceKeyStats(
-            symbol=symbol,
-            pe_ratio=_to_decimal(info.get("trailingPE")),
-            pb_ratio=_to_decimal(info.get("priceToBook")),
-            dividend_yield=_to_decimal(info.get("dividendYield")),
-            payout_ratio=_to_decimal(info.get("payoutRatio")),
-            roe=_to_decimal(info.get("returnOnEquity")),
-            roa=_to_decimal(info.get("returnOnAssets")),
-            debt_to_equity=_to_decimal(info.get("debtToEquity")),
-            revenue_growth_yoy=_to_decimal(info.get("revenueGrowth")),
-            earnings_growth_yoy=_to_decimal(info.get("earningsGrowth")),
-        )
+        pe = _to_decimal(info.get("trailingPE"))
+        pb = _to_decimal(info.get("priceToBook"))
+        div_yield = _to_decimal(info.get("dividendYield"))
+        payout = _to_decimal(info.get("payoutRatio"))
+        roe = _to_decimal(info.get("returnOnEquity"))
+        roa = _to_decimal(info.get("returnOnAssets"))
+        d_to_e = _to_decimal(info.get("debtToEquity"))
+        rev_growth = _to_decimal(info.get("revenueGrowth"))
+        earn_growth = _to_decimal(info.get("earningsGrowth"))
+        if all(v is None for v in (pe, pb, div_yield, payout, roe, roa, d_to_e, rev_growth, earn_growth)):
+            key_stats: YFinanceKeyStats | None = None
+        else:
+            key_stats = YFinanceKeyStats(
+                symbol=symbol,
+                pe_ratio=pe,
+                pb_ratio=pb,
+                dividend_yield=div_yield,
+                payout_ratio=payout,
+                roe=roe,
+                roa=roa,
+                debt_to_equity=d_to_e,
+                revenue_growth_yoy=rev_growth,
+                earnings_growth_yoy=earn_growth,
+            )
 
         return YFinanceSnapshot(profile=profile, quote=quote, key_stats=key_stats)
 

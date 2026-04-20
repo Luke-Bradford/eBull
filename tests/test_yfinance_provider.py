@@ -532,3 +532,43 @@ def test_get_snapshot_empty_info_returns_all_nones() -> None:
     provider._ticker = lambda _symbol: _EmptyTicker()  # type: ignore[method-assign,return-value]
     snapshot = provider.get_snapshot("AAPL")
     assert snapshot == YFinanceSnapshot(profile=None, quote=None, key_stats=None)
+
+
+def test_get_snapshot_info_with_only_identity_returns_null_quote_and_stats() -> None:
+    """If .info has identity fields but no price or stats keys, quote and
+    key_stats sections must be None — not all-None dataclasses. Addresses
+    PR #358 review WARNING: contract says null sections, not shells."""
+
+    class _IdentityOnlyTicker:
+        info = {
+            "longName": "Tiny Co",
+            "sector": "Consumer",
+        }
+
+    provider = YFinanceProvider()
+    provider._ticker = lambda _symbol: _IdentityOnlyTicker()  # type: ignore[method-assign,return-value]
+    snapshot = provider.get_snapshot("TINY")
+    assert snapshot.profile is not None
+    assert snapshot.profile.display_name == "Tiny Co"
+    assert snapshot.quote is None
+    assert snapshot.key_stats is None
+
+
+def test_get_snapshot_info_with_all_null_price_fields_returns_null_quote() -> None:
+    """Explicit NaN or None values in price fields must collapse to quote=None."""
+
+    class _NullPriceTicker:
+        info = {
+            "longName": "Ghost Co",
+            "regularMarketPrice": float("nan"),
+            "regularMarketPreviousClose": None,
+            "fiftyTwoWeekHigh": None,
+            "fiftyTwoWeekLow": float("nan"),
+            # Stats still all null
+        }
+
+    provider = YFinanceProvider()
+    provider._ticker = lambda _symbol: _NullPriceTicker()  # type: ignore[method-assign,return-value]
+    snapshot = provider.get_snapshot("GHOST")
+    assert snapshot.quote is None
+    assert snapshot.key_stats is None

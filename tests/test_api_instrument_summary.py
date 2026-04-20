@@ -276,6 +276,50 @@ def test_summary_local_company_name_beats_yfinance(client: TestClient) -> None:
     assert body["identity"]["display_name"] == "Apple Inc."
 
 
+def test_summary_numeric_symbol_routes_to_summary_not_detail(client: TestClient) -> None:
+    """Numeric ticker symbols (e.g. Tokyo 7203) must route to /summary, not
+    to the /{instrument_id} detail endpoint. The /summary path suffix
+    differentiates the routes even when the symbol segment is all digits."""
+    stub_provider = MagicMock()
+    stub_provider.get_snapshot.return_value = YFinanceSnapshot(profile=None, quote=None, key_stats=None)
+    _install_stub_provider(stub_provider)
+
+    def _db_conn():
+        conn_mock = MagicMock()
+        cur_mock = MagicMock()
+        cur_mock.__enter__.return_value = cur_mock
+        cur_mock.fetchone.return_value = {
+            "instrument_id": 99,
+            "symbol": "7203",
+            "company_name": "Toyota Motor Corp",
+            "exchange": "TSE",
+            "currency": "JPY",
+            "sector": "Consumer Cyclical",
+            "industry": None,
+            "country": "Japan",
+            "is_tradable": True,
+            "coverage_tier": None,
+        }
+        conn_mock.cursor.return_value = cur_mock
+        yield conn_mock
+
+    from app.db import get_conn
+
+    app.dependency_overrides[get_conn] = _db_conn
+    try:
+        resp = client.get("/instruments/7203/summary")
+    finally:
+        app.dependency_overrides.pop(get_conn, None)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    # InstrumentSummary response shape — NOT InstrumentDetail which has
+    # external_identifiers / first_seen_at.
+    assert "identity" in body
+    assert "external_identifiers" not in body
+    assert body["identity"]["symbol"] == "7203"
+
+
 def test_summary_empty_symbol_returns_400(client: TestClient) -> None:
     # Whitespace-only symbol should reject with 400 rather than a DB probe.
     stub_provider = MagicMock()
