@@ -39,7 +39,16 @@ export function RightRail({
   return (
     <aside className="space-y-4">
       <RecentFilings instrumentId={instrumentId} />
-      <PeerSnapshot sector={sector} currentSymbol={currentSymbol} />
+      {/* `key={sector}` forces a full remount when the sector changes
+          so `useAsync` re-initialises with `loading=true, data=null`
+          on the first render for the new sector — otherwise one frame
+          would show the prior sector's peers under the new sector's
+          heading (Codex slice-2 round-2 stale-data finding). */}
+      <PeerSnapshot
+        key={sector ?? "__no_sector__"}
+        sector={sector}
+        currentSymbol={currentSymbol}
+      />
       <RecentNews instrumentId={instrumentId} />
     </aside>
   );
