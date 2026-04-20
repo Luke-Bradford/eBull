@@ -570,6 +570,80 @@ def test_summary_sec_preference_missing_local_falls_through_to_yfinance(
     assert body["key_stats"]["pe_ratio"] == "28.5"  # yfinance value
 
 
+def test_summary_id_override_pins_specific_instrument(client: TestClient) -> None:
+    """Slice 0: `?id=<instrument_id>` overrides primary-listing resolution
+    so the caller can pin a specific exchange listing when a symbol
+    collides. Verifies the id's symbol must match the path (404 on
+    mismatch)."""
+    from unittest.mock import MagicMock
+
+    from app.db import get_conn
+
+    stub_provider = MagicMock()
+    stub_provider.get_snapshot.return_value = YFinanceSnapshot(profile=None, quote=None, key_stats=None)
+    _install_stub_provider(stub_provider)
+
+    def _db_conn() -> Iterator[MagicMock]:
+        yield _make_cursor_sequence(
+            [
+                # Cursor 1: instrument lookup via ?id=.
+                [
+                    {
+                        "instrument_id": 777,  # alternate listing
+                        "symbol": "VOD",
+                        "company_name": "Vodafone Group PLC (LSE listing)",
+                        "exchange": "LSE",
+                        "currency": "GBP",
+                        "sector": "Telecom",
+                        "industry": None,
+                        "country": "United Kingdom",
+                        "is_tradable": True,
+                        "coverage_tier": 2,
+                    }
+                ],
+                # Cursor 2: _has_sec_cik probe — LSE ticker has no CIK.
+                [None],
+            ]
+        )
+
+    app.dependency_overrides[get_conn] = _db_conn
+    try:
+        resp = client.get("/instruments/VOD/summary?id=777")
+    finally:
+        app.dependency_overrides.pop(get_conn, None)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["instrument_id"] == 777
+    assert body["identity"]["exchange"] == "LSE"
+
+
+def test_summary_id_override_mismatched_symbol_returns_404(
+    client: TestClient,
+) -> None:
+    """If `?id=<n>` refers to an instrument whose symbol doesn't match
+    the path, respond 404 rather than silently returning the wrong
+    instrument."""
+    from unittest.mock import MagicMock
+
+    from app.db import get_conn
+
+    stub_provider = MagicMock()
+    stub_provider.get_snapshot.return_value = YFinanceSnapshot(profile=None, quote=None, key_stats=None)
+    _install_stub_provider(stub_provider)
+
+    def _db_conn() -> Iterator[MagicMock]:
+        yield _make_cursor_sequence([[None]])  # lookup returns no row
+
+    app.dependency_overrides[get_conn] = _db_conn
+    try:
+        resp = client.get("/instruments/AAPL/summary?id=777")
+    finally:
+        app.dependency_overrides.pop(get_conn, None)
+
+    assert resp.status_code == 404
+
+
 def test_summary_empty_symbol_returns_400(client: TestClient) -> None:
     # Whitespace-only symbol should reject with 400 rather than a DB probe.
     stub_provider = MagicMock()

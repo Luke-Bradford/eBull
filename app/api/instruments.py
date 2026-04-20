@@ -425,10 +425,18 @@ def get_instrument_financials(
 
     columns = _STATEMENT_COLUMNS[statement]
 
-    # Resolve symbol -> instrument_id for the local read.
+    # Resolve symbol -> instrument_id for the local read. `symbol` is
+    # not UNIQUE across exchanges (see migration 043), so order by
+    # `is_primary_listing DESC, instrument_id ASC` to make the winner
+    # deterministic on collisions.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            "SELECT instrument_id, symbol FROM instruments WHERE UPPER(symbol) = %(s)s LIMIT 1",
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
             {"s": symbol_clean},
         )
         inst_row = cur.fetchone()
@@ -684,28 +692,54 @@ def get_instrument_summary(
     symbol: str,
     conn: psycopg.Connection[object] = Depends(get_conn),
     yfinance_provider: YFinanceProvider = Depends(get_yfinance_provider),
+    instrument_id: int | None = Query(default=None, ge=1, alias="id"),
 ) -> InstrumentSummary:
     """Per-ticker research summary (Phase 2.2 of the 2026-04-19 refocus).
 
     Merges local identity/tier data with yfinance-sourced price + key
     stats. A missing symbol returns 404. yfinance failures return null
     sections rather than 500 — the UI renders what it has.
+
+    `?id=<instrument_id>` override: when a symbol collides across
+    exchanges, the caller can pin a specific instrument_id. The server
+    verifies that id's symbol matches the path symbol — a mismatch is a
+    404, not a silent wrong-instrument response. See
+    docs/superpowers/specs/2026-04-20-per-stock-research-page.md §2.
     """
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
         raise HTTPException(status_code=400, detail="symbol is required")
 
-    lookup_sql = """
-        SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
-               i.currency, i.sector, i.industry, i.country,
-               i.is_tradable, c.coverage_tier
-        FROM instruments i
-        LEFT JOIN coverage c USING (instrument_id)
-        WHERE UPPER(i.symbol) = %(symbol)s
-        LIMIT 1
-    """
+    # `symbol` is not UNIQUE across exchanges (see migration 043);
+    # ORDER BY `is_primary_listing DESC, instrument_id ASC` makes the
+    # winner deterministic when two listings share a ticker. See
+    # docs/superpowers/specs/2026-04-20-per-stock-research-page.md §2.
+    if instrument_id is not None:
+        # instrument_id is the PK so the lookup is already unique; no
+        # ORDER BY / LIMIT needed.
+        lookup_sql = """
+            SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
+                   i.currency, i.sector, i.industry, i.country,
+                   i.is_tradable, c.coverage_tier
+            FROM instruments i
+            LEFT JOIN coverage c USING (instrument_id)
+            WHERE i.instrument_id = %(id)s AND UPPER(i.symbol) = %(symbol)s
+        """
+        params: dict[str, object] = {"id": instrument_id, "symbol": symbol_clean}
+    else:
+        lookup_sql = """
+            SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
+                   i.currency, i.sector, i.industry, i.country,
+                   i.is_tradable, c.coverage_tier
+            FROM instruments i
+            LEFT JOIN coverage c USING (instrument_id)
+            WHERE UPPER(i.symbol) = %(symbol)s
+            ORDER BY i.is_primary_listing DESC, i.instrument_id ASC
+            LIMIT 1
+        """
+        params = {"symbol": symbol_clean}
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(lookup_sql, {"symbol": symbol_clean})
+        cur.execute(lookup_sql, params)
         row = cur.fetchone()
 
     if row is None:
