@@ -13,7 +13,7 @@
  * The right rail (filings + peer + news preview) ships in Slice 2.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import { fetchFilings } from "@/api/filings";
@@ -482,8 +482,29 @@ function InstrumentPageBody({
 
   const [addOpen, setAddOpen] = useState(false);
   const [closeOpen, setCloseOpen] = useState(false);
+  // Capture the close target at click time so a mid-flight refetch
+  // clearing `positionAsync.data` can't unmount an open modal
+  // (Codex slice-1 round-3 finding).
+  const [closeTarget, setCloseTarget] = useState<{
+    positionId: number;
+  } | null>(null);
   const [thesisBusy, setThesisBusy] = useState(false);
   const [thesisErr, setThesisErr] = useState<string | null>(null);
+
+  // Sticky error flags. `useAsync.refetch()` clears `error` to null at
+  // the start of the next run, which would briefly hide the error
+  // badge + retry affordance. Keep a sticky bit that only clears when
+  // the next fetch settles cleanly (non-loading + non-error).
+  const [thesisErrSticky, setThesisErrSticky] = useState(false);
+  const [positionErrSticky, setPositionErrSticky] = useState(false);
+  useEffect(() => {
+    if (thesisAsync.error !== null) setThesisErrSticky(true);
+    else if (!thesisAsync.loading) setThesisErrSticky(false);
+  }, [thesisAsync.error, thesisAsync.loading]);
+  useEffect(() => {
+    if (positionAsync.error !== null) setPositionErrSticky(true);
+    else if (!positionAsync.loading) setPositionErrSticky(false);
+  }, [positionAsync.error, positionAsync.loading]);
 
   async function handleGenerateThesis() {
     setThesisBusy(true);
@@ -501,6 +522,7 @@ function InstrumentPageBody({
   function handleFilled() {
     setAddOpen(false);
     setCloseOpen(false);
+    setCloseTarget(null);
     positionAsync.refetch();
   }
 
@@ -510,18 +532,34 @@ function InstrumentPageBody({
       ? position.trades[0]
       : null;
 
+  function handleCloseClick() {
+    if (singleTrade === null || singleTrade === undefined) return;
+    setCloseTarget({ positionId: singleTrade.position_id });
+    setCloseOpen(true);
+  }
+
   return (
     <div className="space-y-4">
       <SummaryStrip
         summary={summary}
         thesis={thesisAsync.data}
-        thesisLoaded={!thesisAsync.loading && thesisAsync.error === null}
-        thesisError={thesisAsync.error !== null}
+        // `thesisLoaded=true` iff fetch settled cleanly (not errored,
+        // even historically) AND not currently reloading.
+        thesisLoaded={
+          !thesisAsync.loading &&
+          thesisAsync.error === null &&
+          !thesisErrSticky
+        }
+        thesisError={thesisErrSticky}
         position={position}
-        positionLoaded={!positionAsync.loading && positionAsync.error === null}
-        positionError={positionAsync.error !== null}
+        positionLoaded={
+          !positionAsync.loading &&
+          positionAsync.error === null &&
+          !positionErrSticky
+        }
+        positionError={positionErrSticky}
         onAdd={() => setAddOpen(true)}
-        onClose={() => setCloseOpen(true)}
+        onClose={handleCloseClick}
         onGenerateThesis={handleGenerateThesis}
         generatingThesis={thesisBusy}
       />
@@ -576,13 +614,16 @@ function InstrumentPageBody({
         />
       ) : null}
 
-      {closeOpen && singleTrade !== null && singleTrade !== undefined ? (
+      {closeOpen && closeTarget !== null ? (
         <ClosePositionModal
           isOpen
           instrumentId={summary.instrument_id}
-          positionId={singleTrade.position_id}
+          positionId={closeTarget.positionId}
           valuationSource="quote"
-          onRequestClose={() => setCloseOpen(false)}
+          onRequestClose={() => {
+            setCloseOpen(false);
+            setCloseTarget(null);
+          }}
           onFilled={handleFilled}
         />
       ) : null}
