@@ -1,8 +1,11 @@
+import { useState } from "react";
+
 import { fetchBudget } from "@/api/budget";
 import { fetchPortfolio } from "@/api/portfolio";
 import { fetchRecommendations } from "@/api/recommendations";
 import { fetchSystemStatus } from "@/api/system";
 import { fetchConfig } from "@/api/config";
+import { fetchWatchlist, removeFromWatchlist } from "@/api/watchlist";
 import { useAsync } from "@/lib/useAsync";
 import { ErrorBanner } from "@/components/states/ErrorBanner";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
@@ -12,6 +15,7 @@ import { RecentRecommendations } from "@/components/dashboard/RecentRecommendati
 import { BudgetOverviewPanel } from "@/components/dashboard/BudgetOverviewPanel";
 import { SystemStatusPanel } from "@/components/dashboard/SystemStatusPanel";
 import { BootstrapProgress, isBootstrapping } from "@/components/dashboard/BootstrapProgress";
+import { WatchlistPanel } from "@/components/dashboard/WatchlistPanel";
 
 /**
  * Operator dashboard (#60).
@@ -37,6 +41,23 @@ export function DashboardPage() {
   const system = useAsync(fetchSystemStatus, []);
   const config = useAsync(fetchConfig, []);
   const budget = useAsync(fetchBudget, []);
+  const watchlist = useAsync(fetchWatchlist, []);
+  const [watchlistError, setWatchlistError] = useState<string | null>(null);
+
+  const handleRemove = async (symbol: string) => {
+    setWatchlistError(null);
+    try {
+      await removeFromWatchlist(symbol);
+      watchlist.refetch();
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : `Failed to remove ${symbol}`;
+      setWatchlistError(message);
+      // Refetch anyway so the UI reflects server state (e.g. another
+      // session already removed the row).
+      watchlist.refetch();
+    }
+  };
 
   const allFailed =
     portfolio.error !== null &&
@@ -121,6 +142,31 @@ export function DashboardPage() {
           </Section>
         </div>
       </div>
+
+      <Section title={`Watchlist${watchlist.data ? ` (${watchlist.data.total})` : ""}`}>
+        {watchlistError !== null && (
+          <div className="mb-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+            {watchlistError}
+            <button
+              type="button"
+              className="ml-2 underline"
+              onClick={() => setWatchlistError(null)}
+            >
+              dismiss
+            </button>
+          </div>
+        )}
+        {watchlist.loading ? (
+          <SectionSkeleton rows={3} />
+        ) : watchlist.error !== null ? (
+          <SectionError onRetry={watchlist.refetch} />
+        ) : (
+          <WatchlistPanel
+            items={watchlist.data?.items ?? []}
+            onRemove={handleRemove}
+          />
+        )}
+      </Section>
 
       <Section title="Recent recommendations">
         {recs.loading ? (

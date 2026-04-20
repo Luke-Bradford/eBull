@@ -86,7 +86,7 @@ function PositionRow({ p, currency }: { p: PositionItem; currency: string }) {
     <tr className="border-t border-slate-100">
       <Td>
         <Link
-          to={`/instruments/${p.instrument_id}`}
+          to={`/instrument/${encodeURIComponent(p.symbol)}`}
           className="font-medium text-blue-600 hover:underline"
         >
           {p.symbol}
