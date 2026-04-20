@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { fetchPortfolio } from "@/api/portfolio";
 import { useAsync } from "@/lib/useAsync";
@@ -118,13 +125,20 @@ export function PortfolioPage() {
     portfolio.refetch();
   }
 
-  function drillInto(row: RowItem) {
-    if (row.kind === "position") {
-      navigate(`/portfolio/${row.data.instrument_id}`);
-    } else {
-      navigate(`/copy-trading/${row.data.mirror_id}`);
-    }
-  }
+  // `useCallback` with `navigate` as the only dep keeps the function
+  // identity stable so the window-keyboard `useEffect` can list it as
+  // a dep without re-binding the listener every render (and without
+  // hiding a real stale-closure risk behind eslint-disable).
+  const drillInto = useCallback(
+    (row: RowItem) => {
+      if (row.kind === "position") {
+        navigate(`/portfolio/${row.data.instrument_id}`);
+      } else {
+        navigate(`/copy-trading/${row.data.mirror_id}`);
+      }
+    },
+    [navigate],
+  );
 
   useEffect(() => {
     function isEditable(el: Element | null): boolean {
@@ -185,8 +199,7 @@ export function PortfolioPage() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [addFor, closeFor]);
+  }, [addFor, closeFor, drillInto]);
 
   return (
     <div className="space-y-4">

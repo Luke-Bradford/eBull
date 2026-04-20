@@ -317,6 +317,25 @@ describe("PortfolioPage — keyboard", () => {
     });
   });
 
+  it("Enter drills a focused mirror row to /copy-trading/:id", async () => {
+    // Override the keyboard-describe beforeEach with a mixed fixture so
+    // the second sorted row is a mirror.
+    mockedFetchPortfolio.mockResolvedValue(
+      portfolioWith(
+        [position(1, "AAA", { market_value: 300 })],
+        [mirror(42, "@gurutrader", { mirror_equity: 200 })],
+      ),
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId("position-row-1");
+
+    await user.keyboard("j{Enter}");
+    await waitFor(() => {
+      expect(screen.getByTestId("location").textContent).toBe("/copy-trading/42");
+    });
+  });
+
   it("Esc blurs and clears search input when focused", async () => {
     const user = userEvent.setup();
     renderPage();
