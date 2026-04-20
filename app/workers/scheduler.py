@@ -840,14 +840,18 @@ def daily_candle_refresh() -> None:
             EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
             psycopg.connect(settings.database_url) as conn,
         ):
-            # Held positions — always included, regardless of coverage tier.
+            # Held positions — always included, regardless of coverage
+            # tier OR is_tradable status. A delisted/suspended instrument
+            # still in the portfolio needs candle updates so P&L and
+            # exit-timing logic keep working. If the provider 404s on
+            # delisted symbols, refresh_market_data logs and continues
+            # per-instrument.
             held_rows = conn.execute(
                 """
                 SELECT DISTINCT i.instrument_id, i.symbol
                 FROM positions p
                 JOIN instruments i ON i.instrument_id = p.instrument_id
                 WHERE p.current_units > 0
-                  AND i.is_tradable = TRUE
                 ORDER BY i.symbol, i.instrument_id
                 """
             ).fetchall()
