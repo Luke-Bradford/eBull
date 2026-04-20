@@ -8,8 +8,6 @@ import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
 import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
-import { DetailPanel } from "@/components/portfolio/DetailPanel";
-import type { CloseTarget } from "@/components/portfolio/DetailPanel";
 import type {
   BrokerPositionItem,
   PositionItem,
@@ -20,52 +18,55 @@ type RowItem =
   | { kind: "position"; data: PositionItem }
   | { kind: "mirror"; data: PortfolioMirrorItem };
 
+interface CloseTarget {
+  instrumentId: number;
+  trade: BrokerPositionItem;
+  valuationSource: PositionItem["valuation_source"];
+}
+
 const PAGE_SIZE = 50;
 
 /**
- * Portfolio page — the operator's trading workstation (#314).
+ * Portfolio page — unified drill-in for positions + mirrors (#324).
  *
- * Split layout (≥lg):
- *   - left pane: summary bar + search + table + pagination
- *   - right pane: DetailPanel for the currently-selected position
+ * Revert of the #314 workstation split. Both row types behave the same:
+ *   - Position row click → /portfolio/:instrumentId
+ *   - Mirror row click   → /copy-trading/:mirrorId
+ * No right-side detail pane; the per-row Add / Close buttons still open
+ * their modals inline so the #313 action surface is preserved.
  *
- * Selection + keyboard shortcuts:
- *   - `/` focuses search, `j`/`k` move the focus ring, `Enter` selects,
- *     `Esc` clears selection (or blurs search), `b` opens Add modal on
- *     the selected position, `c` opens Close modal only when the
- *     selected position has exactly one broker trade underneath.
- *   - Shortcuts are attached via a window listener so they work
- *     regardless of DOM focus. Gated on: no input is focused (Esc is
- *     exempt), no modal is open, no modifier keys.
- *   - Clicking a mirror row still navigates to /copy-trading/:id.
+ * Keyboard:
+ *   - `/` focuses search
+ *   - `j` / `k` moves the focus ring
+ *   - `Enter` drills into the focused row
+ *   - `Esc` clears search / blurs input
+ *
+ * `b` / `c` shortcuts are gone with the selection model they depended
+ * on — operators use the row buttons or drill into the detail page.
  */
 export function PortfolioPage() {
   const portfolio = useAsync(fetchPortfolio, []);
   const currency = useDisplayCurrency();
+  const navigate = useNavigate();
 
   const [search, setSearch] = useState("");
-  const [selectedId, setSelectedId] = useState<number | null>(null);
   const [focusedIdx, setFocusedIdx] = useState<number>(0);
   const [page, setPage] = useState<number>(1);
-  const [hint, setHint] = useState<string | null>(null);
 
   const [addFor, setAddFor] = useState<PositionItem | null>(null);
   const [closeFor, setCloseFor] = useState<CloseTarget | null>(null);
 
   const searchRef = useRef<HTMLInputElement | null>(null);
 
-  // Refs track the freshest focus index + page rows + selected
-  // position so the window keyboard handler (which captures closures
-  // each effect run) always reads the current values, not a snapshot
-  // from an earlier render. The refs also keep the effect's deps
-  // array small — re-binding the listener every time `portfolio.data`
-  // changes is wasteful when the handler only *reads* the position.
+  // Refs keep the window keyboard handler reading the freshest focus
+  // index + visible rows without re-binding the listener on every
+  // render.
   const focusedIdxRef = useRef(focusedIdx);
   const pageRowsRef = useRef<RowItem[]>([]);
-  const selectedPositionRef = useRef<PositionItem | null>(null);
 
-  // Derived: all rows (positions + mirrors, sorted by value), then
-  // filtered by search, then sliced for the current page.
+  // Positions + mirrors merged, sorted by dollar value, filtered by
+  // search, then paged. Both row types contribute to "account worth",
+  // so they share the same sorted list.
   const allRows: RowItem[] = useMemo(() => {
     if (portfolio.data === null) return [];
     const positions = portfolio.data.positions.map<RowItem>((p) => ({
@@ -97,49 +98,19 @@ export function PortfolioPage() {
     return visible.slice(start, start + PAGE_SIZE);
   }, [visible, page]);
 
-  // Derive selectedPosition from the UNFILTERED positions so the
-  // detail panel keeps rendering when the operator narrows search.
-  const selectedPosition: PositionItem | null = useMemo(() => {
-    if (selectedId === null || portfolio.data === null) return null;
-    return (
-      portfolio.data.positions.find((p) => p.instrument_id === selectedId) ??
-      null
-    );
-  }, [selectedId, portfolio.data]);
-
-  // Keep refs aligned with the current render so the window listener
-  // never reads a stale snapshot. Using useLayoutEffect (rather than
-  // assigning during render) avoids the "no side effects in render"
-  // rule so the same code is safe under React.StrictMode double-
-  // rendering and future concurrent-mode invariants.
   useLayoutEffect(() => {
     focusedIdxRef.current = focusedIdx;
     pageRowsRef.current = pageRows;
-    selectedPositionRef.current = selectedPosition;
   });
 
-  // Clamp focusedIdx when pageRows.length changes.
   useEffect(() => {
     if (pageRows.length === 0) return;
     setFocusedIdx((i) => Math.min(Math.max(i, 0), pageRows.length - 1));
   }, [pageRows.length]);
 
-  // Clamp page when it exceeds totalPages after search shrinks results.
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
   }, [page, totalPages]);
-
-  // Clear stale selectedId after a /portfolio refetch that drops it
-  // (e.g. a full close in ClosePositionModal). Otherwise the detail
-  // panel would collapse but `b`/`c` would still try to act on a
-  // ghost position — gated below via selectedPosition !== null.
-  useEffect(() => {
-    if (selectedId === null || portfolio.data === null) return;
-    const stillExists = portfolio.data.positions.some(
-      (p) => p.instrument_id === selectedId,
-    );
-    if (!stillExists) setSelectedId(null);
-  }, [portfolio.data, selectedId]);
 
   function handleFilled() {
     setAddFor(null);
@@ -147,30 +118,19 @@ export function PortfolioPage() {
     portfolio.refetch();
   }
 
-  function handleSelectRow(row: RowItem, idxOnPage: number) {
+  function drillInto(row: RowItem) {
     if (row.kind === "position") {
-      setSelectedId(row.data.instrument_id);
-      setFocusedIdx(idxOnPage);
-      // Any stale multi-trade hint becomes irrelevant once the
-      // operator picks a new row — clear it.
-      setHint(null);
+      navigate(`/portfolio/${row.data.instrument_id}`);
+    } else {
+      navigate(`/copy-trading/${row.data.mirror_id}`);
     }
-    // Mirror rows intentionally do not set selection — the row itself
-    // navigates via MirrorRow's onClick.
   }
 
-  // Window-level keyboard handler so shortcuts work before the
-  // operator has clicked anything.
   useEffect(() => {
     function isEditable(el: Element | null): boolean {
       if (el === null) return false;
       const tag = el.tagName;
-      if (
-        tag === "INPUT" ||
-        tag === "TEXTAREA" ||
-        tag === "SELECT"
-      )
-        return true;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
       return (el as HTMLElement).isContentEditable === true;
     }
 
@@ -180,8 +140,6 @@ export function PortfolioPage() {
 
       const activeEditable = isEditable(document.activeElement);
 
-      // Esc is special-cased: always processed so it can blur the
-      // search input + clear the search string.
       if (e.key === "Escape") {
         if (activeEditable && document.activeElement === searchRef.current) {
           searchRef.current?.blur();
@@ -189,9 +147,7 @@ export function PortfolioPage() {
           e.preventDefault();
           return;
         }
-        setSelectedId(null);
         setFocusedIdx(0);
-        setHint(null);
         e.preventDefault();
         return;
       }
@@ -203,7 +159,6 @@ export function PortfolioPage() {
         searchRef.current?.focus();
         return;
       }
-
       if (e.key === "j") {
         const rows = pageRowsRef.current;
         if (rows.length === 0) return;
@@ -222,37 +177,7 @@ export function PortfolioPage() {
         const rows = pageRowsRef.current;
         if (rows.length === 0) return;
         const target = rows[focusedIdxRef.current];
-        if (target !== undefined && target.kind === "position") {
-          setSelectedId(target.data.instrument_id);
-          setHint(null);
-        }
-        e.preventDefault();
-        return;
-      }
-      if (e.key === "b") {
-        const pos = selectedPositionRef.current;
-        if (pos === null) return;
-        setAddFor(pos);
-        setHint(null);
-        e.preventDefault();
-        return;
-      }
-      if (e.key === "c") {
-        const pos = selectedPositionRef.current;
-        if (pos === null) return;
-        const trades = pos.trades;
-        if (trades.length === 1 && trades[0] !== undefined) {
-          setCloseFor({
-            instrumentId: pos.instrument_id,
-            trade: trades[0],
-            valuationSource: pos.valuation_source,
-          });
-          setHint(null);
-        } else if (trades.length > 1) {
-          setHint(
-            "Close requires a single broker position — use the detail panel.",
-          );
-        }
+        if (target !== undefined) drillInto(target);
         e.preventDefault();
         return;
       }
@@ -260,9 +185,7 @@ export function PortfolioPage() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // Modal presence flags gate the handler; everything else the
-    // handler reads is carried by refs, so the listener does not need
-    // to re-bind on per-render state changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addFor, closeFor]);
 
   return (
@@ -276,81 +199,59 @@ export function PortfolioPage() {
       ) : portfolio.loading || portfolio.data === null ? (
         <SectionSkeleton rows={8} />
       ) : (
-        <div className="grid gap-4 lg:grid-cols-5">
-          <div className="space-y-3 lg:col-span-3">
-            <SummaryBar data={portfolio.data} currency={currency} />
-            {hint !== null ? (
-              <div
-                role="status"
-                className="rounded border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs text-amber-800"
+        <div className="space-y-3">
+          <SummaryBar data={portfolio.data} currency={currency} />
+          {allRows.length === 0 ? (
+            <EmptyState
+              title="No positions yet"
+              description="Open a position from the rankings page to see it here."
+            >
+              <Link
+                to="/rankings"
+                className="text-sm font-medium text-blue-600 hover:underline"
               >
-                {hint}
-              </div>
-            ) : null}
-            {allRows.length === 0 ? (
-              <EmptyState
-                title="No positions yet"
-                description="Open a position from the rankings page to see it here."
-              >
-                <Link
-                  to="/rankings"
-                  className="text-sm font-medium text-blue-600 hover:underline"
-                >
-                  Go to rankings →
-                </Link>
-              </EmptyState>
-            ) : (
-              <>
-                <PortfolioTable
-                  pageRows={pageRows}
-                  currency={currency}
-                  search={search}
-                  onSearchChange={(v) => {
-                    setSearch(v);
-                    setPage(1);
+                Go to rankings →
+              </Link>
+            </EmptyState>
+          ) : (
+            <>
+              <PortfolioTable
+                pageRows={pageRows}
+                currency={currency}
+                search={search}
+                onSearchChange={(v) => {
+                  setSearch(v);
+                  setPage(1);
+                }}
+                searchRef={searchRef}
+                focusedIdx={focusedIdx}
+                onDrill={drillInto}
+                onAdd={(p) => setAddFor(p)}
+                onClose={(t) => setCloseFor(t)}
+              />
+              {visible.length > PAGE_SIZE ? (
+                <PaginationBar
+                  page={page}
+                  totalPages={totalPages}
+                  onPrev={() => {
+                    setPage((p) => Math.max(1, p - 1));
+                    setFocusedIdx(0);
                   }}
-                  searchRef={searchRef}
-                  focusedIdx={focusedIdx}
-                  selectedId={selectedId}
-                  onSelectRow={handleSelectRow}
-                  onAdd={(p) => setAddFor(p)}
-                  onClose={(t) => setCloseFor(t)}
+                  onNext={() => {
+                    setPage((p) => Math.min(totalPages, p + 1));
+                    setFocusedIdx(0);
+                  }}
                 />
-                {visible.length > PAGE_SIZE ? (
-                  <PaginationBar
-                    page={page}
-                    totalPages={totalPages}
-                    onPrev={() => {
-                      setPage((p) => Math.max(1, p - 1));
-                      setFocusedIdx(0);
-                    }}
-                    onNext={() => {
-                      setPage((p) => Math.min(totalPages, p + 1));
-                      setFocusedIdx(0);
-                    }}
-                  />
-                ) : null}
-                <div className="text-[10px] text-slate-400">
-                  <kbd className="rounded bg-slate-100 px-1">/</kbd> search ·{" "}
-                  <kbd className="rounded bg-slate-100 px-1">j</kbd>/
-                  <kbd className="rounded bg-slate-100 px-1">k</kbd> move ·{" "}
-                  <kbd className="rounded bg-slate-100 px-1">Enter</kbd>{" "}
-                  select · <kbd className="rounded bg-slate-100 px-1">Esc</kbd>{" "}
-                  clear · <kbd className="rounded bg-slate-100 px-1">b</kbd>{" "}
-                  Add · <kbd className="rounded bg-slate-100 px-1">c</kbd>{" "}
-                  Close
-                </div>
-              </>
-            )}
-          </div>
-          <div className="lg:col-span-2">
-            <DetailPanel
-              selectedPosition={selectedPosition}
-              currency={currency}
-              onAdd={(p) => setAddFor(p)}
-              onCloseTrade={(t) => setCloseFor(t)}
-            />
-          </div>
+              ) : null}
+              <div className="text-[10px] text-slate-400">
+                <kbd className="rounded bg-slate-100 px-1">/</kbd> search ·{" "}
+                <kbd className="rounded bg-slate-100 px-1">j</kbd>/
+                <kbd className="rounded bg-slate-100 px-1">k</kbd> move ·{" "}
+                <kbd className="rounded bg-slate-100 px-1">Enter</kbd> open ·{" "}
+                <kbd className="rounded bg-slate-100 px-1">Esc</kbd> clear
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -493,8 +394,7 @@ function PortfolioTable({
   onSearchChange,
   searchRef,
   focusedIdx,
-  selectedId,
-  onSelectRow,
+  onDrill,
   onAdd,
   onClose,
 }: {
@@ -504,8 +404,7 @@ function PortfolioTable({
   onSearchChange: (v: string) => void;
   searchRef: React.MutableRefObject<HTMLInputElement | null>;
   focusedIdx: number;
-  selectedId: number | null;
-  onSelectRow: (row: RowItem, idxOnPage: number) => void;
+  onDrill: (row: RowItem) => void;
   onAdd: (p: PositionItem) => void;
   onClose: (t: CloseTarget) => void;
 }) {
@@ -550,8 +449,7 @@ function PortfolioTable({
                   p={row.data}
                   currency={currency}
                   focused={idx === focusedIdx}
-                  selected={row.data.instrument_id === selectedId}
-                  onSelect={() => onSelectRow(row, idx)}
+                  onDrill={() => onDrill(row)}
                   onAdd={onAdd}
                   onClose={onClose}
                 />
@@ -561,6 +459,7 @@ function PortfolioTable({
                   m={row.data}
                   currency={currency}
                   focused={idx === focusedIdx}
+                  onDrill={() => onDrill(row)}
                 />
               ),
             )}
@@ -608,23 +507,21 @@ function PaginationBar({
 }
 
 // ---------------------------------------------------------------------------
-// Position row — click selects for the detail panel
+// Rows — both drill into a dedicated detail page on click
 // ---------------------------------------------------------------------------
 
 function PositionRow({
   p,
   currency,
   focused,
-  selected,
-  onSelect,
+  onDrill,
   onAdd,
   onClose,
 }: {
   p: PositionItem;
   currency: string;
   focused: boolean;
-  selected: boolean;
-  onSelect: () => void;
+  onDrill: () => void;
   onAdd: (p: PositionItem) => void;
   onClose: (t: CloseTarget) => void;
 }) {
@@ -636,18 +533,15 @@ function PositionRow({
 
   const rowClass = [
     "cursor-pointer border-t border-slate-100 transition-colors",
-    selected
-      ? "bg-blue-50 border-l-2 border-l-blue-500"
-      : focused
-        ? "bg-slate-100 border-l-2 border-l-slate-400"
-        : "hover:bg-slate-50/70",
+    focused
+      ? "bg-slate-100 border-l-2 border-l-slate-400"
+      : "hover:bg-slate-50/70",
   ].join(" ");
 
   return (
     <tr
       className={rowClass}
-      onClick={onSelect}
-      aria-selected={selected}
+      onClick={onDrill}
       data-testid={`position-row-${p.instrument_id}`}
     >
       <td className="px-4 py-2 text-left">
@@ -716,20 +610,17 @@ function PositionRow({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Mirror row — click navigates to /copy-trading/:mirrorId (unchanged)
-// ---------------------------------------------------------------------------
-
 function MirrorRow({
   m,
   currency,
   focused,
+  onDrill,
 }: {
   m: PortfolioMirrorItem;
   currency: string;
   focused: boolean;
+  onDrill: () => void;
 }) {
-  const navigate = useNavigate();
   const pct = pnlPct(m.unrealized_pnl, m.funded);
   const positive = m.unrealized_pnl >= 0;
 
@@ -739,7 +630,11 @@ function MirrorRow({
   ].join(" ");
 
   return (
-    <tr className={rowClass} onClick={() => navigate(`/copy-trading/${m.mirror_id}`)}>
+    <tr
+      className={rowClass}
+      onClick={onDrill}
+      data-testid={`mirror-row-${m.mirror_id}`}
+    >
       <td className="px-4 py-2 text-left">
         <span className="inline-flex items-center gap-2">
           <span
