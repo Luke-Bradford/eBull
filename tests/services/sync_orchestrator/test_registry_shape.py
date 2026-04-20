@@ -12,10 +12,7 @@ from app.services.sync_orchestrator.registry import LAYERS
 
 EXPECTED_CADENCES: dict[str, timedelta] = {
     "universe": timedelta(days=7),
-    "cik_mapping": timedelta(hours=24),
     "candles": timedelta(hours=24),
-    "financial_facts": timedelta(hours=24),
-    "financial_normalization": timedelta(hours=24),
     "fundamentals": timedelta(days=90),
     "news": timedelta(hours=4),
     "thesis": timedelta(hours=24),
@@ -49,7 +46,7 @@ def test_minute_cadence_layers_have_tighter_retry_policy() -> None:
 
 
 def test_daily_layers_use_default_retry_policy() -> None:
-    for name in ("cik_mapping", "candles", "financial_facts"):
+    for name in ("candles", "fundamentals", "thesis"):
         assert LAYERS[name].retry_policy == DEFAULT_RETRY_POLICY
 
 
@@ -72,7 +69,7 @@ def test_llm_layers_declare_anthropic_secret() -> None:
 
 def test_market_data_layers_declare_no_env_secrets() -> None:
     assert LAYERS["candles"].secret_refs == ()
-    assert LAYERS["cik_mapping"].secret_refs == ()
+    assert LAYERS["fundamentals"].secret_refs == ()
 
 
 def test_candles_has_content_predicate() -> None:
@@ -84,5 +81,5 @@ def test_fundamentals_has_content_predicate() -> None:
 
 
 def test_layers_without_content_predicate_have_none() -> None:
-    for name in ("universe", "news", "scoring", "portfolio_sync", "cik_mapping"):
+    for name in ("universe", "news", "scoring", "portfolio_sync", "thesis"):
         assert LAYERS[name].content_predicate is None

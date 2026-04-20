@@ -336,8 +336,6 @@ class TestProductionInvokerRegistry:
             "nightly_universe_sync",
             # Phase-4 moved from SCHEDULED_JOBS to orchestrator-driven:
             "daily_candle_refresh",
-            "daily_cik_refresh",
-            "daily_financial_facts",
             "daily_news_refresh",
             "daily_portfolio_sync",
             "daily_research_refresh",
@@ -347,6 +345,9 @@ class TestProductionInvokerRegistry:
             "morning_candidate_review",
             "seed_cost_models",
             "weekly_report",
+            # daily_cik_refresh + daily_financial_facts retired from _INVOKERS
+            # in Chunk 3 of the 2026-04-19 research-tool refocus; they are
+            # now called from inside fundamentals_sync.
         }
         assert on_demand == expected_on_demand, (
             f"Unexpected on-demand invokers (update this test if intentional): "

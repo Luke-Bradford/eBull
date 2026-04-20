@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.services.coverage import ReviewResult
 from app.services.coverage_audit import AuditSummary
 from app.services.filings_backfill import BackfillOutcome, BackfillResult
@@ -89,6 +91,8 @@ def test_fundamentals_sync_runs_audit_backfill_then_review() -> None:
         patch.object(scheduler, "psycopg") as psycopg_mod,
         patch.object(scheduler, "SecFilingsProvider") as provider_cls,
         patch.object(scheduler, "review_coverage", return_value=review) as review_mock,
+        patch.object(scheduler, "daily_cik_refresh") as cik_mock,
+        patch.object(scheduler, "daily_financial_facts") as facts_mock,
         patch(
             "app.services.coverage_audit.audit_all_instruments",
             return_value=summary,
@@ -108,6 +112,9 @@ def test_fundamentals_sync_runs_audit_backfill_then_review() -> None:
     audit_mock.assert_called_once_with(phase1_conn)
     review_mock.assert_called_once_with(phase2_conn)
     assert backfill_mock.call_count == 2
+    # Phases 0 + 1 fired exactly once each before the audit/review phases.
+    cik_mock.assert_called_once()
+    facts_mock.assert_called_once()
     # audit.total_updated (7) + 2 × COMPLETE_OK (2) + promotions+demotions (3)
     assert tracker.row_count == 12
 
@@ -147,6 +154,8 @@ def test_fundamentals_sync_per_instrument_error_is_isolated() -> None:
         patch.object(scheduler, "psycopg") as psycopg_mod,
         patch.object(scheduler, "SecFilingsProvider") as provider_cls,
         patch.object(scheduler, "review_coverage", return_value=review) as review_mock,
+        patch.object(scheduler, "daily_cik_refresh") as cik_mock,
+        patch.object(scheduler, "daily_financial_facts") as facts_mock,
         patch(
             "app.services.coverage_audit.audit_all_instruments",
             return_value=summary,
@@ -162,6 +171,8 @@ def test_fundamentals_sync_per_instrument_error_is_isolated() -> None:
 
         scheduler.fundamentals_sync()
 
+    cik_mock.assert_called_once()
+    facts_mock.assert_called_once()
     assert backfill_mock.call_count == 3
     # Rollback is the phase-1 connection's — phase-2 should not have been touched.
     phase1_conn.rollback.assert_called()
@@ -187,6 +198,8 @@ def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
         patch.object(scheduler, "_tracked_job") as tracked_cm,
         patch.object(scheduler, "psycopg") as psycopg_mod,
         patch.object(scheduler, "review_coverage") as review_mock,
+        patch.object(scheduler, "daily_cik_refresh") as cik_mock,
+        patch.object(scheduler, "daily_financial_facts") as facts_mock,
         patch(
             "app.services.coverage_audit.audit_all_instruments",
             side_effect=RuntimeError("classifier broke"),
@@ -208,14 +221,18 @@ def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
             raise AssertionError("expected RuntimeError to propagate")
 
     review_mock.assert_not_called()
+    # Phases 0 + 1 still fire before the audit raises.
+    cik_mock.assert_called_once()
+    facts_mock.assert_called_once()
     assert psycopg_mod.connect.call_count == 1
 
 
 def test_fundamentals_sync_phase2_failure_preserves_phase1_success() -> None:
-    """review_coverage raising must NOT fail the whole job — phase 1 audit +
-    backfill writes already committed, and the tracker row_count still
-    reflects them. Mirrors the old weekly_coverage_review's try/except/return
-    semantics."""
+    """review_coverage raising must still surface as a job failure so health
+    surfaces see it, but phase 2 audit + backfill writes were already
+    committed and tracker.row_count reflects them. The end-of-job raise
+    marks the outer _tracked_job failed; phases 0/1/3 are all isolated so
+    this is the only way phase-3 failures reach the health surface."""
     summary = AuditSummary(
         analysable=10,
         insufficient=2,
@@ -248,6 +265,8 @@ def test_fundamentals_sync_phase2_failure_preserves_phase1_success() -> None:
             "review_coverage",
             side_effect=RuntimeError("review crashed"),
         ) as review_mock,
+        patch.object(scheduler, "daily_cik_refresh") as cik_mock,
+        patch.object(scheduler, "daily_financial_facts") as facts_mock,
         patch(
             "app.services.coverage_audit.audit_all_instruments",
             return_value=summary,
@@ -261,12 +280,117 @@ def test_fundamentals_sync_phase2_failure_preserves_phase1_success() -> None:
         _stub_two_connect_ctxes(psycopg_mod, phase1_conn, phase2_conn)
         provider_cls.return_value.__enter__.return_value = MagicMock()
 
-        # Must not raise — phase 2 failures are swallowed so the
-        # committed phase-1 writes still mark the job succeeded.
-        scheduler.fundamentals_sync()
+        # Raises at the end so health surfaces record the job as failed.
+        # tracker.row_count is still set to the phase-2 contribution so
+        # the audit trail shows what work DID happen.
+        with pytest.raises(RuntimeError, match="phase 3"):
+            scheduler.fundamentals_sync()
 
     review_mock.assert_called_once_with(phase2_conn)
+    cik_mock.assert_called_once()
+    facts_mock.assert_called_once()
     assert backfill_mock.call_count == 1
-    # Only phase-1 contribution: total_updated (4) + 1 × COMPLETE_OK (1).
+    # Only phase-2 contribution: audit total_updated (4) + 1 × COMPLETE_OK (1).
     # review_rows stays 0 because the review raised.
     assert tracker.row_count == 5
+
+
+def test_fundamentals_sync_phase0_cik_failure_isolated() -> None:
+    """Phase 0 (CIK refresh) raising must not prevent phases 1/2/3 from
+    running, but the job must still surface as failed at the end so health
+    surfaces see the outage (Codex/#351-review feedback). Downstream phases
+    operate on the previously-persisted CIK map."""
+    summary = AuditSummary(
+        analysable=0,
+        insufficient=0,
+        fpi=0,
+        no_primary_sec_cik=0,
+        total_updated=0,
+        null_anomalies=0,
+    )
+    review = _stub_review_result()
+
+    stub_settings = MagicMock()
+    stub_settings.database_url = "postgresql://test"
+    stub_settings.sec_user_agent = "test-agent@example.com"
+
+    tracker = MagicMock()
+
+    phase1_conn = MagicMock()
+    phase1_conn.execute.return_value.fetchall.return_value = []
+    phase2_conn = MagicMock()
+
+    with (
+        patch.object(scheduler, "settings", stub_settings),
+        patch.object(scheduler, "_tracked_job") as tracked_cm,
+        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "SecFilingsProvider") as provider_cls,
+        patch.object(scheduler, "review_coverage", return_value=review) as review_mock,
+        patch.object(scheduler, "daily_cik_refresh", side_effect=RuntimeError("cik pull failed")) as cik_mock,
+        patch.object(scheduler, "daily_financial_facts") as facts_mock,
+        patch(
+            "app.services.coverage_audit.audit_all_instruments",
+            return_value=summary,
+        ) as audit_mock,
+    ):
+        tracked_cm.return_value.__enter__.return_value = tracker
+        _stub_two_connect_ctxes(psycopg_mod, phase1_conn, phase2_conn)
+        provider_cls.return_value.__enter__.return_value = MagicMock()
+
+        # Raises at the end — phase 0 failure is isolated but surfaced.
+        with pytest.raises(RuntimeError, match="phase 0"):
+            scheduler.fundamentals_sync()
+
+    cik_mock.assert_called_once()
+    facts_mock.assert_called_once()
+    audit_mock.assert_called_once_with(phase1_conn)
+    review_mock.assert_called_once_with(phase2_conn)
+
+
+def test_fundamentals_sync_phase1_xbrl_failure_isolated() -> None:
+    """Phase 1 (XBRL + normalization) raising must not prevent phase 2/3
+    from running; the job surfaces as failed at the end."""
+    summary = AuditSummary(
+        analysable=0,
+        insufficient=0,
+        fpi=0,
+        no_primary_sec_cik=0,
+        total_updated=0,
+        null_anomalies=0,
+    )
+    review = _stub_review_result()
+
+    stub_settings = MagicMock()
+    stub_settings.database_url = "postgresql://test"
+    stub_settings.sec_user_agent = "test-agent@example.com"
+
+    tracker = MagicMock()
+
+    phase1_conn = MagicMock()
+    phase1_conn.execute.return_value.fetchall.return_value = []
+    phase2_conn = MagicMock()
+
+    with (
+        patch.object(scheduler, "settings", stub_settings),
+        patch.object(scheduler, "_tracked_job") as tracked_cm,
+        patch.object(scheduler, "psycopg") as psycopg_mod,
+        patch.object(scheduler, "SecFilingsProvider") as provider_cls,
+        patch.object(scheduler, "review_coverage", return_value=review) as review_mock,
+        patch.object(scheduler, "daily_cik_refresh") as cik_mock,
+        patch.object(scheduler, "daily_financial_facts", side_effect=RuntimeError("xbrl outage")) as facts_mock,
+        patch(
+            "app.services.coverage_audit.audit_all_instruments",
+            return_value=summary,
+        ) as audit_mock,
+    ):
+        tracked_cm.return_value.__enter__.return_value = tracker
+        _stub_two_connect_ctxes(psycopg_mod, phase1_conn, phase2_conn)
+        provider_cls.return_value.__enter__.return_value = MagicMock()
+
+        with pytest.raises(RuntimeError, match="phase 1"):
+            scheduler.fundamentals_sync()
+
+    cik_mock.assert_called_once()
+    facts_mock.assert_called_once()
+    audit_mock.assert_called_once_with(phase1_conn)
+    review_mock.assert_called_once_with(phase2_conn)

@@ -16,9 +16,7 @@ import psycopg
 
 from app.services.sync_orchestrator.adapters import (
     refresh_candles,
-    refresh_cik_mapping,
     refresh_cost_models,
-    refresh_financial_facts_and_normalization,
     refresh_fundamentals,
     refresh_fx_rates,
     refresh_monthly_reports,
@@ -35,10 +33,7 @@ from app.services.sync_orchestrator.content_predicates import (
 )
 from app.services.sync_orchestrator.freshness import (
     candles_is_fresh,
-    cik_mapping_is_fresh,
     cost_models_is_fresh,
-    financial_facts_is_fresh,
-    financial_normalization_is_fresh,
     fundamentals_is_fresh,
     fx_rates_is_fresh,
     monthly_reports_is_fresh,
@@ -93,16 +88,6 @@ LAYERS: dict[str, DataLayer] = {
         dependencies=(),
         plain_language_sla="Refreshed weekly — eToro instrument list.",
     ),
-    "cik_mapping": DataLayer(
-        name="cik_mapping",
-        display_name="SEC CIK Mapping",
-        tier=0,
-        cadence=Cadence(interval=timedelta(hours=24)),
-        is_fresh=cik_mapping_is_fresh,
-        refresh=refresh_cik_mapping,
-        dependencies=("universe",),
-        plain_language_sla="Refreshed nightly from SEC company_tickers.json.",
-    ),
     "candles": DataLayer(
         name="candles",
         display_name="Daily Price Candles",
@@ -113,26 +98,6 @@ LAYERS: dict[str, DataLayer] = {
         dependencies=("universe",),
         content_predicate=candles_content_ok,
         plain_language_sla="Refreshed every trading day after market close.",
-    ),
-    "financial_facts": DataLayer(
-        name="financial_facts",
-        display_name="SEC EDGAR XBRL Facts",
-        tier=1,
-        cadence=Cadence(interval=timedelta(hours=24)),
-        is_fresh=financial_facts_is_fresh,
-        refresh=refresh_financial_facts_and_normalization,
-        dependencies=("cik_mapping",),
-        plain_language_sla="Refreshed nightly from SEC XBRL filings.",
-    ),
-    "financial_normalization": DataLayer(
-        name="financial_normalization",
-        display_name="Financial Period Normalization",
-        tier=2,
-        cadence=Cadence(interval=timedelta(hours=24)),
-        is_fresh=financial_normalization_is_fresh,
-        refresh=refresh_financial_facts_and_normalization,
-        dependencies=("financial_facts",),
-        plain_language_sla="Derived nightly from SEC XBRL facts.",
     ),
     "fundamentals": DataLayer(
         name="fundamentals",
@@ -164,7 +129,7 @@ LAYERS: dict[str, DataLayer] = {
         cadence=Cadence(interval=timedelta(hours=24)),
         is_fresh=thesis_is_fresh,
         refresh=refresh_thesis,
-        dependencies=("fundamentals", "financial_normalization", "news"),
+        dependencies=("fundamentals", "news"),
         secret_refs=(SecretRef(env_var="ANTHROPIC_API_KEY", display_name="Anthropic API key"),),
         plain_language_sla="Refreshed nightly for stale Tier 1 tickers.",
     ),
@@ -251,11 +216,9 @@ LAYERS: dict[str, DataLayer] = {
 # to tuple of emitted layer names. Empty tuple = outside-DAG job (stays
 # as-is in Phase 1–3, dashboard shows in "Background tasks" panel).
 JOB_TO_LAYERS: dict[str, tuple[str, ...]] = {
-    # In-DAG (13 entries, non-empty tuples):
+    # In-DAG (11 entries, non-empty tuples):
     "nightly_universe_sync": ("universe",),
-    "daily_cik_refresh": ("cik_mapping",),
     "daily_candle_refresh": ("candles",),
-    "daily_financial_facts": ("financial_facts", "financial_normalization"),
     "daily_research_refresh": ("fundamentals",),
     "daily_news_refresh": ("news",),
     "daily_thesis_refresh": ("thesis",),
