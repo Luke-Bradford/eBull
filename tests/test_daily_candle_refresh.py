@@ -20,15 +20,18 @@ from app.workers.scheduler import _T3_BOOTSTRAP_BATCH_SIZE, daily_candle_refresh
 def _make_mock_conn(
     tier12_rows: list[tuple[int, str]],
     t3_rows: list[tuple[int, str]],
+    held_rows: list[tuple[int, str]] | None = None,
 ) -> MagicMock:
-    """Mock connection that returns tier12_rows on first execute, t3_rows
-    on second."""
+    """Mock connection that returns held_rows / tier12_rows / t3_rows in
+    the order the handler executes them (held → tier12 → t3)."""
     conn = MagicMock()
-    result1 = MagicMock()
-    result1.fetchall.return_value = tier12_rows
-    result2 = MagicMock()
-    result2.fetchall.return_value = t3_rows
-    conn.execute.side_effect = [result1, result2]
+    result_held = MagicMock()
+    result_held.fetchall.return_value = held_rows or []
+    result_12 = MagicMock()
+    result_12.fetchall.return_value = tier12_rows
+    result_t3 = MagicMock()
+    result_t3.fetchall.return_value = t3_rows
+    conn.execute.side_effect = [result_held, result_12, result_t3]
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=False)
     return conn
@@ -50,13 +53,14 @@ class TestDailyCandleRefreshT3Bootstrap:
         self,
         tier12_rows: list[tuple[int, str]],
         t3_rows: list[tuple[int, str]],
+        held_rows: list[tuple[int, str]] | None = None,
     ) -> MagicMock:
         """Run daily_candle_refresh with mocked dependencies.
 
         Returns the mock for refresh_market_data so callers can inspect
         what instruments were passed.
         """
-        mock_conn = _make_mock_conn(tier12_rows, t3_rows)
+        mock_conn = _make_mock_conn(tier12_rows, t3_rows, held_rows)
         mock_provider = MagicMock()
         mock_provider.__enter__ = MagicMock(return_value=mock_provider)
         mock_provider.__exit__ = MagicMock(return_value=False)
@@ -113,6 +117,27 @@ class TestDailyCandleRefreshT3Bootstrap:
         mock_refresh = self._run([], [])
         mock_refresh.assert_not_called()
 
+    def test_held_positions_included(self) -> None:
+        """Held positions must be refreshed regardless of coverage tier."""
+        held = [(999, "LEGACY_HOLD")]
+        tier12 = [(1, "AAPL")]
+        t3_bootstrap = [(100, "XYZ")]
+        mock_refresh = self._run(tier12, t3_bootstrap, held_rows=held)
+
+        instruments = mock_refresh.call_args[0][2]
+        assert (999, "LEGACY_HOLD") in instruments
+        # Dedupe: ordering puts held first, T1/T2 next, T3 last.
+        assert instruments[0] == (999, "LEGACY_HOLD")
+
+    def test_duplicate_instrument_across_scopes_is_deduped(self) -> None:
+        """An instrument that's both held and T1/T2 must not be fetched twice."""
+        held = [(1, "AAPL")]
+        tier12 = [(1, "AAPL"), (2, "MSFT")]
+        mock_refresh = self._run(tier12, [], held_rows=held)
+
+        instruments = mock_refresh.call_args[0][2]
+        assert instruments == [(1, "AAPL"), (2, "MSFT")]
+
     def test_t3_query_uses_limit_param(self) -> None:
         """Verify the T3 query passes _T3_BOOTSTRAP_BATCH_SIZE as limit."""
         mock_conn = _make_mock_conn([(1, "AAPL")], [(100, "XYZ")])
@@ -134,8 +159,9 @@ class TestDailyCandleRefreshT3Bootstrap:
         ):
             daily_candle_refresh()
 
-        # Second execute call is the T3 query with limit param
-        t3_call = mock_conn.execute.call_args_list[1]
+        # Third execute call is the T3 query with limit param
+        # (1st=held, 2nd=tier12, 3rd=T3 bootstrap).
+        t3_call = mock_conn.execute.call_args_list[2]
         sql_text = t3_call[0][0]
         params = t3_call[0][1]
         assert "LIMIT" in sql_text

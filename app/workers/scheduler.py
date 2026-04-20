@@ -810,19 +810,24 @@ data to enable T3→T2 promotion via the scoring/coverage pipeline.
 
 def daily_candle_refresh() -> None:
     """
-    Refresh candles for Tier 1/2 instruments and a bootstrap subset of
-    Tier 3 instruments that have fundamentals data.
+    Refresh candles for the scoped instrument set.
 
-    T1/T2: all covered instruments (uncapped).
-    T3: up to _T3_BOOTSTRAP_BATCH_SIZE instruments that already have a
-    fundamentals_snapshot row, ordered by symbol for determinism.  This
-    gives T3 instruments enough price data for momentum scoring, enabling
-    T3→T2 promotion via the weekly coverage review.
+    Scope (per 2026-04-19 research-tool refocus §1.3):
+      1. All currently-held positions (regardless of coverage tier) —
+         the operator needs current price context for anything in the
+         portfolio even if it's been demoted below T2.
+      2. All Tier 1/2 covered instruments (uncapped).
+      3. Up to ``_T3_BOOTSTRAP_BATCH_SIZE`` Tier 3 instruments that
+         already have fundamentals, ordered by symbol for determinism.
+         Enables T3→T2 promotion by seeding candle history.
 
     Fetches up to 400 daily candles per instrument (enough for 1y return
     + buffer).  Quotes are skipped (owned by the hourly job).
 
-    Runs daily at 22:00 UTC, after US market close.
+    Runs daily at 22:00 UTC, after US market close. Watchlist scope
+    (spec §1.3 bullet 2) lands once the watchlist table exists
+    (Phase 3.2). High-frequency held-position refresh (5-min cadence
+    during market hours) is Phase 4 (live quotes).
     """
     creds = _load_etoro_credentials("daily_candle_refresh")
     if creds is None:
@@ -835,7 +840,20 @@ def daily_candle_refresh() -> None:
             EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
             psycopg.connect(settings.database_url) as conn,
         ):
-            # T1/T2: all covered instruments
+            # Held positions — always included, regardless of coverage tier.
+            held_rows = conn.execute(
+                """
+                SELECT DISTINCT i.instrument_id, i.symbol
+                FROM positions p
+                JOIN instruments i ON i.instrument_id = p.instrument_id
+                WHERE p.current_units > 0
+                  AND i.is_tradable = TRUE
+                ORDER BY i.symbol, i.instrument_id
+                """
+            ).fetchall()
+
+            # T1/T2: all covered instruments (minus any already picked up
+            # via held_rows, to avoid duplicate fetches in this batch).
             tier12_rows = conn.execute(
                 """
                 SELECT i.instrument_id, i.symbol
@@ -877,20 +895,32 @@ def daily_candle_refresh() -> None:
                 {"limit": _T3_BOOTSTRAP_BATCH_SIZE},
             ).fetchall()
 
-            all_rows = tier12_rows + t3_rows
-            if not all_rows:
-                logger.info("daily_candle_refresh: no covered instruments found, skipping")
+            # Dedupe across scopes. A held T1 instrument must not be
+            # fetched twice; set semantics keyed on instrument_id preserve
+            # the symbol tuple from the first scope that introduced it.
+            seen: set[int] = set()
+            ordered: list[tuple[int, str]] = []
+            for row in held_rows + tier12_rows + t3_rows:
+                iid = int(row[0])
+                if iid in seen:
+                    continue
+                seen.add(iid)
+                ordered.append((iid, str(row[1])))
+
+            if not ordered:
+                logger.info("daily_candle_refresh: no instruments to refresh, skipping")
                 tracker.row_count = 0
                 return
 
             logger.info(
-                "daily_candle_refresh: %d T1/T2 + %d T3 bootstrap = %d instruments",
+                "daily_candle_refresh: %d held + %d T1/T2 + %d T3 bootstrap = %d unique instruments",
+                len(held_rows),
                 len(tier12_rows),
                 len(t3_rows),
-                len(all_rows),
+                len(ordered),
             )
 
-            instruments = [(row[0], row[1]) for row in all_rows]
+            instruments = ordered
             # skip_quotes=True: quote freshness is owned by the hourly
             # fx_rates_refresh job; daily candle job must not shadow
             # those fresher values with stale end-of-day data.
