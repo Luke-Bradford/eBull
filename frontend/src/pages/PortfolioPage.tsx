@@ -37,7 +37,7 @@ const PAGE_SIZE = 50;
  * Portfolio page — unified drill-in for positions + mirrors (#324).
  *
  * Revert of the #314 workstation split. Both row types behave the same:
- *   - Position row click → /portfolio/:instrumentId
+ *   - Position row click → /instrument/:symbol?tab=positions
  *   - Mirror row click   → /copy-trading/:mirrorId
  * No right-side detail pane; the per-row Add / Close buttons still open
  * their modals inline so the #313 action surface is preserved.
@@ -132,7 +132,12 @@ export function PortfolioPage() {
   const drillInto = useCallback(
     (row: RowItem) => {
       if (row.kind === "position") {
-        navigate(`/portfolio/${row.data.instrument_id}`);
+        // Position rows drill into the research page's Positions tab
+        // (per-stock research spec §4) — the operator lands on the
+        // canonical research view with their position pre-selected.
+        navigate(
+          `/instrument/${encodeURIComponent(row.data.symbol)}?tab=positions`,
+        );
       } else {
         navigate(`/copy-trading/${row.data.mirror_id}`);
       }

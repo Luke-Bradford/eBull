@@ -2,7 +2,7 @@
  * Tests for PortfolioPage after the #324 unified drill-in revert.
  *
  * Behaviour pinned:
- *   - Position row click → navigates to /portfolio/:instrumentId.
+ *   - Position row click → navigates to /instrument/:symbol?tab=positions.
  *   - Mirror row click   → navigates to /copy-trading/:mirrorId.
  *   - Row Add / Close buttons open modals without drilling.
  *   - Keyboard: `/` focuses search, `j`/`k` moves focus ring, Enter drills
@@ -147,7 +147,12 @@ function portfolioWith(
 // the current URL after a navigation without needing a real router.
 function LocationProbe() {
   const loc = useLocation();
-  return <div data-testid="location">{loc.pathname}</div>;
+  return (
+    <>
+      <div data-testid="location">{loc.pathname}</div>
+      <div data-testid="location-search">{loc.search}</div>
+    </>
+  );
 }
 
 function renderPage() {
@@ -164,7 +169,7 @@ function renderPage() {
               </>
             }
           />
-          <Route path="/portfolio/:id" element={<LocationProbe />} />
+          <Route path="/instrument/:symbol" element={<LocationProbe />} />
           <Route path="/copy-trading/:id" element={<LocationProbe />} />
         </Routes>
       </MemoryRouter>
@@ -216,7 +221,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("PortfolioPage — unified drill-in", () => {
-  it("position row click navigates to /portfolio/:instrumentId", async () => {
+  it("position row click navigates to /instrument/:symbol (tab=positions via query)", async () => {
     mockedFetchPortfolio.mockResolvedValue(portfolioWith([position(7, "AAPL")]));
     const user = userEvent.setup();
     renderPage();
@@ -225,7 +230,10 @@ describe("PortfolioPage — unified drill-in", () => {
     await user.click(row);
 
     await waitFor(() => {
-      expect(screen.getByTestId("location").textContent).toBe("/portfolio/7");
+      expect(screen.getByTestId("location").textContent).toBe("/instrument/AAPL");
+      expect(screen.getByTestId("location-search").textContent).toBe(
+        "?tab=positions",
+      );
     });
   });
 
@@ -306,14 +314,14 @@ describe("PortfolioPage — keyboard", () => {
     expect(input.value).toBe("");
   });
 
-  it("Enter drills the focused row to /portfolio/:id", async () => {
+  it("Enter drills the focused row to /instrument/:symbol", async () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByTestId("position-row-1");
 
     await user.keyboard("j{Enter}"); // focus second row (BBB → id 2), drill
     await waitFor(() => {
-      expect(screen.getByTestId("location").textContent).toBe("/portfolio/2");
+      expect(screen.getByTestId("location").textContent).toBe("/instrument/BBB");
     });
   });
 

@@ -5,7 +5,7 @@
  * coverage-tier filters, and server-side pagination. Columns are sortable
  * client-side within the current page (server-side sort is symbol ASC).
  *
- * Each instrument row links to /instruments/:id (detail page, #62).
+ * Each instrument row links to /instrument/:symbol (research page).
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -394,7 +394,7 @@ function InstrumentsTable({
             <tr key={item.instrument_id} className="align-top hover:bg-slate-50">
               <td className="py-2 pr-4">
                 <Link
-                  to={`/instruments/${item.instrument_id}`}
+                  to={`/instrument/${encodeURIComponent(item.symbol)}`}
                   className="text-blue-600 hover:underline"
                 >
                   <span className="font-medium">{item.symbol}</span>
