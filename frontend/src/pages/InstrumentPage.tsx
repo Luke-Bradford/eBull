@@ -122,7 +122,7 @@ function Header({ summary }: { summary: InstrumentSummary }) {
           <span className="text-3xl font-semibold">
             {formatDecimal(price.current, { currency: price.currency })}
           </span>
-          {price.day_change !== null && (
+          {price.day_change !== null && price.day_change_pct !== null && (
             <span className={`text-sm ${changeColor}`}>
               {Number(price.day_change) >= 0 ? "+" : ""}
               {formatDecimal(price.day_change)} (
@@ -203,8 +203,11 @@ function FinancialsTab({ symbol }: { symbol: string }) {
   );
 
   const rows = data?.rows ?? [];
+  // Collect the column set across all rows (periods may report different
+  // concepts), then sort alphabetically so the ordering is stable across
+  // re-fetches regardless of backend key order.
   const columns = rows.length
-    ? Array.from(new Set(rows.flatMap((row) => Object.keys(row.values))))
+    ? Array.from(new Set(rows.flatMap((row) => Object.keys(row.values)))).sort()
     : [];
 
   return (
@@ -249,7 +252,7 @@ function FinancialsTab({ symbol }: { symbol: string }) {
       {!loading && error === null && rows.length === 0 && (
         <EmptyState title="No statement data" description="Neither the local SEC XBRL cache nor yfinance returned data for this statement." />
       )}
-      {!loading && !error && rows.length > 0 && (
+      {!loading && error === null && rows.length > 0 && (
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead>
@@ -351,7 +354,7 @@ function AnalysisTab({ symbol }: { symbol: string }) {
           )}
         </div>
       )}
-      {!thesis && !error && !loading && (
+      {!thesis && error === null && !loading && (
         <p className="text-xs text-slate-500">
           Click "Generate thesis" to produce an AI-written bull / bear analysis.
           Results are cached for 24h per ticker so repeat clicks don't spend
