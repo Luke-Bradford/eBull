@@ -84,13 +84,17 @@ function geometry(rows: CandleBar[]): ChartGeometry | null {
   const clean = rows.filter((r) => parseNum(r.close) !== null);
   if (clean.length < 2) return null;
 
+  // Reduce rather than spread Math.min/max — spread can blow the
+  // call-stack on very large arrays. Our MAX range tops out around
+  // 5y*252 trading days ≈ 1260 bars, comfortably under any runtime's
+  // arg-count limit today, but reduce is portable and costs nothing.
   const closes = clean.map((r) => parseNum(r.close) ?? 0);
-  const priceMin = Math.min(...closes);
-  const priceMax = Math.max(...closes);
+  const priceMin = closes.reduce((a, b) => (a < b ? a : b), closes[0] ?? 0);
+  const priceMax = closes.reduce((a, b) => (a > b ? a : b), closes[0] ?? 0);
   const priceRange = priceMax - priceMin || 1;
 
   const volumes = clean.map((r) => parseNum(r.volume) ?? 0);
-  const volMax = Math.max(...volumes, 1);
+  const volMax = volumes.reduce((a, b) => (a > b ? a : b), 1);
 
   const plotW = W - PAD_LEFT - PAD_RIGHT;
   const plotH = PRICE_H - PAD_TOP - PAD_BOTTOM;
