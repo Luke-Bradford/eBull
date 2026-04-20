@@ -7,7 +7,7 @@
  * this page after two cycles, retiring is safe.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { fetchMonthlyReports, fetchWeeklyReports } from "@/api/reports";
 import type { ReportSnapshot } from "@/api/reports";
@@ -26,8 +26,13 @@ function ErrorView({ error }: { error: unknown }) {
   );
 }
 
-function formatDate(iso: string): string {
-  return iso.slice(0, 10);
+function formatDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const head = iso.slice(0, 10);
+  // ISO date-prefix like "2026-04-19" — anything shorter or malformed
+  // falls back to the em-dash sentinel used elsewhere on the page.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(head)) return "—";
+  return head;
 }
 
 function formatMoney(raw: unknown): string {
@@ -214,6 +219,19 @@ function ReportList({ reports }: { reports: ReportSnapshot[] }) {
   const [selectedId, setSelectedId] = useState<number | null>(
     reports[0]?.snapshot_id ?? null,
   );
+  // Reset selectedId when the list changes and the previous selection is
+  // no longer present — otherwise the highlighted button and the detail
+  // pane fall out of sync (selected silently falls back to reports[0]).
+  useEffect(() => {
+    if (reports.length === 0) {
+      setSelectedId(null);
+      return;
+    }
+    const present = reports.some((r) => r.snapshot_id === selectedId);
+    if (!present) {
+      setSelectedId(reports[0]?.snapshot_id ?? null);
+    }
+  }, [reports, selectedId]);
   const selected = reports.find((r) => r.snapshot_id === selectedId) ?? reports[0];
 
   return (
