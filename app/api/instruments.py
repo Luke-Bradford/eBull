@@ -106,6 +106,16 @@ class InstrumentPrice(BaseModel):
     currency: str | None
 
 
+# Closed set of values for `InstrumentKeyStats.field_source` entries. Mirror
+# in frontend/src/api/types.ts — consumers rely on this being exhaustive.
+KeyStatsFieldSource = Literal[
+    "sec_xbrl",
+    "yfinance",
+    "unavailable",
+    "sec_xbrl_price_missing",
+]
+
+
 class InstrumentKeyStats(BaseModel):
     pe_ratio: Decimal | None
     pb_ratio: Decimal | None
@@ -116,9 +126,7 @@ class InstrumentKeyStats(BaseModel):
     debt_to_equity: Decimal | None
     revenue_growth_yoy: Decimal | None
     earnings_growth_yoy: Decimal | None
-    # Per-field provenance map — present only when stats came from a mixed
-    # local+yfinance merge. None when the whole block is yfinance-only.
-    field_source: dict[str, str] | None = None
+    field_source: dict[str, KeyStatsFieldSource] | None = None
 
 
 class InstrumentFinancialRow(BaseModel):
@@ -592,7 +600,7 @@ def _merge_stats_with_local(
     if yfinance_stats is None and not local:
         return None
 
-    field_source: dict[str, str] = {}
+    field_source: dict[str, KeyStatsFieldSource] = {}
 
     def _pick(field: str, local_value: Decimal | None, yfinance_value: Decimal | None) -> Decimal | None:
         if local_value is not None:

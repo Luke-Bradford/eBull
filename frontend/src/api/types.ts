@@ -212,6 +212,21 @@ export interface InstrumentPrice {
   currency: string | null;
 }
 
+// Closed set of values emitted in InstrumentKeyStats.field_source.
+// Mirrors KeyStatsFieldSource in app/api/instruments.py.
+//   - "sec_xbrl"                 → computed from local SEC XBRL data
+//   - "yfinance"                 → pulled from yfinance snapshot
+//   - "unavailable"              → field genuinely absent everywhere
+//   - "sec_xbrl_price_missing"   → local SEC inputs present but live
+//                                  quote absent, so ratio is unresolvable
+//                                  (distinct from "unavailable" so UI
+//                                  can render a "waiting on price" hint)
+export type KeyStatsFieldSource =
+  | "sec_xbrl"
+  | "yfinance"
+  | "unavailable"
+  | "sec_xbrl_price_missing";
+
 export interface InstrumentKeyStats {
   pe_ratio: string | null;
   pb_ratio: string | null;
@@ -222,7 +237,7 @@ export interface InstrumentKeyStats {
   debt_to_equity: string | null;
   revenue_growth_yoy: string | null;
   earnings_growth_yoy: string | null;
-  field_source?: Record<string, string> | null;
+  field_source?: Record<string, KeyStatsFieldSource> | null;
 }
 
 export interface InstrumentSummary {

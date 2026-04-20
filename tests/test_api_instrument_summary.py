@@ -38,6 +38,38 @@ def cleanup() -> Iterator[None]:
     _clear_provider_override()
 
 
+def _make_cursor_sequence(fetchone_per_cursor: list[list[object]]) -> MagicMock:
+    """Build a conn mock whose every `cursor(...)` call returns an isolated
+    cursor mock with its own `fetchone` sequence.
+
+    Why: endpoint helpers open distinct cursors (one without `row_factory`
+    for `_has_sec_cik`, one with `dict_row` for `_fetch_local_fundamentals`
+    that runs two queries). A single shared `cur_mock` with
+    `fetchone.side_effect = [...]` couples query order to cursor order —
+    a refactor silently desyncs the stub and the test passes with wrong
+    data. Per-call isolation prevents that.
+
+    `fetchone_per_cursor[i]` is the list of `fetchone` return values for
+    the i-th `cursor(...)` call in dispatch order (one entry per execute).
+    """
+    cursors_iter = iter(fetchone_per_cursor)
+
+    def _next_cursor(*_args: object, **_kwargs: object) -> MagicMock:
+        cur = MagicMock()
+        cur.__enter__.return_value = cur
+        cur.__exit__.return_value = None
+        results = next(cursors_iter)
+        if len(results) == 1:
+            cur.fetchone.return_value = results[0]
+        else:
+            cur.fetchone.side_effect = list(results)
+        return cur
+
+    conn_mock = MagicMock()
+    conn_mock.cursor.side_effect = _next_cursor
+    return conn_mock
+
+
 def _stub_profile(symbol: str = "AAPL") -> YFinanceProfile:
     return YFinanceProfile(
         symbol=symbol,
@@ -339,45 +371,48 @@ def test_summary_prefers_local_sec_xbrl_for_us_ticker(client: TestClient) -> Non
     _install_stub_provider(stub_provider)
 
     def _db_conn() -> Iterator[MagicMock]:
-        conn_mock = MagicMock()
-        cur_mock = MagicMock()
-        cur_mock.__enter__.return_value = cur_mock
-        cur_mock.__exit__.return_value = None
-        # Sequence: instrument lookup, has_sec_cik lookup, fundamentals_snapshot,
-        # financial_periods.
-        cur_mock.fetchone.side_effect = [
-            {
-                "instrument_id": 42,
-                "symbol": "AAPL",
-                "company_name": "Apple Inc.",
-                "exchange": "NMS",
-                "currency": "USD",
-                "sector": "Technology",
-                "industry": None,
-                "country": "United States",
-                "is_tradable": True,
-                "coverage_tier": 1,
-            },
-            (1,),  # has_sec_cik
-            {
-                "eps": Decimal("6.50"),
-                "book_value": Decimal("4.20"),
-                "shares_outstanding": Decimal("15000000000"),
-                "cash": Decimal("50000000000"),
-                "debt": Decimal("120000000000"),
-                "net_debt": Decimal("70000000000"),
-                "revenue_ttm": Decimal("400000000000"),
-            },
-            {
-                "net_income": Decimal("100000000000"),
-                "shareholders_equity": Decimal("63000000000"),
-                "total_assets": Decimal("350000000000"),
-                "total_liabilities": Decimal("287000000000"),
-                "revenue": Decimal("400000000000"),
-            },
-        ]
-        conn_mock.cursor.return_value = cur_mock
-        yield conn_mock
+        # Cursor dispatch order:
+        #   1. instrument lookup (one fetchone)
+        #   2. _has_sec_cik (one fetchone)
+        #   3. _fetch_local_fundamentals (two fetchones on one cursor:
+        #      fundamentals_snapshot then financial_periods)
+        yield _make_cursor_sequence(
+            [
+                [
+                    {
+                        "instrument_id": 42,
+                        "symbol": "AAPL",
+                        "company_name": "Apple Inc.",
+                        "exchange": "NMS",
+                        "currency": "USD",
+                        "sector": "Technology",
+                        "industry": None,
+                        "country": "United States",
+                        "is_tradable": True,
+                        "coverage_tier": 1,
+                    }
+                ],
+                [(1,)],
+                [
+                    {
+                        "eps": Decimal("6.50"),
+                        "book_value": Decimal("4.20"),
+                        "shares_outstanding": Decimal("15000000000"),
+                        "cash": Decimal("50000000000"),
+                        "debt": Decimal("120000000000"),
+                        "net_debt": Decimal("70000000000"),
+                        "revenue_ttm": Decimal("400000000000"),
+                    },
+                    {
+                        "net_income": Decimal("100000000000"),
+                        "shareholders_equity": Decimal("63000000000"),
+                        "total_assets": Decimal("350000000000"),
+                        "total_liabilities": Decimal("287000000000"),
+                        "revenue": Decimal("400000000000"),
+                    },
+                ],
+            ]
+        )
 
     app.dependency_overrides[get_conn] = _db_conn
     try:
@@ -430,37 +465,37 @@ def test_summary_sec_preference_reports_price_missing_when_quote_absent(
     _install_stub_provider(stub_provider)
 
     def _db_conn() -> Iterator[MagicMock]:
-        conn_mock = MagicMock()
-        cur_mock = MagicMock()
-        cur_mock.__enter__.return_value = cur_mock
-        cur_mock.__exit__.return_value = None
-        cur_mock.fetchone.side_effect = [
-            {
-                "instrument_id": 42,
-                "symbol": "AAPL",
-                "company_name": "Apple Inc.",
-                "exchange": "NMS",
-                "currency": "USD",
-                "sector": "Technology",
-                "industry": None,
-                "country": "United States",
-                "is_tradable": True,
-                "coverage_tier": 1,
-            },
-            (1,),
-            {
-                "eps": Decimal("6.50"),
-                "book_value": Decimal("4.20"),
-                "shares_outstanding": None,
-                "cash": None,
-                "debt": None,
-                "net_debt": None,
-                "revenue_ttm": None,
-            },
-            None,
-        ]
-        conn_mock.cursor.return_value = cur_mock
-        yield conn_mock
+        yield _make_cursor_sequence(
+            [
+                [
+                    {
+                        "instrument_id": 42,
+                        "symbol": "AAPL",
+                        "company_name": "Apple Inc.",
+                        "exchange": "NMS",
+                        "currency": "USD",
+                        "sector": "Technology",
+                        "industry": None,
+                        "country": "United States",
+                        "is_tradable": True,
+                        "coverage_tier": 1,
+                    }
+                ],
+                [(1,)],
+                [
+                    {
+                        "eps": Decimal("6.50"),
+                        "book_value": Decimal("4.20"),
+                        "shares_outstanding": None,
+                        "cash": None,
+                        "debt": None,
+                        "net_debt": None,
+                        "revenue_ttm": None,
+                    },
+                    None,
+                ],
+            ]
+        )
 
     app.dependency_overrides[get_conn] = _db_conn
     try:
@@ -494,29 +529,26 @@ def test_summary_sec_preference_missing_local_falls_through_to_yfinance(
     _install_stub_provider(stub_provider)
 
     def _db_conn() -> Iterator[MagicMock]:
-        conn_mock = MagicMock()
-        cur_mock = MagicMock()
-        cur_mock.__enter__.return_value = cur_mock
-        cur_mock.__exit__.return_value = None
-        cur_mock.fetchone.side_effect = [
-            {
-                "instrument_id": 42,
-                "symbol": "AAPL",
-                "company_name": "Apple Inc.",
-                "exchange": "NMS",
-                "currency": "USD",
-                "sector": "Technology",
-                "industry": None,
-                "country": "United States",
-                "is_tradable": True,
-                "coverage_tier": 1,
-            },
-            (1,),  # has_sec_cik → True
-            None,  # no fundamentals_snapshot row
-            None,  # no financial_periods row
-        ]
-        conn_mock.cursor.return_value = cur_mock
-        yield conn_mock
+        yield _make_cursor_sequence(
+            [
+                [
+                    {
+                        "instrument_id": 42,
+                        "symbol": "AAPL",
+                        "company_name": "Apple Inc.",
+                        "exchange": "NMS",
+                        "currency": "USD",
+                        "sector": "Technology",
+                        "industry": None,
+                        "country": "United States",
+                        "is_tradable": True,
+                        "coverage_tier": 1,
+                    }
+                ],
+                [(1,)],  # has_sec_cik → True
+                [None, None],  # no fundamentals_snapshot, no financial_periods
+            ]
+        )
 
     app.dependency_overrides[get_conn] = _db_conn
     try:
