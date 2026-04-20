@@ -1,5 +1,10 @@
 import { apiFetch } from "@/api/client";
-import type { InstrumentDetail, InstrumentListResponse } from "@/api/types";
+import type {
+  InstrumentDetail,
+  InstrumentFinancials,
+  InstrumentListResponse,
+  InstrumentSummary,
+} from "@/api/types";
 
 export interface InstrumentsQuery {
   search: string | null;
@@ -31,4 +36,30 @@ export function fetchInstrumentDetail(
   instrumentId: number,
 ): Promise<InstrumentDetail> {
   return apiFetch<InstrumentDetail>(`/instruments/${instrumentId}`);
+}
+
+export function fetchInstrumentSummary(
+  symbol: string,
+): Promise<InstrumentSummary> {
+  return apiFetch<InstrumentSummary>(
+    `/instruments/${encodeURIComponent(symbol)}/summary`,
+  );
+}
+
+export interface InstrumentFinancialsQuery {
+  statement: "income" | "balance" | "cashflow";
+  period: "quarterly" | "annual";
+}
+
+export function fetchInstrumentFinancials(
+  symbol: string,
+  query: InstrumentFinancialsQuery,
+): Promise<InstrumentFinancials> {
+  const params = new URLSearchParams({
+    statement: query.statement,
+    period: query.period,
+  });
+  return apiFetch<InstrumentFinancials>(
+    `/instruments/${encodeURIComponent(symbol)}/financials?${params.toString()}`,
+  );
 }
