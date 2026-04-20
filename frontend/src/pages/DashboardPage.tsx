@@ -3,6 +3,7 @@ import { fetchPortfolio } from "@/api/portfolio";
 import { fetchRecommendations } from "@/api/recommendations";
 import { fetchSystemStatus } from "@/api/system";
 import { fetchConfig } from "@/api/config";
+import { fetchWatchlist, removeFromWatchlist } from "@/api/watchlist";
 import { useAsync } from "@/lib/useAsync";
 import { ErrorBanner } from "@/components/states/ErrorBanner";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
@@ -12,6 +13,7 @@ import { RecentRecommendations } from "@/components/dashboard/RecentRecommendati
 import { BudgetOverviewPanel } from "@/components/dashboard/BudgetOverviewPanel";
 import { SystemStatusPanel } from "@/components/dashboard/SystemStatusPanel";
 import { BootstrapProgress, isBootstrapping } from "@/components/dashboard/BootstrapProgress";
+import { WatchlistPanel } from "@/components/dashboard/WatchlistPanel";
 
 /**
  * Operator dashboard (#60).
@@ -37,6 +39,16 @@ export function DashboardPage() {
   const system = useAsync(fetchSystemStatus, []);
   const config = useAsync(fetchConfig, []);
   const budget = useAsync(fetchBudget, []);
+  const watchlist = useAsync(fetchWatchlist, []);
+
+  const handleRemove = async (symbol: string) => {
+    try {
+      await removeFromWatchlist(symbol);
+      watchlist.refetch();
+    } catch {
+      // Surface via the existing error slot on next render; for now no-op.
+    }
+  };
 
   const allFailed =
     portfolio.error !== null &&
@@ -121,6 +133,19 @@ export function DashboardPage() {
           </Section>
         </div>
       </div>
+
+      <Section title={`Watchlist${watchlist.data ? ` (${watchlist.data.total})` : ""}`}>
+        {watchlist.loading ? (
+          <SectionSkeleton rows={3} />
+        ) : watchlist.error !== null ? (
+          <SectionError onRetry={watchlist.refetch} />
+        ) : (
+          <WatchlistPanel
+            items={watchlist.data?.items ?? []}
+            onRemove={handleRemove}
+          />
+        )}
+      </Section>
 
       <Section title="Recent recommendations">
         {recs.loading ? (
