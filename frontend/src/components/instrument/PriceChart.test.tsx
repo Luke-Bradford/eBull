@@ -122,15 +122,17 @@ describe("PriceChart — data states", () => {
     expect(screen.queryByText(/No price data/i)).not.toBeInTheDocument();
   });
 
-  it("propagates fetch errors via SectionError", async () => {
+  it("propagates fetch errors via SectionError + shows a retry button", async () => {
     mockedFetch.mockRejectedValue(new Error("network down"));
     render(<MemoryRouter><PriceChart symbol="AAPL" /></MemoryRouter>);
     await waitFor(() => {
-      // SectionError renders "Failed to load" by convention elsewhere
-      // in the codebase; we just check the chart didn't render.
+      // Retry button is the operator's recovery affordance; presence
+      // guards against a future refactor silently swallowing the
+      // error (Codex slice-B round-2 test-hygiene finding).
       expect(
-        screen.queryByTestId("price-chart-AAPL"),
-      ).not.toBeInTheDocument();
+        screen.getByRole("button", { name: /retry/i }),
+      ).toBeInTheDocument();
     });
+    expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
   });
 });

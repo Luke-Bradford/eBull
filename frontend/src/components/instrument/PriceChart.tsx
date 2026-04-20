@@ -253,13 +253,15 @@ function ChartSvg({
   "data-testid": string;
 }): JSX.Element {
   const totalH = PRICE_H + VOL_H + 8;
-  const hoverIdx = (evt: React.MouseEvent<SVGSVGElement>): number => {
+  const findNearestIdx = (evt: React.MouseEvent<SVGSVGElement>): number => {
     const svg = evt.currentTarget;
     const rect = svg.getBoundingClientRect();
+    // Container aspect-ratio is pinned to the viewBox below, so the
+    // svg element's width ↔ viewBox.width mapping is uniform and this
+    // linear rescale is correct (would need getScreenCTM otherwise).
     const x = ((evt.clientX - rect.left) / rect.width) * W;
-    // Nearest-x lookup. Points are evenly spaced so a linear search
-    // over the array length is fine for the MVP; if ranges >1y start
-    // feeling slow we can bisect.
+    // Nearest-x lookup. Points are evenly spaced so linear search is
+    // fine for the MVP; bisect later if large ranges feel slow.
     let best = 0;
     let bestDx = Infinity;
     for (let i = 0; i < geom.points.length; i++) {
@@ -276,10 +278,18 @@ function ChartSvg({
     <svg
       data-testid={testId}
       viewBox={`0 0 ${W} ${totalH}`}
-      preserveAspectRatio="none"
+      // `xMidYMid meet` + container aspectRatio pinned to viewBox
+      // ensures uniform scaling — no stretched line slopes or
+      // tall-looking volume bars on narrow screens (Codex slice-B
+      // round-2 finding). `maxHeight` still caps the chart on very
+      // wide viewports.
+      preserveAspectRatio="xMidYMid meet"
       className="w-full"
-      style={{ maxHeight: `${PRICE_H + VOL_H + 24}px` }}
-      onMouseMove={(e) => onHover(hoverIdx(e))}
+      style={{
+        aspectRatio: `${W} / ${totalH}`,
+        maxHeight: `${PRICE_H + VOL_H + 24}px`,
+      }}
+      onMouseMove={(e) => onHover(findNearestIdx(e))}
       onMouseLeave={() => onHover(null)}
     >
       {/* Y-axis ticks — 4 evenly-spaced price labels */}
