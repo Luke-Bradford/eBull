@@ -2290,8 +2290,19 @@ def fundamentals_sync() -> None:
         # pick it up. Phases 0, 1, 3 are isolated by try/except; phase 2
         # (audit) propagates immediately so it never reaches here if it
         # failed.
+        #
+        # Each failing phase has already logged its own exc_info=True
+        # traceback. The message below names the subsystems so alerting
+        # rules can distinguish SEC-upstream outages (phases 0/1) from
+        # coverage-review logic failures (phase 3); operators grep the
+        # logs by phase name to find the captured traceback.
         if failed_phases:
-            raise RuntimeError(f"fundamentals_sync completed with phase failures: {', '.join(failed_phases)}")
+            raise RuntimeError(
+                "fundamentals_sync completed with phase failures: "
+                + "; ".join(failed_phases)
+                + " (individual tracebacks logged at ERROR level; "
+                + "grep logs for 'fundamentals_sync phase <N>')"
+            )
 
 
 def fx_rates_refresh() -> None:

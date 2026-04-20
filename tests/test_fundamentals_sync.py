@@ -174,7 +174,8 @@ def test_fundamentals_sync_per_instrument_error_is_isolated() -> None:
     cik_mock.assert_called_once()
     facts_mock.assert_called_once()
     assert backfill_mock.call_count == 3
-    # Rollback is the phase-1 connection's — phase-2 should not have been touched.
+    # Rollback is the phase-2 (audit) connection's — phase-3 (review) should
+    # not have been touched by the failed backfill.
     phase1_conn.rollback.assert_called()
     # Review still runs even after a per-instrument backfill error — we
     # completed phase 1 (not phase-fatal).
