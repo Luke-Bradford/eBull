@@ -87,6 +87,15 @@ interface HoverState {
   close: number;
 }
 
+interface NumericBar {
+  time: UTCTimestamp;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
 export interface PriceChartProps {
   symbol: string;
   initialRange?: CandleRange;
@@ -257,14 +266,20 @@ function ChartCanvas({
         setHover(null);
         return;
       }
+      // We feed UTCTimestamp (epoch seconds), so `param.time` should
+      // come back as a number. Guard against the library ever
+      // returning a BusinessDay object so we don't silently render
+      // "1970-01-01" from a NaN cast.
+      if (typeof param.time !== "number") {
+        setHover(null);
+        return;
+      }
       const bar = param.seriesData.get(cp);
       if (!bar || typeof bar !== "object" || !("close" in bar)) {
         setHover(null);
         return;
       }
-      // `time` arrives as our UTC-seconds input; format it back.
-      const ts = param.time as number;
-      const date = new Date(ts * 1000).toISOString().slice(0, 10);
+      const date = new Date(param.time * 1000).toISOString().slice(0, 10);
       setHover({ date, close: (bar as { close: number }).close });
     });
 
@@ -291,14 +306,6 @@ function ChartCanvas({
     // Pre-convert to numeric bars so downstream `setData` calls work
     // with guaranteed-non-null values (no dead `?? 0` fallbacks). Rows
     // that fail any numeric or date parse are dropped here.
-    interface NumericBar {
-      time: UTCTimestamp;
-      open: number;
-      high: number;
-      low: number;
-      close: number;
-      volume: number;
-    }
     const clean: NumericBar[] = rows.flatMap((r) => {
       const time = dateToTime(r.date);
       const open = parseNum(r.open);
