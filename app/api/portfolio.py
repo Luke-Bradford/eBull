@@ -776,17 +776,17 @@ def get_rolling_pnl(
 # Portfolio value history (#204)
 # ---------------------------------------------------------------------------
 
-# Range → days-back. `max` is intentionally capped at 5y (1825 days,
-# same as the "5y" row) to keep the daily generate_series loop cheap;
-# decade-scale history would need either materialised snapshots or an
-# expression index on fills.filled_at::date / cash_ledger.event_time::date.
-_VALUE_HISTORY_RANGES: dict[str, int] = {
+# Range → days-back. None on "max" means "from the earliest row in
+# fills/cash_ledger to today" (parallels the candles API `max`). The
+# generate_series loop stays bounded by real data; a fund with 10y of
+# trades gets 10y of points, not 5y of truncation.
+_VALUE_HISTORY_RANGES: dict[str, int | None] = {
     "1m": 30,
     "3m": 90,
     "6m": 180,
     "1y": 365,
     "5y": 1825,
-    "max": 1825,
+    "max": None,
 }
 
 
@@ -851,12 +851,27 @@ def get_value_history(
     # 1. Pull signed position-value points per (date, instrument).
     #    Uses a correlated subquery for close-at-or-before so the query
     #    self-contained — no separate price lookup loop in Python.
+    #    When `days` is NULL (range=max), start from the earliest row
+    #    in fills / cash_ledger so the chart covers real history
+    #    rather than duplicating the 5Y window.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            WITH dates AS (
+            WITH bounds AS (
+                SELECT CASE
+                    WHEN %(days)s::int IS NULL THEN COALESCE(
+                        LEAST(
+                            (SELECT MIN(filled_at::date) FROM fills),
+                            (SELECT MIN(event_time::date) FROM cash_ledger)
+                        ),
+                        CURRENT_DATE
+                    )
+                    ELSE CURRENT_DATE - make_interval(days => %(days)s::int)
+                END AS start_date
+            ),
+            dates AS (
                 SELECT generate_series(
-                    CURRENT_DATE - make_interval(days => %(days)s::int),
+                    (SELECT start_date FROM bounds),
                     CURRENT_DATE,
                     '1 day'::interval
                 )::date AS d
@@ -914,13 +929,26 @@ def get_value_history(
         )
         position_rows = cur.fetchall()
 
-    # 2. Pull daily cumulative cash balance per currency.
+    # 2. Pull daily cumulative cash balance per currency. Same
+    #    NULL-days = earliest-row bounding as the positions query.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            WITH dates AS (
+            WITH bounds AS (
+                SELECT CASE
+                    WHEN %(days)s::int IS NULL THEN COALESCE(
+                        LEAST(
+                            (SELECT MIN(filled_at::date) FROM fills),
+                            (SELECT MIN(event_time::date) FROM cash_ledger)
+                        ),
+                        CURRENT_DATE
+                    )
+                    ELSE CURRENT_DATE - make_interval(days => %(days)s::int)
+                END AS start_date
+            ),
+            dates AS (
                 SELECT generate_series(
-                    CURRENT_DATE - make_interval(days => %(days)s::int),
+                    (SELECT start_date FROM bounds),
                     CURRENT_DATE,
                     '1 day'::interval
                 )::date AS d
@@ -1017,10 +1045,20 @@ def get_value_history(
         per_day[row["point_date"]] += balance
 
     points = [ValueHistoryPoint(date=d, value=float(v)) for d, v in sorted(per_day.items())]
+
+    # For `max` the actual lookback depends on the earliest ledger
+    # row, not the input bucket — surface the effective span so the
+    # operator / charting code can label the axis correctly without
+    # needing to subtract the first point's date client-side.
+    if days is None:
+        effective_days = (points[-1].date - points[0].date).days if len(points) >= 2 else 0
+    else:
+        effective_days = days
+
     return ValueHistoryResponse(
         display_currency=display_currency,
         range=range,
-        days=days,
+        days=effective_days,
         fx_skipped=len(fx_missing_pairs),
         points=points,
     )

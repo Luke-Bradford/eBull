@@ -285,6 +285,63 @@ def test_value_history_fx_skipped_counts_distinct_pairs_not_rows(
     assert body["fx_skipped"] == 1  # one pair (USD→GBP), not three rows
 
 
+def test_value_history_max_reports_effective_days_from_point_span(
+    client: TestClient,
+) -> None:
+    """range=max sends NULL days to SQL (letting the query start from
+    the earliest ledger row); the endpoint should report the actual
+    span from first to last point as `days`, not a hard-coded ceiling.
+    Pins that `max` is no longer a silent duplicate of `5y`."""
+    from app.db import get_conn
+
+    def _conn() -> Iterator[MagicMock]:
+        yield _make_conn(
+            [
+                # Three dates roughly ~2 years apart — exercises the
+                # span-computation branch.
+                [
+                    {
+                        "point_date": date(2024, 4, 20),
+                        "instrument_id": 1,
+                        "native_currency": "GBP",
+                        "units_at_date": Decimal("10"),
+                        "close_at_date": Decimal("100"),
+                    },
+                    {
+                        "point_date": date(2026, 4, 20),
+                        "instrument_id": 1,
+                        "native_currency": "GBP",
+                        "units_at_date": Decimal("10"),
+                        "close_at_date": Decimal("110"),
+                    },
+                ],
+                [],
+            ]
+        )
+
+    app.dependency_overrides[get_conn] = _conn
+    try:
+        with (
+            patch(
+                "app.api.portfolio.get_runtime_config",
+                return_value=_runtime_stub("GBP"),
+            ),
+            patch(
+                "app.api.portfolio.load_live_fx_rates_with_metadata",
+                return_value={},
+            ),
+        ):
+            resp = client.get("/portfolio/value-history?range=max")
+    finally:
+        app.dependency_overrides.pop(get_conn, None)
+
+    body = resp.json()
+    assert body["range"] == "max"
+    # 2024-04-20 → 2026-04-20 = ~730 days (with leap year).
+    assert body["days"] in (730, 731)
+    assert [p["date"] for p in body["points"]] == ["2024-04-20", "2026-04-20"]
+
+
 def test_value_history_fx_missing_skips_cash_event(client: TestClient) -> None:
     """Cash in a currency with no live FX rate is logged-and-skipped,
     not a 500. Keeps the endpoint resilient to partial FX coverage."""
