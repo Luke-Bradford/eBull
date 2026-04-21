@@ -130,6 +130,7 @@ export function AlertsStrip(): JSX.Element | null {
       <div
         tabIndex={0}
         role="list"
+        aria-labelledby="alerts-strip-heading"
         className="max-h-96 overflow-y-auto divide-y divide-slate-100"
       >
         {data.rejections.map((row) => (

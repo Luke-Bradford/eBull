@@ -32,16 +32,21 @@ import { WatchlistPanel } from "@/components/dashboard/WatchlistPanel";
  * every data source failed.
  *
  * Layout:
- *   ┌ SummaryCards (AUM · Cash · P&L · Deployment) ┐
- *   │ RollingPnlStrip (1d · 1w · 1m)               │
- *   │ AlertsStrip (guard rejections)               │
- *   │ PortfolioValueChart                          │
- *   │                                              │
- *   │ Positions                                    │
+ *   ┌ SummaryCards (AUM · Cash · P&L · Deployment) ┐  ← portfolio-gated
+ *   │ RollingPnlStrip (1d · 1w · 1m)               │  ← portfolio-gated
+ *   │ PortfolioValueChart                          │  ← portfolio-gated
+ *   │ Positions                                    │  ← portfolio-gated
+ *   │──────────────────────────────────────────────│
+ *   │ AlertsStrip (guard rejections)               │  ← self-isolating, always mounted
  *   │ Needs action (proposed recs)                 │
  *   │                                              │
  *   │ Watchlist                                    │
  *   └──────────────────────────────────────────────┘
+ *
+ * Note: AlertsStrip is intentionally outside the portfolio-gated block so
+ * a /portfolio failure never suppresses guard-rejection alerts. RollingPnlStrip
+ * and PortfolioValueChart remain portfolio-gated (pre-existing behaviour from
+ * Phase 2); their isolation is tracked as tech-debt.
  */
 export function DashboardPage() {
   const portfolio = useAsync(fetchPortfolio, []);
@@ -120,10 +125,6 @@ export function DashboardPage() {
               movement. Hidden on error so a failed rolling fetch
               doesn't blank the rest of the page. */}
           <RollingPnlStrip />
-          {/* Needs-action surface — guard rejections since last visit.
-              Hidden when empty, silent on error. Sits above the narrative
-              chart so action-required signal precedes trajectory context. */}
-          <AlertsStrip />
           {/* Portfolio value over time (positions + cash). Mounted
               under the pills so the operator sees the cockpit row
               (totals → short-horizon delta → long-horizon trajectory)
@@ -141,6 +142,12 @@ export function DashboardPage() {
           </Section>
         </>
       )}
+
+      {/* Needs-action surface — guard rejections since last visit.
+          Self-isolating: handles its own loading/error/empty states.
+          Mounted outside the portfolio-gated branch so a failed
+          /portfolio fetch never suppresses guard-rejection alerts. */}
+      <AlertsStrip />
 
       <Section
         title={`Needs action${recs.data ? ` · ${recs.data.total}` : ""}`}
