@@ -97,29 +97,32 @@ export function DashboardPage() {
       ) : null}
 
       {portfolio.error !== null ? (
+        // Single error surface covers both SummaryCards and Positions —
+        // they share the `/portfolio` fetch so duplicating the retry
+        // affordance would just confuse the operator (Codex #387
+        // review).
         <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
           <SectionError onRetry={portfolio.refetch} />
         </div>
       ) : (
-        <SummaryCards
-          data={portfolio.loading ? null : portfolio.data}
-          budgetData={budget.loading || budget.error !== null ? null : budget.data}
-          budgetError={budget.error !== null}
-        />
-      )}
-
-      <Section title="Positions">
-        {portfolio.loading ? (
-          <SectionSkeleton rows={4} />
-        ) : portfolio.error !== null ? (
-          <SectionError onRetry={portfolio.refetch} />
-        ) : (
-          <PositionsTable
-            positions={portfolio.data?.positions ?? []}
-            mirrors={portfolio.data?.mirrors ?? []}
+        <>
+          <SummaryCards
+            data={portfolio.loading ? null : portfolio.data}
+            budgetData={budget.loading || budget.error !== null ? null : budget.data}
+            budgetError={budget.error !== null}
           />
-        )}
-      </Section>
+          <Section title="Positions">
+            {portfolio.loading ? (
+              <SectionSkeleton rows={4} />
+            ) : (
+              <PositionsTable
+                positions={portfolio.data?.positions ?? []}
+                mirrors={portfolio.data?.mirrors ?? []}
+              />
+            )}
+          </Section>
+        </>
+      )}
 
       <Section
         title={`Needs action${recs.data ? ` · ${recs.data.total}` : ""}`}
