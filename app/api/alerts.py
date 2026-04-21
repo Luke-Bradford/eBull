@@ -74,12 +74,60 @@ def _resolve_operator(conn: psycopg.Connection[object]) -> UUID:
 def get_guard_rejections(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> GuardRejectionsResponse:
-    _operator_id = _resolve_operator(conn)  # used in Task 3 query
-    # Implementation in Task 3.
+    operator_id = _resolve_operator(conn)
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # 1. Read operator's cursor.
+        cur.execute(
+            "SELECT alerts_last_seen_decision_id FROM operators WHERE operator_id = %(op)s",
+            {"op": operator_id},
+        )
+        op_row = cur.fetchone()
+        last_seen: int | None = op_row["alerts_last_seen_decision_id"] if op_row else None
+
+        # 2. Count unseen in-window rows (uncapped).
+        cur.execute(
+            """
+            SELECT COUNT(*) AS unseen_count
+            FROM decision_audit
+            WHERE pass_fail = 'FAIL'
+              AND stage = 'execution_guard'
+              AND decision_time >= now() - INTERVAL '7 days'
+              AND (%(last_id)s IS NULL OR decision_id > %(last_id)s)
+            """,
+            {"last_id": last_seen},
+        )
+        count_row = cur.fetchone()
+        unseen_count: int = int(count_row["unseen_count"]) if count_row else 0
+
+        # 3. Fetch the list (capped at 500). Ordering is by decision_id DESC
+        # (the PK sequence), not decision_time DESC — decision_time is app-supplied
+        # via _utcnow() and can be clock-skewed, which would break the invariant
+        # that rejections[0].decision_id === MAX(decision_id).
+        cur.execute(
+            """
+            SELECT
+                da.decision_id,
+                da.decision_time,
+                da.instrument_id,
+                i.symbol,
+                tr.action,
+                da.explanation
+            FROM decision_audit da
+            LEFT JOIN instruments i ON i.instrument_id = da.instrument_id
+            LEFT JOIN trade_recommendations tr ON tr.recommendation_id = da.recommendation_id
+            WHERE da.pass_fail = 'FAIL'
+              AND da.stage = 'execution_guard'
+              AND da.decision_time >= now() - INTERVAL '7 days'
+            ORDER BY da.decision_id DESC
+            LIMIT 500
+            """
+        )
+        rows = cur.fetchall()
+
     return GuardRejectionsResponse(
-        alerts_last_seen_decision_id=None,
-        unseen_count=0,
-        rejections=[],
+        alerts_last_seen_decision_id=last_seen,
+        unseen_count=unseen_count,
+        rejections=[GuardRejection.model_validate(r) for r in rows],
     )
 
 
