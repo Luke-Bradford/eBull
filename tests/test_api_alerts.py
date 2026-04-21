@@ -32,7 +32,22 @@ def _install_conn(
     fetchall_returns: Sequence[object] | None = None,
     rowcount: int = 1,
 ) -> MagicMock:
-    """Stub DB whose cursor feeds fetchone/fetchall in the order supplied."""
+    """Stub DB whose cursor feeds fetchone/fetchall in the order supplied.
+
+    Returns the MagicMock cursor so tests can assert on ``cur.execute.call_args_list``
+    for SQL-shape pinning.
+
+    Call ordering by endpoint:
+      GET /alerts/guard-rejections — 2x fetchone, 1x fetchall:
+        fetchone[0] → {"alerts_last_seen_decision_id": int | None}
+        fetchone[1] → {"unseen_count": int}
+        fetchall    → list[rejection-row dicts]
+      POST /alerts/seen — no fetchone/fetchall; only cur.execute for the UPDATE.
+      POST /alerts/dismiss-all — no fetchone/fetchall; only cur.execute for the UPDATE.
+
+    Any test that doesn't supply the right number of fetchone entries will get a
+    MagicMock back from the exhausted side_effect, which serialises to garbage.
+    """
     conn = MagicMock()
     cur = MagicMock()
     cur.__enter__.return_value = cur

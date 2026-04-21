@@ -97,7 +97,8 @@ def get_guard_rejections(
             {"last_id": last_seen},
         )
         count_row = cur.fetchone()
-        unseen_count: int = int(count_row["unseen_count"]) if count_row else 0
+        assert count_row is not None, "COUNT(*) always returns a row"
+        unseen_count: int = int(count_row["unseen_count"])
 
         # 3. Fetch the list (capped at 500). Ordering is by decision_id DESC
         # (the PK sequence), not decision_time DESC — decision_time is app-supplied
