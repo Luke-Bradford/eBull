@@ -8,6 +8,7 @@ import { fetchWatchlist, removeFromWatchlist } from "@/api/watchlist";
 import { useConfig } from "@/lib/ConfigContext";
 import { useAsync } from "@/lib/useAsync";
 import { ErrorBanner } from "@/components/states/ErrorBanner";
+import { AlertsStrip } from "@/components/dashboard/AlertsStrip";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { PortfolioValueChart } from "@/components/dashboard/PortfolioValueChart";
 import { RollingPnlStrip } from "@/components/dashboard/RollingPnlStrip";
@@ -32,9 +33,11 @@ import { WatchlistPanel } from "@/components/dashboard/WatchlistPanel";
  *
  * Layout:
  *   ┌ SummaryCards (AUM · Cash · P&L · Deployment) ┐
+ *   │ RollingPnlStrip (1d · 1w · 1m)               │
+ *   │ AlertsStrip (guard rejections)               │
+ *   │ PortfolioValueChart                          │
  *   │                                              │
  *   │ Positions                                    │
- *   │                                              │
  *   │ Needs action (proposed recs)                 │
  *   │                                              │
  *   │ Watchlist                                    │
@@ -117,6 +120,10 @@ export function DashboardPage() {
               movement. Hidden on error so a failed rolling fetch
               doesn't blank the rest of the page. */}
           <RollingPnlStrip />
+          {/* Needs-action surface — guard rejections since last visit.
+              Hidden when empty, silent on error. Sits above the narrative
+              chart so action-required signal precedes trajectory context. */}
+          <AlertsStrip />
           {/* Portfolio value over time (positions + cash). Mounted
               under the pills so the operator sees the cockpit row
               (totals → short-horizon delta → long-horizon trajectory)
