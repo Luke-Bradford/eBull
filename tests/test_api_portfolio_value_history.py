@@ -224,6 +224,67 @@ def test_value_history_rejects_unknown_range(client: TestClient) -> None:
     assert resp.status_code == 422
 
 
+def test_value_history_fx_skipped_counts_distinct_pairs_not_rows(
+    client: TestClient,
+) -> None:
+    """A single missing pair dropping many rows must surface as
+    fx_skipped=1, not len(rows) — keeps the operator-facing count
+    interpretable when a gap spans an entire series."""
+    from app.db import get_conn
+
+    def _conn() -> Iterator[MagicMock]:
+        yield _make_conn(
+            [
+                # 3 days × same USD instrument → 3 rows, all dropping on
+                # the same USD→GBP pair.
+                [
+                    {
+                        "point_date": date(2026, 4, 18),
+                        "instrument_id": 1,
+                        "native_currency": "USD",
+                        "units_at_date": Decimal("1"),
+                        "close_at_date": Decimal("100"),
+                    },
+                    {
+                        "point_date": date(2026, 4, 19),
+                        "instrument_id": 1,
+                        "native_currency": "USD",
+                        "units_at_date": Decimal("1"),
+                        "close_at_date": Decimal("100"),
+                    },
+                    {
+                        "point_date": date(2026, 4, 20),
+                        "instrument_id": 1,
+                        "native_currency": "USD",
+                        "units_at_date": Decimal("1"),
+                        "close_at_date": Decimal("100"),
+                    },
+                ],
+                # No cash rows
+                [],
+            ]
+        )
+
+    app.dependency_overrides[get_conn] = _conn
+    try:
+        with (
+            patch(
+                "app.api.portfolio.get_runtime_config",
+                return_value=_runtime_stub("GBP"),
+            ),
+            patch(
+                "app.api.portfolio.load_live_fx_rates_with_metadata",
+                return_value={},
+            ),
+        ):
+            resp = client.get("/portfolio/value-history?range=1m")
+    finally:
+        app.dependency_overrides.pop(get_conn, None)
+
+    body = resp.json()
+    assert body["fx_skipped"] == 1  # one pair (USD→GBP), not three rows
+
+
 def test_value_history_fx_missing_skips_cash_event(client: TestClient) -> None:
     """Cash in a currency with no live FX rate is logged-and-skipped,
     not a 500. Keeps the endpoint resilient to partial FX coverage."""
@@ -257,9 +318,10 @@ def test_value_history_fx_missing_skips_cash_event(client: TestClient) -> None:
     finally:
         app.dependency_overrides.pop(get_conn, None)
 
-    # Request succeeds; EUR cash skipped; no points emitted for that
-    # day, but fx_skipped counts the drop so the FE can distinguish
-    # "empty series due to missing FX" from "truly no history".
+    # Request succeeds; EUR cash skipped; no points emitted. fx_skipped
+    # counts distinct pairs (one: EUR→GBP), not the number of rows
+    # dropped — a 365-day gap on one pair must read as "1 pair missing"
+    # not "365 rows missing" for the FE copy to stay meaningful.
     assert resp.status_code == 200
     body = resp.json()
     assert body["points"] == []

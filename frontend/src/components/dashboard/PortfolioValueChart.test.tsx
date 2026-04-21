@@ -135,10 +135,10 @@ describe("PortfolioValueChart", () => {
   });
 
   it("surfaces an 'FX rates missing' empty state when fx_skipped > 0", async () => {
-    // All-skipped is indistinguishable from "no data" without fx_skipped;
-    // the counter lets the operator know why their mixed-currency
-    // portfolio is rendering empty (Codex round-1 finding).
-    mocked.mockResolvedValue(resp([], { fx_skipped: 4 }));
+    // All-skipped is indistinguishable from "no data" without
+    // fx_skipped; the pair-count lets the operator know why their
+    // mixed-currency portfolio is rendering empty.
+    mocked.mockResolvedValue(resp([], { fx_skipped: 2 }));
     render(
       <MemoryRouter>
         <PortfolioValueChart />
@@ -147,7 +147,7 @@ describe("PortfolioValueChart", () => {
     await waitFor(() => {
       expect(screen.getByText(/FX rates missing/i)).toBeInTheDocument();
     });
-    expect(screen.getByText(/4 native-currency rows/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 currency pair/i)).toBeInTheDocument();
   });
 
   it("calls chart.remove() on unmount so Canvas is released", async () => {

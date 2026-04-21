@@ -39,14 +39,13 @@ const RANGES: { id: ValueHistoryRange; label: string }[] = [
   { id: "max", label: "MAX" },
 ];
 
-const VALID_RANGES: readonly ValueHistoryRange[] = [
-  "1m",
-  "3m",
-  "6m",
-  "1y",
-  "5y",
-  "max",
-];
+// Derived rather than maintained separately — keeps the URL-parse
+// whitelist in lock-step with what's rendered.
+const VALID_RANGES: readonly string[] = RANGES.map((r) => r.id);
+
+function isValidRange(v: string | null): v is ValueHistoryRange {
+  return v !== null && VALID_RANGES.includes(v);
+}
 
 /** Same format as PriceChart — UTC-midnight epoch seconds; null on any
  * unparseable input so we drop bad rows rather than poison the time
@@ -74,11 +73,7 @@ export function PortfolioValueChart(): JSX.Element | null {
   // so both can coexist if we ever merge these pages.
   const [searchParams, setSearchParams] = useSearchParams();
   const rawRange = searchParams.get("value");
-  const range: ValueHistoryRange = VALID_RANGES.includes(
-    rawRange as ValueHistoryRange,
-  )
-    ? (rawRange as ValueHistoryRange)
-    : "1y";
+  const range: ValueHistoryRange = isValidRange(rawRange) ? rawRange : "1y";
 
   const setRange = useCallback(
     (next: ValueHistoryRange) => {
@@ -146,7 +141,7 @@ export function PortfolioValueChart(): JSX.Element | null {
           title={data !== null && data.fx_skipped > 0 ? "FX rates missing" : "No history yet"}
           description={
             data !== null && data.fx_skipped > 0
-              ? `${data.fx_skipped} native-currency rows were dropped because today's FX snapshot doesn't cover them. Wait for the FX refresh job to repopulate and retry.`
+              ? `${data.fx_skipped} currency pair(s) missing from today's FX snapshot — all rows in those pairs were dropped. Wait for the FX refresh job to repopulate and retry.`
               : "Not enough daily valuations to plot a line. Try a wider range, or wait for more trading days to accrue."
           }
         />

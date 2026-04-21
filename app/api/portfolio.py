@@ -776,8 +776,10 @@ def get_rolling_pnl(
 # Portfolio value history (#204)
 # ---------------------------------------------------------------------------
 
-# Range → days-back. `max` bounded to 5y (1825d) to keep the daily
-# loop cheap; operators needing decade-scale history can follow up.
+# Range → days-back. `max` is intentionally capped at 5y (1825 days,
+# same as the "5y" row) to keep the daily generate_series loop cheap;
+# decade-scale history would need either materialised snapshots or an
+# expression index on fills.filled_at::date / cash_ledger.event_time::date.
 _VALUE_HISTORY_RANGES: dict[str, int] = {
     "1m": 30,
     "3m": 90,
@@ -807,9 +809,10 @@ class ValueHistoryResponse(BaseModel):
     # historical-FX accuracy should treat this chart as directional,
     # not forensic.
     fx_mode: str = "live"
-    # Count of native-currency rows we had to drop because the live
-    # FX snapshot didn't have that pair. Lets the FE distinguish
-    # "truly no history" from "all-skipped due to missing FX".
+    # Distinct FX pairs we had to drop because the live snapshot didn't
+    # have them. Lets the FE distinguish "truly no history" from
+    # "all-skipped due to missing FX", without inflating the count by
+    # (instruments × days).
     fx_skipped: int = 0
     points: list[ValueHistoryPoint]
 
@@ -935,8 +938,14 @@ def get_value_history(
         cash_rows = cur.fetchall()
 
     # 3. Aggregate into one value per day in display currency.
+    # cash_ledger semantics: every INSERT site (orders.py, order_client.py,
+    # portfolio_sync.py) writes a *delta* row, never an absolute snapshot.
+    # SUM(amount) is therefore the running balance — correct per-call-site
+    # invariant, not a coincidence of the test fixtures.
     per_day: dict[date, Decimal] = defaultdict(lambda: Decimal("0"))
-    fx_skipped = 0
+    # Track missing FX as a set of (from, to) pairs so the operator-
+    # facing count reflects distinct gaps, not N * days of duplicates.
+    fx_missing_pairs: set[tuple[str, str]] = set()
 
     for row in position_rows:
         close_raw = row["close_at_date"]
@@ -964,7 +973,7 @@ def get_value_history(
             try:
                 value_native = convert(value_native, native_ccy, display_currency, rates)
             except FxRateNotFound:
-                fx_skipped += 1
+                fx_missing_pairs.add((native_ccy, display_currency))
                 logger.warning(
                     "value-history: FX %s→%s missing; skipping instrument_id=%s on %s",
                     native_ccy,
@@ -991,7 +1000,7 @@ def get_value_history(
             try:
                 balance = convert(balance, native_ccy, display_currency, rates)
             except FxRateNotFound:
-                fx_skipped += 1
+                fx_missing_pairs.add((native_ccy, display_currency))
                 logger.warning(
                     "value-history: FX %s→%s missing for cash on %s",
                     native_ccy,
@@ -1006,6 +1015,6 @@ def get_value_history(
         display_currency=display_currency,
         range=range,
         days=days,
-        fx_skipped=fx_skipped,
+        fx_skipped=len(fx_missing_pairs),
         points=points,
     )
