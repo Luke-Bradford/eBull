@@ -8,6 +8,7 @@ import { fetchWatchlist, removeFromWatchlist } from "@/api/watchlist";
 import { useConfig } from "@/lib/ConfigContext";
 import { useAsync } from "@/lib/useAsync";
 import { ErrorBanner } from "@/components/states/ErrorBanner";
+import { AlertsStrip } from "@/components/dashboard/AlertsStrip";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { PortfolioValueChart } from "@/components/dashboard/PortfolioValueChart";
 import { RollingPnlStrip } from "@/components/dashboard/RollingPnlStrip";
@@ -31,14 +32,21 @@ import { WatchlistPanel } from "@/components/dashboard/WatchlistPanel";
  * every data source failed.
  *
  * Layout:
- *   ┌ SummaryCards (AUM · Cash · P&L · Deployment) ┐
- *   │                                              │
- *   │ Positions                                    │
- *   │                                              │
+ *   ┌ SummaryCards (AUM · Cash · P&L · Deployment) ┐  ← portfolio-gated
+ *   │ RollingPnlStrip (1d · 1w · 1m)               │  ← portfolio-gated
+ *   │ PortfolioValueChart                          │  ← portfolio-gated
+ *   │ Positions                                    │  ← portfolio-gated
+ *   │──────────────────────────────────────────────│
+ *   │ AlertsStrip (guard rejections)               │  ← self-isolating, always mounted
  *   │ Needs action (proposed recs)                 │
  *   │                                              │
  *   │ Watchlist                                    │
  *   └──────────────────────────────────────────────┘
+ *
+ * Note: AlertsStrip is intentionally outside the portfolio-gated block so
+ * a /portfolio failure never suppresses guard-rejection alerts. RollingPnlStrip
+ * and PortfolioValueChart remain portfolio-gated (pre-existing behaviour from
+ * Phase 2); their isolation is tracked as tech-debt.
  */
 export function DashboardPage() {
   const portfolio = useAsync(fetchPortfolio, []);
@@ -134,6 +142,12 @@ export function DashboardPage() {
           </Section>
         </>
       )}
+
+      {/* Needs-action surface — guard rejections since last visit.
+          Self-isolating: handles its own loading/error/empty states.
+          Mounted outside the portfolio-gated branch so a failed
+          /portfolio fetch never suppresses guard-rejection alerts. */}
+      <AlertsStrip />
 
       <Section
         title={`Needs action${recs.data ? ` · ${recs.data.total}` : ""}`}

@@ -54,6 +54,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "financial_periods_raw",
     "financial_periods",
     "filing_events",
+    "decision_audit",  # #315 Phase 3 alerts
+    "trade_recommendations",  # #315 Phase 3 alerts (FK parent of decision_audit)
+    "operators",  # #315 Phase 3 alerts (cursor column)
 )
 
 

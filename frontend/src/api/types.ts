@@ -906,3 +906,24 @@ export interface LayerEnabledResponse {
   is_enabled: boolean;
   warning: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// #315 Phase 3 — alerts strip (app/api/alerts.py)
+// ---------------------------------------------------------------------------
+
+export type GuardRejectionAction = "BUY" | "ADD" | "HOLD" | "EXIT";
+
+export interface GuardRejection {
+  decision_id: number;
+  decision_time: string;  // ISO TIMESTAMPTZ
+  instrument_id: number | null;
+  symbol: string | null;
+  action: GuardRejectionAction | null;
+  explanation: string;
+}
+
+export interface GuardRejectionsResponse {
+  alerts_last_seen_decision_id: number | null;
+  unseen_count: number;
+  rejections: GuardRejection[];
+}

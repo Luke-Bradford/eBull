@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from app.api.auth import require_session_or_service_token
 from app.main import app
+from tests.fixtures.ebull_test_db import ebull_test_conn as ebull_test_conn  # noqa: F401
 
 
 def _noop_auth() -> None:  # pragma: no cover - trivial override
