@@ -867,16 +867,16 @@ def get_value_history(
                 ) AS start_date
                 """
             )
-            row = cur.fetchone()
-            start_date: date = row["start_date"] if row else date.today()
         else:
             cur.execute(
                 "SELECT (CURRENT_DATE - make_interval(days => %(days)s::int))::date AS start_date",
                 {"days": days},
             )
-            row = cur.fetchone()
-            assert row is not None  # CURRENT_DATE always returns one row
-            start_date = row["start_date"]
+        # A SELECT without FROM always returns exactly one row in
+        # Postgres; the `or` fallback keeps a driver-level anomaly
+        # from raising an AssertionError in a live request path.
+        row = cur.fetchone()
+        start_date: date = row["start_date"] if row else date.today()
 
     # 1. Pull signed position-value points per (date, instrument).
     #    Uses a correlated subquery for close-at-or-before so the query

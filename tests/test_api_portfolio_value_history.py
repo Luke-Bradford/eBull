@@ -37,7 +37,7 @@ def _make_conn(
     `fetchall_per_cursor` holds rows for cursors 2 and 3; the first
     cursor's fetchone uses `start_date_row` or a sane default that
     predates every fixture in this file."""
-    cursor_1 = {"fetchone": start_date_row or _DEFAULT_START}
+    start_row = start_date_row or _DEFAULT_START
     fetchalls = iter(fetchall_per_cursor)
     cursor_idx = [0]
 
@@ -46,7 +46,7 @@ def _make_conn(
         cur.__enter__.return_value = cur
         cur.__exit__.return_value = None
         if cursor_idx[0] == 0:
-            cur.fetchone.return_value = cursor_1["fetchone"]
+            cur.fetchone.return_value = start_row
         else:
             cur.fetchall.return_value = next(fetchalls)
         cursor_idx[0] += 1
