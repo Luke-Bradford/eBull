@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
-from uuid import UUID
 
-import psycopg
 import pytest
 from fastapi.testclient import TestClient
 

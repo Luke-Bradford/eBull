@@ -74,7 +74,7 @@ def _resolve_operator(conn: psycopg.Connection[object]) -> UUID:
 def get_guard_rejections(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> GuardRejectionsResponse:
-    _resolve_operator(conn)
+    _operator_id = _resolve_operator(conn)  # used in Task 3 query
     # Implementation in Task 3.
     return GuardRejectionsResponse(
         alerts_last_seen_decision_id=None,
@@ -88,7 +88,7 @@ def mark_seen(
     body: MarkSeenRequest,
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> None:
-    _resolve_operator(conn)
+    _operator_id = _resolve_operator(conn)  # used in Task 4 UPDATE
     # Implementation in Task 4.
 
 
@@ -96,5 +96,5 @@ def mark_seen(
 def dismiss_all(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> None:
-    _resolve_operator(conn)
+    _operator_id = _resolve_operator(conn)  # used in Task 5 UPDATE
     # Implementation in Task 5.
