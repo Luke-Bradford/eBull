@@ -848,30 +848,45 @@ def get_value_history(
     rates_meta = load_live_fx_rates_with_metadata(conn)
     rates: dict[tuple[str, str], Decimal] = {k: v["rate"] for k, v in rates_meta.items()}
 
+    # Resolve the start date in Python so both ledger queries below
+    # use the same literal, not duplicated CTEs — a prior iteration
+    # had `max` diverge from `5y` because the bound was computed in
+    # two places. For range=max, pull the earliest ledger row; fall
+    # back to CURRENT_DATE so an empty ledger produces a single-point
+    # series rather than failing.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        if days is None:
+            cur.execute(
+                """
+                SELECT COALESCE(
+                    LEAST(
+                        (SELECT MIN(filled_at::date) FROM fills),
+                        (SELECT MIN(event_time::date) FROM cash_ledger)
+                    ),
+                    CURRENT_DATE
+                ) AS start_date
+                """
+            )
+            row = cur.fetchone()
+            start_date: date = row["start_date"] if row else date.today()
+        else:
+            cur.execute(
+                "SELECT (CURRENT_DATE - make_interval(days => %(days)s::int))::date AS start_date",
+                {"days": days},
+            )
+            row = cur.fetchone()
+            assert row is not None  # CURRENT_DATE always returns one row
+            start_date = row["start_date"]
+
     # 1. Pull signed position-value points per (date, instrument).
     #    Uses a correlated subquery for close-at-or-before so the query
-    #    self-contained — no separate price lookup loop in Python.
-    #    When `days` is NULL (range=max), start from the earliest row
-    #    in fills / cash_ledger so the chart covers real history
-    #    rather than duplicating the 5Y window.
+    #    is self-contained — no separate price lookup loop in Python.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            WITH bounds AS (
-                SELECT CASE
-                    WHEN %(days)s::int IS NULL THEN COALESCE(
-                        LEAST(
-                            (SELECT MIN(filled_at::date) FROM fills),
-                            (SELECT MIN(event_time::date) FROM cash_ledger)
-                        ),
-                        CURRENT_DATE
-                    )
-                    ELSE CURRENT_DATE - make_interval(days => %(days)s::int)
-                END AS start_date
-            ),
-            dates AS (
+            WITH dates AS (
                 SELECT generate_series(
-                    (SELECT start_date FROM bounds),
+                    %(start)s::date,
                     CURRENT_DATE,
                     '1 day'::interval
                 )::date AS d
@@ -925,30 +940,17 @@ def get_value_history(
             FROM units_per_day u
             JOIN instruments i USING (instrument_id)
             """,
-            {"days": days},
+            {"start": start_date},
         )
         position_rows = cur.fetchall()
 
-    # 2. Pull daily cumulative cash balance per currency. Same
-    #    NULL-days = earliest-row bounding as the positions query.
+    # 2. Pull daily cumulative cash balance per currency.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            WITH bounds AS (
-                SELECT CASE
-                    WHEN %(days)s::int IS NULL THEN COALESCE(
-                        LEAST(
-                            (SELECT MIN(filled_at::date) FROM fills),
-                            (SELECT MIN(event_time::date) FROM cash_ledger)
-                        ),
-                        CURRENT_DATE
-                    )
-                    ELSE CURRENT_DATE - make_interval(days => %(days)s::int)
-                END AS start_date
-            ),
-            dates AS (
+            WITH dates AS (
                 SELECT generate_series(
-                    (SELECT start_date FROM bounds),
+                    %(start)s::date,
                     CURRENT_DATE,
                     '1 day'::interval
                 )::date AS d
@@ -967,7 +969,7 @@ def get_value_history(
             WHERE cl.currency IS NOT NULL
             GROUP BY d.d, cl.currency
             """,
-            {"days": days},
+            {"start": start_date},
         )
         cash_rows = cur.fetchall()
 

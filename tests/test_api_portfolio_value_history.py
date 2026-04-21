@@ -18,17 +18,38 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def _make_conn(fetchall_per_cursor: list[list[dict[str, object]]]) -> MagicMock:
-    """Conn with one cursor per `conn.cursor()` call, each pre-loaded
-    with `fetchall_per_cursor[i]` as rows. The value-history endpoint
-    opens TWO cursors (positions + cash) in sequence."""
-    cursors = iter(fetchall_per_cursor)
+_DEFAULT_START = {"start_date": date(2020, 1, 1)}
+
+
+def _make_conn(
+    fetchall_per_cursor: list[list[dict[str, object]]],
+    *,
+    start_date_row: dict[str, object] | None = None,
+) -> MagicMock:
+    """Conn with one cursor per `conn.cursor()` call.
+
+    The value-history endpoint opens three cursors in sequence:
+        1. start-date resolution (`cur.fetchone()` returns a dict
+           with `start_date`)
+        2. positions query (`cur.fetchall()` returns position rows)
+        3. cash query (`cur.fetchall()` returns cash rows)
+
+    `fetchall_per_cursor` holds rows for cursors 2 and 3; the first
+    cursor's fetchone uses `start_date_row` or a sane default that
+    predates every fixture in this file."""
+    cursor_1 = {"fetchone": start_date_row or _DEFAULT_START}
+    fetchalls = iter(fetchall_per_cursor)
+    cursor_idx = [0]
 
     def _next(*_a: object, **_k: object) -> MagicMock:
         cur = MagicMock()
         cur.__enter__.return_value = cur
         cur.__exit__.return_value = None
-        cur.fetchall.return_value = next(cursors)
+        if cursor_idx[0] == 0:
+            cur.fetchone.return_value = cursor_1["fetchone"]
+        else:
+            cur.fetchall.return_value = next(fetchalls)
+        cursor_idx[0] += 1
         return cur
 
     conn = MagicMock()
@@ -285,6 +306,44 @@ def test_value_history_fx_skipped_counts_distinct_pairs_not_rows(
     assert body["fx_skipped"] == 1  # one pair (USD→GBP), not three rows
 
 
+def test_value_history_max_empty_ledger_returns_days_zero(
+    client: TestClient,
+) -> None:
+    """range=max on an empty ledger → start_date defaults to today,
+    generate_series produces a single row, nothing to price → empty
+    points + days=0. Pins the contract so FE can trust days=0 ==
+    'no history', not 'couldn't compute'."""
+    from app.db import get_conn
+
+    def _conn() -> Iterator[MagicMock]:
+        # Custom start_date_row: the COALESCE in the start-date query
+        # produces CURRENT_DATE when both ledgers are empty.
+        yield _make_conn(
+            [[], []],
+            start_date_row={"start_date": date(2026, 4, 21)},
+        )
+
+    app.dependency_overrides[get_conn] = _conn
+    try:
+        with (
+            patch(
+                "app.api.portfolio.get_runtime_config",
+                return_value=_runtime_stub("GBP"),
+            ),
+            patch(
+                "app.api.portfolio.load_live_fx_rates_with_metadata",
+                return_value={},
+            ),
+        ):
+            resp = client.get("/portfolio/value-history?range=max")
+    finally:
+        app.dependency_overrides.pop(get_conn, None)
+
+    body = resp.json()
+    assert body["points"] == []
+    assert body["days"] == 0
+
+
 def test_value_history_max_reports_effective_days_from_point_span(
     client: TestClient,
 ) -> None:
@@ -337,8 +396,9 @@ def test_value_history_max_reports_effective_days_from_point_span(
 
     body = resp.json()
     assert body["range"] == "max"
-    # 2024-04-20 → 2026-04-20 = ~730 days (with leap year).
-    assert body["days"] in (730, 731)
+    # Exact span from first to last point — kept computed, not hard-
+    # coded, so a future schema/semantics change surfaces here.
+    assert body["days"] == (date(2026, 4, 20) - date(2024, 4, 20)).days
     assert [p["date"] for p in body["points"]] == ["2024-04-20", "2026-04-20"]
 
 
