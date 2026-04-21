@@ -54,8 +54,7 @@ function Pill({
         {LABELS[period.period] ?? period.period}
       </div>
       <div className={`mt-0.5 text-lg font-semibold tabular-nums ${toneText}`}>
-        {sign === "pos" ? "+" : ""}
-        {formatMoney(period.pnl, currency)}
+        {`${sign === "pos" ? "+" : ""}${formatMoney(period.pnl, currency)}`}
       </div>
       <div className={`text-xs tabular-nums ${toneText}`}>
         {/* formatPct already signs positives — don't double-prefix. */}
