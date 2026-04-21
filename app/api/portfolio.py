@@ -931,6 +931,12 @@ def get_value_history(
                 SUM(cl.amount) AS balance
             FROM dates d
             JOIN cash_ledger cl ON cl.event_time::date <= d.d
+            -- Filter NULL-currency rows at the SQL level so they
+            -- don't collapse into a single (date, NULL) group that
+            -- undercounts the data-quality signal. The Python loop
+            -- keeps a defence-in-depth guard in case this filter
+            -- ever gets dropped.
+            WHERE cl.currency IS NOT NULL
             GROUP BY d.d, cl.currency
             """,
             {"days": days},
