@@ -698,6 +698,7 @@ def get_rolling_pnl(
             cur.execute(
                 """
                 SELECT
+                    p.instrument_id,
                     i.currency AS native_currency,
                     p.current_units,
                     curr.close AS curr_close,
@@ -745,10 +746,10 @@ def get_rolling_pnl(
                     cost_native = convert(cost_native, native_ccy, display_currency, rates)
                 except FxRateNotFound:
                     logger.warning(
-                        "rolling-pnl: FX %s→%s missing; skipping position %s",
+                        "rolling-pnl: FX %s→%s missing; skipping instrument_id=%s",
                         native_ccy,
                         display_currency,
-                        row["instrument_id"] if "instrument_id" in row else "<unknown>",
+                        row["instrument_id"],
                     )
                     continue
             total_pnl += delta_native

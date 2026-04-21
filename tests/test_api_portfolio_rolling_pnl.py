@@ -43,14 +43,22 @@ def _runtime_stub(currency: str = "GBP") -> MagicMock:
     return rt
 
 
+_NEXT_IID = [1]
+
+
 def _position_row(
     *,
     curr: Decimal,
     prior: Decimal | None,
     units: Decimal,
     currency: str = "GBP",
+    instrument_id: int | None = None,
 ) -> dict[str, object]:
+    if instrument_id is None:
+        instrument_id = _NEXT_IID[0]
+        _NEXT_IID[0] += 1
     return {
+        "instrument_id": instrument_id,
         "native_currency": currency,
         "current_units": units,
         "curr_close": curr,

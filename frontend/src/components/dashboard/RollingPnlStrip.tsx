@@ -29,9 +29,22 @@ function Pill({
   period: RollingPnlPeriod;
   currency: string;
 }) {
-  const isPositive = period.pnl >= 0;
-  const toneText = isPositive ? "text-emerald-700" : "text-red-700";
-  const toneBorder = isPositive ? "border-emerald-200" : "border-red-200";
+  // Zero delta is neutral, not positive — avoids the odd "+£0.00"
+  // rendering (Codex #388 round-2 finding).
+  const sign: "pos" | "neg" | "neutral" =
+    period.pnl > 0 ? "pos" : period.pnl < 0 ? "neg" : "neutral";
+  const toneText =
+    sign === "pos"
+      ? "text-emerald-700"
+      : sign === "neg"
+        ? "text-red-700"
+        : "text-slate-600";
+  const toneBorder =
+    sign === "pos"
+      ? "border-emerald-200"
+      : sign === "neg"
+        ? "border-red-200"
+        : "border-slate-200";
   return (
     <div
       className={`flex-1 rounded-md border ${toneBorder} bg-white p-3 shadow-sm`}
@@ -41,7 +54,7 @@ function Pill({
         {LABELS[period.period] ?? period.period}
       </div>
       <div className={`mt-0.5 text-lg font-semibold tabular-nums ${toneText}`}>
-        {isPositive ? "+" : ""}
+        {sign === "pos" ? "+" : ""}
         {formatMoney(period.pnl, currency)}
       </div>
       <div className={`text-xs tabular-nums ${toneText}`}>
