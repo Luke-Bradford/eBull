@@ -9,6 +9,7 @@ import { useConfig } from "@/lib/ConfigContext";
 import { useAsync } from "@/lib/useAsync";
 import { ErrorBanner } from "@/components/states/ErrorBanner";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { RollingPnlStrip } from "@/components/dashboard/RollingPnlStrip";
 import { SummaryCards } from "@/components/dashboard/SummaryCards";
 import { PositionsTable } from "@/components/dashboard/PositionsTable";
 import { RecentRecommendations } from "@/components/dashboard/RecentRecommendations";
@@ -111,6 +112,10 @@ export function DashboardPage() {
             budgetData={budget.loading || budget.error !== null ? null : budget.data}
             budgetError={budget.error !== null}
           />
+          {/* Rolling P&L: 1d/1w/1m pills showing short-horizon
+              movement. Hidden on error so a failed rolling fetch
+              doesn't blank the rest of the page. */}
+          <RollingPnlStrip />
           <Section title="Positions">
             {portfolio.loading ? (
               <SectionSkeleton rows={4} />

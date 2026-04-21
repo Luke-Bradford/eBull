@@ -148,6 +148,20 @@ class InstrumentPositionDetail(BaseModel):
     trades: list[NativeTradeItem]
 
 
+class RollingPnlPeriod(BaseModel):
+    """One row of the rolling P&L strip on the dashboard."""
+
+    period: str  # "1d" | "1w" | "1m"
+    pnl: float  # cumulative unrealised change in display currency
+    pnl_pct: float | None  # pnl / cost_basis_at_start, None when denominator is 0
+    coverage: int  # positions that contributed (had a prior close available)
+
+
+class RollingPnlResponse(BaseModel):
+    display_currency: str
+    periods: list[RollingPnlPeriod]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -628,4 +642,131 @@ def get_instrument_positions(
         total_value=total_value,
         total_pnl=total_pnl,
         trades=trades,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rolling P&L (#315 Phase 2)
+# ---------------------------------------------------------------------------
+
+# Period → (label, days-back). Trading days ≠ calendar days but the
+# dashboard wants calendar-week / calendar-month labels the operator
+# thinks in; rolling P&L "since 7 days ago" is the right semantic
+# for a long-horizon fund.
+_ROLLING_PERIODS: tuple[tuple[str, int], ...] = (
+    ("1d", 1),
+    ("1w", 7),
+    ("1m", 30),
+)
+
+
+@router.get("/rolling-pnl", response_model=RollingPnlResponse)
+def get_rolling_pnl(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> RollingPnlResponse:
+    """Unrealised P&L deltas at 1d / 1w / 1m lookbacks, in display currency.
+
+    Per period and per open position:
+        delta_native = (latest_close − close_at_or_before(anchor − N days)) * current_units
+        delta_display = FX-convert(delta_native, native_ccy → display_ccy)
+    Sum over positions. Anchor is each position's own `latest_close`
+    price_date (NOT wall-clock `CURRENT_DATE`) so a stale candle
+    store or market-closed day doesn't collapse the 1d bucket to zero
+    (Codex #387 phase-2 finding).
+
+    Positions without a prior close at that lookback (recent listings,
+    fresh holdings) contribute zero to `pnl` AND zero to the cost-basis
+    denominator, so they aren't wrongly attributed and don't dilute the
+    percentage. `coverage` reports how many positions contributed.
+
+    FX: converts each position's native-currency delta to display
+    currency using live FX rates (same path as GET /portfolio). If a
+    rate is missing the position skips — logged at WARNING, does not
+    fail the endpoint.
+    """
+    runtime = get_runtime_config(conn)
+    display_currency = runtime.display_currency
+    # `load_live_fx_rates_with_metadata` returns {(from,to): {rate, quoted_at}};
+    # `convert()` expects the raw Decimal, so unwrap — matches the
+    # pattern in `get_portfolio` above.
+    rates_meta = load_live_fx_rates_with_metadata(conn)
+    rates: dict[tuple[str, str], Decimal] = {k: v["rate"] for k, v in rates_meta.items()}
+
+    periods: list[RollingPnlPeriod] = []
+    for label, days in _ROLLING_PERIODS:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT
+                    p.instrument_id,
+                    i.currency AS native_currency,
+                    p.current_units,
+                    curr.close AS curr_close,
+                    curr.price_date AS curr_date,
+                    prior.close AS prior_close
+                FROM positions p
+                JOIN instruments i USING (instrument_id)
+                LEFT JOIN LATERAL (
+                    SELECT close, price_date FROM price_daily
+                    WHERE instrument_id = p.instrument_id
+                      AND close IS NOT NULL
+                    ORDER BY price_date DESC
+                    LIMIT 1
+                ) curr ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT close FROM price_daily
+                    WHERE instrument_id = p.instrument_id
+                      AND close IS NOT NULL
+                      AND price_date <= curr.price_date - make_interval(days => %(days)s::int)
+                    ORDER BY price_date DESC
+                    LIMIT 1
+                ) prior ON TRUE
+                WHERE p.current_units > 0
+                  AND curr.close IS NOT NULL
+                """,
+                {"days": days},
+            )
+            rows = cur.fetchall()
+
+        total_pnl = Decimal("0")
+        total_cost = Decimal("0")
+        coverage = 0
+        for row in rows:
+            prior_close: Decimal | None = row["prior_close"]
+            if prior_close is None:
+                continue
+            curr_close: Decimal = row["curr_close"]
+            units = Decimal(str(row["current_units"]))
+            native_ccy = str(row["native_currency"] or display_currency)
+            delta_native = (curr_close - prior_close) * units
+            cost_native = prior_close * units
+            if native_ccy != display_currency:
+                try:
+                    delta_native = convert(delta_native, native_ccy, display_currency, rates)
+                    cost_native = convert(cost_native, native_ccy, display_currency, rates)
+                except FxRateNotFound:
+                    logger.warning(
+                        "rolling-pnl: FX %s→%s missing; skipping instrument_id=%s",
+                        native_ccy,
+                        display_currency,
+                        row["instrument_id"],
+                    )
+                    continue
+            total_pnl += delta_native
+            total_cost += cost_native
+            coverage += 1
+
+        pnl_pct = float(total_pnl / total_cost) if total_cost != 0 else None
+        periods.append(
+            RollingPnlPeriod(
+                period=label,
+                pnl=float(total_pnl),
+                pnl_pct=pnl_pct,
+                coverage=coverage,
+            )
+        )
+
+    return RollingPnlResponse(
+        display_currency=display_currency,
+        periods=periods,
     )
