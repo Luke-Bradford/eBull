@@ -414,20 +414,28 @@ class TestPersistPositionAlerts:
         assert stats == PersistStats(opened=1, resolved=1, unchanged=1)
 
     def test_partial_unique_index_blocks_duplicate_open_pair(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """Direct DB-level test: two open rows for same (instrument, type) fail."""
+        """Direct DB-level test: two open rows for same (instrument, type) fail.
+
+        Wraps both INSERTs in a ``conn.transaction()`` savepoint so the
+        UniqueViolation is absorbed cleanly — without it, the connection's
+        implicit transaction remains in an aborted state after the second
+        INSERT fails, which would leak into any subsequent statement on
+        the same connection (brittle under future test-code additions).
+        """
         iid = _seed_instrument(ebull_test_conn)
-        with ebull_test_conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO position_alerts (instrument_id, alert_type, detail) VALUES (%s, 'sl_breach', 'first')",
-                (iid,),
-            )
-            with pytest.raises(psycopg.errors.UniqueViolation):
-                cur.execute(
-                    "INSERT INTO position_alerts "
-                    "(instrument_id, alert_type, detail) "
-                    "VALUES (%s, 'sl_breach', 'second')",
-                    (iid,),
-                )
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            with ebull_test_conn.transaction():
+                with ebull_test_conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO position_alerts (instrument_id, alert_type, detail) VALUES (%s, 'sl_breach', 'first')",
+                        (iid,),
+                    )
+                    cur.execute(
+                        "INSERT INTO position_alerts "
+                        "(instrument_id, alert_type, detail) "
+                        "VALUES (%s, 'sl_breach', 'second')",
+                        (iid,),
+                    )
 
     def test_partial_unique_index_allows_reopen_after_resolve(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """Partial index WHERE resolved_at IS NULL — a resolved row does not
