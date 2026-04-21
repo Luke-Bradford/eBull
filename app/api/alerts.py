@@ -137,8 +137,32 @@ def mark_seen(
     body: MarkSeenRequest,
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> None:
-    _operator_id = _resolve_operator(conn)  # used in Task 4 UPDATE
-    # Implementation in Task 4.
+    operator_id = _resolve_operator(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE operators
+            SET alerts_last_seen_decision_id = GREATEST(
+                COALESCE(alerts_last_seen_decision_id, 0),
+                LEAST(
+                    %(seen_through_decision_id)s,
+                    COALESCE((
+                        SELECT MAX(decision_id)
+                        FROM decision_audit
+                        WHERE pass_fail = 'FAIL'
+                          AND stage = 'execution_guard'
+                          AND decision_time >= now() - INTERVAL '7 days'
+                    ), 0)
+                )
+            )
+            WHERE operator_id = %(op)s
+            """,
+            {
+                "seen_through_decision_id": body.seen_through_decision_id,
+                "op": operator_id,
+            },
+        )
+    conn.commit()
 
 
 @router.post("/dismiss-all", status_code=status.HTTP_204_NO_CONTENT)

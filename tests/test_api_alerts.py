@@ -229,3 +229,67 @@ def test_get_unseen_count_query_uses_strict_gt_on_decision_id(client: TestClient
     assert "INTERVAL '7 days'" in count_sql
     # NULL last-seen path counts everything in window.
     assert "%(last_id)s IS NULL" in count_sql
+
+
+def test_post_seen_rejects_missing_field(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn()
+        resp = client.post("/alerts/seen", json={})
+    assert resp.status_code == 422
+
+
+def test_post_seen_rejects_non_integer(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn()
+        resp = client.post("/alerts/seen", json={"seen_through_decision_id": "abc"})
+    assert resp.status_code == 422
+
+
+def test_post_seen_rejects_non_positive(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn()
+        resp = client.post("/alerts/seen", json={"seen_through_decision_id": 0})
+    assert resp.status_code == 422
+
+
+def test_post_seen_writes_update(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        cur = _install_conn(rowcount=1)
+        resp = client.post("/alerts/seen", json={"seen_through_decision_id": 1234})
+    assert resp.status_code == 204
+    # One UPDATE call was issued with the posted value.
+    calls = cur.execute.call_args_list
+    assert any("UPDATE operators" in c.args[0] for c in calls)
+    params = [c.args[1] for c in calls if "UPDATE operators" in c.args[0]][0]
+    assert params["seen_through_decision_id"] == 1234
+    assert params["op"] == _OP_ID
+
+
+def test_post_seen_sql_shape_pins_greatest_and_least_and_scope(client: TestClient) -> None:
+    """SQL must be: GREATEST(COALESCE(current, 0), LEAST(posted, MAX-in-window-or-0))
+    with MAX subselect filtered to FAIL + execution_guard + 7-day window."""
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        cur = _install_conn(rowcount=1)
+        resp = client.post("/alerts/seen", json={"seen_through_decision_id": 99999})
+    assert resp.status_code == 204
+    sql = next(c.args[0] for c in cur.execute.call_args_list if "UPDATE operators" in c.args[0])
+    assert "GREATEST" in sql
+    assert "LEAST" in sql
+    assert "SELECT MAX(decision_id)" in sql
+    assert "pass_fail = 'FAIL'" in sql
+    assert "stage = 'execution_guard'" in sql
+    assert "INTERVAL '7 days'" in sql
+
+
+def test_post_seen_returns_503_when_no_operator(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", side_effect=NoOperatorError()):
+        _install_conn()
+        resp = client.post("/alerts/seen", json={"seen_through_decision_id": 1})
+    assert resp.status_code == 503
+
+
+def test_post_seen_returns_501_when_multiple_operators(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", side_effect=AmbiguousOperatorError()):
+        _install_conn()
+        resp = client.post("/alerts/seen", json={"seen_through_decision_id": 1})
+    assert resp.status_code == 501
