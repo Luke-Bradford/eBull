@@ -35,7 +35,8 @@ def _install_conn(
     """Stub DB whose cursor feeds fetchone/fetchall in the order supplied.
 
     Returns the MagicMock cursor so tests can assert on ``cur.execute.call_args_list``
-    for SQL-shape pinning.
+    for SQL-shape pinning. Access the parent connection via ``cur._parent_conn`` to
+    assert on commit for regression guards.
 
     Call ordering by endpoint:
       GET /alerts/guard-rejections — 2x fetchone, 1x fetchall:
@@ -59,6 +60,7 @@ def _install_conn(
     cur.rowcount = rowcount
     conn.cursor.return_value = cur
     conn.commit = MagicMock()
+    cur._parent_conn = conn  # exposed so tests can assert on commit
 
     def _dep() -> Iterator[MagicMock]:
         yield conn
@@ -263,6 +265,8 @@ def test_post_seen_writes_update(client: TestClient) -> None:
     params = [c.args[1] for c in calls if "UPDATE operators" in c.args[0]][0]
     assert params["seen_through_decision_id"] == 1234
     assert params["op"] == _OP_ID
+    # Regression guard: conn.commit() must fire or the UPDATE never persists.
+    cur._parent_conn.commit.assert_called_once()
 
 
 def test_post_seen_sql_shape_pins_greatest_and_least_and_scope(client: TestClient) -> None:
