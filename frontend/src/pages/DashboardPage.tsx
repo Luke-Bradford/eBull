@@ -9,6 +9,7 @@ import { useConfig } from "@/lib/ConfigContext";
 import { useAsync } from "@/lib/useAsync";
 import { ErrorBanner } from "@/components/states/ErrorBanner";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { PortfolioValueChart } from "@/components/dashboard/PortfolioValueChart";
 import { RollingPnlStrip } from "@/components/dashboard/RollingPnlStrip";
 import { SummaryCards } from "@/components/dashboard/SummaryCards";
 import { PositionsTable } from "@/components/dashboard/PositionsTable";
@@ -116,6 +117,11 @@ export function DashboardPage() {
               movement. Hidden on error so a failed rolling fetch
               doesn't blank the rest of the page. */}
           <RollingPnlStrip />
+          {/* Portfolio value over time (positions + cash). Mounted
+              under the pills so the operator sees the cockpit row
+              (totals → short-horizon delta → long-horizon trajectory)
+              before scrolling into the action queue. */}
+          <PortfolioValueChart />
           <Section title="Positions">
             {portfolio.loading ? (
               <SectionSkeleton rows={4} />

@@ -371,6 +371,23 @@ export interface RollingPnlResponse {
   periods: RollingPnlPeriod[];
 }
 
+// /portfolio/value-history — #204 portfolio NAV over time
+export type ValueHistoryRange = "1m" | "3m" | "6m" | "1y" | "5y" | "max";
+
+export interface ValueHistoryPoint {
+  date: string; // YYYY-MM-DD
+  value: number;
+}
+
+export interface ValueHistoryResponse {
+  display_currency: string;
+  range: ValueHistoryRange;
+  days: number;
+  fx_mode: string; // "live" in v1 — flags whether historical FX was used
+  fx_skipped: number; // rows dropped due to missing live FX pair
+  points: ValueHistoryPoint[];
+}
+
 // /portfolio/instruments/:instrumentId — native currency drill-through
 export interface NativeTradeItem {
   position_id: number;

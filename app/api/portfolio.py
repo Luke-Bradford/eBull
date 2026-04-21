@@ -26,7 +26,7 @@ import logging
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 import psycopg.rows
@@ -769,4 +769,298 @@ def get_rolling_pnl(
     return RollingPnlResponse(
         display_currency=display_currency,
         periods=periods,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Portfolio value history (#204)
+# ---------------------------------------------------------------------------
+
+# Range → days-back. None on "max" means "from the earliest row in
+# fills/cash_ledger to today" (parallels the candles API `max`). The
+# generate_series loop stays bounded by real data; a fund with 10y of
+# trades gets 10y of points, not 5y of truncation.
+_VALUE_HISTORY_RANGES: dict[str, int | None] = {
+    "1m": 30,
+    "3m": 90,
+    "6m": 180,
+    "1y": 365,
+    "5y": 1825,
+    "max": None,
+}
+
+
+class ValueHistoryPoint(BaseModel):
+    date: date
+    value: float
+
+
+ValueHistoryRange = Literal["1m", "3m", "6m", "1y", "5y", "max"]
+
+
+class ValueHistoryResponse(BaseModel):
+    display_currency: str
+    range: ValueHistoryRange
+    days: int
+    # Today's FX rates applied to every historical date. A multi-
+    # currency portfolio's past values are therefore approximate — a
+    # proper historical-FX series lives in `fx_rates` (tax ledger)
+    # but only covers dates with tax events. Callers that care about
+    # historical-FX accuracy should treat this chart as directional,
+    # not forensic.
+    fx_mode: str = "live"
+    # Distinct FX pairs we had to drop because the live snapshot didn't
+    # have them. Lets the FE distinguish "truly no history" from
+    # "all-skipped due to missing FX", without inflating the count by
+    # (instruments × days).
+    fx_skipped: int = 0
+    points: list[ValueHistoryPoint]
+
+
+@router.get("/value-history", response_model=ValueHistoryResponse)
+def get_value_history(
+    range: ValueHistoryRange = "1y",  # noqa: A002 — URL param
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> ValueHistoryResponse:
+    """Daily portfolio total value (positions + cash) over a rolling window.
+
+    Value at day D is reconstructed as:
+        sum over each instrument:
+            signed_units_at_D * close_at_D_or_prior   (converted to display ccy)
+        plus sum over each currency:
+            net_cash_ledger_at_D                       (converted to display ccy)
+
+    Signed units replay the fills ledger by order action (BUY/ADD add,
+    SELL/EXIT subtract). If a position had no `price_daily` close on
+    or before D (e.g. new listing with stale local store), that bar
+    is skipped for that day — conservatively under-states value
+    rather than inventing a zero.
+
+    FX conversion uses the **live** snapshot only (`live_fx_rates`).
+    Historical daily FX is only populated on tax-event dates today, so
+    reusing it would leave coverage gaps worse than the current
+    approximation. Flagged via `fx_mode` in the response.
+    """
+    days = _VALUE_HISTORY_RANGES[range]
+
+    runtime = get_runtime_config(conn)
+    display_currency = runtime.display_currency
+    rates_meta = load_live_fx_rates_with_metadata(conn)
+    rates: dict[tuple[str, str], Decimal] = {k: v["rate"] for k, v in rates_meta.items()}
+
+    # Resolve the start date in Python so both ledger queries below
+    # use the same literal, not duplicated CTEs — a prior iteration
+    # had `max` diverge from `5y` because the bound was computed in
+    # two places. For range=max, pull the earliest ledger row; fall
+    # back to CURRENT_DATE so an empty ledger produces a single-point
+    # series rather than failing.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        if days is None:
+            cur.execute(
+                """
+                SELECT COALESCE(
+                    LEAST(
+                        (SELECT MIN(filled_at::date) FROM fills),
+                        (SELECT MIN(event_time::date) FROM cash_ledger)
+                    ),
+                    CURRENT_DATE
+                ) AS start_date
+                """
+            )
+        else:
+            cur.execute(
+                "SELECT (CURRENT_DATE - make_interval(days => %(days)s::int))::date AS start_date",
+                {"days": days},
+            )
+        # A SELECT without FROM always returns exactly one row in
+        # Postgres; the `or` fallback keeps a driver-level anomaly
+        # from raising an AssertionError in a live request path.
+        row = cur.fetchone()
+        start_date: date = row["start_date"] if row else date.today()
+
+    # 1. Pull signed position-value points per (date, instrument).
+    #    Uses a correlated subquery for close-at-or-before so the query
+    #    is self-contained — no separate price lookup loop in Python.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            WITH dates AS (
+                SELECT generate_series(
+                    %(start)s::date,
+                    CURRENT_DATE,
+                    '1 day'::interval
+                )::date AS d
+            ),
+            fills_signed AS (
+                -- Explicit whitelist rather than default-to-negative so
+                -- a future action code (e.g. a corporate-action type)
+                -- can't silently flip the NAV sign. Unknown actions
+                -- fall through to NULL and are dropped by the SUM.
+                SELECT
+                    f.filled_at::date AS fill_date,
+                    o.instrument_id,
+                    CASE
+                        WHEN o.action IN ('BUY', 'ADD') THEN f.units
+                        WHEN o.action IN ('SELL', 'EXIT') THEN -f.units
+                        ELSE NULL
+                    END AS units
+                FROM fills f
+                JOIN orders o ON o.order_id = f.order_id
+                WHERE o.action IN ('BUY', 'ADD', 'SELL', 'EXIT')
+            ),
+            units_per_day AS (
+                -- Long-only invariant (CLAUDE.md, eBull non-negotiables
+                -- "Long only in v1. No shorting."). We intentionally
+                -- drop zero and negative net-units: zero = fully
+                -- closed (contributes nothing), negative = should
+                -- not exist in this product and is treated as
+                -- corrupt data rather than silently priced.
+                SELECT
+                    d.d,
+                    fs.instrument_id,
+                    SUM(fs.units) AS units_at_date
+                FROM dates d
+                JOIN fills_signed fs ON fs.fill_date <= d.d
+                GROUP BY d.d, fs.instrument_id
+                HAVING SUM(fs.units) > 0
+            )
+            SELECT
+                u.d AS point_date,
+                u.instrument_id,
+                i.currency AS native_currency,
+                u.units_at_date,
+                (
+                    SELECT close FROM price_daily
+                    WHERE instrument_id = u.instrument_id
+                      AND price_date <= u.d
+                      AND close IS NOT NULL
+                    ORDER BY price_date DESC
+                    LIMIT 1
+                ) AS close_at_date
+            FROM units_per_day u
+            JOIN instruments i USING (instrument_id)
+            """,
+            {"start": start_date},
+        )
+        position_rows = cur.fetchall()
+
+    # 2. Pull daily cumulative cash balance per currency.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            WITH dates AS (
+                SELECT generate_series(
+                    %(start)s::date,
+                    CURRENT_DATE,
+                    '1 day'::interval
+                )::date AS d
+            )
+            SELECT
+                d.d AS point_date,
+                cl.currency,
+                SUM(cl.amount) AS balance
+            FROM dates d
+            JOIN cash_ledger cl ON cl.event_time::date <= d.d
+            -- Filter NULL-currency rows at the SQL level so they
+            -- don't collapse into a single (date, NULL) group that
+            -- undercounts the data-quality signal. The Python loop
+            -- keeps a defence-in-depth guard in case this filter
+            -- ever gets dropped.
+            WHERE cl.currency IS NOT NULL
+            GROUP BY d.d, cl.currency
+            """,
+            {"start": start_date},
+        )
+        cash_rows = cur.fetchall()
+
+    # 3. Aggregate into one value per day in display currency.
+    # cash_ledger semantics: every INSERT site (orders.py, order_client.py,
+    # portfolio_sync.py) writes a *delta* row, never an absolute snapshot.
+    # SUM(amount) is therefore the running balance — correct per-call-site
+    # invariant, not a coincidence of the test fixtures.
+    per_day: dict[date, Decimal] = defaultdict(lambda: Decimal("0"))
+    # Track missing FX as a set of (from, to) pairs so the operator-
+    # facing count reflects distinct gaps, not N * days of duplicates.
+    fx_missing_pairs: set[tuple[str, str]] = set()
+
+    for row in position_rows:
+        close_raw = row["close_at_date"]
+        if close_raw is None:
+            continue  # no close on or before this date → skip, not zero
+        # psycopg3 returns NUMERIC as Decimal in practice, but wrap
+        # defensively so we never mix Decimal with a float if a driver
+        # or column-type change ever slips in.
+        close = Decimal(str(close_raw))
+        units = Decimal(str(row["units_at_date"]))
+        raw_ccy = row["native_currency"]
+        if raw_ccy is None:
+            # Instrument missing a currency is a data-quality bug, not
+            # a display-currency position. Log and skip so we don't
+            # silently attribute foreign value to display-ccy NAV.
+            logger.warning(
+                "value-history: instrument_id=%s has NULL currency; skipping on %s",
+                row["instrument_id"],
+                row["point_date"],
+            )
+            continue
+        native_ccy = str(raw_ccy)
+        value_native = close * units
+        if native_ccy != display_currency:
+            try:
+                value_native = convert(value_native, native_ccy, display_currency, rates)
+            except FxRateNotFound:
+                fx_missing_pairs.add((native_ccy, display_currency))
+                logger.warning(
+                    "value-history: FX %s→%s missing; skipping instrument_id=%s on %s",
+                    native_ccy,
+                    display_currency,
+                    row["instrument_id"],
+                    row["point_date"],
+                )
+                continue
+        per_day[row["point_date"]] += value_native
+
+    for row in cash_rows:
+        balance = Decimal(str(row["balance"]))
+        raw_ccy = row["currency"]
+        if raw_ccy is None:
+            # Mirrors the positions-loop guard: cash without a currency
+            # is a data-quality bug, not a display-currency balance.
+            logger.warning(
+                "value-history: cash_ledger row has NULL currency on %s; skipping",
+                row["point_date"],
+            )
+            continue
+        native_ccy = str(raw_ccy)
+        if native_ccy != display_currency:
+            try:
+                balance = convert(balance, native_ccy, display_currency, rates)
+            except FxRateNotFound:
+                fx_missing_pairs.add((native_ccy, display_currency))
+                logger.warning(
+                    "value-history: FX %s→%s missing for cash on %s",
+                    native_ccy,
+                    display_currency,
+                    row["point_date"],
+                )
+                continue
+        per_day[row["point_date"]] += balance
+
+    points = [ValueHistoryPoint(date=d, value=float(v)) for d, v in sorted(per_day.items())]
+
+    # For `max` the actual lookback depends on the earliest ledger
+    # row, not the input bucket — surface the effective span so the
+    # operator / charting code can label the axis correctly without
+    # needing to subtract the first point's date client-side.
+    if days is None:
+        effective_days = (points[-1].date - points[0].date).days if len(points) >= 2 else 0
+    else:
+        effective_days = days
+
+    return ValueHistoryResponse(
+        display_currency=display_currency,
+        range=range,
+        days=effective_days,
+        fx_skipped=len(fx_missing_pairs),
+        points=points,
     )
