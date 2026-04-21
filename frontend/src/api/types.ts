@@ -358,6 +358,19 @@ export interface PortfolioResponse {
   fx_rates_used: Record<string, FxRateUsed>;
 }
 
+// /portfolio/rolling-pnl — #315 Phase 2 rolling unrealised P&L
+export interface RollingPnlPeriod {
+  period: string; // "1d" | "1w" | "1m"
+  pnl: number;
+  pnl_pct: number | null;
+  coverage: number;
+}
+
+export interface RollingPnlResponse {
+  display_currency: string;
+  periods: RollingPnlPeriod[];
+}
+
 // /portfolio/instruments/:instrumentId — native currency drill-through
 export interface NativeTradeItem {
   position_id: number;
