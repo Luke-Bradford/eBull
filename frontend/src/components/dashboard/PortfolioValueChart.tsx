@@ -171,8 +171,12 @@ export function PortfolioValueChart(): JSX.Element | null {
           description={`${fxSkipped} currency pair(s) missing from today's FX snapshot — all rows in those pairs were dropped. Wait for the FX refresh job to repopulate and retry.`}
         />
       ) : null}
-      {hasMovement && points !== null && data !== null ? (
-        <ValueCanvas points={points} currency={data.display_currency} />
+      {hasMovement && validPoints !== null && data !== null ? (
+        // Pass the date-filtered array so the canvas and the movement
+        // guard share the same view of the series. The canvas would
+        // still re-filter internally, but passing `points` raw means
+        // two different "what counts as a row" rules in the same file.
+        <ValueCanvas points={validPoints} currency={data.display_currency} />
       ) : null}
     </div>
   );
