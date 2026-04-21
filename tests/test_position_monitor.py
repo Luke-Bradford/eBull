@@ -2,6 +2,7 @@
 
 Structure:
   - TestCheckPositionHealth — full check_position_health with mocked DB
+  - TestPersistPositionAlerts — writer diff-logic tests against real ebull_test DB
 """
 
 from __future__ import annotations
@@ -11,10 +12,21 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
 
+import psycopg
+import pytest
+
 from app.services.position_monitor import (
     EXIT_RED_FLAG_THRESHOLD,
+    MonitorAlert,
+    MonitorResult,
+    PersistStats,
     check_position_health,
+    persist_position_alerts,
 )
+from tests.fixtures.ebull_test_db import ebull_test_conn
+from tests.fixtures.ebull_test_db import test_db_available as _test_db_available
+
+__all__ = ["ebull_test_conn"]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -230,3 +242,240 @@ class TestCheckPositionHealth:
         tb_alerts = [a for a in result.alerts if a.alert_type == "thesis_break"]
         assert len(tb_alerts) == 1
         assert tb_alerts[0].current_bid is None
+
+
+# ---------------------------------------------------------------------------
+# TestPersistPositionAlerts
+# ---------------------------------------------------------------------------
+
+_next_instrument_id = 0
+
+
+def _seed_instrument(conn: psycopg.Connection[tuple], *, symbol: str = "AAPL") -> int:
+    """Insert a tradable instrument, return instrument_id.
+
+    ``instruments.instrument_id`` is a BIGINT PRIMARY KEY with NO default
+    (sql/001_init.sql:2), so the caller supplies the id. ``symbol`` and
+    ``company_name`` are NOT NULL (sql/001_init.sql:3-4) — no fixture-neutral
+    defaults. Prevention: ``INSERT INTO instruments fixtures must supply
+    is_tradable``; we supply it explicitly even though it has a default.
+    """
+    global _next_instrument_id
+    _next_instrument_id += 1
+    iid = _next_instrument_id
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO instruments (instrument_id, symbol, company_name, currency, is_tradable) "
+            "VALUES (%s, %s, %s, 'USD', TRUE)",
+            (iid, symbol, f"{symbol} Inc."),
+        )
+    conn.commit()
+    return iid
+
+
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestPersistPositionAlerts:
+    """Writer diff-logic tests against real ebull_test DB."""
+
+    def test_empty_and_empty_is_noop(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        result = MonitorResult(positions_checked=0, alerts=())
+        stats = persist_position_alerts(ebull_test_conn, result)
+        assert stats == PersistStats(opened=0, resolved=0, unchanged=0)
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM position_alerts")
+            assert cur.fetchone() == (0,)
+
+    def test_new_breach_opens_episode(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn)
+        alert = MonitorAlert(
+            instrument_id=iid,
+            symbol="AAPL",
+            alert_type="sl_breach",
+            detail="bid=130 < sl=140",
+            current_bid=Decimal("130"),
+        )
+        stats = persist_position_alerts(ebull_test_conn, MonitorResult(positions_checked=1, alerts=(alert,)))
+        assert stats == PersistStats(opened=1, resolved=0, unchanged=0)
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT alert_type, detail, current_bid, resolved_at FROM position_alerts WHERE instrument_id = %s",
+                (iid,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "sl_breach"
+        assert rows[0][1] == "bid=130 < sl=140"
+        assert rows[0][2] == Decimal("130")
+        assert rows[0][3] is None
+
+    def test_still_breaching_is_noop(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn)
+        alert = MonitorAlert(
+            instrument_id=iid,
+            symbol="AAPL",
+            alert_type="sl_breach",
+            detail="bid=130 < sl=140",
+            current_bid=Decimal("130"),
+        )
+        persist_position_alerts(ebull_test_conn, MonitorResult(positions_checked=1, alerts=(alert,)))
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT alert_id, opened_at FROM position_alerts WHERE instrument_id = %s",
+                (iid,),
+            )
+            first = cur.fetchone()
+        assert first is not None
+
+        stats = persist_position_alerts(ebull_test_conn, MonitorResult(positions_checked=1, alerts=(alert,)))
+        assert stats == PersistStats(opened=0, resolved=0, unchanged=1)
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT alert_id, opened_at FROM position_alerts WHERE instrument_id = %s",
+                (iid,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == first[0]
+        assert rows[0][1] == first[1]
+
+    def test_clearance_resolves_episode(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn)
+        alert = MonitorAlert(
+            instrument_id=iid,
+            symbol="AAPL",
+            alert_type="sl_breach",
+            detail="bid=130 < sl=140",
+            current_bid=Decimal("130"),
+        )
+        persist_position_alerts(ebull_test_conn, MonitorResult(positions_checked=1, alerts=(alert,)))
+        stats = persist_position_alerts(ebull_test_conn, MonitorResult(positions_checked=1, alerts=()))
+        assert stats == PersistStats(opened=0, resolved=1, unchanged=0)
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT resolved_at FROM position_alerts WHERE instrument_id = %s",
+                (iid,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] is not None
+
+    def test_re_breach_after_clearance_opens_new_episode(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn)
+        alert = MonitorAlert(
+            instrument_id=iid,
+            symbol="AAPL",
+            alert_type="sl_breach",
+            detail="bid=130 < sl=140",
+            current_bid=Decimal("130"),
+        )
+        persist_position_alerts(ebull_test_conn, MonitorResult(positions_checked=1, alerts=(alert,)))
+        persist_position_alerts(ebull_test_conn, MonitorResult(positions_checked=1, alerts=()))
+        stats = persist_position_alerts(ebull_test_conn, MonitorResult(positions_checked=1, alerts=(alert,)))
+        assert stats == PersistStats(opened=1, resolved=0, unchanged=0)
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT resolved_at FROM position_alerts WHERE instrument_id = %s ORDER BY alert_id",
+                (iid,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 2
+        assert rows[0][0] is not None
+        assert rows[1][0] is None
+
+    def test_mixed_across_alert_types(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn)
+        sl = MonitorAlert(
+            instrument_id=iid, symbol="AAPL", alert_type="sl_breach", detail="sl", current_bid=Decimal("100")
+        )
+        tp = MonitorAlert(
+            instrument_id=iid, symbol="AAPL", alert_type="tp_breach", detail="tp", current_bid=Decimal("250")
+        )
+        thesis = MonitorAlert(
+            instrument_id=iid, symbol="AAPL", alert_type="thesis_break", detail="red=0.9", current_bid=None
+        )
+        persist_position_alerts(ebull_test_conn, MonitorResult(positions_checked=1, alerts=(sl,)))
+        stats = persist_position_alerts(ebull_test_conn, MonitorResult(positions_checked=1, alerts=(tp, thesis)))
+        assert stats == PersistStats(opened=2, resolved=1, unchanged=0)
+
+    def test_mixed_across_instruments(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid_a = _seed_instrument(ebull_test_conn, symbol="AAPL")
+        iid_b = _seed_instrument(ebull_test_conn, symbol="MSFT")
+        iid_c = _seed_instrument(ebull_test_conn, symbol="GOOG")
+        sl_a = MonitorAlert(iid_a, "AAPL", "sl_breach", "a", Decimal("100"))
+        sl_b = MonitorAlert(iid_b, "MSFT", "sl_breach", "b", Decimal("100"))
+        sl_c = MonitorAlert(iid_c, "GOOG", "sl_breach", "c", Decimal("100"))
+        persist_position_alerts(ebull_test_conn, MonitorResult(positions_checked=2, alerts=(sl_a, sl_b)))
+        stats = persist_position_alerts(ebull_test_conn, MonitorResult(positions_checked=2, alerts=(sl_a, sl_c)))
+        assert stats == PersistStats(opened=1, resolved=1, unchanged=1)
+
+    def test_partial_unique_index_blocks_duplicate_open_pair(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Direct DB-level test: two open rows for same (instrument, type) fail."""
+        iid = _seed_instrument(ebull_test_conn)
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO position_alerts (instrument_id, alert_type, detail) VALUES (%s, 'sl_breach', 'first')",
+                (iid,),
+            )
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                cur.execute(
+                    "INSERT INTO position_alerts "
+                    "(instrument_id, alert_type, detail) "
+                    "VALUES (%s, 'sl_breach', 'second')",
+                    (iid,),
+                )
+
+    def test_partial_unique_index_allows_reopen_after_resolve(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Partial index WHERE resolved_at IS NULL — a resolved row does not
+        block a new open row for the same (instrument, type)."""
+        iid = _seed_instrument(ebull_test_conn)
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO position_alerts "
+                "(instrument_id, alert_type, detail, resolved_at) "
+                "VALUES (%s, 'sl_breach', 'first', now())",
+                (iid,),
+            )
+            cur.execute(
+                "INSERT INTO position_alerts "
+                "(instrument_id, alert_type, detail) "
+                "VALUES (%s, 'sl_breach', 'second-open')",
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM position_alerts WHERE instrument_id = %s",
+                (iid,),
+            )
+            assert cur.fetchone() == (2,)
+
+    def test_all_three_alert_types_for_same_instrument(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn)
+        sl = MonitorAlert(iid, "AAPL", "sl_breach", "s", Decimal("100"))
+        tp = MonitorAlert(iid, "AAPL", "tp_breach", "t", Decimal("250"))
+        th = MonitorAlert(iid, "AAPL", "thesis_break", "r", None)
+        stats = persist_position_alerts(ebull_test_conn, MonitorResult(positions_checked=1, alerts=(sl, tp, th)))
+        assert stats == PersistStats(opened=3, resolved=0, unchanged=0)
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT alert_type FROM position_alerts WHERE instrument_id = %s ORDER BY alert_type",
+                (iid,),
+            )
+            types = [row[0] for row in cur.fetchall()]
+        assert types == ["sl_breach", "thesis_break", "tp_breach"]
+
+    def test_current_bid_null_passes_through(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn)
+        alert = MonitorAlert(iid, "AAPL", "thesis_break", "red=0.9", None)
+        persist_position_alerts(ebull_test_conn, MonitorResult(positions_checked=1, alerts=(alert,)))
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("SELECT current_bid FROM position_alerts WHERE instrument_id = %s", (iid,))
+            row = cur.fetchone()
+        assert row == (None,)
