@@ -263,6 +263,41 @@ describe("PriceChart — data states", () => {
     expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
   });
 
+  it("drops rows with malformed date strings (no NaN in the time scale)", async () => {
+    // Two rows — one with `date: ""`, one with a non-date. Even though
+    // OHLC is populated, the chart cannot plot these because their
+    // time values would be NaN. Mount gate drops them → empty state.
+    mockedFetch.mockResolvedValue(
+      candles([
+        {
+          date: "",
+          open: "100",
+          high: "102",
+          low: "99",
+          close: "101",
+          volume: "1000",
+        },
+        {
+          date: "not-a-date",
+          open: "101",
+          high: "104",
+          low: "100",
+          close: "103",
+          volume: "1500",
+        },
+      ]),
+    );
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText(/No price data/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
+  });
+
   it("calls chart.remove() on unmount so the Canvas is released", async () => {
     mockedFetch.mockResolvedValue(
       candles([

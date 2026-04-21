@@ -62,16 +62,24 @@ function parseNum(v: string | null | undefined): number | null {
 
 /**
  * Convert a YYYY-MM-DD date string to a UTC-midnight Unix seconds
- * timestamp. lightweight-charts requires monotonically-increasing
- * `Time` values; epoch seconds give us a stable ordering across DST
- * shifts that BusinessDay does not.
+ * timestamp. We use epoch seconds rather than BusinessDay because
+ * BusinessDay mode requires the library to know which dates are
+ * trading days — weekends/holidays produce gaps that confuse its
+ * internal scaling.
+ *
+ * Returns null for anything that doesn't parse cleanly so a bad row
+ * is dropped rather than poisoning the time scale with NaN.
  */
-function dateToTime(date: string): UTCTimestamp {
-  // Date.UTC handles out-of-range inputs by rolling over; we assume
-  // the backend emits valid ISO dates (it does — price_daily.d is a
-  // DATE column).
-  const [y, m, d] = date.split("-").map((n) => parseInt(n, 10));
-  return (Date.UTC(y ?? 1970, (m ?? 1) - 1, d ?? 1) / 1000) as UTCTimestamp;
+function dateToTime(date: string): UTCTimestamp | null {
+  const parts = date.split("-");
+  if (parts.length !== 3) return null;
+  const y = Number(parts[0]);
+  const m = Number(parts[1]);
+  const d = Number(parts[2]);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+  const ts = Date.UTC(y, m - 1, d);
+  if (!Number.isFinite(ts)) return null;
+  return (ts / 1000) as UTCTimestamp;
 }
 
 interface HoverState {
@@ -120,10 +128,11 @@ export function PriceChart({
   const effectivelyLoading = loading || !dataMatchesRange;
 
   const rows = dataMatchesRange && data ? data.rows : null;
-  // Candlestick rendering needs all four OHLC values non-null;
-  // `close`-only isn't enough (lightweight-charts silently drops
-  // partial bars, leaving a blank canvas). CandleBar explicitly
-  // allows null O/H/L/C so we have to check each.
+  // Candlestick rendering needs all four OHLC values non-null AND a
+  // parseable date; `close`-only isn't enough (lightweight-charts
+  // silently drops partial bars, leaving a blank canvas). Mirrors the
+  // filter in `ChartCanvas`'s setData effect exactly so the gate
+  // can't accept rows the effect will then drop.
   const hasChartData =
     rows !== null &&
     rows.filter(
@@ -131,7 +140,8 @@ export function PriceChart({
         parseNum(r.open) !== null &&
         parseNum(r.high) !== null &&
         parseNum(r.low) !== null &&
-        parseNum(r.close) !== null,
+        parseNum(r.close) !== null &&
+        dateToTime(r.date) !== null,
     ).length >= 2;
 
   return (
@@ -278,32 +288,46 @@ function ChartCanvas({
     const chart = chartRef.current;
     if (!candle || !volume || !chart) return;
 
-    const clean = rows.filter(
-      (r) =>
-        parseNum(r.open) !== null &&
-        parseNum(r.high) !== null &&
-        parseNum(r.low) !== null &&
-        parseNum(r.close) !== null,
-    );
+    // Pre-convert to numeric bars so downstream `setData` calls work
+    // with guaranteed-non-null values (no dead `?? 0` fallbacks). Rows
+    // that fail any numeric or date parse are dropped here.
+    interface NumericBar {
+      time: UTCTimestamp;
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volume: number;
+    }
+    const clean: NumericBar[] = rows.flatMap((r) => {
+      const time = dateToTime(r.date);
+      const open = parseNum(r.open);
+      const high = parseNum(r.high);
+      const low = parseNum(r.low);
+      const close = parseNum(r.close);
+      if (time === null || open === null || high === null || low === null || close === null) {
+        return [];
+      }
+      return [{ time, open, high, low, close, volume: parseNum(r.volume) ?? 0 }];
+    });
 
     candle.setData(
-      clean.map((r) => ({
-        time: dateToTime(r.date) as Time,
-        open: parseNum(r.open) ?? 0,
-        high: parseNum(r.high) ?? 0,
-        low: parseNum(r.low) ?? 0,
-        close: parseNum(r.close) ?? 0,
+      clean.map((b) => ({
+        time: b.time as Time,
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
       })),
     );
 
     volume.setData(
-      clean.map((r, i) => {
-        const curr = parseNum(r.close) ?? 0;
-        const prev = i > 0 ? (parseNum(clean[i - 1]!.close) ?? curr) : curr;
+      clean.map((b, i) => {
+        const prev = i > 0 ? clean[i - 1]!.close : b.close;
         return {
-          time: dateToTime(r.date) as Time,
-          value: parseNum(r.volume) ?? 0,
-          color: curr >= prev ? "rgba(16,185,129,0.4)" : "rgba(239,68,68,0.4)",
+          time: b.time as Time,
+          value: b.volume,
+          color: b.close >= prev ? "rgba(16,185,129,0.4)" : "rgba(239,68,68,0.4)",
         };
       }),
     );
