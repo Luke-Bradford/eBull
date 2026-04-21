@@ -325,6 +325,8 @@ def test_post_dismiss_all_filters_scope_to_guard_fails_in_window(client: TestCli
     assert "stage = 'execution_guard'" in update_sql
     assert "INTERVAL '7 days'" in update_sql
     assert "m.max_id IS NOT NULL" in update_sql
+    assert "GREATEST" in update_sql
+    assert "COALESCE" in update_sql
 
 
 def test_post_dismiss_all_is_noop_on_zero_rowcount(client: TestClient) -> None:
