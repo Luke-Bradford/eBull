@@ -154,6 +154,18 @@ jobs:
               "(psycopg v3, PostgreSQL 17, Pydantic v2). The author is Claude Code — it "
               "already knows the stack. Only surface real problems.\n\n"
 
+              "## Review ONLY the diff — never the surrounding code\n"
+              "Your job is to judge what CHANGED in this PR. Unchanged code is out of scope.\n"
+              "- If a finding is about a line that exists only OUTSIDE the `+` / `-` hunks, "
+              "DELETE it. You are not reviewing the codebase; you are reviewing the diff.\n"
+              "- Imports, helpers, config, existing patterns: if the diff did not add/modify "
+              "them in this PR, do not flag them. Same for pre-existing bugs.\n"
+              "- Do not speculate about behaviour of code you cannot quote from an added "
+              "line (prefixed `+`). If you need to reason about unchanged code to evaluate "
+              "the change, either state the assumption as 'assuming X holds, ...' or omit.\n"
+              "- 'Does X handle Y?' questions about existing helpers: omit. The author knows "
+              "the existing helpers; flagging them is noise.\n\n"
+
               "## Python 3.14 syntax notes\n"
               "- PEP 758: `except A, B:` without parentheses is valid Python 3.14 syntax "
               "for catching multiple exceptions. NOT the old Python 2 `except T, var:` pattern.\n"
@@ -178,7 +190,13 @@ jobs:
               "`return` inside the body triggers the else branch (success path) normally — "
               "job_runs completion is written. Do not flag early returns as 'swallowing' completion.\n"
               "- psycopg3's Connection and Transaction context managers commit on clean exit. "
-              "`return` inside a `with conn.transaction():` block commits — standard Python.\n\n"
+              "`return` inside a `with conn.transaction():` block commits — standard Python.\n"
+              "- `apiFetch` in `frontend/src/api/client.ts` auto-sets `Content-Type: application/json` "
+              "when `body` is present. Do not flag POST calls for missing Content-Type.\n"
+              "- Read endpoints that use `get_conn` run under READ COMMITTED. Multi-query handlers "
+              "may see per-statement snapshot drift under concurrent writes; this is the repo-wide "
+              "pattern, not a per-PR bug. Only flag if the PR introduces a NEW multi-query handler "
+              "where the drift is user-facing-incorrect, not cosmetic.\n\n"
 
               "## Review rules\n"
               "- Do not explain what the code does — the author wrote it.\n"
@@ -188,28 +206,32 @@ jobs:
               "- Post only confirmed findings. If a candidate issue turns out not to be real, "
               "omit it entirely — no 'actually...', no 'on closer inspection', no self-withdrawals. "
               "Silent discards only.\n"
-              "- Before posting any finding, quote the exact line you are flagging. If you "
-              "cannot quote it verbatim from the supplied diff, you did not read it correctly — "
-              "DELETE the finding.\n"
+              "- Before posting any finding, quote the exact line you are flagging FROM AN ADDED "
+              "(`+`-prefixed) LINE IN THE DIFF. If you cannot quote a `+` line, the finding is "
+              "about unchanged code — DELETE it.\n"
               "- Count characters, line numbers, and hex digits carefully before making claims "
               "about lengths or positions. When in doubt, omit the finding.\n"
               "- Claims about MISSING code (e.g. 'no is_tradable filter', 'no try/except') "
               "are the most failure-prone. Before posting one, quote the surrounding block "
-              "VERBATIM — not just the line number, the actual code text. If the block you "
-              "quote contains the thing you claim is missing, your finding is a hallucination. "
-              "DELETE it.\n"
+              "VERBATIM from the `+` lines — not just the line number, the actual code text. "
+              "If the block you quote contains the thing you claim is missing, your finding is "
+              "a hallucination. DELETE it.\n"
               "- If the author rebutted an identical finding in the PR Comment History with "
               "file:line evidence, that rebuttal is authoritative. Do NOT re-post the same "
               "finding on a subsequent round — either cite new evidence that contradicts the "
               "rebuttal, or omit.\n\n"
 
               "## Check for\n"
-              "Correctness and edge cases, SQL injection / missing parameterisation, "
-              "audit trail gaps, execution guard bypass, missing version stamps, "
-              "API contract consistency, regressions from removed code.\n\n"
+              "Correctness and edge cases IN ADDED LINES, SQL injection / missing parameterisation "
+              "IN ADDED QUERIES, audit trail gaps, execution guard bypass, missing version stamps, "
+              "API contract consistency between added types + added handlers, regressions from "
+              "removed code.\n\n"
 
-              "## Output format\n\n"
-              "Be terse. Findings only. One sentence per item. No preamble, no narrative.\n"
+              "## Output format — one line per finding, no paragraphs\n"
+              "Be ruthlessly terse. Findings-only. One sentence per item, no multi-line "
+              "rationale blocks, no code fences inside findings. No preamble, no narrative.\n"
+              "If a finding needs more than one sentence, the finding is probably wrong — "
+              "either tighten to one line or delete it.\n"
               "Omit any section with no items — empty sections are not allowed.\n\n"
               "### [BLOCKING] — must fix before merge\n"
               "`file:line` — what is wrong (one sentence).\n\n"
@@ -249,9 +271,15 @@ jobs:
 
           user_prompt += "## Full diff\n```diff\n" + diff + "\n```"
 
+          # Extended thinking with a mid budget — gives the model room to
+          # triage findings (reject hallucinations, rebutted-already, code-not-in-diff)
+          # before emitting. Cheap vs the cost of a bad review round.
+          # budget_tokens must be strictly less than max_tokens; keep a 2k
+          # response cap on top of 3k thinking so findings stay terse.
           payload = {
               "model": "claude-sonnet-4-6",
-              "max_tokens": 2000,
+              "max_tokens": 5000,
+              "thinking": {"type": "enabled", "budget_tokens": 3000},
               "system": [
                   {
                       "type": "text",
@@ -295,7 +323,14 @@ jobs:
               print('Unexpected response shape:', json.dumps(data, indent=2))
               sys.exit(1)
           stop_reason = data.get('stop_reason') or ''
-          text = data['content'][0]['text']
+          # Extended thinking adds one or more 'thinking' blocks before the
+          # final 'text' block. Find the first text block; thinking blocks
+          # are internal and must not be posted to the PR.
+          text_blocks = [b for b in data['content'] if b.get('type') == 'text']
+          if not text_blocks:
+              print('No text block in response content:', json.dumps(data, indent=2))
+              sys.exit(1)
+          text = text_blocks[0]['text']
           with open('stop_reason.txt', 'w') as f:
               f.write(stop_reason)
           if stop_reason == 'max_tokens':
