@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -224,13 +225,14 @@ def test_get_unseen_count_query_uses_strict_gt_on_decision_id(client: TestClient
         client.get("/alerts/guard-rejections")
     count_sql = next(c.args[0] for c in cur.execute.call_args_list if "SELECT COUNT(*)" in c.args[0])
     # Strict `>` ties are structurally impossible on a unique PK.
-    assert "decision_id > %(last_id)s" in count_sql
+    # BIGINT cast avoids AmbiguousParameter when last_id is NULL on real psycopg.
+    assert "decision_id > %(last_id)s::BIGINT" in count_sql
     # Filter matches list query so counts and rows agree.
     assert "pass_fail = 'FAIL'" in count_sql
     assert "stage = 'execution_guard'" in count_sql
     assert "INTERVAL '7 days'" in count_sql
     # NULL last-seen path counts everything in window.
-    assert "%(last_id)s IS NULL" in count_sql
+    assert "%(last_id)s::BIGINT IS NULL" in count_sql
 
 
 def test_post_seen_rejects_missing_field(client: TestClient) -> None:
@@ -305,10 +307,7 @@ def test_post_dismiss_all_issues_update(client: TestClient) -> None:
         resp = client.post("/alerts/dismiss-all")
     assert resp.status_code == 204
     calls = cur.execute.call_args_list
-    assert any(
-        "UPDATE operators" in c.args[0] and "SELECT MAX(decision_id)" in c.args[0]
-        for c in calls
-    )
+    assert any("UPDATE operators" in c.args[0] and "SELECT MAX(decision_id)" in c.args[0] for c in calls)
     cur._parent_conn.commit.assert_called_once()
 
 
@@ -318,9 +317,7 @@ def test_post_dismiss_all_filters_scope_to_guard_fails_in_window(client: TestCli
         cur = _install_conn(rowcount=1)
         resp = client.post("/alerts/dismiss-all")
     assert resp.status_code == 204
-    update_sql = next(
-        c.args[0] for c in cur.execute.call_args_list if "UPDATE operators" in c.args[0]
-    )
+    update_sql = next(c.args[0] for c in cur.execute.call_args_list if "UPDATE operators" in c.args[0])
     assert "pass_fail = 'FAIL'" in update_sql
     assert "stage = 'execution_guard'" in update_sql
     assert "INTERVAL '7 days'" in update_sql
@@ -349,3 +346,206 @@ def test_post_dismiss_all_returns_501_when_multiple_operators(client: TestClient
         _install_conn()
         resp = client.post("/alerts/dismiss-all")
     assert resp.status_code == 501
+
+
+# --- Integration tests (real ebull_test DB) ----------------------------------
+
+from tests.fixtures.ebull_test_db import test_db_available  # noqa: E402,F401
+
+_INT_OP_ID = UUID("11111111-1111-1111-1111-111111111111")
+
+
+def _seed_operator(conn: psycopg.Connection[tuple]) -> None:
+    """Insert a known operator row so sole_operator_id resolves and the
+    UPDATE in /alerts/seen / /dismiss-all has a target row. `username`
+    and `password_hash` are NOT NULL per sql/016_operators_sessions.sql;
+    use dummy values — these rows are created for the alerts tests only
+    and never authenticate."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO operators (operator_id, username, password_hash)
+            VALUES (%s, 'alerts_test_op', 'x')
+            ON CONFLICT DO NOTHING
+            """,
+            (_INT_OP_ID,),
+        )
+    conn.commit()
+
+
+def _bind_test_client(conn: psycopg.Connection[tuple]) -> TestClient:
+    """Bind TestClient's get_conn dep to the ebull_test connection + patch
+    the operator resolver to return the seeded operator id. Returns a
+    client whose requests run against ebull_test."""
+
+    def _dep() -> Iterator[psycopg.Connection[tuple]]:
+        yield conn
+
+    from app.db import get_conn
+
+    app.dependency_overrides[get_conn] = _dep
+    return TestClient(app)
+
+
+@pytest.mark.skipif("not test_db_available()")
+def test_integration_get_orders_by_decision_id_under_clock_skew(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Row B gets a later decision_time but an earlier decision_id.
+    GET must still put the row with the higher decision_id first."""
+    _seed_operator(ebull_test_conn)
+
+    with ebull_test_conn.cursor() as cur:
+        # instruments.instrument_id is BIGINT PRIMARY KEY with no default
+        # (sql/001_init.sql), so the caller supplies the id explicitly.
+        cur.execute(
+            "INSERT INTO instruments (instrument_id, symbol, company_name, currency, is_tradable) "
+            "VALUES (1, 'ZZZ', 'Test', 'USD', TRUE)"
+        )
+        iid = 1
+
+        # Insert Row B first (gets lower decision_id) with the LATER decision_time.
+        cur.execute(
+            "INSERT INTO decision_audit "
+            "(decision_time, instrument_id, stage, pass_fail, explanation) "
+            "VALUES (now(), %s, 'execution_guard', 'FAIL', 'B-later-time') "
+            "RETURNING decision_id",
+            (iid,),
+        )
+        row_b = cur.fetchone()
+        assert row_b is not None
+        id_b = row_b[0]
+
+        # Insert Row A second (gets HIGHER decision_id) with the EARLIER decision_time.
+        cur.execute(
+            "INSERT INTO decision_audit "
+            "(decision_time, instrument_id, stage, pass_fail, explanation) "
+            "VALUES (now() - INTERVAL '1 hour', %s, 'execution_guard', 'FAIL', 'A-earlier-time') "
+            "RETURNING decision_id",
+            (iid,),
+        )
+        row_a = cur.fetchone()
+        assert row_a is not None
+        id_a = row_a[0]
+    ebull_test_conn.commit()
+
+    assert id_a > id_b  # sanity check on the natural PK ordering
+
+    client = _bind_test_client(ebull_test_conn)
+    try:
+        with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+            resp = client.get("/alerts/guard-rejections")
+        assert resp.status_code == 200
+        rejections = resp.json()["rejections"]
+        assert rejections[0]["decision_id"] == id_a
+        assert rejections[1]["decision_id"] == id_b
+    finally:
+        from app.db import get_conn
+
+        app.dependency_overrides.pop(get_conn, None)
+
+
+@pytest.mark.skipif("not test_db_available()")
+def test_integration_post_seen_clamps_to_in_window_max(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _seed_operator(ebull_test_conn)
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO decision_audit "
+            "(decision_time, stage, pass_fail, explanation) "
+            "VALUES (now(), 'execution_guard', 'FAIL', 'in-window') RETURNING decision_id"
+        )
+        max_in_window_row = cur.fetchone()
+        assert max_in_window_row is not None
+        max_in_window = max_in_window_row[0]
+    ebull_test_conn.commit()
+
+    client = _bind_test_client(ebull_test_conn)
+    try:
+        with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+            resp = client.post(
+                "/alerts/seen",
+                json={"seen_through_decision_id": max_in_window + 99999},
+            )
+        assert resp.status_code == 204
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT alerts_last_seen_decision_id FROM operators WHERE operator_id = %s",
+                (_INT_OP_ID,),
+            )
+            stored_row = cur.fetchone()
+            assert stored_row is not None
+            stored = stored_row[0]
+        assert stored == max_in_window
+    finally:
+        from app.db import get_conn
+
+        app.dependency_overrides.pop(get_conn, None)
+
+
+@pytest.mark.skipif("not test_db_available()")
+def test_integration_dismiss_all_empty_window_stays_null(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _seed_operator(ebull_test_conn)
+    # No guard rows in window; cursor NULL; POST dismiss-all; cursor stays NULL.
+    client = _bind_test_client(ebull_test_conn)
+    try:
+        with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+            resp = client.post("/alerts/dismiss-all")
+        assert resp.status_code == 204
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT alerts_last_seen_decision_id FROM operators WHERE operator_id = %s",
+                (_INT_OP_ID,),
+            )
+            dismiss_row = cur.fetchone()
+            assert dismiss_row is not None
+            assert dismiss_row[0] is None
+    finally:
+        from app.db import get_conn
+
+        app.dependency_overrides.pop(get_conn, None)
+
+
+@pytest.mark.skipif("not test_db_available()")
+def test_integration_non_guard_stage_excluded_from_list_and_dismiss(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _seed_operator(ebull_test_conn)
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO decision_audit "
+            "(decision_time, stage, pass_fail, explanation) "
+            "VALUES (now(), 'order_execution', 'FAIL', 'not a guard') RETURNING decision_id"
+        )
+        non_guard_row = cur.fetchone()
+        assert non_guard_row is not None
+        id_non_guard = non_guard_row[0]
+    ebull_test_conn.commit()
+
+    client = _bind_test_client(ebull_test_conn)
+    try:
+        with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+            resp = client.get("/alerts/guard-rejections")
+        ids = [r["decision_id"] for r in resp.json()["rejections"]]
+        assert id_non_guard not in ids
+
+        # dismiss-all MAX subselect is NULL (no guard rows) → no-op.
+        with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+            resp = client.post("/alerts/dismiss-all")
+        assert resp.status_code == 204
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT alerts_last_seen_decision_id FROM operators WHERE operator_id = %s",
+                (_INT_OP_ID,),
+            )
+            non_guard_dismiss_row = cur.fetchone()
+            assert non_guard_dismiss_row is not None
+            assert non_guard_dismiss_row[0] is None
+    finally:
+        from app.db import get_conn
+
+        app.dependency_overrides.pop(get_conn, None)

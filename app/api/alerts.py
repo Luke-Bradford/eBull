@@ -92,7 +92,7 @@ def get_guard_rejections(
             WHERE pass_fail = 'FAIL'
               AND stage = 'execution_guard'
               AND decision_time >= now() - INTERVAL '7 days'
-              AND (%(last_id)s IS NULL OR decision_id > %(last_id)s)
+              AND (%(last_id)s::BIGINT IS NULL OR decision_id > %(last_id)s::BIGINT)
             """,
             {"last_id": last_seen},
         )
