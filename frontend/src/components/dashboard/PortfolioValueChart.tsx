@@ -97,22 +97,51 @@ export function PortfolioValueChart(): JSX.Element | null {
   const effectivelyLoading = loading || !dataMatchesRange;
 
   const points = dataMatchesRange && data ? data.points : null;
-  const hasData =
-    points !== null && points.filter((p) => dateToTime(p.date) !== null).length >= 2;
+  const validPoints =
+    points !== null ? points.filter((p) => dateToTime(p.date) !== null) : null;
+  const hasData = validPoints !== null && validPoints.length >= 2;
 
-  if (error !== null) {
-    // Silent-on-error: dashboard already has SummaryCards + rolling pills.
-    return null;
-  }
+  // Chart is meaningful only when there are ≥2 points AND at least
+  // one diverges from the first — demo eToro collapses to cash-only
+  // flat, fresh accounts collapse to a single-point series, both
+  // produce noise. Preserved branches:
+  //   - fx_skipped > 0  → show the "FX rates missing" empty state so
+  //                       the operator knows why values are absent.
+  //   - loading         → show skeleton (before data arrives).
+  // Every other no-signal state silent-hides the whole card.
+  const hasMovement =
+    hasData && validPoints.some((p) => p.value !== validPoints[0]!.value);
+  const fxSkipped = data?.fx_skipped ?? 0;
+
+  if (error !== null) return null;
+  if (!effectivelyLoading && !hasMovement && fxSkipped === 0) return null;
 
   return (
     <div className="rounded-md border border-slate-200 bg-white p-3 shadow-sm">
       <div className="flex items-center justify-between">
         <div className="flex items-baseline gap-2">
           <h2 className="text-sm font-medium text-slate-700">Portfolio value</h2>
-          {data?.fx_mode === "live" ? (
+          {/* Two mutually-exclusive FX signals:
+              - caption  → fine state (live FX applied cleanly)
+              - badge    → partial state (some pairs dropped)
+              When both conditions match we keep the badge only,
+              since it already implies the live-FX context and the
+              caption would just duplicate. */}
+          {data?.fx_mode === "live" && hasMovement && fxSkipped === 0 ? (
             <span className="text-[10px] text-slate-400">
               historical converted at today's FX
+            </span>
+          ) : null}
+          {/* Keep the FX-missing signal even when the chart has
+              real movement. Without this the operator only sees the
+              warning when the series is *entirely* dropped, hiding
+              partial-coverage from view. */}
+          {fxSkipped > 0 && hasMovement ? (
+            <span
+              className="text-[10px] text-amber-700"
+              data-testid="value-fx-missing-badge"
+            >
+              {fxSkipped} FX pair(s) missing — some rows dropped
             </span>
           ) : null}
         </div>
@@ -136,18 +165,18 @@ export function PortfolioValueChart(): JSX.Element | null {
       </div>
 
       {effectivelyLoading ? <SectionSkeleton rows={5} /> : null}
-      {!effectivelyLoading && !hasData ? (
+      {!effectivelyLoading && fxSkipped > 0 && !hasMovement ? (
         <EmptyState
-          title={data !== null && data.fx_skipped > 0 ? "FX rates missing" : "No history yet"}
-          description={
-            data !== null && data.fx_skipped > 0
-              ? `${data.fx_skipped} currency pair(s) missing from today's FX snapshot — all rows in those pairs were dropped. Wait for the FX refresh job to repopulate and retry.`
-              : "Not enough daily valuations to plot a line. Try a wider range, or wait for more trading days to accrue."
-          }
+          title="FX rates missing"
+          description={`${fxSkipped} currency pair(s) missing from today's FX snapshot — all rows in those pairs were dropped. Wait for the FX refresh job to repopulate and retry.`}
         />
       ) : null}
-      {hasData && points !== null && data !== null ? (
-        <ValueCanvas points={points} currency={data.display_currency} />
+      {hasMovement && validPoints !== null && data !== null ? (
+        // Pass the date-filtered array so the canvas and the movement
+        // guard share the same view of the series. The canvas would
+        // still re-filter internally, but passing `points` raw means
+        // two different "what counts as a row" rules in the same file.
+        <ValueCanvas points={validPoints} currency={data.display_currency} />
       ) : null}
     </div>
   );

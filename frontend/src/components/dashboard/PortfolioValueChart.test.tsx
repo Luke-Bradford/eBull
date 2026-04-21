@@ -62,26 +62,33 @@ beforeEach(() => {
 });
 
 describe("PortfolioValueChart", () => {
+  // Movement-bearing series so the silent-hide guard doesn't drop the
+  // card when these tests assert on range buttons / refetch.
+  const movingPoints = [
+    { date: "2026-04-18", value: 1000 },
+    { date: "2026-04-19", value: 1100 },
+  ];
+
   it("renders all six range buttons + an fx_mode caption on live", async () => {
-    mocked.mockResolvedValue(resp([]));
+    mocked.mockResolvedValue(resp(movingPoints));
     render(
       <MemoryRouter>
         <PortfolioValueChart />
       </MemoryRouter>,
     );
+    await waitFor(() => {
+      expect(screen.getByTestId("value-range-1y")).toBeInTheDocument();
+    });
     for (const r of ["1m", "3m", "6m", "1y", "5y", "max"]) {
       expect(screen.getByTestId(`value-range-${r}`)).toBeInTheDocument();
     }
-    // fx_mode caption only renders once data has loaded and reports "live".
-    await waitFor(() => {
-      expect(
-        screen.getByText(/historical converted at today's FX/i),
-      ).toBeInTheDocument();
-    });
+    expect(
+      screen.getByText(/historical converted at today's FX/i),
+    ).toBeInTheDocument();
   });
 
   it("clicking a range refetches with the new range", async () => {
-    mocked.mockResolvedValue(resp([]));
+    mocked.mockResolvedValue(resp(movingPoints));
     const user = userEvent.setup();
     render(
       <MemoryRouter>
@@ -90,6 +97,9 @@ describe("PortfolioValueChart", () => {
     );
     await waitFor(() => {
       expect(mocked).toHaveBeenCalledWith("1y");
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("value-range-3m")).toBeInTheDocument();
     });
     await user.click(screen.getByTestId("value-range-3m"));
     await waitFor(() => {
@@ -121,20 +131,73 @@ describe("PortfolioValueChart", () => {
     expect(call[1]?.value).toBe(1100);
   });
 
-  it("renders empty state when fewer than two valid points", async () => {
+  it("silent-hides with fewer than two valid points (no meaningful chart)", async () => {
     mocked.mockResolvedValue(resp([{ date: "2026-04-19", value: 1000 }]));
+    const { container } = render(
+      <MemoryRouter>
+        <PortfolioValueChart />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(mocked).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid^="value-range-"]')).toBeNull();
+    });
+    expect(
+      container.querySelector('[data-testid="portfolio-value-chart"]'),
+    ).toBeNull();
+  });
+
+  it("surfaces an FX-missing badge when fx_skipped > 0 AND the series still has movement", async () => {
+    // Partial-coverage case: some pairs dropped but the chart still
+    // has data. Without this badge the operator never learns about
+    // the FX gap (previously only the all-dropped branch warned).
+    mocked.mockResolvedValue(
+      resp(
+        [
+          { date: "2026-04-18", value: 1000 },
+          { date: "2026-04-19", value: 1100 },
+        ],
+        { fx_skipped: 3 },
+      ),
+    );
     render(
       <MemoryRouter>
         <PortfolioValueChart />
       </MemoryRouter>,
     );
     await waitFor(() => {
-      expect(screen.getByText(/No history yet/i)).toBeInTheDocument();
+      expect(screen.getByTestId("value-fx-missing-badge")).toBeInTheDocument();
     });
-    expect(screen.queryByTestId("portfolio-value-chart")).not.toBeInTheDocument();
+    expect(screen.getByText(/3 FX pair/)).toBeInTheDocument();
+    // Chart still renders in the partial-coverage case.
+    expect(screen.getByTestId("portfolio-value-chart")).toBeInTheDocument();
+    // Badge replaces the fx_mode caption — no duplicate FX-context
+    // messaging in the header line.
+    expect(
+      screen.queryByText(/historical converted at today's FX/i),
+    ).not.toBeInTheDocument();
   });
 
-  it("surfaces an 'FX rates missing' empty state when fx_skipped > 0", async () => {
+  it("suppresses the fx_mode caption when showing the FX-missing empty state", async () => {
+    // No conversion actually happened (all dropped) → the
+    // 'historical converted at today's FX' caption is misleading.
+    mocked.mockResolvedValue(resp([], { fx_skipped: 2 }));
+    render(
+      <MemoryRouter>
+        <PortfolioValueChart />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText(/FX rates missing/i)).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText(/historical converted at today's FX/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("surfaces an 'FX rates missing' empty state when fx_skipped > 0 AND no movement", async () => {
     // All-skipped is indistinguishable from "no data" without
     // fx_skipped; the pair-count lets the operator know why their
     // mixed-currency portfolio is rendering empty.
@@ -167,6 +230,51 @@ describe("PortfolioValueChart", () => {
     });
     cleanup();
     expect(libState.remove).toHaveBeenCalled();
+  });
+
+  it("silent-hides when the series is entirely flat (demo-only cash)", async () => {
+    // Demo eToro doesn't backfill fills history → the endpoint reduces
+    // to cash-only, emitting the same value on every day. Rendering a
+    // flat line on the dashboard is noise, so the whole widget hides.
+    mocked.mockResolvedValue(
+      resp([
+        { date: "2026-04-18", value: 1260.87 },
+        { date: "2026-04-19", value: 1260.87 },
+        { date: "2026-04-20", value: 1260.87 },
+      ]),
+    );
+    const { container } = render(
+      <MemoryRouter>
+        <PortfolioValueChart />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(mocked).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid^="value-range-"]')).toBeNull();
+    });
+    expect(
+      container.querySelector('[data-testid="portfolio-value-chart"]'),
+    ).toBeNull();
+  });
+
+  it("renders when at least one point diverges from the first value", async () => {
+    mocked.mockResolvedValue(
+      resp([
+        { date: "2026-04-18", value: 1000 },
+        { date: "2026-04-19", value: 1000 },
+        { date: "2026-04-20", value: 1100 },
+      ]),
+    );
+    render(
+      <MemoryRouter>
+        <PortfolioValueChart />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("portfolio-value-chart")).toBeInTheDocument();
+    });
   });
 
   it("silent-hides on fetch error — no blanking of the rest of the dashboard", async () => {
