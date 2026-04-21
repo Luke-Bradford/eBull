@@ -214,3 +214,60 @@ describe("AlertsStrip — Mark all read (normal path)", () => {
     });
   });
 });
+
+describe("AlertsStrip — Dismiss all (overflow path)", () => {
+  function overflowStub() {
+    stubFetch({
+      alerts_last_seen_decision_id: null,
+      unseen_count: 600,
+      rejections: Array.from({ length: 500 }, (_, i) => ({
+        ...baseRow,
+        decision_id: 600 - i,
+      })),
+    });
+  }
+
+  it("renders 'Dismiss all (600) as acknowledged' and a /recommendations link when unseen_count > rejections.length", async () => {
+    overflowStub();
+    renderStrip();
+    expect(
+      await screen.findByRole("button", { name: /dismiss all \(600\)/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /mark all read/i })).toBeNull();
+    const recLink = screen.getByRole("link", { name: /recommendations/i });
+    expect(recLink.getAttribute("href")).toBe("/recommendations");
+  });
+
+  it("confirm dialog: confirm calls dismissAllAlerts + refetch", async () => {
+    overflowStub();
+    vi.mocked(alertsApi.dismissAllAlerts).mockResolvedValue(undefined);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderStrip();
+
+    const btn = await screen.findByRole("button", { name: /dismiss all \(600\)/i });
+    await userEvent.click(btn);
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(alertsApi.dismissAllAlerts).toHaveBeenCalled();
+    await vi.waitFor(() => {
+      expect(vi.mocked(alertsApi.fetchGuardRejections).mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+    confirmSpy.mockRestore();
+  });
+
+  it("confirm dialog: cancel does NOT call dismissAllAlerts or refetch", async () => {
+    overflowStub();
+    vi.mocked(alertsApi.dismissAllAlerts).mockResolvedValue(undefined);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderStrip();
+
+    const fetchCallsBefore = vi.mocked(alertsApi.fetchGuardRejections).mock.calls.length;
+    const btn = await screen.findByRole("button", { name: /dismiss all \(600\)/i });
+    await userEvent.click(btn);
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(alertsApi.dismissAllAlerts).not.toHaveBeenCalled();
+    expect(vi.mocked(alertsApi.fetchGuardRejections).mock.calls.length).toBe(fetchCallsBefore);
+    confirmSpy.mockRestore();
+  });
+});

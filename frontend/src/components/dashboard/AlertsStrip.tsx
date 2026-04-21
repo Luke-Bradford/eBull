@@ -10,8 +10,7 @@
  */
 import { Link } from "react-router-dom";
 
-import { fetchGuardRejections, markAlertsSeen } from "@/api/alerts";
-// dismissAllAlerts is added in Task 11.
+import { dismissAllAlerts, fetchGuardRejections, markAlertsSeen } from "@/api/alerts";
 import type { GuardRejection } from "@/api/types";
 import { formatRelativeTime } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
@@ -72,12 +71,21 @@ export function AlertsStrip(): JSX.Element | null {
   const lastSeen = data.alerts_last_seen_decision_id;
   const normalAck =
     data.unseen_count > 0 && data.unseen_count <= data.rejections.length;
+  const overflowAck = data.unseen_count > data.rejections.length;
 
   async function onMarkAllRead() {
     // rejections is non-empty here (strip is hidden otherwise),
     // and is ordered decision_id DESC on the server so index 0 is MAX.
     const seenThroughDecisionId = data!.rejections[0]!.decision_id;
     await markAlertsSeen(seenThroughDecisionId);
+    refetch();
+  }
+
+  async function onDismissAll() {
+    const hiddenCount = data!.unseen_count - data!.rejections.length;
+    const msg = `Dismiss all ${data!.unseen_count} unseen rejections? ${hiddenCount} are not shown above. Review them at /recommendations before dismissing if they might matter.`;
+    if (!window.confirm(msg)) return;
+    await dismissAllAlerts();
     refetch();
   }
 
@@ -100,6 +108,23 @@ export function AlertsStrip(): JSX.Element | null {
           >
             Mark all read
           </button>
+        ) : null}
+        {overflowAck ? (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onDismissAll}
+              className="rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800 hover:bg-amber-100"
+            >
+              Dismiss all ({data.unseen_count}) as acknowledged
+            </button>
+            <Link
+              to="/recommendations"
+              className="text-xs text-slate-500 underline hover:text-slate-700"
+            >
+              Triage at /recommendations
+            </Link>
+          </div>
         ) : null}
       </header>
       <div
