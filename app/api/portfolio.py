@@ -26,7 +26,7 @@ import logging
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 import psycopg.rows
@@ -769,4 +769,204 @@ def get_rolling_pnl(
     return RollingPnlResponse(
         display_currency=display_currency,
         periods=periods,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Portfolio value history (#204)
+# ---------------------------------------------------------------------------
+
+# Range → days-back. `max` bounded to 5y (1825d) to keep the daily
+# loop cheap; operators needing decade-scale history can follow up.
+_VALUE_HISTORY_RANGES: dict[str, int] = {
+    "1m": 30,
+    "3m": 90,
+    "6m": 180,
+    "1y": 365,
+    "5y": 1825,
+    "max": 1825,
+}
+
+
+class ValueHistoryPoint(BaseModel):
+    date: date
+    value: float
+
+
+ValueHistoryRange = Literal["1m", "3m", "6m", "1y", "5y", "max"]
+
+
+class ValueHistoryResponse(BaseModel):
+    display_currency: str
+    range: ValueHistoryRange
+    days: int
+    # Today's FX rates applied to every historical date. A multi-
+    # currency portfolio's past values are therefore approximate — a
+    # proper historical-FX series lives in `fx_rates` (tax ledger)
+    # but only covers dates with tax events. Callers that care about
+    # historical-FX accuracy should treat this chart as directional,
+    # not forensic.
+    fx_mode: str = "live"
+    # Count of native-currency rows we had to drop because the live
+    # FX snapshot didn't have that pair. Lets the FE distinguish
+    # "truly no history" from "all-skipped due to missing FX".
+    fx_skipped: int = 0
+    points: list[ValueHistoryPoint]
+
+
+@router.get("/value-history", response_model=ValueHistoryResponse)
+def get_value_history(
+    range: ValueHistoryRange = "1y",  # noqa: A002 — URL param
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> ValueHistoryResponse:
+    """Daily portfolio total value (positions + cash) over a rolling window.
+
+    Value at day D is reconstructed as:
+        sum over each instrument:
+            signed_units_at_D * close_at_D_or_prior   (converted to display ccy)
+        plus sum over each currency:
+            net_cash_ledger_at_D                       (converted to display ccy)
+
+    Signed units replay the fills ledger by order action (BUY/ADD add,
+    SELL/EXIT subtract). If a position had no `price_daily` close on
+    or before D (e.g. new listing with stale local store), that bar
+    is skipped for that day — conservatively under-states value
+    rather than inventing a zero.
+
+    FX conversion uses the **live** snapshot only (`live_fx_rates`).
+    Historical daily FX is only populated on tax-event dates today, so
+    reusing it would leave coverage gaps worse than the current
+    approximation. Flagged via `fx_mode` in the response.
+    """
+    days = _VALUE_HISTORY_RANGES[range]
+
+    runtime = get_runtime_config(conn)
+    display_currency = runtime.display_currency
+    rates_meta = load_live_fx_rates_with_metadata(conn)
+    rates: dict[tuple[str, str], Decimal] = {k: v["rate"] for k, v in rates_meta.items()}
+
+    # 1. Pull signed position-value points per (date, instrument).
+    #    Uses a correlated subquery for close-at-or-before so the query
+    #    self-contained — no separate price lookup loop in Python.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            WITH dates AS (
+                SELECT generate_series(
+                    CURRENT_DATE - make_interval(days => %(days)s::int),
+                    CURRENT_DATE,
+                    '1 day'::interval
+                )::date AS d
+            ),
+            fills_signed AS (
+                SELECT
+                    f.filled_at::date AS fill_date,
+                    o.instrument_id,
+                    CASE WHEN o.action IN ('BUY', 'ADD') THEN f.units ELSE -f.units END AS units
+                FROM fills f
+                JOIN orders o ON o.order_id = f.order_id
+            ),
+            units_per_day AS (
+                SELECT
+                    d.d,
+                    fs.instrument_id,
+                    SUM(fs.units) AS units_at_date
+                FROM dates d
+                JOIN fills_signed fs ON fs.fill_date <= d.d
+                GROUP BY d.d, fs.instrument_id
+                HAVING SUM(fs.units) > 0
+            )
+            SELECT
+                u.d AS point_date,
+                u.instrument_id,
+                i.currency AS native_currency,
+                u.units_at_date,
+                (
+                    SELECT close FROM price_daily
+                    WHERE instrument_id = u.instrument_id
+                      AND price_date <= u.d
+                      AND close IS NOT NULL
+                    ORDER BY price_date DESC
+                    LIMIT 1
+                ) AS close_at_date
+            FROM units_per_day u
+            JOIN instruments i USING (instrument_id)
+            """,
+            {"days": days},
+        )
+        position_rows = cur.fetchall()
+
+    # 2. Pull daily cumulative cash balance per currency.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            WITH dates AS (
+                SELECT generate_series(
+                    CURRENT_DATE - make_interval(days => %(days)s::int),
+                    CURRENT_DATE,
+                    '1 day'::interval
+                )::date AS d
+            )
+            SELECT
+                d.d AS point_date,
+                cl.currency,
+                SUM(cl.amount) AS balance
+            FROM dates d
+            JOIN cash_ledger cl ON cl.event_time::date <= d.d
+            GROUP BY d.d, cl.currency
+            """,
+            {"days": days},
+        )
+        cash_rows = cur.fetchall()
+
+    # 3. Aggregate into one value per day in display currency.
+    per_day: dict[date, Decimal] = defaultdict(lambda: Decimal("0"))
+    fx_skipped = 0
+
+    for row in position_rows:
+        close = row["close_at_date"]
+        if close is None:
+            continue  # no close on or before this date → skip, not zero
+        units = Decimal(str(row["units_at_date"]))
+        native_ccy = str(row["native_currency"] or display_currency)
+        value_native = close * units
+        if native_ccy != display_currency:
+            try:
+                value_native = convert(value_native, native_ccy, display_currency, rates)
+            except FxRateNotFound:
+                fx_skipped += 1
+                logger.warning(
+                    "value-history: FX %s→%s missing; skipping instrument_id=%s on %s",
+                    native_ccy,
+                    display_currency,
+                    row["instrument_id"],
+                    row["point_date"],
+                )
+                continue
+        per_day[row["point_date"]] += value_native
+
+    for row in cash_rows:
+        balance = Decimal(str(row["balance"]))
+        native_ccy = str(row["currency"] or display_currency)
+        if native_ccy != display_currency:
+            try:
+                balance = convert(balance, native_ccy, display_currency, rates)
+            except FxRateNotFound:
+                fx_skipped += 1
+                logger.warning(
+                    "value-history: FX %s→%s missing for cash on %s",
+                    native_ccy,
+                    display_currency,
+                    row["point_date"],
+                )
+                continue
+        per_day[row["point_date"]] += balance
+
+    points = [ValueHistoryPoint(date=d, value=float(v)) for d, v in sorted(per_day.items())]
+    return ValueHistoryResponse(
+        display_currency=display_currency,
+        range=range,
+        days=days,
+        fx_skipped=fx_skipped,
+        points=points,
     )

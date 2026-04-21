@@ -3,6 +3,8 @@ import type {
   InstrumentPositionDetail,
   PortfolioResponse,
   RollingPnlResponse,
+  ValueHistoryRange,
+  ValueHistoryResponse,
 } from "@/api/types";
 
 export function fetchPortfolio(): Promise<PortfolioResponse> {
@@ -15,4 +17,12 @@ export function fetchInstrumentPositions(instrumentId: number): Promise<Instrume
 
 export function fetchRollingPnl(): Promise<RollingPnlResponse> {
   return apiFetch<RollingPnlResponse>("/portfolio/rolling-pnl");
+}
+
+export function fetchValueHistory(
+  range: ValueHistoryRange,
+): Promise<ValueHistoryResponse> {
+  return apiFetch<ValueHistoryResponse>(
+    `/portfolio/value-history?range=${encodeURIComponent(range)}`,
+  );
 }
