@@ -1,21 +1,54 @@
 /**
- * Tests for PriceChart (Slice B of #316).
+ * Tests for PriceChart (#204 lightweight-charts migration).
  *
- * Pin the contract that matters for operators:
- *   - All 7 range buttons render + switching triggers a re-fetch.
- *   - Empty data → "No price data" empty state, no SVG.
- *   - One bar is not enough to draw a line (need ≥2) — same empty state.
- *   - SVG renders when data is ≥2 rows.
+ * lightweight-charts renders to a Canvas which jsdom cannot paint, so
+ * we mock the library wholesale. What we pin here is the component's
+ * contract — not the library's rendering:
+ *
+ *   - All 7 range buttons render + switching refetches.
+ *   - Empty / single-row data → empty state, no chart mount.
+ *   - ≥2 valid rows → chart div mounts and the mocked series receives
+ *     setData() with the right shape.
  *   - Loading / error states.
- *
- * The visual geometry (path d="..." exact values) is intentionally
- * NOT asserted — those are render-details that churn freely. We
- * check structural presence (price path element, volume bars) only.
+ *   - Stale-chart guard while a new-range fetch is in flight.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
+
+// Mock lightweight-charts before importing PriceChart so the module
+// picks up the stubs at module-load time. `vi.hoisted` lets the mock
+// expose handles we can introspect from the tests.
+const libState = vi.hoisted(() => ({
+  candleSetData: vi.fn(),
+  volumeSetData: vi.fn(),
+  fitContent: vi.fn(),
+  crosshairHandlers: [] as Array<(p: unknown) => void>,
+  remove: vi.fn(),
+}));
+
+vi.mock("lightweight-charts", () => {
+  const candleSeries = { setData: libState.candleSetData };
+  const volumeSeries = { setData: libState.volumeSetData };
+  const priceScale = { applyOptions: vi.fn() };
+  const chart = {
+    addSeries: vi.fn((seriesDef: unknown) =>
+      seriesDef === "__candlestick__" ? candleSeries : volumeSeries,
+    ),
+    priceScale: vi.fn(() => priceScale),
+    timeScale: vi.fn(() => ({ fitContent: libState.fitContent })),
+    subscribeCrosshairMove: vi.fn((h: (p: unknown) => void) => {
+      libState.crosshairHandlers.push(h);
+    }),
+    remove: libState.remove,
+  };
+  return {
+    createChart: vi.fn(() => chart),
+    CandlestickSeries: "__candlestick__",
+    HistogramSeries: "__histogram__",
+  };
+});
 
 import { PriceChart } from "@/components/instrument/PriceChart";
 import type { InstrumentCandles } from "@/api/types";
@@ -39,12 +72,21 @@ function candles(rows: InstrumentCandles["rows"]): InstrumentCandles {
 
 beforeEach(() => {
   mockedFetch.mockReset();
+  libState.candleSetData.mockClear();
+  libState.volumeSetData.mockClear();
+  libState.fitContent.mockClear();
+  libState.remove.mockClear();
+  libState.crosshairHandlers.length = 0;
 });
 
 describe("PriceChart — range picker", () => {
   it("renders all seven range buttons", async () => {
     mockedFetch.mockResolvedValue(candles([]));
-    render(<MemoryRouter><PriceChart symbol="AAPL" /></MemoryRouter>);
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
     for (const r of ["1w", "1m", "3m", "6m", "1y", "5y", "max"]) {
       expect(screen.getByTestId(`chart-range-${r}`)).toBeInTheDocument();
     }
@@ -53,7 +95,11 @@ describe("PriceChart — range picker", () => {
   it("clicking a range button refetches with the new range", async () => {
     mockedFetch.mockResolvedValue(candles([]));
     const user = userEvent.setup();
-    render(<MemoryRouter><PriceChart symbol="AAPL" /></MemoryRouter>);
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
 
     await waitFor(() => {
       expect(mockedFetch).toHaveBeenCalledWith("AAPL", "1m");
@@ -68,14 +114,18 @@ describe("PriceChart — range picker", () => {
 describe("PriceChart — data states", () => {
   it("renders 'No price data' when rows is empty", async () => {
     mockedFetch.mockResolvedValue(candles([]));
-    render(<MemoryRouter><PriceChart symbol="AAPL" /></MemoryRouter>);
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
     await waitFor(() => {
       expect(screen.getByText(/No price data/i)).toBeInTheDocument();
     });
     expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
   });
 
-  it("renders empty state when only one valid close (can't draw a line)", async () => {
+  it("renders empty state with only one valid close (can't draw a chart)", async () => {
     mockedFetch.mockResolvedValue(
       candles([
         {
@@ -88,13 +138,17 @@ describe("PriceChart — data states", () => {
         },
       ]),
     );
-    render(<MemoryRouter><PriceChart symbol="AAPL" /></MemoryRouter>);
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
     await waitFor(() => {
       expect(screen.getByText(/No price data/i)).toBeInTheDocument();
     });
   });
 
-  it("renders the SVG chart when there are ≥2 rows with close", async () => {
+  it("mounts the chart canvas and pushes ≥2 rows to the series", async () => {
     mockedFetch.mockResolvedValue(
       candles([
         {
@@ -115,18 +169,31 @@ describe("PriceChart — data states", () => {
         },
       ]),
     );
-    render(<MemoryRouter><PriceChart symbol="AAPL" /></MemoryRouter>);
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
     await waitFor(() => {
       expect(screen.getByTestId("price-chart-AAPL")).toBeInTheDocument();
     });
     expect(screen.queryByText(/No price data/i)).not.toBeInTheDocument();
+    // Candlestick series received the two rows in OHLC shape.
+    await waitFor(() => {
+      expect(libState.candleSetData).toHaveBeenCalled();
+    });
+    const call = libState.candleSetData.mock.calls[0]?.[0] as Array<{
+      open: number;
+      close: number;
+    }>;
+    expect(call).toHaveLength(2);
+    expect(call[0]?.open).toBe(100);
+    expect(call[1]?.close).toBe(103);
+    // Volume series got the same count.
+    expect(libState.volumeSetData).toHaveBeenCalled();
   });
 
-  it("hides the stale chart while a new-range fetch is in flight", async () => {
-    // Resolve returns a response whose `range !== requested range` —
-    // simulates the one-frame window after a range click but before
-    // useAsync's effect clears data. Chart must NOT render because
-    // `data.range` no longer matches the component's `range`.
+  it("hides the chart while a new-range fetch is in flight", async () => {
     mockedFetch.mockResolvedValue({
       ...candles([
         {
@@ -146,26 +213,132 @@ describe("PriceChart — data states", () => {
           volume: "1500",
         },
       ]),
-      range: "5y", // mismatch: component defaults to 1m
+      range: "5y",
       days: 1825,
     });
-    render(<MemoryRouter><PriceChart symbol="AAPL" /></MemoryRouter>);
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
     await waitFor(() => {
       expect(mockedFetch).toHaveBeenCalled();
     });
-    // Data arrived for a different range; chart stays hidden because
-    // data.range !== component range. Skeleton remains visible.
     expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
     expect(screen.queryByText(/No price data/i)).not.toBeInTheDocument();
   });
 
+  it("treats rows missing OHLC as dropped — empty state not a blank chart", async () => {
+    // Two rows, but only `close` is populated. lightweight-charts
+    // silently drops bars with null O/H/L, so the chart would mount
+    // empty if we gated on `close` alone. Verifies the stricter gate.
+    mockedFetch.mockResolvedValue(
+      candles([
+        {
+          date: "2026-04-10",
+          open: null,
+          high: null,
+          low: null,
+          close: "101",
+          volume: "1000",
+        },
+        {
+          date: "2026-04-11",
+          open: null,
+          high: null,
+          low: null,
+          close: "103",
+          volume: "1500",
+        },
+      ]),
+    );
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText(/No price data/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
+  });
+
+  it("drops rows with malformed date strings (no NaN in the time scale)", async () => {
+    // Two rows — one with `date: ""`, one with a non-date. Even though
+    // OHLC is populated, the chart cannot plot these because their
+    // time values would be NaN. Mount gate drops them → empty state.
+    mockedFetch.mockResolvedValue(
+      candles([
+        {
+          date: "",
+          open: "100",
+          high: "102",
+          low: "99",
+          close: "101",
+          volume: "1000",
+        },
+        {
+          date: "not-a-date",
+          open: "101",
+          high: "104",
+          low: "100",
+          close: "103",
+          volume: "1500",
+        },
+      ]),
+    );
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText(/No price data/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
+  });
+
+  it("calls chart.remove() on unmount so the Canvas is released", async () => {
+    mockedFetch.mockResolvedValue(
+      candles([
+        {
+          date: "2026-04-10",
+          open: "100",
+          high: "102",
+          low: "99",
+          close: "101",
+          volume: "1000",
+        },
+        {
+          date: "2026-04-11",
+          open: "101",
+          high: "104",
+          low: "100",
+          close: "103",
+          volume: "1500",
+        },
+      ]),
+    );
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("price-chart-AAPL")).toBeInTheDocument();
+    });
+    cleanup();
+    expect(libState.remove).toHaveBeenCalled();
+  });
+
   it("propagates fetch errors via SectionError + shows a retry button", async () => {
     mockedFetch.mockRejectedValue(new Error("network down"));
-    render(<MemoryRouter><PriceChart symbol="AAPL" /></MemoryRouter>);
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
     await waitFor(() => {
-      // Retry button is the operator's recovery affordance; presence
-      // guards against a future refactor silently swallowing the
-      // error (Codex slice-B round-2 test-hygiene finding).
       expect(
         screen.getByRole("button", { name: /retry/i }),
       ).toBeInTheDocument();
