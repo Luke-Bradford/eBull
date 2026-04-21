@@ -43,20 +43,18 @@ def _runtime_stub(currency: str = "GBP") -> MagicMock:
     return rt
 
 
-_NEXT_IID = [1]
-
-
 def _position_row(
     *,
     curr: Decimal,
     prior: Decimal | None,
     units: Decimal,
     currency: str = "GBP",
-    instrument_id: int | None = None,
+    instrument_id: int = 1,
 ) -> dict[str, object]:
-    if instrument_id is None:
-        instrument_id = _NEXT_IID[0]
-        _NEXT_IID[0] += 1
+    """Position row fixture. `instrument_id` defaults to 1 — pass
+    explicit IDs when a test uses multiple positions and care about
+    identifying them. No module-level counter (test-order
+    independence; Codex PR #388 round-2 finding)."""
     return {
         "instrument_id": instrument_id,
         "native_currency": currency,
