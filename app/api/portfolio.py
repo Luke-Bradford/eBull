@@ -859,12 +859,21 @@ def get_value_history(
                 )::date AS d
             ),
             fills_signed AS (
+                -- Explicit whitelist rather than default-to-negative so
+                -- a future action code (e.g. a corporate-action type)
+                -- can't silently flip the NAV sign. Unknown actions
+                -- fall through to NULL and are dropped by the SUM.
                 SELECT
                     f.filled_at::date AS fill_date,
                     o.instrument_id,
-                    CASE WHEN o.action IN ('BUY', 'ADD') THEN f.units ELSE -f.units END AS units
+                    CASE
+                        WHEN o.action IN ('BUY', 'ADD') THEN f.units
+                        WHEN o.action IN ('SELL', 'EXIT') THEN -f.units
+                        ELSE NULL
+                    END AS units
                 FROM fills f
                 JOIN orders o ON o.order_id = f.order_id
+                WHERE o.action IN ('BUY', 'ADD', 'SELL', 'EXIT')
             ),
             units_per_day AS (
                 -- Long-only invariant (CLAUDE.md, eBull non-negotiables
@@ -968,7 +977,16 @@ def get_value_history(
 
     for row in cash_rows:
         balance = Decimal(str(row["balance"]))
-        native_ccy = str(row["currency"] or display_currency)
+        raw_ccy = row["currency"]
+        if raw_ccy is None:
+            # Mirrors the positions-loop guard: cash without a currency
+            # is a data-quality bug, not a display-currency balance.
+            logger.warning(
+                "value-history: cash_ledger row has NULL currency on %s; skipping",
+                row["point_date"],
+            )
+            continue
+        native_ccy = str(raw_ccy)
         if native_ccy != display_currency:
             try:
                 balance = convert(balance, native_ccy, display_currency, rates)
