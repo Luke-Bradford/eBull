@@ -94,3 +94,18 @@ export function pnlPct(unrealized: number, costBasis: number): number | null {
   if (costBasis === 0) return null;
   return unrealized / costBasis;
 }
+
+/** Relative-time formatter for strip rows. Uses local system clock.
+ *  <60s → "just now", <1h → "Nm ago", <1d → "Nh ago", <7d → "Nd ago",
+ *  else → formatDate fallback. */
+export function formatRelativeTime(iso: string | null | undefined): string {
+  if (iso === null || iso === undefined || iso === "") return "—";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "—";
+  const deltaS = Math.floor((Date.now() - then) / 1000);
+  if (deltaS < 60) return "just now";
+  if (deltaS < 3600) return `${Math.floor(deltaS / 60)}m ago`;
+  if (deltaS < 86400) return `${Math.floor(deltaS / 3600)}h ago`;
+  if (deltaS < 604800) return `${Math.floor(deltaS / 86400)}d ago`;
+  return formatDate(iso);
+}
