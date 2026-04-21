@@ -101,21 +101,20 @@ export function PortfolioValueChart(): JSX.Element | null {
     points !== null ? points.filter((p) => dateToTime(p.date) !== null) : null;
   const hasData = validPoints !== null && validPoints.length >= 2;
 
-  // Flat-line guard: when every valid point shares the same value
-  // (e.g. demo eToro where fills history isn't backfilled locally so
-  // the series reduces to cash-only across every day), hide the whole
-  // card. A chart showing one flat line is noise on the dashboard.
-  // SummaryCards + RollingPnlStrip already cover current-snapshot P&L.
+  // Chart is meaningful only when there are ≥2 points AND at least
+  // one diverges from the first — demo eToro collapses to cash-only
+  // flat, fresh accounts collapse to a single-point series, both
+  // produce noise. Preserved branches:
+  //   - fx_skipped > 0  → show the "FX rates missing" empty state so
+  //                       the operator knows why values are absent.
+  //   - loading         → show skeleton (before data arrives).
+  // Every other no-signal state silent-hides the whole card.
   const hasMovement =
-    hasData &&
-    validPoints !== null &&
-    validPoints.some((p) => p.value !== validPoints[0]!.value);
+    hasData && validPoints.some((p) => p.value !== validPoints[0]!.value);
+  const fxSkipped = data?.fx_skipped ?? 0;
 
-  if (error !== null || (hasData && !hasMovement)) {
-    // Silent-hide on error + on meaningless flat series. Dashboard
-    // already has SummaryCards + rolling pills for the snapshot view.
-    return null;
-  }
+  if (error !== null) return null;
+  if (!effectivelyLoading && !hasMovement && fxSkipped === 0) return null;
 
   return (
     <div className="rounded-md border border-slate-200 bg-white p-3 shadow-sm">
@@ -148,17 +147,13 @@ export function PortfolioValueChart(): JSX.Element | null {
       </div>
 
       {effectivelyLoading ? <SectionSkeleton rows={5} /> : null}
-      {!effectivelyLoading && !hasData ? (
+      {!effectivelyLoading && fxSkipped > 0 && !hasMovement ? (
         <EmptyState
-          title={data !== null && data.fx_skipped > 0 ? "FX rates missing" : "No history yet"}
-          description={
-            data !== null && data.fx_skipped > 0
-              ? `${data.fx_skipped} currency pair(s) missing from today's FX snapshot — all rows in those pairs were dropped. Wait for the FX refresh job to repopulate and retry.`
-              : "Not enough daily valuations to plot a line. Try a wider range, or wait for more trading days to accrue."
-          }
+          title="FX rates missing"
+          description={`${fxSkipped} currency pair(s) missing from today's FX snapshot — all rows in those pairs were dropped. Wait for the FX refresh job to repopulate and retry.`}
         />
       ) : null}
-      {hasData && points !== null && data !== null ? (
+      {hasMovement && points !== null && data !== null ? (
         <ValueCanvas points={points} currency={data.display_currency} />
       ) : null}
     </div>
