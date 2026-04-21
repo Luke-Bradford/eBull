@@ -175,6 +175,23 @@ describe("PortfolioValueChart", () => {
     expect(screen.getByTestId("portfolio-value-chart")).toBeInTheDocument();
   });
 
+  it("suppresses the fx_mode caption when showing the FX-missing empty state", async () => {
+    // No conversion actually happened (all dropped) → the
+    // 'historical converted at today's FX' caption is misleading.
+    mocked.mockResolvedValue(resp([], { fx_skipped: 2 }));
+    render(
+      <MemoryRouter>
+        <PortfolioValueChart />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText(/FX rates missing/i)).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText(/historical converted at today's FX/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("surfaces an 'FX rates missing' empty state when fx_skipped > 0 AND no movement", async () => {
     // All-skipped is indistinguishable from "no data" without
     // fx_skipped; the pair-count lets the operator know why their

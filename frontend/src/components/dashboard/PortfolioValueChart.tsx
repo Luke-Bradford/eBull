@@ -121,7 +121,10 @@ export function PortfolioValueChart(): JSX.Element | null {
       <div className="flex items-center justify-between">
         <div className="flex items-baseline gap-2">
           <h2 className="text-sm font-medium text-slate-700">Portfolio value</h2>
-          {data?.fx_mode === "live" ? (
+          {/* Only surface the FX-mode caption when there's an actual
+              chart to contextualise. Rendering it above the FX-missing
+              empty state is misleading — no conversion happened. */}
+          {data?.fx_mode === "live" && hasMovement ? (
             <span className="text-[10px] text-slate-400">
               historical converted at today's FX
             </span>
