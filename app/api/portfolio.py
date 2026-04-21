@@ -867,6 +867,12 @@ def get_value_history(
                 JOIN orders o ON o.order_id = f.order_id
             ),
             units_per_day AS (
+                -- Long-only invariant (CLAUDE.md, eBull non-negotiables
+                -- "Long only in v1. No shorting."). We intentionally
+                -- drop zero and negative net-units: zero = fully
+                -- closed (contributes nothing), negative = should
+                -- not exist in this product and is treated as
+                -- corrupt data rather than silently priced.
                 SELECT
                     d.d,
                     fs.instrument_id,
@@ -924,11 +930,26 @@ def get_value_history(
     fx_skipped = 0
 
     for row in position_rows:
-        close = row["close_at_date"]
-        if close is None:
+        close_raw = row["close_at_date"]
+        if close_raw is None:
             continue  # no close on or before this date → skip, not zero
+        # psycopg3 returns NUMERIC as Decimal in practice, but wrap
+        # defensively so we never mix Decimal with a float if a driver
+        # or column-type change ever slips in.
+        close = Decimal(str(close_raw))
         units = Decimal(str(row["units_at_date"]))
-        native_ccy = str(row["native_currency"] or display_currency)
+        raw_ccy = row["native_currency"]
+        if raw_ccy is None:
+            # Instrument missing a currency is a data-quality bug, not
+            # a display-currency position. Log and skip so we don't
+            # silently attribute foreign value to display-ccy NAV.
+            logger.warning(
+                "value-history: instrument_id=%s has NULL currency; skipping on %s",
+                row["instrument_id"],
+                row["point_date"],
+            )
+            continue
+        native_ccy = str(raw_ccy)
         value_native = close * units
         if native_ccy != display_currency:
             try:
