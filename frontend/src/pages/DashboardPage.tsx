@@ -12,32 +12,50 @@ import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/S
 import { SummaryCards } from "@/components/dashboard/SummaryCards";
 import { PositionsTable } from "@/components/dashboard/PositionsTable";
 import { RecentRecommendations } from "@/components/dashboard/RecentRecommendations";
-import { BudgetOverviewPanel } from "@/components/dashboard/BudgetOverviewPanel";
-import { SystemStatusPanel } from "@/components/dashboard/SystemStatusPanel";
 import { BootstrapProgress, isBootstrapping } from "@/components/dashboard/BootstrapProgress";
 import { WatchlistPanel } from "@/components/dashboard/WatchlistPanel";
 
 /**
- * Operator dashboard (#60).
+ * Operator dashboard — command center (#315 Phase 1).
  *
- * Each of the four endpoints owns its own request lifecycle so a partial
- * failure (e.g. /system/status down while /portfolio is fine) does not
- * blank unrelated panels. The top-of-page banner only appears when *all
- * four* requests have failed — that's the "API unreachable" signal from
- * the issue.
+ * Landing view answers "how's my fund today + what needs me next 5 min?"
+ * Ops-health panels (sync layers, job runs) live on /admin and no longer
+ * clutter the dashboard. Budget rolls into the summary strip; the old
+ * standalone Budget section retired for the same reason — Deployment
+ * card already surfaces the same number.
  *
- * This page is strictly read-only. The kill switch toggle and any config
- * mutation lives on the admin page (#64) — see SystemStatusPanel.
+ * Each endpoint owns its request lifecycle; a partial failure leaves
+ * unrelated panels rendering. The page-level banner only fires when
+ * every data source failed.
+ *
+ * Layout:
+ *   ┌ SummaryCards (AUM · Cash · P&L · Deployment) ┐
+ *   │                                              │
+ *   │ Positions                                    │
+ *   │                                              │
+ *   │ Needs action (proposed recs)                 │
+ *   │                                              │
+ *   │ Watchlist                                    │
+ *   └──────────────────────────────────────────────┘
  */
 export function DashboardPage() {
   const portfolio = useAsync(fetchPortfolio, []);
-  // The arrow function below is intentionally not memoised: useAsync
-  // captures the latest `fn` via a ref (see frontend/src/lib/useAsync.ts),
-  // so a new identity per render is harmless and does not trigger refetch.
+  // "Needs action" = recommendations the operator hasn't triaged yet.
+  // Filter to status=proposed so executed / rejected rows don't
+  // crowd the decision queue.
   const recs = useAsync(
-    () => fetchRecommendations({ action: null, status: null, instrument_id: null }, 0, 10),
+    () =>
+      fetchRecommendations(
+        { action: null, status: "proposed", instrument_id: null },
+        0,
+        10,
+      ),
     [],
   );
+  // `system` + `config` are kept so BootstrapProgress can detect a
+  // first-run install, and so the all-endpoints-failed banner fires
+  // when the backend is unreachable. The System status panel itself
+  // moved to /admin in Phase 1.
   const system = useAsync(fetchSystemStatus, []);
   const config = useConfig();
   const budget = useAsync(fetchBudget, []);
@@ -53,8 +71,6 @@ export function DashboardPage() {
       const message =
         err instanceof Error ? err.message : `Failed to remove ${symbol}`;
       setWatchlistError(message);
-      // Refetch anyway so the UI reflects server state (e.g. another
-      // session already removed the row).
       watchlist.refetch();
     }
   };
@@ -76,74 +92,48 @@ export function DashboardPage() {
         <ErrorBanner message="The API is unreachable. Check that the backend is running and the auth token is configured." />
       ) : null}
 
-      {/* First-run bootstrap progress — shown when all data layers are
-          empty (credentials saved but pipeline not yet populated). The
-          panel derives its stage from /system/status layer + job states
-          and disappears once data starts flowing. */}
       {!system.loading && system.data !== null && isBootstrapping(system.data) ? (
         <BootstrapProgress system={system.data} />
       ) : null}
 
-      {/* Portfolio summary cards share a single /portfolio fetch. */}
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <div className="space-y-6 xl:col-span-2">
-          {portfolio.error !== null ? (
-            <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-              <SectionError onRetry={portfolio.refetch} />
-            </div>
-          ) : (
-            <>
-              <SummaryCards
-                data={portfolio.loading ? null : portfolio.data}
-                budgetData={budget.loading || budget.error !== null ? null : budget.data}
-                budgetError={budget.error !== null}
-              />
-              <Section title="Positions">
-                {portfolio.loading ? (
-                  <SectionSkeleton rows={4} />
-                ) : (
-                  <PositionsTable
-                    positions={portfolio.data?.positions ?? []}
-                    mirrors={portfolio.data?.mirrors ?? []}
-                  />
-                )}
-              </Section>
-            </>
-          )}
+      {portfolio.error !== null ? (
+        <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+          <SectionError onRetry={portfolio.refetch} />
         </div>
+      ) : (
+        <SummaryCards
+          data={portfolio.loading ? null : portfolio.data}
+          budgetData={budget.loading || budget.error !== null ? null : budget.data}
+          budgetError={budget.error !== null}
+        />
+      )}
 
-        <div className="space-y-6">
-          <Section title="System status">
-            {/* No combined loading gate: each endpoint's loading / error /
-                data state must drive its own render branch so a slow or
-                retrying endpoint cannot hide the already-resolved side.
-                See docs/review-prevention-log.md "Duplicate error widgets…"
-                and the related round-3 PR-#89 finding on shared loading
-                gates. */}
-            <SystemStatusPanel
-              system={system.error !== null ? null : system.data}
-              config={config.error !== null ? null : config.data}
-              systemLoading={system.loading}
-              configLoading={config.loading}
-              systemError={system.error !== null}
-              configError={config.error !== null}
-              onRetrySystem={system.refetch}
-              onRetryConfig={config.refetch}
-            />
-          </Section>
+      <Section title="Positions">
+        {portfolio.loading ? (
+          <SectionSkeleton rows={4} />
+        ) : portfolio.error !== null ? (
+          <SectionError onRetry={portfolio.refetch} />
+        ) : (
+          <PositionsTable
+            positions={portfolio.data?.positions ?? []}
+            mirrors={portfolio.data?.mirrors ?? []}
+          />
+        )}
+      </Section>
 
-          <Section title="Budget">
-            <BudgetOverviewPanel
-              budget={budget.error !== null ? null : budget.data}
-              loading={budget.loading}
-              hasError={budget.error !== null}
-              onRetry={budget.refetch}
-            />
-          </Section>
-        </div>
-      </div>
+      <Section
+        title={`Needs action${recs.data ? ` · ${recs.data.total}` : ""}`}
+      >
+        {recs.loading ? (
+          <SectionSkeleton rows={4} />
+        ) : recs.error !== null ? (
+          <SectionError onRetry={recs.refetch} />
+        ) : (
+          <RecentRecommendations items={recs.data?.items ?? []} />
+        )}
+      </Section>
 
-      <Section title={`Watchlist${watchlist.data ? ` (${watchlist.data.total})` : ""}`}>
+      <Section title={`Watchlist${watchlist.data ? ` · ${watchlist.data.total}` : ""}`}>
         {watchlistError !== null && (
           <div className="mb-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700">
             {watchlistError}
@@ -165,16 +155,6 @@ export function DashboardPage() {
             items={watchlist.data?.items ?? []}
             onRemove={handleRemove}
           />
-        )}
-      </Section>
-
-      <Section title="Recent recommendations">
-        {recs.loading ? (
-          <SectionSkeleton rows={4} />
-        ) : recs.error !== null ? (
-          <SectionError onRetry={recs.refetch} />
-        ) : (
-          <RecentRecommendations items={recs.data?.items ?? []} />
         )}
       </Section>
     </div>

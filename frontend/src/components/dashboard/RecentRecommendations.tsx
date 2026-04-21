@@ -19,10 +19,13 @@ const STATUS_TONE: Record<string, string> = {
 
 export function RecentRecommendations({ items }: { items: RecommendationListItem[] }) {
   if (items.length === 0) {
+    // Empty = nothing awaiting the operator's action. This is the
+    // steady-state "clean queue" signal on the dashboard; wording
+    // intentionally avoids implying the system is broken.
     return (
       <EmptyState
-        title="No recommendations yet"
-        description="Recommendations will appear here once the portfolio manager has run."
+        title="Nothing awaiting review"
+        description="New recommendations surface here the moment the portfolio manager queues one."
       />
     );
   }
