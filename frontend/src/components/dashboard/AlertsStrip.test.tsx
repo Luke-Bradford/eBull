@@ -213,6 +213,29 @@ describe("AlertsStrip — Mark all read (normal path)", () => {
       expect(vi.mocked(alertsApi.fetchGuardRejections).mock.calls.length).toBeGreaterThanOrEqual(2);
     });
   });
+
+  it("swallows markAlertsSeen rejection silently and still refetches", async () => {
+    stubFetch({
+      alerts_last_seen_decision_id: 499,
+      unseen_count: 1,
+      rejections: [{ ...baseRow, decision_id: 501 }],
+    });
+    vi.mocked(alertsApi.markAlertsSeen).mockRejectedValue(new Error("boom"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    renderStrip();
+
+    const btn = await screen.findByRole("button", { name: /mark all read/i });
+    await userEvent.click(btn);
+
+    await vi.waitFor(() => {
+      expect(errSpy).toHaveBeenCalled();
+    });
+    // Refetch fires even after a failed ack.
+    await vi.waitFor(() => {
+      expect(vi.mocked(alertsApi.fetchGuardRejections).mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+    errSpy.mockRestore();
+  });
 });
 
 describe("AlertsStrip — Dismiss all (overflow path)", () => {
@@ -269,5 +292,25 @@ describe("AlertsStrip — Dismiss all (overflow path)", () => {
     expect(alertsApi.dismissAllAlerts).not.toHaveBeenCalled();
     expect(vi.mocked(alertsApi.fetchGuardRejections).mock.calls.length).toBe(fetchCallsBefore);
     confirmSpy.mockRestore();
+  });
+
+  it("swallows dismissAllAlerts rejection silently and still refetches", async () => {
+    overflowStub();
+    vi.mocked(alertsApi.dismissAllAlerts).mockRejectedValue(new Error("boom"));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    renderStrip();
+
+    const btn = await screen.findByRole("button", { name: /dismiss all \(600\)/i });
+    await userEvent.click(btn);
+
+    await vi.waitFor(() => {
+      expect(errSpy).toHaveBeenCalled();
+    });
+    await vi.waitFor(() => {
+      expect(vi.mocked(alertsApi.fetchGuardRejections).mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+    confirmSpy.mockRestore();
+    errSpy.mockRestore();
   });
 });

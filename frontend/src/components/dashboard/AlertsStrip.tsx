@@ -77,7 +77,13 @@ export function AlertsStrip(): JSX.Element | null {
     // rejections is non-empty here (strip is hidden otherwise),
     // and is ordered decision_id DESC on the server so index 0 is MAX.
     const seenThroughDecisionId = data!.rejections[0]!.decision_id;
-    await markAlertsSeen(seenThroughDecisionId);
+    try {
+      await markAlertsSeen(seenThroughDecisionId);
+    } catch (err) {
+      // Silent-on-error matches the rest of the strip; log for debugging.
+      // Server ack is idempotent (GREATEST monotonic) so a future retry is safe.
+      console.error("[AlertsStrip] markAlertsSeen failed", err);
+    }
     refetch();
   }
 
@@ -85,7 +91,11 @@ export function AlertsStrip(): JSX.Element | null {
     const hiddenCount = data!.unseen_count - data!.rejections.length;
     const msg = `Dismiss all ${data!.unseen_count} unseen rejections? ${hiddenCount} are not shown above. Review them at /recommendations before dismissing if they might matter.`;
     if (!window.confirm(msg)) return;
-    await dismissAllAlerts();
+    try {
+      await dismissAllAlerts();
+    } catch (err) {
+      console.error("[AlertsStrip] dismissAllAlerts failed", err);
+    }
     refetch();
   }
 
