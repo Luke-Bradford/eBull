@@ -121,10 +121,13 @@ export function PortfolioValueChart(): JSX.Element | null {
       <div className="flex items-center justify-between">
         <div className="flex items-baseline gap-2">
           <h2 className="text-sm font-medium text-slate-700">Portfolio value</h2>
-          {/* Only surface the FX-mode caption when there's an actual
-              chart to contextualise. Rendering it above the FX-missing
-              empty state is misleading — no conversion happened. */}
-          {data?.fx_mode === "live" && hasMovement ? (
+          {/* Two mutually-exclusive FX signals:
+              - caption  → fine state (live FX applied cleanly)
+              - badge    → partial state (some pairs dropped)
+              When both conditions match we keep the badge only,
+              since it already implies the live-FX context and the
+              caption would just duplicate. */}
+          {data?.fx_mode === "live" && hasMovement && fxSkipped === 0 ? (
             <span className="text-[10px] text-slate-400">
               historical converted at today's FX
             </span>

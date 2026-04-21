@@ -173,6 +173,11 @@ describe("PortfolioValueChart", () => {
     expect(screen.getByText(/3 FX pair/)).toBeInTheDocument();
     // Chart still renders in the partial-coverage case.
     expect(screen.getByTestId("portfolio-value-chart")).toBeInTheDocument();
+    // Badge replaces the fx_mode caption — no duplicate FX-context
+    // messaging in the header line.
+    expect(
+      screen.queryByText(/historical converted at today's FX/i),
+    ).not.toBeInTheDocument();
   });
 
   it("suppresses the fx_mode caption when showing the FX-missing empty state", async () => {
