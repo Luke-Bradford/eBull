@@ -97,11 +97,23 @@ export function PortfolioValueChart(): JSX.Element | null {
   const effectivelyLoading = loading || !dataMatchesRange;
 
   const points = dataMatchesRange && data ? data.points : null;
-  const hasData =
-    points !== null && points.filter((p) => dateToTime(p.date) !== null).length >= 2;
+  const validPoints =
+    points !== null ? points.filter((p) => dateToTime(p.date) !== null) : null;
+  const hasData = validPoints !== null && validPoints.length >= 2;
 
-  if (error !== null) {
-    // Silent-on-error: dashboard already has SummaryCards + rolling pills.
+  // Flat-line guard: when every valid point shares the same value
+  // (e.g. demo eToro where fills history isn't backfilled locally so
+  // the series reduces to cash-only across every day), hide the whole
+  // card. A chart showing one flat line is noise on the dashboard.
+  // SummaryCards + RollingPnlStrip already cover current-snapshot P&L.
+  const hasMovement =
+    hasData &&
+    validPoints !== null &&
+    validPoints.some((p) => p.value !== validPoints[0]!.value);
+
+  if (error !== null || (hasData && !hasMovement)) {
+    // Silent-hide on error + on meaningless flat series. Dashboard
+    // already has SummaryCards + rolling pills for the snapshot view.
     return null;
   }
 

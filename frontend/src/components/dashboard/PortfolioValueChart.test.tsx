@@ -169,6 +169,51 @@ describe("PortfolioValueChart", () => {
     expect(libState.remove).toHaveBeenCalled();
   });
 
+  it("silent-hides when the series is entirely flat (demo-only cash)", async () => {
+    // Demo eToro doesn't backfill fills history → the endpoint reduces
+    // to cash-only, emitting the same value on every day. Rendering a
+    // flat line on the dashboard is noise, so the whole widget hides.
+    mocked.mockResolvedValue(
+      resp([
+        { date: "2026-04-18", value: 1260.87 },
+        { date: "2026-04-19", value: 1260.87 },
+        { date: "2026-04-20", value: 1260.87 },
+      ]),
+    );
+    const { container } = render(
+      <MemoryRouter>
+        <PortfolioValueChart />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(mocked).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid^="value-range-"]')).toBeNull();
+    });
+    expect(
+      container.querySelector('[data-testid="portfolio-value-chart"]'),
+    ).toBeNull();
+  });
+
+  it("renders when at least one point diverges from the first value", async () => {
+    mocked.mockResolvedValue(
+      resp([
+        { date: "2026-04-18", value: 1000 },
+        { date: "2026-04-19", value: 1000 },
+        { date: "2026-04-20", value: 1100 },
+      ]),
+    );
+    render(
+      <MemoryRouter>
+        <PortfolioValueChart />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("portfolio-value-chart")).toBeInTheDocument();
+    });
+  });
+
   it("silent-hides on fetch error — no blanking of the rest of the dashboard", async () => {
     mocked.mockRejectedValue(new Error("offline"));
     const { container } = render(
