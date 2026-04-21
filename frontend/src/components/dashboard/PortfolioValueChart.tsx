@@ -195,6 +195,12 @@ function ValueCanvas({
       lineWidth: 2,
     });
 
+    // Assign refs BEFORE subscribing so the callback can never fire
+    // against a null seriesRef in the same effect tick (latent-but-
+    // practically-unreachable race the bot flagged).
+    chartRef.current = chart;
+    seriesRef.current = series;
+
     chart.subscribeCrosshairMove((param) => {
       const sp = seriesRef.current;
       if (!param.time || !sp || typeof param.time !== "number") {
@@ -209,9 +215,6 @@ function ValueCanvas({
       const date = new Date(param.time * 1000).toISOString().slice(0, 10);
       setHover({ date, value: (pt as { value: number }).value });
     });
-
-    chartRef.current = chart;
-    seriesRef.current = series;
 
     return () => {
       chart.remove();
