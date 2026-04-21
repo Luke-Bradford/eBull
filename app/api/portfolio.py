@@ -717,7 +717,7 @@ def get_rolling_pnl(
                     SELECT close FROM price_daily
                     WHERE instrument_id = p.instrument_id
                       AND close IS NOT NULL
-                      AND price_date <= curr.price_date - make_interval(days => %(days)s)
+                      AND price_date <= curr.price_date - make_interval(days => %(days)s::int)
                     ORDER BY price_date DESC
                     LIMIT 1
                 ) prior ON TRUE
