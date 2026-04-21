@@ -126,6 +126,18 @@ export function PortfolioValueChart(): JSX.Element | null {
               historical converted at today's FX
             </span>
           ) : null}
+          {/* Keep the FX-missing signal even when the chart has
+              real movement. Without this the operator only sees the
+              warning when the series is *entirely* dropped, hiding
+              partial-coverage from view. */}
+          {fxSkipped > 0 && hasMovement ? (
+            <span
+              className="text-[10px] text-amber-700"
+              data-testid="value-fx-missing-badge"
+            >
+              {fxSkipped} FX pair(s) missing — some rows dropped
+            </span>
+          ) : null}
         </div>
         <div className="flex gap-1">
           {RANGES.map((r) => (

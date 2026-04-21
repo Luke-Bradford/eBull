@@ -149,7 +149,33 @@ describe("PortfolioValueChart", () => {
     ).toBeNull();
   });
 
-  it("surfaces an 'FX rates missing' empty state when fx_skipped > 0", async () => {
+  it("surfaces an FX-missing badge when fx_skipped > 0 AND the series still has movement", async () => {
+    // Partial-coverage case: some pairs dropped but the chart still
+    // has data. Without this badge the operator never learns about
+    // the FX gap (previously only the all-dropped branch warned).
+    mocked.mockResolvedValue(
+      resp(
+        [
+          { date: "2026-04-18", value: 1000 },
+          { date: "2026-04-19", value: 1100 },
+        ],
+        { fx_skipped: 3 },
+      ),
+    );
+    render(
+      <MemoryRouter>
+        <PortfolioValueChart />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("value-fx-missing-badge")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/3 FX pair/)).toBeInTheDocument();
+    // Chart still renders in the partial-coverage case.
+    expect(screen.getByTestId("portfolio-value-chart")).toBeInTheDocument();
+  });
+
+  it("surfaces an 'FX rates missing' empty state when fx_skipped > 0 AND no movement", async () => {
     // All-skipped is indistinguishable from "no data" without
     // fx_skipped; the pair-count lets the operator know why their
     // mixed-currency portfolio is rendering empty.
