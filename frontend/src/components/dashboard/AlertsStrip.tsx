@@ -10,8 +10,8 @@
  */
 import { Link } from "react-router-dom";
 
-import { fetchGuardRejections } from "@/api/alerts";
-// markAlertsSeen and dismissAllAlerts are added in Tasks 10 and 11.
+import { fetchGuardRejections, markAlertsSeen } from "@/api/alerts";
+// dismissAllAlerts is added in Task 11.
 import type { GuardRejection } from "@/api/types";
 import { formatRelativeTime } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
@@ -64,38 +64,48 @@ function RowView({
 }
 
 export function AlertsStrip(): JSX.Element | null {
-  const { data, error } = useAsync(fetchGuardRejections, []);
+  const { data, error, refetch } = useAsync(fetchGuardRejections, []);
 
   if (error !== null || data === null) return null;
   if (data.rejections.length === 0) return null;
 
   const lastSeen = data.alerts_last_seen_decision_id;
+  const normalAck =
+    data.unseen_count > 0 && data.unseen_count <= data.rejections.length;
+
+  async function onMarkAllRead() {
+    // rejections is non-empty here (strip is hidden otherwise),
+    // and is ordered decision_id DESC on the server so index 0 is MAX.
+    const seenThroughDecisionId = data!.rejections[0]!.decision_id;
+    await markAlertsSeen(seenThroughDecisionId);
+    refetch();
+  }
 
   return (
-    <section
-      className="rounded-md border border-slate-200 bg-white shadow-sm"
-      aria-labelledby="alerts-strip-heading"
-    >
+    <section aria-labelledby="alerts-strip-heading" className="rounded-md border border-slate-200 bg-white shadow-sm">
       <header className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
         <div className="flex items-center gap-2">
-          <h2
-            id="alerts-strip-heading"
-            className="text-sm font-semibold text-slate-700"
-          >
-            Guard rejections
-          </h2>
+          <h2 id="alerts-strip-heading" className="text-sm font-semibold text-slate-700">Guard rejections</h2>
           {data.unseen_count > 0 ? (
             <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
               {data.unseen_count} new
             </span>
           ) : null}
         </div>
-        {/* Action buttons land in Tasks 10 and 11 */}
+        {normalAck ? (
+          <button
+            type="button"
+            onClick={onMarkAllRead}
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+          >
+            Mark all read
+          </button>
+        ) : null}
       </header>
       <div
-        className="max-h-96 overflow-y-auto divide-y divide-slate-100"
-        role="list"
         tabIndex={0}
+        role="list"
+        className="max-h-96 overflow-y-auto divide-y divide-slate-100"
       >
         {data.rejections.map((row) => (
           <RowView key={row.decision_id} row={row} lastSeen={lastSeen} />

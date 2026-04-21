@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
@@ -150,5 +151,66 @@ describe("AlertsStrip", () => {
     const node = await screen.findByText(long);
     expect(node.getAttribute("title")).toBe(long);
     expect(node.className).toMatch(/truncate/);
+  });
+});
+
+describe("AlertsStrip — Mark all read (normal path)", () => {
+  it("renders 'Mark all read' when unseen_count > 0 and <= rejections.length", async () => {
+    stubFetch({
+      alerts_last_seen_decision_id: 499,
+      unseen_count: 2,
+      rejections: [
+        { ...baseRow, decision_id: 501 },
+        { ...baseRow, decision_id: 500 },
+      ],
+    });
+    renderStrip();
+    expect(await screen.findByRole("button", { name: /mark all read/i })).toBeInTheDocument();
+  });
+
+  it("hides 'Mark all read' when unseen_count === 0 (all rows already seen)", async () => {
+    stubFetch({
+      alerts_last_seen_decision_id: 999,
+      unseen_count: 0,
+      rejections: [{ ...baseRow, decision_id: 500 }],  // seen (500 < 999)
+    });
+    renderStrip();
+    await screen.findByText("AAPL");
+    expect(screen.queryByRole("button", { name: /mark all read/i })).toBeNull();
+  });
+
+  it("stays visible at the 500-row cap when unseen_count === rejections.length === 500", async () => {
+    const rejections = Array.from({ length: 500 }, (_, i) => ({
+      ...baseRow,
+      decision_id: 500 - i,
+    }));
+    stubFetch({
+      alerts_last_seen_decision_id: null,
+      unseen_count: 500,
+      rejections,
+    });
+    renderStrip();
+    expect(await screen.findByRole("button", { name: /mark all read/i })).toBeInTheDocument();
+  });
+
+  it("click posts rejections[0].decision_id and refetches", async () => {
+    stubFetch({
+      alerts_last_seen_decision_id: 499,
+      unseen_count: 2,
+      rejections: [
+        { ...baseRow, decision_id: 501 },
+        { ...baseRow, decision_id: 500 },
+      ],
+    });
+    vi.mocked(alertsApi.markAlertsSeen).mockResolvedValue(undefined);
+    renderStrip();
+
+    const btn = await screen.findByRole("button", { name: /mark all read/i });
+    await userEvent.click(btn);
+
+    expect(alertsApi.markAlertsSeen).toHaveBeenCalledWith(501);  // MAX(decision_id) in payload
+    await vi.waitFor(() => {
+      expect(vi.mocked(alertsApi.fetchGuardRejections).mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
   });
 });
