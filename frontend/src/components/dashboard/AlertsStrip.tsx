@@ -37,6 +37,7 @@ function RowView({
   const content = (
     <div
       data-testid="alerts-row"
+      role="listitem"
       className={`flex items-center gap-3 px-3 py-2 text-sm ${border} bg-white`}
     >
       <span className="w-16 font-semibold tabular-nums">{row.symbol ?? "—"}</span>
@@ -71,10 +72,18 @@ export function AlertsStrip(): JSX.Element | null {
   const lastSeen = data.alerts_last_seen_decision_id;
 
   return (
-    <section className="rounded-md border border-slate-200 bg-white shadow-sm">
+    <section
+      className="rounded-md border border-slate-200 bg-white shadow-sm"
+      aria-labelledby="alerts-strip-heading"
+    >
       <header className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
         <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold text-slate-700">Guard rejections</h2>
+          <h2
+            id="alerts-strip-heading"
+            className="text-sm font-semibold text-slate-700"
+          >
+            Guard rejections
+          </h2>
           {data.unseen_count > 0 ? (
             <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
               {data.unseen_count} new
@@ -83,7 +92,11 @@ export function AlertsStrip(): JSX.Element | null {
         </div>
         {/* Action buttons land in Tasks 10 and 11 */}
       </header>
-      <div className="max-h-96 overflow-y-auto divide-y divide-slate-100">
+      <div
+        className="max-h-96 overflow-y-auto divide-y divide-slate-100"
+        role="list"
+        tabIndex={0}
+      >
         {data.rejections.map((row) => (
           <RowView key={row.decision_id} row={row} lastSeen={lastSeen} />
         ))}

@@ -24,8 +24,8 @@ const baseRow = {
 
 const mockedFetch = vi.mocked(alertsApi.fetchGuardRejections);
 
-function stubFetch(data: GuardRejectionsResponse | null) {
-  mockedFetch.mockResolvedValue(data ?? ({} as GuardRejectionsResponse));
+function stubFetch(data: GuardRejectionsResponse) {
+  mockedFetch.mockResolvedValue(data);
 }
 
 function stubFetchError() {
