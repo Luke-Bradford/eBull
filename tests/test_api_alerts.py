@@ -297,3 +297,53 @@ def test_post_seen_returns_501_when_multiple_operators(client: TestClient) -> No
         _install_conn()
         resp = client.post("/alerts/seen", json={"seen_through_decision_id": 1})
     assert resp.status_code == 501
+
+
+def test_post_dismiss_all_issues_update(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        cur = _install_conn(rowcount=1)
+        resp = client.post("/alerts/dismiss-all")
+    assert resp.status_code == 204
+    calls = cur.execute.call_args_list
+    assert any(
+        "UPDATE operators" in c.args[0] and "SELECT MAX(decision_id)" in c.args[0]
+        for c in calls
+    )
+    cur._parent_conn.commit.assert_called_once()
+
+
+def test_post_dismiss_all_filters_scope_to_guard_fails_in_window(client: TestClient) -> None:
+    # Inspect the SQL shape — scope is execution_guard + FAIL + 7-day window.
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        cur = _install_conn(rowcount=1)
+        resp = client.post("/alerts/dismiss-all")
+    assert resp.status_code == 204
+    update_sql = next(
+        c.args[0] for c in cur.execute.call_args_list if "UPDATE operators" in c.args[0]
+    )
+    assert "pass_fail = 'FAIL'" in update_sql
+    assert "stage = 'execution_guard'" in update_sql
+    assert "INTERVAL '7 days'" in update_sql
+    assert "m.max_id IS NOT NULL" in update_sql
+
+
+def test_post_dismiss_all_is_noop_on_zero_rowcount(client: TestClient) -> None:
+    # rowcount=0 mimics the empty-window case (WHERE m.max_id IS NOT NULL excludes the row).
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn(rowcount=0)
+        resp = client.post("/alerts/dismiss-all")
+    assert resp.status_code == 204  # No-op still returns 204.
+
+
+def test_post_dismiss_all_returns_503_when_no_operator(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", side_effect=NoOperatorError()):
+        _install_conn()
+        resp = client.post("/alerts/dismiss-all")
+    assert resp.status_code == 503
+
+
+def test_post_dismiss_all_returns_501_when_multiple_operators(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", side_effect=AmbiguousOperatorError()):
+        _install_conn()
+        resp = client.post("/alerts/dismiss-all")
+    assert resp.status_code == 501

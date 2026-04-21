@@ -169,5 +169,25 @@ def mark_seen(
 def dismiss_all(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> None:
-    _operator_id = _resolve_operator(conn)  # used in Task 5 UPDATE
-    # Implementation in Task 5.
+    operator_id = _resolve_operator(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE operators AS op
+            SET alerts_last_seen_decision_id = GREATEST(
+                COALESCE(op.alerts_last_seen_decision_id, 0),
+                m.max_id
+            )
+            FROM (
+                SELECT MAX(decision_id) AS max_id
+                FROM decision_audit
+                WHERE pass_fail = 'FAIL'
+                  AND stage = 'execution_guard'
+                  AND decision_time >= now() - INTERVAL '7 days'
+            ) AS m
+            WHERE op.operator_id = %(op)s
+              AND m.max_id IS NOT NULL
+            """,
+            {"op": operator_id},
+        )
+    conn.commit()
