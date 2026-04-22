@@ -18,6 +18,7 @@ Routes:
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
@@ -56,6 +57,30 @@ class GuardRejectionsResponse(BaseModel):
 
 class MarkSeenRequest(BaseModel):
     seen_through_decision_id: int = Field(gt=0)
+
+
+AlertType = Literal["sl_breach", "tp_breach", "thesis_break"]
+
+
+class PositionAlert(BaseModel):
+    alert_id: int
+    alert_type: AlertType
+    instrument_id: int
+    symbol: str
+    opened_at: datetime
+    resolved_at: datetime | None
+    detail: str
+    current_bid: Decimal | None
+
+
+class PositionAlertsResponse(BaseModel):
+    alerts_last_seen_position_alert_id: int | None
+    unseen_count: int
+    alerts: list[PositionAlert]
+
+
+class PositionAlertsMarkSeenRequest(BaseModel):
+    seen_through_position_alert_id: int = Field(gt=0)
 
 
 def _resolve_operator(conn: psycopg.Connection[object]) -> UUID:
@@ -191,3 +216,62 @@ def dismiss_all(
             {"op": operator_id},
         )
     conn.commit()
+
+
+@router.get("/position-alerts", response_model=PositionAlertsResponse)
+def get_position_alerts(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> PositionAlertsResponse:
+    operator_id = _resolve_operator(conn)
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # 1. Read operator's cursor.
+        cur.execute(
+            "SELECT alerts_last_seen_position_alert_id FROM operators WHERE operator_id = %(op)s",
+            {"op": operator_id},
+        )
+        op_row = cur.fetchone()
+        last_seen: int | None = op_row["alerts_last_seen_position_alert_id"] if op_row else None
+
+        # 2. Count unseen in-window rows (uncapped).
+        cur.execute(
+            """
+            SELECT COUNT(*) AS unseen_count
+            FROM position_alerts
+            WHERE opened_at >= now() - INTERVAL '7 days'
+              AND (%(last_id)s::BIGINT IS NULL OR alert_id > %(last_id)s::BIGINT)
+            """,
+            {"last_id": last_seen},
+        )
+        count_row = cur.fetchone()
+        assert count_row is not None, "COUNT(*) always returns a row"
+        unseen_count: int = int(count_row["unseen_count"])
+
+        # 3. Fetch the list (capped at 500). ORDER BY alert_id DESC —
+        # BIGSERIAL PK is the race-safe ordering (clock-skew irrelevant;
+        # single-threaded writer guarantees monotonicity). Matches #394
+        # rationale for decision_id.
+        cur.execute(
+            """
+            SELECT
+                pa.alert_id,
+                pa.alert_type,
+                pa.instrument_id,
+                i.symbol,
+                pa.opened_at,
+                pa.resolved_at,
+                pa.detail,
+                pa.current_bid
+            FROM position_alerts pa
+            JOIN instruments i ON i.instrument_id = pa.instrument_id
+            WHERE pa.opened_at >= now() - INTERVAL '7 days'
+            ORDER BY pa.alert_id DESC
+            LIMIT 500
+            """
+        )
+        rows = cur.fetchall()
+
+    return PositionAlertsResponse(
+        alerts_last_seen_position_alert_id=last_seen,
+        unseen_count=unseen_count,
+        alerts=[PositionAlert.model_validate(r) for r in rows],
+    )
