@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { act, renderHook } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Operator } from "@/api/auth";
 import type {
@@ -10,9 +11,14 @@ import { GENERIC_ERROR } from "@/pages/setupErrorMessages";
 import {
   classifyBrokerSaveError,
   initialWizardState,
+  useSetupWizard,
   wizardReducer,
   type WizardState,
 } from "@/pages/useSetupWizard";
+
+vi.mock("@/api/auth");
+vi.mock("@/api/brokerCredentials");
+vi.mock("@/api/jobs");
 
 const OP: Operator = { id: "op-1", username: "test" };
 const ROW_API: BrokerCredentialView = {
@@ -198,5 +204,121 @@ describe("classifyBrokerSaveError", () => {
   });
   it("non-Error value → 'Could not save credential.'", () => {
     expect(classifyBrokerSaveError("plain string")).toBe("Could not save credential.");
+  });
+});
+
+describe("useSetupWizard (hook)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("submitOperator maps any fetch failure to GENERIC_ERROR (not err.message)", async () => {
+    const { postSetup } = await import("@/api/auth");
+    vi.mocked(postSetup).mockRejectedValue(new Error("Leaky backend detail"));
+
+    const onComplete = vi.fn();
+    const { result } = renderHook(() => useSetupWizard({ onComplete }));
+    await act(async () => {
+      await result.current.submitOperator({ username: "u", password: "p", setupToken: "" });
+    });
+    expect(result.current.state.operatorError).toBe(GENERIC_ERROR);
+    expect(result.current.state.operatorError).not.toContain("Leaky backend detail");
+    expect(result.current.state.step).toBe("operator");
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it("submitOperator success advances step to broker + stores operator", async () => {
+    const { postSetup } = await import("@/api/auth");
+    vi.mocked(postSetup).mockResolvedValue({ operator: OP });
+
+    const onComplete = vi.fn();
+    const { result } = renderHook(() => useSetupWizard({ onComplete }));
+    await act(async () => {
+      await result.current.submitOperator({ username: "u", password: "p", setupToken: "" });
+    });
+    expect(result.current.state.step).toBe("broker");
+    expect(result.current.state.pendingOperator).toEqual(OP);
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it("submitBroker in create-mode fires runJob(nightly_universe_sync) fire-and-forget", async () => {
+    const { createBrokerCredential, listBrokerCredentials } = await import(
+      "@/api/brokerCredentials"
+    );
+    const { runJob } = await import("@/api/jobs");
+    vi.mocked(createBrokerCredential).mockResolvedValue({
+      credential: ROW_API,
+      recovery_phrase: null,
+    });
+    vi.mocked(listBrokerCredentials).mockResolvedValue([ROW_API, ROW_USER]);
+    vi.mocked(runJob).mockResolvedValue(undefined);
+
+    const { result } = renderHook(() => useSetupWizard({ onComplete: vi.fn() }));
+    // state.credRows === null → mode === 'create' → wasCreate=true
+    await act(async () => {
+      await result.current.submitBroker({ apiKey: "a", userKey: "u" });
+    });
+    expect(runJob).toHaveBeenCalledWith("nightly_universe_sync");
+    expect(result.current.state.brokerError).toBeNull();
+  });
+
+  it("submitBroker in repair-mode does NOT fire runJob", async () => {
+    const { createBrokerCredential, listBrokerCredentials } = await import(
+      "@/api/brokerCredentials"
+    );
+    const { runJob } = await import("@/api/jobs");
+    vi.mocked(createBrokerCredential).mockResolvedValue({
+      credential: ROW_USER,
+      recovery_phrase: null,
+    });
+    // Seed hook with credRows = [ROW_API] → mode='repair', missingLabel='user_key'
+    vi.mocked(listBrokerCredentials).mockResolvedValueOnce([ROW_API]);
+
+    const { result } = renderHook(() => useSetupWizard({ onComplete: vi.fn() }));
+    await act(async () => {
+      await result.current.loadCredentials();
+    });
+    expect(result.current.state.credRows).toEqual([ROW_API]);
+
+    // Subsequent list call (post-save) returns both rows.
+    vi.mocked(listBrokerCredentials).mockResolvedValue([ROW_API, ROW_USER]);
+    await act(async () => {
+      await result.current.submitBroker({ apiKey: "a", userKey: "u" });
+    });
+    expect(runJob).not.toHaveBeenCalled();
+  });
+
+  it("submitBroker failure with listBrokerCredentials also failing leaves credRows=null", async () => {
+    const { createBrokerCredential, listBrokerCredentials } = await import(
+      "@/api/brokerCredentials"
+    );
+    vi.mocked(createBrokerCredential).mockRejectedValue(new ApiError(500, "boom"));
+    vi.mocked(listBrokerCredentials).mockRejectedValue(new Error("list boom"));
+
+    const { result } = renderHook(() => useSetupWizard({ onComplete: vi.fn() }));
+    await act(async () => {
+      await result.current.submitBroker({ apiKey: "a", userKey: "u" });
+    });
+    expect(result.current.state.brokerError).toBe("Could not save credential.");
+    expect(result.current.state.credRows).toBeNull();
+  });
+
+  it("skipBroker invokes onComplete without dispatching state transitions", async () => {
+    const onComplete = vi.fn();
+    const { result } = renderHook(() => useSetupWizard({ onComplete }));
+    act(() => {
+      result.current.skipBroker();
+    });
+    expect(onComplete).toHaveBeenCalledOnce();
+    expect(result.current.state.step).toBe("operator");
+  });
+
+  it("completeWizard invokes onComplete without dispatching state transitions", async () => {
+    const onComplete = vi.fn();
+    const { result } = renderHook(() => useSetupWizard({ onComplete }));
+    act(() => {
+      result.current.completeWizard();
+    });
+    expect(onComplete).toHaveBeenCalledOnce();
   });
 });
