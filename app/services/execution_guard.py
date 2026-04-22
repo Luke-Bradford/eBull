@@ -237,6 +237,7 @@ def _load_cash(conn: psycopg.Connection[Any]) -> float | None:
 def _load_sector_exposure(
     conn: psycopg.Connection[Any],
     instrument_id: int,
+    cash: float,
 ) -> tuple[bool, str | None, float, float]:
     """
     Return (instrument_found, sector, current_sector_pct, total_aum).
@@ -246,13 +247,19 @@ def _load_sector_exposure(
     current_sector_pct is the fraction of AUM currently in the same sector as
     instrument_id (excluding the instrument itself, since it is unowned for BUY).
     total_aum = SUM(position mark-to-market, **excluding the queried
-    instrument**) + cash + active mirror equity. The positions SELECT at
+    instrument**) + ``cash`` + active mirror equity. The positions SELECT at
     line ~269 filters `p.instrument_id != %(iid)s` (added in c006ae6 as a
     bug fix for #9 — without this, ADD actions on an already-held position
     would double-count the existing holding). This exclusion therefore
     applies to the whole total_aum figure the caller sees, not just to the
     sector numerator. Returns 0.0 when unknown. Mirrors expand the
     denominator only — the sector numerator is untouched (spec §4, #187).
+
+    ``cash`` is passed in by the caller (from the single ``compute_budget_state``
+    read) rather than re-queried here — prevents the #46 snapshot drift
+    where ``compute_budget_state`` and this function read ``cash_ledger``
+    independently within the same guard invocation and could observe
+    different totals if a row is inserted between them.
     """
     # Instrument sector
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -297,12 +304,8 @@ def _load_sector_exposure(
         sector_values[r["sector"]] = mv
         total_positions += mv
 
-    # Cash
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute("SELECT SUM(amount) AS balance FROM cash_ledger")
-        row = cur.fetchone()
-    cash = float(row["balance"]) if row is not None and row["balance"] is not None else 0.0
-
+    # Cash is passed in by the caller — read once per evaluate_recommendation
+    # invocation via compute_budget_state rather than re-queried here (#46).
     mirror_equity = _load_mirror_equity(conn)
     total_aum = total_positions + cash + mirror_equity
     current_sector_pct = (sector_values.get(sector, 0.0) / total_aum) if total_aum > 0 else 0.0
@@ -716,12 +719,21 @@ def evaluate_recommendation(
         cost_model_row = load_instrument_cost(conn, instrument_id)
         # Budget-aware cash check: replaces raw _load_cash(conn).
         # compute_budget_state reads budget_config, cash_ledger, positions,
-        # copy_mirrors, disposal_matches, and live_fx_rates.
+        # copy_mirrors, disposal_matches, and live_fx_rates. We then hand
+        # the resolved cash figure to _load_sector_exposure so both checks
+        # share a single cash_ledger snapshot (#46).
         try:
             budget = compute_budget_state(conn)
         except BudgetConfigCorrupt:
             budget = None
-        instrument_found, sector, current_sector_pct, total_aum = _load_sector_exposure(conn, instrument_id)
+        cash_for_aum = (
+            float(budget.cash_balance)
+            if budget is not None and budget.cash_balance is not None
+            else 0.0
+        )
+        instrument_found, sector, current_sector_pct, total_aum = _load_sector_exposure(
+            conn, instrument_id, cash_for_aum
+        )
 
     # --- Step 3: evaluate rules ---
     rule_results: list[RuleResult] = []

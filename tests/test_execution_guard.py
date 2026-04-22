@@ -204,7 +204,6 @@ def _sector_cursors(
     sector: str | None = "Technology",
     sector_market_value: float = 0.0,
     total_positions: float = 0.0,
-    cash: float = 50_000.0,
     instrument_missing: bool = False,
     mirror_equity: float = 0.0,
 ) -> list[MagicMock]:
@@ -212,11 +211,10 @@ def _sector_cursors(
 
     When instrument_missing=True the instruments cursor returns no rows and
     _load_sector_exposure returns early — only 1 cursor is consumed.
-    Otherwise 4 cursors are returned (instruments, positions, cash_ledger,
-    mirror_equity). The mirror_equity cursor is consumed by
-    `_load_mirror_equity`, wired into `total_aum` by Track 1b (#187).
-    Existing mock-driven tests default it to 0.0 so the pre-PR behaviour
-    is preserved bit-identically.
+    Otherwise 3 cursors are returned (instruments, positions, mirror_equity).
+    The cash_ledger cursor was removed in #46 — cash is now a parameter
+    passed by the caller (evaluate_recommendation reads it once via
+    compute_budget_state and hands the snapshot to _load_sector_exposure).
     """
     if instrument_missing:
         return [_make_cursor([])]
@@ -225,9 +223,8 @@ def _sector_cursors(
         positions_cur = _make_cursor([{"sector": sector, "market_value": sector_market_value}])
     else:
         positions_cur = _make_cursor([])
-    cash_cur = _make_cursor([{"balance": cash}])
     mirror_cur = _make_cursor([{"total": mirror_equity}])
-    return [instrument_cur, positions_cur, cash_cur, mirror_cur]
+    return [instrument_cur, positions_cur, mirror_cur]
 
 
 def _cost_config_cursor(
@@ -304,7 +301,6 @@ def _buy_cursors(
     sector: str | None = "Technology",
     sector_mv: float = 0.0,
     total_positions: float = 0.0,
-    cash_for_sector: float = 50_000.0,
     instrument_missing: bool = False,
     decision_id: int = 99,
 ) -> list[MagicMock]:
@@ -329,7 +325,6 @@ def _buy_cursors(
             sector=sector,
             sector_market_value=sector_mv,
             total_positions=total_positions,
-            cash=cash_for_sector,
             instrument_missing=instrument_missing,
         ),
         _audit_cursor(decision_id=decision_id),
@@ -930,7 +925,7 @@ class TestEvaluateRecommendation:
         cursors = _buy_cursors(
             sector="Technology",
             sector_mv=10_500.0,
-            cash_for_sector=39_500.0,
+            cash_balance=39_500.0,
         )
         result = self._eval(cursors)
         assert result.verdict == "FAIL"
@@ -942,7 +937,7 @@ class TestEvaluateRecommendation:
         cursors = _buy_cursors(
             sector="Technology",
             sector_mv=10_000.0,
-            cash_for_sector=40_000.0,
+            cash_balance=40_000.0,
         )
         result = self._eval(cursors)
         assert result.verdict == "PASS"
