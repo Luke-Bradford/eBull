@@ -1442,14 +1442,10 @@ class TestCoverageStatusDropsGet:
 
 @pytest.mark.skipif("not test_db_available()")
 class TestCoverageStatusDropsGetIntegration:
-    def test_get_returns_drops_in_window(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_get_returns_drops_in_window(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         _seed_operator(ebull_test_conn)
         iid = _seed_alert_instrument(ebull_test_conn)
-        _seed_coverage_status_event(
-            ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour"
-        )
+        _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
 
         client = _bind_test_client(ebull_test_conn)
         try:
@@ -1467,9 +1463,7 @@ class TestCoverageStatusDropsGetIntegration:
 
             app.dependency_overrides.pop(get_conn, None)
 
-    def test_get_excludes_non_drops(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_get_excludes_non_drops(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """Promotions (insufficient -> analysable) + first audit (NULL -> terminal)
         must not appear on strip."""
         _seed_operator(ebull_test_conn)
@@ -1501,14 +1495,10 @@ class TestCoverageStatusDropsGetIntegration:
 
             app.dependency_overrides.pop(get_conn, None)
 
-    def test_get_excludes_rows_older_than_7_days(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_get_excludes_rows_older_than_7_days(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         _seed_operator(ebull_test_conn)
         iid = _seed_alert_instrument(ebull_test_conn)
-        _seed_coverage_status_event(
-            ebull_test_conn, instrument_id=iid, changed_at_offset="-8 days"
-        )
+        _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-8 days")
 
         client = _bind_test_client(ebull_test_conn)
         try:
@@ -1521,9 +1511,7 @@ class TestCoverageStatusDropsGetIntegration:
 
             app.dependency_overrides.pop(get_conn, None)
 
-    def test_get_orders_by_event_id_desc(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_get_orders_by_event_id_desc(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """Runtime check: BIGSERIAL PK ordering is the race-safe ordering.
         Seed events out of changed_at order — assert list comes back event_id
         DESC (most-recent-inserted first)."""
@@ -1531,12 +1519,8 @@ class TestCoverageStatusDropsGetIntegration:
         iid = _seed_alert_instrument(ebull_test_conn)
         # e1 seeded first (lower event_id) but with a LATER changed_at offset
         # than e2 — if ordering were by changed_at, e1 would be first.
-        e1 = _seed_coverage_status_event(
-            ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour"
-        )
-        e2 = _seed_coverage_status_event(
-            ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours"
-        )
+        e1 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
+        e2 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours")
         client = _bind_test_client(ebull_test_conn)
         try:
             with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
@@ -1550,9 +1534,7 @@ class TestCoverageStatusDropsGetIntegration:
 
             app.dependency_overrides.pop(get_conn, None)
 
-    def test_get_caps_at_500(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_get_caps_at_500(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """Spec requires LIMIT 500 cap."""
         _seed_operator(ebull_test_conn)
         iid = _seed_alert_instrument(ebull_test_conn)
@@ -1580,22 +1562,15 @@ class TestCoverageStatusDropsGetIntegration:
 
             app.dependency_overrides.pop(get_conn, None)
 
-    def test_get_respects_cursor_on_unseen_count(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_get_respects_cursor_on_unseen_count(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         _seed_operator(ebull_test_conn)
         iid = _seed_alert_instrument(ebull_test_conn)
-        e1 = _seed_coverage_status_event(
-            ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours"
-        )
-        _seed_coverage_status_event(
-            ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour"
-        )
+        e1 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours")
+        _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
 
         with ebull_test_conn.cursor() as cur:
             cur.execute(
-                "UPDATE operators SET alerts_last_seen_coverage_event_id = %s "
-                "WHERE operator_id = %s",
+                "UPDATE operators SET alerts_last_seen_coverage_event_id = %s WHERE operator_id = %s",
                 (e1, _INT_OP_ID),
             )
         ebull_test_conn.commit()
@@ -1615,17 +1590,11 @@ class TestCoverageStatusDropsGetIntegration:
 
 @pytest.mark.skipif("not test_db_available()")
 class TestCoverageStatusDropsSeen:
-    def test_seen_advances_cursor_monotonically(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_seen_advances_cursor_monotonically(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         _seed_operator(ebull_test_conn)
         iid = _seed_alert_instrument(ebull_test_conn)
-        e1 = _seed_coverage_status_event(
-            ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours"
-        )
-        _seed_coverage_status_event(
-            ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour"
-        )
+        e1 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours")
+        _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
 
         client = _bind_test_client(ebull_test_conn)
         try:
@@ -1637,8 +1606,7 @@ class TestCoverageStatusDropsSeen:
             assert resp.status_code == 204
             with ebull_test_conn.cursor() as cur:
                 cur.execute(
-                    "SELECT alerts_last_seen_coverage_event_id FROM operators "
-                    "WHERE operator_id = %s",
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators WHERE operator_id = %s",
                     (_INT_OP_ID,),
                 )
                 row = cur.fetchone()
@@ -1655,8 +1623,7 @@ class TestCoverageStatusDropsSeen:
             assert resp.status_code == 204
             with ebull_test_conn.cursor() as cur:
                 cur.execute(
-                    "SELECT alerts_last_seen_coverage_event_id FROM operators "
-                    "WHERE operator_id = %s",
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators WHERE operator_id = %s",
                     (_INT_OP_ID,),
                 )
                 row = cur.fetchone()
@@ -1668,9 +1635,7 @@ class TestCoverageStatusDropsSeen:
 
             app.dependency_overrides.pop(get_conn, None)
 
-    def test_seen_empty_window_is_noop_and_preserves_null(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_seen_empty_window_is_noop_and_preserves_null(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """No in-window drops + NULL cursor → /seen does NOT materialize a cursor.
         Mirrors position-alerts /seen behaviour (no #395 divergence)."""
         _seed_operator(ebull_test_conn)
@@ -1685,8 +1650,7 @@ class TestCoverageStatusDropsSeen:
             assert resp.status_code == 204
             with ebull_test_conn.cursor() as cur:
                 cur.execute(
-                    "SELECT alerts_last_seen_coverage_event_id FROM operators "
-                    "WHERE operator_id = %s",
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators WHERE operator_id = %s",
                     (_INT_OP_ID,),
                 )
                 row = cur.fetchone()
@@ -1698,14 +1662,10 @@ class TestCoverageStatusDropsSeen:
 
             app.dependency_overrides.pop(get_conn, None)
 
-    def test_seen_clamps_to_in_window_max(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_seen_clamps_to_in_window_max(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         _seed_operator(ebull_test_conn)
         iid = _seed_alert_instrument(ebull_test_conn)
-        e1 = _seed_coverage_status_event(
-            ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour"
-        )
+        e1 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
         client = _bind_test_client(ebull_test_conn)
         try:
             with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
@@ -1716,8 +1676,7 @@ class TestCoverageStatusDropsSeen:
             assert resp.status_code == 204
             with ebull_test_conn.cursor() as cur:
                 cur.execute(
-                    "SELECT alerts_last_seen_coverage_event_id FROM operators "
-                    "WHERE operator_id = %s",
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators WHERE operator_id = %s",
                     (_INT_OP_ID,),
                 )
                 row = cur.fetchone()
@@ -1744,17 +1703,11 @@ class TestCoverageStatusDropsSeen:
 
 @pytest.mark.skipif("not test_db_available()")
 class TestCoverageStatusDropsDismissAll:
-    def test_dismiss_all_advances_to_max(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_dismiss_all_advances_to_max(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         _seed_operator(ebull_test_conn)
         iid = _seed_alert_instrument(ebull_test_conn)
-        _seed_coverage_status_event(
-            ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours"
-        )
-        e2 = _seed_coverage_status_event(
-            ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour"
-        )
+        _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours")
+        e2 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
 
         client = _bind_test_client(ebull_test_conn)
         try:
@@ -1763,8 +1716,7 @@ class TestCoverageStatusDropsDismissAll:
             assert resp.status_code == 204
             with ebull_test_conn.cursor() as cur:
                 cur.execute(
-                    "SELECT alerts_last_seen_coverage_event_id FROM operators "
-                    "WHERE operator_id = %s",
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators WHERE operator_id = %s",
                     (_INT_OP_ID,),
                 )
                 row = cur.fetchone()
@@ -1776,9 +1728,7 @@ class TestCoverageStatusDropsDismissAll:
 
             app.dependency_overrides.pop(get_conn, None)
 
-    def test_dismiss_all_empty_window_preserves_null_cursor(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_dismiss_all_empty_window_preserves_null_cursor(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         _seed_operator(ebull_test_conn)
         client = _bind_test_client(ebull_test_conn)
         try:
@@ -1787,8 +1737,7 @@ class TestCoverageStatusDropsDismissAll:
             assert resp.status_code == 204
             with ebull_test_conn.cursor() as cur:
                 cur.execute(
-                    "SELECT alerts_last_seen_coverage_event_id FROM operators "
-                    "WHERE operator_id = %s",
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators WHERE operator_id = %s",
                     (_INT_OP_ID,),
                 )
                 row = cur.fetchone()
@@ -1800,18 +1749,13 @@ class TestCoverageStatusDropsDismissAll:
 
             app.dependency_overrides.pop(get_conn, None)
 
-    def test_dismiss_all_does_not_regress_cursor(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_dismiss_all_does_not_regress_cursor(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         _seed_operator(ebull_test_conn)
         iid = _seed_alert_instrument(ebull_test_conn)
-        e1 = _seed_coverage_status_event(
-            ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour"
-        )
+        e1 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
         with ebull_test_conn.cursor() as cur:
             cur.execute(
-                "UPDATE operators SET alerts_last_seen_coverage_event_id = %s "
-                "WHERE operator_id = %s",
+                "UPDATE operators SET alerts_last_seen_coverage_event_id = %s WHERE operator_id = %s",
                 (e1 + 999, _INT_OP_ID),
             )
         ebull_test_conn.commit()
@@ -1823,8 +1767,7 @@ class TestCoverageStatusDropsDismissAll:
             assert resp.status_code == 204
             with ebull_test_conn.cursor() as cur:
                 cur.execute(
-                    "SELECT alerts_last_seen_coverage_event_id FROM operators "
-                    "WHERE operator_id = %s",
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators WHERE operator_id = %s",
                     (_INT_OP_ID,),
                 )
                 row = cur.fetchone()

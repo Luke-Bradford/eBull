@@ -387,9 +387,7 @@ def get_coverage_status_drops(
             {"op": operator_id},
         )
         op_row = cur.fetchone()
-        last_seen: int | None = (
-            op_row["alerts_last_seen_coverage_event_id"] if op_row else None
-        )
+        last_seen: int | None = op_row["alerts_last_seen_coverage_event_id"] if op_row else None
 
         # 2. Count unseen in-window drops (uncapped).
         cur.execute(
@@ -472,9 +470,7 @@ def mark_coverage_status_drops_seen(
     conn.commit()
 
 
-@router.post(
-    "/coverage-status-drops/dismiss-all", status_code=status.HTTP_204_NO_CONTENT
-)
+@router.post("/coverage-status-drops/dismiss-all", status_code=status.HTTP_204_NO_CONTENT)
 def dismiss_all_coverage_status_drops(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> None:

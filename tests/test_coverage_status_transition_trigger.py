@@ -26,19 +26,14 @@ def _fetch_one_scalar(
 
 
 class TestMigration047Structure:
-    def test_coverage_status_events_table_exists(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_coverage_status_events_table_exists(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         exists = _fetch_one_scalar(
             ebull_test_conn,
-            "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
-            "WHERE table_name = 'coverage_status_events')",
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'coverage_status_events')",
         )
         assert exists is True
 
-    def test_coverage_status_events_columns(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_coverage_status_events_columns(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         with ebull_test_conn.cursor() as cur:
             cur.execute(
                 "SELECT column_name, data_type, is_nullable "
@@ -55,9 +50,7 @@ class TestMigration047Structure:
         assert by_name["old_status"] == ("text", "YES")
         assert by_name["new_status"] == ("text", "YES")
 
-    def test_instrument_id_fk_present(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_instrument_id_fk_present(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         with ebull_test_conn.cursor() as cur:
             cur.execute(
                 """
@@ -75,13 +68,10 @@ class TestMigration047Structure:
         assert row is not None
         assert row[0] == 1
 
-    def test_drops_partial_index_on_event_id(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_drops_partial_index_on_event_id(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         indexdef = _fetch_one_scalar(
             ebull_test_conn,
-            "SELECT indexdef FROM pg_indexes "
-            "WHERE indexname = 'idx_coverage_status_events_drops'",
+            "SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_coverage_status_events_drops'",
         )
         assert indexdef is not None
         s = str(indexdef)
@@ -89,13 +79,10 @@ class TestMigration047Structure:
         assert "old_status = 'analysable'" in s
         assert "new_status IS DISTINCT FROM 'analysable'" in s
 
-    def test_drops_partial_index_on_changed_at(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_drops_partial_index_on_changed_at(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         indexdef = _fetch_one_scalar(
             ebull_test_conn,
-            "SELECT indexdef FROM pg_indexes "
-            "WHERE indexname = 'idx_coverage_status_events_drops_changed_at'",
+            "SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_coverage_status_events_drops_changed_at'",
         )
         assert indexdef is not None
         s = str(indexdef)
@@ -103,9 +90,7 @@ class TestMigration047Structure:
         assert "old_status = 'analysable'" in s
         assert "new_status IS DISTINCT FROM 'analysable'" in s
 
-    def test_operators_cursor_column_exists(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_operators_cursor_column_exists(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         with ebull_test_conn.cursor() as cur:
             cur.execute(
                 "SELECT data_type, is_nullable FROM information_schema.columns "
@@ -114,15 +99,11 @@ class TestMigration047Structure:
             )
             row = cur.fetchone()
         ebull_test_conn.commit()
-        assert row is not None, (
-            "alerts_last_seen_coverage_event_id column missing from operators"
-        )
+        assert row is not None, "alerts_last_seen_coverage_event_id column missing from operators"
         assert row[0] == "bigint"
         assert row[1] == "YES"
 
-    def test_trigger_exists_after_update_of_filings_status(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_trigger_exists_after_update_of_filings_status(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         with ebull_test_conn.cursor() as cur:
             cur.execute(
                 """
@@ -135,16 +116,12 @@ class TestMigration047Structure:
             )
             row = cur.fetchone()
         ebull_test_conn.commit()
-        assert row is not None, (
-            "trigger trg_coverage_filings_status_transition missing"
-        )
+        assert row is not None, "trigger trg_coverage_filings_status_transition missing"
         triggerdef = str(row[1])
         assert "AFTER UPDATE OF filings_status" in triggerdef
         assert "FOR EACH ROW" in triggerdef
 
-    def test_trigger_function_takes_advisory_lock(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_trigger_function_takes_advisory_lock(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         prosrc = _fetch_one_scalar(
             ebull_test_conn,
             "SELECT prosrc FROM pg_proc WHERE proname = 'log_coverage_status_transition'",
@@ -184,8 +161,7 @@ def _seed_instrument_with_coverage(
             (instrument_id, f"TRG{instrument_id}", f"Trig {instrument_id}"),
         )
         cur.execute(
-            "INSERT INTO coverage (instrument_id, coverage_tier, filings_status) "
-            "VALUES (%s, 3, NULL)",
+            "INSERT INTO coverage (instrument_id, coverage_tier, filings_status) VALUES (%s, 3, NULL)",
             (instrument_id,),
         )
         if initial_status is not None:
@@ -197,9 +173,7 @@ def _seed_instrument_with_coverage(
     return instrument_id
 
 
-def _count_events(
-    conn: psycopg.Connection[tuple], instrument_id: int | None = None
-) -> int:
+def _count_events(conn: psycopg.Connection[tuple], instrument_id: int | None = None) -> int:
     with conn.cursor() as cur:
         if instrument_id is None:
             cur.execute("SELECT COUNT(*) FROM coverage_status_events")
@@ -215,9 +189,7 @@ def _count_events(
 
 
 class TestTriggerBehaviour:
-    def test_null_to_analysable_logs_event(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_null_to_analysable_logs_event(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument_with_coverage(ebull_test_conn)  # filings_status NULL
         assert _count_events(ebull_test_conn, iid) == 0
 
@@ -231,8 +203,7 @@ class TestTriggerBehaviour:
         assert _count_events(ebull_test_conn, iid) == 1
         with ebull_test_conn.cursor() as cur:
             cur.execute(
-                "SELECT old_status, new_status FROM coverage_status_events "
-                "WHERE instrument_id = %s",
+                "SELECT old_status, new_status FROM coverage_status_events WHERE instrument_id = %s",
                 (iid,),
             )
             row = cur.fetchone()
@@ -241,9 +212,7 @@ class TestTriggerBehaviour:
         assert row[0] is None
         assert row[1] == "analysable"
 
-    def test_analysable_to_insufficient_logs_event(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_analysable_to_insufficient_logs_event(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument_with_coverage(ebull_test_conn, initial_status="analysable")
         baseline = _count_events(ebull_test_conn, iid)
 
@@ -256,9 +225,7 @@ class TestTriggerBehaviour:
 
         assert _count_events(ebull_test_conn, iid) == baseline + 1
 
-    def test_no_op_update_same_value_writes_nothing(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_no_op_update_same_value_writes_nothing(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument_with_coverage(ebull_test_conn, initial_status="analysable")
         baseline = _count_events(ebull_test_conn, iid)
 
@@ -295,9 +262,7 @@ class TestTriggerBehaviour:
 
         assert _count_events(ebull_test_conn, iid) == baseline
 
-    def test_update_of_unrelated_column_does_not_fire(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_update_of_unrelated_column_does_not_fire(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument_with_coverage(ebull_test_conn, initial_status="analysable")
         baseline = _count_events(ebull_test_conn, iid)
 
@@ -310,9 +275,7 @@ class TestTriggerBehaviour:
 
         assert _count_events(ebull_test_conn, iid) == baseline
 
-    def test_insert_with_filings_status_does_not_fire(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_insert_with_filings_status_does_not_fire(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """Documented scope limit: INSERT path not covered by trigger."""
         global _TRG_INSTRUMENT_ID_COUNTER
         _TRG_INSTRUMENT_ID_COUNTER += 1
@@ -325,17 +288,14 @@ class TestTriggerBehaviour:
                 (iid, f"INS{iid}", f"Insert {iid}"),
             )
             cur.execute(
-                "INSERT INTO coverage (instrument_id, coverage_tier, filings_status) "
-                "VALUES (%s, 3, 'unknown')",
+                "INSERT INTO coverage (instrument_id, coverage_tier, filings_status) VALUES (%s, 3, 'unknown')",
                 (iid,),
             )
         ebull_test_conn.commit()
 
         assert _count_events(ebull_test_conn, iid) == 0
 
-    def test_bulk_update_mixed_transitioning_and_static_rows(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_bulk_update_mixed_transitioning_and_static_rows(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid_a = _seed_instrument_with_coverage(ebull_test_conn, initial_status="analysable")
         iid_b = _seed_instrument_with_coverage(ebull_test_conn, initial_status="insufficient")
         baseline = _count_events(ebull_test_conn)
@@ -413,8 +373,7 @@ class TestConcurrentWriters:
             try:
                 with conn_b.cursor() as cur_b:
                     cur_b.execute(
-                        "UPDATE coverage SET filings_status = 'insufficient' "
-                        "WHERE instrument_id = %s",
+                        "UPDATE coverage SET filings_status = 'insufficient' WHERE instrument_id = %s",
                         (iid_b,),
                     )
                 conn_b.commit()
