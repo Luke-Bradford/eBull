@@ -427,7 +427,9 @@ class TestPersistPositionAlerts:
             with ebull_test_conn.transaction():
                 with ebull_test_conn.cursor() as cur:
                     cur.execute(
-                        "INSERT INTO position_alerts (instrument_id, alert_type, detail) VALUES (%s, 'sl_breach', 'first')",
+                        "INSERT INTO position_alerts "
+                        "(instrument_id, alert_type, detail) "
+                        "VALUES (%s, 'sl_breach', 'first')",
                         (iid,),
                     )
                     cur.execute(

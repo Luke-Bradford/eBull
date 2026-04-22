@@ -163,21 +163,24 @@ class TestMonitorPositionsJob:
     @patch(_SPIKE_PATCH, return_value=MagicMock(flagged=False))
     @patch(_RECORD_FINISH_PATCH)
     @patch(_RECORD_START_PATCH, return_value=1)
+    @patch("app.workers.scheduler.persist_position_alerts")
     @patch("app.workers.scheduler.check_position_health")
     @patch(_PSYCOPG_CONNECT_PATCH)
     def test_calls_check_position_health(
         self,
         mock_connect: MagicMock,
         mock_health: MagicMock,
+        mock_persist: MagicMock,
         mock_start: MagicMock,
         mock_finish: MagicMock,
         mock_spike: MagicMock,
     ) -> None:
         """monitor_positions_job must call check_position_health and set row_count."""
-        from app.services.position_monitor import MonitorResult
+        from app.services.position_monitor import MonitorResult, PersistStats
 
         fake_result = MonitorResult(positions_checked=3, alerts=())
         mock_health.return_value = fake_result
+        mock_persist.return_value = PersistStats(opened=0, resolved=0, unchanged=0)
 
         conn_ctx = MagicMock()
         conn_ctx.__enter__ = MagicMock(return_value=conn_ctx)
@@ -191,18 +194,20 @@ class TestMonitorPositionsJob:
     @patch(_SPIKE_PATCH, return_value=MagicMock(flagged=False))
     @patch(_RECORD_FINISH_PATCH)
     @patch(_RECORD_START_PATCH, return_value=1)
+    @patch("app.workers.scheduler.persist_position_alerts")
     @patch("app.workers.scheduler.check_position_health")
     @patch(_PSYCOPG_CONNECT_PATCH)
     def test_row_count_equals_positions_checked(
         self,
         mock_connect: MagicMock,
         mock_health: MagicMock,
+        mock_persist: MagicMock,
         mock_start: MagicMock,
         mock_finish: MagicMock,
         mock_spike: MagicMock,
     ) -> None:
         """tracker.row_count must equal result.positions_checked."""
-        from app.services.position_monitor import MonitorAlert, MonitorResult
+        from app.services.position_monitor import MonitorAlert, MonitorResult, PersistStats
 
         alert = MonitorAlert(
             instrument_id=1,
@@ -212,6 +217,7 @@ class TestMonitorPositionsJob:
         )
         fake_result = MonitorResult(positions_checked=5, alerts=(alert,))
         mock_health.return_value = fake_result
+        mock_persist.return_value = PersistStats(opened=0, resolved=0, unchanged=0)
 
         conn_ctx = MagicMock()
         conn_ctx.__enter__ = MagicMock(return_value=conn_ctx)

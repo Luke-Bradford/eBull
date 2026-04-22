@@ -57,7 +57,11 @@ from app.services.ops_monitor import (
 from app.services.order_client import execute_order
 from app.services.portfolio import run_portfolio_review
 from app.services.portfolio_sync import sync_portfolio
-from app.services.position_monitor import check_position_health
+from app.services.position_monitor import (
+    PersistStats,
+    check_position_health,
+    persist_position_alerts,
+)
 from app.services.refresh_cascade import (
     demote_to_rerank_needed,
     instrument_lock,
@@ -2129,15 +2133,31 @@ def monitor_positions_job() -> None:
     """Hourly position health check.
 
     Detects SL/TP breaches and thesis breaks between daily sync cycles.
-    Alerts are logged for now; future work may trigger out-of-cycle
-    EXIT recommendations or operator notifications.
+    Writes one row per breach ONSET to ``position_alerts`` (#396);
+    existing open episodes are resolved when the breach clears. Alerts
+    also logged for operator visibility via journalctl.
 
-    Read-only — does not place orders or modify positions.
+    Read-only with respect to orders — does not place orders or modify
+    positions. Writes only to ``position_alerts`` via
+    ``persist_position_alerts``.
     """
     with _tracked_job(JOB_MONITOR_POSITIONS) as tracker:
         try:
-            with psycopg.connect(settings.database_url) as conn:
+            with psycopg.connect(settings.database_url, autocommit=True) as conn:
                 result = check_position_health(conn)
+                # Writer has its own inner try/except so that a persist
+                # failure does NOT clobber the job's row_count with 0 —
+                # check_position_health succeeded, the tracked count reflects
+                # what was checked (spec: writer failure must preserve
+                # tracker.row_count = result.positions_checked).
+                try:
+                    stats = persist_position_alerts(conn, result)
+                except Exception:
+                    logger.error(
+                        "monitor_positions: persist_position_alerts failed",
+                        exc_info=True,
+                    )
+                    stats = PersistStats(opened=0, resolved=0, unchanged=0)
         except Exception:
             logger.error("monitor_positions: health check failed", exc_info=True)
             tracker.row_count = 0
@@ -2154,11 +2174,14 @@ def monitor_positions_job() -> None:
                     alert.instrument_id,
                     alert.detail,
                 )
-        else:
-            logger.info(
-                "monitor_positions: %d positions checked, no alerts",
-                result.positions_checked,
-            )
+
+        logger.info(
+            "monitor_positions: %d checked, episodes: +%d opened / -%d resolved / %d unchanged",
+            result.positions_checked,
+            stats.opened,
+            stats.resolved,
+            stats.unchanged,
+        )
 
 
 def fundamentals_sync() -> None:
