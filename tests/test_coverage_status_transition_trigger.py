@@ -357,3 +357,106 @@ class TestTriggerBehaviour:
 
         # Exactly one new event (for iid_a). iid_b was already 'insufficient'.
         assert _count_events(ebull_test_conn) == baseline + 1
+
+
+class TestConcurrentWriters:
+    def test_advisory_lock_serializes_commits_to_event_id_order(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """Two connections update different coverage rows. Second blocks on the
+        advisory lock until the first commits. event_id order matches commit
+        order — no way for a later-committing lower event_id to be silently
+        skipped by the dashboard cursor.
+
+        The false-positive guard is the `thread_b.is_alive()` assertion BEFORE
+        A commits: without the advisory lock, A and B touch different rows
+        (no row-level conflict) and B would have already finished by then.
+        """
+        import threading
+        import time
+
+        from tests.fixtures.ebull_test_db import test_database_url
+
+        iid_a = _seed_instrument_with_coverage(ebull_test_conn, initial_status="analysable")
+        iid_b = _seed_instrument_with_coverage(ebull_test_conn, initial_status="analysable")
+
+        # Clear baseline.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM coverage_status_events WHERE instrument_id IN (%s, %s)",
+                (iid_a, iid_b),
+            )
+        ebull_test_conn.commit()
+
+        url = test_database_url()
+
+        # Open conn A, begin txn, UPDATE iid_a — advisory lock acquired by
+        # trigger but txn NOT yet committed.
+        conn_a = psycopg.connect(url)
+        conn_a.autocommit = False
+        with conn_a.cursor() as cur_a:
+            cur_a.execute(
+                "UPDATE coverage SET filings_status = 'insufficient' WHERE instrument_id = %s",
+                (iid_a,),
+            )
+
+        # Open conn B. Short statement_timeout so the test fails loudly if the
+        # lock isn't acquired as expected.
+        conn_b = psycopg.connect(url)
+        conn_b.autocommit = False
+        with conn_b.cursor() as cur_b:
+            cur_b.execute("SET LOCAL statement_timeout = '3s'")
+
+        b_error: list[BaseException] = []
+
+        def _b_update() -> None:
+            try:
+                with conn_b.cursor() as cur_b:
+                    cur_b.execute(
+                        "UPDATE coverage SET filings_status = 'insufficient' "
+                        "WHERE instrument_id = %s",
+                        (iid_b,),
+                    )
+                conn_b.commit()
+            except BaseException as exc:  # noqa: BLE001
+                b_error.append(exc)
+
+        thread_b = threading.Thread(target=_b_update)
+        thread_b.start()
+
+        time.sleep(0.5)
+
+        # CRITICAL false-positive guard: prove B is actually blocked BEFORE A
+        # commits. Without the advisory lock, A and B hit different instrument
+        # rows (no row-level conflict) and B would have finished during the
+        # sleep — thread_b.is_alive() would be False.
+        assert thread_b.is_alive(), (
+            "advisory lock missing or not serializing: thread B finished before "
+            "A committed. Without the lock, A's and B's UPDATEs hit different "
+            "rows and race — B could commit first and its lower event_id would "
+            "be assigned later than A's higher event_id."
+        )
+
+        # Commit A — releases the advisory lock.
+        conn_a.commit()
+        conn_a.close()
+
+        thread_b.join(timeout=5)
+        assert not thread_b.is_alive(), "thread B did not finish within 5s after A committed"
+        if b_error:
+            raise b_error[0]
+        conn_b.close()
+
+        # Assert event_id order matches commit order.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT instrument_id, event_id FROM coverage_status_events "
+                "WHERE instrument_id IN (%s, %s) ORDER BY event_id",
+                (iid_a, iid_b),
+            )
+            rows = cur.fetchall()
+        ebull_test_conn.commit()
+        assert len(rows) == 2
+        assert rows[0][0] == iid_a, f"expected A ({iid_a}) first, got {rows}"
+        assert rows[1][0] == iid_b, f"expected B ({iid_b}) second, got {rows}"
+        assert rows[0][1] < rows[1][1]
