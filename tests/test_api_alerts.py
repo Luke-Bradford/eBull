@@ -1149,7 +1149,8 @@ def test_integration_position_alerts_dismiss_all_empty_window_existing_cursor(
     client = _bind_test_client(ebull_test_conn)
     try:
         with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
-            client.post("/alerts/position-alerts/dismiss-all")
+            resp = client.post("/alerts/position-alerts/dismiss-all")
+        assert resp.status_code == 204
         with ebull_test_conn.cursor() as cur:
             cur.execute(
                 "SELECT alerts_last_seen_position_alert_id FROM operators WHERE operator_id = %s",
