@@ -435,3 +435,38 @@ def get_coverage_status_drops(
         unseen_count=unseen_count,
         drops=[CoverageStatusDrop.model_validate(r) for r in rows],
     )
+
+
+@router.post("/coverage-status-drops/seen", status_code=status.HTTP_204_NO_CONTENT)
+def mark_coverage_status_drops_seen(
+    body: CoverageStatusDropsMarkSeenRequest,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> None:
+    operator_id = _resolve_operator(conn)
+    with conn.cursor() as cur:
+        # m.max_id IS NOT NULL guard preserves NULL cursor on empty window.
+        # Matches /alerts/position-alerts/seen (post-#395 correct shape) rather
+        # than guard /alerts/seen (pre-#395 divergent shape).
+        cur.execute(
+            """
+            UPDATE operators AS op
+            SET alerts_last_seen_coverage_event_id = GREATEST(
+                COALESCE(op.alerts_last_seen_coverage_event_id, 0),
+                LEAST(%(seen_through_event_id)s, m.max_id)
+            )
+            FROM (
+                SELECT MAX(event_id) AS max_id
+                FROM coverage_status_events
+                WHERE old_status = 'analysable'
+                  AND new_status IS DISTINCT FROM 'analysable'
+                  AND changed_at >= now() - INTERVAL '7 days'
+            ) AS m
+            WHERE op.operator_id = %(op)s
+              AND m.max_id IS NOT NULL
+            """,
+            {
+                "seen_through_event_id": body.seen_through_event_id,
+                "op": operator_id,
+            },
+        )
+    conn.commit()

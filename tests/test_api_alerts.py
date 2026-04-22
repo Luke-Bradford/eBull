@@ -1611,3 +1611,132 @@ class TestCoverageStatusDropsGetIntegration:
             from app.db import get_conn
 
             app.dependency_overrides.pop(get_conn, None)
+
+
+@pytest.mark.skipif("not test_db_available()")
+class TestCoverageStatusDropsSeen:
+    def test_seen_advances_cursor_monotonically(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        _seed_operator(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
+        e1 = _seed_coverage_status_event(
+            ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours"
+        )
+        _seed_coverage_status_event(
+            ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour"
+        )
+
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.post(
+                    "/alerts/coverage-status-drops/seen",
+                    json={"seen_through_event_id": e1},
+                )
+            assert resp.status_code == 204
+            with ebull_test_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators "
+                    "WHERE operator_id = %s",
+                    (_INT_OP_ID,),
+                )
+                row = cur.fetchone()
+            ebull_test_conn.commit()
+            assert row is not None
+            assert row[0] == e1
+
+            # Second call with smaller value — cursor does NOT regress.
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.post(
+                    "/alerts/coverage-status-drops/seen",
+                    json={"seen_through_event_id": 1},
+                )
+            assert resp.status_code == 204
+            with ebull_test_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators "
+                    "WHERE operator_id = %s",
+                    (_INT_OP_ID,),
+                )
+                row = cur.fetchone()
+            ebull_test_conn.commit()
+            assert row is not None
+            assert row[0] == e1
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_seen_empty_window_is_noop_and_preserves_null(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """No in-window drops + NULL cursor → /seen does NOT materialize a cursor.
+        Mirrors position-alerts /seen behaviour (no #395 divergence)."""
+        _seed_operator(ebull_test_conn)
+
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.post(
+                    "/alerts/coverage-status-drops/seen",
+                    json={"seen_through_event_id": 99999},
+                )
+            assert resp.status_code == 204
+            with ebull_test_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators "
+                    "WHERE operator_id = %s",
+                    (_INT_OP_ID,),
+                )
+                row = cur.fetchone()
+            ebull_test_conn.commit()
+            assert row is not None
+            assert row[0] is None
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_seen_clamps_to_in_window_max(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        _seed_operator(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
+        e1 = _seed_coverage_status_event(
+            ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour"
+        )
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.post(
+                    "/alerts/coverage-status-drops/seen",
+                    json={"seen_through_event_id": e1 + 999_999},
+                )
+            assert resp.status_code == 204
+            with ebull_test_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators "
+                    "WHERE operator_id = %s",
+                    (_INT_OP_ID,),
+                )
+                row = cur.fetchone()
+            ebull_test_conn.commit()
+            assert row is not None
+            assert row[0] == e1
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_seen_requires_positive_integer(self, client: TestClient) -> None:
+        _install_conn()
+        with patch(
+            "app.api.alerts.sole_operator_id",
+            return_value=UUID("00000000-0000-0000-0000-000000000001"),
+        ):
+            resp = client.post(
+                "/alerts/coverage-status-drops/seen",
+                json={"seen_through_event_id": 0},
+            )
+        assert resp.status_code == 422
