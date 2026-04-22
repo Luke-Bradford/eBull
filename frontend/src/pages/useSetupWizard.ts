@@ -80,7 +80,8 @@ export type WizardAction =
   | { type: "BROKER_SUBMIT_ERROR"; error: string; rows: BrokerCredentialView[] | null }
   | { type: "VALIDATION_START" }
   | { type: "VALIDATION_SUCCESS"; result: ValidateCredentialResponse }
-  | { type: "VALIDATION_ERROR"; error: string };
+  | { type: "VALIDATION_ERROR"; error: string }
+  | { type: "VALIDATION_CLEAR" };
 
 export function wizardReducer(state: WizardState, action: WizardAction): WizardState {
   switch (action.type) {
@@ -136,6 +137,11 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
       };
     case "VALIDATION_ERROR":
       return { ...state, validating: false, validationError: action.error };
+    case "VALIDATION_CLEAR":
+      // Clears prior result/error without touching `validating` — used
+      // when inputs change so the operator doesn't see a stale pass/fail
+      // banner against new values.
+      return { ...state, validation: null, validationError: null };
   }
 }
 
@@ -244,7 +250,17 @@ export function useSetupWizard({ onComplete }: UseSetupWizardOptions) {
           });
         }
 
-        const rows = await listBrokerCredentials();
+        // Refresh credRows post-save. Failure here must NOT flip the
+        // wizard into the error path — the saves already succeeded and
+        // retrying would 409 on the rows that are already persisted.
+        // Keep credRows at whatever pre-save state we had; the next
+        // step-2 mount (if any) will re-fetch.
+        let rows: BrokerCredentialView[] = state.credRows ?? [];
+        try {
+          rows = await listBrokerCredentials();
+        } catch {
+          // swallow — post-save read is best-effort
+        }
         dispatch({ type: "BROKER_SUBMIT_SUCCESS", rows });
 
         // First-run bootstrap: fire-and-forget universe sync, only on
@@ -277,6 +293,10 @@ export function useSetupWizard({ onComplete }: UseSetupWizardOptions) {
     onComplete();
   }, [onComplete]);
 
+  const clearValidation = useCallback((): void => {
+    dispatch({ type: "VALIDATION_CLEAR" });
+  }, []);
+
   const validateCredentials = useCallback(async (form: BrokerSubmitForm): Promise<void> => {
     dispatch({ type: "VALIDATION_START" });
     try {
@@ -302,5 +322,6 @@ export function useSetupWizard({ onComplete }: UseSetupWizardOptions) {
     skipBroker,
     completeWizard,
     validateCredentials,
+    clearValidation,
   };
 }

@@ -181,6 +181,19 @@ describe("wizardReducer — VALIDATION", () => {
     expect(s.validationError).toBe("Could not reach the validation endpoint.");
     expect(s.validating).toBe(false);
   });
+
+  it("VALIDATION_CLEAR: clears prior result + error, leaves validating flag alone", () => {
+    const seeded: WizardState = {
+      ...initialWizardState,
+      validating: true,
+      validation: VAL_OK,
+      validationError: "old",
+    };
+    const s = wizardReducer(seeded, { type: "VALIDATION_CLEAR" });
+    expect(s.validation).toBeNull();
+    expect(s.validationError).toBeNull();
+    expect(s.validating).toBe(true); // unchanged
+  });
 });
 
 describe("classifyBrokerSaveError", () => {

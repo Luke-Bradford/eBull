@@ -121,13 +121,15 @@ export function SetupPage(): JSX.Element {
   }, [wizard.state.step, wizard.loadCredentials]);
 
   // Clear stale validation result when inputs change or mode transitions.
-  // The reducer's VALIDATION_START also clears these, but this effect
-  // handles the case where the operator edits inputs without clicking
-  // Test connection.
+  // VALIDATION_START only fires on explicit Test-connection click, so
+  // typing into either key field without clicking Test would otherwise
+  // leave prior pass/fail banner on screen against stale values. This
+  // effect dispatches VALIDATION_CLEAR-equivalent via the hook's helper.
   useEffect(() => {
-    // No-op: validation auto-clears on VALIDATION_START dispatch. We
-    // don't need a separate effect since the reducer owns that state.
-    // Kept as an empty useEffect to mark the design intent visible.
+    if (wizard.state.validation !== null || wizard.state.validationError !== null) {
+      wizard.clearValidation();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [brokerApiKey, brokerUserKey, mode]);
 
   const phraseModal = useRecoveryPhraseModal({
