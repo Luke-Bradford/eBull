@@ -58,7 +58,6 @@ from app.services.order_client import execute_order
 from app.services.portfolio import run_portfolio_review
 from app.services.portfolio_sync import sync_portfolio
 from app.services.position_monitor import (
-    PersistStats,
     check_position_health,
     persist_position_alerts,
 )
@@ -2142,28 +2141,23 @@ def monitor_positions_job() -> None:
     ``persist_position_alerts``.
     """
     with _tracked_job(JOB_MONITOR_POSITIONS) as tracker:
-        try:
-            with psycopg.connect(settings.database_url, autocommit=True) as conn:
-                result = check_position_health(conn)
-                # Writer has its own inner try/except so that a persist
-                # failure does NOT clobber the job's row_count with 0 —
-                # check_position_health succeeded, the tracked count reflects
-                # what was checked (spec: writer failure must preserve
-                # tracker.row_count = result.positions_checked).
-                try:
-                    stats = persist_position_alerts(conn, result)
-                except Exception:
-                    logger.error(
-                        "monitor_positions: persist_position_alerts failed",
-                        exc_info=True,
-                    )
-                    stats = PersistStats(opened=0, resolved=0, unchanged=0)
-        except Exception:
-            logger.error("monitor_positions: health check failed", exc_info=True)
-            tracker.row_count = 0
-            return
-
-        tracker.row_count = result.positions_checked
+        # Connection lifecycle: one autocommit connection shared by
+        # check_position_health (read-only) and persist_position_alerts
+        # (owns its own conn.transaction()). autocommit=True is required so
+        # the writer's transaction block is the outer transaction (not a
+        # savepoint) — see prevention log entry "conn.transaction() savepoint
+        # release does not commit the outer transaction".
+        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+            result = check_position_health(conn)
+            # Report row_count BEFORE the risky persist call so that if the
+            # writer raises, _tracked_job still records the count of
+            # positions we actually checked alongside the failure row. The
+            # exception is NOT swallowed here: it propagates out of the
+            # `with _tracked_job(...)` block, which marks the job as
+            # failure in job_runs (prevention: silent success on partial
+            # failure hides broken alert ingestion from ops dashboards).
+            tracker.row_count = result.positions_checked
+            stats = persist_position_alerts(conn, result)
 
         if result.alerts:
             for alert in result.alerts:
