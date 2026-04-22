@@ -366,6 +366,9 @@ Seed helper caveat: the test DB's migrations populate `instruments` + `coverage`
 Append to `tests/test_coverage_status_transition_trigger.py`:
 
 ```python
+_TRG_INSTRUMENT_ID_COUNTER = 5000  # isolated from _PA_INSTRUMENT_ID_COUNTER (1000+)
+
+
 def _seed_instrument_with_coverage(
     conn: psycopg.Connection[tuple],
     *,
@@ -373,35 +376,29 @@ def _seed_instrument_with_coverage(
 ) -> int:
     """Insert one tradable instrument + its coverage row; return instrument_id.
 
+    instruments.instrument_id is caller-supplied BIGINT PK (no sequence) per
+    sql/001_init.sql. Module-level counter guarantees unique IDs across tests.
+
     initial_status=None leaves coverage.filings_status NULL (pre-audit). Otherwise
-    the coverage row lands with that status (via UPDATE after INSERT — see below
-    for why INSERT-direct does not fire the trigger).
+    the coverage row lands with that status (via UPDATE after INSERT — trigger
+    does NOT fire on INSERT, so first UPDATE writes the first event).
     """
+    global _TRG_INSTRUMENT_ID_COUNTER
+    _TRG_INSTRUMENT_ID_COUNTER += 1
+    instrument_id = _TRG_INSTRUMENT_ID_COUNTER
+
     with conn.cursor() as cur:
         cur.execute(
-            """
-            INSERT INTO instruments (symbol, name, instrument_type, is_tradable)
-            VALUES ('TRG_' || nextval('instruments_instrument_id_seq')::text,
-                    'Trigger test instrument', 'STOCK', TRUE)
-            RETURNING instrument_id
-            """
+            "INSERT INTO instruments (instrument_id, symbol, company_name, currency, is_tradable) "
+            "VALUES (%s, %s, %s, 'USD', TRUE)",
+            (instrument_id, f"TRG{instrument_id}", f"Trig {instrument_id}"),
         )
-        row = cur.fetchone()
-        assert row is not None
-        instrument_id = int(row[0])
-
-        # INSERT the coverage row with filings_status NULL (mirrors seed_coverage
-        # behaviour). Trigger does NOT fire on INSERT — this is deliberate per
-        # spec scope.
         cur.execute(
             "INSERT INTO coverage (instrument_id, coverage_tier, filings_status) "
             "VALUES (%s, 3, NULL)",
             (instrument_id,),
         )
         if initial_status is not None:
-            # Second step: UPDATE to initial_status. This fires the trigger, so
-            # tests that want a clean slate must TRUNCATE coverage_status_events
-            # after seeding. Callers responsible.
             cur.execute(
                 "UPDATE coverage SET filings_status = %s WHERE instrument_id = %s",
                 (initial_status, instrument_id),
@@ -516,20 +513,16 @@ class TestTriggerBehaviour:
 
     def test_insert_with_filings_status_does_not_fire(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """Documented scope limit: INSERT path not covered by trigger."""
-        with ebull_test_conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO instruments (symbol, name, instrument_type, is_tradable)
-                VALUES ('TRG_INS_' || nextval('instruments_instrument_id_seq')::text,
-                        'Insert test', 'STOCK', TRUE)
-                RETURNING instrument_id
-                """
-            )
-            row = cur.fetchone()
-        assert row is not None
-        iid = int(row[0])
+        global _TRG_INSTRUMENT_ID_COUNTER
+        _TRG_INSTRUMENT_ID_COUNTER += 1
+        iid = _TRG_INSTRUMENT_ID_COUNTER
 
         with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO instruments (instrument_id, symbol, company_name, currency, is_tradable) "
+                "VALUES (%s, %s, %s, 'USD', TRUE)",
+                (iid, f"INS{iid}", f"Insert {iid}"),
+            )
             cur.execute(
                 "INSERT INTO coverage (instrument_id, coverage_tier, filings_status) "
                 "VALUES (%s, 3, 'unknown')",
@@ -659,16 +652,29 @@ class TestConcurrentWriters:
         thread_b = threading.Thread(target=_b_update)
         thread_b.start()
 
-        # Give B time to reach the lock wait.
+        # Give B time to reach the advisory lock wait.
         import time
 
         time.sleep(0.5)
+
+        # CRITICAL false-positive guard: prove B is actually blocked BEFORE A
+        # commits. Without the advisory lock, B would have already finished
+        # (different instrument_id → no row-level conflict) and thread_b would
+        # not be alive here. This assertion is what makes the test actually
+        # prove the lock is doing its job.
+        assert thread_b.is_alive(), (
+            "advisory lock missing or not serializing: thread B finished before "
+            "A committed. Without the lock, A's and B's UPDATEs hit different "
+            "rows and race — B could commit first and its lower event_id would "
+            "be assigned later than A's higher event_id."
+        )
 
         # Commit A — releases the advisory lock.
         conn_a.commit()
         conn_a.close()
 
         thread_b.join(timeout=5)
+        assert not thread_b.is_alive(), "thread B did not finish within 5s after A committed"
         if b_error:
             raise b_error[0]
         conn_b.close()
@@ -862,7 +868,7 @@ class TestCoverageStatusDropsGetIntegration:
         self, ebull_test_conn: psycopg.Connection[tuple]
     ) -> None:
         _seed_operator(ebull_test_conn)
-        iid = _seed_instrument(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
         _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
 
         client = _bind_test_client(ebull_test_conn)
@@ -887,7 +893,7 @@ class TestCoverageStatusDropsGetIntegration:
         """Promotions (insufficient -> analysable) + first audit (NULL -> terminal)
         must not appear on strip."""
         _seed_operator(ebull_test_conn)
-        iid = _seed_instrument(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
         # Promotion — excluded.
         _seed_coverage_status_event(
             ebull_test_conn, instrument_id=iid, old_status="insufficient", new_status="analysable"
@@ -917,7 +923,7 @@ class TestCoverageStatusDropsGetIntegration:
         self, ebull_test_conn: psycopg.Connection[tuple]
     ) -> None:
         _seed_operator(ebull_test_conn)
-        iid = _seed_instrument(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
         _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-8 days")
 
         client = _bind_test_client(ebull_test_conn)
@@ -931,11 +937,71 @@ class TestCoverageStatusDropsGetIntegration:
 
             app.dependency_overrides.pop(get_conn, None)
 
+    def test_get_orders_by_event_id_desc(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """Runtime check: BIGSERIAL PK ordering is the race-safe ordering.
+        Seed events out of changed_at order — assert list comes back event_id
+        DESC (most-recent-inserted first)."""
+        _seed_operator(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
+        # e1 seeded first (lower event_id) but with a LATER changed_at offset
+        # than e2 — if ordering were by changed_at, e1 would be first.
+        e1 = _seed_coverage_status_event(
+            ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour"
+        )
+        e2 = _seed_coverage_status_event(
+            ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours"
+        )
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.get("/alerts/coverage-status-drops")
+            body = resp.json()
+            event_ids = [d["event_id"] for d in body["drops"]]
+            # event_id DESC: e2 > e1 numerically (e2 inserted second), so e2 first.
+            assert event_ids == [e2, e1]
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_get_caps_at_500(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """Spec requires LIMIT 500 cap."""
+        _seed_operator(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
+        # Bulk-insert 505 in-window drop events via a single SQL.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO coverage_status_events (instrument_id, old_status, new_status, changed_at)
+                SELECT %s, 'analysable', 'insufficient', now() - (s || ' seconds')::interval
+                FROM generate_series(1, 505) s
+                """,
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.get("/alerts/coverage-status-drops")
+            body = resp.json()
+            # List capped at 500; unseen_count uncapped.
+            assert len(body["drops"]) == 500
+            assert body["unseen_count"] == 505
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
     def test_get_respects_cursor_on_unseen_count(
         self, ebull_test_conn: psycopg.Connection[tuple]
     ) -> None:
         _seed_operator(ebull_test_conn)
-        iid = _seed_instrument(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
         e1 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours")
         _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
 
@@ -1132,7 +1198,7 @@ class TestCoverageStatusDropsSeen:
         self, ebull_test_conn: psycopg.Connection[tuple]
     ) -> None:
         _seed_operator(ebull_test_conn)
-        iid = _seed_instrument(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
         e1 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours")
         _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
 
@@ -1212,7 +1278,7 @@ class TestCoverageStatusDropsSeen:
         self, ebull_test_conn: psycopg.Connection[tuple]
     ) -> None:
         _seed_operator(ebull_test_conn)
-        iid = _seed_instrument(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
         e1 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
         # Request far beyond the in-window max — cursor clamps to e1.
         client = _bind_test_client(ebull_test_conn)
@@ -1327,7 +1393,7 @@ class TestCoverageStatusDropsDismissAll:
         self, ebull_test_conn: psycopg.Connection[tuple]
     ) -> None:
         _seed_operator(ebull_test_conn)
-        iid = _seed_instrument(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
         _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours")
         e2 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
 
@@ -1379,7 +1445,7 @@ class TestCoverageStatusDropsDismissAll:
         self, ebull_test_conn: psycopg.Connection[tuple]
     ) -> None:
         _seed_operator(ebull_test_conn)
-        iid = _seed_instrument(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
         e1 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
         # Pre-advance cursor past e1.
         with ebull_test_conn.cursor() as cur:
