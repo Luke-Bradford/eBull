@@ -1,5 +1,9 @@
 import { apiFetch } from "@/api/client";
-import type { GuardRejectionsResponse } from "@/api/types";
+import type {
+  CoverageStatusDropsResponse,
+  GuardRejectionsResponse,
+  PositionAlertsResponse,
+} from "@/api/types";
 
 /**
  * Fetchers for the alerts endpoints.
@@ -32,4 +36,48 @@ export function markAlertsSeen(seenThroughDecisionId: number): Promise<void> {
 
 export function dismissAllAlerts(): Promise<void> {
   return apiFetch<void>("/alerts/dismiss-all", { method: "POST" });
+}
+
+// --- #396/#401 position-alert endpoints -------------------------------------
+
+export function fetchPositionAlerts(): Promise<PositionAlertsResponse> {
+  return apiFetch<PositionAlertsResponse>("/alerts/position-alerts");
+}
+
+export function markPositionAlertsSeen(
+  seenThroughPositionAlertId: number,
+): Promise<void> {
+  return apiFetch<void>("/alerts/position-alerts/seen", {
+    method: "POST",
+    body: JSON.stringify({
+      seen_through_position_alert_id: seenThroughPositionAlertId,
+    }),
+  });
+}
+
+export function dismissAllPositionAlerts(): Promise<void> {
+  return apiFetch<void>("/alerts/position-alerts/dismiss-all", {
+    method: "POST",
+  });
+}
+
+// --- #397/#402 coverage-status-drops endpoints ------------------------------
+
+export function fetchCoverageStatusDrops(): Promise<CoverageStatusDropsResponse> {
+  return apiFetch<CoverageStatusDropsResponse>("/alerts/coverage-status-drops");
+}
+
+export function markCoverageStatusDropsSeen(
+  seenThroughEventId: number,
+): Promise<void> {
+  return apiFetch<void>("/alerts/coverage-status-drops/seen", {
+    method: "POST",
+    body: JSON.stringify({ seen_through_event_id: seenThroughEventId }),
+  });
+}
+
+export function dismissAllCoverageStatusDrops(): Promise<void> {
+  return apiFetch<void>("/alerts/coverage-status-drops/dismiss-all", {
+    method: "POST",
+  });
 }
