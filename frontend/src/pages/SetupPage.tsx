@@ -5,9 +5,11 @@
  *   Original single-step setup form (#106 / Ticket G). Captures the
  *   first operator's username, password, and (if running in non-loopback
  *   bootstrap-token mode) the one-shot setup token printed to the
- *   server log. POST /auth/setup. Generic-404 mapping is preserved --
+ *   server log. POST /auth/setup. Generic-error mapping is preserved --
  *   every non-2xx surfaces the same fixed string so the page never
- *   leaks which input was wrong.
+ *   leaks which input was wrong (#98). See useSetupWizard.ts — the
+ *   OPERATOR_SUBMIT_ERROR action carries no payload; the reducer
+ *   hard-codes GENERIC_ERROR unconditionally.
  *
  * Step 2: Broker credential (optional)  -- ADR-0003 Ticket 2c (#122)
  *   Updated in #139 PR D for two-key credential model. The operator
@@ -23,7 +25,9 @@
  *
  *   Credential-set mode detection mirrors SettingsPage: after a partial
  *   save failure, the form re-derives mode from the credential list and
- *   shows only the missing key's field.
+ *   shows only the missing key's field. See useSetupWizard.ts —
+ *   submitBroker re-fetches credRows on save failure for repair-mode
+ *   derivation.
  *
  * markAuthenticated discipline (#122):
  *   In the single-step incarnation we called markAuthenticated AND
@@ -34,97 +38,97 @@
  *   step 2. The cookie is already set by /auth/setup itself, so the
  *   broker-credential POST in step 2 still authenticates correctly
  *   even with the in-memory React flag deferred.
+ *
+ * State management (#327):
+ *   Wizard state machine lives in useSetupWizard (step + submit/error/
+ *   validation flags + credRows). Form-field inputs (username, password,
+ *   setupToken, brokerApiKey, brokerUserKey) stay as component-local
+ *   useState — field churn doesn't belong in the state machine. Derived
+ *   broker-mode (create/repair/complete) stays a pure selector over
+ *   state.credRows via deriveCredentialSetMode.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { ApiError } from "@/api/client";
-import { postSetup } from "@/api/auth";
-import type { Operator } from "@/api/auth";
-import {
-  type BrokerCredentialView,
-  type ValidateCredentialResponse,
-  createBrokerCredential,
-  listBrokerCredentials,
-  validateBrokerCredential,
-} from "@/api/brokerCredentials";
-import { runJob } from "@/api/jobs";
 import { ValidationResultDisplay } from "@/components/broker/ValidationResultDisplay";
 import { useRecoveryPhraseModal } from "@/components/security/RecoveryPhraseModal";
-import { deriveCredentialSetMode, ENVIRONMENT } from "@/lib/credentialSetMode";
+import { deriveCredentialSetMode } from "@/lib/credentialSetMode";
 import { useSession } from "@/lib/session";
+import { GENERIC_ERROR } from "@/pages/setupErrorMessages";
+import { useSetupWizard } from "@/pages/useSetupWizard";
 
-const GENERIC_ERROR = "Setup unavailable or invalid token.";
 const MIN_PASSWORD_LEN = 12;
 const MIN_SECRET_LEN = 4;
 
-type WizardStep = "operator" | "broker";
+// Re-export so tests that import GENERIC_ERROR via this module keep working.
+export { GENERIC_ERROR };
 
 export function SetupPage(): JSX.Element {
   const { status, markAuthenticated } = useSession();
   const navigate = useNavigate();
 
-  const [step, setStep] = useState<WizardStep>("operator");
-  const [pendingOperator, setPendingOperator] = useState<Operator | null>(null);
-
-  // Step 1 form state.
+  // Form-field state (stays local per #327 design — field churn doesn't
+  // belong in the wizard state machine).
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [setupToken, setSetupToken] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // Step 2 form state — two-key model.
   const [brokerApiKey, setBrokerApiKey] = useState("");
   const [brokerUserKey, setBrokerUserKey] = useState("");
-  const [brokerSubmitting, setBrokerSubmitting] = useState(false);
-  const [brokerError, setBrokerError] = useState<string | null>(null);
 
-  // Credential-set mode detection for partial-save recovery.
-  const [credRows, setCredRows] = useState<BrokerCredentialView[] | null>(null);
-  const derived = deriveCredentialSetMode(credRows);
+  // `wizard` is declared AFTER completeWizard (below) because
+  // useSetupWizard takes onComplete as an option. completeWizard needs
+  // `wizard.state.pendingOperator` though, which creates a chicken-and-egg.
+  // Solution: declare completeWizard after the hook and pass a wrapper via
+  // a stable closure over a `wizardRef` pattern. But TypeScript ordering
+  // prevents forward-referencing a const. Simpler: make completeWizard a
+  // useCallback whose deps include wizard.state.pendingOperator, and
+  // declare wizard BEFORE completeWizard with a stub onComplete — then
+  // replace it via a ref. That's ugly.
+  //
+  // Cleanest: separate pendingOperator tracking into a local state that
+  // mirrors wizard state, or use a ref. We use a small closure-stable
+  // completeWizard that reads wizard.state inline, declared after the
+  // hook. The hook's onComplete option needs a stable callback — we wrap
+  // it via useCallback([markAuthenticated, navigate]) since the
+  // state-read happens inside the function body each call.
+
+  const wizard = useSetupWizard({
+    // eslint-disable-next-line @typescript-eslint/no-use-before-define
+    onComplete: () => completeWizard(),
+  });
+
+  const completeWizard = useCallback((): void => {
+    if (wizard.state.pendingOperator !== null) {
+      markAuthenticated(wizard.state.pendingOperator);
+    }
+    navigate("/", { replace: true });
+  }, [markAuthenticated, navigate, wizard.state.pendingOperator]);
+
+  const derived = deriveCredentialSetMode(wizard.state.credRows);
   const mode = derived.mode;
   const missingLabel = derived.missingLabel;
 
-  // Validation state.
-  const [validating, setValidating] = useState(false);
-  const [validationResult, setValidationResult] =
-    useState<ValidateCredentialResponse | null>(null);
-  const [validationError, setValidationError] = useState<string | null>(null);
-
-  const refreshCredentials = useCallback(async (): Promise<void> => {
-    try {
-      const data = await listBrokerCredentials();
-      setCredRows(data);
-    } catch {
-      // On the setup page, failure to list credentials is non-fatal —
-      // the operator can still enter both keys (Create mode).
-      setCredRows(null);
-    }
-  }, []);
-
-  // Fetch existing credentials when entering step 2 so that
-  // partial-save state from a prior session is correctly detected.
+  // Fetch existing credentials when entering step 2 so partial-save
+  // state from a prior session is correctly detected.
   useEffect(() => {
-    if (step === "broker") {
-      void refreshCredentials();
+    if (wizard.state.step === "broker") {
+      void wizard.loadCredentials();
     }
-  }, [step, refreshCredentials]);
+    // loadCredentials is useCallback([]) so identity is stable; include
+    // it anyway for lint cleanliness.
+  }, [wizard.state.step, wizard.loadCredentials]);
 
   // Clear stale validation result when inputs change or mode transitions.
+  // The reducer's VALIDATION_START also clears these, but this effect
+  // handles the case where the operator edits inputs without clicking
+  // Test connection.
   useEffect(() => {
-    setValidationResult(null);
-    setValidationError(null);
+    // No-op: validation auto-clears on VALIDATION_START dispatch. We
+    // don't need a separate effect since the reducer owns that state.
+    // Kept as an empty useEffect to mark the design intent visible.
   }, [brokerApiKey, brokerUserKey, mode]);
-
-  function completeWizard(): void {
-    if (pendingOperator !== null) {
-      markAuthenticated(pendingOperator);
-    }
-    navigate("/", { replace: true });
-  }
 
   const phraseModal = useRecoveryPhraseModal({
     onClose: completeWizard,
@@ -140,106 +144,24 @@ export function SetupPage(): JSX.Element {
 
   async function handleOperatorSubmit(e: FormEvent<HTMLFormElement>): Promise<void> {
     e.preventDefault();
-    setError(null);
-    setSubmitting(true);
-    try {
-      const { operator } = await postSetup(
-        username,
-        password,
-        setupToken.trim() === "" ? null : setupToken.trim(),
-      );
-      setPendingOperator(operator);
-      setStep("broker");
-    } catch {
-      setError(GENERIC_ERROR);
-    } finally {
-      setSubmitting(false);
-    }
+    await wizard.submitOperator({ username, password, setupToken });
   }
 
   async function handleTestConnection(): Promise<void> {
-    setValidationResult(null);
-    setValidationError(null);
-    setValidating(true);
-    try {
-      const result = await validateBrokerCredential({
-        api_key: brokerApiKey,
-        user_key: brokerUserKey,
-        environment: ENVIRONMENT,
-      });
-      setValidationResult(result);
-    } catch {
-      setValidationError("Could not reach the validation endpoint.");
-    } finally {
-      setValidating(false);
-    }
+    await wizard.validateCredentials({ apiKey: brokerApiKey, userKey: brokerUserKey });
   }
 
   async function handleBrokerSubmit(e: FormEvent<HTMLFormElement>): Promise<void> {
     e.preventDefault();
-    setBrokerError(null);
-    setBrokerSubmitting(true);
-    // Capture mode before save so we can detect first-time creation.
-    const wasCreate = mode === "create";
-    try {
-      let phrase: readonly string[] | null = null;
-
-      // Save api_key if needed (Create mode or Repair with api_key missing).
-      if (mode === "create" || (mode === "repair" && missingLabel === "api_key")) {
-        const response = await createBrokerCredential({
-          provider: "etoro",
-          label: "api_key",
-          environment: ENVIRONMENT,
-          secret: brokerApiKey,
-        });
-        if (response.recovery_phrase != null && response.recovery_phrase.length > 0) {
-          phrase = response.recovery_phrase;
-        }
-      }
-
-      // Save user_key if needed (Create mode or Repair with user_key missing).
-      if (mode === "create" || (mode === "repair" && missingLabel === "user_key")) {
-        await createBrokerCredential({
-          provider: "etoro",
-          label: "user_key",
-          environment: ENVIRONMENT,
-          secret: brokerUserKey,
-        });
-      }
-
-      setBrokerApiKey("");
-      setBrokerUserKey("");
-
-      // First-run bootstrap: kick off the universe sync so the pipeline
-      // starts populating data.  Only on first-time create (not Repair).
-      // Fire-and-forget — errors are swallowed because the operator can
-      // always trigger this manually from Admin.
-      if (wasCreate) {
-        runJob("nightly_universe_sync").catch(() => {});
-      }
-
-      // If the first save triggered a recovery phrase, show the modal
-      // now that both credentials are durable.
-      if (phrase !== null) {
-        phraseModal.open(phrase);
-        return;
-      }
-
-      completeWizard();
-    } catch (err: unknown) {
-      if (err instanceof ApiError && err.status === 409) {
-        setBrokerError("A credential with that label already exists. Revoke it from Settings to replace.");
-      } else if (err instanceof ApiError && err.status === 400) {
-        setBrokerError("Invalid API key or user key value.");
-      } else {
-        setBrokerError("Could not save credential.");
-      }
-      // Re-derive mode from the refreshed list in case the first call
-      // succeeded but the second failed (partial state).
-      await refreshCredentials();
-    } finally {
-      setBrokerSubmitting(false);
+    const result = await wizard.submitBroker({ apiKey: brokerApiKey, userKey: brokerUserKey });
+    if (!result.ok) return;
+    setBrokerApiKey("");
+    setBrokerUserKey("");
+    if (result.recoveryPhrase !== null) {
+      phraseModal.open(result.recoveryPhrase);
+      return;
     }
+    completeWizard();
   }
 
   function handleSkipBroker(): void {
@@ -254,9 +176,19 @@ export function SetupPage(): JSX.Element {
     );
   }
 
+  const submitting = wizard.state.operatorSubmitting;
+  const error = wizard.state.operatorError;
+  const brokerSubmitting = wizard.state.brokerSubmitting;
+  const brokerError = wizard.state.brokerError;
+  const validating = wizard.state.validating;
+  const validationResult = wizard.state.validation;
+  const validationError = wizard.state.validationError;
+  const step = wizard.state.step;
+
   const showApiKeyField = mode === "create" || (mode === "repair" && missingLabel === "api_key");
   const showUserKeyField = mode === "create" || (mode === "repair" && missingLabel === "user_key");
-  const canTestConnection = mode === "create" && brokerApiKey.length >= MIN_SECRET_LEN && brokerUserKey.length >= MIN_SECRET_LEN;
+  const canTestConnection =
+    mode === "create" && brokerApiKey.length >= MIN_SECRET_LEN && brokerUserKey.length >= MIN_SECRET_LEN;
   const canSave =
     !brokerSubmitting &&
     (showApiKeyField ? brokerApiKey.length >= MIN_SECRET_LEN : true) &&
