@@ -1,15 +1,26 @@
 /**
  * Tests for SetupPage 2-step wizard (#122 / ADR-0003 Ticket 2c,
- * updated #139 PR D for two-key credential model).
+ * updated #139 PR D for two-key credential model, trimmed #327 for
+ * state-machine extraction into useSetupWizard).
  *
- * Scope:
- *   - Step 1 creates the operator (unchanged from #122).
- *   - Step 2 shows two-key form (API key + User key), no label field.
- *   - Two sequential createBrokerCredential calls on save.
- *   - "Skip for now" completes the wizard with no broker call.
- *   - Recovery phrase modal flow (first-save lazy-gen).
- *   - Partial-save recovery (first key saved, second failed → Repair).
- *   - markAuthenticated called exactly once, at wizard completion.
+ * Scope (integration-level — multi-step UX that reducer unit tests
+ * cannot cover):
+ *   1. Happy-path save — both credential POSTs + markAuthenticated +
+ *      nightly_universe_sync fire.
+ *   2. Happy-path skip — Skip completes wizard, no broker POST, no
+ *      universe-sync call.
+ *   3. Phrase modal — recovery_phrase response opens modal, operator
+ *      passes challenge, markAuthenticated fires.
+ *   4. Confirm-cancel gate — Cancel during phrase modal routes through
+ *      confirm dialog, "Close anyway" completes wizard.
+ *   5. Repair mode — first save partial-fails, UI re-derives to repair
+ *      mode with only the missing-key field, Skip still available.
+ *   6. Already-complete branch — step 2 opens with both credRows
+ *      present, UI shows Continue button, click completes wizard.
+ *
+ * Reducer + hook-level behaviour (GENERIC_ERROR mapping, classifier
+ * fixed strings, runJob fire-and-forget swallowing, credRows fallback
+ * on list error) is covered by useSetupWizard.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
@@ -25,7 +36,6 @@ import {
 } from "@/api/brokerCredentials";
 import { postSetup } from "@/api/auth";
 import type { Operator } from "@/api/auth";
-import { ApiError } from "@/api/client";
 import { runJob } from "@/api/jobs";
 import { useSession } from "@/lib/session";
 
@@ -90,6 +100,10 @@ function makeRow(overrides: Partial<BrokerCredentialView> = {}): BrokerCredentia
 
 function apiKeyRow(): BrokerCredentialView {
   return makeRow({ id: "aaaa-1111", label: "api_key", last_four: "aaaa" });
+}
+
+function userKeyRow(): BrokerCredentialView {
+  return makeRow({ id: "bbbb-2222", label: "user_key", last_four: "bbbb" });
 }
 
 function withPhrase(): CreateBrokerCredentialResponse {
@@ -159,63 +173,11 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-// ---------------------------------------------------------------------------
-// Step 1 (operator) — unchanged from #122
-// ---------------------------------------------------------------------------
-
-describe("SetupPage — step 1 (operator)", () => {
-  it("surfaces the generic error and stays on step 1 when /auth/setup fails", async () => {
-    mockedPostSetup.mockRejectedValueOnce(new ApiError(404, "nope"));
-    render(<SetupPage />);
-    await completeStep1();
-    expect(
-      await screen.findByText(/Setup unavailable or invalid token/i),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Create operator/i })).toBeInTheDocument();
-    expect(markAuthenticatedMock).not.toHaveBeenCalled();
-    expect(navigateMock).not.toHaveBeenCalled();
-  });
-
-  it("advances to step 2 on success WITHOUT calling markAuthenticated yet", async () => {
-    mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
-    render(<SetupPage />);
-    await completeStep1();
-    expect(
-      await screen.findByRole("button", { name: /Save credentials/i }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Skip for now/i })).toBeInTheDocument();
-    // Two-key fields visible.
-    expect(screen.getByLabelText("API key")).toBeInTheDocument();
-    expect(screen.getByLabelText("User key")).toBeInTheDocument();
-    expect(markAuthenticatedMock).not.toHaveBeenCalled();
-    expect(navigateMock).not.toHaveBeenCalled();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Step 2 (broker, optional) — updated for two-key model
-// ---------------------------------------------------------------------------
-
-describe("SetupPage — step 2 (broker, optional)", () => {
-  it("'Skip for now' completes the wizard with no broker call", async () => {
-    const user = userEvent.setup();
-    mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
-    render(<SetupPage />);
-    await completeStep1();
-    await screen.findByRole("button", { name: /Skip for now/i });
-
-    await user.click(screen.getByRole("button", { name: /Skip for now/i }));
-
-    expect(mockedCreate).not.toHaveBeenCalled();
-    expect(markAuthenticatedMock).toHaveBeenCalledTimes(1);
-    expect(markAuthenticatedMock).toHaveBeenCalledWith(OPERATOR);
-    expect(navigateMock).toHaveBeenCalledWith("/", { replace: true });
-  });
-
-  it("creates both api_key and user_key rows on save", async () => {
+describe("SetupPage — integration", () => {
+  it("happy-path save: creates both credentials, fires universe-sync, completes wizard", async () => {
     mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
     mockedCreate
-      .mockResolvedValueOnce(withoutPhrase())  // api_key
+      .mockResolvedValueOnce(withoutPhrase()) // api_key
       .mockResolvedValueOnce(withoutPhrase()); // user_key
 
     render(<SetupPage />);
@@ -237,16 +199,38 @@ describe("SetupPage — step 2 (broker, optional)", () => {
       environment: "demo",
       secret: "test-user-key",
     });
-    // Wizard completes after both saves.
-    expect(markAuthenticatedMock).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(mockedRunJob).toHaveBeenCalledWith("nightly_universe_sync");
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => {
+      expect(markAuthenticatedMock).toHaveBeenCalledTimes(1);
+    });
+    expect(markAuthenticatedMock).toHaveBeenCalledWith(OPERATOR);
     expect(navigateMock).toHaveBeenCalledWith("/", { replace: true });
   });
 
-  it("opens the phrase modal when the first create response carries a recovery_phrase", async () => {
+  it("happy-path skip: no broker POST, no universe-sync, wizard completes", async () => {
+    const user = userEvent.setup();
+    mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
+    render(<SetupPage />);
+    await completeStep1();
+    await screen.findByRole("button", { name: /Skip for now/i });
+
+    await user.click(screen.getByRole("button", { name: /Skip for now/i }));
+
+    expect(mockedCreate).not.toHaveBeenCalled();
+    expect(mockedRunJob).not.toHaveBeenCalled();
+    expect(markAuthenticatedMock).toHaveBeenCalledTimes(1);
+    expect(markAuthenticatedMock).toHaveBeenCalledWith(OPERATOR);
+    expect(navigateMock).toHaveBeenCalledWith("/", { replace: true });
+  });
+
+  it("phrase-modal branch: recovery_phrase opens modal, passing challenge completes wizard", async () => {
     mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
     mockedCreate
-      .mockResolvedValueOnce(withPhrase())     // api_key (triggers phrase)
-      .mockResolvedValueOnce(withoutPhrase()); // user_key
+      .mockResolvedValueOnce(withPhrase())
+      .mockResolvedValueOnce(withoutPhrase());
 
     render(<SetupPage />);
     await completeStep1();
@@ -256,23 +240,8 @@ describe("SetupPage — step 2 (broker, optional)", () => {
       name: "Recovery phrase confirmation",
     });
     expect(dialog).toBeInTheDocument();
-    // Both credentials saved before modal opens.
     expect(mockedCreate).toHaveBeenCalledTimes(2);
-    // Wizard NOT yet complete.
     expect(markAuthenticatedMock).not.toHaveBeenCalled();
-    expect(navigateMock).not.toHaveBeenCalled();
-  });
-
-  it("completes the wizard after the operator passes the challenge", async () => {
-    mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
-    mockedCreate
-      .mockResolvedValueOnce(withPhrase())
-      .mockResolvedValueOnce(withoutPhrase());
-
-    render(<SetupPage />);
-    await completeStep1();
-    await fillStep2("test-api-key", "test-user-key");
-    await screen.findByRole("dialog");
 
     await advancePastWrittenDownGate();
     await answerChallengeCorrectly();
@@ -284,7 +253,7 @@ describe("SetupPage — step 2 (broker, optional)", () => {
     expect(navigateMock).toHaveBeenCalledWith("/", { replace: true });
   });
 
-  it("routes Cancel through confirm-cancel gate, then 'Close anyway' completes wizard", async () => {
+  it("confirm-cancel gate: Cancel during phrase modal → 'Close anyway' completes wizard", async () => {
     const user = userEvent.setup();
     mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
     mockedCreate
@@ -309,104 +278,50 @@ describe("SetupPage — step 2 (broker, optional)", () => {
     expect(navigateMock).toHaveBeenCalledWith("/", { replace: true });
   });
 
-  it("enters Repair mode and keeps Skip available when second save fails", async () => {
+  it("repair-mode: partial save failure re-derives UI to show only missing key, Skip stays available", async () => {
     mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
     mockedCreate
-      .mockResolvedValueOnce(withoutPhrase())  // api_key succeeds
-      .mockRejectedValueOnce(new Error("boom")); // user_key fails
-    // Mount fetch on step-2 entry returns empty (fresh setup), then
-    // post-error refresh returns the saved api_key.
+      .mockResolvedValueOnce(withoutPhrase())
+      .mockRejectedValueOnce(new Error("boom"));
     mockedList
-      .mockResolvedValueOnce([])           // mount fetch
-      .mockResolvedValueOnce([apiKeyRow()]); // post-error refresh
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([apiKeyRow()]);
 
     render(<SetupPage />);
     await completeStep1();
     await fillStep2("test-api-key", "test-user-key");
 
-    // Error surfaced.
     expect(await screen.findByText(/Could not save credential/i)).toBeInTheDocument();
-    // Re-derived to Repair mode.
     await waitFor(() => {
       expect(screen.queryByLabelText("API key")).toBeNull();
     });
     expect(screen.getByLabelText("User key")).toBeInTheDocument();
-    // Skip still available.
     expect(screen.getByRole("button", { name: /Skip for now/i })).toBeEnabled();
-    // Wizard NOT yet complete.
     expect(markAuthenticatedMock).not.toHaveBeenCalled();
   });
-});
 
-// ---------------------------------------------------------------------------
-// Edge case 2 (ADR-0003 §5 row 3)
-// ---------------------------------------------------------------------------
-
-describe("SetupPage — edge case 2", () => {
-  it("completes wizard with NO phrase modal when response has no recovery_phrase", async () => {
-    mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
-    mockedCreate
-      .mockResolvedValueOnce(withoutPhrase())
-      .mockResolvedValueOnce(withoutPhrase());
-
-    render(<SetupPage />);
-    await completeStep1();
-    await fillStep2("test-api-key", "test-user-key");
-
-    await waitFor(() => {
-      expect(markAuthenticatedMock).toHaveBeenCalledTimes(1);
-    });
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(navigateMock).toHaveBeenCalledWith("/", { replace: true });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// First-run bootstrap trigger (#145)
-// ---------------------------------------------------------------------------
-
-describe("SetupPage — first-run bootstrap trigger", () => {
-  it("fires nightly_universe_sync after both credentials are saved", async () => {
-    mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
-    mockedCreate
-      .mockResolvedValueOnce(withoutPhrase())
-      .mockResolvedValueOnce(withoutPhrase());
-
-    render(<SetupPage />);
-    await completeStep1();
-    await fillStep2("test-api-key", "test-user-key");
-
-    await waitFor(() => {
-      expect(mockedRunJob).toHaveBeenCalledWith("nightly_universe_sync");
-    });
-  });
-
-  it("does not fire universe sync when operator skips credentials", async () => {
+  it("already-complete branch: step 2 opens with both credentials present, Continue completes wizard", async () => {
     const user = userEvent.setup();
     mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
-    render(<SetupPage />);
-    await completeStep1();
-    await screen.findByRole("button", { name: /Skip for now/i });
-
-    await user.click(screen.getByRole("button", { name: /Skip for now/i }));
-
-    expect(mockedRunJob).not.toHaveBeenCalled();
-  });
-
-  it("swallows universe sync errors silently", async () => {
-    mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
-    mockedCreate
-      .mockResolvedValueOnce(withoutPhrase())
-      .mockResolvedValueOnce(withoutPhrase());
-    mockedRunJob.mockRejectedValueOnce(new Error("409 already running"));
+    mockedList.mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
 
     render(<SetupPage />);
     await completeStep1();
-    await fillStep2("test-api-key", "test-user-key");
 
-    // Wizard still completes despite runJob failure.
+    expect(await screen.findByText(/Credentials configured/i)).toBeInTheDocument();
+    const continueBtn = screen.getByRole("button", { name: /Continue/i });
+    expect(continueBtn).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Save credentials/i })).toBeNull();
+    expect(screen.queryByLabelText("API key")).toBeNull();
+    expect(markAuthenticatedMock).not.toHaveBeenCalled();
+
+    await user.click(continueBtn);
     await waitFor(() => {
       expect(markAuthenticatedMock).toHaveBeenCalledTimes(1);
     });
+    expect(markAuthenticatedMock).toHaveBeenCalledWith(OPERATOR);
+    expect(navigateMock).toHaveBeenCalledWith("/", { replace: true });
+    expect(mockedCreate).not.toHaveBeenCalled();
+    expect(mockedRunJob).not.toHaveBeenCalled();
   });
 });
