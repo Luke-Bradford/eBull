@@ -48,7 +48,7 @@
  *   state.credRows via deriveCredentialSetMode.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -77,27 +77,18 @@ export function SetupPage(): JSX.Element {
   const [brokerApiKey, setBrokerApiKey] = useState("");
   const [brokerUserKey, setBrokerUserKey] = useState("");
 
-  // `wizard` is declared AFTER completeWizard (below) because
-  // useSetupWizard takes onComplete as an option. completeWizard needs
-  // `wizard.state.pendingOperator` though, which creates a chicken-and-egg.
-  // Solution: declare completeWizard after the hook and pass a wrapper via
-  // a stable closure over a `wizardRef` pattern. But TypeScript ordering
-  // prevents forward-referencing a const. Simpler: make completeWizard a
-  // useCallback whose deps include wizard.state.pendingOperator, and
-  // declare wizard BEFORE completeWizard with a stub onComplete — then
-  // replace it via a ref. That's ugly.
+  // Stable-identity `onComplete` for useSetupWizard. The hook memoises
+  // skipBroker/completeWizard against `onComplete` identity, so a new
+  // inline arrow each render would re-create those dispatchers on
+  // every wizard state tick — defeats the hook's own useCallback.
   //
-  // Cleanest: separate pendingOperator tracking into a local state that
-  // mirrors wizard state, or use a ref. We use a small closure-stable
-  // completeWizard that reads wizard.state inline, declared after the
-  // hook. The hook's onComplete option needs a stable callback — we wrap
-  // it via useCallback([markAuthenticated, navigate]) since the
-  // state-read happens inside the function body each call.
-
-  const wizard = useSetupWizard({
-    // eslint-disable-next-line @typescript-eslint/no-use-before-define
-    onComplete: () => completeWizard(),
-  });
+  // Fix: wrap a ref. `onComplete` reads `completeRef.current` (stable
+  // identity via useCallback([])). The ref is updated via useEffect
+  // whenever the real `completeWizard` identity changes, so `pendingOperator`
+  // is always fresh at call time.
+  const completeRef = useRef<() => void>(() => {});
+  const onComplete = useCallback(() => completeRef.current(), []);
+  const wizard = useSetupWizard({ onComplete });
 
   const completeWizard = useCallback((): void => {
     if (wizard.state.pendingOperator !== null) {
@@ -105,6 +96,12 @@ export function SetupPage(): JSX.Element {
     }
     navigate("/", { replace: true });
   }, [markAuthenticated, navigate, wizard.state.pendingOperator]);
+
+  // Keep the ref pointing at the latest completeWizard closure so the
+  // stable `onComplete` reads a fresh pendingOperator on each invocation.
+  useEffect(() => {
+    completeRef.current = completeWizard;
+  }, [completeWizard]);
 
   const derived = deriveCredentialSetMode(wizard.state.credRows);
   const mode = derived.mode;

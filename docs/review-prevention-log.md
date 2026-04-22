@@ -860,3 +860,20 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `classify_exception` used `isinstance(exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout))` to route transport-layer failures to `SOURCE_DOWN`. The tuple missed siblings in the same `httpx.TransportError` hierarchy (`WriteTimeout`, `PoolTimeout`, `RemoteProtocolError`, `NetworkError`), which silently fell through to `INTERNAL_ERROR` and lost the self-heal signal for DB-or-network transient infrastructure.
 - Prevention: When routing on an exception hierarchy, prefer the closest common base class (`httpx.TransportError`, `psycopg.errors.IntegrityError`) to a hand-enumerated tuple of leaf types. Hand-enumerated tuples go stale as the library adds sibling subclasses; base-class dispatch is closed under inheritance. Exception: when the classifier needs to branch *within* a hierarchy (e.g. different HTTPStatusError codes), keep the narrower check but make the branch explicit. When adding a new route, grep the library's `errors.py` or public API to list all leaves — if they share a parent, use the parent.
 - Enforced in: this prevention log; `app/services/sync_orchestrator/exception_classifier.py` (now checks `httpx.TransportError` + `psycopg.errors.IntegrityError` base classes).
+
+---
+
+### Wrapper-lambda defeating useCallback memoisation
+
+- First seen in: #405 (#327 frontend subset).
+- Symptom: `SetupPage.tsx` passed `onComplete: () => completeWizard()` to `useSetupWizard`. Because `completeWizard`'s identity changes whenever `wizard.state.pendingOperator` changes, the inline arrow creates a new `onComplete` reference every render. The hook's `skipBroker`/`completeWizard` dispatchers list `onComplete` in useCallback deps and re-create on every state tick — defeating the memoisation entirely.
+- Prevention: When passing a callback to a hook option, never wrap it in an inline arrow if the inner function's identity can change. Use the ref-and-stable-wrapper pattern:
+  ```tsx
+  const completeRef = useRef<() => void>(() => {});
+  const onComplete = useCallback(() => completeRef.current(), []);
+  const wizard = useHook({ onComplete });
+  const completeWizard = useCallback(…);
+  useEffect(() => { completeRef.current = completeWizard; }, [completeWizard]);
+  ```
+  This lets the option identity stay fixed while the real implementation rebinds freely. Before pushing any hook-wiring change, check whether the options passed to custom hooks are memoised — an inline `() => foo()` is a red flag whenever `foo` has non-trivial deps.
+- Enforced in: this prevention log; `frontend/src/pages/SetupPage.tsx` (`completeRef` + stable `onComplete` pattern).
