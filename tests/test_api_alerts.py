@@ -657,6 +657,9 @@ def test_integration_position_alerts_get_includes_rows_within_window(
         body = resp.json()
         assert len(body["alerts"]) == 1
         assert body["alerts"][0]["alert_type"] == "sl_breach"
+        # Pins spec test 5: NULL cursor counts all in-window rows.
+        assert body["unseen_count"] == 1
+        assert body["alerts_last_seen_position_alert_id"] is None
     finally:
         from app.db import get_conn
 
