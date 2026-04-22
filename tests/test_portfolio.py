@@ -304,7 +304,6 @@ class TestEvaluateAdd:
         assert should_add is False
         assert "sector" in reason.lower()
 
-
     def test_pending_sector_pct_accumulator_pushes_add_over_cap(self) -> None:
         """#42: even if held-sector-only math stays under the cap, a large
         in-flight pending BUY allocation in the same sector should block
