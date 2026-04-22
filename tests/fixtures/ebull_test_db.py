@@ -49,6 +49,7 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "data_ingestion_runs",
     "external_identifiers",
     "external_data_watermarks",
+    "position_alerts",  # #396 position-alert episodes
     "instruments",
     "job_runs",
     "financial_periods_raw",

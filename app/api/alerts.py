@@ -1,23 +1,36 @@
-"""Alerts API (#315 Phase 3).
+"""Alerts API — dashboard strip read + cursor endpoints.
 
-Guard-rejection alerts strip. Scope is intentionally narrow — this is
-the execution-guard read surface only. Thesis breaches (#394) and
-filings-status drops (#395) are deferred; #396 wires them into the
-same strip once their event persistence lands.
+Provides two independent alert feeds sharing the same dashboard strip shape:
 
-Cursor model: operators.alerts_last_seen_decision_id (BIGINT). See
-``docs/superpowers/specs/2026-04-21-alerts-strip-guard-rejections.md``
-for why a decision_id cursor rather than decision_time.
+1. Execution-guard rejections (#315 Phase 3 / PR #394):
+   - GET  /alerts/guard-rejections
+   - POST /alerts/seen               (body: {seen_through_decision_id})
+   - POST /alerts/dismiss-all
 
-Routes:
-  GET  /alerts/guard-rejections   — 7-day window, 500-row cap, ORDER BY decision_id DESC
-  POST /alerts/seen               — body {seen_through_decision_id}, monotonic GREATEST + LEAST clamp
-  POST /alerts/dismiss-all        — no body, atomic MAX-in-window advance, no-op on empty window
+2. Position alerts (SL/TP/thesis breach episodes, #396):
+   - GET  /alerts/position-alerts
+   - POST /alerts/position-alerts/seen          (body: {seen_through_position_alert_id})
+   - POST /alerts/position-alerts/dismiss-all
+
+Each feed maintains its own BIGSERIAL cursor column on ``operators`` and a
+7-day window. Cursor semantics are identical across feeds: strict ``>``
+comparison, GREATEST+COALESCE monotonicity, LEAST clamp on /seen, MAX
+advance on /dismiss-all, and ``m.max_id IS NOT NULL`` empty-window guard.
+See specs at ``docs/superpowers/specs/2026-04-21-alerts-strip-guard-rejections.md``
+(guard) and ``docs/superpowers/specs/2026-04-21-position-alert-persistence.md``
+(position).
+
+Known divergence between the two /seen endpoints: guard `/alerts/seen`
+writes ``0`` as the cursor on an empty window + NULL cursor (see #395
+tech-debt). Position `/alerts/position-alerts/seen` does not — it uses
+the same ``m.max_id IS NOT NULL`` guard as dismiss-all to preserve
+``NULL = never acknowledged``.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
@@ -56,6 +69,30 @@ class GuardRejectionsResponse(BaseModel):
 
 class MarkSeenRequest(BaseModel):
     seen_through_decision_id: int = Field(gt=0)
+
+
+AlertType = Literal["sl_breach", "tp_breach", "thesis_break"]
+
+
+class PositionAlert(BaseModel):
+    alert_id: int
+    alert_type: AlertType
+    instrument_id: int
+    symbol: str
+    opened_at: datetime
+    resolved_at: datetime | None
+    detail: str
+    current_bid: Decimal | None
+
+
+class PositionAlertsResponse(BaseModel):
+    alerts_last_seen_position_alert_id: int | None
+    unseen_count: int
+    alerts: list[PositionAlert]
+
+
+class PositionAlertsMarkSeenRequest(BaseModel):
+    seen_through_position_alert_id: int = Field(gt=0)
 
 
 def _resolve_operator(conn: psycopg.Connection[object]) -> UUID:
@@ -191,3 +228,123 @@ def dismiss_all(
             {"op": operator_id},
         )
     conn.commit()
+
+
+@router.post("/position-alerts/seen", status_code=status.HTTP_204_NO_CONTENT)
+def mark_position_alerts_seen(
+    body: PositionAlertsMarkSeenRequest,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> None:
+    operator_id = _resolve_operator(conn)
+    with conn.cursor() as cur:
+        # The m.max_id IS NOT NULL guard makes this a no-op on an empty
+        # window — without it, LEAST(client_posted, NULL) would short-circuit
+        # to NULL and GREATEST(COALESCE(cursor, 0), NULL) would itself be NULL
+        # (PostgreSQL GREATEST ignores NULL arguments), but the simpler reading
+        # is: we never want to materialise a cursor value when no rows exist.
+        cur.execute(
+            """
+            UPDATE operators AS op
+            SET alerts_last_seen_position_alert_id = GREATEST(
+                COALESCE(op.alerts_last_seen_position_alert_id, 0),
+                LEAST(%(seen_through_position_alert_id)s, m.max_id)
+            )
+            FROM (
+                SELECT MAX(alert_id) AS max_id
+                FROM position_alerts
+                WHERE opened_at >= now() - INTERVAL '7 days'
+            ) AS m
+            WHERE op.operator_id = %(op)s
+              AND m.max_id IS NOT NULL
+            """,
+            {
+                "seen_through_position_alert_id": body.seen_through_position_alert_id,
+                "op": operator_id,
+            },
+        )
+    conn.commit()
+
+
+@router.post("/position-alerts/dismiss-all", status_code=status.HTTP_204_NO_CONTENT)
+def dismiss_all_position_alerts(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> None:
+    operator_id = _resolve_operator(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE operators AS op
+            SET alerts_last_seen_position_alert_id = GREATEST(
+                COALESCE(op.alerts_last_seen_position_alert_id, 0),
+                m.max_id
+            )
+            FROM (
+                SELECT MAX(alert_id) AS max_id
+                FROM position_alerts
+                WHERE opened_at >= now() - INTERVAL '7 days'
+            ) AS m
+            WHERE op.operator_id = %(op)s
+              AND m.max_id IS NOT NULL
+            """,
+            {"op": operator_id},
+        )
+    conn.commit()
+
+
+@router.get("/position-alerts", response_model=PositionAlertsResponse)
+def get_position_alerts(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> PositionAlertsResponse:
+    operator_id = _resolve_operator(conn)
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # 1. Read operator's cursor.
+        cur.execute(
+            "SELECT alerts_last_seen_position_alert_id FROM operators WHERE operator_id = %(op)s",
+            {"op": operator_id},
+        )
+        op_row = cur.fetchone()
+        last_seen: int | None = op_row["alerts_last_seen_position_alert_id"] if op_row else None
+
+        # 2. Count unseen in-window rows (uncapped).
+        cur.execute(
+            """
+            SELECT COUNT(*) AS unseen_count
+            FROM position_alerts
+            WHERE opened_at >= now() - INTERVAL '7 days'
+              AND (%(last_id)s::BIGINT IS NULL OR alert_id > %(last_id)s::BIGINT)
+            """,
+            {"last_id": last_seen},
+        )
+        count_row = cur.fetchone()
+        assert count_row is not None, "COUNT(*) always returns a row"
+        unseen_count: int = int(count_row["unseen_count"])
+
+        # 3. Fetch the list (capped at 500). ORDER BY alert_id DESC —
+        # BIGSERIAL PK is the race-safe ordering (clock-skew irrelevant;
+        # single-threaded writer guarantees monotonicity). Matches #394
+        # rationale for decision_id.
+        cur.execute(
+            """
+            SELECT
+                pa.alert_id,
+                pa.alert_type,
+                pa.instrument_id,
+                i.symbol,
+                pa.opened_at,
+                pa.resolved_at,
+                pa.detail,
+                pa.current_bid
+            FROM position_alerts pa
+            JOIN instruments i ON i.instrument_id = pa.instrument_id
+            WHERE pa.opened_at >= now() - INTERVAL '7 days'
+            ORDER BY pa.alert_id DESC
+            LIMIT 500
+            """
+        )
+        rows = cur.fetchall()
+
+    return PositionAlertsResponse(
+        alerts_last_seen_position_alert_id=last_seen,
+        unseen_count=unseen_count,
+        alerts=[PositionAlert.model_validate(r) for r in rows],
+    )

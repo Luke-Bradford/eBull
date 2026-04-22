@@ -13,6 +13,8 @@ import inspect
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import app.workers.scheduler as scheduler_module
 from app.workers.scheduler import (
     monitor_positions_job,
@@ -163,21 +165,24 @@ class TestMonitorPositionsJob:
     @patch(_SPIKE_PATCH, return_value=MagicMock(flagged=False))
     @patch(_RECORD_FINISH_PATCH)
     @patch(_RECORD_START_PATCH, return_value=1)
+    @patch("app.workers.scheduler.persist_position_alerts")
     @patch("app.workers.scheduler.check_position_health")
     @patch(_PSYCOPG_CONNECT_PATCH)
     def test_calls_check_position_health(
         self,
         mock_connect: MagicMock,
         mock_health: MagicMock,
+        mock_persist: MagicMock,
         mock_start: MagicMock,
         mock_finish: MagicMock,
         mock_spike: MagicMock,
     ) -> None:
         """monitor_positions_job must call check_position_health and set row_count."""
-        from app.services.position_monitor import MonitorResult
+        from app.services.position_monitor import MonitorResult, PersistStats
 
         fake_result = MonitorResult(positions_checked=3, alerts=())
         mock_health.return_value = fake_result
+        mock_persist.return_value = PersistStats(opened=0, resolved=0, unchanged=0)
 
         conn_ctx = MagicMock()
         conn_ctx.__enter__ = MagicMock(return_value=conn_ctx)
@@ -191,18 +196,20 @@ class TestMonitorPositionsJob:
     @patch(_SPIKE_PATCH, return_value=MagicMock(flagged=False))
     @patch(_RECORD_FINISH_PATCH)
     @patch(_RECORD_START_PATCH, return_value=1)
+    @patch("app.workers.scheduler.persist_position_alerts")
     @patch("app.workers.scheduler.check_position_health")
     @patch(_PSYCOPG_CONNECT_PATCH)
     def test_row_count_equals_positions_checked(
         self,
         mock_connect: MagicMock,
         mock_health: MagicMock,
+        mock_persist: MagicMock,
         mock_start: MagicMock,
         mock_finish: MagicMock,
         mock_spike: MagicMock,
     ) -> None:
         """tracker.row_count must equal result.positions_checked."""
-        from app.services.position_monitor import MonitorAlert, MonitorResult
+        from app.services.position_monitor import MonitorAlert, MonitorResult, PersistStats
 
         alert = MonitorAlert(
             instrument_id=1,
@@ -212,6 +219,7 @@ class TestMonitorPositionsJob:
         )
         fake_result = MonitorResult(positions_checked=5, alerts=(alert,))
         mock_health.return_value = fake_result
+        mock_persist.return_value = PersistStats(opened=0, resolved=0, unchanged=0)
 
         conn_ctx = MagicMock()
         conn_ctx.__enter__ = MagicMock(return_value=conn_ctx)
@@ -228,6 +236,67 @@ class TestMonitorPositionsJob:
             monitor_positions_job()
 
         assert captured_row_count and captured_row_count[0] == 5
+
+    @patch(_SPIKE_PATCH, return_value=MagicMock(flagged=False))
+    @patch(_RECORD_FINISH_PATCH)
+    @patch(_RECORD_START_PATCH, return_value=1)
+    @patch("app.workers.scheduler.persist_position_alerts")
+    @patch("app.workers.scheduler.check_position_health")
+    @patch(_PSYCOPG_CONNECT_PATCH)
+    def test_persist_failure_marks_job_failure(
+        self,
+        mock_connect: MagicMock,
+        mock_health: MagicMock,
+        mock_persist: MagicMock,
+        mock_start: MagicMock,
+        mock_finish: MagicMock,
+        mock_spike: MagicMock,
+    ) -> None:
+        """Writer failure must propagate out of _tracked_job and record a
+        FAILURE row in job_runs.
+
+        Contract (Codex pre-push review, P1): silently swallowing a persist
+        exception and returning `success` hides broken alert ingestion from
+        ops health surfaces. `persist_position_alerts` is called AFTER
+        ``tracker.row_count`` is set, so the pre-raise row_count is still
+        observable via the tracker (not through ``record_job_finish(status=
+        "success")``); `_tracked_job`'s exception handler records a failure
+        row with the exception message and error category.
+        """
+        from app.services.position_monitor import MonitorResult
+
+        fake_result = MonitorResult(positions_checked=7, alerts=())
+        mock_health.return_value = fake_result
+        mock_persist.side_effect = RuntimeError("simulated persist failure")
+
+        conn_ctx = MagicMock()
+        conn_ctx.__enter__ = MagicMock(return_value=conn_ctx)
+        conn_ctx.__exit__ = MagicMock(return_value=False)
+        mock_connect.return_value = conn_ctx
+
+        captured_calls: list[dict[str, Any]] = []
+
+        def capture_finish(conn: Any, run_id: Any, **kwargs: Any) -> None:
+            captured_calls.append(kwargs)
+
+        with patch(_RECORD_FINISH_PATCH, side_effect=capture_finish):
+            # _tracked_job re-raises the exception after recording the
+            # failure row (app/workers/scheduler.py:_tracked_job line ~588:
+            # `raise`). The scheduler call site (APScheduler or manual
+            # trigger) handles that raise at the edge; the contract this
+            # test pins is that record_job_finish receives status="failure"
+            # and the exception is NOT swallowed.
+            with pytest.raises(RuntimeError, match="simulated persist failure"):
+                monitor_positions_job()
+
+        mock_persist.assert_called_once()
+        # _tracked_job calls record_job_finish(status="failure", ...) on
+        # exception — NOT status="success" with row_count. The health check
+        # did run (mock_health called once), so ops can still correlate the
+        # failure with the hourly tick via run_id.
+        assert mock_health.call_count == 1
+        assert captured_calls, "record_job_finish must be called on failure"
+        assert captured_calls[0].get("status") == "failure"
 
 
 # ---------------------------------------------------------------------------

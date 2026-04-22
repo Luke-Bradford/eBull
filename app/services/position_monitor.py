@@ -56,6 +56,15 @@ class MonitorResult:
     alerts: tuple[MonitorAlert, ...] = ()
 
 
+@dataclass(frozen=True)
+class PersistStats:
+    """Aggregate stats from one persist_position_alerts invocation."""
+
+    opened: int
+    resolved: int
+    unchanged: int
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -171,3 +180,84 @@ def check_position_health(conn: psycopg.Connection[Any]) -> MonitorResult:
             )
 
     return MonitorResult(positions_checked=len(rows), alerts=tuple(alerts))
+
+
+def persist_position_alerts(
+    conn: psycopg.Connection[Any],
+    result: MonitorResult,
+) -> PersistStats:
+    """Reconcile open breach episodes against the current MonitorResult.
+
+    Contract: for each (instrument_id, alert_type) pair:
+      - current breach AND no open episode    -> INSERT new row
+      - current breach AND open episode       -> no-op (still breaching)
+      - no current breach AND open episode    -> UPDATE resolved_at = now()
+      - no current breach AND no open episode -> no-op
+
+    Runs inside a single ``conn.transaction()`` block — caller MUST NOT
+    hold an outer transaction, because psycopg v3 treats nested
+    ``conn.transaction()`` as a savepoint and the outer commit path is
+    the caller's responsibility. ``monitor_positions_job`` opens a
+    fresh connection, invokes ``check_position_health`` (read-only, no
+    BEGIN), then calls this writer — the ``conn.transaction()`` block
+    here IS the outer transaction and commits on clean exit.
+
+    Concurrency: the INSERT path tolerates partial-unique-index
+    conflicts via ``ON CONFLICT DO NOTHING``. The resolve path runs
+    ``WHERE resolved_at IS NULL`` so a row resolved by a concurrent
+    writer between the diff read and the UPDATE is a silent no-op.
+    Both guards are defensive — the scheduler serialises
+    ``monitor_positions_job`` via ``max_instances=1`` + per-job
+    ``threading.Lock`` (app/jobs/runtime.py:224,243).
+    """
+    current: dict[tuple[int, str], MonitorAlert] = {(a.instrument_id, a.alert_type): a for a in result.alerts}
+
+    with conn.transaction():
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT instrument_id, alert_type FROM position_alerts WHERE resolved_at IS NULL")
+            open_pairs: set[tuple[int, str]] = {
+                (int(row["instrument_id"]), str(row["alert_type"])) for row in cur.fetchall()
+            }
+
+            to_open = set(current.keys()) - open_pairs
+            to_resolve = open_pairs - set(current.keys())
+            unchanged = len(open_pairs & set(current.keys()))
+
+            opened = 0
+            for key in to_open:
+                alert = current[key]
+                cur.execute(
+                    """
+                    INSERT INTO position_alerts
+                        (instrument_id, alert_type, detail, current_bid)
+                    VALUES (%(instrument_id)s, %(alert_type)s, %(detail)s, %(current_bid)s)
+                    ON CONFLICT (instrument_id, alert_type) WHERE resolved_at IS NULL
+                    DO NOTHING
+                    """,
+                    {
+                        "instrument_id": alert.instrument_id,
+                        "alert_type": alert.alert_type,
+                        "detail": alert.detail,
+                        "current_bid": alert.current_bid,
+                    },
+                )
+                # rowcount == 1 on insert, 0 on ON CONFLICT DO NOTHING (race backstop).
+                if cur.rowcount == 1:
+                    opened += 1
+
+            resolved = 0
+            for instrument_id, alert_type in to_resolve:
+                cur.execute(
+                    """
+                    UPDATE position_alerts
+                    SET resolved_at = now()
+                    WHERE instrument_id = %(instrument_id)s
+                      AND alert_type = %(alert_type)s
+                      AND resolved_at IS NULL
+                    """,
+                    {"instrument_id": instrument_id, "alert_type": alert_type},
+                )
+                if cur.rowcount == 1:
+                    resolved += 1
+
+    return PersistStats(opened=opened, resolved=resolved, unchanged=unchanged)
