@@ -62,9 +62,16 @@ def test_migration_numeric_prefixes_are_unique_or_grandfathered() -> None:
 
 def test_no_accidental_prefix_regression() -> None:
     """Smoke: all prefixes are strictly 3-digit. A 2- or 4-digit prefix
-    would silently sort wrong under lexicographic ordering."""
+    would silently sort wrong under lexicographic ordering.
+
+    Files that don't match ``_PREFIX_RE`` (e.g. a hypothetical
+    ``init.sql``) are handled by
+    ``test_migration_numeric_prefixes_are_unique_or_grandfathered`` —
+    this test only polices the width of files that ARE prefixed, so
+    non-prefix failures surface with the correct error message there.
+    """
     files = sorted(p.name for p in _SQL_DIR.glob("*.sql"))
-    prefixes = [f.split("_", 1)[0] for f in files]
+    prefixes = [m.group(1) for f in files if (m := _PREFIX_RE.match(f))]
     widths = Counter(len(p) for p in prefixes)
     # Allow exactly width=3; anything else is a regression.
     assert list(widths.keys()) == [3], (
