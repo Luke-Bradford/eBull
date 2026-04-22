@@ -792,3 +792,84 @@ class TestScheduledFirePrerequisite:
         wrapped = rt._wrap_invoker("prereq_met_job", invoker)
         wrapped()
         assert invocations == [1]
+
+
+class TestStartCatchUpEnvGate:
+    """Tests for the ``EBULL_SKIP_CATCH_UP`` env-var gate on ``start()``.
+
+    The gate wraps the ``self._catch_up()`` call at the end of ``start()``
+    so pytest sessions can enter the FastAPI lifespan without firing real
+    overdue APScheduler jobs. Direct calls to ``rt._catch_up()`` are
+    NOT gated (covered in ``TestCatchUpOnBoot``).
+    """
+
+    def test_env_var_set_skips_catch_up_in_start(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.jobs import runtime as rt_mod
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            rt_mod.JobRuntime,
+            "_catch_up",
+            lambda self: calls.append("called"),
+        )
+        monkeypatch.setenv("EBULL_SKIP_CATCH_UP", "1")
+
+        rt = rt_mod.JobRuntime()
+        try:
+            rt.start()
+            assert calls == [], "start() must skip _catch_up() when EBULL_SKIP_CATCH_UP=1"
+        finally:
+            rt.shutdown()
+
+    def test_env_var_unset_runs_catch_up_in_start(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.jobs import runtime as rt_mod
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            rt_mod.JobRuntime,
+            "_catch_up",
+            lambda self: calls.append("called"),
+        )
+        monkeypatch.delenv("EBULL_SKIP_CATCH_UP", raising=False)
+
+        rt = rt_mod.JobRuntime()
+        try:
+            rt.start()
+            assert calls == ["called"], "start() must invoke _catch_up() when env var unset"
+        finally:
+            rt.shutdown()
+
+    def test_env_var_zero_runs_catch_up_in_start(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Exact-match gate: only '1' skips. Any other value fires catch-up.
+
+        Lets a developer override the conftest.py default with
+        EBULL_SKIP_CATCH_UP=0 pytest to reproduce catch-up bugs.
+        """
+        from app.jobs import runtime as rt_mod
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            rt_mod.JobRuntime,
+            "_catch_up",
+            lambda self: calls.append("called"),
+        )
+        monkeypatch.setenv("EBULL_SKIP_CATCH_UP", "0")
+
+        rt = rt_mod.JobRuntime()
+        try:
+            rt.start()
+            assert calls == ["called"], "EBULL_SKIP_CATCH_UP=0 must still fire catch-up"
+        finally:
+            rt.shutdown()

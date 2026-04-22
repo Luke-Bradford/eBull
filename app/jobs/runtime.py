@@ -39,6 +39,7 @@ scheduler's recurring jobs run on their own pool, and the per-job
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -299,7 +300,19 @@ class JobRuntime:
         # Log next-fire times for operator visibility.
         for name, nrt in self.get_next_run_times().items():
             logger.info("  %s → next fire at %s", name, nrt)
-        self._catch_up()
+        # Gate: EBULL_SKIP_CATCH_UP=1 skips the catch-up loop. Used by
+        # tests/conftest.py so pytest's TestClient(app) lifespan entries
+        # don't fire overdue APScheduler jobs against the dev DB (300s+
+        # teardown waits otherwise).
+        #
+        # Gated at the call site in start() (not inside _catch_up() body)
+        # so direct unit tests in TestCatchUpOnBoot that call
+        # rt._catch_up() bypass this gate and continue to exercise the
+        # catch-up loop in isolation.
+        if os.environ.get("EBULL_SKIP_CATCH_UP") == "1":
+            logger.debug("EBULL_SKIP_CATCH_UP=1; skipping catch-up on boot")
+        else:
+            self._catch_up()
 
     def _catch_up(self) -> None:
         """Fire overdue jobs after startup (fire-and-forget).
