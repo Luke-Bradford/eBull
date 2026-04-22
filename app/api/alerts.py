@@ -218,6 +218,38 @@ def dismiss_all(
     conn.commit()
 
 
+@router.post("/position-alerts/seen", status_code=status.HTTP_204_NO_CONTENT)
+def mark_position_alerts_seen(
+    body: PositionAlertsMarkSeenRequest,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> None:
+    operator_id = _resolve_operator(conn)
+    with conn.cursor() as cur:
+        # The m.max_id IS NOT NULL guard makes this a no-op on an empty
+        # window — without it, LEAST(client_posted, NULL) would short-circuit
+        # to NULL and GREATEST(COALESCE(cursor, 0), NULL) would itself be NULL
+        # (PostgreSQL GREATEST ignores NULL arguments), but the simpler reading
+        # is: we never want to materialise a cursor value when no rows exist.
+        cur.execute(
+            """
+            UPDATE operators AS op
+            SET alerts_last_seen_position_alert_id = GREATEST(
+                COALESCE(op.alerts_last_seen_position_alert_id, 0),
+                LEAST(%(seen_through)s, m.max_id)
+            )
+            FROM (
+                SELECT MAX(alert_id) AS max_id
+                FROM position_alerts
+                WHERE opened_at >= now() - INTERVAL '7 days'
+            ) AS m
+            WHERE op.operator_id = %(op)s
+              AND m.max_id IS NOT NULL
+            """,
+            {"seen_through": body.seen_through_position_alert_id, "op": operator_id},
+        )
+    conn.commit()
+
+
 @router.get("/position-alerts", response_model=PositionAlertsResponse)
 def get_position_alerts(
     conn: psycopg.Connection[object] = Depends(get_conn),

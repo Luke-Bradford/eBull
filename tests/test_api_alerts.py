@@ -814,3 +814,219 @@ def test_integration_position_alerts_get_orders_by_alert_id_not_opened_at(
         from app.db import get_conn
 
         app.dependency_overrides.pop(get_conn, None)
+
+
+@pytest.mark.skipif("not test_db_available()")
+def test_integration_position_alerts_seen_monotonic(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _seed_operator(ebull_test_conn)
+    iid = _seed_alert_instrument(ebull_test_conn)
+    _seed_position_alert(
+        ebull_test_conn,
+        instrument_id=iid,
+        opened_at_offset="-1 hour",
+        resolved_at_offset=None,
+    )
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE operators SET alerts_last_seen_position_alert_id = 1000 WHERE operator_id = %s",
+            (_INT_OP_ID,),
+        )
+    ebull_test_conn.commit()
+
+    client = _bind_test_client(ebull_test_conn)
+    try:
+        with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+            resp = client.post(
+                "/alerts/position-alerts/seen",
+                json={"seen_through_position_alert_id": 500},
+            )
+        assert resp.status_code == 204
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT alerts_last_seen_position_alert_id FROM operators WHERE operator_id = %s",
+                (_INT_OP_ID,),
+            )
+            assert cur.fetchone() == (1000,)
+    finally:
+        from app.db import get_conn
+
+        app.dependency_overrides.pop(get_conn, None)
+
+
+@pytest.mark.skipif("not test_db_available()")
+def test_integration_position_alerts_seen_first_time(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _seed_operator(ebull_test_conn)
+    iid = _seed_alert_instrument(ebull_test_conn)
+    a1 = _seed_position_alert(ebull_test_conn, instrument_id=iid, opened_at_offset="-1 hour")
+    client = _bind_test_client(ebull_test_conn)
+    try:
+        with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+            resp = client.post(
+                "/alerts/position-alerts/seen",
+                json={"seen_through_position_alert_id": a1},
+            )
+        assert resp.status_code == 204
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT alerts_last_seen_position_alert_id FROM operators WHERE operator_id = %s",
+                (_INT_OP_ID,),
+            )
+            assert cur.fetchone() == (a1,)
+    finally:
+        from app.db import get_conn
+
+        app.dependency_overrides.pop(get_conn, None)
+
+
+@pytest.mark.skipif("not test_db_available()")
+def test_integration_position_alerts_seen_missing_field_422(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _seed_operator(ebull_test_conn)
+    client = _bind_test_client(ebull_test_conn)
+    try:
+        with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+            resp = client.post("/alerts/position-alerts/seen", json={})
+        assert resp.status_code == 422
+    finally:
+        from app.db import get_conn
+
+        app.dependency_overrides.pop(get_conn, None)
+
+
+@pytest.mark.skipif("not test_db_available()")
+def test_integration_position_alerts_seen_non_integer_422(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Spec case 12 — non-integer body field rejected."""
+    _seed_operator(ebull_test_conn)
+    client = _bind_test_client(ebull_test_conn)
+    try:
+        with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+            resp = client.post(
+                "/alerts/position-alerts/seen",
+                json={"seen_through_position_alert_id": "abc"},
+            )
+        assert resp.status_code == 422
+    finally:
+        from app.db import get_conn
+
+        app.dependency_overrides.pop(get_conn, None)
+
+
+@pytest.mark.skipif("not test_db_available()")
+def test_integration_position_alerts_seen_non_positive_422(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _seed_operator(ebull_test_conn)
+    client = _bind_test_client(ebull_test_conn)
+    try:
+        with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+            resp = client.post(
+                "/alerts/position-alerts/seen",
+                json={"seen_through_position_alert_id": 0},
+            )
+        assert resp.status_code == 422
+    finally:
+        from app.db import get_conn
+
+        app.dependency_overrides.pop(get_conn, None)
+
+
+@pytest.mark.skipif("not test_db_available()")
+def test_integration_position_alerts_seen_clamped_to_in_window_max(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _seed_operator(ebull_test_conn)
+    iid = _seed_alert_instrument(ebull_test_conn)
+    a1 = _seed_position_alert(ebull_test_conn, instrument_id=iid, opened_at_offset="-1 hour")
+    client = _bind_test_client(ebull_test_conn)
+    try:
+        with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+            resp = client.post(
+                "/alerts/position-alerts/seen",
+                json={"seen_through_position_alert_id": 99_999},
+            )
+        assert resp.status_code == 204
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT alerts_last_seen_position_alert_id FROM operators WHERE operator_id = %s",
+                (_INT_OP_ID,),
+            )
+            assert cur.fetchone() == (a1,)
+    finally:
+        from app.db import get_conn
+
+        app.dependency_overrides.pop(get_conn, None)
+
+
+@pytest.mark.skipif("not test_db_available()")
+def test_integration_position_alerts_seen_empty_window_noop(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _seed_operator(ebull_test_conn)
+    client = _bind_test_client(ebull_test_conn)
+    try:
+        with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+            resp = client.post(
+                "/alerts/position-alerts/seen",
+                json={"seen_through_position_alert_id": 500},
+            )
+        assert resp.status_code == 204
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT alerts_last_seen_position_alert_id FROM operators WHERE operator_id = %s",
+                (_INT_OP_ID,),
+            )
+            # Cursor stays NULL — no 0 written. Divergence from #394 /alerts/seen
+            # (which does write 0 on the same edge; tracked separately).
+            assert cur.fetchone() == (None,)
+    finally:
+        from app.db import get_conn
+
+        app.dependency_overrides.pop(get_conn, None)
+
+
+@pytest.mark.skipif("not test_db_available()")
+def test_integration_position_alerts_seen_race_strict_greater(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _seed_operator(ebull_test_conn)
+    iid = _seed_alert_instrument(ebull_test_conn)
+    a_old = _seed_position_alert(
+        ebull_test_conn,
+        instrument_id=iid,
+        alert_type="sl_breach",
+        opened_at_offset="-1 hour",
+        resolved_at_offset="-30 min",
+    )
+    client = _bind_test_client(ebull_test_conn)
+    try:
+        with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+            client.post(
+                "/alerts/position-alerts/seen",
+                json={"seen_through_position_alert_id": a_old},
+            )
+        # Row arrives AFTER the POST — larger alert_id, must remain unseen.
+        _seed_position_alert(
+            ebull_test_conn,
+            instrument_id=iid,
+            alert_type="tp_breach",
+            opened_at_offset="-5 min",
+        )
+        with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+            resp = client.get("/alerts/position-alerts")
+        body = resp.json()
+        assert body["unseen_count"] == 1
+    finally:
+        from app.db import get_conn
+
+        app.dependency_overrides.pop(get_conn, None)
