@@ -470,3 +470,33 @@ def mark_coverage_status_drops_seen(
             },
         )
     conn.commit()
+
+
+@router.post(
+    "/coverage-status-drops/dismiss-all", status_code=status.HTTP_204_NO_CONTENT
+)
+def dismiss_all_coverage_status_drops(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> None:
+    operator_id = _resolve_operator(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE operators AS op
+            SET alerts_last_seen_coverage_event_id = GREATEST(
+                COALESCE(op.alerts_last_seen_coverage_event_id, 0),
+                m.max_id
+            )
+            FROM (
+                SELECT MAX(event_id) AS max_id
+                FROM coverage_status_events
+                WHERE old_status = 'analysable'
+                  AND new_status IS DISTINCT FROM 'analysable'
+                  AND changed_at >= now() - INTERVAL '7 days'
+            ) AS m
+            WHERE op.operator_id = %(op)s
+              AND m.max_id IS NOT NULL
+            """,
+            {"op": operator_id},
+        )
+    conn.commit()
