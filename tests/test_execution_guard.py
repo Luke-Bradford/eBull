@@ -256,6 +256,7 @@ def _budget_cursors_list(
     *,
     cash_balance: float | None = 10_000.0,
     budget_corrupt: bool = False,
+    fallback_cash: float | None = 10_000.0,
 ) -> list[MagicMock]:
     """Return the cursor sequence consumed by compute_budget_state.
 
@@ -268,12 +269,21 @@ def _budget_cursors_list(
       4: tax_estimates (_load_tax_estimates)
       5: gbp_usd_rate (_load_gbp_usd_rate)
 
+    #46: when the budget path cannot supply cash (corrupt budget OR
+    ``cash_balance=None``), execution_guard falls back to ``_load_cash``
+    to avoid zeroing out the sector-concentration denominator. An extra
+    cash_ledger cursor is appended in those cases; the ``fallback_cash``
+    arg controls what ``_load_cash`` returns.
+
     Note: test_budget.py patches _load_mirror_equity directly (5 cursors),
     so its _budget_conn() helper omits cursor 3.
     """
     if budget_corrupt:
-        return [_make_cursor([])]  # empty budget_config -> BudgetConfigCorrupt
-    return [
+        return [
+            _make_cursor([]),  # empty budget_config -> BudgetConfigCorrupt
+            _make_cursor([{"balance": fallback_cash}]),  # execution_guard fallback _load_cash
+        ]
+    cursors = [
         _budget_config_cursor(),
         _budget_cash_cursor(balance=cash_balance),
         _budget_deployed_cursor(),
@@ -281,6 +291,11 @@ def _budget_cursors_list(
         _budget_tax_cursor(),
         _budget_fx_cursor(),
     ]
+    # cash_balance=None means compute_budget_state returns cash_balance=None,
+    # triggering the execution_guard fallback _load_cash read.
+    if cash_balance is None:
+        cursors.append(_make_cursor([{"balance": fallback_cash}]))
+    return cursors
 
 
 def _buy_cursors(

@@ -722,15 +722,21 @@ def evaluate_recommendation(
         # copy_mirrors, disposal_matches, and live_fx_rates. We then hand
         # the resolved cash figure to _load_sector_exposure so both checks
         # share a single cash_ledger snapshot (#46).
+        #
+        # If budget_config is corrupt we still need a real cash figure for
+        # the concentration check — falling back to 0.0 would report a
+        # spurious concentration_breach alongside the real budget_available
+        # failure and muddy the audit trail. Read cash_ledger directly in
+        # that one path.
         try:
             budget = compute_budget_state(conn)
         except BudgetConfigCorrupt:
             budget = None
-        cash_for_aum = (
-            float(budget.cash_balance)
-            if budget is not None and budget.cash_balance is not None
-            else 0.0
-        )
+        if budget is not None and budget.cash_balance is not None:
+            cash_for_aum = float(budget.cash_balance)
+        else:
+            fallback_cash = _load_cash(conn)
+            cash_for_aum = fallback_cash if fallback_cash is not None else 0.0
         instrument_found, sector, current_sector_pct, total_aum = _load_sector_exposure(
             conn, instrument_id, cash_for_aum
         )
