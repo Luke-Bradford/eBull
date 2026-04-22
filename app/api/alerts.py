@@ -235,7 +235,7 @@ def mark_position_alerts_seen(
             UPDATE operators AS op
             SET alerts_last_seen_position_alert_id = GREATEST(
                 COALESCE(op.alerts_last_seen_position_alert_id, 0),
-                LEAST(%(seen_through)s, m.max_id)
+                LEAST(%(seen_through_position_alert_id)s, m.max_id)
             )
             FROM (
                 SELECT MAX(alert_id) AS max_id
@@ -245,7 +245,10 @@ def mark_position_alerts_seen(
             WHERE op.operator_id = %(op)s
               AND m.max_id IS NOT NULL
             """,
-            {"seen_through": body.seen_through_position_alert_id, "op": operator_id},
+            {
+                "seen_through_position_alert_id": body.seen_through_position_alert_id,
+                "op": operator_id,
+            },
         )
     conn.commit()
 
