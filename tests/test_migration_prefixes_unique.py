@@ -36,8 +36,7 @@ def test_migration_numeric_prefixes_are_unique_or_grandfathered() -> None:
     for name in files:
         match = _PREFIX_RE.match(name)
         assert match is not None, (
-            f"Migration {name!r} does not match the NNN_<snake>.sql naming contract. "
-            f"Fix the filename before merging."
+            f"Migration {name!r} does not match the NNN_<snake>.sql naming contract. Fix the filename before merging."
         )
         prefix = match.group(1)
         prefix_to_files.setdefault(prefix, []).append(name)
