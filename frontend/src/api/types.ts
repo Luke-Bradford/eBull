@@ -927,3 +927,45 @@ export interface GuardRejectionsResponse {
   unseen_count: number;
   rejections: GuardRejection[];
 }
+
+// ---------------------------------------------------------------------------
+// #396/#401 position alerts (app/api/alerts.py)
+// ---------------------------------------------------------------------------
+
+export type PositionAlertType = "sl_breach" | "tp_breach" | "thesis_break";
+
+export interface PositionAlert {
+  alert_id: number;
+  alert_type: PositionAlertType;
+  instrument_id: number;
+  symbol: string;
+  opened_at: string;
+  resolved_at: string | null;
+  detail: string;
+  current_bid: string | null; // Decimal serialized as string by pydantic
+}
+
+export interface PositionAlertsResponse {
+  alerts_last_seen_position_alert_id: number | null;
+  unseen_count: number;
+  alerts: PositionAlert[];
+}
+
+// ---------------------------------------------------------------------------
+// #397/#402 coverage status drops (app/api/alerts.py)
+// ---------------------------------------------------------------------------
+
+export interface CoverageStatusDrop {
+  event_id: number;
+  instrument_id: number;
+  symbol: string;
+  changed_at: string;
+  old_status: string;
+  new_status: string | null;
+}
+
+export interface CoverageStatusDropsResponse {
+  alerts_last_seen_coverage_event_id: number | null;
+  unseen_count: number;
+  drops: CoverageStatusDrop[];
+}
