@@ -1360,3 +1360,421 @@ def test_integration_position_alerts_alert_type_round_trip_all_three(
         from app.db import get_conn
 
         app.dependency_overrides.pop(get_conn, None)
+
+
+# ---------------------------------------------------------------------
+# #397: coverage-status-drops endpoints
+# ---------------------------------------------------------------------
+
+
+def _seed_coverage_status_event(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+    old_status: str = "analysable",
+    new_status: str = "insufficient",
+    changed_at_offset: str = "-1 hour",
+) -> int:
+    """Insert one coverage_status_events row with controlled offset; return event_id.
+
+    ``changed_at_offset`` is a SQL interval literal (``'-1 hour'``, ``'-8 days'``).
+    F-string composition for interval literal only — test-controlled constants
+    only, matches _seed_position_alert pattern in this file.
+    """
+    sql = f"""
+            INSERT INTO coverage_status_events
+                (instrument_id, old_status, new_status, changed_at)
+            VALUES (
+                %s, %s, %s,
+                now() + INTERVAL '{changed_at_offset}'
+            )
+            RETURNING event_id
+            """
+    with conn.cursor() as cur:
+        cur.execute(sql, (instrument_id, old_status, new_status))  # type: ignore[call-overload]
+        row = cur.fetchone()
+        assert row is not None
+    conn.commit()
+    return int(row[0])
+
+
+class TestCoverageStatusDropsGet:
+    def test_get_returns_503_when_no_operator(self, client: TestClient) -> None:
+        with patch("app.api.alerts.sole_operator_id", side_effect=NoOperatorError()):
+            _install_conn()
+            resp = client.get("/alerts/coverage-status-drops")
+        assert resp.status_code == 503
+
+    def test_get_returns_501_when_multiple_operators(self, client: TestClient) -> None:
+        with patch("app.api.alerts.sole_operator_id", side_effect=AmbiguousOperatorError()):
+            _install_conn()
+            resp = client.get("/alerts/coverage-status-drops")
+        assert resp.status_code == 501
+
+    def test_get_empty_state(self, client: TestClient) -> None:
+        cur = _install_conn(
+            fetchone_returns=[
+                {"alerts_last_seen_coverage_event_id": None},
+                {"unseen_count": 0},
+            ],
+            fetchall_returns=[],
+        )
+        with patch(
+            "app.api.alerts.sole_operator_id",
+            return_value=UUID("00000000-0000-0000-0000-000000000001"),
+        ):
+            resp = client.get("/alerts/coverage-status-drops")
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "alerts_last_seen_coverage_event_id": None,
+            "unseen_count": 0,
+            "drops": [],
+        }
+        # SQL shape pin: predicate references BOTH old_status = 'analysable'
+        # AND new_status IS DISTINCT FROM 'analysable' on the list query; the
+        # list is ordered event_id DESC and capped at 500.
+        list_sql = cur.execute.call_args_list[-1][0][0]
+        assert "old_status = 'analysable'" in list_sql
+        assert "new_status IS DISTINCT FROM 'analysable'" in list_sql
+        assert "ORDER BY e.event_id DESC" in list_sql
+        assert "LIMIT 500" in list_sql
+
+
+@pytest.mark.skipif("not test_db_available()")
+class TestCoverageStatusDropsGetIntegration:
+    def test_get_returns_drops_in_window(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_operator(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
+        _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
+
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.get("/alerts/coverage-status-drops")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["alerts_last_seen_coverage_event_id"] is None
+            assert body["unseen_count"] == 1
+            assert len(body["drops"]) == 1
+            assert body["drops"][0]["old_status"] == "analysable"
+            assert body["drops"][0]["new_status"] == "insufficient"
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_get_excludes_non_drops(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Promotions (insufficient -> analysable) + first audit (NULL -> terminal)
+        must not appear on strip."""
+        _seed_operator(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
+        _seed_coverage_status_event(
+            ebull_test_conn,
+            instrument_id=iid,
+            old_status="insufficient",
+            new_status="analysable",
+        )
+        # NULL -> 'analysable' first-audit — excluded (old_status IS NULL
+        # does not match 'analysable' predicate).
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO coverage_status_events (instrument_id, old_status, new_status) "
+                "VALUES (%s, NULL, 'analysable')",
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.get("/alerts/coverage-status-drops")
+            assert resp.json()["drops"] == []
+            assert resp.json()["unseen_count"] == 0
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_get_excludes_rows_older_than_7_days(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_operator(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
+        _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-8 days")
+
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.get("/alerts/coverage-status-drops")
+            assert resp.json()["drops"] == []
+            assert resp.json()["unseen_count"] == 0
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_get_orders_by_event_id_desc(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Runtime check: BIGSERIAL PK ordering is the race-safe ordering.
+        Seed events out of changed_at order — assert list comes back event_id
+        DESC (most-recent-inserted first)."""
+        _seed_operator(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
+        # e1 seeded first (lower event_id) but with a LATER changed_at offset
+        # than e2 — if ordering were by changed_at, e1 would be first.
+        e1 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
+        e2 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours")
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.get("/alerts/coverage-status-drops")
+            body = resp.json()
+            event_ids = [d["event_id"] for d in body["drops"]]
+            # event_id DESC: e2 > e1 numerically, so e2 first.
+            assert event_ids == [e2, e1]
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_get_caps_at_500(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Spec requires LIMIT 500 cap."""
+        _seed_operator(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
+        # Bulk-insert 505 in-window drop events via a single SQL.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO coverage_status_events (instrument_id, old_status, new_status, changed_at)
+                SELECT %s, 'analysable', 'insufficient', now() - (s || ' seconds')::interval
+                FROM generate_series(1, 505) s
+                """,
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.get("/alerts/coverage-status-drops")
+            body = resp.json()
+            assert len(body["drops"]) == 500
+            assert body["unseen_count"] == 505
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_get_respects_cursor_on_unseen_count(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_operator(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
+        e1 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours")
+        _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE operators SET alerts_last_seen_coverage_event_id = %s WHERE operator_id = %s",
+                (e1, _INT_OP_ID),
+            )
+        ebull_test_conn.commit()
+
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.get("/alerts/coverage-status-drops")
+            body = resp.json()
+            assert body["unseen_count"] == 1
+            assert len(body["drops"]) == 2
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+
+@pytest.mark.skipif("not test_db_available()")
+class TestCoverageStatusDropsSeen:
+    def test_seen_advances_cursor_monotonically(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_operator(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
+        e1 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours")
+        _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
+
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.post(
+                    "/alerts/coverage-status-drops/seen",
+                    json={"seen_through_event_id": e1},
+                )
+            assert resp.status_code == 204
+            with ebull_test_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators WHERE operator_id = %s",
+                    (_INT_OP_ID,),
+                )
+                row = cur.fetchone()
+            ebull_test_conn.commit()
+            assert row is not None
+            assert row[0] == e1
+
+            # Second call with smaller value — cursor does NOT regress.
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.post(
+                    "/alerts/coverage-status-drops/seen",
+                    json={"seen_through_event_id": 1},
+                )
+            assert resp.status_code == 204
+            with ebull_test_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators WHERE operator_id = %s",
+                    (_INT_OP_ID,),
+                )
+                row = cur.fetchone()
+            ebull_test_conn.commit()
+            assert row is not None
+            assert row[0] == e1
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_seen_empty_window_is_noop_and_preserves_null(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """No in-window drops + NULL cursor → /seen does NOT materialize a cursor.
+        Mirrors position-alerts /seen behaviour (no #395 divergence)."""
+        _seed_operator(ebull_test_conn)
+
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.post(
+                    "/alerts/coverage-status-drops/seen",
+                    json={"seen_through_event_id": 99999},
+                )
+            assert resp.status_code == 204
+            with ebull_test_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators WHERE operator_id = %s",
+                    (_INT_OP_ID,),
+                )
+                row = cur.fetchone()
+            ebull_test_conn.commit()
+            assert row is not None
+            assert row[0] is None
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_seen_clamps_to_in_window_max(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_operator(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
+        e1 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.post(
+                    "/alerts/coverage-status-drops/seen",
+                    json={"seen_through_event_id": e1 + 999_999},
+                )
+            assert resp.status_code == 204
+            with ebull_test_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators WHERE operator_id = %s",
+                    (_INT_OP_ID,),
+                )
+                row = cur.fetchone()
+            ebull_test_conn.commit()
+            assert row is not None
+            assert row[0] == e1
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_seen_requires_positive_integer(self, client: TestClient) -> None:
+        _install_conn()
+        with patch(
+            "app.api.alerts.sole_operator_id",
+            return_value=UUID("00000000-0000-0000-0000-000000000001"),
+        ):
+            resp = client.post(
+                "/alerts/coverage-status-drops/seen",
+                json={"seen_through_event_id": 0},
+            )
+        assert resp.status_code == 422
+
+
+@pytest.mark.skipif("not test_db_available()")
+class TestCoverageStatusDropsDismissAll:
+    def test_dismiss_all_advances_to_max(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_operator(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
+        _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-2 hours")
+        e2 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
+
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.post("/alerts/coverage-status-drops/dismiss-all")
+            assert resp.status_code == 204
+            with ebull_test_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators WHERE operator_id = %s",
+                    (_INT_OP_ID,),
+                )
+                row = cur.fetchone()
+            ebull_test_conn.commit()
+            assert row is not None
+            assert row[0] == e2
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_dismiss_all_empty_window_preserves_null_cursor(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_operator(ebull_test_conn)
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.post("/alerts/coverage-status-drops/dismiss-all")
+            assert resp.status_code == 204
+            with ebull_test_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators WHERE operator_id = %s",
+                    (_INT_OP_ID,),
+                )
+                row = cur.fetchone()
+            ebull_test_conn.commit()
+            assert row is not None
+            assert row[0] is None
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
+
+    def test_dismiss_all_does_not_regress_cursor(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_operator(ebull_test_conn)
+        iid = _seed_alert_instrument(ebull_test_conn)
+        e1 = _seed_coverage_status_event(ebull_test_conn, instrument_id=iid, changed_at_offset="-1 hour")
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE operators SET alerts_last_seen_coverage_event_id = %s WHERE operator_id = %s",
+                (e1 + 999, _INT_OP_ID),
+            )
+        ebull_test_conn.commit()
+
+        client = _bind_test_client(ebull_test_conn)
+        try:
+            with patch("app.api.alerts.sole_operator_id", return_value=_INT_OP_ID):
+                resp = client.post("/alerts/coverage-status-drops/dismiss-all")
+            assert resp.status_code == 204
+            with ebull_test_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT alerts_last_seen_coverage_event_id FROM operators WHERE operator_id = %s",
+                    (_INT_OP_ID,),
+                )
+                row = cur.fetchone()
+            ebull_test_conn.commit()
+            assert row is not None
+            assert row[0] == e1 + 999  # GREATEST preserves larger existing cursor
+        finally:
+            from app.db import get_conn
+
+            app.dependency_overrides.pop(get_conn, None)
