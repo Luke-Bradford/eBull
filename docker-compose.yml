@@ -7,8 +7,12 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-ebull}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    # Bind to loopback by default (#248). Without the 127.0.0.1 prefix,
+    # Docker publishes on 0.0.0.0 and a LAN-reachable host would expose
+    # a default-password Postgres. Override via ``POSTGRES_BIND`` if
+    # multi-host access is genuinely required.
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 
@@ -16,8 +20,11 @@ services:
     image: redis:7-alpine
     container_name: ebull-redis
     restart: unless-stopped
+    # Bind to loopback by default (#248). Redis has no auth configured;
+    # a 0.0.0.0 publish would hand an unauthenticated cache to anything
+    # on the LAN. Override via ``REDIS_BIND`` if needed.
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "${REDIS_BIND:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
 
 volumes:
   pgdata:
