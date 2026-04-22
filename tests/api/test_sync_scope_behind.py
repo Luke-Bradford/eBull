@@ -41,14 +41,25 @@ def test_post_sync_behind_includes_non_healthy_upstream(clean_client: TestClient
     # scoring is ACTION_NEEDED, all its upstreams (candles, fundamentals)
     # are healthy so only scoring fires. Verify the candidate job set
     # contains morning_candidate_review (the job that emits scoring).
+    #
+    # _safe_run_and_finalize is patched to a no-op: submit_sync still plans
+    # via the planner (the behaviour under test) and enqueues to the
+    # manual executor, but the enqueued work returns immediately instead
+    # of running real scoring against the dev DB (~300s+).
     from app.services.sync_orchestrator.layer_types import LayerState
     from app.services.sync_orchestrator.registry import LAYERS
 
     states = {n: LayerState.HEALTHY for n in LAYERS}
     states["scoring"] = LayerState.ACTION_NEEDED
-    with patch(
-        "app.services.sync_orchestrator.planner.compute_layer_states_from_db",
-        return_value=states,
+    with (
+        patch(
+            "app.services.sync_orchestrator.planner.compute_layer_states_from_db",
+            return_value=states,
+        ),
+        patch(
+            "app.services.sync_orchestrator.executor._safe_run_and_finalize",
+            return_value=[],
+        ),
     ):
         resp = clean_client.post("/sync", json={"scope": "behind"})
     body = resp.json()
@@ -82,9 +93,15 @@ def test_post_sync_behind_skips_disabled_upstream(clean_client: TestClient) -> N
     states["candles"] = LayerState.DEGRADED
     states["universe"] = LayerState.DISABLED
 
-    with patch(
-        "app.services.sync_orchestrator.planner.compute_layer_states_from_db",
-        return_value=states,
+    with (
+        patch(
+            "app.services.sync_orchestrator.planner.compute_layer_states_from_db",
+            return_value=states,
+        ),
+        patch(
+            "app.services.sync_orchestrator.executor._safe_run_and_finalize",
+            return_value=[],
+        ),
     ):
         resp = clean_client.post("/sync", json={"scope": "behind"})
     body = resp.json()
@@ -116,6 +133,10 @@ def test_post_sync_behind_bypasses_legacy_freshness_filter(clean_client: TestCli
         patch(
             "app.services.sync_orchestrator.planner._all_emits_fresh",
             return_value=(True, "faked fresh"),
+        ),
+        patch(
+            "app.services.sync_orchestrator.executor._safe_run_and_finalize",
+            return_value=[],
         ),
     ):
         resp = clean_client.post("/sync", json={"scope": "behind"})
