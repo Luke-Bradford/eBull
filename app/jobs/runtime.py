@@ -447,12 +447,20 @@ class JobRuntime:
         """
         if not self._started:
             return
+        # Test fast path: EBULL_SKIP_CATCH_UP=1 also drops wait=True here
+        # so pytest TestClient teardowns don't block on whatever jobs the
+        # test happened to queue on the manual executor (e.g. POST /sync
+        # without mocking submit_sync would run a 300s+ real sync). Tests
+        # run against the dev DB so the "silent corruption of job_runs"
+        # concern below is irrelevant — the pool is about to be closed
+        # anyway and no operator is watching that table.
+        wait = os.environ.get("EBULL_SKIP_CATCH_UP") != "1"
         try:
-            self._scheduler.shutdown(wait=True)
+            self._scheduler.shutdown(wait=wait)
         except Exception:
             logger.exception("JobRuntime scheduler shutdown raised")
         try:
-            self._manual_executor.shutdown(wait=True)
+            self._manual_executor.shutdown(wait=wait)
         except Exception:
             logger.exception("JobRuntime manual executor shutdown raised")
         self._started = False
