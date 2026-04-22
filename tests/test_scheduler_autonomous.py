@@ -235,6 +235,54 @@ class TestMonitorPositionsJob:
 
         assert captured_row_count and captured_row_count[0] == 5
 
+    @patch(_SPIKE_PATCH, return_value=MagicMock(flagged=False))
+    @patch(_RECORD_FINISH_PATCH)
+    @patch(_RECORD_START_PATCH, return_value=1)
+    @patch("app.workers.scheduler.persist_position_alerts")
+    @patch("app.workers.scheduler.check_position_health")
+    @patch(_PSYCOPG_CONNECT_PATCH)
+    def test_persist_failure_preserves_row_count(
+        self,
+        mock_connect: MagicMock,
+        mock_health: MagicMock,
+        mock_persist: MagicMock,
+        mock_start: MagicMock,
+        mock_finish: MagicMock,
+        mock_spike: MagicMock,
+    ) -> None:
+        """Writer failure must NOT clobber row_count with 0.
+
+        Contract (spec §persist_position_alerts integration): when
+        check_position_health succeeds but persist_position_alerts raises,
+        the tracked row_count must still equal result.positions_checked —
+        the check side-effect DID happen, so the tracker reflects it.
+        """
+        from app.services.position_monitor import MonitorResult
+
+        fake_result = MonitorResult(positions_checked=7, alerts=())
+        mock_health.return_value = fake_result
+        mock_persist.side_effect = RuntimeError("simulated persist failure")
+
+        conn_ctx = MagicMock()
+        conn_ctx.__enter__ = MagicMock(return_value=conn_ctx)
+        conn_ctx.__exit__ = MagicMock(return_value=False)
+        mock_connect.return_value = conn_ctx
+
+        captured_row_count: list[Any] = []
+
+        def capture_finish(conn: Any, run_id: Any, **kwargs: Any) -> None:
+            captured_row_count.append(kwargs.get("row_count"))
+
+        with patch(_RECORD_FINISH_PATCH, side_effect=capture_finish):
+            monitor_positions_job()
+
+        # Writer raised, but the check succeeded with 7 positions — the
+        # inner except swallows the writer exception and falls through to
+        # the unconditional tracker.row_count = result.positions_checked
+        # assignment after the outer try/except.
+        assert captured_row_count and captured_row_count[0] == 7
+        mock_persist.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Task 6: timing_deferred_at stamp — source-level assertion
