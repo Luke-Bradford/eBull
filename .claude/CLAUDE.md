@@ -179,10 +179,12 @@ If the PR touches `frontend/`, also run:
 
 ```bash
 pnpm --dir frontend typecheck
-pnpm --dir frontend test
+pnpm --dir frontend test:unit
 ```
 
 Both must pass.
+
+`test:unit` excludes `src/pages/SetupPage.test.tsx` (heavy integration). CI runs the full `test` script on push — integration tests still gate merge. Run `pnpm --dir frontend test` locally when explicitly debugging integration coverage.
 
 ## Required engineering skills
 
