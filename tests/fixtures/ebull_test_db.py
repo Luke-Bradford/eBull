@@ -49,6 +49,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "data_ingestion_runs",
     "external_identifiers",
     "external_data_watermarks",
+    "coverage_status_events",  # #397 transition log (child of coverage)
+    "coverage",  # #397 truncate needed to reset trigger-driven state cleanly
     "position_alerts",  # #396 position-alert episodes
     "instruments",
     "job_runs",
