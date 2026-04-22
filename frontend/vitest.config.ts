@@ -29,6 +29,11 @@ export default mergeConfig(
       setupFiles: ["./src/test/setup.ts"],
       css: false,
       include: ["src/**/*.{test,spec}.{ts,tsx}"],
+      // Pin pool + cap concurrency. Vitest v2 defaults to forks already;
+      // pinning makes the choice explicit so a future edit doesn't silently
+      // switch back to threads (where #399 hit a tinypool crash).
+      pool: "forks",
+      poolOptions: { forks: { minForks: 1, maxForks: 2 } },
     },
   }),
 );
