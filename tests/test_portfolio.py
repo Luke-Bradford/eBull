@@ -180,6 +180,7 @@ class TestEvaluateAdd:
             prev_score_total,
             total_aum=10_000.0,
             positions=self._base_positions(pos),
+            pending_sector_pct={},
         )
         assert should_add is True
         assert "score improved" in reason
@@ -199,6 +200,7 @@ class TestEvaluateAdd:
             prev_score_total,
             total_aum=10_000.0,
             positions=self._base_positions(pos),
+            pending_sector_pct={},
         )
         assert should_add is True
         assert "confidence improved" in reason
@@ -218,6 +220,7 @@ class TestEvaluateAdd:
             prev_score_total,
             total_aum=10_000.0,
             positions=self._base_positions(pos),
+            pending_sector_pct={},
         )
         assert should_add is False
 
@@ -236,6 +239,7 @@ class TestEvaluateAdd:
             prev_score_total=0.60,
             total_aum=10_000.0,
             positions=self._base_positions(pos),
+            pending_sector_pct={},
         )
         assert should_add is False
 
@@ -253,6 +257,7 @@ class TestEvaluateAdd:
             prev_score_total=0.60,
             total_aum=10_000.0,
             positions=self._base_positions(pos),
+            pending_sector_pct={},
         )
         assert should_add is False
 
@@ -271,6 +276,7 @@ class TestEvaluateAdd:
             prev_score_total=0.60,
             total_aum=10_000.0,
             positions=self._base_positions(pos),
+            pending_sector_pct={},
         )
         assert should_add is False
 
@@ -291,9 +297,39 @@ class TestEvaluateAdd:
             prev_score_total=0.60,
             total_aum=10_000.0,
             positions={1: pos1, 2: pos2},
+            pending_sector_pct={},
         )
         # Technology = (2000+400)/10000 = 24%; add_pct = min(10%-4%, 5%) = 5%
         # sector_after = 24% + 5% = 29% > 25% cap
+        assert should_add is False
+        assert "sector" in reason.lower()
+
+    def test_pending_sector_pct_accumulator_pushes_add_over_cap(self) -> None:
+        """#42: even if held-sector-only math stays under the cap, a large
+        in-flight pending BUY allocation in the same sector should block
+        the ADD. Documents the invariant that the signature now enforces.
+        """
+        # pos1: Technology 8% (below full-size 10% → ADD eligible)
+        # pos2: Technology 12% (other holding).  held_sector_pct = 20%.
+        # add_pct = min(10% - 8%, 5%) = 2%. sector_after without pending
+        # = 20% + 2% = 22% (passes). With pending 5% BUY in Technology,
+        # sector_after = 20% + 5% + 2% = 27% > 25% cap.
+        pos1 = _pos(instrument_id=1, symbol="A", sector="Technology", market_value=800.0)
+        pos2 = _pos(instrument_id=2, symbol="B", sector="Technology", market_value=1_200.0)
+        details: dict[str, Any] = {
+            "thesis": _thesis(stance="buy"),
+            "prev_thesis_confidence": 0.60,
+        }
+        latest_score = _score(total_score=0.80, confidence_score=0.80)
+        should_add, reason = _evaluate_add(
+            pos1,
+            details,
+            latest_score,
+            prev_score_total=0.60,
+            total_aum=10_000.0,
+            positions={1: pos1, 2: pos2},
+            pending_sector_pct={"Technology": 0.05},
+        )
         assert should_add is False
         assert "sector" in reason.lower()
 

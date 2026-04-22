@@ -630,6 +630,7 @@ def _evaluate_add(
     prev_score_total: float | None,
     total_aum: float,
     positions: dict[int, PositionState],
+    pending_sector_pct: dict[str, float],
 ) -> tuple[bool, str]:
     """
     Return (should_add, reason).
@@ -640,6 +641,15 @@ def _evaluate_add(
       - no thesis break (max_red_flag below threshold)
       - conviction improved: confidence_score delta >= 0.05 OR score delta >= 0.05
       - sector concentration passes after proposed add
+
+    ``pending_sector_pct`` is the accumulator that _evaluate_buy
+    maintains for approved-so-far BUYs in the current review pass. In
+    today's run_portfolio_review order (ADDs before any BUY accumulation)
+    the caller passes ``{}`` and the accumulator is effectively unused;
+    the parameter exists so the invariant does not depend on evaluation
+    order (#42). If a future refactor interleaves BUYs + ADDs, the
+    sector-breach check here already sees in-flight BUYs without
+    further changes.
     """
     if total_aum <= 0:
         return False, ""
@@ -678,9 +688,16 @@ def _evaluate_add(
         return False, ""
 
     # Sector check: would adding breach the cap?
+    #
+    # Includes held positions (_sector_pct) AND any in-flight BUYs from
+    # this same review pass (pending_sector_pct). Today the caller passes
+    # pending={} because BUYs run after ADDs, but carrying the accumulator
+    # in the signature means the invariant stops relying on caller order.
     headroom = MAX_FULL_POSITION_PCT - current_pct
     add_pct = min(headroom, MAX_INITIAL_POSITION_PCT)
-    sector_after = _sector_pct(positions, pos.sector, total_aum) + add_pct
+    held_sector_pct = _sector_pct(positions, pos.sector, total_aum)
+    pending_pct = pending_sector_pct.get(pos.sector, 0.0) if pos.sector is not None else 0.0
+    sector_after = held_sector_pct + pending_pct + add_pct
     if pos.sector is not None and sector_after > MAX_SECTOR_EXPOSURE_PCT:
         return (
             False,
@@ -1003,7 +1020,15 @@ def run_portfolio_review(
         # 2. ADD (only if ranked and has a score)
         if latest_score is not None:
             prev_score_total = prev_scores.get(iid)
-            should_add, add_reason = _evaluate_add(pos, details, latest_score, prev_score_total, total_aum, positions)
+            should_add, add_reason = _evaluate_add(
+                pos,
+                details,
+                latest_score,
+                prev_score_total,
+                total_aum,
+                positions,
+                pending_sector_pct={},  # ADDs currently evaluated before BUY accumulator is touched (#42)
+            )
             if should_add:
                 current_pct = pos.market_value / total_aum if total_aum > 0 else 0.0
                 add_target = min(current_pct + MAX_INITIAL_POSITION_PCT, MAX_FULL_POSITION_PCT)

@@ -155,7 +155,7 @@ def test_empty_baseline_no_mirrors(
     )
     conn.commit()
 
-    found, sector, pct, total_aum = _load_sector_exposure(conn, _GUARD_INSTRUMENT_ID)
+    found, sector, pct, total_aum = _load_sector_exposure(conn, _GUARD_INSTRUMENT_ID, cash=100.0)
     assert found is True
     assert sector == _GUARD_INSTRUMENT_SECTOR
     assert total_aum == pytest.approx(250.0 + 100.0, abs=1e-6)
@@ -182,7 +182,7 @@ def test_active_mirror_adds_to_denominator(
     expected_mirror = _load_mirror_equity(conn)
     assert expected_mirror == pytest.approx(1550.0, abs=1e-6)
 
-    found, sector, pct, total_aum = _load_sector_exposure(conn, _GUARD_INSTRUMENT_ID)
+    found, sector, pct, total_aum = _load_sector_exposure(conn, _GUARD_INSTRUMENT_ID, cash=100.0)
     assert found is True
     assert sector == _GUARD_INSTRUMENT_SECTOR
     assert total_aum == pytest.approx(250.0 + 100.0 + 1550.0, abs=1e-6)
@@ -208,7 +208,7 @@ def test_closed_mirror_contributes_nothing(
     )
     conn.commit()
 
-    found, _, _, total_aum = _load_sector_exposure(conn, _GUARD_INSTRUMENT_ID)
+    found, _, _, total_aum = _load_sector_exposure(conn, _GUARD_INSTRUMENT_ID, cash=100.0)
     assert found is True
     assert total_aum == pytest.approx(250.0 + 100.0, abs=1e-6)
 
@@ -239,7 +239,7 @@ def test_sector_numerator_unchanged_by_mirror(
     # cover only the 770001 position (which the query itself
     # excludes via instrument_id != iid, so numerator = 0).
     # The denominator still includes the mirror.
-    found_hc, sector_hc, pct_hc, aum_hc = _load_sector_exposure(conn, 770001)
+    found_hc, sector_hc, pct_hc, aum_hc = _load_sector_exposure(conn, 770001, cash=100.0)
     assert found_hc is True
     assert sector_hc == "healthcare"
     # Expected: the sole healthcare position is the iid being
@@ -272,12 +272,12 @@ def test_guard_delta_matches_mirror_equity(
     conn.commit()
 
     expected_mirror_contribution = _load_mirror_equity(conn)
-    _, _, _, with_mirror = _load_sector_exposure(conn, _GUARD_INSTRUMENT_ID)
+    _, _, _, with_mirror = _load_sector_exposure(conn, _GUARD_INSTRUMENT_ID, cash=100.0)
 
     with conn.cursor() as cur:
         cur.execute("UPDATE copy_mirrors SET active = FALSE")
     conn.commit()
 
-    _, _, _, without_mirror = _load_sector_exposure(conn, _GUARD_INSTRUMENT_ID)
+    _, _, _, without_mirror = _load_sector_exposure(conn, _GUARD_INSTRUMENT_ID, cash=100.0)
 
     assert (with_mirror - without_mirror) == pytest.approx(expected_mirror_contribution, abs=1e-6)
