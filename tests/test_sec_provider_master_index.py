@@ -180,10 +180,10 @@ def test_fetch_returns_none_on_403_for_future_date(monkeypatch: pytest.MonkeyPat
     assert result is None
 
 
-def test_fetch_raises_on_403_for_past_date(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Past-dated 403 is not a publish-window race — it indicates SEC
-    # is actively blocking us (UA / rate limit / WAF). Must raise so
-    # the scheduler surfaces the incident.
+def test_fetch_raises_on_403_for_past_weekday(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Past-dated 403 on a weekday is not a publish-window race — it
+    # indicates SEC is actively blocking us (UA / rate limit / WAF).
+    # Must raise so the scheduler surfaces the incident.
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403)
 
@@ -192,5 +192,24 @@ def test_fetch_raises_on_403_for_past_date(monkeypatch: pytest.MonkeyPatch) -> N
 
     _pin_now_et(monkeypatch, "2026-04-23T12:00:00")
 
+    # 2026-04-20 is a Monday — past weekday, no publish-window excuse.
     with pytest.raises(httpx.HTTPStatusError):
         provider.fetch_master_index(date(2026, 4, 20), if_modified_since=None)
+
+
+def test_fetch_returns_none_on_403_for_weekend(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SEC does not publish the daily master-index on weekends and has
+    # been observed to serve 403 (not just 404) for those dates. The
+    # gate must tolerate it so the 30-day lookback does not trip on
+    # every Saturday / Sunday in the window.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403)
+
+    provider = SecFilingsProvider(user_agent="test test@example.com")
+    _rewire_tickers_transport(provider, httpx.MockTransport(handler))
+
+    _pin_now_et(monkeypatch, "2026-04-23T12:00:00")
+
+    # 2026-04-18 is Saturday, 2026-04-19 is Sunday.
+    assert provider.fetch_master_index(date(2026, 4, 18), if_modified_since=None) is None
+    assert provider.fetch_master_index(date(2026, 4, 19), if_modified_since=None) is None
