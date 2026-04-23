@@ -1148,9 +1148,20 @@ def normalize_financial_periods(
 # run gets a 304 and pays only the conditional-GET round-trip. A
 # 30-call burst at the 10 rps SEC cap is bounded at ~3s.
 #
-# Gaps longer than this window need a one-shot submissions.json
-# backfill for covered CIKs — tracked as tech debt.
+# Gaps longer than this window are handled by the stale-watermark
+# submissions.json backfill path (issue #410) — see
+# ``_stale_submission_ciks`` below.
 LOOKBACK_DAYS = 30
+
+
+# Per-run cap on the submissions.json backfill for stale-watermark
+# CIKs (#410). This is a rare-path branch; in steady state zero CIKs
+# are stale and the extra SQL query is a bounded no-op. After a long
+# outage many CIKs may qualify — the cap bounds blast radius so a
+# single run cannot burn the SEC rate budget on backfill alone. At
+# 10 rps the SEC cap is 36,000 calls/hour, so 200 is generous without
+# being reckless.
+SUBMISSIONS_STALE_BACKFILL_CAP = 200
 
 # 6-K (foreign-private-issuer interim reports) is deliberately
 # excluded — typically lacks structured XBRL, so refreshing
@@ -1250,6 +1261,58 @@ def _load_covered_us_ciks(conn: psycopg.Connection[tuple]) -> list[str]:
 
 def _lookback_dates(today: date) -> list[date]:
     return [today - timedelta(days=i) for i in range(LOOKBACK_DAYS)]
+
+
+def _stale_submission_ciks(
+    conn: psycopg.Connection[tuple],
+    *,
+    covered: list[str],
+    today: date,
+    exclude: set[str],
+    limit: int,
+) -> list[str]:
+    """Covered CIKs whose ``sec.submissions`` watermark has not been
+    refreshed in the last ``LOOKBACK_DAYS`` days.
+
+    Steady-state (short outage, at most a few days) returns an empty
+    list — every active CIK's watermark was touched on the last run.
+    After a long outage — longer than ``LOOKBACK_DAYS`` — CIKs that
+    filed during the gap are silently skipped by the master-index
+    window because their filings fall outside the planner's lookback.
+    Those CIKs are rescued here: the backfill path fetches
+    ``submissions.json`` unconditionally and diffs the top accession
+    against the stored watermark, enqueuing any new filings for a
+    refresh.
+
+    - ``covered`` is the list of covered US CIKs, already loaded by
+      the caller.  Passed in so we do not re-query the cohort.
+    - ``exclude`` is the set of CIKs already queued as a seed or
+      refresh this run — they do not need a second backfill pass.
+    - ``limit`` bounds the number of CIKs returned per run.  Returns
+      the oldest-watermark CIKs first so a long-outage backfill
+      progresses steadily rather than rotating through the same
+      hundred CIKs forever.
+    """
+    if not covered or limit <= 0:
+        return []
+    cutoff = today - timedelta(days=LOOKBACK_DAYS)
+    # Parameterise the IN clause via a single ARRAY param to avoid
+    # fan-out over N placeholders and to stay safe against CIK lists
+    # that grow to thousands of entries.
+    rows = conn.execute(
+        """
+        SELECT key
+        FROM external_data_watermarks
+        WHERE source = 'sec.submissions'
+          AND fetched_at < %s
+          AND key = ANY(%s)
+          AND NOT (key = ANY(%s))
+        ORDER BY fetched_at ASC
+        LIMIT %s
+        """,
+        (cutoff, covered, list(exclude), limit),
+    ).fetchall()
+    return [str(r[0]) for r in rows]
 
 
 def _top_accession_from_submissions(
@@ -1392,6 +1455,82 @@ def plan_refresh(
             refreshes.append((cik, top_accession))
         else:
             submissions_only.append((cik, top_accession))
+
+    # --- Stale-watermark backfill (#410) ------------------------------
+    # Covered CIKs whose sec.submissions watermark is older than
+    # LOOKBACK_DAYS AND that did not hit the master-index this window
+    # would otherwise be silently skipped — they filed during a gap
+    # longer than the window. Rescue them by fetching submissions.json
+    # unconditionally and comparing top_accession against the stored
+    # watermark. Rare-path branch: in steady state this SQL returns
+    # zero rows and the extra work is bounded.
+    #
+    # Exclude every CIK the main loop already inspected — ``seeds``
+    # covers CIKs with no watermark, and ``master_hits_by_cik`` covers
+    # CIKs that went through the main-loop submissions.json lookup
+    # (whether that produced a refresh, a submissions-only advance, a
+    # failed-plan flag, or the "accession unchanged" no-op). Either
+    # way, the main loop has already fetched submissions.json for them
+    # this run; the backfill path must not double-fetch.
+    already_handled = set(seeds) | set(master_hits_by_cik.keys())
+    stale_ciks = _stale_submission_ciks(
+        conn,
+        covered=covered,
+        today=today,
+        exclude=already_handled,
+        limit=SUBMISSIONS_STALE_BACKFILL_CAP,
+    )
+    if stale_ciks:
+        logger.info(
+            "plan_refresh: stale-watermark backfill for %d CIK(s) (cap=%d)",
+            len(stale_ciks),
+            SUBMISSIONS_STALE_BACKFILL_CAP,
+        )
+    for cik in stale_ciks:
+        wm = get_watermark(conn, "sec.submissions", cik)
+        if wm is None:
+            # Belt-and-braces: _stale_submission_ciks guarantees this
+            # CIK has a watermark row; a concurrent delete between the
+            # SELECT and this lookup would fall here. Treat as seed so
+            # the executor runs a full backfill.
+            seeds.append(cik)
+            continue
+        submissions = provider.fetch_submissions(cik)
+        if submissions is None:
+            # Transient. Same invariant as the main loop: withhold the
+            # master-index watermark by flagging this CIK so the next
+            # run retries.
+            logger.warning(
+                "plan_refresh: backfill fetch_submissions returned None for cik=%s — will retry next run",
+                cik,
+            )
+            failed_plan_ciks.append(cik)
+            continue
+        top_accession = _top_accession_from_submissions(submissions)
+        if top_accession is None:
+            logger.warning(
+                "plan_refresh: backfill submissions.json for cik=%s has empty filings.recent",
+                cik,
+            )
+            failed_plan_ciks.append(cik)
+            continue
+        if top_accession == wm.watermark:
+            # No new filings since the last watermark — this CIK has
+            # genuinely been idle during the outage. Advance
+            # ``fetched_at`` so the ``ORDER BY fetched_at ASC LIMIT``
+            # cap can make forward progress: without this, the same
+            # oldest-fetched CIKs would monopolise the cap on every
+            # run and newer stale CIKs would starve indefinitely. The
+            # UPDATE is idempotent and touches a single row.
+            conn.execute(
+                "UPDATE external_data_watermarks SET fetched_at = NOW() WHERE source = 'sec.submissions' AND key = %s",
+                (cik,),
+            )
+            continue
+        # A new filing arrived during the outage. Enqueue as refresh —
+        # the executor will fetch companyfacts and advance both
+        # watermarks atomically.
+        refreshes.append((cik, top_accession))
 
     return RefreshPlan(
         seeds=sorted(seeds),

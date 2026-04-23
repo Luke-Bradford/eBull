@@ -367,3 +367,328 @@ def test_body_hash_match_skips_parse(
     # Body-hash match → no parse → no entries → no refresh/submissions-only.
     assert plan.refreshes == []
     assert plan.submissions_only_advances == []
+
+
+# ---------------------------------------------------------------------------
+# Stale-watermark submissions.json backfill (#410)
+# ---------------------------------------------------------------------------
+
+
+def _set_submissions_watermark(
+    conn: psycopg.Connection[tuple],
+    *,
+    cik: str,
+    watermark: str,
+    fetched_at: date,
+) -> None:
+    """Seed a ``sec.submissions`` watermark row whose ``fetched_at``
+    is arbitrarily old. ``set_watermark`` always stamps NOW(), so
+    tests that need an antique ``fetched_at`` have to UPDATE directly.
+    """
+    with conn.transaction():
+        set_watermark(
+            conn,
+            source="sec.submissions",
+            key=cik,
+            watermark=watermark,
+        )
+        conn.execute(
+            "UPDATE external_data_watermarks SET fetched_at = %s WHERE source = 'sec.submissions' AND key = %s",
+            (fetched_at, cik),
+        )
+
+
+def test_stale_watermark_with_new_accession_enqueues_refresh(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A CIK whose sec.submissions watermark is older than
+    LOOKBACK_DAYS AND that did NOT hit the master-index window must
+    be rescued via submissions.json and enqueued as a refresh when a
+    new top accession is returned.
+    """
+    today = date(2026, 4, 15)
+    _seed_us_cohort(ebull_test_conn, ["0000000001"])
+    # Watermark fetched 90 days ago — well outside LOOKBACK_DAYS.
+    _set_submissions_watermark(
+        ebull_test_conn,
+        cik="0000000001",
+        watermark="old-accession-000042",
+        fetched_at=today - timedelta(days=90),
+    )
+
+    # No master-index bodies on any window day — the main loop skips
+    # this CIK. The backfill path must still pick it up.
+    provider = StubFilingsProvider(
+        master_bodies={},
+        submissions_by_cik={
+            "0000000001": {
+                "filings": {
+                    "recent": {
+                        "accessionNumber": ["new-accession-000099"],
+                        "form": ["10-K"],
+                        "acceptedDate": ["2026-03-01T16:05:00.000Z"],
+                    }
+                }
+            }
+        },
+    )
+    plan = plan_refresh(
+        ebull_test_conn,
+        cast(SecFilingsProvider, provider),
+        today=today,
+    )
+
+    assert plan.refreshes == [("0000000001", "new-accession-000099")]
+
+
+def test_stale_watermark_with_unchanged_accession_refreshes_fetched_at(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Stale watermark + submissions top accession unchanged → the
+    CIK was genuinely idle during the outage. Do not enqueue work,
+    BUT the planner must advance ``fetched_at`` so the next run's
+    backfill cap can make forward progress. Without this the oldest-
+    idle CIKs would monopolise the cap forever and newer stale CIKs
+    would starve (regression caught by codex).
+    """
+    today = date(2026, 4, 15)
+    _seed_us_cohort(ebull_test_conn, ["0000000001"])
+    _set_submissions_watermark(
+        ebull_test_conn,
+        cik="0000000001",
+        watermark="same-accession-000042",
+        fetched_at=today - timedelta(days=90),
+    )
+
+    provider = StubFilingsProvider(
+        master_bodies={},
+        submissions_by_cik={
+            "0000000001": {
+                "filings": {
+                    "recent": {
+                        "accessionNumber": ["same-accession-000042"],
+                        "form": ["10-K"],
+                        "acceptedDate": ["2026-03-01T16:05:00.000Z"],
+                    }
+                }
+            }
+        },
+    )
+    plan = plan_refresh(
+        ebull_test_conn,
+        cast(SecFilingsProvider, provider),
+        today=today,
+    )
+
+    assert plan.refreshes == []
+    assert plan.submissions_only_advances == []
+
+    # fetched_at must have been advanced past the stale cutoff so
+    # the next run's _stale_submission_ciks query no longer picks
+    # this CIK.
+    row = ebull_test_conn.execute(
+        "SELECT fetched_at FROM external_data_watermarks WHERE source = 'sec.submissions' AND key = %s",
+        ("0000000001",),
+    ).fetchone()
+    assert row is not None
+    # NOW() on the planner side is strictly after today - 90 days,
+    # and must now be inside the LOOKBACK_DAYS window.
+    fetched_at = row[0]
+    assert (today - fetched_at.date()).days < LOOKBACK_DAYS
+
+
+def test_fresh_watermark_is_not_a_backfill_candidate(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Steady-state regression guard: a CIK whose watermark was
+    touched inside LOOKBACK_DAYS must NOT trigger the backfill fetch,
+    even if it did not hit the master-index this window.
+    """
+    today = date(2026, 4, 15)
+    _seed_us_cohort(ebull_test_conn, ["0000000001"])
+    _set_submissions_watermark(
+        ebull_test_conn,
+        cik="0000000001",
+        watermark="fresh-accession-000042",
+        fetched_at=today - timedelta(days=5),
+    )
+
+    provider = StubFilingsProvider(master_bodies={}, submissions_by_cik={})
+    plan = plan_refresh(
+        ebull_test_conn,
+        cast(SecFilingsProvider, provider),
+        today=today,
+    )
+
+    assert plan.refreshes == []
+    # If the backfill path had run, it would have called
+    # fetch_submissions and raised a KeyError on the empty map.
+    # Reaching this assertion proves it did not run.
+
+
+def test_stale_watermark_already_queued_as_refresh_is_not_double_processed(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """CIK that hits the master-index window AND has a stale watermark
+    must only appear once (via the main loop), not twice (main loop +
+    backfill path).
+    """
+    today = date(2026, 4, 15)
+    master_day = today - timedelta(days=3)
+    _seed_us_cohort(ebull_test_conn, ["0000000001"])
+    _set_submissions_watermark(
+        ebull_test_conn,
+        cik="0000000001",
+        watermark="old-accession-000042",
+        fetched_at=today - timedelta(days=90),
+    )
+
+    master_body = (
+        b"Description:           Master Index of EDGAR Dissemination Feed\n"
+        b"Last Data Received:    April 15, 2026\n"
+        b"Comments:              webmaster@sec.gov\n"
+        b"Anonymous FTP:         ftp://ftp.sec.gov/edgar/\n"
+        b"\n"
+        b" \n"
+        b"CIK|Company Name|Form Type|Date Filed|Filename\n"
+        b"--------------------------------------------------------------------------------\n"
+        b"1|Test Co|10-K|2026-04-12|edgar/data/1/new-accession-000099.txt\n"
+    )
+    provider = StubFilingsProvider(
+        master_bodies={master_day: master_body},
+        submissions_by_cik={
+            "0000000001": {
+                "filings": {
+                    "recent": {
+                        "accessionNumber": ["new-accession-000099"],
+                        "form": ["10-K"],
+                        "acceptedDate": ["2026-04-12T16:05:00.000Z"],
+                    }
+                }
+            }
+        },
+    )
+    plan = plan_refresh(
+        ebull_test_conn,
+        cast(SecFilingsProvider, provider),
+        today=today,
+    )
+
+    # Exactly one refresh entry for the CIK — no duplicate from the
+    # backfill loop.
+    assert plan.refreshes == [("0000000001", "new-accession-000099")]
+
+
+def test_main_loop_no_op_cik_is_excluded_from_backfill(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Regression guard: a stale-watermark CIK that hit the
+    master-index this run and resolved to the main-loop ``accession
+    unchanged`` no-op must NOT be re-fetched by the backfill path.
+    That would burn backfill cap on a CIK whose submissions.json the
+    main loop already resolved this run, and (on a slow provider)
+    double the SEC rate-limit spend.
+    """
+    today = date(2026, 4, 15)
+    master_day = today - timedelta(days=3)
+    _seed_us_cohort(ebull_test_conn, ["0000000001"])
+    _set_submissions_watermark(
+        ebull_test_conn,
+        cik="0000000001",
+        watermark="same-accession-000042",
+        fetched_at=today - timedelta(days=90),
+    )
+
+    master_body = (
+        b"CIK|Company Name|Form Type|Date Filed|Filename\n"
+        b"--------------------------------------------------------------------------------\n"
+        b"1|Test Co|10-K|2026-04-12|edgar/data/1/same-accession-000042.txt\n"
+    )
+    # Count submissions fetches so we can assert the backfill path
+    # does NOT re-fetch.
+    fetch_count = {"n": 0}
+
+    class CountingStub(StubFilingsProvider):
+        def fetch_submissions(self, cik: str) -> dict[str, object] | None:
+            fetch_count["n"] += 1
+            return super().fetch_submissions(cik)
+
+    provider = CountingStub(
+        master_bodies={master_day: master_body},
+        submissions_by_cik={
+            "0000000001": {
+                "filings": {
+                    "recent": {
+                        "accessionNumber": ["same-accession-000042"],
+                        "form": ["10-K"],
+                        "acceptedDate": ["2026-04-12T16:05:00.000Z"],
+                    }
+                }
+            }
+        },
+    )
+    plan_refresh(
+        ebull_test_conn,
+        cast(SecFilingsProvider, provider),
+        today=today,
+    )
+
+    # Exactly one fetch_submissions call — the main loop's. If the
+    # backfill path also fetched, the counter would be 2.
+    assert fetch_count["n"] == 1
+
+
+def test_backfill_cap_bounds_blast_radius(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """When many CIKs are stale (long outage), the per-run cap must
+    limit how many submissions.json calls happen in one run.
+    """
+    from app.services import fundamentals as fundamentals_module
+
+    today = date(2026, 4, 15)
+    # 5 stale CIKs, cap=2 → backfill enqueues at most 2.
+    ciks = [f"{i:010d}" for i in range(1, 6)]
+    _seed_us_cohort(ebull_test_conn, ciks)
+    for i, cik in enumerate(ciks):
+        _set_submissions_watermark(
+            ebull_test_conn,
+            cik=cik,
+            watermark=f"old-{i:03d}",
+            fetched_at=today - timedelta(days=90 + i),
+        )
+
+    provider = StubFilingsProvider(
+        master_bodies={},
+        submissions_by_cik={
+            cik: {
+                "filings": {
+                    "recent": {
+                        "accessionNumber": [f"new-{i:03d}"],
+                        "form": ["10-K"],
+                        "acceptedDate": ["2026-03-01T16:05:00.000Z"],
+                    }
+                }
+            }
+            for i, cik in enumerate(ciks)
+        },
+    )
+
+    original_cap = fundamentals_module.SUBMISSIONS_STALE_BACKFILL_CAP
+    fundamentals_module.SUBMISSIONS_STALE_BACKFILL_CAP = 2
+    try:
+        plan = plan_refresh(
+            ebull_test_conn,
+            cast(SecFilingsProvider, provider),
+            today=today,
+        )
+    finally:
+        fundamentals_module.SUBMISSIONS_STALE_BACKFILL_CAP = original_cap
+
+    # Exactly two entries, and they are the two oldest watermarks —
+    # seeded at -94 days (0000000005) and -93 days (0000000004).
+    # plan.refreshes is alphabetically sorted by the planner, so we
+    # assert membership rather than order.
+    assert len(plan.refreshes) == 2
+    chosen_ciks = {cik for cik, _ in plan.refreshes}
+    assert chosen_ciks == {"0000000005", "0000000004"}
