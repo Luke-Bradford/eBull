@@ -79,6 +79,23 @@ assert rec.rationale == _hold_rationale(score_row, quote_is_fallback=False)
 
 If a function both writes to the DB and returns a result object, there must be a test verifying the returned object matches what was written. Silent divergence between in-memory and persisted state is a real bug class.
 
+## Integration-marker discipline
+
+Any test that uses the `clean_client` fixture (or any fixture that touches a real DB) MUST be decorated with `@pytest.mark.integration`. Unit-only CI passes deselect integration tests by marker; an unmarked integration test will either be silently skipped or error during fixture setup.
+
+```python
+# Wrong — silently runs against whichever DB mode CI picked
+def test_post_ingest_enabled_unknown_key_404(clean_client: TestClient) -> None:
+    ...
+
+# Correct
+@pytest.mark.integration
+def test_post_ingest_enabled_unknown_key_404(clean_client: TestClient) -> None:
+    ...
+```
+
+Self-check before pushing: `grep -n "def test_.*\(clean_client" tests/` and assert each match is preceded by `@pytest.mark.integration`.
+
 ## Test naming
 
 Method names describe the scenario and expected outcome:

@@ -444,21 +444,26 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_FUNDAMENTALS_SYNC,
         description=(
-            "Weekly fundamentals research refresh: re-classify every "
+            "Daily fundamentals research refresh: re-classify every "
             "tradable instrument's coverage.filings_status, backfill "
             "eligible instruments via SEC EDGAR, then re-evaluate "
             "coverage tier promote/demote rules. Collapses the previous "
             "weekly_coverage_audit + weekly_coverage_review pair into a "
-            "single job per the 2026-04-19 research-tool refocus."
+            "single job per the 2026-04-19 research-tool refocus. "
+            "Cadence 02:30 UTC lands ~30 min after SEC's nightly XBRL "
+            "publish window (~22:00 ET / 02:00 UTC) so new filings are "
+            "picked up the same night rather than up to seven days "
+            "later (#414)."
         ),
-        cadence=Cadence.weekly(weekday=0, hour=5, minute=0),  # Monday 05:00 UTC
+        cadence=Cadence.daily(hour=2, minute=30),
         prerequisite=_has_any_coverage,
         # Never catch up on boot. The job pulls SEC EDGAR data for every
         # covered CIK (tens of minutes, holds DB-pool workers and hits
         # SEC's 10 rps cap). Every dev-stack restart would otherwise
         # fire a catch-up and make the site unresponsive until it
-        # finishes. Weekly cadence also means a missed Monday is not
-        # time-critical — operator can click "Run now" in the admin UI.
+        # finishes. A missed 02:30 run rolls forward to the next day —
+        # the incremental watermark design (#420) picks up skipped
+        # filings on the following run.
         catch_up_on_boot=False,
     ),
     # attribution_summary retired from scheduling in Phase 1.4 of the
@@ -1094,8 +1099,19 @@ def daily_research_refresh() -> None:
         total_rows = 0
 
         # Fundamentals — SEC XBRL (primary, free, US equities)
+        # Chunk #414: when ``enable_sec_fundamentals_dedupe`` is True,
+        # skip this call entirely. ``fundamentals_sync`` phase 1b already
+        # refreshes ``fundamentals_snapshot`` for every CIK-mapped
+        # tradable instrument daily at 02:30 UTC — same data, one HTTP
+        # path. Keeps FMP (non-US) + enrichment + CH filings below
+        # unchanged.
         sec_symbols = [(sym, iid) for sym, iid in symbols if sym.upper() in cik_map]
-        if sec_symbols:
+        if settings.enable_sec_fundamentals_dedupe:
+            logger.info(
+                "SEC fundamentals refresh: skipped (enable_sec_fundamentals_dedupe=True); "
+                "relying on fundamentals_sync phase 1b for fundamentals_snapshot"
+            )
+        elif sec_symbols:
             with (
                 SecFundamentalsProvider(user_agent=settings.sec_user_agent) as sec_fund,
                 psycopg.connect(settings.database_url) as conn,
@@ -2186,11 +2202,14 @@ def monitor_positions_job() -> None:
 
 
 def fundamentals_sync() -> None:
-    """Weekly fundamentals research refresh.
+    """Daily fundamentals research refresh.
 
     Per the 2026-04-19 research-tool refocus
     (docs/superpowers/specs/2026-04-19-research-tool-refocus.md §1.1), this
-    job owns the SEC research data pipeline end-to-end. Runs Monday 05:00 UTC.
+    job owns the SEC research data pipeline end-to-end. Runs daily at
+    02:30 UTC (#414 — landed just after the SEC nightly XBRL publish
+    window so newly-submitted 10-K/10-Q/8-K filings are ingested the
+    same night rather than up to seven days later).
 
     Four phases, in order:
 
@@ -2215,6 +2234,53 @@ def fundamentals_sync() -> None:
     fails. Phase 3 is isolated too — a transient review error leaves
     phase-2 writes committed and the job succeeded.
     """
+    # Operator pause switch (#414 design goal F). Operator flips
+    # ``layer_enabled[fundamentals_ingest]`` to False via the admin UI /
+    # SQL to pause ingest during a demo or when SEC is rate-limiting us,
+    # without restarting the server. Default behaviour is enabled — an
+    # absent row counts as enabled, so first-time deploys are not gated
+    # by a missing migration.
+    #
+    # Checked BEFORE entering ``_tracked_job`` and written as a
+    # ``status='skipped'`` row via ``record_job_skip`` so the admin UI
+    # can distinguish an operator-initiated pause from a regular
+    # zero-row success (same pattern as ``_write_prereq_skip_row``).
+    from app.services.layer_enabled import is_layer_enabled
+
+    # Fail-open posture: if the gate read itself errors (DB unavailable,
+    # table missing on a first-boot), fall through to ``_tracked_job`` so
+    # the run still lands a job_runs row — either success or a real
+    # failure from the body — rather than vanishing silently. Mirrors
+    # the runtime's prerequisite-check policy in
+    # ``app/jobs/runtime.py``.
+    ingest_paused = False
+    try:
+        with psycopg.connect(settings.database_url, autocommit=True) as gate_conn:
+            if not is_layer_enabled(gate_conn, "fundamentals_ingest"):
+                ingest_paused = True
+                logger.info(
+                    "fundamentals_sync: skipped (layer_enabled[fundamentals_ingest]=False); "
+                    "operator paused ingest — flip to True via the admin UI to resume"
+                )
+                try:
+                    record_job_skip(
+                        gate_conn,
+                        JOB_FUNDAMENTALS_SYNC,
+                        "paused by operator: layer_enabled[fundamentals_ingest]=False",
+                    )
+                except Exception:
+                    logger.error(
+                        "fundamentals_sync: failed to write operator-pause skip row",
+                        exc_info=True,
+                    )
+    except Exception:
+        logger.error(
+            "fundamentals_sync: operator-pause gate read failed — falling open and running job",
+            exc_info=True,
+        )
+    if ingest_paused:
+        return
+
     with _tracked_job(JOB_FUNDAMENTALS_SYNC) as tracker:
         from app.services.coverage import BackfillOutcome, audit_all_instruments, backfill_filings
 
@@ -2254,6 +2320,67 @@ def fundamentals_sync() -> None:
                 exc_info=True,
             )
             failed_phases.append("phase 1 (XBRL + normalization)")
+
+        # --- Phase 1b: SEC fundamentals snapshot refresh -----------------
+        # Collapses the dual SEC ``companyfacts`` fetch path identified
+        # in issue #414. Only runs when the operator has flipped
+        # ``enable_sec_fundamentals_dedupe=True`` in settings — the
+        # matching gate in ``daily_research_refresh`` skips its own SEC
+        # section when the flag is on, so exactly one job per day hits
+        # ``data.sec.gov/api/xbrl/companyfacts/…``.
+        #
+        # Isolated like phase 0/1: a transient snapshot failure must not
+        # block audit/review. Coverage reads ``fundamentals_snapshot`` so
+        # stale rows still beat a missed audit.
+        phase1b_rows = 0
+        if settings.enable_sec_fundamentals_dedupe:
+            try:
+                with psycopg.connect(settings.database_url) as conn:
+                    # ``ei.is_primary = TRUE`` matches the phase-2 audit
+                    # query. Without it, an instrument with a demoted
+                    # historical SEC CIK row would appear twice in the
+                    # result and the cik_map dict would non-deterministically
+                    # pick whichever row came last — critical now that
+                    # this query is the sole SEC snapshot driver under
+                    # the dedupe flag.
+                    cik_rows = conn.execute(
+                        """
+                        SELECT i.symbol, i.instrument_id::text, ei.identifier_value
+                        FROM instruments i
+                        JOIN external_identifiers ei
+                            ON ei.instrument_id = i.instrument_id
+                           AND ei.provider = 'sec'
+                           AND ei.identifier_type = 'cik'
+                           AND ei.is_primary = TRUE
+                        WHERE i.is_tradable = TRUE
+                        """
+                    ).fetchall()
+                    conn.commit()
+                if cik_rows:
+                    sec_symbols = [(str(row[0]), str(row[1])) for row in cik_rows]
+                    cik_map = {str(row[0]).upper(): str(row[2]) for row in cik_rows}
+                    with (
+                        SecFundamentalsProvider(user_agent=settings.sec_user_agent) as sec_fund,
+                        psycopg.connect(settings.database_url) as conn,
+                    ):
+                        sec_fund.set_cik_cache(cik_map)
+                        snap_summary = refresh_fundamentals(sec_fund, conn, sec_symbols)
+                    phase1b_rows = snap_summary.snapshots_upserted
+                    logger.info(
+                        "fundamentals_sync phase 1b (SEC snapshot) complete: attempted=%d upserted=%d skipped=%d",
+                        snap_summary.symbols_attempted,
+                        snap_summary.snapshots_upserted,
+                        snap_summary.symbols_skipped,
+                    )
+                else:
+                    logger.info("fundamentals_sync phase 1b (SEC snapshot) skipped: no CIK-mapped tradable instruments")
+            except Exception:
+                logger.error(
+                    "fundamentals_sync phase 1b (SEC snapshot) failed — "
+                    "continuing to audit/review on last-known snapshot",
+                    exc_info=True,
+                )
+                failed_phases.append("phase 1b (SEC snapshot)")
 
         # --- Phase 2: coverage audit + eligibility-gated backfill --------
         outcomes: dict[BackfillOutcome, int] = {o: 0 for o in BackfillOutcome}
@@ -2349,7 +2476,11 @@ def fundamentals_sync() -> None:
             logger.error("fundamentals_sync phase 3 (review) failed", exc_info=True)
             failed_phases.append("phase 3 (review)")
 
-        tracker.row_count = audit_rows + review_rows
+        # Phase 1b snapshots are counted separately from phase-2/3 rows
+        # so the row-count contract (tracker = rows written / audit-
+        # consistent) still holds when this job becomes the sole SEC
+        # companyfacts writer under #414.
+        tracker.row_count = audit_rows + review_rows + phase1b_rows
 
         # Raise at the end so all phases ran first, but the outer
         # _tracked_job marks the job failed and the health surfaces

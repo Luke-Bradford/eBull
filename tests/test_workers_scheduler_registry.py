@@ -107,6 +107,27 @@ class TestOrchestratorTriggers:
         assert "daily_candle_refresh" not in names
 
 
+class TestFundamentalsSyncCadence:
+    """fundamentals_sync cadence moved weekly→daily 02:30 UTC under #414.
+
+    SEC publishes the nightly XBRL update around 22:00 ET (02:00 UTC).
+    The previous Monday 05:00 UTC window missed the natural incremental
+    and amplified seed lag (a missed Monday meant week-long staleness).
+    Daily 02:30 UTC lands ~30 min after the publish window so new
+    filings ingest the same night.
+    """
+
+    def test_fundamentals_sync_is_daily_02_30(self) -> None:
+        job = next(j for j in SCHEDULED_JOBS if j.name == "fundamentals_sync")
+        assert job.cadence.kind == "daily"
+        assert job.cadence.hour == 2
+        assert job.cadence.minute == 30
+
+    def test_fundamentals_sync_does_not_catch_up_on_boot(self) -> None:
+        job = next(j for j in SCHEDULED_JOBS if j.name == "fundamentals_sync")
+        assert job.catch_up_on_boot is False
+
+
 # ---------------------------------------------------------------------------
 # Cadence validators
 # ---------------------------------------------------------------------------
