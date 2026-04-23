@@ -798,3 +798,35 @@ def test_timing_log_emitted_on_instrument_missing_skip(
     assert "cik=0000999999" in line
     assert "outcome=skip_instrument_missing" in line
     assert "facts_upserted=0" in line
+
+
+def test_cik_upsert_timing_row_persisted(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    # Persist-path companion to the log-line tests above (#418): each
+    # _run_cik_upsert exit must write a cik_upsert_timing row so the
+    # admin UI can surface p50/p95 per-CIK without tailing logs.
+    ebull_test_conn.execute("TRUNCATE cik_upsert_timing RESTART IDENTITY CASCADE")
+    ebull_test_conn.commit()
+
+    plan = RefreshPlan(seeds=["0000999998"])
+    filings = StubFilingsProvider()
+    fundamentals = StubFundamentalsProvider()
+
+    execute_refresh(
+        ebull_test_conn,
+        filings_provider=cast(SecFilingsProvider, filings),
+        fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+        plan=plan,
+    )
+
+    rows = ebull_test_conn.execute(
+        "SELECT cik, mode, outcome, facts_upserted, seconds FROM cik_upsert_timing ORDER BY timing_id"
+    ).fetchall()
+    assert len(rows) == 1
+    cik, mode, outcome, facts, seconds = rows[0]
+    assert cik == "0000999998"
+    assert mode == "seed"
+    assert outcome == "skip_instrument_missing"
+    assert facts == 0
+    assert float(seconds) >= 0

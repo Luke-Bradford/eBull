@@ -21,6 +21,10 @@ from pydantic import BaseModel
 from app.api.auth import require_session_or_service_token
 from app.config import settings
 from app.db import get_conn
+from app.services.fundamentals_observability import (
+    get_cik_timing_summary,
+    get_seed_progress,
+)
 from app.services.layer_enabled import set_layer_enabled
 from app.services.sync_orchestrator import (
     ExecutionPlan,
@@ -555,6 +559,146 @@ def post_ingest_enabled(
         key=key,
         display_name=INGEST_TOGGLES[key],
         is_enabled=body.enabled,
+    )
+
+
+# ---------------------------------------------------------------------------
+# SEC ingest observability (#414 design goal G, #418)
+# ---------------------------------------------------------------------------
+
+
+class CikTimingModeModel(BaseModel):
+    mode: Literal["seed", "refresh"]
+    count: int
+    p50_seconds: float | None
+    p95_seconds: float | None
+    max_seconds: float | None
+    facts_upserted_total: int
+
+
+class SlowCikModel(BaseModel):
+    cik: str
+    mode: Literal["seed", "refresh"]
+    seconds: float
+    facts_upserted: int
+    outcome: str
+    finished_at: datetime
+
+
+class CikTimingSummaryResponse(BaseModel):
+    ingestion_run_id: int | None
+    run_source: str | None
+    run_started_at: datetime | None
+    run_finished_at: datetime | None
+    run_status: str | None
+    modes: list[CikTimingModeModel]
+    slowest: list[SlowCikModel]
+
+
+@router.get("/ingest/cik_timing/latest", response_model=CikTimingSummaryResponse)
+def get_cik_timing_latest(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> CikTimingSummaryResponse:
+    """Return p50/p95 per-CIK timing for the most recent SEC XBRL
+    ingest run (#418 acceptance: validate ADR 0004 Shape-B bench
+    ratios against production without tailing logs).
+
+    If no timing rows exist yet (pre-#418 deploy or empty table), every
+    field except an empty-list ``modes``/``slowest`` is null — the UI
+    renders "no data yet" rather than a 500.
+    """
+    summary = get_cik_timing_summary(conn)
+    return CikTimingSummaryResponse(
+        ingestion_run_id=summary.ingestion_run_id,
+        run_source=summary.run_source,
+        run_started_at=summary.run_started_at,
+        run_finished_at=summary.run_finished_at,
+        run_status=summary.run_status,
+        modes=[
+            CikTimingModeModel(
+                mode=m.mode,
+                count=m.count,
+                p50_seconds=m.p50_seconds,
+                p95_seconds=m.p95_seconds,
+                max_seconds=m.max_seconds,
+                facts_upserted_total=m.facts_upserted_total,
+            )
+            for m in summary.modes
+        ],
+        slowest=[
+            SlowCikModel(
+                cik=s.cik,
+                mode=s.mode,
+                seconds=s.seconds,
+                facts_upserted=s.facts_upserted,
+                outcome=s.outcome,
+                finished_at=s.finished_at,
+            )
+            for s in summary.slowest
+        ],
+    )
+
+
+class SeedSourceModel(BaseModel):
+    source: str
+    key_description: str
+    seeded: int
+    total: int
+
+
+class LatestIngestionRunModel(BaseModel):
+    ingestion_run_id: int
+    source: str
+    started_at: datetime
+    finished_at: datetime | None
+    status: str
+    rows_upserted: int
+    rows_skipped: int
+
+
+class SeedProgressResponse(BaseModel):
+    sources: list[SeedSourceModel]
+    latest_run: LatestIngestionRunModel | None
+    ingest_paused: bool
+
+
+@router.get("/ingest/seed_progress", response_model=SeedProgressResponse)
+def get_seed_progress_endpoint(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> SeedProgressResponse:
+    """Return seed progress ratios + latest-run state + pause flag for
+    the admin UI (#414 design goal G).
+
+    ``sources[].total`` is the count of CIK-mapped tradable
+    instruments; ``seeded`` is the number of that set with a committed
+    watermark. Ratio is the operator's "N of 5,134" seed-progress
+    number.
+    """
+    summary = get_seed_progress(conn)
+    return SeedProgressResponse(
+        sources=[
+            SeedSourceModel(
+                source=s.source,
+                key_description=s.key_description,
+                seeded=s.seeded,
+                total=s.total,
+            )
+            for s in summary.sources
+        ],
+        latest_run=(
+            LatestIngestionRunModel(
+                ingestion_run_id=summary.latest_run.ingestion_run_id,
+                source=summary.latest_run.source,
+                started_at=summary.latest_run.started_at,
+                finished_at=summary.latest_run.finished_at,
+                status=summary.latest_run.status,
+                rows_upserted=summary.latest_run.rows_upserted,
+                rows_skipped=summary.latest_run.rows_skipped,
+            )
+            if summary.latest_run is not None
+            else None
+        ),
+        ingest_paused=summary.ingest_paused,
     )
 
 

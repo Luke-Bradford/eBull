@@ -1818,15 +1818,101 @@ def _run_cik_upsert(
         # production ratios can be validated against the ADR 0004 bench
         # (Shape B was ~18x faster on the DB-path bench). Emits on
         # every exit path (success, skip, exception). Log keys are
-        # machine-parseable; the full "alert on regression" surface
-        # ships with #418's observability work.
+        # machine-parseable so grep-based alerting still works even if
+        # the persist path below fails.
+        finished_ts = time.perf_counter()
+        elapsed = finished_ts - started
         logger.info(
             "fundamentals.cik_timing cik=%s mode=%s outcome=%s facts_upserted=%d seconds=%.3f",
             cik,
             mode,
             outcome,
             facts_upserted,
-            time.perf_counter() - started,
+            elapsed,
+        )
+        # Persist the timing row (#418 acceptance: p50/p95 per-CIK
+        # timing surfaced in the admin UI without tailing logs). Writes
+        # on the caller's connection inside its own transaction block;
+        # by this point both the exception path and the success path
+        # have called commit/rollback, so the connection is in a clean
+        # state. Skip-path exits (no run body) pass ``run_id=None``
+        # into a NULL FK; the DDL allows NULL + ON DELETE SET NULL for
+        # safe ``data_ingestion_runs`` pruning.
+        try:
+            # Close any outstanding implicit read transaction (e.g.
+            # the one opened by ``_instrument_for_cik`` on the
+            # skip-path early returns) so ``conn.transaction()`` in
+            # ``persist_cik_timing`` opens a real BEGIN/COMMIT pair
+            # rather than nesting a savepoint that the caller's
+            # later ``conn.rollback()`` would drop. Safe — by this
+            # point the per-CIK success/error branches have already
+            # committed or rolled back their own work, and a
+            # rollback on a clean session is a no-op.
+            try:
+                conn.rollback()
+            except psycopg.Error:
+                logger.debug("pre-timing rollback suppressed", exc_info=True)
+            persist_cik_timing(
+                conn,
+                cik=cik,
+                ingestion_run_id=run_id,
+                mode=mode,
+                outcome=outcome,
+                facts_upserted=facts_upserted,
+                seconds=elapsed,
+                started_at=_utc_from_perf(started),
+                finished_at=_utc_from_perf(finished_ts),
+            )
+        except Exception:
+            logger.warning("fundamentals.cik_timing persist failed", exc_info=True)
+
+
+def _utc_from_perf(perf: float) -> datetime:
+    """Convert ``time.perf_counter`` timestamp to a wall-clock UTC
+    datetime by anchoring on ``datetime.now(tz=UTC)`` minus the
+    perf-counter delta. Used only for the cik_upsert_timing audit row
+    — elapsed seconds remain the source of truth for duration.
+    """
+    return datetime.now(tz=UTC) - timedelta(seconds=time.perf_counter() - perf)
+
+
+def persist_cik_timing(
+    conn: psycopg.Connection[tuple],
+    *,
+    cik: str,
+    ingestion_run_id: int | None,
+    mode: str,
+    outcome: str,
+    facts_upserted: int,
+    seconds: float,
+    started_at: datetime,
+    finished_at: datetime,
+) -> None:
+    """Insert one ``cik_upsert_timing`` row on the caller-supplied
+    connection. Uses its own transaction block so the write commits
+    independently of whatever the surrounding logic does next.
+    """
+    with conn.transaction():
+        conn.execute(
+            """
+            INSERT INTO cik_upsert_timing (
+                ingestion_run_id, cik, mode, outcome,
+                facts_upserted, seconds, started_at, finished_at
+            ) VALUES (
+                %(run_id)s, %(cik)s, %(mode)s, %(outcome)s,
+                %(facts)s, %(seconds)s, %(started)s, %(finished)s
+            )
+            """,
+            {
+                "run_id": ingestion_run_id,
+                "cik": cik,
+                "mode": mode,
+                "outcome": outcome,
+                "facts": facts_upserted,
+                "seconds": round(seconds, 3),
+                "started": started_at,
+                "finished": finished_at,
+            },
         )
 
 
