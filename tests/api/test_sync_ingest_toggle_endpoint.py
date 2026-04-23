@@ -31,6 +31,7 @@ def test_post_ingest_enabled_happy_path(clean_client: TestClient) -> None:
         clean_client.post("/sync/ingest/fundamentals_ingest/enabled", json={"enabled": True})
 
 
+@pytest.mark.integration
 def test_post_ingest_enabled_unknown_key_404(clean_client: TestClient) -> None:
     resp = clean_client.post("/sync/ingest/not_a_real_key/enabled", json={"enabled": False})
     assert resp.status_code == 404
