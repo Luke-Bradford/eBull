@@ -699,11 +699,7 @@ def test_seed_path_does_not_write_filing_events(
 
 
 def _timing_lines(caplog_records: Sequence[LogRecord]) -> list[str]:
-    return [
-        r.getMessage()
-        for r in caplog_records
-        if r.getMessage().startswith("fundamentals.cik_timing ")
-    ]
+    return [r.getMessage() for r in caplog_records if r.getMessage().startswith("fundamentals.cik_timing ")]
 
 
 def test_timing_log_emitted_on_success(
