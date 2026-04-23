@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -297,6 +298,48 @@ def finish_ingestion_run(
     )
 
 
+_UPSERT_FACT_SQL = """
+INSERT INTO financial_facts_raw (
+    instrument_id, taxonomy, concept, unit,
+    period_start, period_end, val, frame,
+    accession_number, form_type, filed_date,
+    fiscal_year, fiscal_period, decimals,
+    ingestion_run_id
+) VALUES (
+    %(instrument_id)s, %(taxonomy)s, %(concept)s, %(unit)s,
+    %(period_start)s, %(period_end)s, %(val)s, %(frame)s,
+    %(accession_number)s, %(form_type)s, %(filed_date)s,
+    %(fiscal_year)s, %(fiscal_period)s, %(decimals)s,
+    %(ingestion_run_id)s
+)
+ON CONFLICT (
+    instrument_id, concept, unit,
+    COALESCE(period_start, '0001-01-01'::date),
+    period_end, accession_number
+)
+DO UPDATE SET
+    val = EXCLUDED.val,
+    frame = EXCLUDED.frame,
+    form_type = EXCLUDED.form_type,
+    filed_date = EXCLUDED.filed_date,
+    fiscal_year = EXCLUDED.fiscal_year,
+    fiscal_period = EXCLUDED.fiscal_period,
+    decimals = EXCLUDED.decimals,
+    ingestion_run_id = EXCLUDED.ingestion_run_id,
+    fetched_at = NOW()
+WHERE financial_facts_raw.val IS DISTINCT FROM EXCLUDED.val
+   OR financial_facts_raw.frame IS DISTINCT FROM EXCLUDED.frame
+"""
+
+
+# Batch size for executemany. A 10-K carries ~10k facts; a chunk of
+# 1000 keeps each round trip well under Postgres's default
+# max_parameter size (65k params ÷ 15 columns ≈ 4300 rows) while
+# being large enough to amortise per-round-trip latency. The ADR
+# 0004 bench showed this shape ~18× faster than the prior row-loop.
+_UPSERT_PAGE_SIZE = 1000
+
+
 def upsert_facts_for_instrument(
     conn: psycopg.Connection[tuple],
     *,
@@ -304,73 +347,69 @@ def upsert_facts_for_instrument(
     facts: Sequence[XbrlFact],
     ingestion_run_id: int,
 ) -> tuple[int, int]:
-    """Upsert XBRL facts into financial_facts_raw.
+    """Upsert XBRL facts into ``financial_facts_raw``.
 
-    Returns (upserted_count, skipped_count).
-    Uses ON CONFLICT DO UPDATE so restatements overwrite prior values.
+    Returns ``(upserted_count, skipped_count)``. "Upserted" means the
+    row was either INSERTed fresh or UPDATEd in place because the WHERE
+    guard on ``IS DISTINCT FROM`` matched a change; "skipped" means the
+    ON CONFLICT fired but the WHERE filter short-circuited because the
+    value was unchanged (idempotent re-upsert).
+
+    Uses ``cur.executemany`` with a 1000-row page size — the DB path
+    from ADR 0004. Same SQL as the previous row-loop shape; only the
+    call shape changed, so the identity index, ON CONFLICT semantics,
+    and `IS DISTINCT FROM` filter are unchanged.
+
+    Connection-level rowcount after ``executemany`` aggregates across
+    all parameter sets (psycopg3 contract), so ``upserted`` is
+    ``sum(cur.rowcount)`` per chunk and ``skipped`` is
+    ``len(facts) − upserted``.
     """
     if not facts:
         return 0, 0
 
-    upserted = 0
-    skipped = 0
-    for fact in facts:
-        cur = conn.execute(
-            """
-            INSERT INTO financial_facts_raw (
-                instrument_id, taxonomy, concept, unit,
-                period_start, period_end, val, frame,
-                accession_number, form_type, filed_date,
-                fiscal_year, fiscal_period, decimals,
-                ingestion_run_id
-            ) VALUES (
-                %(instrument_id)s, %(taxonomy)s, %(concept)s, %(unit)s,
-                %(period_start)s, %(period_end)s, %(val)s, %(frame)s,
-                %(accession_number)s, %(form_type)s, %(filed_date)s,
-                %(fiscal_year)s, %(fiscal_period)s, %(decimals)s,
-                %(ingestion_run_id)s
-            )
-            ON CONFLICT (
-                instrument_id, concept, unit,
-                COALESCE(period_start, '0001-01-01'::date),
-                period_end, accession_number
-            )
-            DO UPDATE SET
-                val = EXCLUDED.val,
-                frame = EXCLUDED.frame,
-                form_type = EXCLUDED.form_type,
-                filed_date = EXCLUDED.filed_date,
-                fiscal_year = EXCLUDED.fiscal_year,
-                fiscal_period = EXCLUDED.fiscal_period,
-                decimals = EXCLUDED.decimals,
-                ingestion_run_id = EXCLUDED.ingestion_run_id,
-                fetched_at = NOW()
-            WHERE financial_facts_raw.val IS DISTINCT FROM EXCLUDED.val
-               OR financial_facts_raw.frame IS DISTINCT FROM EXCLUDED.frame
-            """,
-            {
-                "instrument_id": instrument_id,
-                "taxonomy": fact.taxonomy,
-                "concept": fact.concept,
-                "unit": fact.unit,
-                "period_start": fact.period_start,
-                "period_end": fact.period_end,
-                "val": fact.val,
-                "frame": fact.frame,
-                "accession_number": fact.accession_number,
-                "form_type": fact.form_type,
-                "filed_date": fact.filed_date,
-                "fiscal_year": fact.fiscal_year,
-                "fiscal_period": fact.fiscal_period,
-                "decimals": fact.decimals,
-                "ingestion_run_id": ingestion_run_id,
-            },
-        )
-        if cur.rowcount > 0:
-            upserted += 1
-        else:
-            skipped += 1
+    rows: list[dict[str, object]] = [
+        {
+            "instrument_id": instrument_id,
+            "taxonomy": fact.taxonomy,
+            "concept": fact.concept,
+            "unit": fact.unit,
+            "period_start": fact.period_start,
+            "period_end": fact.period_end,
+            "val": fact.val,
+            "frame": fact.frame,
+            "accession_number": fact.accession_number,
+            "form_type": fact.form_type,
+            "filed_date": fact.filed_date,
+            "fiscal_year": fact.fiscal_year,
+            "fiscal_period": fact.fiscal_period,
+            "decimals": fact.decimals,
+            "ingestion_run_id": ingestion_run_id,
+        }
+        for fact in facts
+    ]
 
+    upserted = 0
+    with conn.cursor() as cur:
+        for start in range(0, len(rows), _UPSERT_PAGE_SIZE):
+            chunk = rows[start : start + _UPSERT_PAGE_SIZE]
+            cur.executemany(_UPSERT_FACT_SQL, chunk)
+            # rowcount == -1 means the driver/pool adapter did not
+            # report a command tag. That breaks the upserted/skipped
+            # accounting contract — treating it as zero would
+            # silently mis-count every fact as "skipped" and
+            # contaminate downstream metrics. Fail loudly so the
+            # caller surfaces it as a per-CIK failure (the watermark
+            # then stays at its previous value and the next run
+            # retries) rather than drifting silently.
+            if cur.rowcount < 0:
+                raise RuntimeError(
+                    "upsert_facts_for_instrument: driver returned rowcount=-1 "
+                    "after executemany; unable to account for upsert/skip counts"
+                )
+            upserted += cur.rowcount
+
+    skipped = len(rows) - upserted
     return upserted, skipped
 
 
@@ -1506,7 +1545,20 @@ def _run_cik_upsert(
     All writes for one CIK happen inside one ``with conn.transaction()``
     block so on exception the facts upsert AND both watermark writes
     roll back together — watermarks never drift ahead of data.
+
+    Emits a single ``fundamentals.cik_timing`` log line per invocation
+    (success OR failure) carrying wall-clock seconds, facts_upserted,
+    and seed-vs-refresh mode. This is the observability signal required
+    by issue #418 — per-CIK timing isolates whether the Shape-B DB-path
+    fix (ADR 0004) landed in production. ``data_ingestion_runs`` today
+    is per provider batch, not per CIK, so log parsing is the smallest
+    surface that answers the question without a schema change.
     """
+    started = time.perf_counter()
+    mode = "refresh" if known_top_accession is not None else "seed"
+    facts_upserted = 0
+    outcome = "unknown"
+
     try:
         inst = _instrument_for_cik(conn, cik)
         if inst is None:
@@ -1520,6 +1572,7 @@ def _run_cik_upsert(
                 cik,
             )
             failed.append((cik, "InstrumentMissing"))
+            outcome = "skip_instrument_missing"
             return None
         instrument_id, symbol = inst
         # Close the implicit read transaction opened by _instrument_for_cik
@@ -1546,6 +1599,7 @@ def _run_cik_upsert(
                     cik,
                 )
                 failed.append((cik, "SubmissionsMissing"))
+                outcome = "skip_submissions_missing"
                 return None
             top_accession = _top_accession_from_submissions(submissions)
             if top_accession is None:
@@ -1557,10 +1611,11 @@ def _run_cik_upsert(
                     cik,
                 )
                 failed.append((cik, "EmptyFilingsRecent"))
+                outcome = "skip_empty_filings"
                 return None
 
         facts = fundamentals_provider.extract_facts(symbol, cik)
-        facts_upserted = 0
+        upserted_in_tx = 0
 
         with conn.transaction():
             if facts:
@@ -1570,7 +1625,7 @@ def _run_cik_upsert(
                     facts=facts,
                     ingestion_run_id=run_id,
                 )
-                facts_upserted = upserted
+                upserted_in_tx = upserted
             # Upsert each master-index entry for this CIK into
             # filing_events so downstream event-driven triggers
             # (#273 thesis, #276 cascade) have a timestamped signal.
@@ -1598,6 +1653,13 @@ def _run_cik_upsert(
                 watermark=top_accession,
             )
         conn.commit()
+        # Only credit facts_upserted *after* the watermark writes and
+        # the commit have succeeded — if any step inside the
+        # transaction block raises, Postgres rolls back the fact
+        # upserts with it and the timing log must report 0 (not the
+        # count that was never actually committed).
+        facts_upserted = upserted_in_tx
+        outcome = "success"
         return facts_upserted
     except Exception as exc:
         # ``with conn.transaction()`` already rolled back on exception;
@@ -1610,7 +1672,23 @@ def _run_cik_upsert(
             logger.debug("rollback suppressed after executor exception", exc_info=True)
         failed.append((cik, type(exc).__name__))
         logger.exception("sec_incremental per-CIK upsert failed for cik=%s", cik)
+        outcome = f"error_{type(exc).__name__}"
         return None
+    finally:
+        # Structured per-CIK timing log — required by #418 so
+        # production ratios can be validated against the ADR 0004 bench
+        # (Shape B was ~18x faster on the DB-path bench). Emits on
+        # every exit path (success, skip, exception). Log keys are
+        # machine-parseable; the full "alert on regression" surface
+        # ships with #418's observability work.
+        logger.info(
+            "fundamentals.cik_timing cik=%s mode=%s outcome=%s facts_upserted=%d seconds=%.3f",
+            cik,
+            mode,
+            outcome,
+            facts_upserted,
+            time.perf_counter() - started,
+        )
 
 
 def execute_refresh(

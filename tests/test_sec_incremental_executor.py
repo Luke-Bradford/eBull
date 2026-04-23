@@ -676,3 +676,127 @@ def test_seed_path_does_not_write_filing_events(
 
     count = ebull_test_conn.execute("SELECT COUNT(*) FROM filing_events WHERE instrument_id = 1").fetchone()
     assert count is not None and count[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# Per-CIK timing log (issue #418 observability signal)
+# ---------------------------------------------------------------------------
+#
+# The per-CIK ``fundamentals.cik_timing`` log line is the signal #418
+# uses to validate the ADR 0004 Shape B fix landed in production. The
+# tests below pin its invariants:
+#
+# - Emits exactly once per CIK on the success path, carrying
+#   ``outcome=success`` and the committed facts_upserted count.
+# - Emits exactly once on the exception path, carrying
+#   ``outcome=error_<ExceptionName>`` and ``facts_upserted=0`` — the
+#   transaction rolled back, so no facts were actually committed
+#   even if the upsert call completed before the later step raised.
+# - Emits exactly once on early skip paths, carrying an explicit
+#   ``outcome=skip_*`` tag.
+
+
+def _timing_lines(caplog_records: list[object]) -> list[str]:
+    return [
+        r.getMessage()  # type: ignore[attr-defined]
+        for r in caplog_records
+        if r.getMessage().startswith("fundamentals.cik_timing ")  # type: ignore[attr-defined]
+    ]
+
+
+def test_timing_log_emitted_on_success(
+    ebull_test_conn: psycopg.Connection[tuple],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000320193")
+    plan = RefreshPlan(seeds=["0000320193"])
+    filings = StubFilingsProvider(
+        submissions_by_cik={"0000320193": _submissions_with_top("0000320193-26-000042")},
+    )
+    fundamentals = StubFundamentalsProvider(
+        facts_by_cik={"0000320193": [_sample_fact("0000320193-26-000042")]},
+    )
+
+    with caplog.at_level("INFO", logger="app.services.fundamentals"):
+        execute_refresh(
+            ebull_test_conn,
+            filings_provider=cast(SecFilingsProvider, filings),
+            fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+            plan=plan,
+        )
+
+    lines = _timing_lines(caplog.records)
+    assert len(lines) == 1
+    line = lines[0]
+    assert "cik=0000320193" in line
+    assert "mode=seed" in line
+    assert "outcome=success" in line
+    assert "facts_upserted=1" in line
+
+
+def test_timing_log_emitted_on_exception_reports_zero_facts(
+    ebull_test_conn: psycopg.Connection[tuple],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # ``fail_on`` causes the fundamentals provider to raise during
+    # extract_facts, which is before the upsert runs — but the timing
+    # log must still emit exactly once, with outcome=error_RuntimeError
+    # and facts_upserted=0 (nothing was committed).
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000320193")
+    with ebull_test_conn.transaction():
+        set_watermark(
+            ebull_test_conn,
+            source="sec.submissions",
+            key="0000320193",
+            watermark="0000320193-25-000108",
+        )
+    ebull_test_conn.commit()
+
+    plan = RefreshPlan(refreshes=[("0000320193", "0000320193-26-000042")])
+    filings = StubFilingsProvider(
+        submissions_by_cik={"0000320193": _submissions_with_top("0000320193-26-000042")},
+    )
+    fundamentals = StubFundamentalsProvider(fail_on={"0000320193"})
+
+    with caplog.at_level("INFO", logger="app.services.fundamentals"):
+        execute_refresh(
+            ebull_test_conn,
+            filings_provider=cast(SecFilingsProvider, filings),
+            fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+            plan=plan,
+        )
+
+    lines = _timing_lines(caplog.records)
+    assert len(lines) == 1
+    line = lines[0]
+    assert "cik=0000320193" in line
+    assert "mode=refresh" in line
+    assert "outcome=error_RuntimeError" in line
+    assert "facts_upserted=0" in line
+
+
+def test_timing_log_emitted_on_instrument_missing_skip(
+    ebull_test_conn: psycopg.Connection[tuple],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Plan-time drift: the CIK was in the plan but no instrument
+    # resolves for it. _run_cik_upsert hits the InstrumentMissing
+    # early return; the timing log must still emit once.
+    plan = RefreshPlan(seeds=["0000999999"])
+    filings = StubFilingsProvider()
+    fundamentals = StubFundamentalsProvider()
+
+    with caplog.at_level("INFO", logger="app.services.fundamentals"):
+        execute_refresh(
+            ebull_test_conn,
+            filings_provider=cast(SecFilingsProvider, filings),
+            fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+            plan=plan,
+        )
+
+    lines = _timing_lines(caplog.records)
+    assert len(lines) == 1
+    line = lines[0]
+    assert "cik=0000999999" in line
+    assert "outcome=skip_instrument_missing" in line
+    assert "facts_upserted=0" in line
