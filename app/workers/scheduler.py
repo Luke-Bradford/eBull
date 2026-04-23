@@ -453,6 +453,13 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.weekly(weekday=0, hour=5, minute=0),  # Monday 05:00 UTC
         prerequisite=_has_any_coverage,
+        # Never catch up on boot. The job pulls SEC EDGAR data for every
+        # covered CIK (tens of minutes, holds DB-pool workers and hits
+        # SEC's 10 rps cap). Every dev-stack restart would otherwise
+        # fire a catch-up and make the site unresponsive until it
+        # finishes. Weekly cadence also means a missed Monday is not
+        # time-critical — operator can click "Run now" in the admin UI.
+        catch_up_on_boot=False,
     ),
     # attribution_summary retired from scheduling in Phase 1.4 of the
     # 2026-04-19 research-tool refocus — no UI consumer today. The
