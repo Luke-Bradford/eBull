@@ -148,5 +148,19 @@ class Settings(BaseSettings):
     # → follow-up PR deletes the guarded SEC block.
     enable_filings_fetch_dedupe: bool = False
 
+    # When True, ``daily_research_refresh`` skips its SEC XBRL
+    # ``refresh_fundamentals`` call and ``fundamentals_sync`` phase 1b
+    # owns ``fundamentals_snapshot`` refresh for CIK-mapped tradable
+    # instruments. Collapses the dual SEC ``companyfacts`` fetch path
+    # identified in issue #414 so only one scheduled job hits
+    # ``data.sec.gov/api/xbrl/companyfacts/…`` each day. FMP fallback,
+    # FMP enrichment (profile / earnings / estimates), and Companies
+    # House filings all continue to run in ``daily_research_refresh``
+    # regardless of this flag.
+    # Ship as False (default) → operator flips True → observe ~1 day
+    # → follow-up PR deletes the guarded SEC-fundamentals block in
+    # ``daily_research_refresh``.
+    enable_sec_fundamentals_dedupe: bool = False
+
 
 settings = Settings()

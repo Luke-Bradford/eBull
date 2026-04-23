@@ -508,6 +508,56 @@ def post_layer_enabled(
     )
 
 
+# ---------------------------------------------------------------------------
+# Non-orchestrator ingest toggles (#414)
+# ---------------------------------------------------------------------------
+
+# Ingest keys the operator can pause/resume at runtime without a restart.
+# Distinct from ``LAYERS`` because these gate scheduled *jobs*, not
+# orchestrator layers — ``fundamentals_sync`` has no layer emit and is not
+# in ``JOB_TO_LAYERS``. Stored in the same ``layer_enabled`` table for
+# operational convenience; absent row counts as enabled.
+INGEST_TOGGLES: dict[str, str] = {
+    "fundamentals_ingest": "Fundamentals ingest (fundamentals_sync)",
+}
+
+
+class IngestToggleResponse(BaseModel):
+    key: str
+    display_name: str
+    is_enabled: bool
+
+
+@router.post("/ingest/{key}/enabled", response_model=IngestToggleResponse)
+def post_ingest_enabled(
+    key: str,
+    body: LayerEnabledRequest,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> IngestToggleResponse:
+    """Pause or resume a scheduled ingest job without restarting the
+    server (#414 design goal F).
+
+    Flip ``fundamentals_ingest`` to False to skip the daily
+    ``fundamentals_sync`` run (used during demos, or when SEC rate-
+    limits us). The job still runs at its cron time, logs the skip,
+    and records a zero-row ``job_runs`` entry — so the admin UI
+    shows the operator-initiated pause explicitly rather than silent
+    staleness.
+    """
+    if key not in INGEST_TOGGLES:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown ingest key: {key}; allowed: {sorted(INGEST_TOGGLES)}",
+        )
+    set_layer_enabled(conn, key, enabled=body.enabled)
+    conn.commit()
+    return IngestToggleResponse(
+        key=key,
+        display_name=INGEST_TOGGLES[key],
+        is_enabled=body.enabled,
+    )
+
+
 def _system_summary(
     *,
     action_needed: list[ActionNeededItem],
