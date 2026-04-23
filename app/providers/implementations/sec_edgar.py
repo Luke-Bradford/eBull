@@ -28,14 +28,23 @@ Provider contract:
 import hashlib
 import logging
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from types import TracebackType
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from app.providers.filings import FilingEvent, FilingNotFound, FilingSearchResult, FilingsProvider
 from app.providers.resilient_client import ResilientClient
 from app.services import raw_persistence
+
+_ET = ZoneInfo("America/New_York")
+
+# SEC publishes the daily master-index ~22:00 ET on the same business
+# day. Before that moment a 403 on the current day is the "not yet
+# published" signal. After it, a 403 means SEC is actively blocking us
+# (UA/rate-limit/WAF) and must surface.
+_MASTER_INDEX_PUBLISH_HOUR_ET = 22
 
 logger = logging.getLogger(__name__)
 
@@ -331,8 +340,18 @@ class SecFilingsProvider(FilingsProvider):
         body bytes + sha256 hash + Last-Modified header for the caller
         to persist in the watermark row.
 
+        SEC's Archives host serves 403 (not 404) for files that do not
+        yet exist — current-day files are only published after the
+        Eastern-time business day closes (~22:00 ET). To distinguish
+        "not yet published" from a genuine access block, a 403 is
+        tolerated only when ``target_date`` is still within its
+        publish window: future-dated, or same-day-ET before the
+        22:00-ET publish cutoff. A 403 on a past date, or on the
+        current ET day after the publish cutoff, raises — that's
+        SEC refusing us (UA/rate-limit/etc.), not awaiting publication.
+
         Rate-limited alongside the other SEC clients via the shared
-        timestamp list, so a burst of 7 calls respects the 10 rps cap.
+        timestamp list, so a burst of N calls respects the 10 rps cap.
         """
         quarter = (target_date.month - 1) // 3 + 1
         url = (
@@ -346,6 +365,21 @@ class SecFilingsProvider(FilingsProvider):
         resp = self._http_tickers.get(url, headers=headers)
         if resp.status_code in (304, 404):
             return None
+        if resp.status_code == 403:
+            now_et = datetime.now(_ET)
+            publish_due = datetime.combine(
+                target_date,
+                time(_MASTER_INDEX_PUBLISH_HOUR_ET, 0),
+                tzinfo=_ET,
+            )
+            if now_et < publish_due:
+                logger.info(
+                    "SEC master-index: 403 on %s treated as not-yet-published (now_et=%s publish_due=%s)",
+                    target_date.isoformat(),
+                    now_et.isoformat(timespec="minutes"),
+                    publish_due.isoformat(timespec="minutes"),
+                )
+                return None
         resp.raise_for_status()
         body_hash = hashlib.sha256(resp.content).hexdigest()
         return MasterIndexFetchResult(

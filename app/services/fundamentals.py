@@ -1102,7 +1102,16 @@ def normalize_financial_periods(
 # ============================================================================
 
 
-LOOKBACK_DAYS = 7
+# 30-day rolling window covers typical outage / offline scenarios
+# (weekend + holiday + a few days of developer laptop being off)
+# without explicit backfill. Each day has its own watermark keyed by
+# ISO date, so once a day's master-index has been committed the next
+# run gets a 304 and pays only the conditional-GET round-trip. A
+# 30-call burst at the 10 rps SEC cap is bounded at ~3s.
+#
+# Gaps longer than this window need a one-shot submissions.json
+# backfill for covered CIKs — tracked as tech debt.
+LOOKBACK_DAYS = 30
 
 # 6-K (foreign-private-issuer interim reports) is deliberately
 # excluded — typically lacks structured XBRL, so refreshing
