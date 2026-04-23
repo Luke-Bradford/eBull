@@ -257,10 +257,14 @@ describe("AdminPage — top-level composition", () => {
 
   it("shows problems panel when a job has failed", async () => {
     renderPage();
+    // The alert title `attribution_summary — last run failed` is the
+    // only place where that exact phrase appears (the "Clears when the
+    // next run of attribution_summary succeeds." line introduced in
+    // #415 contains `attribution_summary` too, so a bare regex matches
+    // twice — scope to the combined phrase).
     expect(
-      await screen.findByText(/attribution_summary/),
+      await screen.findByText(/attribution_summary — last run failed/),
     ).toBeInTheDocument();
-    expect(screen.getByText(/last run failed/)).toBeInTheDocument();
   });
 
   it("shows problems panel when a layer has consecutive failures", async () => {

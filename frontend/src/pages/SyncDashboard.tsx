@@ -195,6 +195,14 @@ export function SyncDashboard({ syncTrigger }: SyncDashboardProps) {
           {syncTrigger.kind === "error" && syncTrigger.message !== null && (
             <span className="text-sm text-red-600">{syncTrigger.message}</span>
           )}
+          {syncTrigger.kind === "conflict" && syncTrigger.message !== null && (
+            <span
+              className="rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-sm text-amber-800"
+              role="status"
+            >
+              {syncTrigger.message}
+            </span>
+          )}
           {syncTrigger.kind === "queued" && syncTrigger.queuedRunId !== null && (
             <span className="text-sm text-slate-500">
               Queued as run #{syncTrigger.queuedRunId}

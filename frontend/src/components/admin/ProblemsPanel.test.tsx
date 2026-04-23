@@ -266,8 +266,127 @@ describe("ProblemsPanel", () => {
       ],
     };
     renderPanel({ jobs });
-    expect(screen.getByText(/test_job/)).toBeInTheDocument();
-    expect(screen.getByText(/last run failed/i)).toBeInTheDocument();
+    // `test_job` now appears in both the alert title and the
+    // "Clears when the next run of test_job succeeds." line — use a
+    // non-greedy matcher scoped to the title row.
+    expect(screen.getByText(/test_job — last run failed/i)).toBeInTheDocument();
+  });
+
+  it("renders a drill-through link to /admin/jobs/<name> for a failing job", () => {
+    const jobs: JobsListResponse = {
+      checked_at: new Date().toISOString(),
+      jobs: [
+        {
+          name: "fundamentals_sync",
+          description: "",
+          cadence: "weekly",
+          cadence_kind: "weekly",
+          next_run_time: new Date().toISOString(),
+          next_run_time_source: "declared",
+          last_status: "failure",
+          last_started_at: null,
+          last_finished_at: new Date().toISOString(),
+          detail: "",
+        },
+      ],
+    };
+    renderPanel({ jobs });
+    const link = screen.getByRole("link", {
+      name: /View runs for fundamentals_sync/i,
+    });
+    expect(link).toHaveAttribute("href", "/admin/jobs/fundamentals_sync");
+  });
+
+  it("URL-encodes job names containing special characters in the drill link", () => {
+    // Defensive: job_name is a plain string in the DB; if an operator
+    // ever names a job with `/`, space, or `?`, the drill link must
+    // stay unambiguous. encodeURIComponent at link-construction time.
+    const jobs: JobsListResponse = {
+      checked_at: new Date().toISOString(),
+      jobs: [
+        {
+          name: "etl/fundamentals_sync",
+          description: "",
+          cadence: "weekly",
+          cadence_kind: "weekly",
+          next_run_time: new Date().toISOString(),
+          next_run_time_source: "declared",
+          last_status: "failure",
+          last_started_at: null,
+          last_finished_at: new Date().toISOString(),
+          detail: "",
+        },
+      ],
+    };
+    renderPanel({ jobs });
+    const link = screen.getByRole("link", {
+      name: /View runs for etl\/fundamentals_sync/i,
+    });
+    expect(link).toHaveAttribute(
+      "href",
+      "/admin/jobs/etl%2Ffundamentals_sync",
+    );
+  });
+
+  it("renders a 'Clears when' hint on each alert type", () => {
+    const v2 = emptyV2();
+    v2.system_state = "needs_attention";
+    v2.action_needed = [
+      {
+        root_layer: "cik_mapping",
+        display_name: "SEC CIK Mapping",
+        category: "db_constraint",
+        operator_message: "DB error",
+        operator_fix: null,
+        self_heal: false,
+        consecutive_failures: 2,
+        affected_downstream: [],
+      },
+    ];
+    v2.secret_missing = [
+      {
+        layer: "news",
+        display_name: "News & Sentiment",
+        missing_secret: "ANTHROPIC_API_KEY",
+        operator_fix: "Set ANTHROPIC_API_KEY in Settings → Providers",
+      },
+    ];
+    const jobs: JobsListResponse = {
+      checked_at: new Date().toISOString(),
+      jobs: [
+        {
+          name: "fundamentals_sync",
+          description: "",
+          cadence: "weekly",
+          cadence_kind: "weekly",
+          next_run_time: new Date().toISOString(),
+          next_run_time_source: "declared",
+          last_status: "failure",
+          last_started_at: null,
+          last_finished_at: new Date().toISOString(),
+          detail: "",
+        },
+      ],
+    };
+    const coverage: CoverageSummaryResponse = {
+      ...emptyCoverage(),
+      null_rows: 7,
+    };
+    renderPanel({ v2, jobs, coverage });
+    expect(
+      screen.getByText(/Clears when the next run of cik_mapping succeeds/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Clears when the credential is supplied/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Clears when the next run of fundamentals_sync succeeds/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Clears after the fundamentals\/coverage audit/i),
+    ).toBeInTheDocument();
   });
 
   it("carries over coverage null_rows from v1 behaviour", () => {
@@ -398,7 +517,8 @@ describe("ProblemsPanel", () => {
           name: "test_job",
           description: "test job",
           cadence: "daily",
-          next_run_time: null,
+          next_run_time: new Date().toISOString(),
+          next_run_time_source: "declared",
           last_status: "failure",
           last_finished_at: new Date().toISOString(),
         } as unknown as JobsListResponse["jobs"][number],
