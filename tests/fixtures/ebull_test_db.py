@@ -45,8 +45,15 @@ _SQL_DIR = Path(__file__).resolve().parents[2] / "sql"
 # TRUNCATE in dependency order with CASCADE to handle FKs cleanly.
 _PLANNER_TABLES: tuple[str, ...] = (
     "cascade_retry_queue",
+    "cik_upsert_timing",  # #418 per-CIK timing audit (FK → data_ingestion_runs)
     "financial_facts_raw",
     "data_ingestion_runs",
+    # layer_enabled is the home of the #414 fundamentals_ingest pause
+    # flag and is written by several observability/planner tests. Keep
+    # it in the planner truncation set so a failed test cannot leak
+    # a disabled state across the next function-scoped run and
+    # silently make subsequent "not paused" assertions trip.
+    "layer_enabled",
     "external_identifiers",
     "external_data_watermarks",
     "coverage_status_events",  # #397 transition log (child of coverage)
