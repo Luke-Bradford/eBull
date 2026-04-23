@@ -341,14 +341,18 @@ class SecFilingsProvider(FilingsProvider):
         to persist in the watermark row.
 
         SEC's Archives host serves 403 (not 404) for files that do not
-        yet exist — current-day files are only published after the
-        Eastern-time business day closes (~22:00 ET). To distinguish
-        "not yet published" from a genuine access block, a 403 is
-        tolerated only when ``target_date`` is still within its
-        publish window: future-dated, or same-day-ET before the
-        22:00-ET publish cutoff. A 403 on a past date, or on the
-        current ET day after the publish cutoff, raises — that's
-        SEC refusing us (UA/rate-limit/etc.), not awaiting publication.
+        yet exist. Two tolerated 403 classes:
+          1. Weekend (Sat/Sun) target_date — SEC never publishes on
+             weekends, and observed behaviour shows 403 rather than 404.
+          2. Not-yet-published — current-day before the ~22:00-ET
+             publish cutoff, or future-dated.
+        Any other 403 (past weekday, or current weekday after the
+        publish cutoff) raises — that's SEC refusing us
+        (UA/rate-limit/etc.), not awaiting publication.
+
+        US federal holidays also yield 403/404 on SEC side but are not
+        enumerated here — a same-day retry on the next business day
+        catches them via the per-day watermark path.
 
         Rate-limited alongside the other SEC clients via the shared
         timestamp list, so a burst of N calls respects the 10 rps cap.
@@ -366,6 +370,19 @@ class SecFilingsProvider(FilingsProvider):
         if resp.status_code in (304, 404):
             return None
         if resp.status_code == 403:
+            # SEC is inconsistent about 404 vs 403 for non-existent files.
+            # Two tolerated classes:
+            #   1. Weekend: file never publishes on Sat/Sun, ever.
+            #   2. Not-yet-published: current-day before the ~22:00-ET
+            #      publish cutoff.
+            # Anything else is a real block (UA/rate-limit/WAF) and must
+            # surface.
+            if target_date.weekday() >= 5:  # 5=Sat, 6=Sun
+                logger.info(
+                    "SEC master-index: 403 on %s treated as weekend (no publish)",
+                    target_date.isoformat(),
+                )
+                return None
             now_et = datetime.now(_ET)
             publish_due = datetime.combine(
                 target_date,
