@@ -140,10 +140,12 @@ export function AdminPage() {
   }, [triggerClearQueued, isRunning]);
 
   useEffect(() => {
-    if (triggerKind !== "queued") return;
+    if (triggerKind !== "queued" && triggerKind !== "conflict") return;
     // Fallback: if the server-side sync finishes before we ever see
     // is_running=true, recover the idle state after the next refresh
-    // tick. Otherwise the button would stay disabled indefinitely.
+    // tick. Otherwise the button would stay disabled indefinitely in
+    // the queued case, or the amber "Another sync is already running"
+    // pill would stick indefinitely in the conflict case.
     const id = window.setTimeout(
       () => triggerClearQueued(true),
       refreshInterval + 2_000,
@@ -337,7 +339,7 @@ function SyncNowButton({
   isRunning,
   onClick,
 }: {
-  triggerKind: "idle" | "running" | "queued" | "error";
+  triggerKind: "idle" | "running" | "queued" | "conflict" | "error";
   message: string | null;
   isRunning: boolean;
   onClick: () => void;
@@ -356,6 +358,13 @@ function SyncNowButton({
     <div className="flex items-center gap-2">
       {triggerKind === "error" && message !== null ? (
         <span className="text-xs text-red-600">{message}</span>
+      ) : triggerKind === "conflict" && message !== null ? (
+        <span
+          className="rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs text-amber-800"
+          role="status"
+        >
+          {message}
+        </span>
       ) : null}
       <button
         type="button"

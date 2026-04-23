@@ -44,7 +44,12 @@ describe("useSyncTrigger", () => {
     expect(onTriggered).toHaveBeenCalledTimes(1);
   });
 
-  it("surfaces 409 as 'Sync already running'", async () => {
+  it("surfaces 409 as conflict (not error) and calls onTriggered for immediate reconcile", async () => {
+    // A 409 means the orchestrator is already running a sync. The UI
+    // should render an amber informational pill (not a red error), AND
+    // the caller's status poll must fire right away so the "conflict"
+    // resolves into the grey "Running" disabled state within one poll
+    // cycle instead of waiting up to 60s for the idle-cadence tick.
     mockedTrigger.mockRejectedValueOnce(new ApiError(409, "conflict"));
     const { hook, onTriggered } = setup();
 
@@ -52,18 +57,20 @@ describe("useSyncTrigger", () => {
       await hook.result.current.trigger();
     });
 
-    expect(hook.result.current.kind).toBe("error");
-    expect(hook.result.current.message).toBe("Sync already running");
-    expect(onTriggered).not.toHaveBeenCalled();
+    expect(hook.result.current.kind).toBe("conflict");
+    expect(hook.result.current.message).toBe("Another sync is already running");
+    expect(onTriggered).toHaveBeenCalledTimes(1);
   });
 
-  it("surfaces 503 as 'Sync orchestrator disabled'", async () => {
+  it("surfaces 503 as error (orchestrator disabled) — not a conflict", async () => {
     mockedTrigger.mockRejectedValueOnce(new ApiError(503, "disabled"));
-    const { hook } = setup();
+    const { hook, onTriggered } = setup();
     await act(async () => {
       await hook.result.current.trigger();
     });
+    expect(hook.result.current.kind).toBe("error");
     expect(hook.result.current.message).toBe("Sync orchestrator disabled");
+    expect(onTriggered).not.toHaveBeenCalled();
   });
 
   it("guards against a second click while already running", async () => {
@@ -125,8 +132,36 @@ describe("useSyncTrigger", () => {
     expect(hook.result.current.kind).toBe("queued");
   });
 
-  it("clearQueued does NOT auto-reset an error state", async () => {
+  it("clearQueued(true) collapses a conflict to idle once the server confirms a sync is running", async () => {
+    // 409 means "someone else is already running a sync" — the amber
+    // pill has done its job. As soon as /sync/status reports
+    // is_running=true, the pill must collapse so the caller's normal
+    // "Running" grey state (driven by `isRunning`) takes over. Without
+    // this, the pill would persist past the end of the server-side
+    // sync and mislead the operator.
     mockedTrigger.mockRejectedValueOnce(new ApiError(409, ""));
+    const { hook } = setup();
+    await act(async () => {
+      await hook.result.current.trigger();
+    });
+    expect(hook.result.current.kind).toBe("conflict");
+
+    act(() => hook.result.current.clearQueued(true));
+    expect(hook.result.current.kind).toBe("idle");
+  });
+
+  it("clearQueued(false) keeps a conflict state (server not yet confirmed running)", async () => {
+    mockedTrigger.mockRejectedValueOnce(new ApiError(409, ""));
+    const { hook } = setup();
+    await act(async () => {
+      await hook.result.current.trigger();
+    });
+    act(() => hook.result.current.clearQueued(false));
+    expect(hook.result.current.kind).toBe("conflict");
+  });
+
+  it("clearQueued does NOT auto-reset a 503 error state", async () => {
+    mockedTrigger.mockRejectedValueOnce(new ApiError(503, "disabled"));
     const { hook } = setup();
     await act(async () => {
       await hook.result.current.trigger();
@@ -167,8 +202,30 @@ describe("useSyncTrigger", () => {
     expect(hook.result.current.queuedRunId).toBe(2);
   });
 
-  it("re-triggers after an error (retry flow)", async () => {
+  it("re-triggers after a conflict (retry flow)", async () => {
+    // 409 lands in `conflict`. The inFlight guard must still release
+    // so the operator's retry click dispatches a second POST once the
+    // orchestrator sync finishes.
     mockedTrigger.mockRejectedValueOnce(new ApiError(409, "conflict"));
+    const { hook } = setup();
+
+    await act(async () => {
+      await hook.result.current.trigger();
+    });
+    expect(hook.result.current.kind).toBe("conflict");
+
+    mockedTrigger.mockResolvedValueOnce({
+      sync_run_id: 9,
+      plan: { layers_to_refresh: [], layers_skipped: [] },
+    });
+    await act(async () => {
+      await hook.result.current.trigger();
+    });
+    expect(mockedTrigger).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-triggers after a 503 error (retry flow)", async () => {
+    mockedTrigger.mockRejectedValueOnce(new ApiError(503, "disabled"));
     const { hook } = setup();
 
     await act(async () => {
@@ -176,9 +233,6 @@ describe("useSyncTrigger", () => {
     });
     expect(hook.result.current.kind).toBe("error");
 
-    // An error transition drops the inFlight guard via the same
-    // useEffect — operator's retry click should dispatch a second
-    // POST.
     mockedTrigger.mockResolvedValueOnce({
       sync_run_id: 9,
       plan: { layers_to_refresh: [], layers_skipped: [] },

@@ -161,7 +161,17 @@ export function ProblemsPanel({
                 {job.last_finished_at !== null ? (
                   <div className="text-xs text-slate-600">Failed at {formatDateTime(job.last_finished_at)}</div>
                 ) : null}
+                <div className="text-xs text-slate-600">
+                  Clears when the next run of {job.name} succeeds.
+                </div>
               </div>
+              <Link
+                to={`/admin/jobs/${encodeURIComponent(job.name)}`}
+                className="shrink-0 text-xs font-medium text-blue-700 hover:underline"
+                aria-label={`View runs for ${job.name}`}
+              >
+                View runs →
+              </Link>
             </div>
           </li>
         ))}
@@ -174,6 +184,11 @@ export function ProblemsPanel({
                   {coverageNullRows} instrument{coverageNullRows === 1 ? "" : "s"} have a NULL filings_status
                 </div>
                 <div className="text-xs text-slate-600">The filings-status audit job has not covered these instruments yet.</div>
+                <div className="text-xs text-slate-600">
+                  Clears after the fundamentals/coverage audit tags these
+                  instruments. If the count is not falling, the audit job
+                  is stuck — check its last run.
+                </div>
               </div>
             </div>
           </li>
@@ -208,6 +223,9 @@ function ActionNeededRow({ item, onOpen }: { item: ActionNeededItem; onOpen: () 
             </div>
           ) : null}
           <div className="mt-1 text-xs text-slate-500">{item.consecutive_failures} consecutive failures</div>
+          <div className="text-xs text-slate-600">
+            Clears when the next run of {item.root_layer} succeeds.
+          </div>
           {item.affected_downstream.length > 0 ? (
             <button
               type="button"
@@ -260,6 +278,9 @@ function SecretMissingRow({ item }: { item: SecretMissingItem }): JSX.Element {
             ) : (
               <span>{item.operator_fix}</span>
             )}
+          </div>
+          <div className="text-xs text-slate-600">
+            Clears when the credential is supplied in Settings → Providers.
           </div>
         </div>
       </div>

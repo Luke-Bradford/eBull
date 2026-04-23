@@ -26,7 +26,12 @@ import { ApiError } from "@/api/client";
 import { triggerSync } from "@/api/sync";
 import type { SyncTriggerRequest } from "@/api/sync";
 
-export type SyncTriggerKind = "idle" | "running" | "queued" | "error";
+export type SyncTriggerKind =
+  | "idle"
+  | "running"
+  | "queued"
+  | "conflict"
+  | "error";
 
 export interface SyncTriggerState {
   readonly kind: SyncTriggerKind;
@@ -75,13 +80,28 @@ export function useSyncTrigger(
       });
       onTriggered();
     } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        // 409 means an orchestrator sync is already running. The
+        // operator's click was not a failure — the system is already
+        // doing the work. Render as an amber informational pill
+        // (handled by consumers) instead of a red error, and fire the
+        // caller's status poll immediately so the "conflict" amber
+        // resolves into the grey "Running" disabled state within one
+        // poll cycle instead of up to the next idle-cadence tick
+        // (currently 60s).
+        setState({
+          kind: "conflict",
+          queuedRunId: null,
+          message: "Another sync is already running",
+        });
+        onTriggered();
+        return;
+      }
       const message =
         err instanceof ApiError
-          ? err.status === 409
-            ? "Sync already running"
-            : err.status === 503
-              ? "Sync orchestrator disabled"
-              : `Failed (HTTP ${err.status})`
+          ? err.status === 503
+            ? "Sync orchestrator disabled"
+            : `Failed (HTTP ${err.status})`
           : "Failed";
       setState({ kind: "error", queuedRunId: null, message });
     }
@@ -97,6 +117,15 @@ export function useSyncTrigger(
       if (prev.kind === "queued" && isRunning) {
         return { kind: "idle", queuedRunId: null, message: null };
       }
+      // `conflict` collapses to `idle` as soon as the caller's status
+      // poll confirms a sync is running — the amber "Another sync is
+      // already running" pill has done its job; from that point the
+      // normal grey "Running" state (driven by `isRunning`) carries
+      // the UX. Otherwise the pill would persist past the end of the
+      // server-side sync and mislead the operator.
+      if (prev.kind === "conflict" && isRunning) {
+        return { kind: "idle", queuedRunId: null, message: null };
+      }
       // `error` has no auto-reset — caller must click again.
       return prev;
     });
@@ -108,6 +137,10 @@ export function useSyncTrigger(
   // leave the ref out of sync with `kind` (e.g. fast-run fallback
   // timer, caller-initiated reset, unexpected state path).
   useEffect(() => {
+    // `conflict` is a terminal state (the POST failed with 409) — the
+    // guard must release so a retry click after the server-side sync
+    // finishes can dispatch a new POST. Same logic as `error` and
+    // `idle`.
     inFlightRef.current =
       state.kind === "running" || state.kind === "queued";
   }, [state.kind]);
