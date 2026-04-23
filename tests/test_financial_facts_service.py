@@ -67,29 +67,79 @@ class TestFinishIngestionRun:
         assert "status" in sql
 
 
+def _mock_conn_with_rowcount(rowcount: int) -> tuple[MagicMock, MagicMock]:
+    """Return ``(conn, cur)`` where ``conn.cursor()`` yields a cursor
+    whose ``executemany`` sets ``rowcount`` to the provided value.
+
+    The ADR 0004 shape calls ``conn.cursor()`` as a context manager,
+    then ``cur.executemany(sql, chunk)``, then reads ``cur.rowcount``.
+    The test double models that path so unit tests do not need a real
+    Postgres.
+    """
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.rowcount = rowcount
+    conn.cursor.return_value.__enter__.return_value = cur
+    return conn, cur
+
+
 class TestUpsertFacts:
     def test_upserts_single_fact(self) -> None:
-        conn = MagicMock()
-        cursor = MagicMock()
-        cursor.rowcount = 1
-        conn.execute.return_value = cursor
+        conn, cur = _mock_conn_with_rowcount(1)
         facts = [_make_fact()]
         upserted, skipped = upsert_facts_for_instrument(conn, instrument_id=1, facts=facts, ingestion_run_id=42)
         assert upserted == 1
         assert skipped == 0
+        cur.executemany.assert_called_once()
 
     def test_handles_empty_facts(self) -> None:
         conn = MagicMock()
         upserted, skipped = upsert_facts_for_instrument(conn, instrument_id=1, facts=[], ingestion_run_id=42)
         assert upserted == 0
         assert skipped == 0
+        # Empty facts must short-circuit before opening a cursor —
+        # avoids a wasted round-trip on instruments with no XBRL facts.
+        conn.cursor.assert_not_called()
 
     def test_counts_skipped_when_unchanged(self) -> None:
-        conn = MagicMock()
-        cursor = MagicMock()
-        cursor.rowcount = 0  # ON CONFLICT skipped because data unchanged
-        conn.execute.return_value = cursor
+        # ``IS DISTINCT FROM`` filter matches zero rows — all facts are
+        # idempotent no-ops. rowcount=0 across the whole chunk.
+        conn, _ = _mock_conn_with_rowcount(0)
         facts = [_make_fact()]
         upserted, skipped = upsert_facts_for_instrument(conn, instrument_id=1, facts=facts, ingestion_run_id=42)
         assert upserted == 0
         assert skipped == 1
+
+    def test_batches_large_payload_via_executemany(self) -> None:
+        # 2500 facts must split into three chunks at page_size=1000.
+        # ``set_rowcount`` side-effect refreshes ``cur.rowcount`` to
+        # the chunk length on every call, so the cumulative upsert
+        # count equals the total facts.
+        conn = MagicMock()
+        cur = MagicMock()
+
+        def set_rowcount(_sql: object, params: list[object]) -> None:
+            cur.rowcount = len(params)
+
+        cur.executemany.side_effect = set_rowcount
+        conn.cursor.return_value.__enter__.return_value = cur
+        facts = [_make_fact(accession_number=f"acc-{i:05d}") for i in range(2500)]
+        upserted, skipped = upsert_facts_for_instrument(conn, instrument_id=1, facts=facts, ingestion_run_id=42)
+        assert cur.executemany.call_count == 3
+        chunk_sizes = [len(call.args[1]) for call in cur.executemany.call_args_list]
+        assert chunk_sizes == [1000, 1000, 500]
+        assert upserted == 2500
+        assert skipped == 0
+
+    def test_negative_rowcount_raises(self) -> None:
+        # rowcount == -1 means the driver did not report a command
+        # tag. Silently treating that as "all rows were skipped"
+        # would contaminate upserted/skipped accounting. The contract
+        # is to raise so the caller rolls back and the watermark
+        # stays at its previous value (the next run retries).
+        import pytest
+
+        conn, _ = _mock_conn_with_rowcount(-1)
+        facts = [_make_fact()]
+        with pytest.raises(RuntimeError, match="rowcount=-1"):
+            upsert_facts_for_instrument(conn, instrument_id=1, facts=facts, ingestion_run_id=42)
