@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from logging import LogRecord
 from typing import cast
 
 import psycopg
@@ -696,11 +698,11 @@ def test_seed_path_does_not_write_filing_events(
 #   ``outcome=skip_*`` tag.
 
 
-def _timing_lines(caplog_records: list[object]) -> list[str]:
+def _timing_lines(caplog_records: Sequence[LogRecord]) -> list[str]:
     return [
-        r.getMessage()  # type: ignore[attr-defined]
+        r.getMessage()
         for r in caplog_records
-        if r.getMessage().startswith("fundamentals.cik_timing ")  # type: ignore[attr-defined]
+        if r.getMessage().startswith("fundamentals.cik_timing ")
     ]
 
 

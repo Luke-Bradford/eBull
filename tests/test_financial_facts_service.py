@@ -112,21 +112,19 @@ class TestUpsertFacts:
 
     def test_batches_large_payload_via_executemany(self) -> None:
         # 2500 facts must split into three chunks at page_size=1000.
-        # Each chunk reports rowcount = chunk_size (all INSERTed).
+        # ``set_rowcount`` side-effect refreshes ``cur.rowcount`` to
+        # the chunk length on every call, so the cumulative upsert
+        # count equals the total facts.
         conn = MagicMock()
         cur = MagicMock()
-        rowcounts = iter([1000, 1000, 500])
 
         def set_rowcount(_sql: object, params: list[object]) -> None:
             cur.rowcount = len(params)
 
         cur.executemany.side_effect = set_rowcount
-        cur.rowcount = next(rowcounts)  # pre-set for first .rowcount read
         conn.cursor.return_value.__enter__.return_value = cur
         facts = [_make_fact(accession_number=f"acc-{i:05d}") for i in range(2500)]
         upserted, skipped = upsert_facts_for_instrument(conn, instrument_id=1, facts=facts, ingestion_run_id=42)
-        # Three executemany calls; each one sets rowcount to its chunk
-        # length. Aggregate == total facts.
         assert cur.executemany.call_count == 3
         chunk_sizes = [len(call.args[1]) for call in cur.executemany.call_args_list]
         assert chunk_sizes == [1000, 1000, 500]
