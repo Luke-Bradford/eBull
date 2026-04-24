@@ -73,9 +73,16 @@ class RetentionPolicy:
 
 
 # Per-source rationale:
-# - sec_fundamentals / sec / companies_house: NO age-based delete.
-#   Raw bodies are small post-dedup; re-fetching SEC is rate-limited
-#   + slow; reproducible audit trail costs nothing.
+# - sec_fundamentals / sec: 30 days rolling. Full SQL coverage landed
+#   across #449 / #450 / #451 / #452 / #463, so every structured field
+#   from companyfacts.json, submissions.json, and filing-index JSON
+#   is queryable in SQL. The raw dump is a short-lived audit trail
+#   (catch a parser regression within 30 days), not a parser
+#   substrate. Previously ``None`` (retain forever); flipped to 30
+#   days under #464 + #466 to reclaim ~12 GB of disk.
+# - companies_house: NO age-based delete. Coverage is thinner than
+#   SEC so the raw Companies House payloads are still the parser
+#   substrate for some fields.
 # - etoro: 7 days covers OHLCV candles (redundant with price_daily),
 #   instrument lists, quote batches, and error bodies collectively.
 #   If a longer diagnostic trail is ever needed, split etoro into
@@ -84,8 +91,16 @@ class RetentionPolicy:
 #   reconciling position / cash discrepancies.
 # - fmp: fallback only; 30 days is enough for re-derivation.
 _RETENTION_POLICY: dict[str, RetentionPolicy] = {
-    "sec_fundamentals": RetentionPolicy(max_age_days=None, max_duplicate_files_per_hash=1),
-    "sec": RetentionPolicy(max_age_days=None, max_duplicate_files_per_hash=1),
+    # sec_fundamentals / sec: flipped to 30 days rolling (#464 / #466).
+    # End-to-end SQL coverage is complete — every field from
+    # companyfacts.json lands in financial_facts_raw + sec_facts_concept_catalog
+    # (#451), submissions.json lands in instrument_sec_profile +
+    # sec_entity_change_log (#463 / #427), and filing-index JSON
+    # lands in filing_documents (#452). The raw dump is now a
+    # short-lived audit trail, not a parser substrate — 30 days is
+    # enough to catch any regression introduced by a parser bump.
+    "sec_fundamentals": RetentionPolicy(max_age_days=30, max_duplicate_files_per_hash=1),
+    "sec": RetentionPolicy(max_age_days=30, max_duplicate_files_per_hash=1),
     "etoro": RetentionPolicy(max_age_days=7, max_duplicate_files_per_hash=1),
     "etoro_broker": RetentionPolicy(max_age_days=90, max_duplicate_files_per_hash=1),
     "fmp": RetentionPolicy(max_age_days=30, max_duplicate_files_per_hash=1),
