@@ -221,6 +221,71 @@ class TestLatestShareCount:
         assert got.source_taxonomy == "us-gaap"
 
 
+class TestFlowOnlyPeriodsCount:
+    """Review #442: TTM flow totals must include periods where the
+    filer published issuance / buyback without a matching
+    shares_outstanding snapshot. Prior version filtered those out."""
+
+    def test_flow_without_outstanding_still_counts_in_ttm(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn, symbol="FLOW")
+        # One period with snapshot (anchors latest_as_of + year-ago
+        # lookup). One period with ONLY a flow fact.
+        _seed_fact(
+            ebull_test_conn,
+            instrument_id=iid,
+            concept="CommonStockSharesOutstanding",
+            period_end=date(2025, 12, 31),
+            val=10_000_000,
+        )
+        _seed_fact(
+            ebull_test_conn,
+            instrument_id=iid,
+            concept="StockIssuedDuringPeriodSharesNewIssues",
+            period_end=date(2025, 9, 30),
+            val=500_000,
+        )
+        summary = get_dilution_summary(ebull_test_conn, instrument_id=iid)
+        assert summary.ttm_shares_issued == Decimal("500000.000000")
+
+
+class TestPeriodEndGroupingDedupes:
+    """Review #442: a 10-K/A that re-tags the same period_end with a
+    different fiscal_period must not produce duplicate rows."""
+
+    def test_amendment_retag_does_not_duplicate_period_end(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn, symbol="RTAG")
+        _seed_fact(
+            ebull_test_conn,
+            instrument_id=iid,
+            concept="CommonStockSharesOutstanding",
+            period_end=date(2025, 12, 31),
+            val=10_000_000,
+            accession="acc-orig",
+            filed_date=date(2026, 1, 30),
+            fiscal_year=2025,
+            fiscal_period="FY",
+        )
+        # Amendment re-tags the same period_end with different fiscal
+        # tags (rare but real — happens when filers correct their
+        # fiscal-year boundary).
+        _seed_fact(
+            ebull_test_conn,
+            instrument_id=iid,
+            concept="CommonStockSharesOutstanding",
+            period_end=date(2025, 12, 31),
+            val=10_200_000,
+            accession="acc-amend",
+            filed_date=date(2026, 3, 1),
+            fiscal_year=2026,
+            fiscal_period="Q1",
+            form_type="10-K/A",
+        )
+        history = get_share_count_history(ebull_test_conn, instrument_id=iid)
+        # Exactly one row per period_end — no duplication.
+        assert len(history) == 1
+        assert history[0].shares_outstanding == Decimal("10200000.000000")
+
+
 def test_limit_out_of_range_raises(ebull_test_conn: psycopg.Connection[tuple]) -> None:
     with pytest.raises(ValueError, match="limit must be"):
         get_share_count_history(ebull_test_conn, instrument_id=1, limit=0)

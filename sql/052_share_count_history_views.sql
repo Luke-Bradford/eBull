@@ -60,11 +60,16 @@ WITH latest_fact AS (
     ORDER BY f.instrument_id, f.concept, f.period_end, f.period_start,
              f.filed_date DESC, f.accession_number DESC
 )
+-- Group strictly on (instrument_id, period_end) so a 10-K/A re-tag
+-- of the same period_end under a different fiscal_year/fiscal_period
+-- cannot produce duplicate rows. We still expose one representative
+-- fiscal_year + fiscal_period via MAX() for display convenience;
+-- downstream consumers treat them as hints, not keys.
 SELECT
     instrument_id,
     period_end,
-    fiscal_year,
-    fiscal_period,
+    MAX(fiscal_year)    AS fiscal_year,
+    MAX(fiscal_period)  AS fiscal_period,
     -- Share-count snapshots — prefer DEI (entity cover page) over
     -- us-gaap when both are present, because DEI is filed by the
     -- issuer specifically as the point-in-time authoritative count.
@@ -85,7 +90,7 @@ SELECT
     MAX(form_type)  AS latest_form_type,
     MAX(filed_date) AS latest_filed_date
 FROM latest_fact
-GROUP BY instrument_id, period_end, fiscal_year, fiscal_period;
+GROUP BY instrument_id, period_end;
 
 COMMENT ON VIEW share_count_history IS
     'Per-period share-count snapshot + issuance/buyback deltas from '
@@ -98,12 +103,15 @@ COMMENT ON VIEW share_count_history IS
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE VIEW instrument_dilution_summary AS
-WITH ranked AS (
+WITH outstanding_only AS (
+    -- Rank by period_end across rows that report a point-in-time
+    -- count. This is what drives the "latest" + "year-ago" slots;
+    -- flow TTM below uses a SEPARATE ranking so flow-only periods
+    -- (filer publishes issuance without matching outstanding
+    -- snapshot) still contribute to ttm totals.
     SELECT instrument_id,
            period_end,
            shares_outstanding,
-           shares_issued_new,
-           buyback_shares,
            ROW_NUMBER() OVER (
                PARTITION BY instrument_id
                ORDER BY period_end DESC
@@ -111,10 +119,26 @@ WITH ranked AS (
     FROM share_count_history
     WHERE shares_outstanding IS NOT NULL
 ),
+flow_only AS (
+    -- Independent ranking for flow TTM. No shares_outstanding filter
+    -- so a period with only issuance / buyback facts still counts
+    -- toward ttm_shares_issued / ttm_buyback_shares.
+    SELECT instrument_id,
+           period_end,
+           shares_issued_new,
+           buyback_shares,
+           ROW_NUMBER() OVER (
+               PARTITION BY instrument_id
+               ORDER BY period_end DESC
+           ) AS rn
+    FROM share_count_history
+    WHERE shares_issued_new IS NOT NULL
+       OR buyback_shares    IS NOT NULL
+),
 current_state AS (
     SELECT instrument_id, shares_outstanding AS latest_shares,
            period_end AS latest_as_of
-    FROM ranked
+    FROM outstanding_only
     WHERE rn = 1
 ),
 -- Year-ago share count (rn=5 across quarterly series, or the oldest
@@ -122,17 +146,16 @@ current_state AS (
 year_ago AS (
     SELECT DISTINCT ON (instrument_id) instrument_id,
            shares_outstanding AS yoy_shares
-    FROM ranked
+    FROM outstanding_only
     WHERE rn BETWEEN 4 AND 6
     ORDER BY instrument_id, rn ASC
 ),
--- Trailing-4-quarter deltas. Use these when the raw snapshot approach
--- is missing (filer publishes flow but no point-in-time figure).
+-- Trailing-4-quarter deltas from the flow series.
 trailing_flow AS (
     SELECT instrument_id,
            SUM(shares_issued_new) FILTER (WHERE rn <= 4) AS ttm_shares_issued,
            SUM(buyback_shares)    FILTER (WHERE rn <= 4) AS ttm_buyback_shares
-    FROM ranked
+    FROM flow_only
     GROUP BY instrument_id
 )
 SELECT
