@@ -1231,16 +1231,56 @@ def ingest_insider_transactions_backfill(
 class InsiderSummary:
     """Aggregate view of recent insider activity for an instrument.
 
-    ``net_shares_90d`` is positive when insiders net-bought over the
-    window, negative when they net-sold. Only non-derivative
-    transactions contribute — options/RSU grants are weaker signals
-    and the issue explicitly wants buy/sell directionality."""
+    Two lenses, both scoped to the last 90 days of non-derivative
+    transactions:
 
-    net_shares_90d: Decimal
-    buy_count_90d: int
-    sell_count_90d: int
+    - **Open-market** (``open_market_*``) — only ``txn_code='P'``
+      (open-market buy) and ``txn_code='S'`` (open-market sale). This
+      is the discretionary-sentiment signal: the insider chose to
+      trade in public markets. Grants, exercises, tax-withholding
+      sells, and same-day sell-to-cover lots are excluded because
+      they are mechanical consequences of compensation, not
+      directional bets.
+    - **Total acquired / disposed** (``total_acquired_*`` /
+      ``total_disposed_*``) — every non-derivative transaction, split
+      by ``acquired_disposed_code`` when present and by ``txn_code``
+      otherwise. This is the full insider-holdings-change view, so a
+      panel that only shows open-market numbers doesn't accidentally
+      imply insiders are net sellers during an RSU-vest month when
+      they actually accumulated shares on balance.
+
+    Operators need both. A large grant (A) followed by a small
+    sell-to-cover (S) reads very differently from an operator
+    deliberately dumping stock into the market.
+    """
+
+    # Open-market (discretionary-sentiment) view.
+    open_market_net_shares_90d: Decimal
+    open_market_buy_count_90d: int
+    open_market_sell_count_90d: int
+    # Total-acquired / total-disposed (full-activity) view.
+    total_acquired_shares_90d: Decimal
+    total_disposed_shares_90d: Decimal
+    acquisition_count_90d: int
+    disposition_count_90d: int
+    # Cross-lens metadata.
     unique_filers_90d: int
     latest_txn_date: date | None
+
+    # Back-compat aliases so existing callers that rely on the old
+    # ``net_shares_90d`` / ``buy_count_90d`` / ``sell_count_90d``
+    # names keep working while the API + frontend migrate.
+    @property
+    def net_shares_90d(self) -> Decimal:
+        return self.open_market_net_shares_90d
+
+    @property
+    def buy_count_90d(self) -> int:
+        return self.open_market_buy_count_90d
+
+    @property
+    def sell_count_90d(self) -> int:
+        return self.open_market_sell_count_90d
 
 
 def get_insider_summary(
@@ -1262,17 +1302,54 @@ def get_insider_summary(
         cur.execute(
             """
             SELECT
+                -- Open-market (discretionary) view: only explicit
+                -- P / S codes. This is the sentiment signal.
                 COALESCE(SUM(
                     CASE
                         WHEN it.txn_code = 'P' THEN it.shares
                         WHEN it.txn_code = 'S' THEN -it.shares
                         ELSE 0
                     END
-                ), 0) AS net_shares,
-                COUNT(*) FILTER (WHERE it.txn_code = 'P') AS buys,
-                COUNT(*) FILTER (WHERE it.txn_code = 'S') AS sells,
+                ), 0)                                                 AS open_market_net,
+                COUNT(*) FILTER (WHERE it.txn_code = 'P')             AS open_market_buys,
+                COUNT(*) FILTER (WHERE it.txn_code = 'S')             AS open_market_sells,
+                -- Total-activity view: classify by acquired_disposed_code
+                -- when SEC gave us one (authoritative), else fall back
+                -- to txn_code (P/A/M/X = acquired; S/D/F/G = disposed).
+                COALESCE(SUM(
+                    CASE
+                        WHEN COALESCE(it.acquired_disposed_code,
+                                      CASE WHEN it.txn_code IN ('P','A','M','X','C','V','J') THEN 'A'
+                                           WHEN it.txn_code IN ('S','D','F','G') THEN 'D'
+                                           ELSE NULL END) = 'A'
+                        THEN it.shares
+                        ELSE 0
+                    END
+                ), 0)                                                 AS total_acquired,
+                COALESCE(SUM(
+                    CASE
+                        WHEN COALESCE(it.acquired_disposed_code,
+                                      CASE WHEN it.txn_code IN ('P','A','M','X','C','V','J') THEN 'A'
+                                           WHEN it.txn_code IN ('S','D','F','G') THEN 'D'
+                                           ELSE NULL END) = 'D'
+                        THEN it.shares
+                        ELSE 0
+                    END
+                ), 0)                                                 AS total_disposed,
+                COUNT(*) FILTER (
+                    WHERE COALESCE(it.acquired_disposed_code,
+                                   CASE WHEN it.txn_code IN ('P','A','M','X','C','V','J') THEN 'A'
+                                        WHEN it.txn_code IN ('S','D','F','G') THEN 'D'
+                                        ELSE NULL END) = 'A'
+                )                                                     AS acquisition_count,
+                COUNT(*) FILTER (
+                    WHERE COALESCE(it.acquired_disposed_code,
+                                   CASE WHEN it.txn_code IN ('P','A','M','X','C','V','J') THEN 'A'
+                                        WHEN it.txn_code IN ('S','D','F','G') THEN 'D'
+                                        ELSE NULL END) = 'D'
+                )                                                     AS disposition_count,
                 COUNT(DISTINCT COALESCE(it.filer_cik, it.filer_name)) AS filers,
-                MAX(it.txn_date) AS latest
+                MAX(it.txn_date)                                      AS latest
             FROM insider_transactions it
             INNER JOIN insider_filings f
                 ON f.accession_number = it.accession_number
@@ -1285,13 +1362,27 @@ def get_insider_summary(
         )
         row = cur.fetchone()
     if row is None:
-        return InsiderSummary(Decimal(0), 0, 0, 0, None)
+        return InsiderSummary(
+            open_market_net_shares_90d=Decimal(0),
+            open_market_buy_count_90d=0,
+            open_market_sell_count_90d=0,
+            total_acquired_shares_90d=Decimal(0),
+            total_disposed_shares_90d=Decimal(0),
+            acquisition_count_90d=0,
+            disposition_count_90d=0,
+            unique_filers_90d=0,
+            latest_txn_date=None,
+        )
     return InsiderSummary(
-        net_shares_90d=Decimal(row[0]) if row[0] is not None else Decimal(0),
-        buy_count_90d=int(row[1] or 0),
-        sell_count_90d=int(row[2] or 0),
-        unique_filers_90d=int(row[3] or 0),
-        latest_txn_date=row[4],
+        open_market_net_shares_90d=Decimal(row[0]) if row[0] is not None else Decimal(0),
+        open_market_buy_count_90d=int(row[1] or 0),
+        open_market_sell_count_90d=int(row[2] or 0),
+        total_acquired_shares_90d=Decimal(row[3]) if row[3] is not None else Decimal(0),
+        total_disposed_shares_90d=Decimal(row[4]) if row[4] is not None else Decimal(0),
+        acquisition_count_90d=int(row[5] or 0),
+        disposition_count_90d=int(row[6] or 0),
+        unique_filers_90d=int(row[7] or 0),
+        latest_txn_date=row[8],
     )
 
 
@@ -1312,6 +1403,7 @@ class InsiderTransactionDetail:
     """
 
     accession_number: str
+    txn_row_num: int
     document_type: str
     txn_date: date
     deemed_execution_date: date | None
@@ -1355,6 +1447,7 @@ def list_insider_transactions(
             """
             SELECT
                 it.accession_number,
+                it.txn_row_num,
                 f.document_type,
                 it.txn_date,
                 it.deemed_execution_date,
@@ -1409,7 +1502,7 @@ def list_insider_transactions(
     rows: list[InsiderTransactionDetail] = []
     for r in raw_rows:
         acc = str(r[0])
-        refs_raw = r[24] or []
+        refs_raw = r[25] or []
         # psycopg returns JSONB as a Python list/dict already.
         refs = refs_raw if isinstance(refs_raw, list) else json.loads(refs_raw)
         footnotes: dict[str, str] = {}
@@ -1422,29 +1515,30 @@ def list_insider_transactions(
         rows.append(
             InsiderTransactionDetail(
                 accession_number=acc,
-                document_type=str(r[1]),
-                txn_date=r[2],
-                deemed_execution_date=r[3],
-                filer_cik=r[4],
-                filer_name=str(r[5]),
-                filer_role=r[6],
-                security_title=r[7],
-                txn_code=str(r[8]),
-                acquired_disposed_code=r[9],
-                shares=r[10],
-                price=r[11],
-                post_transaction_shares=r[12],
-                direct_indirect=r[13],
-                nature_of_ownership=r[14],
-                is_derivative=bool(r[15]),
-                equity_swap_involved=r[16],
-                transaction_timeliness=r[17],
-                conversion_exercise_price=r[18],
-                exercise_date=r[19],
-                expiration_date=r[20],
-                underlying_security_title=r[21],
-                underlying_shares=r[22],
-                underlying_value=r[23],
+                txn_row_num=int(r[1]),
+                document_type=str(r[2]),
+                txn_date=r[3],
+                deemed_execution_date=r[4],
+                filer_cik=r[5],
+                filer_name=str(r[6]),
+                filer_role=r[7],
+                security_title=r[8],
+                txn_code=str(r[9]),
+                acquired_disposed_code=r[10],
+                shares=r[11],
+                price=r[12],
+                post_transaction_shares=r[13],
+                direct_indirect=r[14],
+                nature_of_ownership=r[15],
+                is_derivative=bool(r[16]),
+                equity_swap_involved=r[17],
+                transaction_timeliness=r[18],
+                conversion_exercise_price=r[19],
+                exercise_date=r[20],
+                expiration_date=r[21],
+                underlying_security_title=r[22],
+                underlying_shares=r[23],
+                underlying_value=r[24],
                 footnotes=footnotes,
             )
         )

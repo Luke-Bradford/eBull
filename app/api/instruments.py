@@ -993,12 +993,35 @@ def get_instrument_dividends(
 
 
 class InsiderSummaryModel(BaseModel):
+    """90-day insider-activity summary with two lenses (#458).
+
+    Open-market fields (``open_market_*``) capture discretionary P/S
+    trading — the strongest sentiment signal. Total-activity fields
+    (``total_acquired_*`` / ``total_disposed_*``) capture every
+    non-derivative transaction classified by
+    ``acquired_disposed_code`` (or ``txn_code`` when SEC omitted the
+    A/D flag). Operators need both: an RSU-vest month can show zero
+    open-market buys alongside a large grant, and a summary that
+    only reports open-market activity would misleadingly imply the
+    insider disposed of shares on balance.
+    """
+
     symbol: str
+    open_market_net_shares_90d: Decimal
+    open_market_buy_count_90d: int
+    open_market_sell_count_90d: int
+    total_acquired_shares_90d: Decimal
+    total_disposed_shares_90d: Decimal
+    acquisition_count_90d: int
+    disposition_count_90d: int
+    unique_filers_90d: int
+    latest_txn_date: date | None
+    # Back-compat aliases for callers built against the pre-#458 shape.
+    # Mirror the primary open-market fields so existing consumers keep
+    # rendering. Remove after all callers migrate.
     net_shares_90d: Decimal
     buy_count_90d: int
     sell_count_90d: int
-    unique_filers_90d: int
-    latest_txn_date: date | None
 
 
 @router.get("/{symbol}/insider_summary", response_model=InsiderSummaryModel)
@@ -1006,13 +1029,12 @@ def get_instrument_insider_summary(
     symbol: str,
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> InsiderSummaryModel:
-    """Return the 90-day insider-transaction summary (#429).
+    """Return the 90-day insider-transaction summary (#429 / #458).
 
-    ``net_shares_90d`` is positive when insiders net-bought, negative
-    when they net-sold. Only non-derivative trades (open-market P/S
-    transactions) contribute — option grants / RSU vests are weaker
-    signals and excluded. Counts cover each filer once regardless of
-    how many transactions they filed.
+    Two lenses: open-market (discretionary P/S) and total-activity
+    (every non-derivative transaction classified by
+    ``acquired_disposed_code``). Only non-derivative trades
+    contribute; derivative grants / option exercises are excluded.
     """
     from app.services.insider_transactions import get_insider_summary
 
@@ -1039,11 +1061,18 @@ def get_instrument_insider_summary(
     summary = get_insider_summary(conn, instrument_id=instrument_id)
     return InsiderSummaryModel(
         symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
-        net_shares_90d=summary.net_shares_90d,
-        buy_count_90d=summary.buy_count_90d,
-        sell_count_90d=summary.sell_count_90d,
+        open_market_net_shares_90d=summary.open_market_net_shares_90d,
+        open_market_buy_count_90d=summary.open_market_buy_count_90d,
+        open_market_sell_count_90d=summary.open_market_sell_count_90d,
+        total_acquired_shares_90d=summary.total_acquired_shares_90d,
+        total_disposed_shares_90d=summary.total_disposed_shares_90d,
+        acquisition_count_90d=summary.acquisition_count_90d,
+        disposition_count_90d=summary.disposition_count_90d,
         unique_filers_90d=summary.unique_filers_90d,
         latest_txn_date=summary.latest_txn_date,
+        net_shares_90d=summary.open_market_net_shares_90d,
+        buy_count_90d=summary.open_market_buy_count_90d,
+        sell_count_90d=summary.open_market_sell_count_90d,
     )
 
 
@@ -1060,6 +1089,7 @@ class InsiderTransactionDetailModel(BaseModel):
     """
 
     accession_number: str
+    txn_row_num: int
     document_type: str
     txn_date: date
     deemed_execution_date: date | None
@@ -1141,6 +1171,7 @@ def get_instrument_insider_transactions(
         rows=[
             InsiderTransactionDetailModel(
                 accession_number=d.accession_number,
+                txn_row_num=d.txn_row_num,
                 document_type=d.document_type,
                 txn_date=d.txn_date,
                 deemed_execution_date=d.deemed_execution_date,

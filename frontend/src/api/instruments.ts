@@ -135,15 +135,25 @@ export async function fetchInstrumentSecProfile(
 
 export interface InsiderSummary {
   symbol: string;
+  open_market_net_shares_90d: string;
+  open_market_buy_count_90d: number;
+  open_market_sell_count_90d: number;
+  total_acquired_shares_90d: string;
+  total_disposed_shares_90d: string;
+  acquisition_count_90d: number;
+  disposition_count_90d: number;
+  unique_filers_90d: number;
+  latest_txn_date: string | null;
+  // Back-compat aliases the API also ships so pre-#458 consumers
+  // keep working. Prefer the open_market_* fields in new code.
   net_shares_90d: string;
   buy_count_90d: number;
   sell_count_90d: number;
-  unique_filers_90d: number;
-  latest_txn_date: string | null;
 }
 
 export interface InsiderTransactionDetail {
   accession_number: string;
+  txn_row_num: number;
   document_type: string;
   txn_date: string;
   deemed_execution_date: string | null;
