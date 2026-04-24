@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -322,8 +322,7 @@ class TestNormaliseRates:
 class TestGetQuotesChunking:
     """Test that get_quotes chunks IDs at 50 and builds correct params."""
 
-    @patch("app.providers.implementations.etoro.raw_persistence.persist_raw_if_new")
-    def test_empty_list_no_http_call(self, _mock_persist: MagicMock) -> None:
+    def test_empty_list_no_http_call(self) -> None:
         from app.providers.implementations.etoro import EtoroMarketDataProvider
 
         with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
@@ -332,8 +331,7 @@ class TestGetQuotesChunking:
             assert result == []
             provider._http.get.assert_not_called()
 
-    @patch("app.providers.implementations.etoro.raw_persistence.persist_raw_if_new")
-    def test_single_batch_params(self, _mock_persist: MagicMock) -> None:
+    def test_single_batch_params(self) -> None:
         """instrumentIds are inlined in the URL with raw commas (not percent-encoded)."""
         from app.providers.implementations.etoro import EtoroMarketDataProvider
 
@@ -351,8 +349,7 @@ class TestGetQuotesChunking:
             url_arg = provider._http.get.call_args.args[0]
             assert "instrumentIds=1001,1002,1003" in url_arg
 
-    @patch("app.providers.implementations.etoro.raw_persistence.persist_raw_if_new")
-    def test_chunking_at_51_ids(self, _mock_persist: MagicMock) -> None:
+    def test_chunking_at_51_ids(self) -> None:
         """51 IDs should produce exactly 2 HTTP requests (50 + 1)."""
         from app.providers.implementations.etoro import EtoroMarketDataProvider
 
@@ -377,8 +374,7 @@ class TestGetQuotesChunking:
             second_ids = second_url.split("instrumentIds=")[1].split("&")[0]
             assert len(second_ids.split(",")) == 1
 
-    @patch("app.providers.implementations.etoro.raw_persistence.persist_raw_if_new")
-    def test_failed_chunk_does_not_poison_others(self, _mock_persist: MagicMock) -> None:
+    def test_failed_chunk_does_not_poison_others(self) -> None:
         """If one chunk 500s, the rest still return quotes."""
         from app.providers.implementations.etoro import EtoroMarketDataProvider
 
@@ -405,12 +401,10 @@ class TestGetQuotesChunking:
             # Should return the quotes from the successful chunk
             assert len(result) == 1
             assert provider._http.get.call_count == 2
-            # Error response body must be persisted for diagnosis.
-            # Shared helper signature: persist_raw_if_new(source, tag, payload)
-            # — tag is positional arg index 1, payload is index 2.
-            persist_calls = {call[0][1]: call[0][2] for call in _mock_persist.call_args_list}
-            assert "rates_batch1_error" in persist_calls
-            assert '{"error":"internal"}' in persist_calls["rates_batch1_error"]
+            # Error body no longer persisted to disk under #471 — the
+            # raw-persistence path was retired now that SQL coverage
+            # is complete. Error diagnostics live in the log line via
+            # exc_info instead.
 
 
 # ---------------------------------------------------------------------------

@@ -33,7 +33,6 @@ from app.providers.broker import (
     OrderStatus,
 )
 from app.providers.resilient_client import ResilientClient
-from app.services import raw_persistence
 
 logger = logging.getLogger(__name__)
 
@@ -401,10 +400,6 @@ class EtoroBrokerProvider(BrokerProvider):
             f"{self._info_prefix}/portfolio",
             headers=self._request_headers(),
         )
-        # Best-effort raw persist. Helper swallows OSError internally
-        # (logs + returns None); sync must continue with parsed
-        # response regardless.
-        raw_persistence.persist_raw_if_new("etoro_broker", "etoro_portfolio", response.content)
         response.raise_for_status()
         raw = response.json()
 

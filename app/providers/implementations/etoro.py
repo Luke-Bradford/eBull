@@ -20,7 +20,6 @@ import httpx
 from app.config import settings
 from app.providers.market_data import InstrumentRecord, MarketDataProvider, OHLCVBar, Quote
 from app.providers.resilient_client import ResilientClient
-from app.services import raw_persistence
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +92,6 @@ class EtoroMarketDataProvider(MarketDataProvider):
         )
         response.raise_for_status()
         raw = response.json()
-        raw_persistence.persist_raw_if_new("etoro", "instruments", raw)
         return _normalise_instruments(raw)
 
     # ------------------------------------------------------------------
@@ -112,7 +110,6 @@ class EtoroMarketDataProvider(MarketDataProvider):
         )
         response.raise_for_status()
         raw = response.json()
-        raw_persistence.persist_raw_if_new("etoro", f"candles_{instrument_id}", raw)
         return _normalise_candles(raw)
 
     # ------------------------------------------------------------------
@@ -154,13 +151,16 @@ class EtoroMarketDataProvider(MarketDataProvider):
                 )
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
-                # Persist the error response body for diagnosis.
-                raw_persistence.persist_raw_if_new("etoro", f"rates_batch{batch_num}_error", exc.response.text)
+                # #471: error body no longer persisted to disk per the
+                # SQL-coverage-replaces-raw rule (#470). Status + body
+                # snippet captured in the log line via exc_info so the
+                # diagnostic survives without a separate disk file.
                 logger.warning(
-                    "Rates chunk %d failed (%d IDs, status %d), skipping",
+                    "Rates chunk %d failed (%d IDs, status %d, body=%r), skipping",
                     batch_num,
                     len(chunk),
                     exc.response.status_code,
+                    exc.response.text[:500],
                     exc_info=True,
                 )
                 failed_chunks += 1
@@ -176,7 +176,6 @@ class EtoroMarketDataProvider(MarketDataProvider):
                 failed_chunks += 1
                 continue
             raw = response.json()
-            raw_persistence.persist_raw_if_new("etoro", f"rates_batch{batch_num}", raw)
             all_quotes.extend(_normalise_rates(raw))
 
         if failed_chunks:

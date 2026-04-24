@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import httpx
 
@@ -645,9 +645,8 @@ FIXTURE_FULL_PORTFOLIO_RESPONSE = {
 }
 
 
-@patch("app.providers.implementations.etoro_broker.raw_persistence.persist_raw_if_new")
 class TestGetPortfolio:
-    def test_returns_positions_and_cash(self, _mock_persist: MagicMock) -> None:
+    def test_returns_positions_and_cash(self) -> None:
         mock_resp = MagicMock()
         mock_resp.json.return_value = FIXTURE_FULL_PORTFOLIO_RESPONSE
         mock_resp.content = b"{}"
@@ -694,7 +693,7 @@ class TestGetPortfolio:
         assert p2.stop_loss_rate is None
         assert p2.take_profit_rate is None
 
-    def test_empty_portfolio(self, _mock_persist: MagicMock) -> None:
+    def test_empty_portfolio(self) -> None:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"clientPortfolio": {"positions": [], "credit": 100000}}
         mock_resp.content = b"{}"
@@ -710,7 +709,7 @@ class TestGetPortfolio:
         assert len(result.positions) == 0
         assert result.available_cash == Decimal("100000")
 
-    def test_missing_credit_defaults_to_zero(self, _mock_persist: MagicMock) -> None:
+    def test_missing_credit_defaults_to_zero(self) -> None:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"clientPortfolio": {"positions": []}}
         mock_resp.content = b"{}"
@@ -725,7 +724,7 @@ class TestGetPortfolio:
 
         assert result.available_cash == Decimal("0")
 
-    def test_calls_correct_endpoint(self, _mock_persist: MagicMock) -> None:
+    def test_calls_correct_endpoint(self) -> None:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"clientPortfolio": {"positions": [], "credit": 0}}
         mock_resp.content = b"{}"
