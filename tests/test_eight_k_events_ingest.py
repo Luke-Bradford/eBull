@@ -22,6 +22,29 @@ class _StubFetcher:
         return self._by_url.get(absolute_url)
 
 
+def _seed_item_codes(conn: psycopg.Connection[tuple]) -> None:
+    """Ensure sec_8k_item_codes carries the codes these tests assert
+    against. Migration 053 seeds the table on first apply but the
+    teardown doesn't touch it, so the row is usually already present —
+    this fixture is defensive so a future test-db rebuild or a
+    targeted truncation can't regress into an empty lookup and make
+    severity assertions silently pass against ``None`` labels.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO sec_8k_item_codes (code, label, severity) VALUES
+                ('1.01', 'Entry into a Material Definitive Agreement', 'material'),
+                ('8.01', 'Other Events', 'informational'),
+                ('9.01', 'Financial Statements and Exhibits', 'informational')
+            ON CONFLICT (code) DO UPDATE SET
+                label    = EXCLUDED.label,
+                severity = EXCLUDED.severity
+            """
+        )
+    conn.commit()
+
+
 def _seed_instrument(conn: psycopg.Connection[tuple], symbol: str = "APEX", iid: int = 401) -> int:
     with conn.cursor() as cur:
         cur.execute(
@@ -79,6 +102,7 @@ _RICH_8K = """
 
 class TestIngest8KEvents:
     def test_rich_filing_lands_header_items_exhibits(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_item_codes(ebull_test_conn)
         iid = _seed_instrument(ebull_test_conn)
         _seed_8k(
             ebull_test_conn,
