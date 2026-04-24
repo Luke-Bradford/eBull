@@ -14,7 +14,6 @@ from app.services.sec_entity_profile import (
     upsert_entity_profile,
 )
 
-
 # ---------------------------------------------------------------------------
 # Pure extraction — new long-tail fields
 # ---------------------------------------------------------------------------
