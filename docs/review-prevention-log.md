@@ -935,3 +935,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `_load_item_labels` used `str(r[2])` when building the `(label, severity)` lookup from `sec_8k_item_codes`. The schema today has `severity` NOT NULL, so the bug was latent — but the moment a future migration relaxes the constraint, every NULL severity would silently serialise to the literal four-character string `"None"` in the loaded dict and then propagate into `eight_k_items.severity` unnoticed.
 - Prevention: In any DB reader helper, `str(row[N])` is only safe when the underlying column is NOT NULL. Before wrapping a column with `str()` / `int()` / `bool()` / `Decimal()`, confirm the schema declares it NOT NULL. For nullable columns, use the Optional-aware pattern: `val if val is None else str(val)` (and widen the return type). At self-review: grep for `str\(r\[|str\(row\[` in service modules and audit each occurrence against the source schema.
 - Enforced in: this prevention log; `app/services/eight_k_events.py::_load_item_labels` now preserves NULL severity as Python `None`.
+
+---
+
+### Provider body-text fetches require a SQL-normalisation path (no disk-only persistence)
+
+- First seen in: #448 (directive); #453 (guard shipped).
+- Symptom: Any new service-layer caller of `SecFilingsProvider.fetch_document_text` that writes the returned body to `data/raw/*` without a matching normalised SQL table silently reintroduces the "body text on disk only" anti-pattern that the operator rejected at #448.
+- Prevention: `tests/test_fetch_document_text_callers.py` pins the allow-listed caller set. Adding a new caller requires the test to be updated alongside a documented normalisation path into SQL (e.g. a dedicated table with every structured field captured as rows / columns / JSONB). For ad-hoc body inspection (debugging, one-off investigation), use a script outside `app/` — never add a service-layer caller without the normalisation pipeline.
+- Enforced in: this prevention log; `tests/test_fetch_document_text_callers.py`; the docstring on `SecFilingsProvider.fetch_document_text` in `app/providers/implementations/sec_edgar.py` states the contract explicitly.

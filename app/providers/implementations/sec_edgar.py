@@ -277,6 +277,20 @@ class SecFilingsProvider(FilingsProvider):
         counts under the same 10 req/s fair-use pool but is served
         by ``self._http``. Using ``_http_tickers`` here keeps the
         host-to-client mapping obvious (www.sec.gov ⇒ tickers client).
+
+        **Contract (#448 / #453):** the body returned by this method
+        MUST be routed through a service-layer ingester that
+        normalises every structured field into SQL before the
+        transaction commits. Disk-only persistence (writing the body
+        to ``data/raw/*`` without a matching SQL row) is forbidden.
+
+        Allowed callers are pinned by
+        ``tests/test_fetch_document_text_callers.py``. Adding a new
+        caller requires the test to be updated alongside a documented
+        normalisation path into SQL. If all you need is the raw body
+        for ad-hoc inspection, use a one-off script — don't add a
+        service-layer caller that writes to disk and leaves the
+        normalisation for "later".
         """
         resp = self._http_tickers.get(absolute_url)
         if resp.status_code in (404, 410):
