@@ -274,6 +274,160 @@ def _seed_instrument(conn: psycopg.Connection[tuple], *, symbol: str = "AAPL") -
 
 
 @pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestCheckPositionHealthAgainstRealSchema:
+    """Integration smoke for the SQL query shape of ``check_position_health``.
+
+    The mocked-DB tests above cover alert-logic branches but never execute
+    the SQL; that gap let a wrong-table reference (``theses.red_flag_score``
+    — the column actually lives on ``filing_events``) ship and raise
+    ``UndefinedColumn`` in production (logs 2026-04-24). These tests run
+    the query against ``ebull_test`` so any future schema drift on the
+    joined columns fails the suite before a release.
+    """
+
+    def test_query_parses_against_current_schema(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        # Zero positions → query still parses. Before the fix, this
+        # raised UndefinedColumn on ``theses.red_flag_score`` at prepare
+        # time, independently of whether ``positions`` had rows.
+        result = check_position_health(ebull_test_conn)
+        assert result.positions_checked == 0
+        assert result.alerts == ()
+
+    def test_red_flag_resolves_from_filing_events(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        # End-to-end: open position + recent high red_flag_score on
+        # filing_events → thesis_break alert surfaces.
+        iid = _seed_instrument(ebull_test_conn, symbol="RFLG")
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO positions (instrument_id, current_units, avg_cost, source) VALUES (%s, 10, 100, 'ebull')",
+                (iid,),
+            )
+            cur.execute(
+                "INSERT INTO quotes (instrument_id, quoted_at, bid, ask) VALUES (%s, NOW(), 150, 151)",
+                (iid,),
+            )
+            cur.execute(
+                """
+                INSERT INTO filing_events (instrument_id, filing_date, filing_type,
+                                           provider, provider_filing_id, red_flag_score)
+                VALUES (%s, CURRENT_DATE, '10-K', 'sec', 'test-rflg-1', 0.95)
+                """,
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        result = check_position_health(ebull_test_conn)
+        assert result.positions_checked == 1
+        thesis_breaks = [a for a in result.alerts if a.alert_type == "thesis_break"]
+        assert len(thesis_breaks) == 1
+        assert thesis_breaks[0].instrument_id == iid
+
+    def test_max_wins_over_latest_when_multiple_filings_in_window(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        # Two in-window filings: the older one carries the higher score.
+        # MAX(red_flag_score) must win over recency so a prior severe
+        # warning cannot be masked by a subsequent clean filing.
+        iid = _seed_instrument(ebull_test_conn, symbol="MAXX")
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO positions (instrument_id, current_units, avg_cost, source) VALUES (%s, 5, 100, 'ebull')",
+                (iid,),
+            )
+            cur.execute(
+                "INSERT INTO quotes (instrument_id, quoted_at, bid, ask) VALUES (%s, NOW(), 150, 151)",
+                (iid,),
+            )
+            # Older filing — HIGH red flag, still inside the 90d window.
+            cur.execute(
+                """
+                INSERT INTO filing_events (instrument_id, filing_date, filing_type,
+                                           provider, provider_filing_id, red_flag_score)
+                VALUES (%s, CURRENT_DATE - INTERVAL '60 days', '10-K',
+                        'sec', 'test-maxx-old', 0.95)
+                """,
+                (iid,),
+            )
+            # Newer filing — LOW red flag; latest-wins would mask the breach.
+            cur.execute(
+                """
+                INSERT INTO filing_events (instrument_id, filing_date, filing_type,
+                                           provider, provider_filing_id, red_flag_score)
+                VALUES (%s, CURRENT_DATE - INTERVAL '10 days', '10-Q',
+                        'sec', 'test-maxx-new', 0.10)
+                """,
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        result = check_position_health(ebull_test_conn)
+        assert result.positions_checked == 1
+        thesis_breaks = [a for a in result.alerts if a.alert_type == "thesis_break"]
+        assert len(thesis_breaks) == 1
+        assert "0.95" in thesis_breaks[0].detail
+
+    def test_90d_boundary_inclusive(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        # Exactly 90 days old must STILL trigger (inclusive window); 91
+        # days must NOT. Pins the boundary so a future refactor to
+        # ``> N days`` vs ``>= N days`` can't silently drift.
+        iid = _seed_instrument(ebull_test_conn, symbol="BNDY")
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO positions (instrument_id, current_units, avg_cost, source) VALUES (%s, 5, 100, 'ebull')",
+                (iid,),
+            )
+            cur.execute(
+                "INSERT INTO quotes (instrument_id, quoted_at, bid, ask) VALUES (%s, NOW(), 150, 151)",
+                (iid,),
+            )
+            cur.execute(
+                """
+                INSERT INTO filing_events (instrument_id, filing_date, filing_type,
+                                           provider, provider_filing_id, red_flag_score)
+                VALUES
+                    (%s, CURRENT_DATE - INTERVAL '90 days', '10-K', 'sec', 'bndy-90', 0.95),
+                    (%s, CURRENT_DATE - INTERVAL '91 days', '10-K', 'sec', 'bndy-91', 0.99)
+                """,
+                (iid, iid),
+            )
+        ebull_test_conn.commit()
+
+        result = check_position_health(ebull_test_conn)
+        thesis_breaks = [a for a in result.alerts if a.alert_type == "thesis_break"]
+        assert len(thesis_breaks) == 1
+        # 90-day row wins (0.95); 91-day row (0.99) is out of window.
+        assert "0.95" in thesis_breaks[0].detail
+
+    def test_old_red_flag_outside_90d_window_is_ignored(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        # Mirrors the portfolio.max_red_flag contract: filing_events
+        # older than 90 days must not feed the monitor.
+        iid = _seed_instrument(ebull_test_conn, symbol="OLDF")
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO positions (instrument_id, current_units, avg_cost, source) VALUES (%s, 5, 100, 'ebull')",
+                (iid,),
+            )
+            cur.execute(
+                "INSERT INTO quotes (instrument_id, quoted_at, bid, ask) VALUES (%s, NOW(), 120, 121)",
+                (iid,),
+            )
+            cur.execute(
+                """
+                INSERT INTO filing_events (instrument_id, filing_date, filing_type,
+                                           provider, provider_filing_id, red_flag_score)
+                VALUES (%s, CURRENT_DATE - INTERVAL '200 days', '10-K',
+                        'sec', 'test-oldf-1', 0.95)
+                """,
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        result = check_position_health(ebull_test_conn)
+        assert result.positions_checked == 1
+        assert not any(a.alert_type == "thesis_break" for a in result.alerts)
+
+
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
 class TestPersistPositionAlerts:
     """Writer diff-logic tests against real ebull_test DB."""
 

@@ -1,13 +1,14 @@
 """Position monitor service — intraday SL/TP/thesis-break detection.
 
-Checks all open positions against the latest quotes and thesis data to
-surface breaches that the daily 05:30 broker sync would otherwise miss.
+Checks all open positions against the latest quotes and filing-event
+red-flag signals to surface breaches that the daily 05:30 broker sync
+would otherwise miss.
 
 Design choices:
   - READ-ONLY: no state mutations, no orders placed.
   - NULL SL/TP/red_flag = skip that check (never block on missing data).
   - filter WHERE current_units > 0 to exclude liquidated positions.
-  - LATERAL joins for quotes/theses/broker_positions to avoid JOIN fan-out.
+  - LATERAL joins for quotes/filing_events/broker_positions to avoid JOIN fan-out.
 """
 
 from __future__ import annotations
@@ -71,12 +72,15 @@ class PersistStats:
 
 
 def check_position_health(conn: psycopg.Connection[Any]) -> MonitorResult:
-    """Check all open positions against latest quotes and thesis data.
+    """Check all open positions against latest quotes and filing-event
+    red-flag signals.
 
     For each open position:
       - sl_breach:    bid is not None AND sl is not None AND bid < sl
       - tp_breach:    bid is not None AND tp is not None AND bid >= tp
       - thesis_break: red_flag is not None AND red_flag >= EXIT_RED_FLAG_THRESHOLD
+                      (red_flag = MAX(filing_events.red_flag_score) over
+                      the last 90 days for the instrument)
 
     Returns a MonitorResult with the count of positions checked and any alerts
     raised. NULL SL/TP/red_flag values are silently skipped — never block on
@@ -114,13 +118,19 @@ def check_position_health(conn: psycopg.Connection[Any]) -> MonitorResult:
                 ORDER BY quoted_at DESC
                 LIMIT 1
             ) q ON TRUE
-            -- Latest thesis red_flag_score.
+            -- Max red_flag_score from filing_events in the last 90 days.
+            -- The column lives on filing_events, not theses (bug surfaced
+            -- in backend logs 2026-04-24: monitor_positions raised
+            -- UndefinedColumn against theses.red_flag_score). Mirrors
+            -- the pattern already used by portfolio._load_guard_details
+            -- so the hard-rule "severe red flag" path and the alert path
+            -- agree on what "red flag" means.
             LEFT JOIN LATERAL (
-                SELECT red_flag_score
-                FROM theses
+                SELECT MAX(red_flag_score) AS red_flag_score
+                FROM filing_events
                 WHERE instrument_id = p.instrument_id
-                ORDER BY created_at DESC
-                LIMIT 1
+                  AND filing_date >= CURRENT_DATE - INTERVAL '90 days'
+                  AND red_flag_score IS NOT NULL
             ) t ON TRUE
             WHERE p.current_units > 0
             """
