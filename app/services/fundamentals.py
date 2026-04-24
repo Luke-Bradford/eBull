@@ -1760,6 +1760,15 @@ def _run_cik_upsert(
             # which is acceptable because entity metadata (description,
             # SIC, exchanges, former names) changes rarely; any stale
             # row converges on the next seed cycle.
+            #
+            # Wrapped in ``with conn.transaction():`` so any DB error
+            # inside the upsert rolls back a SAVEPOINT rather than
+            # leaving the outer per-CIK transaction in
+            # ``InFailedSqlTransaction`` state. Without the savepoint,
+            # a bare ``except Exception`` still catches the error but
+            # the subsequent XBRL facts upsert below would fail with
+            # "current transaction is aborted, commands ignored".
+            # Review #439 BLOCKING.
             try:
                 from app.services.sec_entity_profile import (
                     parse_entity_profile,
@@ -1771,7 +1780,8 @@ def _run_cik_upsert(
                     instrument_id=instrument_id,
                     cik=cik,
                 )
-                upsert_entity_profile(conn, profile)
+                with conn.transaction():
+                    upsert_entity_profile(conn, profile)
             except Exception:
                 logger.warning(
                     "sec_incremental: entity-profile upsert failed for cik=%s",

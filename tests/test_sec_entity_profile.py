@@ -211,3 +211,50 @@ class TestUpsertRoundTrip:
         iid = _seed_instrument(ebull_test_conn, symbol="NOPR")
         got = get_entity_profile(ebull_test_conn, instrument_id=iid)
         assert got is None
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestSavepointIsolation:
+    """Review #439 BLOCKING: a failed ``upsert_entity_profile`` must not
+    leave the connection in ``InFailedSqlTransaction``, otherwise the
+    caller's subsequent XBRL facts upsert errors with "current
+    transaction is aborted, commands ignored". The caller wraps the
+    upsert in ``with conn.transaction():`` to scope rollback to a
+    savepoint; this test pins that behaviour.
+    """
+
+    def test_upsert_failure_inside_savepoint_leaves_conn_usable(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        iid = _seed_instrument(ebull_test_conn, symbol="SPVT")
+        # FK-violating row: instrument_id points at an instrument that
+        # does not exist. Hits the ON DELETE CASCADE FK, raises
+        # ForeignKeyViolation, rolls back the savepoint.
+        bogus = parse_entity_profile(
+            {"sic": "1234"},
+            instrument_id=999_999_999,
+            cik="bogus",
+        )
+
+        # Mirror the caller pattern from fundamentals.py:1730.
+        try:
+            with ebull_test_conn.transaction():
+                upsert_entity_profile(ebull_test_conn, bogus)
+        except Exception:
+            pass
+
+        # Connection must still be usable for the subsequent XBRL write.
+        # Before the savepoint fix, the caller connection was poisoned
+        # and this next execute would raise InFailedSqlTransaction.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            assert cur.fetchone() == (1,)
+
+        # The instrument we DID seed is still there — outer tx intact.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT instrument_id FROM instruments WHERE instrument_id = %s",
+                (iid,),
+            )
+            assert cur.fetchone() == (iid,)
