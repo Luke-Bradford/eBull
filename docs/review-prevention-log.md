@@ -527,7 +527,13 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - First seen in: #171
 - Symptom: `get_quotes()` caught `httpx.HTTPStatusError` on a 500 response but skipped the chunk without persisting the error response body. The 500 body (which may contain diagnostic info from the upstream API) was silently discarded, violating the raw-payload persistence rule.
 - Prevention: When catching `httpx.HTTPStatusError` in provider code to skip/continue, call `_persist_raw(tag + "_error", exc.response.text)` before logging or continuing. Network errors (`httpx.RequestError`) have no response body — log with `exc_info` only.
-- **Scope narrowed (#470, 2026-04-24):** the "raw payload persistence" imperative only applies to sources whose SQL normalisation is incomplete. Once every structured field lands in SQL (as for `sec`/`sec_fundamentals` post #449/#450/#451/#452/#463), raw disk persistence is redundant, not audit — operator explicitly directed drop-on-process. The rule stands for `companies_house`, `etoro`, `etoro_broker`, `fmp` whose SQL coverage is thinner.
+- **Scope narrowed (#470, 2026-04-24):** the "raw payload persistence" imperative only applies to sources whose SQL normalisation is incomplete. Once every structured field lands in SQL (as for `sec`/`sec_fundamentals` post #449/#450/#451/#452/#463), raw disk persistence is redundant, not audit — operator explicitly directed drop-on-process.
+- **Further narrowed (#471, 2026-04-24):** `etoro` + `etoro_broker` SQL coverage audit completed and provider-side raw writes dropped. Coverage map:
+  - `etoro/instruments` → `instruments` table (provider_id, symbol, company_name, exchange, sector, is_tradable; `currency` enriched separately by FMP per the live-pricing spec).
+  - `etoro/candles_*` → `price_daily` (price_date, open, high, low, close, volume).
+  - `etoro/rates_batch*` → `quotes` (instrument_id, bid, ask, last_execution, date).
+  - `etoro_broker/etoro_portfolio` → `broker_positions` + `cash_ledger` + `copy_mirror_positions` (full position + cash + mirror snapshot).
+- **Rule remaining scope:** stands for `companies_house` and `fmp` whose SQL coverage is thinner; raw payloads still serve as parser substrate there until coverage audits land.
 - Enforced in: this prevention log
 
 ---

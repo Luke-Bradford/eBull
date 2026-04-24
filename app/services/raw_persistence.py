@@ -73,16 +73,16 @@ class RetentionPolicy:
 
 
 # Per-source rationale:
-# - sec_fundamentals / sec: NO new raw writes. The providers stopped
-#   calling ``persist_raw_if_new`` under #470 once SQL coverage was
-#   complete (every structured field from companyfacts.json,
-#   submissions.json, and filing-index JSON lands in
-#   financial_facts_raw + sec_facts_concept_catalog +
-#   instrument_sec_profile + sec_entity_change_log + filing_documents).
-#   Retention is set to ``max_age_days=0`` so the next sweep tick
-#   reclaims the existing ~12 GB on disk from prior runs. Policy
-#   entries remain in this map so ``sweep_source`` still works for
-#   the cleanup — removing them would KeyError on sweep.
+# - sec_fundamentals / sec: NO new raw writes (#470). All structured
+#   fields from companyfacts.json, submissions.json, and filing-index
+#   JSON land in SQL.
+# - etoro / etoro_broker: NO new raw writes (#471). Instruments,
+#   candles, quotes, and broker portfolio all land in SQL via the
+#   existing pipeline (instruments / price_daily / quotes /
+#   broker_positions / cash_ledger / copy_mirror_positions).
+# - All four sources kept in the policy map at max_age_days=0 so
+#   ``sweep_source`` still works for the residual cleanup —
+#   removing them would KeyError on sweep.
 # - companies_house: NO age-based delete. Coverage is thinner than
 #   SEC so the raw Companies House payloads are still the parser
 #   substrate for some fields.
@@ -99,8 +99,12 @@ _RETENTION_POLICY: dict[str, RetentionPolicy] = {
     # next sweep reclaims the ~12 GB of prior writes on disk.
     "sec_fundamentals": RetentionPolicy(max_age_days=0, max_duplicate_files_per_hash=1),
     "sec": RetentionPolicy(max_age_days=0, max_duplicate_files_per_hash=1),
-    "etoro": RetentionPolicy(max_age_days=7, max_duplicate_files_per_hash=1),
-    "etoro_broker": RetentionPolicy(max_age_days=90, max_duplicate_files_per_hash=1),
+    # etoro / etoro_broker: providers stopped writing raw under #471
+    # — instruments / candles / quotes / portfolio all land in SQL
+    # via the existing pipeline. Policy at 0 so the next sweep
+    # reclaims residual files past the 24-hour safeguard.
+    "etoro": RetentionPolicy(max_age_days=0, max_duplicate_files_per_hash=1),
+    "etoro_broker": RetentionPolicy(max_age_days=0, max_duplicate_files_per_hash=1),
     "fmp": RetentionPolicy(max_age_days=30, max_duplicate_files_per_hash=1),
     "companies_house": RetentionPolicy(max_age_days=None, max_duplicate_files_per_hash=1),
 }

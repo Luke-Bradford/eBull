@@ -312,17 +312,19 @@ class TestSweepSource:
         assert "sec_submissions_old.json" not in remaining
 
     def test_deletes_files_older_than_policy(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """etoro policy has max_age_days=7 → files older than 7 days
-        are deleted; newer preserved."""
+        """``fmp`` policy has max_age_days=30 → files older than 30
+        days are deleted; newer preserved. (Previously used
+        ``etoro`` at max_age_days=7; etoro flipped to 0 under #471
+        once SQL coverage replaced raw persistence.)"""
         monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
-        etoro_dir = tmp_path / "etoro"
-        _seed(etoro_dir, "old_20260101T120000Z.json", {"x": 1}, age=timedelta(days=10))
-        _seed(etoro_dir, "fresh_20260102T120000Z.json", {"y": 2}, age=timedelta(days=3))
+        fmp_dir = tmp_path / "fmp"
+        _seed(fmp_dir, "old_20260101T120000Z.json", {"x": 1}, age=timedelta(days=45))
+        _seed(fmp_dir, "fresh_20260102T120000Z.json", {"y": 2}, age=timedelta(days=10))
 
-        result = sweep_source("etoro", dry_run=False)
+        result = sweep_source("fmp", dry_run=False)
 
         assert result.files_deleted == 1
-        remaining = {p.name for p in etoro_dir.iterdir()}
+        remaining = {p.name for p in fmp_dir.iterdir()}
         assert "fresh_20260102T120000Z.json" in remaining
         assert "old_20260101T120000Z.json" not in remaining
 
