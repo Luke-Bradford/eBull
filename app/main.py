@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -45,8 +46,18 @@ from app.db.migrations import migration_status, run_migrations
 from app.jobs.runtime import JobRuntime, shutdown_runtime, start_runtime
 from app.security import master_key
 from app.security.secrets_crypto import set_active_key as set_broker_encryption_key
+from app.services.broker_credentials import (
+    CredentialNotFound,
+    load_credential_for_provider_use,
+)
 from app.services.coverage import override_tier
+from app.services.etoro_websocket import EtoroWebSocketSubscriber
 from app.services.operator_setup import ensure_startup_token, operators_empty
+from app.services.operators import (
+    AmbiguousOperatorError,
+    NoOperatorError,
+    sole_operator_id,
+)
 from app.services.sync_orchestrator.layer_state import compute_layer_states_from_db
 from app.services.sync_orchestrator.layer_types import LayerState
 from app.services.sync_orchestrator.reaper import reap_orphaned_syncs
@@ -141,7 +152,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.exception("failed to register orchestrator executor")
 
+    # eToro WebSocket live-price subscriber (#274 Slice 1). Starts
+    # only when broker credentials are loadable — otherwise the
+    # operator hasn't completed setup yet and there's nothing to
+    # subscribe to. WS failures must NOT block the rest of the app.
+    ws_subscriber = await _maybe_start_etoro_ws(pool)
+    app.state.etoro_ws = ws_subscriber
+
     yield
+
+    if ws_subscriber is not None:
+        try:
+            await ws_subscriber.stop()
+        except Exception:
+            logger.exception("EtoroWebSocketSubscriber.stop failed")
 
     # Shut the runtime down BEFORE closing the pool so any in-flight
     # job can still write to job_runs as part of its cleanup. The
@@ -152,6 +176,59 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     pool.close()
     logger.info("Connection pool closed.")
+
+
+async def _maybe_start_etoro_ws(pool: ConnectionPool[Any]) -> EtoroWebSocketSubscriber | None:
+    """Boot the WS subscriber when credentials are available.
+
+    Pulled out of ``lifespan`` so the credential-load + subscriber
+    start runs under a single broad try/except — a missing or
+    invalid credential pair must not crash startup. Returns ``None``
+    when credentials aren't loadable yet (pre-setup flow).
+    """
+    try:
+        with pool.connection() as conn:
+            op_id = sole_operator_id(conn)
+            api_key = load_credential_for_provider_use(
+                conn,
+                operator_id=op_id,
+                provider="etoro",
+                label="api_key",
+                environment=settings.etoro_env,
+                caller="etoro_ws_subscriber",
+            )
+            conn.commit()
+            user_key = load_credential_for_provider_use(
+                conn,
+                operator_id=op_id,
+                provider="etoro",
+                label="user_key",
+                environment=settings.etoro_env,
+                caller="etoro_ws_subscriber",
+            )
+            conn.commit()
+    except (NoOperatorError, AmbiguousOperatorError, CredentialNotFound) as exc:
+        logger.info(
+            "EtoroWebSocketSubscriber not started (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
+        return None
+    except Exception:
+        logger.exception("EtoroWebSocketSubscriber credential load failed")
+        return None
+
+    subscriber = EtoroWebSocketSubscriber(
+        api_key=api_key,
+        user_key=user_key,
+        pool=pool,
+    )
+    try:
+        await subscriber.start()
+    except Exception:
+        logger.exception("EtoroWebSocketSubscriber.start failed")
+        return None
+    return subscriber
 
 
 app = FastAPI(title="eBull", version="0.1.0", lifespan=lifespan)
