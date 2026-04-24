@@ -53,6 +53,28 @@ class XbrlFact:
     decimals: str | None  # XBRL allows non-integer values like "INF"
 
 
+@dataclass(frozen=True)
+class XbrlConceptCatalogEntry:
+    """Per-concept metadata extracted from the SEC companyfacts JSON.
+
+    The companyfacts response carries a ``label`` + ``description``
+    alongside each concept's ``units`` block. Capturing these into
+    ``sec_facts_concept_catalog`` (#451) lets the UI and analysis
+    queries render a human-readable concept name without hard-coding
+    a Python alias map for the entire XBRL taxonomy.
+    """
+
+    taxonomy: str
+    concept: str
+    label: str | None
+    description: str | None
+    # Unit types observed for this concept in the current response.
+    # ``sec_facts_concept_catalog.units_seen`` accumulates the union
+    # across every ingest pass so a concept reporting in multiple
+    # units over time is represented truthfully.
+    units_seen: tuple[str, ...]
+
+
 class FundamentalsProvider(ABC):
     """
     Interface for normalised company fundamentals: income, balance sheet, cash flow.
