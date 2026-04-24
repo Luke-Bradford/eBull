@@ -241,6 +241,7 @@ JOB_SEC_DIVIDEND_CALENDAR_INGEST = "sec_dividend_calendar_ingest"
 JOB_SEC_BUSINESS_SUMMARY_INGEST = "sec_business_summary_ingest"
 JOB_SEC_INSIDER_TRANSACTIONS_INGEST = "sec_insider_transactions_ingest"
 JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
+JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +512,19 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "cost nothing when nothing new has landed."
         ),
         cadence=Cadence.hourly(minute=30),
+        catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_8K_EVENTS_INGEST,
+        description=(
+            "Parse SEC 8-K filings into structured eight_k_filings + "
+            "eight_k_items + eight_k_exhibits (#450). Runs hourly; "
+            "8-K is the fastest filing flow (event within 4 business "
+            "days), so stale structured capture is low-value. Bounded "
+            "to 200 filings per run; idempotent on the filing UNIQUE "
+            "key."
+        ),
+        cadence=Cadence.hourly(minute=20),
         catch_up_on_boot=False,
     ),
     ScheduledJob(
@@ -3137,6 +3151,36 @@ def sec_insider_transactions_ingest() -> None:
             result.filings_scanned,
             result.filings_parsed,
             result.rows_inserted,
+            result.fetch_errors,
+            result.parse_misses,
+        )
+
+
+def sec_8k_events_ingest() -> None:
+    """Parse 8-K filings into structured SQL tables (#450).
+
+    Complements the Item 8.01 dividend parser (#434) by capturing
+    every 8-K's header, per-item bodies, and exhibits list. Runs
+    hourly so material 8-Ks (officer departures, acquisition
+    agreements, cybersecurity incidents) land in SQL within one
+    cycle of hitting EDGAR.
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.eight_k_events import ingest_8k_events
+
+    with _tracked_job(JOB_SEC_8K_EVENTS_INGEST) as tracker:
+        with (
+            psycopg.connect(settings.database_url) as conn,
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+        ):
+            result = ingest_8k_events(conn, provider)
+
+        tracker.row_count = result.items_inserted
+        logger.info(
+            "sec_8k_events_ingest: scanned=%d parsed=%d items=%d fetch_errors=%d parse_misses=%d",
+            result.filings_scanned,
+            result.filings_parsed,
+            result.items_inserted,
             result.fetch_errors,
             result.parse_misses,
         )

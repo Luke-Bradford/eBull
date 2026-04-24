@@ -64,6 +64,16 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "financial_periods_raw",
     "financial_periods",
     "dividend_events",  # #434 — 8-K 8.01 calendar, FK → instruments
+    # #450 8-K structured-event tables. Children → parent:
+    # items + exhibits FK into eight_k_filings; eight_k_filings FKs
+    # into instruments (so the instrument truncation below would
+    # cascade, but listing them explicitly keeps teardown deterministic
+    # when a test populates a filings-only row without touching
+    # instruments).
+    "eight_k_exhibits",
+    "eight_k_items",
+    "eight_k_filings",
+    "instrument_business_summary_sections",  # #449 — FK → instruments
     "instrument_business_summary",  # #428 — 10-K Item 1 body, FK → instruments
     # #429 Form 4 tables. Child-to-parent truncation order: transactions
     # and footnotes FK into filings; filers also FK into filings;
