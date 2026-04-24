@@ -212,7 +212,7 @@ def parse_8k_filing(
     raw_html: str,
     *,
     known_items: tuple[str, ...] = (),
-    item_labels: dict[str, tuple[str, str]] | None = None,
+    item_labels: dict[str, tuple[str, str | None]] | None = None,
 ) -> Parsed8KFiling | None:
     """Extract header + per-item bodies + exhibits from an 8-K filing.
 
@@ -400,7 +400,7 @@ def upsert_8k_filing(
     accession_number: str,
     primary_document_url: str,
     parsed: Parsed8KFiling,
-    item_labels: dict[str, tuple[str, str]] | None = None,
+    item_labels: dict[str, tuple[str, str | None]] | None = None,
 ) -> None:
     """Insert / refresh the filing header + items + exhibits for one
     8-K accession.
@@ -659,11 +659,25 @@ class IngestResult:
     parse_misses: int
 
 
-def _load_item_labels(conn: psycopg.Connection[Any]) -> dict[str, tuple[str, str]]:
-    """Load sec_8k_item_codes into a (code → (label, severity)) map."""
+def _load_item_labels(
+    conn: psycopg.Connection[Any],
+) -> dict[str, tuple[str, str | None]]:
+    """Load sec_8k_item_codes into a (code → (label, severity)) map.
+
+    ``severity`` is preserved as-is from the row — ``None`` passes
+    through as ``None`` rather than being coerced to the string
+    "None" by ``str()``. The schema today is NOT NULL but widening
+    the reader keeps the helper safe against a future migration
+    that relaxes that constraint.
+    """
     with conn.cursor() as cur:
         cur.execute("SELECT code, label, severity FROM sec_8k_item_codes")
-        return {str(r[0]): (str(r[1]), str(r[2])) for r in cur.fetchall()}
+        result: dict[str, tuple[str, str | None]] = {}
+        for r in cur.fetchall():
+            severity_raw = r[2]
+            severity = str(severity_raw) if severity_raw is not None else None
+            result[str(r[0])] = (str(r[1]), severity)
+        return result
 
 
 def ingest_8k_events(
