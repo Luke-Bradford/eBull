@@ -61,6 +61,9 @@ def test_sec_profile_endpoint_returns_profile() -> None:
 
     with (
         patch("app.services.sec_entity_profile.get_entity_profile", return_value=_sample_profile()),
+        # #428 wired the endpoint to also read instrument_business_summary;
+        # patch the lookup so the test's mock-only conn doesn't raise.
+        patch("app.services.business_summary.get_business_summary", return_value=None),
         TestClient(app) as client,
     ):
         resp = client.get("/instruments/AAPL/sec_profile")

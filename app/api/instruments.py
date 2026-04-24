@@ -697,6 +697,7 @@ def get_instrument_sec_profile(
     been seeded yet (pre-first-seed or non-US ticker without a primary
     CIK).
     """
+    from app.services.business_summary import get_business_summary
     from app.services.sec_entity_profile import get_entity_profile
 
     symbol_clean = symbol.strip().upper()
@@ -718,12 +719,21 @@ def get_instrument_sec_profile(
     if inst_row is None:
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
 
-    profile = get_entity_profile(conn, instrument_id=int(inst_row["instrument_id"]))  # type: ignore[arg-type]
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    profile = get_entity_profile(conn, instrument_id=instrument_id)
     if profile is None:
         raise HTTPException(
             status_code=404,
             detail="no SEC profile on file for this instrument",
         )
+
+    # #428: prefer the authoritative 10-K Item 1 body over the short
+    # entity-level ``description`` from submissions.json. The
+    # submissions description is a ~1-sentence blurb SEC surfaces in
+    # their own UI; Item 1 is the multi-paragraph authoritative text
+    # investors expect on an instrument page.
+    item_1_body = get_business_summary(conn, instrument_id=instrument_id)
+    description = item_1_body if item_1_body is not None else profile.description
 
     return InstrumentSecProfile(
         symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
@@ -731,7 +741,7 @@ def get_instrument_sec_profile(
         sic=profile.sic,
         sic_description=profile.sic_description,
         owner_org=profile.owner_org,
-        description=profile.description,
+        description=description,
         website=profile.website,
         investor_website=profile.investor_website,
         ein=profile.ein,

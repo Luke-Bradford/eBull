@@ -238,6 +238,7 @@ JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
 JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC = "orchestrator_high_frequency_sync"
 JOB_FUNDAMENTALS_SYNC = "fundamentals_sync"
 JOB_SEC_DIVIDEND_CALENDAR_INGEST = "sec_dividend_calendar_ingest"
+JOB_SEC_BUSINESS_SUMMARY_INGEST = "sec_business_summary_ingest"
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +483,19 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "over several runs without duplicating work."
         ),
         cadence=Cadence.daily(hour=3, minute=0),
+        catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_BUSINESS_SUMMARY_INGEST,
+        description=(
+            "Extract 10-K Item 1 'Business' narratives into "
+            "``instrument_business_summary`` (#428). Runs 03:15 UTC "
+            "— 45 min after fundamentals_sync so new 10-K filings are "
+            "visible. Bounded to 200 instruments per run with a 7-day "
+            "TTL on ``last_parsed_at`` so a backlog drains without "
+            "re-fetching already-parsed instruments."
+        ),
+        cadence=Cadence.daily(hour=3, minute=15),
         catch_up_on_boot=False,
     ),
     ScheduledJob(
@@ -3030,6 +3044,36 @@ def sec_dividend_calendar_ingest() -> None:
         tracker.row_count = result.rows_inserted + result.rows_updated
         logger.info(
             "sec_dividend_calendar_ingest complete: scanned=%d inserted=%d updated=%d fetch_errors=%d parse_misses=%d",
+            result.filings_scanned,
+            result.rows_inserted,
+            result.rows_updated,
+            result.fetch_errors,
+            result.parse_misses,
+        )
+
+
+def sec_business_summary_ingest() -> None:
+    """Extract 10-K Item 1 into ``instrument_business_summary`` (#428).
+
+    Same shape as :func:`sec_dividend_calendar_ingest` (#434) — scans
+    10-K filings, fetches the primary document, parses Item 1, and
+    upserts. Bounded per run (``limit=200``) with a 7-day
+    ``last_parsed_at`` TTL so steady-state daily runs don't hammer
+    SEC for already-parsed instruments.
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.business_summary import ingest_business_summaries
+
+    with _tracked_job(JOB_SEC_BUSINESS_SUMMARY_INGEST) as tracker:
+        with (
+            psycopg.connect(settings.database_url) as conn,
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+        ):
+            result = ingest_business_summaries(conn, provider)
+
+        tracker.row_count = result.rows_inserted + result.rows_updated
+        logger.info(
+            "sec_business_summary_ingest complete: scanned=%d inserted=%d updated=%d fetch_errors=%d parse_misses=%d",
             result.filings_scanned,
             result.rows_inserted,
             result.rows_updated,
