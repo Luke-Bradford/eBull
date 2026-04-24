@@ -167,9 +167,7 @@ class TestUpsertAppendsChangeLog:
         conn.commit()
         return int(row[0])
 
-    def test_first_ingest_writes_no_change_log_entries(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_first_ingest_writes_no_change_log_entries(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = self._seed_instrument(ebull_test_conn)
         upsert_entity_profile(ebull_test_conn, _profile(instrument_id=iid))
         ebull_test_conn.commit()
@@ -182,9 +180,7 @@ class TestUpsertAppendsChangeLog:
         assert row is not None
         assert row[0] == 0
 
-    def test_second_ingest_writes_one_row_per_changed_field(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_second_ingest_writes_one_row_per_changed_field(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = self._seed_instrument(ebull_test_conn, iid=902)
         # First ingest.
         upsert_entity_profile(ebull_test_conn, _profile(instrument_id=iid))
@@ -209,9 +205,7 @@ class TestUpsertAppendsChangeLog:
         # No spurious entries for unchanged fields.
         assert "fiscal_year_end" not in field_names
 
-    def test_reader_returns_new_long_tail_fields(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_reader_returns_new_long_tail_fields(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = self._seed_instrument(ebull_test_conn, iid=903)
         upsert_entity_profile(
             ebull_test_conn,
