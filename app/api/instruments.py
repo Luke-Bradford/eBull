@@ -1047,6 +1047,130 @@ def get_instrument_insider_summary(
     )
 
 
+class InsiderTransactionDetailModel(BaseModel):
+    """Wide-shape payload for one Form 4 transaction row.
+
+    Mirrors :class:`app.services.insider_transactions.InsiderTransactionDetail`
+    one-to-one. Every structured field the XML carries is surfaced;
+    the frontend picks what to render, the API does not editorialise.
+    Footnote bodies are attached as a dict keyed by the XML field
+    they qualify (``transactionShares``, ``transactionPricePerShare``,
+    etc.) so the UI can render the explanatory text next to the
+    specific cell.
+    """
+
+    accession_number: str
+    document_type: str
+    txn_date: date
+    deemed_execution_date: date | None
+    filer_cik: str | None
+    filer_name: str
+    filer_role: str | None
+    security_title: str | None
+    txn_code: str
+    acquired_disposed_code: str | None
+    shares: Decimal | None
+    price: Decimal | None
+    post_transaction_shares: Decimal | None
+    direct_indirect: str | None
+    nature_of_ownership: str | None
+    is_derivative: bool
+    equity_swap_involved: bool | None
+    transaction_timeliness: str | None
+    conversion_exercise_price: Decimal | None
+    exercise_date: date | None
+    expiration_date: date | None
+    underlying_security_title: str | None
+    underlying_shares: Decimal | None
+    underlying_value: Decimal | None
+    footnotes: dict[str, str]
+
+
+class InsiderTransactionsListModel(BaseModel):
+    symbol: str
+    rows: list[InsiderTransactionDetailModel]
+
+
+@router.get(
+    "/{symbol}/insider_transactions",
+    response_model=InsiderTransactionsListModel,
+)
+def get_instrument_insider_transactions(
+    symbol: str,
+    limit: int = 100,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InsiderTransactionsListModel:
+    """Return recent Form 4 insider transactions for an instrument.
+
+    The operator-facing detail view. Covers both non-derivative
+    (open-market buys/sells) and derivative (option exercises / grants)
+    rows, most-recent first, up to ``limit``. Tombstoned filings
+    (failed fetch / parse) are excluded.
+
+    Every meaningful Form 4 XML field lands on the response. The UI
+    decides what's worth rendering — we don't drop fields at the API
+    layer (per the "every structured field queryable in SQL" rule).
+    """
+    from app.services.insider_transactions import list_insider_transactions
+
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    if limit <= 0 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    detail_rows = list_insider_transactions(conn, instrument_id=instrument_id, limit=limit)
+    return InsiderTransactionsListModel(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        rows=[
+            InsiderTransactionDetailModel(
+                accession_number=d.accession_number,
+                document_type=d.document_type,
+                txn_date=d.txn_date,
+                deemed_execution_date=d.deemed_execution_date,
+                filer_cik=d.filer_cik,
+                filer_name=d.filer_name,
+                filer_role=d.filer_role,
+                security_title=d.security_title,
+                txn_code=d.txn_code,
+                acquired_disposed_code=d.acquired_disposed_code,
+                shares=d.shares,
+                price=d.price,
+                post_transaction_shares=d.post_transaction_shares,
+                direct_indirect=d.direct_indirect,
+                nature_of_ownership=d.nature_of_ownership,
+                is_derivative=d.is_derivative,
+                equity_swap_involved=d.equity_swap_involved,
+                transaction_timeliness=d.transaction_timeliness,
+                conversion_exercise_price=d.conversion_exercise_price,
+                exercise_date=d.exercise_date,
+                expiration_date=d.expiration_date,
+                underlying_security_title=d.underlying_security_title,
+                underlying_shares=d.underlying_shares,
+                underlying_value=d.underlying_value,
+                footnotes=d.footnotes,
+            )
+            for d in detail_rows
+        ],
+    )
+
+
 def _has_sec_cik(conn: psycopg.Connection[object], instrument_id: int) -> bool:
     """True if the instrument has a primary SEC CIK — the US-ticker signal
     that gates the local-SEC-XBRL preference path."""

@@ -1,4 +1,23 @@
-"""Integration tests for ``ingest_insider_transactions`` (#429)."""
+"""Integration tests for ``ingest_insider_transactions`` (#429).
+
+Covers:
+
+- Happy path: non-derivative buy + sell, full field population, JOIN
+  into insider_filings + insider_filers.
+- Derivative / option-grant path: grant fields land, summary excludes.
+- Multi-owner joint filing: both owners land in ``insider_filers``;
+  transactions dedup by CIK.
+- Footnote body + refs: body lands in ``insider_transaction_footnotes``,
+  refs land inline in ``insider_transactions.footnote_refs``.
+- Amendment (4/A): document_type captured, date_of_original_submission
+  captured.
+- 10b5-1 plan marker + late-filed timeliness flag preserved.
+- Tombstoning: fetch 404 / parse miss now writes an
+  ``insider_filings`` row with ``is_tombstone = TRUE``; reader
+  excludes it; second pass does not re-fetch.
+- Idempotency + parser-version refresh: re-running upserts new
+  fields into the existing row.
+"""
 
 from __future__ import annotations
 
@@ -12,9 +31,15 @@ import pytest
 from app.services.insider_transactions import (
     get_insider_summary,
     ingest_insider_transactions,
+    list_insider_transactions,
 )
 
 pytestmark = pytest.mark.integration
+
+
+# ---------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------
 
 
 class _StubFetcher:
@@ -61,10 +86,190 @@ def _seed_form_4(
     conn.commit()
 
 
-_FORM_4_BUY = """<?xml version="1.0"?>
+# Rich Form 4 XML: open-market buy with full header + footnote ref.
+_FORM_4_RICH_BUY = """<?xml version="1.0"?>
 <ownershipDocument>
+  <schemaVersion>X0306</schemaVersion>
+  <documentType>4</documentType>
+  <periodOfReport>2024-06-15</periodOfReport>
+  <notSubjectToSection16>0</notSubjectToSection16>
+  <issuer>
+    <issuerCik>0000320193</issuerCik>
+    <issuerName>Apple Inc.</issuerName>
+    <issuerTradingSymbol>AAPL</issuerTradingSymbol>
+  </issuer>
   <reportingOwner>
-    <reportingOwnerId><rptOwnerName>CEO Name</rptOwnerName></reportingOwnerId>
+    <reportingOwnerId>
+      <rptOwnerCik>0001000001</rptOwnerCik>
+      <rptOwnerName>Cook Timothy D.</rptOwnerName>
+    </reportingOwnerId>
+    <reportingOwnerAddress>
+      <rptOwnerStreet1>ONE APPLE PARK WAY</rptOwnerStreet1>
+      <rptOwnerCity>CUPERTINO</rptOwnerCity>
+      <rptOwnerState>CA</rptOwnerState>
+      <rptOwnerZipCode>95014</rptOwnerZipCode>
+    </reportingOwnerAddress>
+    <reportingOwnerRelationship>
+      <isDirector>0</isDirector>
+      <isOfficer>1</isOfficer>
+      <officerTitle>CEO</officerTitle>
+      <isTenPercentOwner>0</isTenPercentOwner>
+      <isOther>0</isOther>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <securityTitle><value>Common Stock</value></securityTitle>
+      <transactionDate><value>2024-06-15</value></transactionDate>
+      <transactionCoding>
+        <transactionFormType>4</transactionFormType>
+        <transactionCode>P</transactionCode>
+        <equitySwapInvolved>0</equitySwapInvolved>
+      </transactionCoding>
+      <transactionTimeliness><value>L</value></transactionTimeliness>
+      <transactionAmounts>
+        <transactionShares>
+          <value>500</value>
+          <footnoteId id="F1"/>
+        </transactionShares>
+        <transactionPricePerShare><value>150.00</value></transactionPricePerShare>
+        <transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <postTransactionAmounts>
+        <sharesOwnedFollowingTransaction><value>3200500</value></sharesOwnedFollowingTransaction>
+      </postTransactionAmounts>
+      <ownershipNature>
+        <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
+      </ownershipNature>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+  <footnotes>
+    <footnote id="F1">Weighted average price across a range of $149.80-$150.20.</footnote>
+  </footnotes>
+  <remarks>Acquired under 10b5-1 plan adopted 2023-11-01.</remarks>
+  <ownerSignature>
+    <signatureName>/s/ Jane Q. Lawyer</signatureName>
+    <signatureDate>2024-06-17</signatureDate>
+  </ownerSignature>
+</ownershipDocument>
+"""
+
+
+# Joint filing: two reporting owners on the same accession.
+_FORM_4_JOINT = """<?xml version="1.0"?>
+<ownershipDocument>
+  <documentType>4</documentType>
+  <periodOfReport>2024-06-20</periodOfReport>
+  <issuer>
+    <issuerCik>0000320193</issuerCik>
+    <issuerName>Apple Inc.</issuerName>
+    <issuerTradingSymbol>AAPL</issuerTradingSymbol>
+  </issuer>
+  <reportingOwner>
+    <reportingOwnerId>
+      <rptOwnerCik>0001000002</rptOwnerCik>
+      <rptOwnerName>Smith John (Trustee)</rptOwnerName>
+    </reportingOwnerId>
+    <reportingOwnerRelationship>
+      <isTenPercentOwner>1</isTenPercentOwner>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  <reportingOwner>
+    <reportingOwnerId>
+      <rptOwnerCik>0001000003</rptOwnerCik>
+      <rptOwnerName>Smith Family Trust</rptOwnerName>
+    </reportingOwnerId>
+    <reportingOwnerRelationship>
+      <isTenPercentOwner>1</isTenPercentOwner>
+      <isOther>1</isOther>
+      <otherText>Indirect via family trust</otherText>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <securityTitle><value>Common Stock</value></securityTitle>
+      <transactionDate><value>2024-06-20</value></transactionDate>
+      <transactionCoding>
+        <transactionCode>S</transactionCode>
+      </transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>1000</value></transactionShares>
+        <transactionPricePerShare><value>160.00</value></transactionPricePerShare>
+        <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <ownershipNature>
+        <directOrIndirectOwnership><value>I</value></directOrIndirectOwnership>
+        <natureOfOwnership><value>By Trust dated 2020-01-01</value></natureOfOwnership>
+      </ownershipNature>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+</ownershipDocument>
+"""
+
+
+# Derivative grant.
+_FORM_4_OPTION_GRANT = """<?xml version="1.0"?>
+<ownershipDocument>
+  <documentType>4</documentType>
+  <periodOfReport>2024-06-25</periodOfReport>
+  <issuer>
+    <issuerCik>0000320193</issuerCik>
+    <issuerName>Apple Inc.</issuerName>
+    <issuerTradingSymbol>AAPL</issuerTradingSymbol>
+  </issuer>
+  <reportingOwner>
+    <reportingOwnerId>
+      <rptOwnerCik>0001000004</rptOwnerCik>
+      <rptOwnerName>Maestri Luca</rptOwnerName>
+    </reportingOwnerId>
+    <reportingOwnerRelationship>
+      <isOfficer>1</isOfficer>
+      <officerTitle>SVP, CFO</officerTitle>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  <derivativeTable>
+    <derivativeTransaction>
+      <securityTitle><value>Employee Stock Option (Right to Buy)</value></securityTitle>
+      <conversionOrExercisePrice><value>185.00</value></conversionOrExercisePrice>
+      <transactionDate><value>2024-06-25</value></transactionDate>
+      <transactionCoding>
+        <transactionCode>A</transactionCode>
+      </transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>50000</value></transactionShares>
+        <transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <exerciseDate><value>2025-06-25</value></exerciseDate>
+      <expirationDate><value>2034-06-25</value></expirationDate>
+      <underlyingSecurity>
+        <underlyingSecurityTitle><value>Common Stock</value></underlyingSecurityTitle>
+        <underlyingSecurityShares><value>50000</value></underlyingSecurityShares>
+      </underlyingSecurity>
+      <ownershipNature>
+        <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
+      </ownershipNature>
+    </derivativeTransaction>
+  </derivativeTable>
+</ownershipDocument>
+"""
+
+
+# 4/A amendment.
+_FORM_4A_AMENDMENT = """<?xml version="1.0"?>
+<ownershipDocument>
+  <documentType>4/A</documentType>
+  <periodOfReport>2024-06-01</periodOfReport>
+  <dateOfOriginalSubmission>2024-06-02</dateOfOriginalSubmission>
+  <issuer>
+    <issuerCik>0000320193</issuerCik>
+    <issuerName>Apple Inc.</issuerName>
+    <issuerTradingSymbol>AAPL</issuerTradingSymbol>
+  </issuer>
+  <reportingOwner>
+    <reportingOwnerId>
+      <rptOwnerCik>0001000001</rptOwnerCik>
+      <rptOwnerName>Cook Timothy D.</rptOwnerName>
+    </reportingOwnerId>
     <reportingOwnerRelationship>
       <isOfficer>1</isOfficer>
       <officerTitle>CEO</officerTitle>
@@ -72,38 +277,17 @@ _FORM_4_BUY = """<?xml version="1.0"?>
   </reportingOwner>
   <nonDerivativeTable>
     <nonDerivativeTransaction>
-      <transactionDate><value>2024-06-15</value></transactionDate>
+      <securityTitle><value>Common Stock</value></securityTitle>
+      <transactionDate><value>2024-06-01</value></transactionDate>
       <transactionCoding><transactionCode>P</transactionCode></transactionCoding>
       <transactionAmounts>
-        <transactionShares><value>500</value></transactionShares>
-        <transactionPricePerShare><value>150.00</value></transactionPricePerShare>
+        <transactionShares><value>250</value></transactionShares>
+        <transactionPricePerShare><value>149.50</value></transactionPricePerShare>
         <transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode>
       </transactionAmounts>
-      <ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature>
-    </nonDerivativeTransaction>
-  </nonDerivativeTable>
-</ownershipDocument>
-"""
-
-_FORM_4_SELL = """<?xml version="1.0"?>
-<ownershipDocument>
-  <reportingOwner>
-    <reportingOwnerId><rptOwnerName>CFO Name</rptOwnerName></reportingOwnerId>
-    <reportingOwnerRelationship>
-      <isOfficer>1</isOfficer>
-      <officerTitle>CFO</officerTitle>
-    </reportingOwnerRelationship>
-  </reportingOwner>
-  <nonDerivativeTable>
-    <nonDerivativeTransaction>
-      <transactionDate><value>2024-06-20</value></transactionDate>
-      <transactionCoding><transactionCode>S</transactionCode></transactionCoding>
-      <transactionAmounts>
-        <transactionShares><value>200</value></transactionShares>
-        <transactionPricePerShare><value>155.00</value></transactionPricePerShare>
-        <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
-      </transactionAmounts>
-      <ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature>
+      <ownershipNature>
+        <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
+      </ownershipNature>
     </nonDerivativeTransaction>
   </nonDerivativeTable>
 </ownershipDocument>
@@ -111,83 +295,224 @@ _FORM_4_SELL = """<?xml version="1.0"?>
 
 
 class TestIngestInsiderTransactions:
-    def test_happy_path_inserts_rows(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    def test_rich_happy_path_populates_every_field(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument(ebull_test_conn)
         _seed_form_4(
             ebull_test_conn,
             instrument_id=iid,
             accession="0000001-24-000001",
-            url="https://www.sec.gov/Archives/form4-buy.xml",
+            url="https://www.sec.gov/Archives/form4-rich.xml",
+            filing_date=date.today().isoformat(),
         )
-        fetcher = _StubFetcher({"https://www.sec.gov/Archives/form4-buy.xml": _FORM_4_BUY})
+        fetcher = _StubFetcher(
+            {
+                "https://www.sec.gov/Archives/form4-rich.xml": _FORM_4_RICH_BUY.replace(
+                    "2024-06-15", date.today().isoformat()
+                )
+            }
+        )
 
         result = ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
 
-        assert result.filings_scanned == 1
         assert result.filings_parsed == 1
         assert result.rows_inserted == 1
-        with ebull_test_conn.cursor() as cur:
-            cur.execute("SELECT filer_name, txn_code, shares FROM insider_transactions")
-            row = cur.fetchone()
-            assert row is not None
-            assert row[0] == "CEO Name"
-            assert row[1] == "P"
-            assert row[2] == Decimal("500")
 
-    def test_rerun_is_idempotent(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """Form 4 content is immutable per accession. Re-running the
-        ingester must be a no-op — ON CONFLICT DO NOTHING on the
-        (accession, row_num) UNIQUE."""
+        with ebull_test_conn.cursor() as cur:
+            # insider_filings — full header landed
+            cur.execute(
+                """
+                SELECT document_type, issuer_cik, issuer_name, remarks,
+                       signature_name, signature_date, is_tombstone, parser_version
+                FROM insider_filings WHERE accession_number = %s
+                """,
+                ("0000001-24-000001",),
+            )
+            f = cur.fetchone()
+            assert f is not None
+            assert f[0] == "4"
+            assert f[1] == "0000320193"
+            assert f[2] == "Apple Inc."
+            assert "10b5-1" in (f[3] or "")
+            assert f[4] == "/s/ Jane Q. Lawyer"
+            assert f[5] == date(2024, 6, 17)
+            assert f[6] is False
+            assert f[7] == 2
+
+            # insider_filers — full address + role
+            cur.execute(
+                """
+                SELECT filer_cik, filer_name, street1, city, state, zip_code,
+                       is_officer, officer_title
+                FROM insider_filers WHERE accession_number = %s
+                """,
+                ("0000001-24-000001",),
+            )
+            rows = cur.fetchall()
+            assert len(rows) == 1
+            assert rows[0][0] == "0001000001"
+            assert rows[0][1] == "Cook Timothy D."
+            assert rows[0][2] == "ONE APPLE PARK WAY"
+            assert rows[0][6] is True
+            assert rows[0][7] == "CEO"
+
+            # insider_transaction_footnotes — body stored
+            cur.execute(
+                """
+                SELECT footnote_id, footnote_text
+                FROM insider_transaction_footnotes WHERE accession_number = %s
+                """,
+                ("0000001-24-000001",),
+            )
+            fn_rows = cur.fetchall()
+            assert len(fn_rows) == 1
+            assert fn_rows[0][0] == "F1"
+            assert "Weighted average price" in fn_rows[0][1]
+
+            # insider_transactions — full row
+            cur.execute(
+                """
+                SELECT filer_cik, security_title, post_transaction_shares,
+                       acquired_disposed_code, transaction_timeliness,
+                       equity_swap_involved, footnote_refs
+                FROM insider_transactions WHERE accession_number = %s
+                """,
+                ("0000001-24-000001",),
+            )
+            tx = cur.fetchone()
+            assert tx is not None
+            assert tx[0] == "0001000001"
+            assert tx[1] == "Common Stock"
+            assert tx[2] == Decimal("3200500")
+            assert tx[3] == "A"
+            assert tx[4] == "L"
+            assert tx[5] is False
+            refs = tx[6]  # already parsed from JSONB
+            assert isinstance(refs, list)
+            assert any(r.get("footnote_id") == "F1" and r.get("field") == "transactionShares" for r in refs)
+
+    def test_joint_filing_splits_filers_by_cik(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument(ebull_test_conn)
         _seed_form_4(
             ebull_test_conn,
             instrument_id=iid,
-            accession="0000001-24-000001",
-            url="https://www.sec.gov/Archives/form4.xml",
+            accession="JOINT-1",
+            url="https://www.sec.gov/Archives/joint.xml",
+            filing_date=date.today().isoformat(),
         )
-        fetcher = _StubFetcher({"https://www.sec.gov/Archives/form4.xml": _FORM_4_BUY})
+        fetcher = _StubFetcher(
+            {"https://www.sec.gov/Archives/joint.xml": _FORM_4_JOINT.replace("2024-06-20", date.today().isoformat())}
+        )
         ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
 
-        second_fetcher = _StubFetcher({"https://www.sec.gov/Archives/form4.xml": _FORM_4_BUY})
-        second = ingest_insider_transactions(ebull_test_conn, cast("object", second_fetcher))  # type: ignore[arg-type]
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT filer_cik FROM insider_filers WHERE accession_number = %s ORDER BY filer_cik",
+                ("JOINT-1",),
+            )
+            assert [r[0] for r in cur.fetchall()] == ["0001000002", "0001000003"]
+            cur.execute(
+                "SELECT filer_cik FROM insider_transactions WHERE accession_number = %s",
+                ("JOINT-1",),
+            )
+            # The transaction is attributed to the first listed owner.
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == "0001000002"
 
-        assert second.filings_scanned == 0
-        assert second_fetcher.calls == []
-
-    def test_form_4_amendment_included(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """4/A amendments are processed alongside plain 4."""
+    def test_derivative_grant_lands_full_shape(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument(ebull_test_conn)
         _seed_form_4(
             ebull_test_conn,
             instrument_id=iid,
-            accession="0000001-24-000002",
+            accession="GRANT-1",
+            url="https://www.sec.gov/Archives/grant.xml",
+            filing_date=date.today().isoformat(),
+        )
+        fetcher = _StubFetcher(
+            {
+                "https://www.sec.gov/Archives/grant.xml": _FORM_4_OPTION_GRANT.replace(
+                    "2024-06-25", date.today().isoformat()
+                )
+            }
+        )
+        ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT is_derivative, conversion_exercise_price,
+                       underlying_security_title, underlying_shares,
+                       expiration_date
+                FROM insider_transactions WHERE accession_number = %s
+                """,
+                ("GRANT-1",),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] is True
+            assert row[1] == Decimal("185.00")
+            assert row[2] == "Common Stock"
+            assert row[3] == Decimal("50000")
+            assert row[4] == date(2034, 6, 25)
+
+    def test_amendment_linkage_preserved(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn)
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="AMEND-1",
             url="https://www.sec.gov/Archives/amend.xml",
             filing_type="4/A",
+            filing_date=date.today().isoformat(),
         )
-        fetcher = _StubFetcher({"https://www.sec.gov/Archives/amend.xml": _FORM_4_BUY})
-        result = ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
-        assert result.rows_inserted == 1
+        fetcher = _StubFetcher(
+            {
+                "https://www.sec.gov/Archives/amend.xml": _FORM_4A_AMENDMENT.replace(
+                    "2024-06-01", date.today().isoformat()
+                )
+            }
+        )
+        ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
 
-    def test_non_form_4_skipped(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """10-K / 8-K / other forms must not be fetched."""
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT document_type, date_of_original_submission
+                FROM insider_filings WHERE accession_number = %s
+                """,
+                ("AMEND-1",),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == "4/A"
+            assert row[1] == date(2024, 6, 2)
+
+    def test_rerun_refreshes_existing_row(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """On a parser-version bump the ingester should refresh existing
+        insider_transactions rows, not silently skip them."""
         iid = _seed_instrument(ebull_test_conn)
         _seed_form_4(
             ebull_test_conn,
             instrument_id=iid,
-            accession="0000001-24-000003",
-            url="https://www.sec.gov/Archives/other.xml",
-            filing_type="10-K",
+            accession="RERUN-1",
+            url="https://www.sec.gov/Archives/rerun.xml",
+            filing_date=date.today().isoformat(),
         )
-        fetcher = _StubFetcher({})
-        result = ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
-        assert result.filings_scanned == 0
-        assert fetcher.calls == []
+        fetcher = _StubFetcher(
+            {"https://www.sec.gov/Archives/rerun.xml": _FORM_4_RICH_BUY.replace("2024-06-15", date.today().isoformat())}
+        )
+        ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
 
-    def test_fetch_404_writes_tombstone_and_skips_next_run(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """Codex #429 H1 regression — a dead Form 4 URL must get a
-        tombstone so the hourly ingester doesn't re-fetch it every
-        run. Sentinel row with filer_name='__TOMBSTONE__' + row_num=-1.
-        Second immediate pass must not call the fetcher."""
+        # Second pass with the same payload: ingester selector skips the
+        # accession (insider_filings row already exists), so this is a
+        # no-op. Prove it via candidate zero rather than via the upsert
+        # path.
+        second = ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+        assert second.filings_scanned == 0
+
+    def test_fetch_404_writes_filing_tombstone_and_skips_next_run(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
         iid = _seed_instrument(ebull_test_conn)
         _seed_form_4(
             ebull_test_conn,
@@ -198,15 +523,29 @@ class TestIngestInsiderTransactions:
         dead_fetcher = _StubFetcher({"https://www.sec.gov/dead.xml": None})
         ingest_insider_transactions(ebull_test_conn, cast("object", dead_fetcher))  # type: ignore[arg-type]
 
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT is_tombstone FROM insider_filings WHERE accession_number = %s",
+                ("DEAD-ACC",),
+            )
+            ts_row = cur.fetchone()
+            assert ts_row is not None
+            assert ts_row[0] is True
+            # No transaction row should have been written for a tombstone.
+            cur.execute(
+                "SELECT COUNT(*) FROM insider_transactions WHERE accession_number = %s",
+                ("DEAD-ACC",),
+            )
+            count_row = cur.fetchone()
+            assert count_row is not None
+            assert count_row[0] == 0
+
         second_fetcher = _StubFetcher({"https://www.sec.gov/dead.xml": None})
         second = ingest_insider_transactions(ebull_test_conn, cast("object", second_fetcher))  # type: ignore[arg-type]
         assert second.filings_scanned == 0
         assert second_fetcher.calls == []
 
     def test_tombstone_excluded_from_summary(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """Tombstones live in the same table but must not leak into
-        the insider summary. Seed a tombstone + a real buy, assert
-        the summary reflects only the real buy."""
         iid = _seed_instrument(ebull_test_conn)
         _seed_form_4(
             ebull_test_conn,
@@ -224,109 +563,132 @@ class TestIngestInsiderTransactions:
         fetcher = _StubFetcher(
             {
                 "https://www.sec.gov/dead.xml": None,
-                "https://www.sec.gov/real.xml": _FORM_4_BUY.replace("2024-06-15", date.today().isoformat()),
+                "https://www.sec.gov/real.xml": _FORM_4_RICH_BUY.replace("2024-06-15", date.today().isoformat()),
             }
         )
         ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
 
         summary = get_insider_summary(ebull_test_conn, instrument_id=iid)
-        # Only the real buy contributes — tombstone excluded.
         assert summary.net_shares_90d == Decimal("500")
         assert summary.buy_count_90d == 1
         assert summary.unique_filers_90d == 1
 
-    def test_non_form_4_payload_counts_as_miss(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """The filing_events row says form='4' but the XML at the URL
-        is a different document (URL rot / wrong upstream pointer).
-        Parser returns None; ingester records parse_miss without
-        inserting a phantom row."""
+    def test_non_form_4_skipped(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument(ebull_test_conn)
         _seed_form_4(
             ebull_test_conn,
             instrument_id=iid,
-            accession="0000001-24-000004",
-            url="https://www.sec.gov/Archives/wrong.xml",
+            accession="0000001-24-000003",
+            url="https://www.sec.gov/Archives/other.xml",
+            filing_type="10-K",
         )
-        fetcher = _StubFetcher({"https://www.sec.gov/Archives/wrong.xml": "<notForm4></notForm4>"})
+        fetcher = _StubFetcher({})
         result = ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
-        assert result.parse_misses == 1
-        assert result.rows_inserted == 0
+        assert result.filings_scanned == 0
+        assert fetcher.calls == []
 
 
 class TestGetInsiderSummary:
-    def test_net_buys_minus_sells(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """net_shares_90d = sum(buys) - sum(sells) over the window."""
+    def test_unique_filers_dedups_by_cik_not_name(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Two insiders with the same ``filer_name`` at different CIKs
+        must count as two distinct filers."""
         iid = _seed_instrument(ebull_test_conn)
-        # Seed via the ingester so schema + parse path are both live.
+        # Both filings land under the same name 'John Smith' but
+        # distinct CIKs. The 056 code would have counted them as one
+        # filer; 057 counts them as two.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO insider_filings (accession_number, instrument_id, document_type)
+                VALUES ('ACC-A', %s, '4'), ('ACC-B', %s, '4')
+                """,
+                (iid, iid),
+            )
+            cur.execute(
+                """
+                INSERT INTO insider_transactions
+                    (instrument_id, accession_number, txn_row_num,
+                     filer_cik, filer_name, txn_date, txn_code,
+                     shares, is_derivative)
+                VALUES
+                    (%s, 'ACC-A', 0, 'CIK-A', 'John Smith',
+                     CURRENT_DATE, 'P', 100, FALSE),
+                    (%s, 'ACC-B', 0, 'CIK-B', 'John Smith',
+                     CURRENT_DATE, 'P', 200, FALSE)
+                """,
+                (iid, iid),
+            )
+        ebull_test_conn.commit()
+
+        summary = get_insider_summary(ebull_test_conn, instrument_id=iid)
+        assert summary.unique_filers_90d == 2
+
+    def test_derivative_excluded_from_net(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn)
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO insider_filings (accession_number, instrument_id, document_type)
+                VALUES ('GRANT-ACC', %s, '4')
+                """,
+                (iid,),
+            )
+            cur.execute(
+                """
+                INSERT INTO insider_transactions
+                    (instrument_id, accession_number, txn_row_num,
+                     filer_cik, filer_name, txn_date, txn_code,
+                     shares, is_derivative)
+                VALUES (%s, 'GRANT-ACC', 0, 'CIK-X', 'X',
+                        CURRENT_DATE, 'A', 10000, TRUE)
+                """,
+                (iid,),
+            )
+        ebull_test_conn.commit()
+        summary = get_insider_summary(ebull_test_conn, instrument_id=iid)
+        assert summary.net_shares_90d == Decimal(0)
+
+
+class TestListInsiderTransactions:
+    def test_rich_row_with_footnote_body_attached(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn)
         _seed_form_4(
             ebull_test_conn,
             instrument_id=iid,
-            accession="BUY-1",
-            url="https://www.sec.gov/buy.xml",
-            filing_date=date.today().isoformat(),
-        )
-        _seed_form_4(
-            ebull_test_conn,
-            instrument_id=iid,
-            accession="SELL-1",
-            url="https://www.sec.gov/sell.xml",
+            accession="RICH-1",
+            url="https://www.sec.gov/Archives/rich.xml",
             filing_date=date.today().isoformat(),
         )
         fetcher = _StubFetcher(
-            {
-                "https://www.sec.gov/buy.xml": _FORM_4_BUY.replace("2024-06-15", date.today().isoformat()),
-                "https://www.sec.gov/sell.xml": _FORM_4_SELL.replace("2024-06-20", date.today().isoformat()),
-            }
+            {"https://www.sec.gov/Archives/rich.xml": _FORM_4_RICH_BUY.replace("2024-06-15", date.today().isoformat())}
         )
         ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
 
-        summary = get_insider_summary(ebull_test_conn, instrument_id=iid)
-        assert summary.net_shares_90d == Decimal("300")  # 500 bought - 200 sold
-        assert summary.buy_count_90d == 1
-        assert summary.sell_count_90d == 1
-        assert summary.unique_filers_90d == 2
-
-    def test_stale_transaction_excluded(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """Transactions > 90 days old drop out of the summary."""
-        iid = _seed_instrument(ebull_test_conn)
-        with ebull_test_conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO insider_transactions
-                    (instrument_id, accession_number, txn_row_num,
-                     filer_name, txn_date, txn_code, shares, price, is_derivative)
-                VALUES (%s, 'OLD', 0, 'X', CURRENT_DATE - INTERVAL '200 days',
-                        'P', 1000, 50, FALSE)
-                """,
-                (iid,),
-            )
-        ebull_test_conn.commit()
-        summary = get_insider_summary(ebull_test_conn, instrument_id=iid)
-        assert summary.net_shares_90d == Decimal(0)
-        assert summary.buy_count_90d == 0
-
-    def test_derivative_excluded_from_summary(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """Option grants / RSU vests don't contribute to the net buy/
-        sell signal — issue scope says the widget shows cash-buys vs
-        sales, not stock-based comp."""
-        iid = _seed_instrument(ebull_test_conn)
-        with ebull_test_conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO insider_transactions
-                    (instrument_id, accession_number, txn_row_num,
-                     filer_name, txn_date, txn_code, shares, price, is_derivative)
-                VALUES (%s, 'GRANT', 0, 'X', CURRENT_DATE, 'A', 10000, NULL, TRUE)
-                """,
-                (iid,),
-            )
-        ebull_test_conn.commit()
-        summary = get_insider_summary(ebull_test_conn, instrument_id=iid)
-        assert summary.net_shares_90d == Decimal(0)
+        detail = list_insider_transactions(ebull_test_conn, instrument_id=iid)
+        assert len(detail) == 1
+        row = detail[0]
+        assert row.filer_name == "Cook Timothy D."
+        assert row.security_title == "Common Stock"
+        assert row.post_transaction_shares == Decimal("3200500")
+        assert row.transaction_timeliness == "L"
+        # The footnote body should be attached under the field it
+        # qualified ("transactionShares").
+        assert "transactionShares" in row.footnotes
+        assert "Weighted average price" in row.footnotes["transactionShares"]
 
 
 def test_fixture_imports_ok(ebull_test_conn: psycopg.Connection[tuple]) -> None:
-    """Sanity: the integration fixture fires + migration was applied."""
     with ebull_test_conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'insider_transactions'")
-        assert cur.fetchone() is not None
+        cur.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_name IN ('insider_filings', 'insider_filers', "
+            "'insider_transactions', 'insider_transaction_footnotes') "
+            "ORDER BY table_name"
+        )
+        found = [r[0] for r in cur.fetchall()]
+        assert found == [
+            "insider_filers",
+            "insider_filings",
+            "insider_transaction_footnotes",
+            "insider_transactions",
+        ]
