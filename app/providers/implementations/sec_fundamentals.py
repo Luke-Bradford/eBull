@@ -122,12 +122,44 @@ TRACKED_CONCEPTS: dict[str, tuple[str, ...]] = {
     "investing_cf": ("NetCashProvidedByUsedInInvestingActivities",),
     "financing_cf": ("NetCashProvidedByUsedInFinancingActivities",),
     "capex": ("PaymentsToAcquirePropertyPlantAndEquipment", "CapitalExpenditures"),
-    "dividends_paid": ("PaymentsOfDividends",),
+    "dividends_paid": ("PaymentsOfDividends", "PaymentsOfDividendsCommonStock"),
     "dps_declared": ("CommonStockDividendsPerShareDeclared",),
+    # Cash actually distributed per share (often differs from declared
+    # by a quarter). Captured separately so dividend-capture strategies
+    # can tell declared-but-not-paid cases from paid.
+    "dps_cash_paid": ("CommonStockDividendsPerShareCashPaid",),
+    # Per-share declared amount still payable at period end.
+    "dividends_payable_per_share": ("DividendsPayableAmountPerShare",),
     "buyback_spend": ("PaymentsForRepurchaseOfCommonStock",),
+    # Share-count deltas for the dilution tracker (#435). Captured as
+    # flow (per-period) items — combined with the existing
+    # shares_outstanding balance-sheet series this answers "how much
+    # was issued over time" vs "how much was repurchased".
+    "shares_issued_new": ("StockIssuedDuringPeriodSharesNewIssues",),
+    "buyback_shares": (
+        "StockRepurchasedDuringPeriodShares",
+        "TreasuryStockSharesAcquired",
+    ),
+    # Effective tax rate — useful for cross-filer comparability when
+    # net_income alone obscures tax-regime differences.
+    "effective_tax_rate": ("EffectiveIncomeTaxRateContinuingOperations",),
+}
+
+# DEI (document-and-entity-information) cover-page facts. Thin set —
+# only the three that carry ongoing value: point-in-time share count
+# (fed into market-cap derivation), public float (SEC filer tier
+# reference), and period-focus labels for sanity-checking the fiscal
+# frame. Added under #430 as the last yfinance-replacement data
+# source. Taxonomy is ``dei`` so ``extract_facts`` routes these to
+# the same store as us-gaap with taxonomy-aware grouping.
+DEI_TRACKED_CONCEPTS: dict[str, tuple[str, ...]] = {
+    "dei_shares_outstanding": ("EntityCommonStockSharesOutstanding",),
+    "dei_public_float": ("EntityPublicFloat",),
+    "dei_employees": ("EntityNumberOfEmployees",),
 }
 
 _ALL_TRACKED_TAGS: frozenset[str] = frozenset(tag for tags in TRACKED_CONCEPTS.values() for tag in tags)
+_ALL_TRACKED_DEI_TAGS: frozenset[str] = frozenset(tag for tags in DEI_TRACKED_CONCEPTS.values() for tag in tags)
 
 
 def _zero_pad_cik(cik: str | int) -> str:
@@ -137,11 +169,23 @@ def _zero_pad_cik(cik: str | int) -> str:
 _UNIT_PRIORITY = ("USD", "USD/shares", "shares", "pure")
 
 
-def _extract_facts_from_gaap(gaap: dict[str, Any]) -> list[XbrlFact]:
-    """Extract all tracked XBRL facts from a companyfacts us-gaap section."""
+def _extract_facts_from_section(
+    section: dict[str, Any],
+    *,
+    taxonomy: str,
+    allowed_tags: frozenset[str],
+) -> list[XbrlFact]:
+    """Extract tracked XBRL facts from one ``facts.<taxonomy>`` section.
+
+    ``taxonomy`` names the XBRL namespace (``us-gaap`` or ``dei``) and
+    is stamped onto every emitted fact so downstream consumers can
+    partition without string-prefix guessing. ``allowed_tags`` is the
+    taxonomy-specific allowlist (``_ALL_TRACKED_TAGS`` vs
+    ``_ALL_TRACKED_DEI_TAGS``).
+    """
     facts: list[XbrlFact] = []
-    for tag_name, fact_data in gaap.items():
-        if tag_name not in _ALL_TRACKED_TAGS:
+    for tag_name, fact_data in section.items():
+        if tag_name not in allowed_tags:
             continue
         units = fact_data.get("units", {})
         for unit_key in _UNIT_PRIORITY:
@@ -181,7 +225,7 @@ def _extract_facts_from_gaap(gaap: dict[str, Any]) -> list[XbrlFact]:
                 facts.append(
                     XbrlFact(
                         concept=tag_name,
-                        taxonomy="us-gaap",
+                        taxonomy=taxonomy,
                         unit=unit_key,
                         period_start=period_start,
                         period_end=period_end,
@@ -196,6 +240,18 @@ def _extract_facts_from_gaap(gaap: dict[str, Any]) -> list[XbrlFact]:
                     )
                 )
     return facts
+
+
+def _extract_facts_from_gaap(gaap: dict[str, Any]) -> list[XbrlFact]:
+    """Back-compat shim — existing callers that pass only the
+    ``facts.us-gaap`` section. New code should use
+    ``_extract_facts_from_section`` directly with an explicit taxonomy.
+    """
+    return _extract_facts_from_section(
+        gaap,
+        taxonomy="us-gaap",
+        allowed_tags=_ALL_TRACKED_TAGS,
+    )
 
 
 class SecFundamentalsProvider(FundamentalsProvider):
@@ -307,15 +363,41 @@ class SecFundamentalsProvider(FundamentalsProvider):
         return _build_history_snapshots(symbol, gaap, from_date, to_date, limit)
 
     def extract_facts(self, symbol: str, cik: str) -> list[XbrlFact]:
-        """Extract all tracked XBRL facts from SEC companyfacts."""
+        """Extract all tracked XBRL facts from SEC companyfacts.
+
+        Reads both ``facts.us-gaap`` and ``facts.dei`` sections (the
+        latter under #430). DEI facts carry cover-page metadata that
+        us-gaap omits — point-in-time share count, public float,
+        employee count. Stamped with ``taxonomy='dei'`` so downstream
+        normalisation routes them independently.
+        """
         raw = self._fetch_company_facts(cik)
         if raw is None:
             return []
-        gaap = raw.get("facts", {}).get("us-gaap", {})
-        if not gaap:
-            logger.info("No us-gaap facts for %s (CIK %s)", symbol, cik)
+        all_facts: dict[str, Any] = raw.get("facts", {})
+        gaap_section = all_facts.get("us-gaap", {})
+        dei_section = all_facts.get("dei", {})
+        if not gaap_section and not dei_section:
+            logger.info("No us-gaap or dei facts for %s (CIK %s)", symbol, cik)
             return []
-        return _extract_facts_from_gaap(gaap)
+        facts: list[XbrlFact] = []
+        if gaap_section:
+            facts.extend(
+                _extract_facts_from_section(
+                    gaap_section,
+                    taxonomy="us-gaap",
+                    allowed_tags=_ALL_TRACKED_TAGS,
+                )
+            )
+        if dei_section:
+            facts.extend(
+                _extract_facts_from_section(
+                    dei_section,
+                    taxonomy="dei",
+                    allowed_tags=_ALL_TRACKED_DEI_TAGS,
+                )
+            )
+        return facts
 
     # ------------------------------------------------------------------
     # Private HTTP
