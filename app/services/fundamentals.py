@@ -1789,6 +1789,28 @@ def _run_cik_upsert(
                     exc_info=True,
                 )
 
+            # #431: 8-K items[] typing. Parse the items column in the
+            # submissions.filings.recent table and UPDATE the matching
+            # filing_events rows. Savepoint-scoped per the #439 pattern
+            # so a parse/write failure cannot poison the outer per-CIK
+            # transaction that still has XBRL facts to write.
+            try:
+                from app.services.sec_filing_items import (
+                    apply_8k_items_to_filing_events,
+                    parse_8k_items_by_accession,
+                )
+
+                items_map = parse_8k_items_by_accession(submissions)
+                if items_map:
+                    with conn.transaction():
+                        apply_8k_items_to_filing_events(conn, items_map)
+            except Exception:
+                logger.warning(
+                    "sec_incremental: 8-K items apply failed for cik=%s",
+                    cik,
+                    exc_info=True,
+                )
+
         facts = fundamentals_provider.extract_facts(symbol, cik)
         upserted_in_tx = 0
 
