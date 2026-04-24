@@ -152,8 +152,10 @@ def _address(value: Any) -> dict[str, Any] | None:
         if isinstance(v, str):
             v = v.strip() or None
         out[dst_key] = v
-    # Drop the dict when every field is None/empty.
-    if not any(out.get(k) for k in _ADDRESS_FIELDS):
+    # Drop the dict only when every field is None / empty. Explicit
+    # None check rather than truthiness — ``isForeignLocation: 0``
+    # (SEC's "not foreign" marker) is meaningful and must survive.
+    if all(out.get(k) is None for k in _ADDRESS_FIELDS):
         return None
     return out
 

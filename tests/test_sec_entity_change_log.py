@@ -73,6 +73,14 @@ class TestLongTailFieldExtraction:
         assert _address({"street1": "", "city": None}) is None
         assert _address(None) is None
 
+    def test_integer_only_address_field_is_not_dropped(self) -> None:
+        """Regression: ``isForeignLocation: 0`` is SEC's explicit
+        'not foreign' marker. The address block must NOT be dropped
+        as empty when that's the only populated field."""
+        result = _address({"isForeignLocation": 0})
+        assert result is not None
+        assert result["is_foreign_location"] == 0
+
     def test_missing_addresses_key_leaves_none(self) -> None:
         payload = {"cik": "0000002098"}
         profile = parse_entity_profile(payload, instrument_id=1, cik="0000002098")
