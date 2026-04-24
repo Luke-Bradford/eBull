@@ -911,6 +911,28 @@ class _DocFetcher(Protocol):
     def fetch_document_text(self, absolute_url: str) -> str | None: ...
 
 
+# SEC submissions.json ``primaryDocument`` for ownership filings
+# (Forms 3/4/5) commonly points at an XSL-rendered HTML view rather
+# than the raw XML. The rendered path carries an ``xslF345X06/`` (or
+# sibling ``xslF345X05/`` / ``xslF345/``) segment before the filename;
+# the same file without that segment is the canonical XML.
+#
+#   XSL:  /Archives/edgar/data/320193/000114036126015421/xslF345X06/form4.xml  → text/html
+#   Raw:  /Archives/edgar/data/320193/000114036126015421/form4.xml             → text/xml
+#
+# Without normalisation the ingester fetches HTML, the parser sees an
+# ``<html>`` root instead of ``<ownershipDocument>``, and every filing
+# gets tombstoned (#454).
+_XSL_FORM345_PREFIX_RE = re.compile(r"/xslF345(?:X0[56])?/")
+
+
+def _canonical_form_4_url(url: str) -> str:
+    """Strip the XSL-rendering segment from a SEC Form-3/4/5 URL so
+    the fetch returns raw XML, not XSL-transformed HTML. Idempotent —
+    already-canonical URLs pass through unchanged."""
+    return _XSL_FORM345_PREFIX_RE.sub("/", url, count=1)
+
+
 @dataclass(frozen=True)
 class IngestResult:
     filings_scanned: int
@@ -964,7 +986,7 @@ def ingest_insider_transactions(
             (limit,),
         )
         for row in cur.fetchall():
-            candidates.append((int(row[0]), str(row[1]), str(row[2])))
+            candidates.append((int(row[0]), str(row[1]), _canonical_form_4_url(str(row[2]))))
     conn.commit()
 
     filings_parsed = 0
