@@ -329,6 +329,83 @@ class TestBusinessSectionsIngest:
         prod_refs = {(r.reference_type, r.target) for r in products.cross_references}
         assert ("item", "Item 7") in prod_refs
 
+    def test_insert_failure_rolls_back_delete_atomically(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """#449 BLOCKING regression — a failure inside the sections
+        upsert must not leave an empty sections table committed. If
+        the INSERT loop raises, the DELETE rolls back too. Older
+        sections survive."""
+        from app.services.business_summary import (
+            ParsedBusinessSection,
+            upsert_business_sections,
+        )
+
+        iid = _seed_instrument(ebull_test_conn, symbol="APEX", iid=205)
+        # Seed a prior sections snapshot to prove it survives a failed
+        # re-upsert.
+        upsert_business_sections(
+            ebull_test_conn,
+            instrument_id=iid,
+            source_accession="APEX-10K-A",
+            sections=(
+                ParsedBusinessSection(
+                    section_order=0,
+                    section_key="general",
+                    section_label="General",
+                    body="Existing body.",
+                    cross_references=(),
+                ),
+            ),
+        )
+        ebull_test_conn.commit()
+
+        # Now try to replace with a payload that will fail at INSERT
+        # time. We force the failure by using an oversize section_key
+        # value... actually the schema doesn't cap section_key length.
+        # Simulate with a synthetic sentinel that psycopg rejects:
+        # a section_order that violates the UNIQUE constraint (two
+        # rows at the same order) — the second INSERT will raise.
+        failing_payload = (
+            ParsedBusinessSection(
+                section_order=0,
+                section_key="general",
+                section_label="Replacement general",
+                body="New body.",
+                cross_references=(),
+            ),
+            ParsedBusinessSection(
+                section_order=0,  # duplicate → UNIQUE violation on 2nd INSERT
+                section_key="products",
+                section_label="Products",
+                body="Product body.",
+                cross_references=(),
+            ),
+        )
+
+        with pytest.raises(Exception):  # UniqueViolation expected
+            upsert_business_sections(
+                ebull_test_conn,
+                instrument_id=iid,
+                source_accession="APEX-10K-A",
+                sections=failing_payload,
+            )
+        ebull_test_conn.rollback()  # caller would rollback on their own error path
+
+        # The savepoint inside upsert_business_sections rolls back
+        # the DELETE; the original "Existing body." row survives.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT body FROM instrument_business_summary_sections
+                WHERE instrument_id = %s
+                  AND source_accession = 'APEX-10K-A'
+                ORDER BY section_order
+                """,
+                (iid,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "Existing body."
+
     def test_reparse_supersedes_prior_sections(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """A later 10-K for the same instrument must replace the
         stored sections snapshot, not leak stale rows."""

@@ -551,50 +551,56 @@ def upsert_business_sections(
     The sections table is keyed by ``(instrument, accession, order)``,
     so a re-parse of the same accession under a better heading detector
     must not leak stale rows. Clear the prior snapshot for the same
-    accession, then re-insert. Tombstone path (empty sections) writes
-    nothing.
+    accession, then re-insert — atomically, inside a savepoint so an
+    INSERT failure mid-loop rolls back the DELETE too (without this
+    guard, a caller that commits on its own error path would wipe
+    prior sections permanently while the blob survived — Claude
+    review PR #460 BLOCKING).
+
+    Tombstone path (empty sections) writes nothing.
     """
     if not sections:
         return 0
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            DELETE FROM instrument_business_summary_sections
-            WHERE instrument_id = %s AND source_accession = %s
-            """,
-            (instrument_id, source_accession),
-        )
-        inserted = 0
-        for section in sections:
-            cross_refs_json = Jsonb(
-                [
-                    {
-                        "reference_type": ref.reference_type,
-                        "target": ref.target,
-                        "context": ref.context,
-                    }
-                    for ref in section.cross_references
-                ]
-            )
+    with conn.transaction():
+        with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO instrument_business_summary_sections
-                    (instrument_id, source_accession, section_order,
-                     section_key, section_label, body, cross_references)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                DELETE FROM instrument_business_summary_sections
+                WHERE instrument_id = %s AND source_accession = %s
                 """,
-                (
-                    instrument_id,
-                    source_accession,
-                    section.section_order,
-                    section.section_key,
-                    section.section_label,
-                    section.body,
-                    cross_refs_json,
-                ),
+                (instrument_id, source_accession),
             )
-            inserted += 1
-        return inserted
+            inserted = 0
+            for section in sections:
+                cross_refs_json = Jsonb(
+                    [
+                        {
+                            "reference_type": ref.reference_type,
+                            "target": ref.target,
+                            "context": ref.context,
+                        }
+                        for ref in section.cross_references
+                    ]
+                )
+                cur.execute(
+                    """
+                    INSERT INTO instrument_business_summary_sections
+                        (instrument_id, source_accession, section_order,
+                         section_key, section_label, body, cross_references)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        instrument_id,
+                        source_accession,
+                        section.section_order,
+                        section.section_key,
+                        section.section_label,
+                        section.body,
+                        cross_refs_json,
+                    ),
+                )
+                inserted += 1
+            return inserted
 
 
 def record_parse_attempt(
