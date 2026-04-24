@@ -25,7 +25,12 @@ from typing import TYPE_CHECKING
 
 import psycopg
 
-from app.providers.fundamentals import FundamentalsProvider, FundamentalsSnapshot, XbrlFact
+from app.providers.fundamentals import (
+    FundamentalsProvider,
+    FundamentalsSnapshot,
+    XbrlConceptCatalogEntry,
+    XbrlFact,
+)
 from app.providers.implementations.sec_edgar import (
     MasterIndexEntry,
     SecFilingsProvider,
@@ -340,6 +345,70 @@ WHERE financial_facts_raw.val IS DISTINCT FROM EXCLUDED.val
 _UPSERT_PAGE_SIZE = 1000
 
 
+_UPSERT_CATALOG_SQL = """
+INSERT INTO sec_facts_concept_catalog (
+    taxonomy, concept, label, description, units_seen
+) VALUES (
+    %(taxonomy)s, %(concept)s, %(label)s, %(description)s, %(units_seen)s
+)
+ON CONFLICT (taxonomy, concept) DO UPDATE SET
+    -- Prefer the latest label/description when non-NULL — a later
+    -- filing's wording supersedes an earlier vacuum.
+    label       = COALESCE(EXCLUDED.label, sec_facts_concept_catalog.label),
+    description = COALESCE(EXCLUDED.description, sec_facts_concept_catalog.description),
+    -- Union the observed unit types so concepts that migrated from
+    -- one unit to another over time still report the full set.
+    units_seen  = ARRAY(
+        SELECT DISTINCT unnest(
+            sec_facts_concept_catalog.units_seen || EXCLUDED.units_seen
+        )
+    ),
+    last_seen_at = NOW()
+"""
+
+
+def upsert_concept_catalog(
+    conn: psycopg.Connection[tuple],
+    *,
+    entries: Sequence[XbrlConceptCatalogEntry],
+) -> int:
+    """Upsert per-concept metadata into ``sec_facts_concept_catalog``.
+
+    Idempotent: re-upserting the same (taxonomy, concept) replaces
+    label + description with the latest non-NULL values and unions
+    the observed unit types so historical units accumulate. Runs
+    alongside :func:`upsert_facts_for_instrument` on the same
+    ingest-run transaction.
+
+    Returns the number of rows affected by the operation.
+    """
+    if not entries:
+        return 0
+    rows = [
+        {
+            "taxonomy": e.taxonomy,
+            "concept": e.concept,
+            "label": e.label,
+            "description": e.description,
+            "units_seen": list(e.units_seen),
+        }
+        for e in entries
+    ]
+    # psycopg3's ``executemany`` reports the cumulative rowcount
+    # across every parameter set — no per-chunk clamp needed. We
+    # fall back to len(chunk) only when the driver signals "unknown"
+    # via rowcount = -1 (never happens for ON CONFLICT in psycopg3
+    # today but keeps the counter sane against a future driver-
+    # behaviour change).
+    affected = 0
+    with conn.cursor() as cur:
+        for i in range(0, len(rows), _UPSERT_PAGE_SIZE):
+            chunk = rows[i : i + _UPSERT_PAGE_SIZE]
+            cur.executemany(_UPSERT_CATALOG_SQL, chunk)
+            affected += cur.rowcount if cur.rowcount and cur.rowcount >= 0 else len(chunk)
+    return affected
+
+
 def upsert_facts_for_instrument(
     conn: psycopg.Connection[tuple],
     *,
@@ -440,7 +509,16 @@ def refresh_financial_facts(
     for idx, (symbol, instrument_id, cik) in enumerate(symbols, start=1):
         try:
             with conn.transaction():
-                facts = provider.extract_facts(symbol, cik)
+                # #451 Phase A — single fetch returns both fact rows
+                # and catalogue entries. Avoids a second SEC round-
+                # trip for the editorial metadata. Fall back to the
+                # legacy ``extract_facts`` when a test stub doesn't
+                # implement the combined helper yet.
+                if hasattr(provider, "extract_facts_and_catalog"):
+                    facts, catalog_entries = provider.extract_facts_and_catalog(symbol, cik)
+                else:
+                    facts = provider.extract_facts(symbol, cik)  # type: ignore[attr-defined]
+                    catalog_entries = []
                 if not facts:
                     logger.info("No XBRL facts for %s (CIK %s)", symbol, cik)
                     continue
@@ -450,13 +528,16 @@ def refresh_financial_facts(
                     facts=facts,
                     ingestion_run_id=run_id,
                 )
+                if catalog_entries:
+                    upsert_concept_catalog(conn, entries=catalog_entries)
                 total_upserted += upserted
                 total_skipped += skipped
                 logger.info(
-                    "SEC facts for %s: %d upserted, %d skipped",
+                    "SEC facts for %s: %d upserted, %d skipped, %d catalog concepts",
                     symbol,
                     upserted,
                     skipped,
+                    len(catalog_entries),
                 )
         except Exception:
             failed += 1
@@ -1811,7 +1892,15 @@ def _run_cik_upsert(
                     exc_info=True,
                 )
 
-        facts = fundamentals_provider.extract_facts(symbol, cik)
+        # #451 Phase A — single fetch returns both fact rows and
+        # catalogue entries. Fall back to ``extract_facts`` when a
+        # test stub provider doesn't yet implement the combined
+        # helper.
+        if hasattr(fundamentals_provider, "extract_facts_and_catalog"):
+            facts, catalog_entries = fundamentals_provider.extract_facts_and_catalog(symbol, cik)
+        else:
+            facts = fundamentals_provider.extract_facts(symbol, cik)  # type: ignore[attr-defined]
+            catalog_entries = []
         upserted_in_tx = 0
 
         with conn.transaction():
@@ -1823,6 +1912,8 @@ def _run_cik_upsert(
                     ingestion_run_id=run_id,
                 )
                 upserted_in_tx = upserted
+            if catalog_entries:
+                upsert_concept_catalog(conn, entries=catalog_entries)
             # Upsert each master-index entry for this CIK into
             # filing_events so downstream event-driven triggers
             # (#273 thesis, #276 cascade) have a timestamped signal.

@@ -38,7 +38,12 @@ from typing import Any
 
 import httpx
 
-from app.providers.fundamentals import FundamentalsProvider, FundamentalsSnapshot, XbrlFact
+from app.providers.fundamentals import (
+    FundamentalsProvider,
+    FundamentalsSnapshot,
+    XbrlConceptCatalogEntry,
+    XbrlFact,
+)
 from app.providers.resilient_client import ResilientClient
 from app.services import raw_persistence
 
@@ -173,19 +178,23 @@ def _extract_facts_from_section(
     section: dict[str, Any],
     *,
     taxonomy: str,
-    allowed_tags: frozenset[str],
+    allowed_tags: frozenset[str] | None = None,
 ) -> list[XbrlFact]:
-    """Extract tracked XBRL facts from one ``facts.<taxonomy>`` section.
+    """Extract XBRL facts from one ``facts.<taxonomy>`` section.
 
     ``taxonomy`` names the XBRL namespace (``us-gaap`` or ``dei``) and
     is stamped onto every emitted fact so downstream consumers can
-    partition without string-prefix guessing. ``allowed_tags`` is the
-    taxonomy-specific allowlist (``_ALL_TRACKED_TAGS`` vs
-    ``_ALL_TRACKED_DEI_TAGS``).
+    partition without string-prefix guessing. ``allowed_tags`` is an
+    optional allowlist: when ``None`` (default, #451 Phase A) every
+    concept in the section is emitted; when a frozenset is provided
+    only listed tags survive. The default is now "emit all" so
+    ``financial_facts_raw`` captures the full richness of each
+    filing instead of the narrow ``TRACKED_CONCEPTS`` editorial
+    subset.
     """
     facts: list[XbrlFact] = []
     for tag_name, fact_data in section.items():
-        if tag_name not in allowed_tags:
+        if allowed_tags is not None and tag_name not in allowed_tags:
             continue
         units = fact_data.get("units", {})
         for unit_key in _UNIT_PRIORITY:
@@ -240,6 +249,54 @@ def _extract_facts_from_section(
                     )
                 )
     return facts
+
+
+def _catalog_from_payload(raw: dict[str, Any]) -> list[XbrlConceptCatalogEntry]:
+    """Helper used by :func:`extract_concept_catalog` to avoid
+    duplicating the section walk when the caller only wants the
+    catalogue side of a companyfacts payload."""
+    facts_block: dict[str, Any] = raw.get("facts", {})
+    entries: list[XbrlConceptCatalogEntry] = []
+    for tax_name, section in facts_block.items():
+        if not isinstance(section, dict):
+            continue
+        entries.extend(_extract_catalog_from_section(section, taxonomy=str(tax_name)))
+    return entries
+
+
+def _extract_catalog_from_section(section: dict[str, Any], *, taxonomy: str) -> list[XbrlConceptCatalogEntry]:
+    """Emit one :class:`XbrlConceptCatalogEntry` per concept present
+    in a ``facts.<taxonomy>`` section.
+
+    Populated opportunistically by the ingester so
+    ``sec_facts_concept_catalog`` accumulates metadata (label,
+    description, observed unit types) for every concept seen across
+    every issuer — no additional HTTP round-trips, the data is
+    already in the companyfacts response we fetched for the
+    fact-level extraction.
+    """
+    entries: list[XbrlConceptCatalogEntry] = []
+    for tag_name, fact_data in section.items():
+        if not isinstance(fact_data, dict):
+            continue
+        label = fact_data.get("label")
+        description = fact_data.get("description")
+        units_raw = fact_data.get("units")
+        units_seen: tuple[str, ...]
+        if isinstance(units_raw, dict):
+            units_seen = tuple(str(k) for k in units_raw if k)
+        else:
+            units_seen = ()
+        entries.append(
+            XbrlConceptCatalogEntry(
+                taxonomy=taxonomy,
+                concept=tag_name,
+                label=str(label) if isinstance(label, str) else None,
+                description=str(description) if isinstance(description, str) else None,
+                units_seen=units_seen,
+            )
+        )
+    return entries
 
 
 def _extract_facts_from_gaap(gaap: dict[str, Any]) -> list[XbrlFact]:
@@ -363,13 +420,22 @@ class SecFundamentalsProvider(FundamentalsProvider):
         return _build_history_snapshots(symbol, gaap, from_date, to_date, limit)
 
     def extract_facts(self, symbol: str, cik: str) -> list[XbrlFact]:
-        """Extract all tracked XBRL facts from SEC companyfacts.
+        """Extract XBRL facts from SEC companyfacts.
 
         Reads both ``facts.us-gaap`` and ``facts.dei`` sections (the
         latter under #430). DEI facts carry cover-page metadata that
         us-gaap omits — point-in-time share count, public float,
         employee count. Stamped with ``taxonomy='dei'`` so downstream
         normalisation routes them independently.
+
+        **#451 Phase A**: extractor no longer filters on the
+        editorial ``TRACKED_CONCEPTS`` allowlist. Every concept the
+        issuer reports lands in ``financial_facts_raw`` so segment
+        reporting, deferred-tax breakdown, lease liabilities, and
+        the rest of the long tail are queryable from SQL. The
+        ``TRACKED_CONCEPTS`` alias map is still used by downstream
+        ``financial_periods`` projection logic to select canonical
+        synonyms when aggregating.
         """
         raw = self._fetch_company_facts(cik)
         if raw is None:
@@ -382,22 +448,50 @@ class SecFundamentalsProvider(FundamentalsProvider):
             return []
         facts: list[XbrlFact] = []
         if gaap_section:
-            facts.extend(
-                _extract_facts_from_section(
-                    gaap_section,
-                    taxonomy="us-gaap",
-                    allowed_tags=_ALL_TRACKED_TAGS,
-                )
-            )
+            facts.extend(_extract_facts_from_section(gaap_section, taxonomy="us-gaap"))
         if dei_section:
-            facts.extend(
-                _extract_facts_from_section(
-                    dei_section,
-                    taxonomy="dei",
-                    allowed_tags=_ALL_TRACKED_DEI_TAGS,
-                )
-            )
+            facts.extend(_extract_facts_from_section(dei_section, taxonomy="dei"))
         return facts
+
+    def extract_concept_catalog(self, symbol: str, cik: str) -> list[XbrlConceptCatalogEntry]:
+        """Extract per-concept metadata (label, description, units)
+        from SEC companyfacts.
+
+        Issues its own HTTP fetch; callers that already hold the
+        companyfacts payload should use
+        :func:`extract_facts_and_catalog` instead to avoid double
+        round-trips (#451).
+        """
+        raw = self._fetch_company_facts(cik)
+        if raw is None:
+            return []
+        return _catalog_from_payload(raw)
+
+    def extract_facts_and_catalog(self, symbol: str, cik: str) -> tuple[list[XbrlFact], list[XbrlConceptCatalogEntry]]:
+        """Single-fetch convenience: return both the fact rows AND
+        the concept-catalogue entries from one companyfacts payload.
+
+        Preferred call for the ingester path so we don't double
+        round-trip SEC for facts + catalogue on every refresh.
+        """
+        raw = self._fetch_company_facts(cik)
+        if raw is None:
+            return [], []
+        all_facts: dict[str, Any] = raw.get("facts", {})
+        gaap_section = all_facts.get("us-gaap", {})
+        dei_section = all_facts.get("dei", {})
+        if not gaap_section and not dei_section:
+            logger.info("No us-gaap or dei facts for %s (CIK %s)", symbol, cik)
+            return [], []
+        facts: list[XbrlFact] = []
+        entries: list[XbrlConceptCatalogEntry] = []
+        if gaap_section:
+            facts.extend(_extract_facts_from_section(gaap_section, taxonomy="us-gaap"))
+            entries.extend(_extract_catalog_from_section(gaap_section, taxonomy="us-gaap"))
+        if dei_section:
+            facts.extend(_extract_facts_from_section(dei_section, taxonomy="dei"))
+            entries.extend(_extract_catalog_from_section(dei_section, taxonomy="dei"))
+        return facts, entries
 
     # ------------------------------------------------------------------
     # Private HTTP

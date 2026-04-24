@@ -47,6 +47,7 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "cascade_retry_queue",
     "cik_upsert_timing",  # #418 per-CIK timing audit (FK → data_ingestion_runs)
     "financial_facts_raw",
+    "sec_facts_concept_catalog",  # #451 — per-concept metadata
     "data_ingestion_runs",
     # layer_enabled is the home of the #414 fundamentals_ingest pause
     # flag and is written by several observability/planner tests. Keep
