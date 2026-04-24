@@ -73,6 +73,7 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "eight_k_exhibits",
     "eight_k_items",
     "eight_k_filings",
+    "filing_documents",  # #452 — child of filing_events
     "instrument_business_summary_sections",  # #449 — FK → instruments
     "instrument_business_summary",  # #428 — 10-K Item 1 body, FK → instruments
     # #429 Form 4 tables. Child-to-parent truncation order: transactions

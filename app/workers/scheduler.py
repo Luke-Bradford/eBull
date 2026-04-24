@@ -242,6 +242,7 @@ JOB_SEC_BUSINESS_SUMMARY_INGEST = "sec_business_summary_ingest"
 JOB_SEC_INSIDER_TRANSACTIONS_INGEST = "sec_insider_transactions_ingest"
 JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
 JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
+JOB_SEC_FILING_DOCUMENTS_INGEST = "sec_filing_documents_ingest"
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +513,19 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "cost nothing when nothing new has landed."
         ),
         cadence=Cadence.hourly(minute=30),
+        catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_FILING_DOCUMENTS_INGEST,
+        description=(
+            "Parse SEC filing-index JSON (``{accession}-index.json``) "
+            "into the filing_documents manifest table (#452). Captures "
+            "every document in every filing (primary + exhibits + "
+            "XBRL + graphics) as structured SQL rows so the long-tail "
+            "disk dump under data/raw/sec/sec_filing_*.json can be "
+            "retired. Bounded to 500 filings per run."
+        ),
+        cadence=Cadence.hourly(minute=35),
         catch_up_on_boot=False,
     ),
     ScheduledJob(
@@ -3151,6 +3165,35 @@ def sec_insider_transactions_ingest() -> None:
             result.filings_scanned,
             result.filings_parsed,
             result.rows_inserted,
+            result.fetch_errors,
+            result.parse_misses,
+        )
+
+
+def sec_filing_documents_ingest() -> None:
+    """Populate the filing_documents manifest table (#452).
+
+    Captures the per-document list from each SEC filing's
+    ``{accession}-index.json`` — primary doc + exhibits + XBRL +
+    graphics + cover — as structured SQL rows so the long-tail
+    ``data/raw/sec/sec_filing_*.json`` disk dump can be retired.
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.filing_documents import ingest_filing_documents
+
+    with _tracked_job(JOB_SEC_FILING_DOCUMENTS_INGEST) as tracker:
+        with (
+            psycopg.connect(settings.database_url) as conn,
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+        ):
+            result = ingest_filing_documents(conn, provider)
+
+        tracker.row_count = result.documents_inserted
+        logger.info(
+            "sec_filing_documents_ingest: scanned=%d parsed=%d docs=%d fetch_errors=%d parse_misses=%d",
+            result.filings_scanned,
+            result.filings_parsed,
+            result.documents_inserted,
             result.fetch_errors,
             result.parse_misses,
         )
