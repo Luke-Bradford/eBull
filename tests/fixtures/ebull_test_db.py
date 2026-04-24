@@ -63,6 +63,7 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "job_runs",
     "financial_periods_raw",
     "financial_periods",
+    "dividend_events",  # #434 — 8-K 8.01 calendar, FK → instruments
     "filing_events",
     "decision_audit",  # #315 Phase 3 alerts
     "trade_recommendations",  # #315 Phase 3 alerts (FK parent of decision_audit)

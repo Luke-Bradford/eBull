@@ -16,6 +16,7 @@ from app.services.dividends import (
     _EMPTY_SUMMARY,
     get_dividend_history,
     get_dividend_summary,
+    get_upcoming_dividends,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn
 from tests.fixtures.ebull_test_db import test_db_available as _test_db_available
@@ -302,3 +303,156 @@ class TestGetDividendHistory:
             get_dividend_history(ebull_test_conn, instrument_id=1, limit=0)
         with pytest.raises(ValueError, match="limit must be"):
             get_dividend_history(ebull_test_conn, instrument_id=1, limit=401)
+
+
+def _seed_dividend_event(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+    source_accession: str,
+    declaration_date: date | None = None,
+    ex_date: date | None = None,
+    record_date: date | None = None,
+    pay_date: date | None = None,
+    dps_declared: str | None = None,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO dividend_events
+                (instrument_id, source_accession, declaration_date,
+                 ex_date, record_date, pay_date, dps_declared, currency)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'USD')
+            """,
+            (
+                instrument_id,
+                source_accession,
+                declaration_date,
+                ex_date,
+                record_date,
+                pay_date,
+                dps_declared,
+            ),
+        )
+    conn.commit()
+
+
+class TestGetUpcomingDividends:
+    """Covers the three forward-looking row shapes (Codex M3 fix)."""
+
+    def test_ex_date_future_surfaces(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn, symbol="KO")
+        _seed_dividend_event(
+            ebull_test_conn,
+            instrument_id=iid,
+            source_accession="A1",
+            ex_date=date(2030, 3, 15),
+            pay_date=date(2030, 4, 1),
+            dps_declared="0.485",
+        )
+        rows = get_upcoming_dividends(
+            ebull_test_conn,
+            instrument_id=iid,
+            reference_date=date(2030, 1, 1),
+        )
+        assert len(rows) == 1
+        assert rows[0].ex_date == date(2030, 3, 15)
+
+    def test_ex_date_past_filtered(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn, symbol="KO")
+        _seed_dividend_event(
+            ebull_test_conn,
+            instrument_id=iid,
+            source_accession="A1",
+            ex_date=date(2020, 3, 15),
+            pay_date=date(2020, 4, 1),
+        )
+        rows = get_upcoming_dividends(
+            ebull_test_conn,
+            instrument_id=iid,
+            reference_date=date(2030, 1, 1),
+        )
+        assert rows == []
+
+    def test_pay_date_only_surfaces(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Announcement parsed pay-date but not ex-date (Codex M3)."""
+        iid = _seed_instrument(ebull_test_conn, symbol="KO")
+        _seed_dividend_event(
+            ebull_test_conn,
+            instrument_id=iid,
+            source_accession="A1",
+            pay_date=date(2030, 4, 1),
+            dps_declared="0.485",
+        )
+        rows = get_upcoming_dividends(
+            ebull_test_conn,
+            instrument_id=iid,
+            reference_date=date(2030, 1, 1),
+        )
+        assert len(rows) == 1
+        assert rows[0].ex_date is None
+        assert rows[0].pay_date == date(2030, 4, 1)
+
+    def test_declaration_only_surfaces_within_lookback(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Codex M3 regression — row with ONLY a recent declaration
+        date + amount (no ex/pay) must surface so the 'Declared …
+        (calendar TBD)' UI branch is reachable."""
+        iid = _seed_instrument(ebull_test_conn, symbol="KO")
+        _seed_dividend_event(
+            ebull_test_conn,
+            instrument_id=iid,
+            source_accession="A1",
+            declaration_date=date(2030, 1, 15),
+            dps_declared="0.485",
+        )
+        rows = get_upcoming_dividends(
+            ebull_test_conn,
+            instrument_id=iid,
+            reference_date=date(2030, 2, 1),
+        )
+        assert len(rows) == 1
+        assert rows[0].ex_date is None
+        assert rows[0].pay_date is None
+        assert rows[0].declaration_date == date(2030, 1, 15)
+
+    def test_declaration_only_past_lookback_filtered(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Stale declaration-only rows drop off after the 90-day
+        lookback so they don't linger forever on the banner."""
+        iid = _seed_instrument(ebull_test_conn, symbol="KO")
+        _seed_dividend_event(
+            ebull_test_conn,
+            instrument_id=iid,
+            source_accession="A1",
+            declaration_date=date(2029, 1, 1),
+            dps_declared="0.485",
+        )
+        # Reference date far past the 90-day window.
+        rows = get_upcoming_dividends(
+            ebull_test_conn,
+            instrument_id=iid,
+            reference_date=date(2030, 6, 1),
+        )
+        assert rows == []
+
+    def test_ordering_by_earliest_date(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """First row is always the earliest future event regardless of
+        which date dimension (ex/pay/declaration) won the COALESCE."""
+        iid = _seed_instrument(ebull_test_conn, symbol="KO")
+        _seed_dividend_event(
+            ebull_test_conn,
+            instrument_id=iid,
+            source_accession="A_LATE",
+            ex_date=date(2030, 6, 10),
+        )
+        _seed_dividend_event(
+            ebull_test_conn,
+            instrument_id=iid,
+            source_accession="A_EARLY",
+            ex_date=date(2030, 3, 1),
+        )
+        rows = get_upcoming_dividends(
+            ebull_test_conn,
+            instrument_id=iid,
+            reference_date=date(2030, 1, 1),
+        )
+        assert [r.source_accession for r in rows] == ["A_EARLY", "A_LATE"]

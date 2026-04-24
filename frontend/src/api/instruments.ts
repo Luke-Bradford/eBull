@@ -62,10 +62,21 @@ export interface DividendSummary {
   dividend_currency: string | null;
 }
 
+export interface UpcomingDividend {
+  source_accession: string;
+  declaration_date: string | null;
+  ex_date: string | null;
+  record_date: string | null;
+  pay_date: string | null;
+  dps_declared: string | null;
+  currency: string;
+}
+
 export interface InstrumentDividends {
   symbol: string;
   summary: DividendSummary;
   history: DividendPeriod[];
+  upcoming: UpcomingDividend[];
 }
 
 export function fetchInstrumentDividends(
