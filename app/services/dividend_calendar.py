@@ -344,19 +344,15 @@ def ingest_dividend_events(
 
     # Tombstone sentinel: written on fetch-errors + parse-misses so
     # the JOIN's 7-day TTL bounds re-fetches to weekly rather than
-    # daily. A DividendAnnouncement with every field None satisfies
-    # the partial-row TTL predicate and naturally gets revisited
-    # when the window expires (Codex PR #446 review WARNING).
-    _TOMBSTONE = DividendAnnouncement()
-
+    # daily. On first-time: inserts a row with all-NULL date/amount
+    # fields. On re-attempt (row already exists from a prior run
+    # that parsed partial data): ONLY bumps ``last_parsed_at`` and
+    # preserves the existing dates/amount — must not clobber
+    # previously-extracted values with NULLs when a transient fetch
+    # error hits between TTL windows (Codex PR #446 BLOCKING fix).
     def _write_tombstone(instrument_id: int, accession: str) -> None:
         try:
-            upsert_dividend_event(
-                conn,
-                instrument_id=instrument_id,
-                source_accession=accession,
-                announcement=_TOMBSTONE,
-            )
+            _upsert_tombstone(conn, instrument_id=instrument_id, source_accession=accession)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -425,6 +421,36 @@ def ingest_dividend_events(
         fetch_errors=fetch_errors,
         parse_misses=parse_misses,
     )
+
+
+def _upsert_tombstone(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    source_accession: str,
+) -> None:
+    """Insert an all-NULL tombstone OR bump ``last_parsed_at`` on an
+    existing row — never overwrites non-NULL date/amount fields.
+
+    Called when the ingester records a fetch error or parse miss for
+    a filing. The idempotency contract of the partial-row TTL rule
+    (re-parse after 7 days) combined with a fetch failure between
+    TTL windows must NOT destroy the previously-parsed dates. A
+    prior run's real data wins over a later transient-failure
+    tombstone.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO dividend_events
+                (instrument_id, source_accession, declaration_date,
+                 ex_date, record_date, pay_date, dps_declared, currency)
+            VALUES (%s, %s, NULL, NULL, NULL, NULL, NULL, 'USD')
+            ON CONFLICT (instrument_id, source_accession) DO UPDATE SET
+                last_parsed_at = NOW()
+            """,
+            (instrument_id, source_accession),
+        )
 
 
 def upsert_dividend_event(

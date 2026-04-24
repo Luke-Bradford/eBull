@@ -315,6 +315,60 @@ class TestIngestDividendEvents:
         assert second.filings_scanned == 0
         assert second_fetcher.calls == []
 
+    def test_tombstone_preserves_existing_partial_data(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Codex PR #446 BLOCKING regression — a partial row re-queued
+        after its 7-day TTL and hit by a transient fetch error on the
+        retry must NOT have its previously-parsed dates overwritten
+        with NULL. Tombstone UPDATE path writes only ``last_parsed_at``.
+        """
+        inst_id = _seed_instrument(ebull_test_conn)
+        accession = "0000021344-24-000030"
+        _seed_filing(
+            ebull_test_conn,
+            instrument_id=inst_id,
+            accession=accession,
+            url="https://www.sec.gov/Archives/partial-then-404.htm",
+        )
+        # First pass: partial parse — record_date + pay_date captured,
+        # ex_date is None (common for an announcement that hasn't
+        # disclosed the ex-date yet).
+        partial = (
+            "The Board declared a quarterly cash dividend of $0.25 per "
+            "share, payable on May 15, 2024, to shareholders of record "
+            "on April 19, 2024."
+        )
+        fetcher = _StubFetcher({"https://www.sec.gov/Archives/partial-then-404.htm": partial})
+        ingest_dividend_events(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        # Advance last_parsed_at so the re-parse TTL lets the ingester
+        # re-queue this row on the next run.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE dividend_events SET last_parsed_at = NOW() - INTERVAL '8 days' "
+                "WHERE instrument_id=%s AND source_accession=%s",
+                (inst_id, accession),
+            )
+        ebull_test_conn.commit()
+
+        # Second pass: the URL is now 404. Tombstone MUST NOT clobber
+        # record_date / pay_date.
+        dead_fetcher = _StubFetcher({"https://www.sec.gov/Archives/partial-then-404.htm": None})
+        result = ingest_dividend_events(ebull_test_conn, cast("object", dead_fetcher))  # type: ignore[arg-type]
+        assert result.fetch_errors == 1
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT record_date, pay_date, dps_declared FROM dividend_events "
+                "WHERE instrument_id=%s AND source_accession=%s",
+                (inst_id, accession),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            # Dates + amount from the original partial parse are intact.
+            assert row[0] is not None
+            assert row[1] is not None
+            assert row[2] is not None
+
     def test_filing_with_different_items_is_skipped(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """8-K with items=['1.01','9.01'] (no 8.01) must not even be
         fetched."""
