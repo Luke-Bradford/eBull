@@ -3,9 +3,10 @@
  * page. Backed by GET /instruments/{symbol}/sec_profile (#427).
  *
  * Surfaces authentic business description, SIC sector, exchange
- * listings, former names, insider-activity flags. Replaces the
- * yfinance long_business_summary blurb as the primary description
- * source for US-mapped tickers.
+ * listings, former names. Replaces the yfinance long_business_summary
+ * blurb as the primary description source for US-mapped tickers.
+ * Form-4 insider activity lives in the sibling InsiderActivityPanel
+ * (backed by #429 ingestion) and is no longer summarised here.
  */
 
 import { fetchInstrumentSecProfile } from "@/api/instruments";
@@ -133,14 +134,6 @@ function Body({ profile }: { profile: InstrumentSecProfile }) {
         </div>
       )}
 
-      {(profile.has_insider_issuer || profile.has_insider_owner) && (
-        <div className="text-xs text-slate-500">
-          <span className="mr-2 inline-block rounded bg-amber-100 px-1.5 py-0.5 font-medium text-amber-800">
-            Insider activity recorded
-          </span>
-          Form 4 filings on SEC EDGAR (detailed list pending #429).
-        </div>
-      )}
     </div>
   );
 }

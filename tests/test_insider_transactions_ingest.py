@@ -31,6 +31,8 @@ import pytest
 from app.services.insider_transactions import (
     get_insider_summary,
     ingest_insider_transactions,
+    ingest_insider_transactions_backfill,
+    ingest_insider_transactions_for_instrument,
     list_insider_transactions,
 )
 
@@ -702,6 +704,96 @@ class TestListInsiderTransactions:
         # qualified ("transactionShares").
         assert "transactionShares" in row.footnotes
         assert "Weighted average price" in row.footnotes["transactionShares"]
+
+
+class TestBackfill:
+    """#456 — per-instrument and round-robin backfill paths."""
+
+    def test_per_instrument_scopes_to_target(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Ingester invoked for one instrument must not fetch filings
+        owned by other instruments."""
+        iid_a = _seed_instrument(ebull_test_conn, iid=201, symbol="AAA")
+        iid_b = _seed_instrument(ebull_test_conn, iid=202, symbol="BBB")
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid_a,
+            accession="ACC-A",
+            url="https://www.sec.gov/Archives/a.xml",
+            filing_date=date.today().isoformat(),
+        )
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid_b,
+            accession="ACC-B",
+            url="https://www.sec.gov/Archives/b.xml",
+            filing_date=date.today().isoformat(),
+        )
+        today_iso = date.today().isoformat()
+        fetcher = _StubFetcher(
+            {
+                "https://www.sec.gov/Archives/a.xml": _FORM_4_RICH_BUY.replace("2024-06-15", today_iso),
+                "https://www.sec.gov/Archives/b.xml": _FORM_4_RICH_BUY.replace("2024-06-15", today_iso).replace(
+                    "0001000001", "0002000002"
+                ),
+            }
+        )
+
+        result = ingest_insider_transactions_for_instrument(
+            ebull_test_conn,
+            cast("object", fetcher),
+            instrument_id=iid_a,  # type: ignore[arg-type]
+        )
+        assert result.filings_scanned == 1
+        assert fetcher.calls == ["https://www.sec.gov/Archives/a.xml"]
+
+    def test_backfill_round_robin_picks_biggest_backlogs(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Round-robin backfill targets instruments with the most
+        un-ingested candidates first, drains oldest-first per target."""
+        iid_deep = _seed_instrument(ebull_test_conn, iid=301, symbol="DEEP")
+        iid_shallow = _seed_instrument(ebull_test_conn, iid=302, symbol="SHAL")
+
+        today_iso = date.today().isoformat()
+        xml_body = _FORM_4_RICH_BUY.replace("2024-06-15", today_iso)
+        url_map: dict[str, str | None] = {}
+        # DEEP: 3 filings; SHAL: 1 filing. DEEP should drain in one pass.
+        for i in range(3):
+            acc = f"DEEP-{i:02d}"
+            url = f"https://www.sec.gov/Archives/deep-{i}.xml"
+            _seed_form_4(
+                ebull_test_conn,
+                instrument_id=iid_deep,
+                accession=acc,
+                url=url,
+                filing_date=f"2024-01-{10 + i:02d}",
+            )
+            url_map[url] = xml_body.replace("0001000001", f"09000{i:05d}")
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid_shallow,
+            accession="SHAL-01",
+            url="https://www.sec.gov/Archives/shal.xml",
+            filing_date=today_iso,
+        )
+        url_map["https://www.sec.gov/Archives/shal.xml"] = xml_body
+
+        fetcher = _StubFetcher(url_map)
+        totals = ingest_insider_transactions_backfill(
+            ebull_test_conn,
+            cast("object", fetcher),  # type: ignore[arg-type]
+            instruments_per_tick=5,
+            per_instrument_limit=50,
+        )
+        assert totals["instruments_processed"] == 2
+        assert totals["filings_parsed"] == 4
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM insider_filings WHERE instrument_id = %s AND is_tombstone = FALSE",
+                (iid_deep,),
+            )
+            deep_count = cur.fetchone()
+            assert deep_count is not None
+            assert deep_count[0] == 3
 
 
 def test_fixture_imports_ok(ebull_test_conn: psycopg.Connection[tuple]) -> None:

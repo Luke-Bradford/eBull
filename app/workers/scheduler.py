@@ -240,6 +240,7 @@ JOB_FUNDAMENTALS_SYNC = "fundamentals_sync"
 JOB_SEC_DIVIDEND_CALENDAR_INGEST = "sec_dividend_calendar_ingest"
 JOB_SEC_BUSINESS_SUMMARY_INGEST = "sec_business_summary_ingest"
 JOB_SEC_INSIDER_TRANSACTIONS_INGEST = "sec_insider_transactions_ingest"
+JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +511,21 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "cost nothing when nothing new has landed."
         ),
         cadence=Cadence.hourly(minute=30),
+        catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL,
+        description=(
+            "Round-robin backfill of Form 4 filings for instruments "
+            "with deep historical backlogs (#456). Complements the "
+            "hourly universe-wide ingester: that job runs newest-first "
+            "across every ticker, so a specific instrument with 400+ "
+            "pending Form 4s can starve for days. This job picks the "
+            "25 instruments with the most un-ingested candidates and "
+            "clears up to 50 per instrument per run, oldest-first, so "
+            "the historical tail drains predictably."
+        ),
+        cadence=Cadence.hourly(minute=45),
         catch_up_on_boot=False,
     ),
     ScheduledJob(
@@ -3123,4 +3139,37 @@ def sec_insider_transactions_ingest() -> None:
             result.rows_inserted,
             result.fetch_errors,
             result.parse_misses,
+        )
+
+
+def sec_insider_transactions_backfill() -> None:
+    """Round-robin backfill for instruments with deep Form 4 backlogs.
+
+    The universe-wide hourly job (``sec_insider_transactions_ingest``)
+    runs newest-first and is bounded at 500 filings per tick. An
+    instrument with 400+ historical filings can sit starved for days
+    because newer filings on other tickers saturate the budget every
+    hour. This job targets the 25 instruments with the most
+    un-ingested Form 4 candidates and clears up to 50 oldest filings
+    per instrument per tick — the historical tail drains predictably
+    without contention against the newest-first job.
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.insider_transactions import ingest_insider_transactions_backfill
+
+    with _tracked_job(JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL) as tracker:
+        with (
+            psycopg.connect(settings.database_url) as conn,
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+        ):
+            totals = ingest_insider_transactions_backfill(conn, provider)
+
+        tracker.row_count = totals["rows_inserted"]
+        logger.info(
+            "sec_insider_transactions_backfill: instruments=%d parsed=%d inserted=%d fetch_errors=%d parse_misses=%d",
+            totals["instruments_processed"],
+            totals["filings_parsed"],
+            totals["rows_inserted"],
+            totals["fetch_errors"],
+            totals["parse_misses"],
         )
