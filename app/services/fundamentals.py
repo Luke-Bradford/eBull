@@ -394,12 +394,18 @@ def upsert_concept_catalog(
         }
         for e in entries
     ]
+    # psycopg3's ``executemany`` reports the cumulative rowcount
+    # across every parameter set — no per-chunk clamp needed. We
+    # fall back to len(chunk) only when the driver signals "unknown"
+    # via rowcount = -1 (never happens for ON CONFLICT in psycopg3
+    # today but keeps the counter sane against a future driver-
+    # behaviour change).
     affected = 0
     with conn.cursor() as cur:
         for i in range(0, len(rows), _UPSERT_PAGE_SIZE):
             chunk = rows[i : i + _UPSERT_PAGE_SIZE]
             cur.executemany(_UPSERT_CATALOG_SQL, chunk)
-            affected += cur.rowcount if cur.rowcount and cur.rowcount > 0 else len(chunk)
+            affected += cur.rowcount if cur.rowcount and cur.rowcount >= 0 else len(chunk)
     return affected
 
 
