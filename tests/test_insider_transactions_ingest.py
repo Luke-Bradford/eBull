@@ -679,9 +679,7 @@ class TestGetInsiderSummary:
         assert summary.total_acquired_shares_90d == Decimal(0)
         assert summary.total_disposed_shares_90d == Decimal(0)
 
-    def test_grant_plus_sell_to_cover_shows_both_lenses(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_grant_plus_sell_to_cover_shows_both_lenses(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """#458 regression — an RSU vest pattern (A grant + S
         sell-to-cover) must surface both views: open-market counts
         only the discretionary S, total-activity counts both the grant
@@ -724,9 +722,7 @@ class TestGetInsiderSummary:
         assert summary.total_acquired_shares_90d == Decimal(1000)
         assert summary.total_disposed_shares_90d == Decimal(300)
 
-    def test_open_market_buy_still_registers_in_both_lenses(
-        self, ebull_test_conn: psycopg.Connection[tuple]
-    ) -> None:
+    def test_open_market_buy_still_registers_in_both_lenses(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """A real open-market P must show up on both views."""
         iid = _seed_instrument(ebull_test_conn)
         with ebull_test_conn.cursor() as cur:

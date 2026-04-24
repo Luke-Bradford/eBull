@@ -120,82 +120,29 @@ function formatDelta(raw: string): { label: string; colour: string } {
 }
 
 function SummaryStrip({ summary }: { summary: InsiderSummary }) {
-  const openMarketBadge = formatDelta(summary.open_market_net_shares_90d);
   const totalAcquired = Number(summary.total_acquired_shares_90d);
   const totalDisposed = Number(summary.total_disposed_shares_90d);
   const totalNet = Number.isFinite(totalAcquired - totalDisposed)
     ? totalAcquired - totalDisposed
     : 0;
   const totalBadge = formatDelta(String(totalNet));
+  const openMarketNet = Number(summary.open_market_net_shares_90d);
+  const openMarketBadge = formatDelta(summary.open_market_net_shares_90d);
   return (
-    <div className="mb-4 flex flex-col gap-4">
-      {/* Lens 1: open-market discretionary activity (P/S only) */}
+    <div className="mb-4 flex flex-col gap-3">
+      {/* Primary view: full insider-holdings change across every
+          non-derivative code. This is the "did insiders end the
+          window owning more or fewer shares" signal operators
+          actually want at a glance. */}
       <div>
-        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-          Open-market activity · 90 days
-          <span
-            className="ml-2 inline-block rounded bg-slate-50 px-1.5 py-0.5 text-[10px] font-normal normal-case tracking-normal text-slate-500"
-            title="Transactions with SEC code P (open-market purchase) or S (open-market sale). Discretionary insider sentiment only; excludes grants, RSU vests, sell-to-cover, and option exercises."
-          >
-            P / S codes only
-          </span>
-        </div>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <div className="flex flex-col">
-            <span className="text-xs uppercase tracking-wide text-slate-500">
-              Net
-            </span>
-            <span
-              className={`mt-1 inline-flex w-fit rounded px-2 py-0.5 text-xs font-semibold ${openMarketBadge.colour}`}
-            >
-              {openMarketBadge.label} shares
-            </span>
-          </div>
-          <div className="flex flex-col">
-            <span className="text-xs uppercase tracking-wide text-slate-500">
-              Buys
-            </span>
-            <span className="mt-1 font-mono text-base tabular-nums text-emerald-700">
-              {summary.open_market_buy_count_90d}
-            </span>
-          </div>
-          <div className="flex flex-col">
-            <span className="text-xs uppercase tracking-wide text-slate-500">
-              Sells
-            </span>
-            <span className="mt-1 font-mono text-base tabular-nums text-rose-700">
-              {summary.open_market_sell_count_90d}
-            </span>
-          </div>
-          <div className="flex flex-col">
-            <span className="text-xs uppercase tracking-wide text-slate-500">
-              Latest trade
-            </span>
-            <span className="mt-1 font-mono text-base tabular-nums text-slate-800">
-              {formatDate(summary.latest_txn_date)}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* Lens 2: total acquired / disposed across all non-derivative codes */}
-      <div>
-        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-          All insider activity · 90 days
-          <span
-            className="ml-2 inline-block rounded bg-slate-50 px-1.5 py-0.5 text-[10px] font-normal normal-case tracking-normal text-slate-500"
-            title="Every non-derivative transaction: grants (A), sales (S), option exercises (M), tax withholding (F), gifts (G), etc. Shows the full change in insider holdings across the window."
-          >
-            All codes
-          </span>
-        </div>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
           <div className="flex flex-col">
             <span className="text-xs uppercase tracking-wide text-slate-500">
-              Net
+              Net change
             </span>
             <span
-              className={`mt-1 inline-flex w-fit rounded px-2 py-0.5 text-xs font-semibold ${totalBadge.colour}`}
+              className={`mt-1 inline-flex w-fit rounded px-2 py-0.5 text-sm font-semibold ${totalBadge.colour}`}
+              title="Total shares acquired minus disposed across every non-derivative Form 4 transaction in the last 90 days. Includes grants, open-market purchases, option exercises, sales, tax withholding, gifts."
             >
               {totalBadge.label} shares
             </span>
@@ -205,10 +152,13 @@ function SummaryStrip({ summary }: { summary: InsiderSummary }) {
               Acquired
             </span>
             <span className="mt-1 font-mono text-base tabular-nums text-emerald-700">
-              {Math.round(totalAcquired).toLocaleString("en-US")}
+              +{Math.round(totalAcquired).toLocaleString("en-US")}
             </span>
             <span className="text-[10px] text-slate-500">
               {summary.acquisition_count_90d} txns
+              {summary.open_market_buy_count_90d > 0 && (
+                <> · {summary.open_market_buy_count_90d} open-market</>
+              )}
             </span>
           </div>
           <div className="flex flex-col">
@@ -216,10 +166,13 @@ function SummaryStrip({ summary }: { summary: InsiderSummary }) {
               Disposed
             </span>
             <span className="mt-1 font-mono text-base tabular-nums text-rose-700">
-              {Math.round(totalDisposed).toLocaleString("en-US")}
+              -{Math.round(totalDisposed).toLocaleString("en-US")}
             </span>
             <span className="text-[10px] text-slate-500">
               {summary.disposition_count_90d} txns
+              {summary.open_market_sell_count_90d > 0 && (
+                <> · {summary.open_market_sell_count_90d} open-market</>
+              )}
             </span>
           </div>
           <div className="flex flex-col">
@@ -240,6 +193,31 @@ function SummaryStrip({ summary }: { summary: InsiderSummary }) {
           </div>
         </div>
       </div>
+
+      {/* Secondary view: discretionary (P/S) only — the sentiment
+          sub-signal, labelled clearly so a "0 buys" count next to
+          grants doesn't read as insiders not buying. */}
+      {(summary.open_market_buy_count_90d + summary.open_market_sell_count_90d > 0 ||
+        openMarketNet !== 0) && (
+        <div className="rounded bg-slate-50 px-3 py-1.5 text-xs text-slate-600">
+          <span className="font-medium text-slate-700">
+            Open-market only (discretionary P/S):
+          </span>{" "}
+          <span
+            className={`inline-flex items-center rounded px-1.5 py-0.5 font-semibold ${openMarketBadge.colour}`}
+          >
+            {openMarketBadge.label} shares
+          </span>{" "}
+          · {summary.open_market_buy_count_90d} buys ·{" "}
+          {summary.open_market_sell_count_90d} sells
+          <span
+            className="ml-1 text-slate-400"
+            title="Only SEC transaction codes P (open-market purchase) and S (open-market sale). Excludes grants, RSU vests, option exercises, tax withholding, gifts."
+          >
+            ⓘ
+          </span>
+        </div>
+      )}
     </div>
   );
 }
