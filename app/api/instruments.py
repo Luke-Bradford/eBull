@@ -649,6 +649,113 @@ def get_instrument_candles(
 
 
 # ---------------------------------------------------------------------------
+# SEC entity profile (#427) — extracted from submissions.json
+# ---------------------------------------------------------------------------
+
+
+class FormerNameModel(BaseModel):
+    name: str
+    from_: str | None = None
+    to: str | None = None
+
+
+class InstrumentSecProfile(BaseModel):
+    symbol: str
+    cik: str
+    sic: str | None
+    sic_description: str | None
+    owner_org: str | None
+    description: str | None
+    website: str | None
+    investor_website: str | None
+    ein: str | None
+    lei: str | None
+    state_of_incorporation: str | None
+    state_of_incorporation_desc: str | None
+    fiscal_year_end: str | None
+    category: str | None
+    exchanges: list[str]
+    former_names: list[FormerNameModel]
+    has_insider_issuer: bool | None
+    has_insider_owner: bool | None
+
+
+@router.get("/{symbol}/sec_profile", response_model=InstrumentSecProfile)
+def get_instrument_sec_profile(
+    symbol: str,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InstrumentSecProfile:
+    """Return the SEC-sourced entity metadata for an instrument (#427).
+
+    Surfaces sic / sic_description / description / website / exchanges
+    / former_names / insider-activity flags from the daily submissions
+    fetch. Populated for US-mapped tickers after the first
+    ``fundamentals_sync`` seeds the row.
+
+    404 when the instrument itself is unknown. 404 + ``{"detail": "no
+    SEC profile"}`` when the instrument exists but no profile row has
+    been seeded yet (pre-first-seed or non-US ticker without a primary
+    CIK).
+    """
+    from app.services.sec_entity_profile import get_entity_profile
+
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    profile = get_entity_profile(conn, instrument_id=int(inst_row["instrument_id"]))  # type: ignore[arg-type]
+    if profile is None:
+        raise HTTPException(
+            status_code=404,
+            detail="no SEC profile on file for this instrument",
+        )
+
+    return InstrumentSecProfile(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        cik=profile.cik,
+        sic=profile.sic,
+        sic_description=profile.sic_description,
+        owner_org=profile.owner_org,
+        description=profile.description,
+        website=profile.website,
+        investor_website=profile.investor_website,
+        ein=profile.ein,
+        lei=profile.lei,
+        state_of_incorporation=profile.state_of_incorporation,
+        state_of_incorporation_desc=profile.state_of_incorporation_desc,
+        fiscal_year_end=profile.fiscal_year_end,
+        category=profile.category,
+        exchanges=profile.exchanges,
+        former_names=[
+            FormerNameModel(
+                name=str(fn["name"]),
+                from_=fn.get("from"),
+                to=fn.get("to"),
+            )
+            for fn in profile.former_names
+            if fn.get("name")
+        ],
+        has_insider_issuer=profile.has_insider_issuer,
+        has_insider_owner=profile.has_insider_owner,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Dividend history + summary (#414 follow-up, operator ask 2026-04-24)
 # ---------------------------------------------------------------------------
 
@@ -999,7 +1106,11 @@ def get_instrument_summary(
     # Local DB is authoritative for every identity field that has a non-null
     # value — yfinance fills only the gaps. company_name is schema-non-null,
     # so display_name falls to yfinance only if the local row somehow has an
-    # empty string (defence-in-depth).
+    # empty string (defence-in-depth). SEC-sourced entity metadata
+    # (description, SIC, exchanges, former names) is exposed via the
+    # dedicated ``GET /instruments/{symbol}/sec_profile`` endpoint (#427);
+    # the frontend consumes both endpoints in parallel so this handler's
+    # query pattern stays unchanged.
     identity = InstrumentIdentity(
         symbol=row["symbol"],  # type: ignore[arg-type]
         display_name=row["company_name"] or (profile.display_name if profile is not None else None),  # type: ignore[arg-type]

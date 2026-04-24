@@ -1752,6 +1752,42 @@ def _run_cik_upsert(
                 failed.append((cik, "EmptyFilingsRecent"))
                 outcome = "skip_empty_filings"
                 return None
+            # #427: extract rich entity metadata from the submissions
+            # dict we already have in memory. Zero extra HTTP. Only
+            # happens when the executor fetches submissions itself
+            # (seed path + first-time refresh) — on the refresh-via-
+            # planner path the dict is thrown away before we get here,
+            # which is acceptable because entity metadata (description,
+            # SIC, exchanges, former names) changes rarely; any stale
+            # row converges on the next seed cycle.
+            #
+            # Wrapped in ``with conn.transaction():`` so any DB error
+            # inside the upsert rolls back a SAVEPOINT rather than
+            # leaving the outer per-CIK transaction in
+            # ``InFailedSqlTransaction`` state. Without the savepoint,
+            # a bare ``except Exception`` still catches the error but
+            # the subsequent XBRL facts upsert below would fail with
+            # "current transaction is aborted, commands ignored".
+            # Review #439 BLOCKING.
+            try:
+                from app.services.sec_entity_profile import (
+                    parse_entity_profile,
+                    upsert_entity_profile,
+                )
+
+                profile = parse_entity_profile(
+                    submissions,
+                    instrument_id=instrument_id,
+                    cik=cik,
+                )
+                with conn.transaction():
+                    upsert_entity_profile(conn, profile)
+            except Exception:
+                logger.warning(
+                    "sec_incremental: entity-profile upsert failed for cik=%s",
+                    cik,
+                    exc_info=True,
+                )
 
         facts = fundamentals_provider.extract_facts(symbol, cik)
         upserted_in_tx = 0
