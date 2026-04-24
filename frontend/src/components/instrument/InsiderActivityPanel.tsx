@@ -87,23 +87,6 @@ function formatDate(raw: string | null): string {
   return raw;
 }
 
-function netSharesBadge(raw: string): { label: string; colour: string } {
-  const num = Number(raw);
-  if (!Number.isFinite(num) || num === 0) {
-    return { label: "Neutral", colour: "bg-slate-100 text-slate-700" };
-  }
-  if (num > 0) {
-    return {
-      label: `+${Math.round(num).toLocaleString("en-US")} shares`,
-      colour: "bg-emerald-100 text-emerald-800",
-    };
-  }
-  return {
-    label: `${Math.round(num).toLocaleString("en-US")} shares`,
-    colour: "bg-rose-100 text-rose-800",
-  };
-}
-
 function roleBadge(role: string | null): string {
   if (role === null || role === "") return "Insider";
   // role shape: pipe-joined — "director|officer:CEO|ten_percent_owner"
@@ -119,49 +102,143 @@ function roleBadge(role: string | null): string {
   return parts.join(" · ");
 }
 
+function formatDelta(raw: string): { label: string; colour: string } {
+  const num = Number(raw);
+  if (!Number.isFinite(num) || num === 0) {
+    return { label: "0", colour: "bg-slate-100 text-slate-700" };
+  }
+  if (num > 0) {
+    return {
+      label: `+${Math.round(num).toLocaleString("en-US")}`,
+      colour: "bg-emerald-100 text-emerald-800",
+    };
+  }
+  return {
+    label: Math.round(num).toLocaleString("en-US"),
+    colour: "bg-rose-100 text-rose-800",
+  };
+}
+
 function SummaryStrip({ summary }: { summary: InsiderSummary }) {
-  const badge = netSharesBadge(summary.net_shares_90d);
+  const openMarketBadge = formatDelta(summary.open_market_net_shares_90d);
+  const totalAcquired = Number(summary.total_acquired_shares_90d);
+  const totalDisposed = Number(summary.total_disposed_shares_90d);
+  const totalNet = Number.isFinite(totalAcquired - totalDisposed)
+    ? totalAcquired - totalDisposed
+    : 0;
+  const totalBadge = formatDelta(String(totalNet));
   return (
-    <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
-      <div className="flex flex-col">
-        <span className="text-xs uppercase tracking-wide text-slate-500">
-          Net 90d
-        </span>
-        <span
-          className={`mt-1 inline-flex w-fit rounded px-2 py-0.5 text-xs font-semibold ${badge.colour}`}
-        >
-          {badge.label}
-        </span>
+    <div className="mb-4 flex flex-col gap-4">
+      {/* Lens 1: open-market discretionary activity (P/S only) */}
+      <div>
+        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+          Open-market activity · 90 days
+          <span
+            className="ml-2 inline-block rounded bg-slate-50 px-1.5 py-0.5 text-[10px] font-normal normal-case tracking-normal text-slate-500"
+            title="Transactions with SEC code P (open-market purchase) or S (open-market sale). Discretionary insider sentiment only; excludes grants, RSU vests, sell-to-cover, and option exercises."
+          >
+            P / S codes only
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="flex flex-col">
+            <span className="text-xs uppercase tracking-wide text-slate-500">
+              Net
+            </span>
+            <span
+              className={`mt-1 inline-flex w-fit rounded px-2 py-0.5 text-xs font-semibold ${openMarketBadge.colour}`}
+            >
+              {openMarketBadge.label} shares
+            </span>
+          </div>
+          <div className="flex flex-col">
+            <span className="text-xs uppercase tracking-wide text-slate-500">
+              Buys
+            </span>
+            <span className="mt-1 font-mono text-base tabular-nums text-emerald-700">
+              {summary.open_market_buy_count_90d}
+            </span>
+          </div>
+          <div className="flex flex-col">
+            <span className="text-xs uppercase tracking-wide text-slate-500">
+              Sells
+            </span>
+            <span className="mt-1 font-mono text-base tabular-nums text-rose-700">
+              {summary.open_market_sell_count_90d}
+            </span>
+          </div>
+          <div className="flex flex-col">
+            <span className="text-xs uppercase tracking-wide text-slate-500">
+              Latest trade
+            </span>
+            <span className="mt-1 font-mono text-base tabular-nums text-slate-800">
+              {formatDate(summary.latest_txn_date)}
+            </span>
+          </div>
+        </div>
       </div>
-      <div className="flex flex-col">
-        <span className="text-xs uppercase tracking-wide text-slate-500">Buys</span>
-        <span className="mt-1 font-mono text-base tabular-nums text-emerald-700">
-          {summary.buy_count_90d}
-        </span>
-      </div>
-      <div className="flex flex-col">
-        <span className="text-xs uppercase tracking-wide text-slate-500">
-          Sells
-        </span>
-        <span className="mt-1 font-mono text-base tabular-nums text-rose-700">
-          {summary.sell_count_90d}
-        </span>
-      </div>
-      <div className="flex flex-col">
-        <span className="text-xs uppercase tracking-wide text-slate-500">
-          Unique insiders
-        </span>
-        <span className="mt-1 font-mono text-base tabular-nums text-slate-800">
-          {summary.unique_filers_90d}
-        </span>
-      </div>
-      <div className="flex flex-col">
-        <span className="text-xs uppercase tracking-wide text-slate-500">
-          Latest trade
-        </span>
-        <span className="mt-1 font-mono text-base tabular-nums text-slate-800">
-          {formatDate(summary.latest_txn_date)}
-        </span>
+
+      {/* Lens 2: total acquired / disposed across all non-derivative codes */}
+      <div>
+        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+          All insider activity · 90 days
+          <span
+            className="ml-2 inline-block rounded bg-slate-50 px-1.5 py-0.5 text-[10px] font-normal normal-case tracking-normal text-slate-500"
+            title="Every non-derivative transaction: grants (A), sales (S), option exercises (M), tax withholding (F), gifts (G), etc. Shows the full change in insider holdings across the window."
+          >
+            All codes
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+          <div className="flex flex-col">
+            <span className="text-xs uppercase tracking-wide text-slate-500">
+              Net
+            </span>
+            <span
+              className={`mt-1 inline-flex w-fit rounded px-2 py-0.5 text-xs font-semibold ${totalBadge.colour}`}
+            >
+              {totalBadge.label} shares
+            </span>
+          </div>
+          <div className="flex flex-col">
+            <span className="text-xs uppercase tracking-wide text-slate-500">
+              Acquired
+            </span>
+            <span className="mt-1 font-mono text-base tabular-nums text-emerald-700">
+              {Math.round(totalAcquired).toLocaleString("en-US")}
+            </span>
+            <span className="text-[10px] text-slate-500">
+              {summary.acquisition_count_90d} txns
+            </span>
+          </div>
+          <div className="flex flex-col">
+            <span className="text-xs uppercase tracking-wide text-slate-500">
+              Disposed
+            </span>
+            <span className="mt-1 font-mono text-base tabular-nums text-rose-700">
+              {Math.round(totalDisposed).toLocaleString("en-US")}
+            </span>
+            <span className="text-[10px] text-slate-500">
+              {summary.disposition_count_90d} txns
+            </span>
+          </div>
+          <div className="flex flex-col">
+            <span className="text-xs uppercase tracking-wide text-slate-500">
+              Unique insiders
+            </span>
+            <span className="mt-1 font-mono text-base tabular-nums text-slate-800">
+              {summary.unique_filers_90d}
+            </span>
+          </div>
+          <div className="flex flex-col">
+            <span className="text-xs uppercase tracking-wide text-slate-500">
+              Latest trade
+            </span>
+            <span className="mt-1 font-mono text-base tabular-nums text-slate-800">
+              {formatDate(summary.latest_txn_date)}
+            </span>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -293,7 +370,11 @@ function Body({
           </thead>
           <tbody>
             {transactions.rows.map((txn) => (
-              <Row key={`${txn.accession_number}-${txn.txn_date}-${txn.filer_cik ?? txn.filer_name}`} txn={txn} />
+              // accession_number + txn_row_num is the DB UNIQUE key,
+              // so it's guaranteed stable and collision-free even for
+              // filings with multiple rows per filer-date (e.g. an
+              // RSU-vest pattern of same-day A + S).
+              <Row key={`${txn.accession_number}-${txn.txn_row_num}`} txn={txn} />
             ))}
           </tbody>
         </table>

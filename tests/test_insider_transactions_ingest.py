@@ -675,7 +675,89 @@ class TestGetInsiderSummary:
             )
         ebull_test_conn.commit()
         summary = get_insider_summary(ebull_test_conn, instrument_id=iid)
-        assert summary.net_shares_90d == Decimal(0)
+        assert summary.open_market_net_shares_90d == Decimal(0)
+        assert summary.total_acquired_shares_90d == Decimal(0)
+        assert summary.total_disposed_shares_90d == Decimal(0)
+
+    def test_grant_plus_sell_to_cover_shows_both_lenses(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """#458 regression — an RSU vest pattern (A grant + S
+        sell-to-cover) must surface both views: open-market counts
+        only the discretionary S, total-activity counts both the grant
+        (acquired) and the sell (disposed). The prior single-lens
+        summary showed NET=-shares / BUYS=0 / SELLS=1 with no hint
+        that the insider actually received a larger grant."""
+        iid = _seed_instrument(ebull_test_conn)
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO insider_filings (accession_number, instrument_id, document_type)
+                VALUES ('VEST-1', %s, '4')
+                """,
+                (iid,),
+            )
+            cur.execute(
+                """
+                INSERT INTO insider_transactions
+                    (instrument_id, accession_number, txn_row_num,
+                     filer_cik, filer_name, txn_date, txn_code,
+                     acquired_disposed_code, shares, is_derivative)
+                VALUES
+                    (%s, 'VEST-1', 0, 'CIK-A', 'Exec A',
+                     CURRENT_DATE, 'A', 'A', 1000, FALSE),
+                    (%s, 'VEST-1', 1, 'CIK-A', 'Exec A',
+                     CURRENT_DATE, 'S', 'D', 300, FALSE)
+                """,
+                (iid, iid),
+            )
+        ebull_test_conn.commit()
+
+        summary = get_insider_summary(ebull_test_conn, instrument_id=iid)
+        # Open-market lens: no P, one S.
+        assert summary.open_market_buy_count_90d == 0
+        assert summary.open_market_sell_count_90d == 1
+        assert summary.open_market_net_shares_90d == Decimal(-300)
+        # All-codes lens: grant and sell both captured.
+        assert summary.acquisition_count_90d == 1
+        assert summary.disposition_count_90d == 1
+        assert summary.total_acquired_shares_90d == Decimal(1000)
+        assert summary.total_disposed_shares_90d == Decimal(300)
+
+    def test_open_market_buy_still_registers_in_both_lenses(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """A real open-market P must show up on both views."""
+        iid = _seed_instrument(ebull_test_conn)
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO insider_filings (accession_number, instrument_id, document_type)
+                VALUES ('OMB-1', %s, '4')
+                """,
+                (iid,),
+            )
+            cur.execute(
+                """
+                INSERT INTO insider_transactions
+                    (instrument_id, accession_number, txn_row_num,
+                     filer_cik, filer_name, txn_date, txn_code,
+                     acquired_disposed_code, shares, is_derivative)
+                VALUES (%s, 'OMB-1', 0, 'CIK-B', 'Exec B',
+                        CURRENT_DATE, 'P', 'A', 500, FALSE)
+                """,
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        summary = get_insider_summary(ebull_test_conn, instrument_id=iid)
+        assert summary.open_market_buy_count_90d == 1
+        assert summary.open_market_net_shares_90d == Decimal(500)
+        assert summary.acquisition_count_90d == 1
+        assert summary.total_acquired_shares_90d == Decimal(500)
+        # Back-compat aliases still work.
+        assert summary.buy_count_90d == 1
+        assert summary.net_shares_90d == Decimal(500)
 
 
 class TestListInsiderTransactions:
