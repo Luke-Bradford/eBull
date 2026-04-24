@@ -32,6 +32,7 @@ interface Filters {
   sector: string | null;
   exchange: string | null;
   coverage_tier: number | null;
+  has_dividend: boolean | null;
 }
 
 const INITIAL_FILTERS: Filters = {
@@ -39,6 +40,7 @@ const INITIAL_FILTERS: Filters = {
   sector: null,
   exchange: null,
   coverage_tier: null,
+  has_dividend: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -129,6 +131,7 @@ export function InstrumentsPage() {
       sector: filters.sector,
       exchange: filters.exchange,
       coverage_tier: filters.coverage_tier,
+      has_dividend: filters.has_dividend,
       offset: page * INSTRUMENTS_PAGE_LIMIT,
       limit: INSTRUMENTS_PAGE_LIMIT,
     }),
@@ -192,8 +195,11 @@ export function InstrumentsPage() {
     : 0;
 
   const handleFilterChange = useCallback(
-    (key: keyof Omit<Filters, "search">, value: string | number | null) => {
-      setFilters((prev) => ({ ...prev, [key]: value || null }));
+    (
+      key: keyof Omit<Filters, "search">,
+      value: string | number | boolean | null,
+    ) => {
+      setFilters((prev) => ({ ...prev, [key]: value === "" ? null : value }));
       setPage(0);
     },
     [],
@@ -257,6 +263,29 @@ export function InstrumentsPage() {
             <option value="3">Tier 3</option>
           </select>
         </div>
+        <div>
+          <label
+            htmlFor="filter-has-dividend"
+            className="mb-1 block text-xs font-medium text-slate-600"
+          >
+            Dividend
+          </label>
+          <label className="flex items-center gap-2 rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700">
+            <input
+              id="filter-has-dividend"
+              type="checkbox"
+              checked={filters.has_dividend === true}
+              onChange={(e) =>
+                handleFilterChange(
+                  "has_dividend",
+                  e.target.checked ? true : null,
+                )
+              }
+              className="h-4 w-4"
+            />
+            <span>Only dividend-paying</span>
+          </label>
+        </div>
       </div>
 
       <Section title="Results">
@@ -268,7 +297,11 @@ export function InstrumentsPage() {
           <EmptyState
             title="No instruments found"
             description={
-              filters.search || filters.sector || filters.exchange || filters.coverage_tier !== null
+              filters.search ||
+              filters.sector ||
+              filters.exchange ||
+              filters.coverage_tier !== null ||
+              filters.has_dividend !== null
                 ? "Try adjusting your search or filters."
                 : "No instruments have been synced yet. Run the universe sync job from the Admin page."
             }
