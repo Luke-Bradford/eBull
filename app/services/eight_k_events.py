@@ -312,7 +312,7 @@ def _extract_items(
     text: str,
     *,
     known_items: tuple[str, ...],
-    item_labels: dict[str, tuple[str, str]] | None,
+    item_labels: dict[str, tuple[str, str | None]] | None,
 ) -> tuple[Parsed8KItem, ...]:
     """Walk the filing text, splitting on ``Item X.XX`` headings."""
     labels = item_labels or {}
