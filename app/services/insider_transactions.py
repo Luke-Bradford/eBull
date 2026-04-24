@@ -942,6 +942,60 @@ class IngestResult:
     parse_misses: int
 
 
+def ingest_insider_transactions_for_instrument(
+    conn: psycopg.Connection[Any],
+    fetcher: _DocFetcher,
+    *,
+    instrument_id: int,
+    limit: int = 500,
+) -> IngestResult:
+    """Targeted backfill for a single instrument.
+
+    The universe-wide :func:`ingest_insider_transactions` selector runs
+    newest-first across every Form 4 filing in ``filing_events`` and
+    is bounded at 500 per tick — which is fine for keeping up with
+    incoming flow but leaves an instrument with hundreds of historical
+    filings starved for days while newer filings on other tickers
+    cycle through. This variant scopes the scan to one instrument so
+    an operator (or a round-robin backfill job) can drain a specific
+    ticker's backlog in one pass.
+
+    Same contract as the universe-wide function:
+
+    - Candidate = ``provider='sec'`` + ``filing_type IN ('4', '4/A')``
+      + ``primary_document_url IS NOT NULL`` + no existing
+      ``insider_filings`` row.
+    - Tombstone on fetch error / parse miss.
+    - Caller's fetch URL runs through :func:`_canonical_form_4_url` to
+      strip XSL-rendering segments.
+    """
+    conn.commit()
+    candidates: list[tuple[int, str, str]] = []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT fe.instrument_id,
+                   fe.provider_filing_id,
+                   fe.primary_document_url
+            FROM filing_events fe
+            LEFT JOIN insider_filings fil ON fil.accession_number = fe.provider_filing_id
+            WHERE fe.provider = 'sec'
+              AND fe.filing_type IN ('4', '4/A')
+              AND fe.primary_document_url IS NOT NULL
+              AND fe.instrument_id = %s
+              AND fil.accession_number IS NULL
+            ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
+            LIMIT %s
+            """,
+            (instrument_id, limit),
+        )
+        for row in cur.fetchall():
+            candidates.append((int(row[0]), str(row[1]), _canonical_form_4_url(str(row[2]))))
+    conn.commit()
+
+    return _process_candidates(conn, fetcher, candidates)
+
+
 def ingest_insider_transactions(
     conn: psycopg.Connection[Any],
     fetcher: _DocFetcher,
@@ -989,6 +1043,21 @@ def ingest_insider_transactions(
             candidates.append((int(row[0]), str(row[1]), _canonical_form_4_url(str(row[2]))))
     conn.commit()
 
+    return _process_candidates(conn, fetcher, candidates)
+
+
+def _process_candidates(
+    conn: psycopg.Connection[Any],
+    fetcher: _DocFetcher,
+    candidates: list[tuple[int, str, str]],
+) -> IngestResult:
+    """Shared fetch-parse-upsert loop for every ingest entry point.
+
+    Each candidate is ``(instrument_id, accession_number,
+    canonical_url)``. Fetch errors / None bodies / parse misses all
+    write a filing-level tombstone so the ingester never re-fetches
+    a dead accession. Successful parses flow through
+    :func:`upsert_filing` which refreshes every column on conflict."""
     filings_parsed = 0
     rows_inserted = 0
     fetch_errors = 0
@@ -1064,6 +1133,93 @@ def ingest_insider_transactions(
         fetch_errors=fetch_errors,
         parse_misses=parse_misses,
     )
+
+
+def ingest_insider_transactions_backfill(
+    conn: psycopg.Connection[Any],
+    fetcher: _DocFetcher,
+    *,
+    instruments_per_tick: int = 25,
+    per_instrument_limit: int = 50,
+) -> dict[str, int]:
+    """Round-robin backfill for instruments with un-ingested Form 4
+    filings. Complements :func:`ingest_insider_transactions` (which
+    runs newest-first universe-wide and can starve deep per-ticker
+    backlogs).
+
+    Strategy: pick the ``instruments_per_tick`` instruments with the
+    most un-ingested candidates, drain up to ``per_instrument_limit``
+    oldest candidates for each. "Oldest-first" because the newest-first
+    universe job already covers the recent end; this job clears the
+    historical tail.
+
+    Returns per-bucket counters so scheduler observability can pick
+    out how many instruments made progress.
+    """
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT fe.instrument_id, COUNT(*) AS unfetched
+            FROM filing_events fe
+            LEFT JOIN insider_filings fil ON fil.accession_number = fe.provider_filing_id
+            WHERE fe.provider = 'sec'
+              AND fe.filing_type IN ('4', '4/A')
+              AND fe.primary_document_url IS NOT NULL
+              AND fil.accession_number IS NULL
+            GROUP BY fe.instrument_id
+            ORDER BY unfetched DESC
+            LIMIT %s
+            """,
+            (instruments_per_tick,),
+        )
+        targets = [(int(r[0]), int(r[1])) for r in cur.fetchall()]
+    conn.commit()
+
+    totals = {
+        "instruments_processed": 0,
+        "filings_parsed": 0,
+        "rows_inserted": 0,
+        "fetch_errors": 0,
+        "parse_misses": 0,
+    }
+
+    for instrument_id, _unfetched in targets:
+        candidates: list[tuple[int, str, str]] = []
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT fe.instrument_id,
+                       fe.provider_filing_id,
+                       fe.primary_document_url
+                FROM filing_events fe
+                LEFT JOIN insider_filings fil
+                    ON fil.accession_number = fe.provider_filing_id
+                WHERE fe.provider = 'sec'
+                  AND fe.filing_type IN ('4', '4/A')
+                  AND fe.primary_document_url IS NOT NULL
+                  AND fe.instrument_id = %s
+                  AND fil.accession_number IS NULL
+                ORDER BY fe.filing_date ASC, fe.filing_event_id ASC
+                LIMIT %s
+                """,
+                (instrument_id, per_instrument_limit),
+            )
+            for row in cur.fetchall():
+                candidates.append((int(row[0]), str(row[1]), _canonical_form_4_url(str(row[2]))))
+        conn.commit()
+
+        if not candidates:
+            continue
+        result = _process_candidates(conn, fetcher, candidates)
+        totals["instruments_processed"] += 1
+        totals["filings_parsed"] += result.filings_parsed
+        totals["rows_inserted"] += result.rows_inserted
+        totals["fetch_errors"] += result.fetch_errors
+        totals["parse_misses"] += result.parse_misses
+
+    return totals
 
 
 # ---------------------------------------------------------------------

@@ -47,7 +47,7 @@ afterEach(() => vi.clearAllMocks());
 
 
 describe("SecProfilePanel", () => {
-  it("renders description + SIC + exchanges + former names + insider badge", async () => {
+  it("renders description + SIC + exchanges + former names", async () => {
     mockFetch.mockResolvedValue(seededProfile());
     render(<SecProfilePanel symbol="AAPL" />);
 
@@ -58,8 +58,11 @@ describe("SecProfilePanel", () => {
     expect(screen.getByText(/NASDAQ/)).toBeInTheDocument();
     expect(screen.getByText(/Large accelerated filer/)).toBeInTheDocument();
     expect(screen.getByText(/APPLE COMPUTER INC/)).toBeInTheDocument();
-    expect(screen.getByText(/Insider activity recorded/i)).toBeInTheDocument();
     expect(screen.getByText(/Sep 30/i)).toBeInTheDocument();
+    // Stale #429 placeholder must be gone — Form-4 activity lives in
+    // the sibling InsiderActivityPanel now.
+    expect(screen.queryByText(/Insider activity recorded/i)).toBeNull();
+    expect(screen.queryByText(/detailed list pending/i)).toBeNull();
   });
 
   it("renders empty state when profile is null (404)", async () => {
