@@ -130,6 +130,39 @@ export async function fetchInstrumentSecProfile(
 }
 
 // ---------------------------------------------------------------------------
+// 10-K Item 1 subsection breakdown (#449)
+// ---------------------------------------------------------------------------
+
+export interface BusinessCrossReference {
+  reference_type: string;
+  target: string;
+  context: string;
+}
+
+export interface BusinessSection {
+  section_order: number;
+  section_key: string;
+  section_label: string;
+  body: string;
+  cross_references: BusinessCrossReference[];
+}
+
+export interface BusinessSectionsResponse {
+  symbol: string;
+  source_accession: string | null;
+  sections: BusinessSection[];
+}
+
+export function fetchBusinessSections(
+  symbol: string,
+): Promise<BusinessSectionsResponse> {
+  return apiFetch<BusinessSectionsResponse>(
+    `/instruments/${encodeURIComponent(symbol)}/business_sections`,
+  );
+}
+
+
+// ---------------------------------------------------------------------------
 // Insider-transactions (Form 4) endpoints (#429)
 // ---------------------------------------------------------------------------
 

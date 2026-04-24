@@ -12,7 +12,10 @@ import pytest
 
 from app.services.business_summary import (
     MAX_BODY_BYTES,
+    ParsedBusinessSection,
+    ParsedCrossReference,
     extract_business_section,
+    extract_business_sections,
 )
 
 
@@ -156,3 +159,125 @@ class TestExtractBusinessSection:
         body = extract_business_section(html)
         assert body is not None
         assert "We are a company" in body
+
+
+class TestExtractBusinessSections:
+    """#449 — subsection-level extraction."""
+
+    def test_canonical_subsections_mapped_and_ordered(self) -> None:
+        """A 10-K with named subsections: General intro, Products,
+        Competition, Human Capital, Regulation. Each heading lands as
+        its own section with the canonical section_key and the
+        verbatim label preserved."""
+        html = """
+        <html><body>
+        <h2>Item 1. Business</h2>
+        <p>The Company is a global manufacturer of industrial
+           materials, incorporated in Delaware in 2001.</p>
+        <h3>Products</h3>
+        <p>Our products span three categories: coatings, films, and
+           adhesives. See Item 7 for segment-level revenue breakdown.</p>
+        <h3>Competition</h3>
+        <p>Competitors include Acme Corp and GlobalChem Inc.</p>
+        <h3>Human Capital Resources</h3>
+        <p>As of fiscal year end, we employed 12,400 people across 24
+           countries.</p>
+        <h3>Government Regulation</h3>
+        <p>Our operations are subject to environmental regulations
+           described in Note 15 of the financial statements.</p>
+        <h2>Item 1A. Risk Factors</h2>
+        <p>The following risks affect our business.</p>
+        </body></html>
+        """
+        sections = extract_business_sections(html)
+        assert len(sections) >= 5
+        keys = [s.section_key for s in sections]
+        labels = [s.section_label for s in sections]
+        # The pre-heading general block is always the first.
+        assert keys[0] == "general"
+        assert "global manufacturer" in sections[0].body
+        # Named subsections map to canonical keys.
+        assert "products" in keys
+        assert "competition" in keys
+        assert "human_capital" in keys
+        assert "regulatory" in keys
+        # Verbatim label preserved (not collapsed to canonical key).
+        assert "Human Capital Resources" in labels
+
+    def test_unmapped_heading_falls_through_as_other(self) -> None:
+        """A heading we don't recognise doesn't get silently dropped —
+        it lands as section_key='other' with the verbatim label."""
+        html = """
+        <html><body>
+        <h2>Item 1. Business</h2>
+        <p>Overview text.</p>
+        <h3>Our Approach to Quantum Something</h3>
+        <p>Details about an obscure subsection.</p>
+        <h2>Item 1A. Risk Factors</h2>
+        </body></html>
+        """
+        sections = extract_business_sections(html)
+        others = [s for s in sections if s.section_key == "other"]
+        assert len(others) >= 1
+        assert any("Quantum" in o.section_label for o in others)
+        assert any("obscure subsection" in o.body for o in others)
+
+    def test_cross_references_captured_per_section(self) -> None:
+        html = """
+        <html><body>
+        <h2>Item 1. Business</h2>
+        <p>See Item 7 and Item 1A for more.</p>
+        <h3>Products</h3>
+        <p>Revenue breakdowns in Exhibit 21 and Note 15.</p>
+        <h2>Item 1A. Risk Factors</h2>
+        </body></html>
+        """
+        sections = extract_business_sections(html)
+        assert sections
+        # General block: item refs.
+        general = next(s for s in sections if s.section_key == "general")
+        ref_types = {r.reference_type for r in general.cross_references}
+        ref_targets = {r.target for r in general.cross_references}
+        assert "item" in ref_types
+        assert "Item 7" in ref_targets
+        # Products block: exhibit + note refs.
+        products = next((s for s in sections if s.section_key == "products"), None)
+        assert products is not None
+        prod_refs = {(r.reference_type, r.target) for r in products.cross_references}
+        assert ("exhibit", "Exhibit 21") in prod_refs
+        assert ("note", "Note 15") in prod_refs
+
+    def test_no_subsections_emits_single_general_block(self) -> None:
+        """A 10-K with no recognisable subsection headings falls back
+        to a single ``general`` block carrying the full Item 1 body."""
+        html = """
+        <html><body>
+        <h2>Item 1. Business</h2>
+        <p>One long paragraph describing the business without internal
+           headings. This is a large part of legacy 10-K filings that
+           used a single narrative block.</p>
+        <h2>Item 1A. Risk Factors</h2>
+        </body></html>
+        """
+        sections = extract_business_sections(html)
+        assert len(sections) == 1
+        assert sections[0].section_key == "general"
+        assert "One long paragraph" in sections[0].body
+
+    def test_empty_input_returns_empty(self) -> None:
+        assert extract_business_sections("") == ()
+        assert extract_business_sections("<html></html>") == ()
+
+    def test_parsed_shape(self) -> None:
+        html = """
+        <html><body>
+        <h2>Item 1. Business</h2>
+        <p>We do things. See Item 7.</p>
+        <h2>Item 1A. Risk Factors</h2>
+        </body></html>
+        """
+        sections = extract_business_sections(html)
+        assert sections
+        assert isinstance(sections[0], ParsedBusinessSection)
+        if sections[0].cross_references:
+            assert isinstance(sections[0].cross_references[0], ParsedCrossReference)

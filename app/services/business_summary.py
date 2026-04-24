@@ -1,4 +1,4 @@
-"""10-K Item 1 "Business" narrative extractor + ingester (#428).
+"""10-K Item 1 "Business" narrative extractor + ingester (#428 / #449).
 
 Replaces the Yahoo ``longBusinessSummary`` blurb with the
 authoritative multi-page description every SEC 10-K carries under
@@ -7,14 +7,27 @@ Item 1. Free, official, bounded per issuer to ~quarterly cadence
 
 Shape mirrors :mod:`app.services.dividend_calendar` (#434):
 
-- :func:`extract_business_section` is a pure function over raw HTML.
+- :func:`extract_business_section` is a pure function over raw HTML
+  returning the whole-Item-1 blob (#428).
+- :func:`extract_business_sections` (#449) is a pure function over
+  raw HTML returning the subsection-level breakdown: every heading
+  inside Item 1 becomes its own :class:`ParsedBusinessSection` with
+  a canonical ``section_key``, the verbatim ``section_label``, the
+  body text, and a list of cross-references to other items /
+  exhibits / notes.
 - :func:`ingest_business_summaries` is the DB path, bounded per run
   with a 7-day TTL on ``last_parsed_at`` so repeat fetches don't
-  consume SEC rate-limit budget.
+  consume SEC rate-limit budget. It populates both the blob table
+  (``instrument_business_summary``) and the sections table
+  (``instrument_business_summary_sections``).
 
 Acceptance bar from issue #428: instrument page shows an authentic
 10-K business description for US tickers with a 10-K on file;
 yfinance fallback only when absent.
+
+Acceptance bar from issue #449: every Item 1 subsection lands as a
+queryable row — no silent drops; unmapped headings surface as
+``section_key='other'`` with the original heading preserved.
 """
 
 from __future__ import annotations
@@ -25,6 +38,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +150,359 @@ def extract_business_section(raw_html: str) -> str | None:
 
 
 # ---------------------------------------------------------------------
+# Subsection extraction (#449)
+# ---------------------------------------------------------------------
+
+
+# Canonical section-key mapping. Keys are lowercased heading phrases;
+# values are the canonical ``section_key`` stored on
+# ``instrument_business_summary_sections``. Order-insensitive.
+#
+# The mapping tolerates common wording variants — e.g. "Human Capital",
+# "Human Capital Resources", "Our People", "Our People and Culture"
+# all resolve to ``human_capital``. Headings that don't match any key
+# fall through as ``section_key='other'`` with the verbatim label
+# preserved, so nothing is silently dropped.
+_CANONICAL_KEY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("general", re.compile(r"^(general|overview|our company|business overview|company overview)\b", re.IGNORECASE)),
+    ("strategy", re.compile(r"^(our )?(business )?strategy\b|^our strategic priorities\b", re.IGNORECASE)),
+    ("history", re.compile(r"^(our )?history\b|^background\b", re.IGNORECASE)),
+    (
+        "segments",
+        re.compile(
+            r"^(reportable |business |operating )?segments?\b|^segment (information|reporting)\b", re.IGNORECASE
+        ),
+    ),
+    ("products", re.compile(r"^(our )?products\b(?! and services)|^principal products\b", re.IGNORECASE)),
+    ("services", re.compile(r"^(our )?services\b(?! and products)", re.IGNORECASE)),
+    ("products_and_services", re.compile(r"^products and services\b|^services and products\b", re.IGNORECASE)),
+    (
+        "customers",
+        re.compile(r"^(our )?customers\b|^principal customers\b|^major customers\b|^clients\b", re.IGNORECASE),
+    ),
+    ("markets", re.compile(r"^(our )?markets\b|^geograph(?:ic|ical) (areas|markets|information)\b", re.IGNORECASE)),
+    ("competition", re.compile(r"^competit(ion|ive (landscape|environment))\b", re.IGNORECASE)),
+    ("seasonality", re.compile(r"^seasonal(ity|\s)\b", re.IGNORECASE)),
+    ("backlog", re.compile(r"^backlog\b", re.IGNORECASE)),
+    (
+        "raw_materials",
+        re.compile(r"^(raw materials|supply chain|sources (of|and) (supply|materials))\b", re.IGNORECASE),
+    ),
+    ("manufacturing", re.compile(r"^(manufacturing|production|operations)\b", re.IGNORECASE)),
+    ("sales_marketing", re.compile(r"^(sales|marketing|sales and marketing|distribution)\b", re.IGNORECASE)),
+    (
+        "ip",
+        re.compile(
+            r"^(intellectual property|patents|trademarks?|proprietary rights?|patents?,?\s*trademarks?)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "r_and_d",
+        re.compile(r"^(research and development|r&\s*d|r and d|research & development)\b", re.IGNORECASE),
+    ),
+    (
+        "regulatory",
+        re.compile(
+            r"^((government )?regulat(ion|ory)|regulatory (matters|environment|landscape))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("environmental", re.compile(r"^environmental (matters|compliance|regulation)\b", re.IGNORECASE)),
+    ("climate", re.compile(r"^(climate change|climate-related|sustainability|esg)\b", re.IGNORECASE)),
+    (
+        "human_capital",
+        re.compile(
+            r"^(human capital(\s+(resources|management))?|employees|our (people|employees|workforce|team)|"
+            r"our people and culture)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("properties", re.compile(r"^(properties|facilities|real estate)\b", re.IGNORECASE)),
+    (
+        "corporate_info",
+        re.compile(r"^(corporate (information|history)|about (us|our company))\b", re.IGNORECASE),
+    ),
+    (
+        "available_information",
+        re.compile(r"^(available information|sec filings|where you can find more information)\b", re.IGNORECASE),
+    ),
+)
+
+
+# Heading detection. SEC 10-Ks express subsection headings through
+# structural HTML — ``<h1>``..``<h6>``, ``<b>``, ``<strong>``, or
+# styled ``<p>`` / ``<div>`` blocks. Detecting headings from fully-
+# stripped plain text is unreliable (title-case noun phrases like
+# "The Company" match as easily as a real heading).
+#
+# Strategy: before stripping the body to plain text, wrap the inner
+# text of every heading tag with a unit-separator sentinel
+# (``␟``). The sentinel survives the subsequent HTML strip, so we
+# can split the stripped body on sentinel boundaries and recover every
+# text span that was originally inside a heading tag. We then test
+# each candidate heading text against ``_looks_like_heading`` to
+# filter out boilerplate (bold inline emphasis, TOC link text, etc.).
+_HEADING_MAX_LEN = 80
+_SENTENCE_ENDER_RE = re.compile(r"[.!?;](?!$)")
+_MIN_WORD_COUNT = 1
+_MAX_WORD_COUNT = 10
+
+_HEADING_SENTINEL = "␟"
+
+# Match <h1>..<h6>, <b>, <strong>, and their closing tags. Inner text
+# gets wrapped with the sentinel before HTML strip. Non-greedy so a
+# single unclosed tag doesn't swallow the whole document.
+_HEADING_WRAP_RE = re.compile(
+    r"<(?P<tag>h[1-6]|b|strong)(?:\s[^>]*)?>(?P<inner>.*?)</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+@dataclass(frozen=True)
+class ParsedCrossReference:
+    """One cross-reference pointer extracted from a section body."""
+
+    reference_type: str  # "item" / "exhibit" / "note" / "filing" / "part"
+    target: str  # canonical short label, e.g. "Item 1A", "Exhibit 21.1"
+    context: str  # sentence-sized phrase around the reference
+
+
+@dataclass(frozen=True)
+class ParsedBusinessSection:
+    """One subsection extracted from Item 1."""
+
+    section_order: int
+    section_key: str  # canonical key from _CANONICAL_KEY_PATTERNS or "other"
+    section_label: str  # heading as it appeared in the filing, verbatim
+    body: str
+    cross_references: tuple[ParsedCrossReference, ...]
+
+
+# Cross-reference regex. Matches the common forms "Item 1A", "Item 7",
+# "Exhibit 21", "Note 15", "Part II". Captures the reference_type and
+# short target; the context is the surrounding ~120-char window.
+_REF_ITEM_RE = re.compile(r"\bItem\s+(\d{1,2}[A-Za-z]?)\b")
+_REF_EXHIBIT_RE = re.compile(r"\bExhibit\s+(\d{1,2}(?:\.\d{1,2})?)\b")
+_REF_NOTE_RE = re.compile(r"\bNote\s+(\d{1,2}[A-Za-z]?)\b")
+_REF_PART_RE = re.compile(r"\bPart\s+(I{1,3}V?|IV|[1-4])\b")
+
+
+def _classify_section_heading(heading: str) -> str:
+    """Map a heading phrase to a canonical ``section_key``.
+
+    Returns ``"other"`` when no pattern matches — callers preserve
+    the verbatim heading in ``section_label`` so nothing is lost.
+    """
+    h = heading.strip()
+    for key, pattern in _CANONICAL_KEY_PATTERNS:
+        if pattern.search(h):
+            return key
+    return "other"
+
+
+def _looks_like_heading(line: str) -> bool:
+    """True if ``line`` (originally inside an HTML heading tag)
+    plausibly stands alone as a subsection heading.
+
+    The sentinel wrapper already proves the text was emphasised in
+    the source HTML — our job here is to reject obvious non-headings:
+
+    - Too long (> 80 chars, so inline bold emphasis spanning a full
+      sentence is filtered out).
+    - Contains internal sentence punctuation (the DOM sometimes bolds
+      an opening clause of a paragraph; those aren't headings).
+    - Too many words for a typical heading.
+    - All digits / single character / empty.
+
+    What we do *not* check: casing. Inside a heading tag, any
+    non-empty short phrase is a candidate regardless of Title-Case /
+    ALL-CAPS / sentence-case shape.
+    """
+    stripped = line.strip().rstrip(":.")
+    if not stripped or len(stripped) > _HEADING_MAX_LEN:
+        return False
+    words = stripped.split()
+    if len(words) < _MIN_WORD_COUNT or len(words) > _MAX_WORD_COUNT:
+        return False
+    if _SENTENCE_ENDER_RE.search(stripped):
+        return False
+    # Must contain at least one alphabetic character — reject
+    # "3.", "(a)", etc.
+    return any(c.isalpha() for c in stripped)
+
+
+def _extract_cross_references(body: str) -> tuple[ParsedCrossReference, ...]:
+    """Harvest Item / Exhibit / Note / Part references from a section
+    body. Each hit carries a ~120-char context window for audit."""
+    refs: list[ParsedCrossReference] = []
+    for ref_type, pattern, label_fmt in (
+        ("item", _REF_ITEM_RE, "Item {}"),
+        ("exhibit", _REF_EXHIBIT_RE, "Exhibit {}"),
+        ("note", _REF_NOTE_RE, "Note {}"),
+        ("part", _REF_PART_RE, "Part {}"),
+    ):
+        for m in pattern.finditer(body):
+            target = label_fmt.format(m.group(1))
+            start = max(0, m.start() - 60)
+            end = min(len(body), m.end() + 60)
+            context = body[start:end].strip()
+            refs.append(
+                ParsedCrossReference(
+                    reference_type=ref_type,
+                    target=target,
+                    context=context,
+                )
+            )
+    return tuple(refs)
+
+
+def _wrap_heading_tags(raw_html: str) -> str:
+    """Wrap the inner text of every heading-candidate tag in
+    ``<␟…␟>`` sentinels so the subsequent HTML strip preserves a
+    machine-detectable boundary at each original heading position.
+    """
+
+    def _wrap(m: re.Match[str]) -> str:
+        inner = m.group("inner")
+        return f" {_HEADING_SENTINEL}{inner}{_HEADING_SENTINEL} "
+
+    return _HEADING_WRAP_RE.sub(_wrap, raw_html)
+
+
+def extract_business_sections(raw_html: str) -> tuple[ParsedBusinessSection, ...]:
+    """Extract Item 1 as an ordered list of subsections.
+
+    Returns an empty tuple when Item 1 can't be located. Otherwise
+    returns every detectable subsection in source order. The first
+    element (section_order=0) is the general / overview text that
+    precedes the first subsection heading, labelled ``"General"``
+    when no explicit heading is present.
+
+    Unmapped headings get ``section_key='other'`` with their
+    verbatim text preserved in ``section_label`` — no silent drops.
+
+    Heading detection uses HTML structure (``<h1>``..``<h6>``,
+    ``<b>``, ``<strong>``) rather than plain-text shape inference,
+    so title-case noun phrases in narrative prose aren't confused
+    for real subsection headings.
+    """
+    if not raw_html:
+        return ()
+    # Pre-strip: wrap heading-tag inner text with sentinels so the
+    # boundaries survive the subsequent plain-text collapse.
+    marked_html = _wrap_heading_tags(raw_html)
+    text = _strip_html(marked_html)
+
+    matches_1 = list(_ITEM_1_RE.finditer(text))
+    if not matches_1:
+        return ()
+    matches_1a = list(_ITEM_1A_RE.finditer(text))
+    end = matches_1a[-1].start() if matches_1a else len(text)
+    candidates = [m for m in matches_1 if m.start() < end]
+    if not candidates:
+        return ()
+    start = candidates[-1].end()
+
+    # If the Item 1 heading was itself wrapped in sentinels, the first
+    # sentinel immediately after ``start`` is the closing of that
+    # heading — skip past it so the body doesn't begin with an orphan
+    # closing marker (which would mis-pair subsequent headings).
+    if start < len(text) and text[start : start + 3].lstrip().startswith(_HEADING_SENTINEL):
+        s_idx = text.find(_HEADING_SENTINEL, start)
+        if s_idx != -1 and s_idx < end:
+            start = s_idx + 1
+    # Same on the end side: if the Item 1A heading was wrapped, back
+    # off before its opening sentinel so we don't leave an orphan
+    # opening marker dangling at the tail of the body.
+    if end > 0:
+        back_idx = text.rfind(_HEADING_SENTINEL, start, end)
+        if back_idx != -1 and back_idx > start:
+            # Only trim when the trailing region between the sentinel
+            # and ``end`` is entirely whitespace — otherwise we'd cut
+            # off real body content.
+            if text[back_idx + 1 : end].strip() == "":
+                end = back_idx
+
+    item_1_body = text[start:end].strip()
+    if not item_1_body:
+        return ()
+
+    # Each sentinel pair wraps one heading-tag's content. Walk the
+    # body and collect (start, end, heading_text) triples, keeping
+    # only those whose text passes _looks_like_heading — inline bold
+    # emphasis inside a paragraph usually isn't heading-shaped
+    # (contains sentence punctuation, is too long, etc.).
+    headings: list[tuple[int, int, str]] = []
+    cursor = 0
+    while cursor < len(item_1_body):
+        open_idx = item_1_body.find(_HEADING_SENTINEL, cursor)
+        if open_idx == -1:
+            break
+        close_idx = item_1_body.find(_HEADING_SENTINEL, open_idx + 1)
+        if close_idx == -1:
+            break
+        heading_text = item_1_body[open_idx + 1 : close_idx].strip()
+        if _looks_like_heading(heading_text):
+            headings.append((open_idx, close_idx + 1, heading_text))
+        cursor = close_idx + 1
+
+    # Build the section list. Strip sentinels from each body slice so
+    # the stored ``body`` is clean narrative.
+    def _clean(s: str) -> str:
+        return s.replace(_HEADING_SENTINEL, " ").strip()
+
+    sections: list[ParsedBusinessSection] = []
+    if not headings:
+        # No subsections detected — emit a single "general" block.
+        body_clean = _clean(item_1_body)
+        if body_clean:
+            sections.append(
+                ParsedBusinessSection(
+                    section_order=0,
+                    section_key="general",
+                    section_label="General",
+                    body=body_clean,
+                    cross_references=_extract_cross_references(body_clean),
+                )
+            )
+        return tuple(sections)
+
+    # Pre-heading general block.
+    first_heading_start = headings[0][0]
+    if first_heading_start > 0:
+        pre_body = _clean(item_1_body[:first_heading_start])
+        if pre_body:
+            sections.append(
+                ParsedBusinessSection(
+                    section_order=0,
+                    section_key="general",
+                    section_label="General",
+                    body=pre_body,
+                    cross_references=_extract_cross_references(pre_body),
+                )
+            )
+
+    for idx, (_h_start, h_end, heading_text) in enumerate(headings):
+        next_start = headings[idx + 1][0] if idx + 1 < len(headings) else len(item_1_body)
+        body_slice = _clean(item_1_body[h_end:next_start])
+        if not body_slice:
+            continue
+        section_key = _classify_section_heading(heading_text)
+        sections.append(
+            ParsedBusinessSection(
+                section_order=len(sections),
+                section_key=section_key,
+                section_label=heading_text,
+                body=body_slice,
+                cross_references=_extract_cross_references(body_slice),
+            )
+        )
+
+    return tuple(sections)
+
+
+# ---------------------------------------------------------------------
 # DB upsert
 # ---------------------------------------------------------------------
 
@@ -169,6 +536,65 @@ def upsert_business_summary(
         )
         row = cur.fetchone()
         return bool(row[0]) if row else False
+
+
+def upsert_business_sections(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    source_accession: str,
+    sections: tuple[ParsedBusinessSection, ...],
+) -> int:
+    """Replace the sections snapshot for ``(instrument, accession)``
+    with the parsed list.
+
+    The sections table is keyed by ``(instrument, accession, order)``,
+    so a re-parse of the same accession under a better heading detector
+    must not leak stale rows. Clear the prior snapshot for the same
+    accession, then re-insert. Tombstone path (empty sections) writes
+    nothing.
+    """
+    if not sections:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM instrument_business_summary_sections
+            WHERE instrument_id = %s AND source_accession = %s
+            """,
+            (instrument_id, source_accession),
+        )
+        inserted = 0
+        for section in sections:
+            cross_refs_json = Jsonb(
+                [
+                    {
+                        "reference_type": ref.reference_type,
+                        "target": ref.target,
+                        "context": ref.context,
+                    }
+                    for ref in section.cross_references
+                ]
+            )
+            cur.execute(
+                """
+                INSERT INTO instrument_business_summary_sections
+                    (instrument_id, source_accession, section_order,
+                     section_key, section_label, body, cross_references)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    instrument_id,
+                    source_accession,
+                    section.section_order,
+                    section.section_key,
+                    section.section_label,
+                    section.body,
+                    cross_refs_json,
+                ),
+            )
+            inserted += 1
+        return inserted
 
 
 def record_parse_attempt(
@@ -230,6 +656,74 @@ def get_business_summary(
         return None
     body = str(row[0])
     return body if body else None
+
+
+@dataclass(frozen=True)
+class BusinessSectionRow:
+    """One section as surfaced to the UI: parsed shape + audit fields."""
+
+    section_order: int
+    section_key: str
+    section_label: str
+    body: str
+    cross_references: tuple[ParsedCrossReference, ...]
+    source_accession: str
+
+
+def get_business_sections(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+) -> tuple[BusinessSectionRow, ...]:
+    """Return Item 1 subsections for an instrument in source order.
+
+    Empty tuple when no sections are stored. Filters to the most
+    recent accession — later 10-Ks supersede via the ingester, so
+    this keeps the UI on the freshest filing.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT section_order, section_key, section_label, body,
+                   cross_references, source_accession
+            FROM instrument_business_summary_sections
+            WHERE instrument_id = %s
+              AND source_accession = (
+                  SELECT source_accession
+                  FROM instrument_business_summary_sections
+                  WHERE instrument_id = %s
+                  ORDER BY fetched_at DESC
+                  LIMIT 1
+              )
+            ORDER BY section_order ASC
+            """,
+            (instrument_id, instrument_id),
+        )
+        raw_rows = cur.fetchall()
+    rows: list[BusinessSectionRow] = []
+    for r in raw_rows:
+        refs_raw = r[4] or []
+        refs_list = refs_raw if isinstance(refs_raw, list) else []
+        refs = tuple(
+            ParsedCrossReference(
+                reference_type=str(ref.get("reference_type", "")),
+                target=str(ref.get("target", "")),
+                context=str(ref.get("context", "")),
+            )
+            for ref in refs_list
+            if isinstance(ref, dict)
+        )
+        rows.append(
+            BusinessSectionRow(
+                section_order=int(r[0]),
+                section_key=str(r[1]),
+                section_label=str(r[2]),
+                body=str(r[3]),
+                cross_references=refs,
+                source_accession=str(r[5]),
+            )
+        )
+    return tuple(rows)
 
 
 # ---------------------------------------------------------------------
@@ -365,6 +859,29 @@ def ingest_business_summaries(
                 body=body,
                 source_accession=accession,
             )
+            # #449 — also populate the sections table. We re-run the
+            # sections extractor over the same HTML so the two writes
+            # share a single fetch. Sections are a best-effort
+            # enrichment: if subsection detection fails (no headings)
+            # the extractor returns a single "general" block and the
+            # blob view still renders. A failure inside the sections
+            # upsert must not roll back the blob write.
+            sections = extract_business_sections(html)
+            if sections:
+                try:
+                    upsert_business_sections(
+                        conn,
+                        instrument_id=instrument_id,
+                        source_accession=accession,
+                        sections=sections,
+                    )
+                except Exception:
+                    logger.warning(
+                        "ingest_business_summaries: section upsert failed accession=%s "
+                        "(blob already stored; rendering degrades to blob-only)",
+                        accession,
+                        exc_info=True,
+                    )
             conn.commit()
         except Exception:
             conn.rollback()
