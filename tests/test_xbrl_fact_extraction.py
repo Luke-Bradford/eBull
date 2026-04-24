@@ -214,3 +214,116 @@ class TestExtractFactsFromGaap:
         }
         facts = _extract_facts_from_gaap(gaap)
         assert len(facts) == 1
+
+
+# ---------------------------------------------------------------------------
+# DEI taxonomy extraction (#430)
+# ---------------------------------------------------------------------------
+
+
+class TestDeiExtraction:
+    """DEI cover-page facts get their own taxonomy tag + allowlist so
+    downstream consumers can partition by ``fact.taxonomy``."""
+
+    def test_entity_common_stock_shares_outstanding_extracted_under_dei(self) -> None:
+        from app.providers.implementations.sec_fundamentals import (
+            _ALL_TRACKED_DEI_TAGS,
+            _extract_facts_from_section,
+        )
+
+        dei = {
+            "EntityCommonStockSharesOutstanding": {
+                "units": {
+                    "shares": [
+                        _make_xbrl_entry(
+                            end="2024-03-31",
+                            val=15_000_000_000.0,
+                            start=None,  # point-in-time fact
+                        )
+                    ]
+                }
+            }
+        }
+        facts = _extract_facts_from_section(dei, taxonomy="dei", allowed_tags=_ALL_TRACKED_DEI_TAGS)
+        assert len(facts) == 1
+        assert facts[0].taxonomy == "dei"
+        assert facts[0].concept == "EntityCommonStockSharesOutstanding"
+        assert facts[0].val == Decimal("15000000000.0")
+
+    def test_non_allowlisted_dei_tag_skipped(self) -> None:
+        from app.providers.implementations.sec_fundamentals import (
+            _ALL_TRACKED_DEI_TAGS,
+            _extract_facts_from_section,
+        )
+
+        dei = {
+            # Real DEI tag we don't track — should NOT land.
+            "DocumentType": {"units": {"pure": [_make_xbrl_entry(end="2024-03-31", val=10.0)]}}
+        }
+        facts = _extract_facts_from_section(dei, taxonomy="dei", allowed_tags=_ALL_TRACKED_DEI_TAGS)
+        assert facts == []
+
+    def test_employees_and_public_float_both_tracked(self) -> None:
+        from app.providers.implementations.sec_fundamentals import (
+            _ALL_TRACKED_DEI_TAGS,
+            _extract_facts_from_section,
+        )
+
+        dei = {
+            "EntityNumberOfEmployees": {
+                "units": {"pure": [_make_xbrl_entry(end="2024-09-30", val=150_000.0, start=None)]}
+            },
+            "EntityPublicFloat": {
+                "units": {"USD": [_make_xbrl_entry(end="2024-06-30", val=2_800_000_000.0, start=None)]}
+            },
+        }
+        facts = _extract_facts_from_section(dei, taxonomy="dei", allowed_tags=_ALL_TRACKED_DEI_TAGS)
+        concepts = {f.concept for f in facts}
+        assert concepts == {"EntityNumberOfEmployees", "EntityPublicFloat"}
+        assert all(f.taxonomy == "dei" for f in facts)
+
+
+class TestExtendedUsGaapConcepts:
+    """#430: expanded us-gaap set (dps_cash_paid, shares_issued_new,
+    buyback_shares, effective_tax_rate, dividends_payable_per_share)."""
+
+    def test_dps_cash_paid_extracted(self) -> None:
+        gaap = {
+            "CommonStockDividendsPerShareCashPaid": {
+                "units": {
+                    "USD/shares": [
+                        _make_xbrl_entry(end="2024-03-31", val=0.24, decimals=4),
+                    ]
+                }
+            }
+        }
+        facts = _extract_facts_from_gaap(gaap)
+        assert len(facts) == 1
+        assert facts[0].concept == "CommonStockDividendsPerShareCashPaid"
+
+    def test_shares_issued_new_extracted(self) -> None:
+        gaap = {
+            "StockIssuedDuringPeriodSharesNewIssues": {
+                "units": {"shares": [_make_xbrl_entry(end="2024-03-31", val=100_000.0)]}
+            }
+        }
+        facts = _extract_facts_from_gaap(gaap)
+        assert len(facts) == 1
+
+    def test_effective_tax_rate_extracted(self) -> None:
+        gaap = {
+            "EffectiveIncomeTaxRateContinuingOperations": {
+                "units": {"pure": [_make_xbrl_entry(end="2024-03-31", val=0.21, decimals=4)]}
+            }
+        }
+        facts = _extract_facts_from_gaap(gaap)
+        assert len(facts) == 1
+
+    def test_buyback_shares_alt_tag_extracted(self) -> None:
+        # TreasuryStockSharesAcquired is the alternate tag some filers use.
+        gaap = {
+            "TreasuryStockSharesAcquired": {"units": {"shares": [_make_xbrl_entry(end="2024-03-31", val=5_000_000.0)]}}
+        }
+        facts = _extract_facts_from_gaap(gaap)
+        assert len(facts) == 1
+        assert facts[0].concept == "TreasuryStockSharesAcquired"
