@@ -263,11 +263,15 @@ class SecFilingsProvider(FilingsProvider):
         ``filing_documents`` service for the per-document manifest
         (#452).
 
-        **Contract**: the dict returned by this method MUST be
-        normalised into SQL (``filing_documents`` for the per-doc
-        manifest; ``filing_events`` for header fields). No disk-only
-        persistence — every structured field is captured in a
-        queryable table.
+        Provider-level JSON payload: the raw response is persisted
+        to ``data/raw/sec/sec_filing_*`` as the audit-trail contract
+        from prevention-log entries #171 / #177 requires — the
+        per-document structural capture lands in ``filing_documents``
+        via the service layer, and the raw dump is retained for
+        audit alongside it (structured JSON payloads remain on disk;
+        body text does not — see docs/review-prevention-log.md
+        "Every structured field from an upstream document lands in
+        SQL").
         """
         raw_id = provider_filing_id.replace("-", "")
         if len(raw_id) != 18:
@@ -281,6 +285,14 @@ class SecFilingsProvider(FilingsProvider):
         parsed = resp.json()
         if not isinstance(parsed, dict):
             return None
+        # Persist raw audit trail — same contract as the other
+        # provider-JSON methods in this file. The structural capture
+        # into SQL happens in the service layer (#452).
+        raw_persistence.persist_raw_if_new(
+            "sec",
+            f"sec_filing_{provider_filing_id.replace('/', '_')}",
+            parsed,
+        )
         return parsed
 
     def fetch_document_text(self, absolute_url: str) -> str | None:

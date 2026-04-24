@@ -309,10 +309,12 @@ def ingest_filing_documents(
         filings_parsed += 1
         documents_inserted += len(docs)
 
-    # Reference the parser version so future refactors can gate a
-    # re-parse by a version change. Currently unused in SQL — kept
-    # as a module constant so the import doesn't feel dead.
-    _ = _PARSER_VERSION
+    logger.info(
+        "ingest_filing_documents: parser_version=%d scanned=%d parsed=%d",
+        _PARSER_VERSION,
+        len(candidates),
+        filings_parsed,
+    )
 
     return IngestResult(
         filings_scanned=len(candidates),
