@@ -36,7 +36,6 @@ import httpx
 
 from app.providers.filings import FilingEvent, FilingNotFound, FilingSearchResult, FilingsProvider
 from app.providers.resilient_client import ResilientClient
-from app.services import raw_persistence
 
 _ET = ZoneInfo("America/New_York")
 
@@ -285,14 +284,6 @@ class SecFilingsProvider(FilingsProvider):
         parsed = resp.json()
         if not isinstance(parsed, dict):
             return None
-        # Persist raw audit trail — same contract as the other
-        # provider-JSON methods in this file. The structural capture
-        # into SQL happens in the service layer (#452).
-        raw_persistence.persist_raw_if_new(
-            "sec",
-            f"sec_filing_{provider_filing_id.replace('/', '_')}",
-            parsed,
-        )
         return parsed
 
     def fetch_document_text(self, absolute_url: str) -> str | None:
@@ -348,7 +339,6 @@ class SecFilingsProvider(FilingsProvider):
         resp = self._http_tickers.get(_TICKERS_URL)
         resp.raise_for_status()
         raw = resp.json()
-        raw_persistence.persist_raw_if_new("sec", "sec_tickers", raw)
         return _parse_cik_mapping(raw)
 
     def build_cik_mapping_conditional(
@@ -388,7 +378,6 @@ class SecFilingsProvider(FilingsProvider):
         # might mutate the content view.
         body_hash = hashlib.sha256(resp.content).hexdigest()
         raw = resp.json()
-        raw_persistence.persist_raw_if_new("sec", "sec_tickers", raw)
         return CikMappingResult(
             mapping=_parse_cik_mapping(raw),
             body_hash=body_hash,
@@ -500,7 +489,6 @@ class SecFilingsProvider(FilingsProvider):
             return None
         resp.raise_for_status()
         raw = resp.json()
-        raw_persistence.persist_raw_if_new("sec", f"sec_submissions_page_{name}", raw)
         return raw  # type: ignore[return-value]
 
     # ------------------------------------------------------------------
@@ -515,7 +503,6 @@ class SecFilingsProvider(FilingsProvider):
             return None
         resp.raise_for_status()
         raw = resp.json()
-        raw_persistence.persist_raw_if_new("sec", f"sec_submissions_{cik_padded}", raw)
         return raw  # type: ignore[return-value]
 
 
