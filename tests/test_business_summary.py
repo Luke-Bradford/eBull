@@ -43,10 +43,13 @@ class TestExtractBusinessSection:
         assert "Risk Factors" not in body
         assert "following factors" not in body
 
-    def test_toc_only_returns_none(self) -> None:
+    def test_toc_only_returns_short_fragment(self) -> None:
         """A document whose only Item 1 mention is in the TOC (with no
-        body heading before Item 1A) has no extractable narrative —
-        better to return None than emit the TOC line."""
+        body heading before Item 1A) yields a short TOC-line fragment.
+        The parser intentionally returns it rather than None so the
+        ingester can apply the ``_MIN_BODY_LEN`` threshold consistently
+        at one layer — short fragments fail that gate and get
+        tombstoned as parse misses."""
         html = """
         <html><body>
         <p>Item 1. Business .... 3</p>
