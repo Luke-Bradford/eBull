@@ -37,6 +37,22 @@ vi.mock("@/api/sync", () => ({
   fetchSyncRuns: vi.fn(),
   triggerSync: vi.fn(),
   setLayerEnabled: vi.fn(),
+  // #418 ingest observability — SeedProgressPanel mounts on AdminPage.
+  fetchSeedProgress: vi.fn().mockResolvedValue({
+    sources: [],
+    latest_run: null,
+    ingest_paused: false,
+  }),
+  fetchCikTimingLatest: vi.fn().mockResolvedValue({
+    ingestion_run_id: null,
+    run_source: null,
+    run_started_at: null,
+    run_finished_at: null,
+    run_status: null,
+    modes: [],
+    slowest: [],
+  }),
+  setIngestEnabled: vi.fn(),
 }));
 vi.mock("@/api/coverage", () => ({ fetchCoverageSummary: vi.fn() }));
 vi.mock("@/api/recommendations", () => ({ fetchRecommendations: vi.fn() }));

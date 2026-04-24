@@ -140,3 +140,87 @@ export function setLayerEnabled(
     },
   );
 }
+
+// ---------------------------------------------------------------------------
+// SEC ingest observability (#414, #418)
+// ---------------------------------------------------------------------------
+
+export type CikTimingMode = "seed" | "refresh";
+
+export interface CikTimingModeSummary {
+  mode: CikTimingMode;
+  count: number;
+  p50_seconds: number | null;
+  p95_seconds: number | null;
+  max_seconds: number | null;
+  facts_upserted_total: number;
+}
+
+export interface SlowCikEntry {
+  cik: string;
+  mode: CikTimingMode;
+  seconds: number;
+  facts_upserted: number;
+  outcome: string;
+  finished_at: string;
+}
+
+export interface CikTimingSummaryResponse {
+  ingestion_run_id: number | null;
+  run_source: string | null;
+  run_started_at: string | null;
+  run_finished_at: string | null;
+  run_status: string | null;
+  modes: CikTimingModeSummary[];
+  slowest: SlowCikEntry[];
+}
+
+export interface SeedSource {
+  source: string;
+  key_description: string;
+  seeded: number;
+  total: number;
+}
+
+export interface LatestIngestionRun {
+  ingestion_run_id: number;
+  source: string;
+  started_at: string;
+  finished_at: string | null;
+  status: string;
+  rows_upserted: number;
+  rows_skipped: number;
+}
+
+export interface SeedProgressResponse {
+  sources: SeedSource[];
+  latest_run: LatestIngestionRun | null;
+  ingest_paused: boolean;
+}
+
+export interface IngestToggleResponse {
+  key: string;
+  display_name: string;
+  is_enabled: boolean;
+}
+
+export function fetchCikTimingLatest(): Promise<CikTimingSummaryResponse> {
+  return apiFetch<CikTimingSummaryResponse>("/sync/ingest/cik_timing/latest");
+}
+
+export function fetchSeedProgress(): Promise<SeedProgressResponse> {
+  return apiFetch<SeedProgressResponse>("/sync/ingest/seed_progress");
+}
+
+export function setIngestEnabled(
+  key: string,
+  enabled: boolean,
+): Promise<IngestToggleResponse> {
+  return apiFetch<IngestToggleResponse>(
+    `/sync/ingest/${encodeURIComponent(key)}/enabled`,
+    {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    },
+  );
+}
