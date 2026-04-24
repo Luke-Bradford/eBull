@@ -64,6 +64,11 @@ def compute_market_cap(
                 WHERE instrument_id = %(iid)s
             ),
             priced AS (
+                -- ``quotes`` is 1:1 current-snapshot by contract, but
+                -- pin ORDER BY + LIMIT 1 as a defensive belt so any
+                -- future migration that holds historical rows cannot
+                -- fan-out this LEFT JOIN into a non-deterministic
+                -- fetchone (review #444 BLOCKING).
                 SELECT
                     COALESCE(
                         NULLIF(GREATEST(last, 0), 0),
@@ -72,6 +77,8 @@ def compute_market_cap(
                     quoted_at::date AS price_as_of
                 FROM quotes
                 WHERE instrument_id = %(iid)s
+                ORDER BY quoted_at DESC
+                LIMIT 1
             )
             SELECT s.latest_shares, s.as_of_date, s.source_taxonomy,
                    p.price, p.price_as_of
