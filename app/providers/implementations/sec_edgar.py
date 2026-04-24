@@ -242,25 +242,58 @@ class SecFilingsProvider(FilingsProvider):
 
         provider_filing_id is the accession number, e.g. '0000320193-24-000001'.
         Raises FilingNotFound if the accession number cannot be resolved.
+
+        Does not persist the raw index JSON — every structured field
+        from that JSON now lands in ``filing_documents`` via the
+        ``filing_documents`` service (#452). Disk-only persistence
+        would re-introduce the "body text on disk without a matching
+        SQL table" anti-pattern (see docs/review-prevention-log.md).
         """
-        # Format: XXXXXXXXXX-YY-NNNNNN (18 chars without dashes); first 10 digits are the CIK
+        raw = self.fetch_filing_index(provider_filing_id)
+        if raw is None:
+            raise FilingNotFound(f"Filing not found: {provider_filing_id}")
+        return _normalise_filing_event(provider_filing_id, raw)
+
+    def fetch_filing_index(self, provider_filing_id: str) -> dict[str, object] | None:
+        """Fetch a filing's ``{accession}-index.json`` manifest.
+
+        Returns the parsed dict on 2xx, ``None`` on 404. Raises on
+        other HTTP errors so the caller decides retry vs skip. Used
+        by :func:`get_filing` for header metadata and by the
+        ``filing_documents`` service for the per-document manifest
+        (#452).
+
+        Provider-level JSON payload: the raw response is persisted
+        to ``data/raw/sec/sec_filing_*`` as the audit-trail contract
+        from prevention-log entries #171 / #177 requires — the
+        per-document structural capture lands in ``filing_documents``
+        via the service layer, and the raw dump is retained for
+        audit alongside it (structured JSON payloads remain on disk;
+        body text does not — see docs/review-prevention-log.md
+        "Every structured field from an upstream document lands in
+        SQL").
+        """
         raw_id = provider_filing_id.replace("-", "")
         if len(raw_id) != 18:
             raise FilingNotFound(f"Invalid accession number format: {provider_filing_id}")
-
         cik_padded = raw_id[:10]
-        accession_no_dashes = raw_id
-
-        # Fetch the filing index JSON
-        path = f"/Archives/edgar/data/{int(cik_padded)}/{accession_no_dashes}/{accession_no_dashes}-index.json"
+        path = f"/Archives/edgar/data/{int(cik_padded)}/{raw_id}/{raw_id}-index.json"
         resp = self._http.get(path)
         if resp.status_code == 404:
-            raise FilingNotFound(f"Filing not found: {provider_filing_id}")
+            return None
         resp.raise_for_status()
-        raw = resp.json()
-        raw_persistence.persist_raw_if_new("sec", f"sec_filing_{provider_filing_id.replace('/', '_')}", raw)
-
-        return _normalise_filing_event(provider_filing_id, raw)
+        parsed = resp.json()
+        if not isinstance(parsed, dict):
+            return None
+        # Persist raw audit trail — same contract as the other
+        # provider-JSON methods in this file. The structural capture
+        # into SQL happens in the service layer (#452).
+        raw_persistence.persist_raw_if_new(
+            "sec",
+            f"sec_filing_{provider_filing_id.replace('/', '_')}",
+            parsed,
+        )
+        return parsed
 
     def fetch_document_text(self, absolute_url: str) -> str | None:
         """Fetch the raw text of a filing's primary document.
