@@ -10,6 +10,7 @@ polluting the real ``data/raw/`` tree.
 
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 from typing import Any
@@ -168,3 +169,98 @@ class TestPersistRawIfNew:
         with pytest.raises(KeyError):
             persist_raw_if_new("nonexistent_source", "tag", {"k": "v"})
         assert not (tmp_path / "nonexistent_source").exists()
+
+
+# ---------------------------------------------------------------------
+# Writer-discipline regression guard (#436)
+# ---------------------------------------------------------------------
+
+
+_PROVIDERS_ROOT = Path(__file__).parent.parent / "app" / "providers"
+
+
+def _iter_provider_files() -> list[Path]:
+    """Every ``.py`` under ``app/providers/`` except ``__init__``.
+
+    Recurses so helper subpackages can't escape the guard by hiding
+    the forbidden call in a nested module."""
+    return sorted(p for p in _PROVIDERS_ROOT.rglob("*.py") if p.name != "__init__.py")
+
+
+# Attribute-name write shapes. The full regression surface is wider
+# (``os.write``, ``open(...).write``, ``from json import dump`` etc.)
+# so the guard also flags any bare ``write`` / ``writelines`` /
+# ``dump`` attribute call that isn't on a logger — providers have no
+# legitimate write path outside ``persist_raw_if_new``.
+_FORBIDDEN_WRITE_ATTRS = {
+    "write",
+    "writelines",
+    "write_text",
+    "write_bytes",
+    "dump",  # json.dump (qualified) + bare dump from ``from json import dump``
+}
+
+# Attribute roots that are known safe — writing to these cannot land
+# a raw payload on disk. Keeping the allow set short + specific means
+# any unexpected call site surfaces as an offender rather than being
+# silently swallowed. Extend only with explicit review.
+_SAFE_WRITE_ROOTS = {
+    "logger",
+    "log",
+    "sys",  # sys.stdout.write / sys.stderr.write (diagnostic only)
+}
+
+
+def _attribute_root_name(node: ast.AST) -> str | None:
+    """Return the leftmost Name in a ``foo.bar.baz`` attribute chain.
+
+    Used to classify ``logger.info(...).write(...)``-style chains as
+    safe (root = ``logger``) vs ``open(target).write(...)``-style
+    chains (root is a Call, returns None → treated as unsafe)."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+class TestProviderWriterDiscipline:
+    """#436 — providers must route raw persistence through
+    ``persist_raw_if_new``. Any other write path is a regression
+    surface for the pre-migration double-write pattern (timestamp
+    variant + hash variant of the same payload)."""
+
+    @pytest.mark.parametrize(
+        "path",
+        _iter_provider_files(),
+        ids=lambda p: p.relative_to(_PROVIDERS_ROOT).as_posix(),
+    )
+    def test_no_direct_file_writes(self, path: Path) -> None:
+        """No provider makes a filesystem write outside the sanctioned
+        ``persist_raw_if_new`` path. Shape-independent: catches
+        ``.write``/``.writelines``/``.write_text``/``.write_bytes``/
+        ``.dump`` on any value that is not a logging sink. Widened
+        from the earlier ``{dump, write_text, write_bytes}`` set per
+        Codex checkpoint — ``open(target).write(...)`` and
+        ``handle.write(...)`` shapes were previously invisible."""
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute):
+                # Bare ``dump(obj, f)`` (``from json import dump``):
+                # also a regression surface. Flag Name-form calls to
+                # forbidden identifiers.
+                if isinstance(func, ast.Name) and func.id in _FORBIDDEN_WRITE_ATTRS:
+                    offenders.append(f"line {node.lineno}: {ast.unparse(node)[:120]}")
+                continue
+            if func.attr not in _FORBIDDEN_WRITE_ATTRS:
+                continue
+            root = _attribute_root_name(func.value)
+            if root in _SAFE_WRITE_ROOTS:
+                continue
+            offenders.append(f"line {node.lineno}: {ast.unparse(node)[:120]}")
+        assert not offenders, (
+            f"{path.name} makes a direct filesystem write — providers "
+            f"must route through persist_raw_if_new:\n  " + "\n  ".join(offenders)
+        )
