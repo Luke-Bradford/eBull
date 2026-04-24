@@ -83,6 +83,23 @@ const recs = useAsync(() => fetchRecommendations(10), []);
 
 If you need memoisation for a different reason (passing the function to a child that uses it as a dep), you're using the wrong hook.
 
+### Refetch every dependent sibling after a mutation
+
+When a mutation handler (toggle, POST, delete) completes, call `refetch()` on **every** async state whose data can be affected — not just the one whose UI contains the button. A panel that owns two `useAsync` calls (e.g. seed progress + per-CIK timing) and only refetches the obvious one leaves the sibling stale until the next poll tick (up to 60 s of idle polling in eBull's dashboard cadence).
+
+```tsx
+// WRONG — toggle changes pause state, but timing card stays stale
+await setIngestEnabled("fundamentals_ingest", seed.ingest_paused);
+seedState.refetch();
+
+// RIGHT — refetch every sibling whose data can reflect the mutation
+await setIngestEnabled("fundamentals_ingest", seed.ingest_paused);
+seedState.refetch();
+timingState.refetch();
+```
+
+Rule of thumb: if a sibling `useAsync` call reads any backend state the mutation touches (directly or transitively), include it in the refetch list. Write a test that asserts every expected `refetch` was called.
+
 ### Cancellation
 
 Every effect that resolves async data must check a `cancelled` flag before calling state setters, so a stale resolution cannot overwrite a newer one. If you write a new async hook, this is non-negotiable.

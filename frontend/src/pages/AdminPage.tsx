@@ -34,6 +34,7 @@ import { CollapsibleSection } from "@/components/admin/CollapsibleSection";
 import { FundDataRow } from "@/components/admin/FundDataRow";
 import { LayerHealthList } from "@/components/admin/LayerHealthList";
 import { ProblemsPanel } from "@/components/admin/ProblemsPanel";
+import { SeedProgressPanel } from "@/components/admin/SeedProgressPanel";
 import {
   SectionError,
   SectionSkeleton,
@@ -292,6 +293,8 @@ export function AdminPage() {
       >
         <SyncDashboard syncTrigger={syncTrigger} />
       </CollapsibleSection>
+
+      <SeedProgressPanel />
 
       <CollapsibleSection
         title="Background tasks"
