@@ -43,6 +43,12 @@ class SecEntityProfile:
     former_names: list[dict[str, Any]]
     has_insider_issuer: bool | None
     has_insider_owner: bool | None
+    # #463 — submissions.json long-tail fields previously dropped.
+    phone: str | None = None
+    entity_type: str | None = None
+    flags: str | None = None
+    address_business: dict[str, Any] | None = None
+    address_mailing: dict[str, Any] | None = None
 
 
 def _non_empty_str(value: Any) -> str | None:
@@ -105,6 +111,55 @@ def _former_names(value: Any) -> list[dict[str, Any]]:
     return out
 
 
+_ADDRESS_FIELDS = (
+    "street1",
+    "street2",
+    "city",
+    "state_or_country",
+    "state_or_country_description",
+    "zip_code",
+    "country",
+    "country_code",
+    "is_foreign_location",
+    "foreign_state_territory",
+)
+
+
+def _address(value: Any) -> dict[str, Any] | None:
+    """Normalise a SEC address block into a stable snake_case shape.
+
+    Returns ``None`` when the source carries no non-empty fields —
+    avoids storing empty-shell dicts that would force every consumer
+    to check emptiness.
+    """
+    if not isinstance(value, dict):
+        return None
+    out: dict[str, Any] = {}
+    mapping = {
+        "street1": "street1",
+        "street2": "street2",
+        "city": "city",
+        "stateOrCountry": "state_or_country",
+        "stateOrCountryDescription": "state_or_country_description",
+        "zipCode": "zip_code",
+        "country": "country",
+        "countryCode": "country_code",
+        "isForeignLocation": "is_foreign_location",
+        "foreignStateTerritory": "foreign_state_territory",
+    }
+    for src_key, dst_key in mapping.items():
+        v = value.get(src_key)
+        if isinstance(v, str):
+            v = v.strip() or None
+        out[dst_key] = v
+    # Drop the dict only when every field is None / empty. Explicit
+    # None check rather than truthiness — ``isForeignLocation: 0``
+    # (SEC's "not foreign" marker) is meaningful and must survive.
+    if all(out.get(k) is None for k in _ADDRESS_FIELDS):
+        return None
+    return out
+
+
 def parse_entity_profile(
     submissions: dict[str, Any],
     *,
@@ -113,6 +168,9 @@ def parse_entity_profile(
 ) -> SecEntityProfile:
     """Extract the entity subset. Never raises — every field falls back
     to None/[]/{} if the source omitted or malformed it."""
+    addresses = submissions.get("addresses")
+    address_business = _address(addresses.get("business")) if isinstance(addresses, dict) else None
+    address_mailing = _address(addresses.get("mailing")) if isinstance(addresses, dict) else None
     return SecEntityProfile(
         instrument_id=instrument_id,
         cik=cik,
@@ -132,6 +190,11 @@ def parse_entity_profile(
         former_names=_former_names(submissions.get("formerNames")),
         has_insider_issuer=_int_to_bool(submissions.get("insiderTransactionForIssuerExists")),
         has_insider_owner=_int_to_bool(submissions.get("insiderTransactionForOwnerExists")),
+        phone=_non_empty_str(submissions.get("phone")),
+        entity_type=_non_empty_str(submissions.get("entityType")),
+        flags=_non_empty_str(submissions.get("flags")),
+        address_business=address_business,
+        address_mailing=address_mailing,
     )
 
 
@@ -141,13 +204,18 @@ INSERT INTO instrument_sec_profile (
     description, website, investor_website, ein, lei,
     state_of_incorporation, state_of_incorporation_desc,
     fiscal_year_end, category, exchanges, former_names,
-    has_insider_issuer, has_insider_owner, fetched_at
+    has_insider_issuer, has_insider_owner,
+    phone, entity_type, flags, address_business, address_mailing,
+    fetched_at
 ) VALUES (
     %(instrument_id)s, %(cik)s, %(sic)s, %(sic_description)s, %(owner_org)s,
     %(description)s, %(website)s, %(investor_website)s, %(ein)s, %(lei)s,
     %(state_of_incorporation)s, %(state_of_incorporation_desc)s,
     %(fiscal_year_end)s, %(category)s, %(exchanges)s, %(former_names)s,
-    %(has_insider_issuer)s, %(has_insider_owner)s, NOW()
+    %(has_insider_issuer)s, %(has_insider_owner)s,
+    %(phone)s, %(entity_type)s, %(flags)s,
+    %(address_business)s, %(address_mailing)s,
+    NOW()
 )
 ON CONFLICT (instrument_id) DO UPDATE SET
     cik                         = EXCLUDED.cik,
@@ -167,15 +235,119 @@ ON CONFLICT (instrument_id) DO UPDATE SET
     former_names                = EXCLUDED.former_names,
     has_insider_issuer          = EXCLUDED.has_insider_issuer,
     has_insider_owner           = EXCLUDED.has_insider_owner,
+    phone                       = EXCLUDED.phone,
+    entity_type                 = EXCLUDED.entity_type,
+    flags                       = EXCLUDED.flags,
+    address_business            = EXCLUDED.address_business,
+    address_mailing             = EXCLUDED.address_mailing,
     fetched_at                  = NOW()
 """
+
+
+# Fields whose changes are captured in sec_entity_change_log. Tuple
+# of (field_name, extractor) so adding a field here is a one-line
+# drop. ``extractor`` returns the JSON-serialisable representation
+# used for both diff comparison and log storage.
+_TRACKED_FIELDS: tuple[tuple[str, Any], ...] = (
+    ("sic", lambda p: p.sic),
+    ("sic_description", lambda p: p.sic_description),
+    ("owner_org", lambda p: p.owner_org),
+    ("description", lambda p: p.description),
+    ("website", lambda p: p.website),
+    ("investor_website", lambda p: p.investor_website),
+    ("state_of_incorporation", lambda p: p.state_of_incorporation),
+    ("state_of_incorporation_desc", lambda p: p.state_of_incorporation_desc),
+    ("fiscal_year_end", lambda p: p.fiscal_year_end),
+    ("category", lambda p: p.category),
+    ("exchanges", lambda p: p.exchanges),
+    ("entity_type", lambda p: p.entity_type),
+    ("phone", lambda p: p.phone),
+    ("flags", lambda p: p.flags),
+    ("address_business", lambda p: p.address_business),
+    ("address_mailing", lambda p: p.address_mailing),
+)
+
+
+def _serialise(value: Any) -> str:
+    """Canonical JSON serialisation for diff + log storage.
+
+    ``json.dumps`` with ``sort_keys=True`` so dict-valued addresses
+    compare equal regardless of field-ordering drift in the source
+    JSON. String values pass through JSON-encoded ("foo" not foo)
+    so the diff sees an explicit quoted form and the log stores a
+    uniform shape.
+    """
+    import json
+
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def detect_profile_changes(
+    prev: SecEntityProfile | None,
+    current: SecEntityProfile,
+) -> list[tuple[str, str | None, str]]:
+    """Return (field_name, prev_value, new_value) for every field in
+    ``_TRACKED_FIELDS`` whose serialised value differs between
+    ``prev`` and ``current``.
+
+    Returns an empty list on initial ingest (``prev is None``) so the
+    first snapshot doesn't synthesise spurious "changed from NULL"
+    events for every field — subsequent ingests are the ones that
+    capture real change.
+    """
+    if prev is None:
+        return []
+    changes: list[tuple[str, str | None, str]] = []
+    for field_name, extractor in _TRACKED_FIELDS:
+        prev_val = extractor(prev)
+        new_val = extractor(current)
+        prev_serialised = _serialise(prev_val)
+        new_serialised = _serialise(new_val)
+        if prev_serialised != new_serialised:
+            changes.append((field_name, prev_serialised, new_serialised))
+    return changes
+
+
+def _append_change_log(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    cik: str,
+    changes: list[tuple[str, str | None, str]],
+    source_accession: str | None = None,
+) -> None:
+    """Insert one row per detected change into ``sec_entity_change_log``.
+
+    No-op when ``changes`` is empty. Caller is responsible for
+    transactional scope — the append runs inline so it commits with
+    the profile upsert.
+    """
+    if not changes:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO sec_entity_change_log
+                (instrument_id, cik, field_name, prev_value, new_value,
+                 source_accession)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            [(instrument_id, cik, name, prev, new, source_accession) for name, prev, new in changes],
+        )
 
 
 def upsert_entity_profile(
     conn: psycopg.Connection[Any],
     profile: SecEntityProfile,
+    *,
+    source_accession: str | None = None,
 ) -> None:
-    """Insert-or-update the profile row for ``profile.instrument_id``."""
+    """Insert-or-update the profile row for ``profile.instrument_id``
+    and append any detected field changes to
+    ``sec_entity_change_log`` in the same transaction (#463).
+    """
+    prev = get_entity_profile(conn, instrument_id=profile.instrument_id)
+    changes = detect_profile_changes(prev, profile)
     conn.execute(
         _UPSERT_SQL,
         {
@@ -197,7 +369,19 @@ def upsert_entity_profile(
             "former_names": Jsonb(profile.former_names),
             "has_insider_issuer": profile.has_insider_issuer,
             "has_insider_owner": profile.has_insider_owner,
+            "phone": profile.phone,
+            "entity_type": profile.entity_type,
+            "flags": profile.flags,
+            "address_business": Jsonb(profile.address_business) if profile.address_business else None,
+            "address_mailing": Jsonb(profile.address_mailing) if profile.address_mailing else None,
         },
+    )
+    _append_change_log(
+        conn,
+        instrument_id=profile.instrument_id,
+        cik=profile.cik,
+        changes=changes,
+        source_accession=source_accession,
     )
 
 
@@ -214,7 +398,9 @@ def get_entity_profile(
                    description, website, investor_website, ein, lei,
                    state_of_incorporation, state_of_incorporation_desc,
                    fiscal_year_end, category, exchanges, former_names,
-                   has_insider_issuer, has_insider_owner
+                   has_insider_issuer, has_insider_owner,
+                   phone, entity_type, flags,
+                   address_business, address_mailing
             FROM instrument_sec_profile
             WHERE instrument_id = %s
             """,
@@ -244,4 +430,9 @@ def get_entity_profile(
         former_names=list(row["former_names"] or []),
         has_insider_issuer=row["has_insider_issuer"],
         has_insider_owner=row["has_insider_owner"],
+        phone=row.get("phone"),
+        entity_type=row.get("entity_type"),
+        flags=row.get("flags"),
+        address_business=(dict(row["address_business"]) if row.get("address_business") else None),
+        address_mailing=(dict(row["address_mailing"]) if row.get("address_mailing") else None),
     )

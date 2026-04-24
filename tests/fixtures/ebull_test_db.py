@@ -48,6 +48,7 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "cik_upsert_timing",  # #418 per-CIK timing audit (FK → data_ingestion_runs)
     "financial_facts_raw",
     "sec_facts_concept_catalog",  # #451 — per-concept metadata
+    "sec_entity_change_log",  # #463 — entity-field change events
     "data_ingestion_runs",
     # layer_enabled is the home of the #414 fundamentals_ingest pause
     # flag and is written by several observability/planner tests. Keep
