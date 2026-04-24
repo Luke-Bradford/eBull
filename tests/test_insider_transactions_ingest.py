@@ -573,6 +573,33 @@ class TestIngestInsiderTransactions:
         assert summary.buy_count_90d == 1
         assert summary.unique_filers_90d == 1
 
+    def test_xsl_rendered_url_normalised_before_fetch(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """#454 regression — filing_events.primary_document_url for
+        ownership filings often points at the XSL-rendered HTML path
+        (``/xslF345X06/form4.xml``). The ingester must strip that
+        segment and fetch the canonical raw XML URL instead."""
+        iid = _seed_instrument(ebull_test_conn)
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="XSL-1",
+            url="https://www.sec.gov/Archives/edgar/data/320193/0001/xslF345X06/form4.xml",
+            filing_date=date.today().isoformat(),
+        )
+        canonical_url = "https://www.sec.gov/Archives/edgar/data/320193/0001/form4.xml"
+        fetcher = _StubFetcher(
+            {
+                canonical_url: _FORM_4_RICH_BUY.replace("2024-06-15", date.today().isoformat()),
+            }
+        )
+
+        result = ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        # Fetcher must have been called with the normalised URL, not the XSL path.
+        assert fetcher.calls == [canonical_url]
+        assert result.filings_parsed == 1
+        assert result.rows_inserted == 1
+
     def test_non_form_4_skipped(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument(ebull_test_conn)
         _seed_form_4(

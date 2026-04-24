@@ -20,6 +20,7 @@ from app.services.insider_transactions import (
     ParsedFiler,
     ParsedFiling,
     ParsedTransaction,
+    _canonical_form_4_url,
     filer_role_string,
     parse_form_4_xml,
 )
@@ -547,6 +548,35 @@ class TestParseForm4Xml:
         assert isinstance(parsed, ParsedFiling)
         assert isinstance(parsed.filers[0], ParsedFiler)
         assert isinstance(parsed.transactions[0], ParsedTransaction)
+
+
+class TestCanonicalForm4Url:
+    """#454 regression — XSL-rendered HTML paths must be normalised to
+    the canonical raw-XML URL before the ingester fetches them."""
+
+    def test_strips_xslf345x06_segment(self) -> None:
+        raw = "https://www.sec.gov/Archives/edgar/data/320193/000114036126015421/xslF345X06/form4.xml"
+        assert _canonical_form_4_url(raw) == (
+            "https://www.sec.gov/Archives/edgar/data/320193/000114036126015421/form4.xml"
+        )
+
+    def test_strips_xslf345x05_segment(self) -> None:
+        raw = "https://www.sec.gov/Archives/edgar/data/320193/abc/xslF345X05/form4.xml"
+        assert _canonical_form_4_url(raw) == ("https://www.sec.gov/Archives/edgar/data/320193/abc/form4.xml")
+
+    def test_strips_xslf345_segment(self) -> None:
+        raw = "https://www.sec.gov/Archives/edgar/data/320193/abc/xslF345/ownership.xml"
+        assert _canonical_form_4_url(raw) == ("https://www.sec.gov/Archives/edgar/data/320193/abc/ownership.xml")
+
+    def test_canonical_url_passes_through_unchanged(self) -> None:
+        raw = "https://www.sec.gov/Archives/edgar/data/320193/abc/form4.xml"
+        assert _canonical_form_4_url(raw) == raw
+
+    def test_unrelated_path_segment_not_touched(self) -> None:
+        """Defensive: ``xslF345X06`` only matches as a path segment,
+        not as a substring inside another segment."""
+        raw = "https://www.sec.gov/Archives/edgar/data/xslF345X06extra/form4.xml"
+        assert _canonical_form_4_url(raw) == raw
 
 
 class TestFilerRoleString:
