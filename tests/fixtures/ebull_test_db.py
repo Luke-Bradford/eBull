@@ -61,6 +61,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "coverage_status_events",  # #397 transition log (child of coverage)
     "coverage",  # #397 truncate needed to reset trigger-driven state cleanly
     "position_alerts",  # #396 position-alert episodes
+    "watchlist",  # #042 — FK → instruments
+    "broker_positions",  # #024 — FK → instruments
+    "quotes",  # #002 — FK → instruments (live-tick target #471)
     "instruments",
     "job_runs",
     "financial_periods_raw",
