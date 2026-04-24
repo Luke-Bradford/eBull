@@ -152,7 +152,8 @@ function SummaryStrip({ summary }: { summary: InsiderSummary }) {
               Acquired
             </span>
             <span className="mt-1 font-mono text-base tabular-nums text-emerald-700">
-              +{Math.round(totalAcquired).toLocaleString("en-US")}
+              {totalAcquired > 0 ? "+" : ""}
+              {Math.round(totalAcquired).toLocaleString("en-US")}
             </span>
             <span className="text-[10px] text-slate-500">
               {summary.acquisition_count_90d} txns
@@ -166,7 +167,8 @@ function SummaryStrip({ summary }: { summary: InsiderSummary }) {
               Disposed
             </span>
             <span className="mt-1 font-mono text-base tabular-nums text-rose-700">
-              -{Math.round(totalDisposed).toLocaleString("en-US")}
+              {totalDisposed > 0 ? "-" : ""}
+              {Math.round(totalDisposed).toLocaleString("en-US")}
             </span>
             <span className="text-[10px] text-slate-500">
               {summary.disposition_count_90d} txns
