@@ -183,6 +183,58 @@ class TestIngestInsiderTransactions:
         assert result.filings_scanned == 0
         assert fetcher.calls == []
 
+    def test_fetch_404_writes_tombstone_and_skips_next_run(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Codex #429 H1 regression — a dead Form 4 URL must get a
+        tombstone so the hourly ingester doesn't re-fetch it every
+        run. Sentinel row with filer_name='__TOMBSTONE__' + row_num=-1.
+        Second immediate pass must not call the fetcher."""
+        iid = _seed_instrument(ebull_test_conn)
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="DEAD-ACC",
+            url="https://www.sec.gov/dead.xml",
+        )
+        dead_fetcher = _StubFetcher({"https://www.sec.gov/dead.xml": None})
+        ingest_insider_transactions(ebull_test_conn, cast("object", dead_fetcher))  # type: ignore[arg-type]
+
+        second_fetcher = _StubFetcher({"https://www.sec.gov/dead.xml": None})
+        second = ingest_insider_transactions(ebull_test_conn, cast("object", second_fetcher))  # type: ignore[arg-type]
+        assert second.filings_scanned == 0
+        assert second_fetcher.calls == []
+
+    def test_tombstone_excluded_from_summary(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Tombstones live in the same table but must not leak into
+        the insider summary. Seed a tombstone + a real buy, assert
+        the summary reflects only the real buy."""
+        iid = _seed_instrument(ebull_test_conn)
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="DEAD-ACC",
+            url="https://www.sec.gov/dead.xml",
+        )
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="REAL-ACC",
+            url="https://www.sec.gov/real.xml",
+            filing_date=date.today().isoformat(),
+        )
+        fetcher = _StubFetcher(
+            {
+                "https://www.sec.gov/dead.xml": None,
+                "https://www.sec.gov/real.xml": _FORM_4_BUY.replace("2024-06-15", date.today().isoformat()),
+            }
+        )
+        ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        summary = get_insider_summary(ebull_test_conn, instrument_id=iid)
+        # Only the real buy contributes — tombstone excluded.
+        assert summary.net_shares_90d == Decimal("500")
+        assert summary.buy_count_90d == 1
+        assert summary.unique_filers_90d == 1
+
     def test_non_form_4_payload_counts_as_miss(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """The filing_events row says form='4' but the XML at the URL
         is a different document (URL rot / wrong upstream pointer).

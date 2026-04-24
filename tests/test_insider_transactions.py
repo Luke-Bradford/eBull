@@ -260,6 +260,106 @@ class TestParseForm4Xml:
         assert parsed is not None
         assert parsed.transactions[0].direct_indirect == expected
 
+    def test_default_namespace_stripped(self) -> None:
+        """Codex #429 M4 regression — a Form 4 with an inline
+        ``xmlns=...`` default namespace on the root must still parse.
+        Real SEC filings sometimes carry this; the regex pre-strip
+        normalises before ET parses so namespace-blind ``.find()``
+        works."""
+        xml = """<?xml version="1.0"?>
+<ownershipDocument xmlns="http://www.sec.gov/edgar/common">
+  <reportingOwner>
+    <reportingOwnerId><rptOwnerName>NS Insider</rptOwnerName></reportingOwnerId>
+    <reportingOwnerRelationship><isOfficer>1</isOfficer><officerTitle>CEO</officerTitle></reportingOwnerRelationship>
+  </reportingOwner>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <transactionDate><value>2024-08-10</value></transactionDate>
+      <transactionCoding><transactionCode>P</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>100</value></transactionShares>
+        <transactionPricePerShare><value>50.00</value></transactionPricePerShare>
+        <transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+</ownershipDocument>
+"""
+        parsed = parse_form_4_xml(xml)
+        assert parsed is not None
+        assert parsed.filer_name == "NS Insider"
+        assert len(parsed.transactions) == 1
+
+    def test_row_num_stable_when_earlier_row_malformed(self) -> None:
+        """Codex #429 H2 regression — malformed leading row must not
+        shift later rows' row_num. Source-order counting keeps the
+        UNIQUE (accession, row_num) key stable across parser revisions."""
+        xml = """<?xml version="1.0"?>
+<ownershipDocument>
+  <reportingOwner>
+    <reportingOwnerId><rptOwnerName>Shifty</rptOwnerName></reportingOwnerId>
+    <reportingOwnerRelationship><isOfficer>1</isOfficer><officerTitle>CFO</officerTitle></reportingOwnerRelationship>
+  </reportingOwner>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <!-- missing transactionDate — today's parser skips this row -->
+      <transactionCoding><transactionCode>P</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>10</value></transactionShares>
+        <transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature>
+    </nonDerivativeTransaction>
+    <nonDerivativeTransaction>
+      <transactionDate><value>2024-08-10</value></transactionDate>
+      <transactionCoding><transactionCode>P</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>20</value></transactionShares>
+        <transactionPricePerShare><value>50</value></transactionPricePerShare>
+        <transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+</ownershipDocument>
+"""
+        parsed = parse_form_4_xml(xml)
+        assert parsed is not None
+        assert len(parsed.transactions) == 1
+        # row_num == 1 because the malformed row above still consumed
+        # source position 0.
+        assert parsed.transactions[0].txn_row_num == 1
+
+    @pytest.mark.parametrize("bad", ["-100", "NaN", "Infinity", "1e20"])
+    def test_decimal_validation_rejects_invalid(self, bad: str) -> None:
+        """Codex #429 M3 regression — negative / NaN / Infinity /
+        over-range values on shares normalise to None rather than
+        corrupting the signed aggregate in get_insider_summary."""
+        xml = f"""<?xml version="1.0"?>
+<ownershipDocument>
+  <reportingOwner>
+    <reportingOwnerId><rptOwnerName>X</rptOwnerName></reportingOwnerId>
+    <reportingOwnerRelationship><isOfficer>1</isOfficer></reportingOwnerRelationship>
+  </reportingOwner>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <transactionDate><value>2024-08-10</value></transactionDate>
+      <transactionCoding><transactionCode>S</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>{bad}</value></transactionShares>
+        <transactionPricePerShare><value>50</value></transactionPricePerShare>
+        <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+</ownershipDocument>
+"""
+        parsed = parse_form_4_xml(xml)
+        assert parsed is not None
+        assert parsed.transactions[0].shares is None
+
     def test_parsed_filing_has_correct_shape(self) -> None:
         """Sanity-check the public dataclasses carry exactly the
         fields the service expects."""

@@ -22,6 +22,7 @@ filing for audit.
 from __future__ import annotations
 
 import logging
+import re
 import xml.etree.ElementTree as ET  # noqa: S405 — Form 4 source is SEC EDGAR, trusted.
 from dataclasses import dataclass
 from datetime import date
@@ -84,8 +85,15 @@ def parse_form_4_xml(raw_xml: str) -> ParsedFiling | None:
     stable across re-parses."""
     if not raw_xml:
         return None
+    # Strip any XML default namespace before parsing. SEC's canonical
+    # Form 4 XSD declares a namespace and real filings sometimes inline
+    # it as ``xmlns="..."`` at the root, which turns every subsequent
+    # namespace-blind ``.find()`` into a miss. Regex pre-strip keeps
+    # the rest of the parser simple without requiring every ``.find()``
+    # site to carry ``{ns}`` braces.
+    cleaned_xml = _XMLNS_RE.sub("", raw_xml)
     try:
-        root = ET.fromstring(raw_xml)
+        root = ET.fromstring(cleaned_xml)
     except ET.ParseError:
         return None
 
@@ -109,6 +117,13 @@ def parse_form_4_xml(raw_xml: str) -> ParsedFiling | None:
         filer_role=filer_role,
         transactions=tuple(transactions),
     )
+
+
+# Matches the ``xmlns="..."`` attribute on any element. We strip
+# these before parsing so element tag lookups don't have to be
+# namespace-aware — cheap trade vs threading ``{ns}`` braces through
+# every ``.find()`` path below.
+_XMLNS_RE = re.compile(r'\sxmlns="[^"]*"')
 
 
 def _localname(tag: str) -> str:
@@ -163,6 +178,15 @@ def _extract_role(rel: ET.Element | None) -> str | None:
 
 
 def _extract_transactions(root: ET.Element) -> list[ParsedTransaction]:
+    """Walk both transaction tables in source order.
+
+    ``txn_row_num`` is the SOURCE POSITION across both tables (non-
+    derivative first, then derivative) so the UNIQUE
+    ``(accession, row_num)`` key is stable across parser revisions.
+    Row 0 that fails to parse today and succeeds after a regex fix
+    tomorrow still lands at row 0; parseable siblings keep their
+    indices. Increment the counter for every source element, not
+    only the ones that parse successfully."""
     rows: list[ParsedTransaction] = []
     row_num = 0
     for table_tag, is_deriv in (
@@ -171,9 +195,9 @@ def _extract_transactions(root: ET.Element) -> list[ParsedTransaction]:
     ):
         for txn_el in root.findall(table_tag):
             parsed = _parse_one_transaction(txn_el, row_num, is_deriv)
+            row_num += 1  # always advance, even when _parse_one_transaction returns None
             if parsed is not None:
                 rows.append(parsed)
-                row_num += 1
     return rows
 
 
@@ -201,8 +225,14 @@ def _parse_one_transaction(
     except ValueError:
         return None
 
-    shares = _safe_decimal(_child_text(txn, "transactionAmounts/transactionShares/value"))
-    price = _safe_decimal(_child_text(txn, "transactionAmounts/transactionPricePerShare/value"))
+    shares = _safe_decimal(
+        _child_text(txn, "transactionAmounts/transactionShares/value"),
+        max_value=_MAX_SHARES,
+    )
+    price = _safe_decimal(
+        _child_text(txn, "transactionAmounts/transactionPricePerShare/value"),
+        max_value=_MAX_PRICE,
+    )
     # Grants often lack a price or carry "0"; normalise "0" / "0.00"
     # to None so the column semantically means "unpriced" rather
     # than "priced at zero".
@@ -223,13 +253,40 @@ def _parse_one_transaction(
     )
 
 
-def _safe_decimal(raw: str | None) -> Decimal | None:
+# Shares precision in the schema is NUMERIC(20,4) → max ~10^16.
+# Price is NUMERIC(18,6) → max ~10^12. Real Form 4 values never
+# approach these — largest insider trades on record sit comfortably
+# under 10^9 shares at under 10^6 per share. Reject values above
+# these caps so a malformed filing (decimal-separator bug, a
+# scientific-notation overflow) fails parsing rather than rolling
+# back the whole transaction at INSERT time (Codex #429 M3).
+_MAX_SHARES = Decimal("1e10")
+_MAX_PRICE = Decimal("1e9")
+
+
+def _safe_decimal(raw: str | None, *, max_value: Decimal) -> Decimal | None:
+    """Parse a numeric value with strict Form 4 semantics.
+
+    Returns ``None`` for malformed strings, NaN / Infinity, negative
+    values, and values exceeding ``max_value``. The schema columns
+    are NUMERIC(precision, scale) and the ``get_insider_summary``
+    signed aggregation assumes non-negative inputs — a negative
+    shares value would double-sign on a sell (code=S) and produce a
+    phantom net buy. Defensive parse is cheaper than a ruined
+    aggregate."""
     if raw is None:
         return None
     try:
-        return Decimal(raw)
+        parsed = Decimal(raw)
     except InvalidOperation, ValueError:
         return None
+    if not parsed.is_finite():  # NaN, Infinity, -Infinity
+        return None
+    if parsed < Decimal(0):
+        return None
+    if parsed > max_value:
+        return None
+    return parsed
 
 
 # ---------------------------------------------------------------------
@@ -301,6 +358,42 @@ class IngestResult:
     parse_misses: int
 
 
+# Tombstone sentinels written on fetch error / parse miss so the
+# ingester's LEFT JOIN excludes that accession on subsequent runs.
+# Without this the hourly schedule would re-fetch every dead URL on
+# every run (Codex #429 H1). The reader filters these out by
+# ``filer_name = _TOMBSTONE_FILER`` so they never leak into summaries.
+_TOMBSTONE_FILER = "__TOMBSTONE__"
+_TOMBSTONE_CODE = "TOMBSTONE"
+
+
+def _write_tombstone(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    accession_number: str,
+) -> None:
+    """Insert a sentinel row so the next ingester pass skips this
+    accession. Uses row_num=-1 + a dedicated filer_name so the row
+    is unambiguous to readers. Inserted with is_derivative=TRUE so
+    even a missed reader filter wouldn't pollute the non-derivative
+    90-day net-buy aggregate.
+
+    Idempotent on re-run: the (accession, row_num) UNIQUE key makes
+    a second tombstone attempt a no-op via ON CONFLICT DO NOTHING."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO insider_transactions
+                (instrument_id, accession_number, txn_row_num,
+                 filer_name, txn_date, txn_code, is_derivative)
+            VALUES (%s, %s, -1, %s, CURRENT_DATE, %s, TRUE)
+            ON CONFLICT (accession_number, txn_row_num) DO NOTHING
+            """,
+            (instrument_id, accession_number, _TOMBSTONE_FILER, _TOMBSTONE_CODE),
+        )
+
+
 def ingest_insider_transactions(
     conn: psycopg.Connection[Any],
     fetcher: _DocFetcher,
@@ -316,11 +409,12 @@ def ingest_insider_transactions(
     2. ``fe.primary_document_url IS NOT NULL``.
     3. No existing ``insider_transactions`` row for the accession.
        Form 4 content is immutable per accession so a single success
-       is enough — no TTL retry needed like the dividend / business-
-       summary ingesters, which re-parse partials when the parser
-       improves. If a Form 4 fetch fails, the LEFT JOIN will pick it
-       up again on the next run; first-time-fetch-failures are rare
-       and ~500/day throughput caps the retry volume naturally.
+       is enough. On fetch error / parse miss we write a tombstone
+       (``filer_name = __TOMBSTONE__``, ``row_num = -1``) so the
+       LEFT JOIN excludes the accession on subsequent runs — the
+       hourly schedule must not re-fetch dead URLs every hour
+       (Codex #429 H1). Tombstones are filtered by the reader so
+       they don't leak into the summary.
     4. Ordered by filing_date DESC so fresh filings always get
        budget.
 
@@ -370,14 +464,20 @@ def ingest_insider_transactions(
                 exc_info=True,
             )
             fetch_errors += 1
+            _write_tombstone(conn, instrument_id=instrument_id, accession_number=accession)
+            conn.commit()
             continue
         if xml is None:
             fetch_errors += 1
+            _write_tombstone(conn, instrument_id=instrument_id, accession_number=accession)
+            conn.commit()
             continue
 
         parsed = parse_form_4_xml(xml)
         if parsed is None:
             parse_misses += 1
+            _write_tombstone(conn, instrument_id=instrument_id, accession_number=accession)
+            conn.commit()
             continue
 
         try:
@@ -457,8 +557,12 @@ def get_insider_summary(
             WHERE instrument_id = %s
               AND is_derivative = FALSE
               AND txn_date >= CURRENT_DATE - INTERVAL '90 days'
+              -- Tombstone sentinels (fetch error / parse miss) carry
+              -- the dedicated filer_name marker; filter them out so
+              -- the aggregate only reflects real transactions.
+              AND filer_name <> %s
             """,
-            (instrument_id,),
+            (instrument_id, _TOMBSTONE_FILER),
         )
         row = cur.fetchone()
     if row is None:
