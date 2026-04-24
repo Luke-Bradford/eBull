@@ -1,29 +1,39 @@
-"""Tests for the eToro WebSocket subscriber (#274 Slice 1).
+"""Tests for the eToro WebSocket subscriber (#274 Slices 1+2).
 
 Pure helpers (auth-message build, subscribe-message build, rate-
-message parser, spread-pct compute) are unit-tested; the DB upsert
-is integration-tested against ``ebull_test``. The connect/listen
-loop itself is not exercised — that requires a real WS server or a
-heavyweight fixture and adds little safety beyond covering the
-component pieces.
+message parser, spread-pct compute, private-event classifier) are
+unit-tested; the DB upsert is integration-tested against
+``ebull_test``. The connect/listen loop is not exercised end-to-end
+— that requires a real WS server or a heavyweight fixture — but the
+debounce dispatch is exercised directly on
+``EtoroWebSocketSubscriber._schedule_reconcile`` with a stub runner
+so the collapse-to-one-call invariant is covered.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+import threading
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import psycopg
 import pytest
 
+from app.services import etoro_websocket
 from app.services.etoro_websocket import (
+    EtoroWebSocketSubscriber,
     QuoteUpdate,
     _compute_spread_pct,
     _is_auth_success,
     build_auth_message,
+    build_private_subscribe_message,
     build_subscribe_message,
     fetch_watched_instrument_ids,
+    is_private_event,
     parse_rate_message,
     upsert_quote,
 )
@@ -282,3 +292,358 @@ class TestFetchWatchedInstrumentIds:
 
         ids = fetch_watched_instrument_ids(ebull_test_conn)
         assert sorted(ids) == [1001, 1002, 1003]
+
+
+# ---------------------------------------------------------------------------
+# Slice 2 — private channel + reconcile debounce
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPrivateSubscribeMessage:
+    def test_envelope_shape(self) -> None:
+        msg = json.loads(build_private_subscribe_message())
+        assert msg["operation"] == "Subscribe"
+        assert msg["data"]["topics"] == ["private"]
+        # snapshot=False — REST reconcile owns the snapshot, the WS
+        # private channel is forward-only.
+        assert msg["data"]["snapshot"] is False
+        assert "id" in msg
+
+
+class TestIsPrivateEvent:
+    @pytest.mark.parametrize(
+        "msg_type",
+        [
+            "Trading.OrderForCloseMultiple.Update",
+            "Trading.OrderForOpenMultiple.Update",
+            "Trading.PositionUpdate",
+            "Trading.CreditUpdate",
+        ],
+    )
+    def test_known_private_types(self, msg_type: str) -> None:
+        raw = json.dumps({"type": msg_type, "data": {}})
+        assert is_private_event(raw) is True
+
+    def test_rate_push_is_not_private(self) -> None:
+        raw = json.dumps({"type": "Trading.Instrument.Rate", "data": {}})
+        assert is_private_event(raw) is False
+
+    def test_unknown_type_is_not_private(self) -> None:
+        raw = json.dumps({"type": "Heartbeat", "data": {}})
+        assert is_private_event(raw) is False
+
+    def test_malformed_returns_false(self) -> None:
+        assert is_private_event("not json") is False
+        assert is_private_event("[]") is False
+        assert is_private_event(json.dumps({"type": 42})) is False
+
+
+class TestReconcileDebounce:
+    """The reconcile worker must collapse a burst of private events
+    into exactly one reconcile call. Critical because a multi-leg
+    eToro trade emits several order/position events within a few
+    hundred ms; without debounce we'd hammer the REST endpoint and
+    burn the 60-GET/min budget on a single user action.
+
+    The worker pattern (single dedicated coroutine + Event signal)
+    also guarantees serial execution: if a new event arrives *while*
+    a reconcile is in flight, the worker completes the current
+    reconcile before starting the next, so two ``sync_portfolio``
+    calls never race against the same DB.
+    """
+
+    def _make_subscriber(self, runner: Any) -> EtoroWebSocketSubscriber:
+        # Pool is never touched in this path: ``watched_ids_provider``
+        # short-circuits ``_default_watched_ids`` and ``runner``
+        # short-circuits ``_default_reconcile_runner``. Constructor
+        # only stores the reference, so an inert sentinel is safe.
+        sentinel: Any = object()
+        return EtoroWebSocketSubscriber(
+            api_key="API",
+            user_key="USR",
+            env="demo",
+            pool=sentinel,
+            watched_ids_provider=lambda: [],
+            reconcile_runner=runner,
+        )
+
+    async def _start_worker(self, sub: EtoroWebSocketSubscriber) -> asyncio.Task[None]:
+        """Spin up just the reconcile worker without booting the WS
+        listen loop. Returns the task so the test can cancel it on
+        teardown."""
+        task = asyncio.create_task(sub._reconcile_worker())
+        # Yield once so the worker reaches its first ``event.wait()``
+        # before any test schedules an event — otherwise the very
+        # first set() can be lost between create_task and the worker
+        # actually awaiting.
+        await asyncio.sleep(0)
+        return task
+
+    async def _stop_worker(self, task: asyncio.Task[None]) -> None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def test_burst_collapses_to_single_call(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(etoro_websocket, "_RECONCILE_DEBOUNCE_S", 0.05)
+
+        calls = 0
+        done = asyncio.Event()
+
+        def runner() -> None:
+            nonlocal calls
+            calls += 1
+            done.set()
+
+        sub = self._make_subscriber(runner)
+        worker = await self._start_worker(sub)
+        try:
+            sub._schedule_reconcile()
+            sub._schedule_reconcile()
+            sub._schedule_reconcile()
+            await asyncio.wait_for(done.wait(), timeout=2.0)
+            # Wait one more debounce window to confirm no second
+            # reconcile fires from the burst.
+            await asyncio.sleep(0.15)
+            assert calls == 1
+        finally:
+            await self._stop_worker(worker)
+
+    async def test_event_during_reconcile_triggers_followup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """If a new private event arrives while a reconcile is in
+        flight, the worker must finish the current reconcile then
+        run a second one. Previously a cancel-and-replace timer
+        could let two reconciles run concurrently because
+        ``Task.cancel()`` doesn't kill an in-progress
+        ``asyncio.to_thread`` worker."""
+        monkeypatch.setattr(etoro_websocket, "_RECONCILE_DEBOUNCE_S", 0.05)
+
+        in_flight = threading.Event()
+        release = threading.Event()
+        order: list[str] = []
+        calls = 0
+
+        def runner() -> None:
+            nonlocal calls
+            calls += 1
+            n = calls
+            order.append(f"start-{n}")
+            in_flight.set()
+            # Block the first reconcile so the test can land a second
+            # event while it's running. The second reconcile is
+            # released immediately because release is set after the
+            # first call signals.
+            release.wait(timeout=2.0)
+            order.append(f"end-{n}")
+
+        sub = self._make_subscriber(runner)
+        worker = await self._start_worker(sub)
+        try:
+            sub._schedule_reconcile()
+            # Wait for the first reconcile to actually be running
+            # inside the worker thread.
+            await asyncio.to_thread(in_flight.wait, 2.0)
+            assert calls == 1
+
+            # Schedule a second event during the in-flight reconcile.
+            sub._schedule_reconcile()
+            # Release the first reconcile; the worker should re-loop,
+            # debounce again, then run reconcile #2.
+            release.set()
+
+            # Wait for the second reconcile to start AND end.
+            for _ in range(200):
+                if calls >= 2 and order.count("end-") >= 0 and "end-2" in order:
+                    break
+                await asyncio.sleep(0.02)
+            assert calls == 2, f"order={order}"
+            # Sequencing: end-1 must precede start-2 — proves serial
+            # execution, no concurrent reconcile.
+            assert order.index("end-1") < order.index("start-2")
+        finally:
+            release.set()
+            await self._stop_worker(worker)
+
+    async def test_runner_exception_does_not_kill_worker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A failing reconcile must not propagate or kill the worker
+        — the next event re-attempts. Logged as a warning in
+        production."""
+        monkeypatch.setattr(etoro_websocket, "_RECONCILE_DEBOUNCE_S", 0.05)
+
+        calls = 0
+        events = [asyncio.Event(), asyncio.Event()]
+
+        def runner() -> None:
+            nonlocal calls
+            calls += 1
+            events[calls - 1].set()
+            if calls == 1:
+                raise RuntimeError("broker exploded")
+
+        sub = self._make_subscriber(runner)
+        worker = await self._start_worker(sub)
+        try:
+            sub._schedule_reconcile()
+            await asyncio.wait_for(events[0].wait(), timeout=2.0)
+            assert calls == 1
+
+            # Worker should still be alive — schedule a second event
+            # and confirm it runs.
+            sub._schedule_reconcile()
+            await asyncio.wait_for(events[1].wait(), timeout=2.0)
+            assert calls == 2
+            assert not worker.done()
+        finally:
+            await self._stop_worker(worker)
+
+    async def test_stop_waits_for_in_flight_reconcile_thread(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``stop()`` must not return while the reconcile thread is
+        still running, otherwise the lifespan caller can close the
+        DB pool out from under ``sync_portfolio``. Cancelling the
+        worker coroutine cancels the *await* but does not kill the
+        thread — so ``stop()`` has to wait on a thread-side barrier.
+        """
+        monkeypatch.setattr(etoro_websocket, "_RECONCILE_DEBOUNCE_S", 0.05)
+
+        thread_done = threading.Event()
+        in_flight = threading.Event()
+        release = threading.Event()
+
+        def runner() -> None:
+            in_flight.set()
+            release.wait(timeout=5.0)
+            thread_done.set()
+
+        sentinel: Any = object()
+        sub = EtoroWebSocketSubscriber(
+            api_key="API",
+            user_key="USR",
+            env="demo",
+            pool=sentinel,
+            watched_ids_provider=lambda: [],
+            reconcile_runner=runner,
+        )
+
+        # Replace _run so start() doesn't try to open a real
+        # WebSocket. The substitute hangs on the stop event so the
+        # listen loop's Task surface mirrors production.
+        async def fake_run() -> None:
+            await sub._stop_event.wait()
+
+        sub._run = fake_run  # type: ignore[method-assign]
+
+        await sub.start()
+        try:
+            sub._schedule_reconcile()
+            await asyncio.to_thread(in_flight.wait, 2.0)
+            assert in_flight.is_set()
+
+            # Kick stop() concurrently. It should block until the
+            # thread completes — the release.set() unblocks the
+            # runner shortly after.
+            stop_task = asyncio.create_task(sub.stop())
+            await asyncio.sleep(0.05)
+            assert not stop_task.done(), "stop() returned while reconcile thread still running"
+
+            release.set()
+            await asyncio.wait_for(stop_task, timeout=2.0)
+            assert thread_done.is_set()
+        finally:
+            release.set()
+            if sub._task is not None or sub._reconcile_worker_task is not None:
+                with contextlib.suppress(Exception):
+                    await sub.stop()
+
+    async def test_separate_windows_each_fire(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Two events separated by more than the debounce window
+        produce two independent reconciles."""
+        monkeypatch.setattr(etoro_websocket, "_RECONCILE_DEBOUNCE_S", 0.05)
+
+        calls = 0
+        events = [asyncio.Event(), asyncio.Event()]
+
+        def runner() -> None:
+            nonlocal calls
+            calls += 1
+            events[calls - 1].set()
+
+        sub = self._make_subscriber(runner)
+        worker = await self._start_worker(sub)
+        try:
+            sub._schedule_reconcile()
+            await asyncio.wait_for(events[0].wait(), timeout=2.0)
+            sub._schedule_reconcile()
+            await asyncio.wait_for(events[1].wait(), timeout=2.0)
+            assert calls == 2
+        finally:
+            await self._stop_worker(worker)
+
+
+class TestListenResilience:
+    """``_listen`` must keep consuming WS frames after a private-event
+    reconcile dispatch and after a reconcile failure — a noisy
+    private channel must not stall the rate path."""
+
+    async def test_rate_frame_after_private_event_still_upserts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(etoro_websocket, "_RECONCILE_DEBOUNCE_S", 0.05)
+
+        upsert_calls: list[QuoteUpdate] = []
+
+        def runner() -> None:
+            # Private path runs but does nothing observable here —
+            # we only assert that a subsequent rate frame still
+            # reaches the upsert path.
+            return None
+
+        sentinel: Any = object()
+        sub = EtoroWebSocketSubscriber(
+            api_key="API",
+            user_key="USR",
+            env="demo",
+            pool=sentinel,
+            watched_ids_provider=lambda: [],
+            reconcile_runner=runner,
+        )
+
+        # Replace _sync_upsert so we don't need a real DB.
+        def fake_upsert(update: QuoteUpdate) -> None:
+            upsert_calls.append(update)
+
+        sub._sync_upsert = fake_upsert  # type: ignore[method-assign]
+
+        worker = asyncio.create_task(sub._reconcile_worker())
+        await asyncio.sleep(0)
+        try:
+            private = json.dumps({"type": "Trading.PositionUpdate", "data": {}})
+            rate = json.dumps(
+                {
+                    "type": "Trading.Instrument.Rate",
+                    "data": {
+                        "InstrumentID": 1001,
+                        "Bid": "100",
+                        "Ask": "101",
+                        "Date": "2026-04-24T14:30:00Z",
+                    },
+                }
+            )
+
+            class FakeWs:
+                def __init__(self, frames: list[str]) -> None:
+                    self._frames = frames
+
+                def __aiter__(self) -> FakeWs:
+                    return self
+
+                async def __anext__(self) -> str:
+                    if not self._frames:
+                        raise StopAsyncIteration
+                    return self._frames.pop(0)
+
+            await sub._listen(FakeWs([private, rate]))  # type: ignore[arg-type]
+
+            assert len(upsert_calls) == 1
+            assert upsert_calls[0].instrument_id == 1001
+        finally:
+            worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await worker

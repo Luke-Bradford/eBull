@@ -221,6 +221,7 @@ async def _maybe_start_etoro_ws(pool: ConnectionPool[Any]) -> EtoroWebSocketSubs
     subscriber = EtoroWebSocketSubscriber(
         api_key=api_key,
         user_key=user_key,
+        env=settings.etoro_env,
         pool=pool,
     )
     try:
