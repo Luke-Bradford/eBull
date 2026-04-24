@@ -740,8 +740,8 @@ class TestBackfill:
 
         result = ingest_insider_transactions_for_instrument(
             ebull_test_conn,
-            cast("object", fetcher),
-            instrument_id=iid_a,  # type: ignore[arg-type]
+            cast("object", fetcher),  # type: ignore[arg-type]
+            instrument_id=iid_a,
         )
         assert result.filings_scanned == 1
         assert fetcher.calls == ["https://www.sec.gov/Archives/a.xml"]
