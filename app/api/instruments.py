@@ -756,6 +756,105 @@ def get_instrument_sec_profile(
 
 
 # ---------------------------------------------------------------------------
+# Dilution + share-count history (#435)
+# ---------------------------------------------------------------------------
+
+
+class ShareCountPeriodModel(BaseModel):
+    period_end: date
+    fiscal_year: int | None
+    fiscal_period: str | None
+    shares_outstanding: Decimal | None
+    shares_issued_new: Decimal | None
+    buyback_shares: Decimal | None
+
+
+class DilutionSummaryModel(BaseModel):
+    latest_shares: Decimal | None
+    latest_as_of: date | None
+    yoy_shares: Decimal | None
+    net_dilution_pct_yoy: Decimal | None
+    ttm_shares_issued: Decimal | None
+    ttm_buyback_shares: Decimal | None
+    ttm_net_share_change: Decimal | None
+    dilution_posture: Literal["dilutive", "buyback_heavy", "stable"]
+
+
+class InstrumentDilution(BaseModel):
+    symbol: str
+    summary: DilutionSummaryModel
+    history: list[ShareCountPeriodModel]
+
+
+@router.get("/{symbol}/dilution", response_model=InstrumentDilution)
+def get_instrument_dilution(
+    symbol: str,
+    limit: int = Query(default=40, ge=1, le=200),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InstrumentDilution:
+    """Per-period share count + TTM dilution summary (#435).
+
+    Source: SEC XBRL facts already ingested via the daily
+    ``fundamentals_sync`` path (``StockIssuedDuringPeriodSharesNewIssues``,
+    ``StockRepurchasedDuringPeriodShares``, ``CommonStockSharesOutstanding``,
+    ``dei:EntityCommonStockSharesOutstanding``). Returns the
+    ``stable`` empty shape for never-seeded / non-US tickers — UI
+    renders an empty state without 404 handling.
+
+    Default ``limit=40`` covers ten years of quarterly history.
+    """
+    from app.services.dilution import get_dilution_summary, get_share_count_history
+
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    summary = get_dilution_summary(conn, instrument_id=instrument_id)
+    history = get_share_count_history(conn, instrument_id=instrument_id, limit=limit)
+
+    return InstrumentDilution(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        summary=DilutionSummaryModel(
+            latest_shares=summary.latest_shares,
+            latest_as_of=summary.latest_as_of,
+            yoy_shares=summary.yoy_shares,
+            net_dilution_pct_yoy=summary.net_dilution_pct_yoy,
+            ttm_shares_issued=summary.ttm_shares_issued,
+            ttm_buyback_shares=summary.ttm_buyback_shares,
+            ttm_net_share_change=summary.ttm_net_share_change,
+            dilution_posture=summary.dilution_posture,
+        ),
+        history=[
+            ShareCountPeriodModel(
+                period_end=p.period_end,
+                fiscal_year=p.fiscal_year,
+                fiscal_period=p.fiscal_period,
+                shares_outstanding=p.shares_outstanding,
+                shares_issued_new=p.shares_issued_new,
+                buyback_shares=p.buyback_shares,
+            )
+            for p in history
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Dividend history + summary (#414 follow-up, operator ask 2026-04-24)
 # ---------------------------------------------------------------------------
 
