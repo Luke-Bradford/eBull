@@ -1,0 +1,114 @@
+"""Writer-discipline regression guard for ``fetch_document_text`` (#453).
+
+The operator directive from #448 forbids disk-only persistence of
+upstream body text: every caller of
+``SecFilingsProvider.fetch_document_text`` MUST route the body
+through a service-layer ingester that normalises every structured
+field into SQL. This test pins the allowed-caller set so a future
+commit that adds a new caller (e.g. to write to ``data/raw/*``
+without a matching SQL normalisation path) fails loudly instead of
+silently regressing the contract.
+
+Pattern copied from ``tests/test_raw_persistence.py`` sentinel tests
+— the prevention log entry "Empty-parametrize silent pass" applies:
+we assert ``>= MIN`` expected hits so a mis-compiled pattern that
+returns zero matches still fails the file rather than passing a
+green no-op.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+# Every file in the repo that legitimately calls ``fetch_document_text``
+# on an SEC provider. New entries require a matching service-layer
+# ingester that normalises into SQL — see docs/review-prevention-log.md
+# "Every structured field from an upstream document lands in SQL".
+_ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
+    {
+        # Production callers. Each one normalises its domain into SQL:
+        #   business_summary    — 10-K Item 1 blob + sections (#428 / #449)
+        #   dividend_calendar   — 8-K Item 8.01 (#434)
+        #   insider_transactions — Form 4 XML (#429)
+        #   eight_k_events      — 8-K full structure (#450)
+        "app/services/business_summary.py",
+        "app/services/dividend_calendar.py",
+        "app/services/insider_transactions.py",
+        "app/services/eight_k_events.py",
+        # Provider implementation owns the method itself.
+        "app/providers/implementations/sec_edgar.py",
+        # Docstring-only reference in the scheduler job that invokes
+        # one of the ingesters. No runtime call site.
+        "app/workers/scheduler.py",
+        # Tests that exercise the ingesters use stub _DocFetcher classes
+        # that shadow the method name — these are test-only and don't
+        # persist to disk.
+        "tests/test_business_summary_ingest.py",
+        "tests/test_dividend_calendar_ingest.py",
+        "tests/test_insider_transactions_ingest.py",
+        "tests/test_eight_k_events_ingest.py",
+        # This guard file itself references the method name in its
+        # contract sentence.
+        "tests/test_fetch_document_text_callers.py",
+    }
+)
+
+
+def _all_caller_files() -> set[str]:
+    """Scan app/ and tests/ for ``fetch_document_text`` occurrences,
+    returning repo-relative forward-slash paths."""
+    pattern = re.compile(r"\bfetch_document_text\b")
+    hits: set[str] = set()
+    for root_name in ("app", "tests"):
+        root = _REPO_ROOT / root_name
+        for path in root.rglob("*.py"):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if pattern.search(text):
+                rel = path.relative_to(_REPO_ROOT).as_posix()
+                hits.add(rel)
+    return hits
+
+
+def test_fetch_document_text_caller_set_is_pinned() -> None:
+    """Every file that references ``fetch_document_text`` is on the
+    allow-list. A new caller fails this test — update the allow-list
+    only alongside a documented SQL-normalisation path (see
+    docs/review-prevention-log.md "Every structured field from an
+    upstream document lands in SQL")."""
+    actual = _all_caller_files()
+    unexpected = actual - _ALLOWED_CALLER_FILES
+    missing = _ALLOWED_CALLER_FILES - actual
+    assert not unexpected, (
+        "New caller(s) of fetch_document_text detected outside the "
+        "allow-list. Each new caller must route the body through a "
+        "service-layer ingester that normalises every structured "
+        "field into SQL (#448 / #453). Offenders: "
+        f"{sorted(unexpected)}"
+    )
+    assert not missing, (
+        "Allow-listed caller(s) no longer reference fetch_document_text. "
+        "Remove stale entries from _ALLOWED_CALLER_FILES so the guard "
+        f"doesn't silently accept new callers. Missing: {sorted(missing)}"
+    )
+
+
+def test_caller_scan_finds_expected_minimum() -> None:
+    """Defensive sentinel (#436 "Empty-parametrize silent pass"
+    pattern): the grep-based walk must return ``>= 9`` hits. If the
+    regex or the file walk breaks, the main test above would silently
+    pass with an empty diff — this assertion makes the guard loud
+    when the scan itself is broken.
+    """
+    hits = _all_caller_files()
+    assert len(hits) >= 9, (
+        f"Scanner returned only {len(hits)} files matching "
+        f"fetch_document_text; expected >= 9. Scanner or repository "
+        "layout changed — re-audit before relaxing this bound."
+    )
