@@ -766,6 +766,110 @@ def get_instrument_sec_profile(
 
 
 # ---------------------------------------------------------------------------
+# 8-K structured-events endpoint (#450)
+# ---------------------------------------------------------------------------
+
+
+class EightKItemModel(BaseModel):
+    item_code: str
+    item_label: str
+    severity: str | None
+    body: str
+
+
+class EightKExhibitModel(BaseModel):
+    exhibit_number: str
+    description: str | None
+
+
+class EightKFilingModel(BaseModel):
+    accession_number: str
+    document_type: str
+    is_amendment: bool
+    date_of_report: date | None
+    reporting_party: str | None
+    signature_name: str | None
+    signature_title: str | None
+    signature_date: date | None
+    primary_document_url: str | None
+    items: list[EightKItemModel]
+    exhibits: list[EightKExhibitModel]
+
+
+class EightKFilingsResponse(BaseModel):
+    symbol: str
+    filings: list[EightKFilingModel]
+
+
+@router.get("/{symbol}/eight_k_filings", response_model=EightKFilingsResponse)
+def get_instrument_8k_filings(
+    symbol: str,
+    limit: int = 50,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> EightKFilingsResponse:
+    """Return recent 8-K filings for an instrument with full structured
+    item bodies + exhibit pointers (#450)."""
+    from app.services.eight_k_events import list_8k_filings
+
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    if limit <= 0 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    filings = list_8k_filings(conn, instrument_id=instrument_id, limit=limit)
+    return EightKFilingsResponse(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        filings=[
+            EightKFilingModel(
+                accession_number=f.accession_number,
+                document_type=f.document_type,
+                is_amendment=f.is_amendment,
+                date_of_report=f.date_of_report,
+                reporting_party=f.reporting_party,
+                signature_name=f.signature_name,
+                signature_title=f.signature_title,
+                signature_date=f.signature_date,
+                primary_document_url=f.primary_document_url,
+                items=[
+                    EightKItemModel(
+                        item_code=i.item_code,
+                        item_label=i.item_label,
+                        severity=i.severity,
+                        body=i.body,
+                    )
+                    for i in f.items
+                ],
+                exhibits=[
+                    EightKExhibitModel(
+                        exhibit_number=e.exhibit_number,
+                        description=e.description,
+                    )
+                    for e in f.exhibits
+                ],
+            )
+            for f in filings
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
 # 10-K Item 1 subsection breakdown (#449)
 # ---------------------------------------------------------------------------
 

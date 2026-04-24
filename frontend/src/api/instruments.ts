@@ -130,6 +130,52 @@ export async function fetchInstrumentSecProfile(
 }
 
 // ---------------------------------------------------------------------------
+// 8-K structured events (#450)
+// ---------------------------------------------------------------------------
+
+export interface EightKItem {
+  item_code: string;
+  item_label: string;
+  severity: string | null;
+  body: string;
+}
+
+export interface EightKExhibit {
+  exhibit_number: string;
+  description: string | null;
+}
+
+export interface EightKFiling {
+  accession_number: string;
+  document_type: string;
+  is_amendment: boolean;
+  date_of_report: string | null;
+  reporting_party: string | null;
+  signature_name: string | null;
+  signature_title: string | null;
+  signature_date: string | null;
+  primary_document_url: string | null;
+  items: EightKItem[];
+  exhibits: EightKExhibit[];
+}
+
+export interface EightKFilingsResponse {
+  symbol: string;
+  filings: EightKFiling[];
+}
+
+export function fetchEightKFilings(
+  symbol: string,
+  limit: number = 25,
+): Promise<EightKFilingsResponse> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return apiFetch<EightKFilingsResponse>(
+    `/instruments/${encodeURIComponent(symbol)}/eight_k_filings?${params.toString()}`,
+  );
+}
+
+
+// ---------------------------------------------------------------------------
 // 10-K Item 1 subsection breakdown (#449)
 // ---------------------------------------------------------------------------
 

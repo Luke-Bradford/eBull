@@ -9,6 +9,7 @@
 import { Section } from "@/components/dashboard/Section";
 import { BusinessSectionsPanel } from "@/components/instrument/BusinessSectionsPanel";
 import { DividendsPanel } from "@/components/instrument/DividendsPanel";
+import { EightKEventsPanel } from "@/components/instrument/EightKEventsPanel";
 import { InsiderActivityPanel } from "@/components/instrument/InsiderActivityPanel";
 import { SecProfilePanel } from "@/components/instrument/SecProfilePanel";
 import { EmptyState } from "@/components/states/EmptyState";
@@ -179,6 +180,9 @@ export function ResearchTab({
       </div>
       <div className="md:col-span-2">
         <InsiderActivityPanel symbol={summary.identity.symbol} />
+      </div>
+      <div className="md:col-span-2">
+        <EightKEventsPanel symbol={summary.identity.symbol} />
       </div>
 
       <Section title="Key statistics">

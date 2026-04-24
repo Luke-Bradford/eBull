@@ -70,6 +70,7 @@ from app.workers.scheduler import (
     JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
     JOB_RAW_DATA_RETENTION_SWEEP,
     JOB_RETRY_DEFERRED,
+    JOB_SEC_8K_EVENTS_INGEST,
     JOB_SEC_BUSINESS_SUMMARY_INGEST,
     JOB_SEC_DIVIDEND_CALENDAR_INGEST,
     JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL,
@@ -96,6 +97,7 @@ from app.workers.scheduler import (
     orchestrator_high_frequency_sync,
     raw_data_retention_sweep,
     retry_deferred_recommendations_job,
+    sec_8k_events_ingest,
     sec_business_summary_ingest,
     sec_dividend_calendar_ingest,
     sec_insider_transactions_backfill,
@@ -150,6 +152,7 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_SEC_DIVIDEND_CALENDAR_INGEST: sec_dividend_calendar_ingest,
     JOB_SEC_INSIDER_TRANSACTIONS_INGEST: sec_insider_transactions_ingest,
     JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL: sec_insider_transactions_backfill,
+    JOB_SEC_8K_EVENTS_INGEST: sec_8k_events_ingest,
 }
 
 

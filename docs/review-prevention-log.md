@@ -926,3 +926,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `upsert_business_sections` issued a `DELETE FROM instrument_business_summary_sections WHERE instrument_id = %s AND source_accession = %s` followed by an INSERT loop. The caller ran the helper inside a wider `try` that logged and continued on failure; if any INSERT raised mid-loop (e.g. a UNIQUE violation on a malformed payload), the exception was caught and the caller still called `conn.commit()` on the outer unit — committing the DELETE alone. Result: a stored snapshot for the accession would silently become an empty list.
 - Prevention: Any helper that clears-then-repopulates rows inside the same connection MUST wrap the clear + repopulate in a `with conn.transaction():` savepoint so a mid-loop failure rolls back the DELETE too. Alternatively, use ON CONFLICT DO UPDATE upserts (no DELETE) when the table has a natural conflict key. At self-review: grep for `DELETE FROM ... WHERE ...` followed by an `INSERT` in the same function, and confirm the pair is atomically scoped.
 - Enforced in: this prevention log; `app/services/business_summary.py::upsert_business_sections` now uses `with conn.transaction():`. Regression pinned by `tests/test_business_summary_ingest.py::TestBusinessSectionsIngest::test_insert_failure_rolls_back_delete_atomically`.
+
+---
+
+### `str(row[N])` coerces SQL NULL to the literal string "None"
+
+- First seen in: #450 (surfaced by Claude review bot on PR #461).
+- Symptom: `_load_item_labels` used `str(r[2])` when building the `(label, severity)` lookup from `sec_8k_item_codes`. The schema today has `severity` NOT NULL, so the bug was latent — but the moment a future migration relaxes the constraint, every NULL severity would silently serialise to the literal four-character string `"None"` in the loaded dict and then propagate into `eight_k_items.severity` unnoticed.
+- Prevention: In any DB reader helper, `str(row[N])` is only safe when the underlying column is NOT NULL. Before wrapping a column with `str()` / `int()` / `bool()` / `Decimal()`, confirm the schema declares it NOT NULL. For nullable columns, use the Optional-aware pattern: `val if val is None else str(val)` (and widen the return type). At self-review: grep for `str\(r\[|str\(row\[` in service modules and audit each occurrence against the source schema.
+- Enforced in: this prevention log; `app/services/eight_k_events.py::_load_item_labels` now preserves NULL severity as Python `None`.
