@@ -377,8 +377,10 @@ class EtoroWebSocketSubscriber:
             portfolio = broker.get_portfolio()
 
         with self._pool.connection() as conn:
+            # ``ConnectionPool.connection()`` already commits on clean
+            # exit / rolls back on error via ``with conn:`` — no
+            # explicit commit needed here.
             sync_portfolio(conn, portfolio)
-            conn.commit()
 
     def _sync_upsert(self, update: QuoteUpdate) -> None:
         """Sync helper offloaded to a worker thread per tick so the
