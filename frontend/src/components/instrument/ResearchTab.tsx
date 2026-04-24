@@ -8,6 +8,7 @@
  */
 import { Section } from "@/components/dashboard/Section";
 import { DividendsPanel } from "@/components/instrument/DividendsPanel";
+import { InsiderActivityPanel } from "@/components/instrument/InsiderActivityPanel";
 import { SecProfilePanel } from "@/components/instrument/SecProfilePanel";
 import { EmptyState } from "@/components/states/EmptyState";
 import type { InstrumentSummary, ThesisDetail } from "@/api/types";
@@ -172,6 +173,9 @@ export function ResearchTab({
     <div className="grid gap-4 md:grid-cols-2">
       <SecProfilePanel symbol={summary.identity.symbol} />
       <DividendsPanel symbol={summary.identity.symbol} />
+      <div className="md:col-span-2">
+        <InsiderActivityPanel symbol={summary.identity.symbol} />
+      </div>
 
       <Section title="Key statistics">
         {stats === null ? (

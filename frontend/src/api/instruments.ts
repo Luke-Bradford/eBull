@@ -129,6 +129,68 @@ export async function fetchInstrumentSecProfile(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Insider-transactions (Form 4) endpoints (#429)
+// ---------------------------------------------------------------------------
+
+export interface InsiderSummary {
+  symbol: string;
+  net_shares_90d: string;
+  buy_count_90d: number;
+  sell_count_90d: number;
+  unique_filers_90d: number;
+  latest_txn_date: string | null;
+}
+
+export interface InsiderTransactionDetail {
+  accession_number: string;
+  document_type: string;
+  txn_date: string;
+  deemed_execution_date: string | null;
+  filer_cik: string | null;
+  filer_name: string;
+  filer_role: string | null;
+  security_title: string | null;
+  txn_code: string;
+  acquired_disposed_code: string | null;
+  shares: string | null;
+  price: string | null;
+  post_transaction_shares: string | null;
+  direct_indirect: string | null;
+  nature_of_ownership: string | null;
+  is_derivative: boolean;
+  equity_swap_involved: boolean | null;
+  transaction_timeliness: string | null;
+  conversion_exercise_price: string | null;
+  exercise_date: string | null;
+  expiration_date: string | null;
+  underlying_security_title: string | null;
+  underlying_shares: string | null;
+  underlying_value: string | null;
+  footnotes: Record<string, string>;
+}
+
+export interface InsiderTransactionsList {
+  symbol: string;
+  rows: InsiderTransactionDetail[];
+}
+
+export function fetchInsiderSummary(symbol: string): Promise<InsiderSummary> {
+  return apiFetch<InsiderSummary>(
+    `/instruments/${encodeURIComponent(symbol)}/insider_summary`,
+  );
+}
+
+export function fetchInsiderTransactions(
+  symbol: string,
+  limit: number = 100,
+): Promise<InsiderTransactionsList> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return apiFetch<InsiderTransactionsList>(
+    `/instruments/${encodeURIComponent(symbol)}/insider_transactions?${params.toString()}`,
+  );
+}
+
 export function fetchInstrumentDetail(
   instrumentId: number,
 ): Promise<InstrumentDetail> {
