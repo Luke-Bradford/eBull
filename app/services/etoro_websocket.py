@@ -48,7 +48,6 @@ logger = logging.getLogger(__name__)
 
 _WS_URL = "wss://ws.etoro.com/ws"
 _RECONNECT_BACKOFF_S = 5.0
-_RESUBSCRIBE_INTERVAL_S = 60.0  # re-poll watched instruments
 
 
 # ---------------------------------------------------------------------
@@ -255,6 +254,16 @@ class EtoroWebSocketSubscriber:
         with self._pool.connection() as conn:
             return fetch_watched_instrument_ids(conn)
 
+    def _sync_upsert(self, update: QuoteUpdate) -> None:
+        """Sync helper offloaded to a worker thread per tick so the
+        event loop never blocks on a DB round-trip. Both
+        ``pool.connection()`` (a sync context manager) and the
+        ``conn.execute`` it yields run inside ``asyncio.to_thread``.
+        """
+        with self._pool.connection() as conn:
+            upsert_quote(conn, update)
+            conn.commit()
+
     async def start(self) -> None:
         if self._task is not None:
             return
@@ -302,7 +311,9 @@ class EtoroWebSocketSubscriber:
             if not _is_auth_success(auth_reply):
                 raise RuntimeError(f"eToro WS auth failed: {auth_reply!r}")
 
-            ids = self._watched_ids_provider()
+            # Selector hits the DB; offload to a worker thread so
+            # the connect path doesn't block the event loop.
+            ids = await asyncio.to_thread(self._watched_ids_provider)
             sub_msg = build_subscribe_message(ids)
             if sub_msg is not None:
                 await ws.send(sub_msg)
@@ -326,9 +337,11 @@ class EtoroWebSocketSubscriber:
             if update is None:
                 continue
             try:
-                with self._pool.connection() as conn:
-                    upsert_quote(conn, update)
-                    conn.commit()
+                # ``pool.connection()`` is sync — calling it from the
+                # event loop would block the loop for the full DB
+                # round-trip on every tick. Offload to a worker
+                # thread so the WS read loop stays hot.
+                await asyncio.to_thread(self._sync_upsert, update)
             except Exception:
                 logger.warning(
                     "EtoroWebSocketSubscriber: upsert failed instrument_id=%d",
