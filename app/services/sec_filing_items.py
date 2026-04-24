@@ -94,9 +94,11 @@ def apply_8k_items_to_filing_events(
     if not items_by_accession:
         return 0
 
-    # Build a single multi-row UPDATE via VALUES. psycopg renders
-    # list[str] as a Postgres text[] natively for the ``items`` col.
-    # No SQL composition; values come via parameter binding.
+    # One UPDATE per accession. At daily-cadence volume (tens of
+    # 8-Ks across all covered CIKs) this is fine — a bulk UNNEST
+    # would be optimal if counts ever climb into the thousands per
+    # run, but isn't worth the SQL complexity today. psycopg renders
+    # ``list[str]`` as a Postgres ``text[]`` natively.
     updated = 0
     with conn.cursor() as cur:
         for accession, codes in items_by_accession.items():
