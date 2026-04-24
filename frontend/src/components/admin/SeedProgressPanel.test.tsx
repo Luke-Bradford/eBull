@@ -146,10 +146,22 @@ describe("SeedProgressPanel", () => {
     render(<SeedProgressPanel />);
 
     const button = await screen.findByRole("button", { name: /Resume ingest/i });
+
+    // Baseline fetch counts — both APIs fire once during initial mount.
+    const seedBefore = mockFetchSeedProgress.mock.calls.length;
+    const timingBefore = mockFetchTiming.mock.calls.length;
+
     await userEvent.click(button);
 
     await waitFor(() => {
       expect(mockSetEnabled).toHaveBeenCalledWith("fundamentals_ingest", true);
+    });
+    // Toggle must refetch BOTH sibling states (review #424 WARNING:
+    // timing table would otherwise stay stale for up to 60 s of idle
+    // polling after the operator toggles ingest).
+    await waitFor(() => {
+      expect(mockFetchSeedProgress.mock.calls.length).toBeGreaterThan(seedBefore);
+      expect(mockFetchTiming.mock.calls.length).toBeGreaterThan(timingBefore);
     });
   });
 

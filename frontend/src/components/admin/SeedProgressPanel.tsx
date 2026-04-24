@@ -76,18 +76,23 @@ export function SeedProgressPanel() {
   const timing = timingState.data;
 
   const handleTogglePause = useCallback(async () => {
-    if (seed === null || seedState.data === null) return;
+    if (seed === null) return;
     setToggleBusy(true);
     setToggleError(null);
     try {
-      await setIngestEnabled(FUNDAMENTALS_INGEST_KEY, seedState.data.ingest_paused);
+      await setIngestEnabled(FUNDAMENTALS_INGEST_KEY, seed.ingest_paused);
+      // Refetch both sibling states — the toggle does not change
+      // timing data directly, but a subsequent run under the new
+      // state will, and leaving the timing card stale for up to
+      // 60 s of idle polling is operator-confusing.
       seedState.refetch();
+      timingState.refetch();
     } catch (err) {
       setToggleError(err instanceof Error ? err.message : "Toggle failed");
     } finally {
       setToggleBusy(false);
     }
-  }, [seed, seedState]);
+  }, [seed, seedState, timingState]);
 
   const toggleLabel = useMemo(() => {
     if (toggleBusy) return "Updating…";
@@ -284,7 +289,7 @@ function TimingSection({
             </thead>
             <tbody className="divide-y divide-slate-100">
               {data.slowest.map((s) => (
-                <tr key={`${s.cik}-${s.finished_at}`}>
+                <tr key={`${s.cik}-${s.mode}-${s.finished_at}`}>
                   <td className="py-1 font-mono text-slate-700">{s.cik}</td>
                   <td>{s.mode}</td>
                   <td>{formatSeconds(s.seconds)}</td>
