@@ -347,6 +347,22 @@ class TestSchedulerWiring:
         job = next(j for j in SCHEDULED_JOBS if j.name == JOB_RAW_DATA_RETENTION_SWEEP)
         assert job.catch_up_on_boot is False
 
+    def test_dry_run_default_is_false_under_issue_325(self) -> None:
+        """Default is no-longer-dry-run — #325 flipped 2026-04-24.
+
+        The retention sweep wrote zero deletions for weeks in dry-run
+        mode, growing ``data/raw/`` past 30 GB. Flipped to False so
+        age-sweep actually reclaims disk on the next daily run.
+        Operators can still force dry-run for one cycle via env var
+        ``EBULL_RAW_RETENTION_DRY_RUN=true``.
+        """
+        # Import Settings class directly — Settings() instantiation is
+        # bypassed so environment overrides do not influence this test.
+        from app.config import Settings
+
+        defaults = Settings.model_fields["raw_retention_dry_run"]
+        assert defaults.default is False
+
 
 # ---------------------------------------------------------------------
 # Integration: end-to-end dedup on real filesystem

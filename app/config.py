@@ -130,10 +130,14 @@ class Settings(BaseSettings):
 
     # Raw-data retention sweep job (#268 follow-up Plan A).
     # When True, ``raw_data_retention_sweep`` logs counts per source
-    # but does NOT delete any files. Operator flips to False only
-    # after observing one dry-run cycle's output and confirming the
-    # expected reclaim volume.
-    raw_retention_dry_run: bool = True
+    # but does NOT delete any files. Default flipped to False under
+    # #325 after dry-run cycles confirmed the reclaim volume and
+    # nothing downstream reads from ``data/raw/`` post-ingest. Env
+    # override ``EBULL_RAW_RETENTION_DRY_RUN=true`` still available
+    # for operators who need a one-run pause (e.g. before a manual
+    # audit). See ``_RETENTION_POLICY`` in
+    # ``app/services/raw_persistence.py`` for per-source max_age.
+    raw_retention_dry_run: bool = False
 
     # Chunk L: dedupe SEC filings fetch. When True,
     # ``daily_research_refresh`` skips its SEC EDGAR filings fetch
