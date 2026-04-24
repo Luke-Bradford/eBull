@@ -242,6 +242,7 @@ def list_instruments(
     sector: str | None = Query(default=None),
     coverage_tier: int | None = Query(default=None, ge=1, le=3),
     exchange: str | None = Query(default=None),
+    has_dividend: bool | None = Query(default=None),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=MAX_PAGE_LIMIT),
 ) -> InstrumentListResponse:
@@ -253,6 +254,10 @@ def list_instruments(
       - sector: exact match on instruments.sector
       - coverage_tier: exact match (1/2/3); untiered instruments excluded
       - exchange: exact match on instruments.exchange
+      - has_dividend: True matches instruments with a positive TTM dividend
+        signal (dps_declared or dividends_paid > 0 in the last four reported
+        quarters); False matches instruments with no such signal. Backed by
+        the ``instrument_dividend_summary`` view (sql/050).
 
     Ordering: symbol ASC, instrument_id ASC (deterministic tiebreak).
     """
@@ -275,6 +280,11 @@ def list_instruments(
     if exchange is not None:
         where_clauses.append("i.exchange = %(exchange)s")
         filter_params["exchange"] = exchange
+    if has_dividend is not None:
+        if has_dividend:
+            where_clauses.append("COALESCE(ds.has_dividend, FALSE) = TRUE")
+        else:
+            where_clauses.append("COALESCE(ds.has_dividend, FALSE) = FALSE")
 
     where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
@@ -282,8 +292,14 @@ def list_instruments(
     # Only join tables that the active filters require.
     # Uses filter_params only — no limit/offset keys that the COUNT has no placeholders for.
     count_needs_coverage = coverage_tier is not None
+    count_needs_dividend = has_dividend is not None
     count_join = "LEFT JOIN coverage c USING (instrument_id)" if count_needs_coverage else ""
-    count_sql = f"SELECT COUNT(*) AS cnt FROM instruments i {count_join}{where_sql}"  # noqa: S608  — hardcoded fragments only
+    count_dividend_join = (
+        "LEFT JOIN instrument_dividend_summary ds USING (instrument_id)" if count_needs_dividend else ""
+    )
+    count_sql = (  # noqa: S608  — hardcoded fragments only
+        f"SELECT COUNT(*) AS cnt FROM instruments i {count_join} {count_dividend_join}{where_sql}"
+    )
 
     # -- Items query -------------------------------------------------------
     items_params: dict[str, object] = {**filter_params, "limit": limit, "offset": offset}
@@ -294,6 +310,7 @@ def list_instruments(
         FROM instruments i
         LEFT JOIN quotes q USING (instrument_id)
         LEFT JOIN coverage c USING (instrument_id)
+        LEFT JOIN instrument_dividend_summary ds USING (instrument_id)
         {where_sql}
         ORDER BY i.symbol, i.instrument_id
         LIMIT %(limit)s OFFSET %(offset)s"""  # noqa: S608  — hardcoded fragments only
@@ -624,6 +641,106 @@ def get_instrument_candles(
         range=range_,
         days=days,
         rows=bars,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dividend history + summary (#414 follow-up, operator ask 2026-04-24)
+# ---------------------------------------------------------------------------
+
+
+class DividendPeriodModel(BaseModel):
+    period_end_date: date
+    period_type: str
+    fiscal_year: int
+    fiscal_quarter: int | None
+    dps_declared: Decimal | None
+    dividends_paid: Decimal | None
+    reported_currency: str | None
+
+
+class DividendSummaryModel(BaseModel):
+    has_dividend: bool
+    ttm_dps: Decimal | None
+    ttm_dividends_paid: Decimal | None
+    ttm_yield_pct: Decimal | None
+    latest_dps: Decimal | None
+    latest_dividend_at: date | None
+    dividend_streak_q: int
+    dividend_currency: str | None
+
+
+class InstrumentDividends(BaseModel):
+    symbol: str
+    summary: DividendSummaryModel
+    history: list[DividendPeriodModel]
+
+
+@router.get("/{symbol}/dividends", response_model=InstrumentDividends)
+def get_instrument_dividends(
+    symbol: str,
+    limit: int = Query(default=40, ge=1, le=400),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InstrumentDividends:
+    """Dividend history + TTM yield summary for a single instrument.
+
+    Source: SEC XBRL ``us-gaap:CommonStockDividendsPerShareDeclared`` +
+    ``us-gaap:PaymentsOfDividends``, already ingested via the daily
+    companyfacts path. Returns ``has_dividend=False`` with an empty
+    history array for instruments that have never reported a dividend
+    — the UI can render an empty state without 404 handling.
+
+    Default ``limit=40`` covers ten years of quarterly history.
+    """
+    from app.services.dividends import get_dividend_history, get_dividend_summary
+
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    summary = get_dividend_summary(conn, instrument_id=instrument_id)
+    history = get_dividend_history(conn, instrument_id=instrument_id, limit=limit)
+
+    return InstrumentDividends(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        summary=DividendSummaryModel(
+            has_dividend=summary.has_dividend,
+            ttm_dps=summary.ttm_dps,
+            ttm_dividends_paid=summary.ttm_dividends_paid,
+            ttm_yield_pct=summary.ttm_yield_pct,
+            latest_dps=summary.latest_dps,
+            latest_dividend_at=summary.latest_dividend_at,
+            dividend_streak_q=summary.dividend_streak_q,
+            dividend_currency=summary.dividend_currency,
+        ),
+        history=[
+            DividendPeriodModel(
+                period_end_date=p.period_end_date,
+                period_type=p.period_type,
+                fiscal_year=p.fiscal_year,
+                fiscal_quarter=p.fiscal_quarter,
+                dps_declared=p.dps_declared,
+                dividends_paid=p.dividends_paid,
+                reported_currency=p.reported_currency,
+            )
+            for p in history
+        ],
     )
 
 

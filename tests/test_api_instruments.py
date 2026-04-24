@@ -266,6 +266,28 @@ class TestListInstruments:
         first_execute_params = cur.execute.call_args_list[0][0][1]
         assert first_execute_params["exchange"] == "NASDAQ"
 
+    def test_filter_by_has_dividend_true(self) -> None:
+        row = _make_instrument_row()
+        conn = _with_conn([[{"cnt": 1}], [row]])
+        resp = client.get("/instruments", params={"has_dividend": "true"})
+
+        assert resp.status_code == 200
+        cur = conn.cursor.return_value
+        count_sql = cur.execute.call_args_list[0][0][0]
+        # has_dividend join + filter must appear in the built SQL.
+        assert "instrument_dividend_summary" in count_sql
+        assert "COALESCE(ds.has_dividend, FALSE) = TRUE" in count_sql
+
+    def test_filter_by_has_dividend_false(self) -> None:
+        row = _make_instrument_row()
+        conn = _with_conn([[{"cnt": 1}], [row]])
+        resp = client.get("/instruments", params={"has_dividend": "false"})
+
+        assert resp.status_code == 200
+        cur = conn.cursor.return_value
+        count_sql = cur.execute.call_args_list[0][0][0]
+        assert "COALESCE(ds.has_dividend, FALSE) = FALSE" in count_sql
+
     def test_pagination_offset_and_limit(self) -> None:
         row = _make_instrument_row()
         conn = _with_conn([[{"cnt": 100}], [row]])
