@@ -413,6 +413,9 @@ def test_summary_prefers_local_sec_xbrl_for_us_ticker(client: TestClient) -> Non
                         "revenue": Decimal("400000000000"),
                     },
                 ],
+                # #432 compute_market_cap cursor — None so the endpoint
+                # keeps the yfinance market_cap for this test's shape.
+                [None],
             ]
         )
 
@@ -496,6 +499,8 @@ def test_summary_sec_preference_reports_price_missing_when_quote_absent(
                     },
                     None,
                 ],
+                # #432 compute_market_cap cursor — None.
+                [None],
             ]
         )
 
@@ -602,6 +607,8 @@ def test_summary_id_override_pins_specific_instrument(client: TestClient) -> Non
                     }
                 ],
                 # Cursor 2: _has_sec_cik probe — LSE ticker has no CIK.
+                [None],
+                # Cursor 3: #432 compute_market_cap — None.
                 [None],
             ]
         )

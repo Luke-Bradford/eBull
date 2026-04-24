@@ -1243,6 +1243,22 @@ def get_instrument_summary(
     if use_local_sec:
         local_fundamentals = _fetch_local_fundamentals(conn, instrument_id_int)
 
+    # #432 (yfinance retire, batch 1): prefer compute-from-XBRL market
+    # cap over yfinance when SEC has a fresh share count. Runs after
+    # the existing local-fundamentals block so its cursor slot is the
+    # LAST in the sequence — keeps the test harness shape stable.
+    # Returns None for non-US / pre-seed; we then fall back to
+    # whatever yfinance provided on the identity built above.
+    try:
+        from app.services.xbrl_derived_stats import compute_market_cap
+
+        computed_cap = compute_market_cap(conn, instrument_id=instrument_id_int)
+    except Exception:
+        logger.warning("compute_market_cap failed", exc_info=True)
+        computed_cap = None
+    if computed_cap is not None:
+        identity = identity.model_copy(update={"market_cap": computed_cap.value})
+
     # Treat a dict of all-None as "no local data" — the fundamentals_snapshot
     # table may exist with sparse rows during bootstrap.
     has_local_values = any(v is not None for v in local_fundamentals.values())
