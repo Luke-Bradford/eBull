@@ -342,6 +342,30 @@ def ingest_dividend_events(
     fetch_errors = 0
     parse_misses = 0
 
+    # Tombstone sentinel: written on fetch-errors + parse-misses so
+    # the JOIN's 7-day TTL bounds re-fetches to weekly rather than
+    # daily. A DividendAnnouncement with every field None satisfies
+    # the partial-row TTL predicate and naturally gets revisited
+    # when the window expires (Codex PR #446 review WARNING).
+    _TOMBSTONE = DividendAnnouncement()
+
+    def _write_tombstone(instrument_id: int, accession: str) -> None:
+        try:
+            upsert_dividend_event(
+                conn,
+                instrument_id=instrument_id,
+                source_accession=accession,
+                announcement=_TOMBSTONE,
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.warning(
+                "ingest_dividend_events: tombstone upsert failed accession=%s",
+                accession,
+                exc_info=True,
+            )
+
     for _filing_id, instrument_id, accession, url in candidates:
         try:
             body = fetcher.fetch_document_text(url)
@@ -353,17 +377,23 @@ def ingest_dividend_events(
                 exc_info=True,
             )
             fetch_errors += 1
+            _write_tombstone(instrument_id, accession)
             continue
         if body is None:
-            # 404 / 410 — filing withdrawn or URL moved. Not an error
-            # state; just skip and let the next pass retry if it ever
-            # comes back.
+            # 404 / 410 — filing withdrawn or URL moved. Write a
+            # tombstone so the 7-day TTL on last_parsed_at caps retry
+            # cadence at weekly rather than daily.
             fetch_errors += 1
+            _write_tombstone(instrument_id, accession)
             continue
 
         announcement = parse_dividend_announcement(body)
         if announcement is None:
+            # Non-dividend 8.01 (buyback, JV, litigation) — same
+            # tombstone treatment. The parser may improve later and
+            # weekly re-parse will pick it up.
             parse_misses += 1
+            _write_tombstone(instrument_id, accession)
             continue
 
         try:

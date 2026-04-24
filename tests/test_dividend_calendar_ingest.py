@@ -140,11 +140,13 @@ class TestIngestDividendEvents:
         assert second.rows_inserted == 0
         assert _count_events(ebull_test_conn) == 1
 
-    def test_non_dividend_8k_is_parse_miss_not_row(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        """A buyback or JV 8-K carrying 8.01 parses as None → parse_miss
-        counter increments, zero rows inserted. Crucially the JOIN
-        logic will re-scan the same filing on the next pass so a
-        future parser improvement can pick it up."""
+    def test_non_dividend_8k_is_parse_miss_with_tombstone(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """A buyback / JV 8-K carrying 8.01 parses as None → parse_miss
+        counter increments AND a tombstone row is written (all NULL
+        dates + NULL amount). The tombstone is what bounds re-fetch
+        cadence to weekly via the partial-row TTL — without it, the
+        LEFT JOIN would re-fetch the same miss on every daily run.
+        Codex PR #446 review WARNING."""
         inst_id = _seed_instrument(ebull_test_conn)
         _seed_filing(
             ebull_test_conn,
@@ -165,13 +167,26 @@ class TestIngestDividendEvents:
         result = ingest_dividend_events(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
 
         assert result.filings_scanned == 1
-        assert result.rows_inserted == 0
         assert result.parse_misses == 1
-        assert _count_events(ebull_test_conn) == 0
+        assert _count_events(ebull_test_conn) == 1  # tombstone row
 
-    def test_fetch_404_counts_but_does_not_row(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        # Second immediate pass: TTL is fresh, so the filing is NOT
+        # re-scanned. Counters reflect zero work.
+        second_fetcher = _StubFetcher(
+            {
+                "https://www.sec.gov/Archives/fake-jv.htm": (
+                    "On March 1, 2024, the Company entered into a joint venture..."
+                )
+            }
+        )
+        second = ingest_dividend_events(ebull_test_conn, cast("object", second_fetcher))  # type: ignore[arg-type]
+        assert second.filings_scanned == 0
+        assert second_fetcher.calls == []
+
+    def test_fetch_404_writes_tombstone(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """Withdrawn filing (provider returns None) → fetch_errors
-        increments, no row inserted."""
+        increments AND tombstone row written. Caps retry cadence at
+        weekly via the TTL, not daily. Codex PR #446 WARNING."""
         inst_id = _seed_instrument(ebull_test_conn)
         _seed_filing(
             ebull_test_conn,
@@ -185,8 +200,13 @@ class TestIngestDividendEvents:
 
         assert result.filings_scanned == 1
         assert result.fetch_errors == 1
-        assert result.rows_inserted == 0
-        assert _count_events(ebull_test_conn) == 0
+        assert _count_events(ebull_test_conn) == 1  # tombstone row
+
+        # Second immediate pass must NOT re-fetch.
+        second_fetcher = _StubFetcher({"https://www.sec.gov/Archives/gone.htm": None})
+        second = ingest_dividend_events(ebull_test_conn, cast("object", second_fetcher))  # type: ignore[arg-type]
+        assert second.filings_scanned == 0
+        assert second_fetcher.calls == []
 
     def test_filing_without_items_is_skipped(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """Pre-#431 filings have items IS NULL and must be ignored —
