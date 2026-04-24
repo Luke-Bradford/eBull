@@ -45,7 +45,6 @@ from app.providers.fundamentals import (
     XbrlFact,
 )
 from app.providers.resilient_client import ResilientClient
-from app.services import raw_persistence
 
 logger = logging.getLogger(__name__)
 
@@ -504,10 +503,8 @@ class SecFundamentalsProvider(FundamentalsProvider):
         if resp.status_code == 404:
             logger.info("SEC fundamentals: no company facts for CIK %s", cik)
             return None
-        # Persist raw response before raise — non-negotiable for auditability.
-        raw = resp.json()
-        raw_persistence.persist_raw_if_new("sec_fundamentals", f"sec_facts_{cik_padded}", raw)
         resp.raise_for_status()
+        raw = resp.json()
         return raw  # type: ignore[no-any-return]
 
 

@@ -264,36 +264,52 @@ class TestSweepSource:
         assert result.files_deleted == 0
         assert len(list(ch_dir.iterdir())) == 1
 
-    def test_sec_fundamentals_30d_retention_deletes_old(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """#466 — sec_fundamentals policy flipped from ``None`` to
-        30 days once end-to-end SQL coverage landed. Files older
-        than the window are swept; fresh files survive."""
+    def test_sec_fundamentals_zero_day_retention_sweeps_all_mutable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#470 — sec_fundamentals policy flipped to ``max_age_days=0``
+        once the providers stopped writing raw. Every file older than
+        the 24-hour min-age safeguard is swept so the existing 11 GB
+        dump reclaims in one pass."""
         monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
         sec_dir = tmp_path / "sec_fundamentals"
-        _seed(sec_dir, "sec_facts_AAA_old.json", {"x": 1}, age=timedelta(days=60))
-        _seed(sec_dir, "sec_facts_BBB_fresh.json", {"y": 2}, age=timedelta(days=10))
+        _seed(sec_dir, "sec_facts_AAA.json", {"x": 1}, age=timedelta(days=60))
+        _seed(sec_dir, "sec_facts_BBB.json", {"y": 2}, age=timedelta(days=2))
 
         result = sweep_source("sec_fundamentals", dry_run=False)
 
-        assert result.files_deleted == 1
-        remaining = {p.name for p in sec_dir.iterdir()}
-        assert "sec_facts_BBB_fresh.json" in remaining
-        assert "sec_facts_AAA_old.json" not in remaining
+        assert result.files_deleted == 2
+        assert list(sec_dir.iterdir()) == []
 
-    def test_sec_30d_retention_deletes_old(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """#464 — sec policy flipped from ``None`` to 30 days once
-        submissions / filing-index / tickers all normalised into SQL."""
+    def test_sec_zero_day_retention_sweeps_all_mutable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#470 — sec policy flipped to ``max_age_days=0``."""
         monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
         sec_dir = tmp_path / "sec"
-        _seed(sec_dir, "sec_submissions_0000000001_old.json", {"x": 1}, age=timedelta(days=45))
-        _seed(sec_dir, "sec_submissions_0000000002_fresh.json", {"y": 2}, age=timedelta(days=5))
+        _seed(sec_dir, "sec_submissions_0000000001.json", {"x": 1}, age=timedelta(days=45))
+        _seed(sec_dir, "sec_submissions_0000000002.json", {"y": 2}, age=timedelta(days=2))
+
+        result = sweep_source("sec", dry_run=False)
+
+        assert result.files_deleted == 2
+        assert list(sec_dir.iterdir()) == []
+
+    def test_sec_min_age_safeguard_still_protects_recent_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#470 — files younger than the 24-hour min-age safeguard
+        are preserved even with max_age_days=0. Defensive against a
+        rogue re-introduction of raw writes."""
+        monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
+        sec_dir = tmp_path / "sec"
+        _seed(sec_dir, "sec_submissions_recent.json", {"x": 1}, age=timedelta(hours=2))
+        _seed(sec_dir, "sec_submissions_old.json", {"y": 2}, age=timedelta(days=2))
 
         result = sweep_source("sec", dry_run=False)
 
         assert result.files_deleted == 1
         remaining = {p.name for p in sec_dir.iterdir()}
-        assert "sec_submissions_0000000002_fresh.json" in remaining
-        assert "sec_submissions_0000000001_old.json" not in remaining
+        assert "sec_submissions_recent.json" in remaining
+        assert "sec_submissions_old.json" not in remaining
 
     def test_deletes_files_older_than_policy(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """etoro policy has max_age_days=7 → files older than 7 days
