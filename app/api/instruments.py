@@ -766,6 +766,103 @@ def get_instrument_sec_profile(
 
 
 # ---------------------------------------------------------------------------
+# 10-K Item 1 subsection breakdown (#449)
+# ---------------------------------------------------------------------------
+
+
+class BusinessCrossReferenceModel(BaseModel):
+    reference_type: str
+    target: str
+    context: str
+
+
+class BusinessSectionModel(BaseModel):
+    section_order: int
+    section_key: str
+    section_label: str
+    body: str
+    cross_references: list[BusinessCrossReferenceModel]
+
+
+class BusinessSectionsResponse(BaseModel):
+    """Response payload for ``/instruments/{symbol}/business_sections``.
+
+    ``sections`` is ordered by the source 10-K layout (section_order).
+    ``source_accession`` identifies the 10-K the sections were extracted
+    from, so the UI can link back to the SEC filing. Empty list when
+    no sections are on file (first-time instruments or no 10-K filed).
+    """
+
+    symbol: str
+    source_accession: str | None
+    sections: list[BusinessSectionModel]
+
+
+@router.get(
+    "/{symbol}/business_sections",
+    response_model=BusinessSectionsResponse,
+)
+def get_instrument_business_sections(
+    symbol: str,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> BusinessSectionsResponse:
+    """Return the 10-K Item 1 subsection breakdown for an instrument (#449).
+
+    Every subsection from the latest 10-K lands as its own row with a
+    canonical ``section_key`` (stable identifier) + the verbatim
+    ``section_label`` from the filing + the body text + cross-references
+    to other items / exhibits / notes. Headings that don't match a known
+    canonical key surface as ``section_key='other'`` with the original
+    heading preserved — no silent drops.
+    """
+    from app.services.business_summary import get_business_sections
+
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    sections = get_business_sections(conn, instrument_id=instrument_id)
+    source_accession = sections[0].source_accession if sections else None
+    return BusinessSectionsResponse(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        source_accession=source_accession,
+        sections=[
+            BusinessSectionModel(
+                section_order=s.section_order,
+                section_key=s.section_key,
+                section_label=s.section_label,
+                body=s.body,
+                cross_references=[
+                    BusinessCrossReferenceModel(
+                        reference_type=ref.reference_type,
+                        target=ref.target,
+                        context=ref.context,
+                    )
+                    for ref in s.cross_references
+                ],
+            )
+            for s in sections
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Dilution + share-count history (#435)
 # ---------------------------------------------------------------------------
 

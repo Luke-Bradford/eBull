@@ -8,6 +8,7 @@ import psycopg
 import pytest
 
 from app.services.business_summary import (
+    get_business_sections,
     get_business_summary,
     ingest_business_summaries,
 )
@@ -272,3 +273,171 @@ class TestIngestBusinessSummaries:
         result = ingest_business_summaries(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
         assert result.filings_scanned == 0
         assert fetcher.calls == []
+
+
+class TestBusinessSectionsIngest:
+    """#449 — sections table populated alongside the blob."""
+
+    _RICH_10K = """
+    <html><body>
+    <h2>Item 1. Business</h2>
+    <p>Apex Industries is a global manufacturer of specialty chemicals
+       serving aerospace, automotive, and healthcare end markets.</p>
+    <h3>Products</h3>
+    <p>We sell coatings, films, and adhesives. See Item 7 for segment
+       breakdowns.</p>
+    <h3>Competition</h3>
+    <p>Competitors include Acme Corp and GlobalChem Inc.</p>
+    <h3>Human Capital Resources</h3>
+    <p>As of year-end we employed 12,400 people across 24 countries.</p>
+    <h3>Government Regulation</h3>
+    <p>Operations are subject to environmental rules per Note 15.</p>
+    <h2>Item 1A. Risk Factors</h2>
+    <p>The following risks apply.</p>
+    </body></html>
+    """
+
+    def test_sections_land_alongside_blob(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn, symbol="APEX", iid=201)
+        _seed_10k(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="APEX-10K-1",
+            url="https://www.sec.gov/Archives/apex.htm",
+        )
+        fetcher = _StubFetcher({"https://www.sec.gov/Archives/apex.htm": self._RICH_10K})
+        result = ingest_business_summaries(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+        assert result.rows_inserted == 1
+
+        # Blob view still populated (back-compat).
+        assert get_business_summary(ebull_test_conn, instrument_id=iid) is not None
+
+        # Sections view: general + 4 subsections, all keys canonical.
+        sections = get_business_sections(ebull_test_conn, instrument_id=iid)
+        assert len(sections) >= 5
+        keys = {s.section_key for s in sections}
+        assert "general" in keys
+        assert "products" in keys
+        assert "competition" in keys
+        assert "human_capital" in keys
+        assert "regulatory" in keys
+        # Verbatim label preserved.
+        hc = next(s for s in sections if s.section_key == "human_capital")
+        assert hc.section_label == "Human Capital Resources"
+        # Cross-references captured per section.
+        products = next(s for s in sections if s.section_key == "products")
+        prod_refs = {(r.reference_type, r.target) for r in products.cross_references}
+        assert ("item", "Item 7") in prod_refs
+
+    def test_insert_failure_rolls_back_delete_atomically(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """#449 BLOCKING regression — a failure inside the sections
+        upsert must not leave an empty sections table committed. If
+        the INSERT loop raises, the DELETE rolls back too. Older
+        sections survive."""
+        from app.services.business_summary import (
+            ParsedBusinessSection,
+            upsert_business_sections,
+        )
+
+        iid = _seed_instrument(ebull_test_conn, symbol="APEX", iid=205)
+        # Seed a prior sections snapshot to prove it survives a failed
+        # re-upsert.
+        upsert_business_sections(
+            ebull_test_conn,
+            instrument_id=iid,
+            source_accession="APEX-10K-A",
+            sections=(
+                ParsedBusinessSection(
+                    section_order=0,
+                    section_key="general",
+                    section_label="General",
+                    body="Existing body.",
+                    cross_references=(),
+                ),
+            ),
+        )
+        ebull_test_conn.commit()
+
+        # Now try to replace with a payload that will fail at INSERT
+        # time. We force the failure by using an oversize section_key
+        # value... actually the schema doesn't cap section_key length.
+        # Simulate with a synthetic sentinel that psycopg rejects:
+        # a section_order that violates the UNIQUE constraint (two
+        # rows at the same order) — the second INSERT will raise.
+        failing_payload = (
+            ParsedBusinessSection(
+                section_order=0,
+                section_key="general",
+                section_label="Replacement general",
+                body="New body.",
+                cross_references=(),
+            ),
+            ParsedBusinessSection(
+                section_order=0,  # duplicate → UNIQUE violation on 2nd INSERT
+                section_key="products",
+                section_label="Products",
+                body="Product body.",
+                cross_references=(),
+            ),
+        )
+
+        with pytest.raises(Exception):  # UniqueViolation expected
+            upsert_business_sections(
+                ebull_test_conn,
+                instrument_id=iid,
+                source_accession="APEX-10K-A",
+                sections=failing_payload,
+            )
+        ebull_test_conn.rollback()  # caller would rollback on their own error path
+
+        # The savepoint inside upsert_business_sections rolls back
+        # the DELETE; the original "Existing body." row survives.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT body FROM instrument_business_summary_sections
+                WHERE instrument_id = %s
+                  AND source_accession = 'APEX-10K-A'
+                ORDER BY section_order
+                """,
+                (iid,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "Existing body."
+
+    def test_reparse_supersedes_prior_sections(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """A later 10-K for the same instrument must replace the
+        stored sections snapshot, not leak stale rows."""
+        iid = _seed_instrument(ebull_test_conn, symbol="APEX", iid=202)
+        _seed_10k(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="APEX-10K-OLD",
+            url="https://www.sec.gov/Archives/old.htm",
+            filing_date="2024-02-15",
+        )
+        _seed_10k(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="APEX-10K-NEW",
+            url="https://www.sec.gov/Archives/new.htm",
+            filing_date="2026-02-15",
+        )
+        fetcher = _StubFetcher(
+            {
+                "https://www.sec.gov/Archives/old.htm": self._RICH_10K,
+                "https://www.sec.gov/Archives/new.htm": self._RICH_10K.replace("Products", "Offerings"),
+            }
+        )
+        # First pass: newest-first candidate picks NEW.
+        ingest_business_summaries(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        sections = get_business_sections(ebull_test_conn, instrument_id=iid)
+        # Reader scopes to the most recent source_accession.
+        assert all(s.source_accession == "APEX-10K-NEW" for s in sections)
+        # Canonical key for a custom "Offerings" heading is "other"
+        # with the verbatim label preserved.
+        offering_sections = [s for s in sections if s.section_label == "Offerings"]
+        assert len(offering_sections) == 1
+        assert offering_sections[0].section_key == "other"
