@@ -239,6 +239,7 @@ JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC = "orchestrator_high_frequency_sync"
 JOB_FUNDAMENTALS_SYNC = "fundamentals_sync"
 JOB_SEC_DIVIDEND_CALENDAR_INGEST = "sec_dividend_calendar_ingest"
 JOB_SEC_BUSINESS_SUMMARY_INGEST = "sec_business_summary_ingest"
+JOB_SEC_INSIDER_TRANSACTIONS_INGEST = "sec_insider_transactions_ingest"
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +497,19 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "re-fetching already-parsed instruments."
         ),
         cadence=Cadence.daily(hour=3, minute=15),
+        catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_INSIDER_TRANSACTIONS_INGEST,
+        description=(
+            "Parse SEC Form 4 filings into ``insider_transactions`` "
+            "(#429). Runs hourly because Form 4 is filed within two "
+            "business days of a trade — insider sentiment is only "
+            "useful timely. Bounded to 500 filings per run. Idempotent "
+            "via (accession, row_num) UNIQUE so hour-to-hour re-runs "
+            "cost nothing when nothing new has landed."
+        ),
+        cadence=Cadence.hourly(minute=30),
         catch_up_on_boot=False,
     ),
     ScheduledJob(
@@ -3077,6 +3091,36 @@ def sec_business_summary_ingest() -> None:
             result.filings_scanned,
             result.rows_inserted,
             result.rows_updated,
+            result.fetch_errors,
+            result.parse_misses,
+        )
+
+
+def sec_insider_transactions_ingest() -> None:
+    """Parse Form 4 filings into ``insider_transactions`` (#429).
+
+    Same shape as the dividend / business-summary ingesters. Runs
+    hourly because Form 4 is filed within two business days of a
+    trade — stale insider data is low-value. Bounded per run and
+    idempotent via the (accession, row_num) UNIQUE key so a quiet
+    hour costs nothing.
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.insider_transactions import ingest_insider_transactions
+
+    with _tracked_job(JOB_SEC_INSIDER_TRANSACTIONS_INGEST) as tracker:
+        with (
+            psycopg.connect(settings.database_url) as conn,
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+        ):
+            result = ingest_insider_transactions(conn, provider)
+
+        tracker.row_count = result.rows_inserted
+        logger.info(
+            "sec_insider_transactions_ingest: scanned=%d parsed=%d inserted=%d fetch_errors=%d parse_misses=%d",
+            result.filings_scanned,
+            result.filings_parsed,
+            result.rows_inserted,
             result.fetch_errors,
             result.parse_misses,
         )

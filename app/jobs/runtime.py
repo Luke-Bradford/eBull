@@ -72,6 +72,7 @@ from app.workers.scheduler import (
     JOB_RETRY_DEFERRED,
     JOB_SEC_BUSINESS_SUMMARY_INGEST,
     JOB_SEC_DIVIDEND_CALENDAR_INGEST,
+    JOB_SEC_INSIDER_TRANSACTIONS_INGEST,
     JOB_SEED_COST_MODELS,
     JOB_WEEKLY_REPORT,
     SCHEDULED_JOBS,
@@ -96,6 +97,7 @@ from app.workers.scheduler import (
     retry_deferred_recommendations_job,
     sec_business_summary_ingest,
     sec_dividend_calendar_ingest,
+    sec_insider_transactions_ingest,
     seed_cost_models,
     weekly_report,
 )
@@ -144,6 +146,7 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_RAW_DATA_RETENTION_SWEEP: raw_data_retention_sweep,
     JOB_SEC_BUSINESS_SUMMARY_INGEST: sec_business_summary_ingest,
     JOB_SEC_DIVIDEND_CALENDAR_INGEST: sec_dividend_calendar_ingest,
+    JOB_SEC_INSIDER_TRANSACTIONS_INGEST: sec_insider_transactions_ingest,
 }
 
 

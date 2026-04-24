@@ -992,6 +992,61 @@ def get_instrument_dividends(
     )
 
 
+class InsiderSummaryModel(BaseModel):
+    symbol: str
+    net_shares_90d: Decimal
+    buy_count_90d: int
+    sell_count_90d: int
+    unique_filers_90d: int
+    latest_txn_date: date | None
+
+
+@router.get("/{symbol}/insider_summary", response_model=InsiderSummaryModel)
+def get_instrument_insider_summary(
+    symbol: str,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InsiderSummaryModel:
+    """Return the 90-day insider-transaction summary (#429).
+
+    ``net_shares_90d`` is positive when insiders net-bought, negative
+    when they net-sold. Only non-derivative trades (open-market P/S
+    transactions) contribute — option grants / RSU vests are weaker
+    signals and excluded. Counts cover each filer once regardless of
+    how many transactions they filed.
+    """
+    from app.services.insider_transactions import get_insider_summary
+
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    summary = get_insider_summary(conn, instrument_id=instrument_id)
+    return InsiderSummaryModel(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        net_shares_90d=summary.net_shares_90d,
+        buy_count_90d=summary.buy_count_90d,
+        sell_count_90d=summary.sell_count_90d,
+        unique_filers_90d=summary.unique_filers_90d,
+        latest_txn_date=summary.latest_txn_date,
+    )
+
+
 def _has_sec_cik(conn: psycopg.Connection[object], instrument_id: int) -> bool:
     """True if the instrument has a primary SEC CIK — the US-ticker signal
     that gates the local-SEC-XBRL preference path."""
