@@ -899,3 +899,21 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
   3. Provider-body fetches (`fetch_document_text` and equivalents) must flow through a service-layer ingester that normalises into SQL. Disk persistence under `data/raw/*` is for provider-level JSON payloads that are already richly structured and small; body text goes to SQL.
   4. Before merging any new or refactored ingester, the author names every top-level element the upstream document may carry and either (a) shows where it lands in SQL, or (b) justifies the exclusion.
 - Enforced in: this prevention log; `sql/057_insider_transactions_richness.sql` (full Form 4 field capture); follow-up tickets for 10-K Item 1 (#449), 8-K Item 8.01 (#450), `data/raw/sec_fundamentals/` normalisation (#451), `data/raw/sec/` normalisation (#452), `fetch_document_text` retirement from disk-only path (#453).
+
+---
+
+### Wrong decimal cap on dollar-valued fields (`_MAX_SHARES` vs `_MAX_PRICE`)
+
+- First seen in: #429 (surfaced by Claude review bot on PR #448 commit 7d6e8d9).
+- Symptom: `insider_transactions.underlying_value` is a dollar amount (the reported market value of the underlying security when share count isn't meaningful) but was parsed with `_safe_decimal(..., max_value=_MAX_SHARES)` — the share-count cap (1e10) instead of the dollar cap (1e9). A malformed filing between 1e9 and 1e10 dollars would pass validation. Copy-paste from the adjacent `underlying_shares` line.
+- Prevention: Whenever a new `_safe_decimal(...)` call is added, the `max_value` must match the unit of the field: share counts → `_MAX_SHARES`; dollar amounts (prices, values, fees) → `_MAX_PRICE`. Grep for `_safe_decimal(` at self-review time; any field name containing `price`, `value`, `cost`, `fee`, `amount` (dollar contexts) must use `_MAX_PRICE`. Any field name ending `_shares` / `_quantity` must use `_MAX_SHARES`.
+- Enforced in: this prevention log; `app/services/insider_transactions.py::_parse_one_transaction`.
+
+---
+
+### Test-teardown list missing new FK-child tables
+
+- First seen in: #429 (surfaced by Claude review bot on PR #448 commit 7d6e8d9).
+- Symptom: A migration added new child tables (`insider_filings` / `insider_filers` / `insider_transaction_footnotes`) that FK into the existing tree. `tests/fixtures/ebull_test_db.py::_PLANNER_TABLES` was updated only to add the existing table name (`insider_transactions`). Because `TRUNCATE ... CASCADE` on the parent (`instruments`) cascades only through existing FK chains, any test that writes a row into a new child without its instrument row leaks the row into the next test. The bug is silent: the CASCADE looks like it covers the new tables because one of them *is* in the list, but the siblings aren't.
+- Prevention: When a migration adds any table with a FK relationship, update `_PLANNER_TABLES` in `tests/fixtures/ebull_test_db.py` in the same commit. List every new table in child-to-parent order (even when the CASCADE would theoretically pick them up) so teardown is deterministic against FK rewrites. At self-review: grep the migration diff for `REFERENCES` and confirm every referenced / referencing table in the new shape appears in the teardown list.
+- Enforced in: this prevention log; `tests/fixtures/ebull_test_db.py::_PLANNER_TABLES`.

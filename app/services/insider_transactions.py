@@ -545,7 +545,7 @@ def _parse_one_transaction(
             )
             underlying_value = _safe_decimal(
                 _child_text(underlying, "./underlyingSecurityValue/value"),
-                max_value=_MAX_SHARES,
+                max_value=_MAX_PRICE,
             )
 
     return ParsedTransaction(
