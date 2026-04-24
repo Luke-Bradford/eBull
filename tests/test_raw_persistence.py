@@ -179,12 +179,36 @@ class TestPersistRawIfNew:
 _PROVIDERS_ROOT = Path(__file__).parent.parent / "app" / "providers"
 
 
+# Bumped with each real provider addition so a misconfigured test env
+# (missing directory, wrong cwd, broken glob) can't silently pass with
+# zero parametrised cases. Fails LOUD instead — review-prevention
+# entry "empty-parametrize silent pass".
+_MIN_PROVIDER_FILES = 10
+
+
 def _iter_provider_files() -> list[Path]:
     """Every ``.py`` under ``app/providers/`` except ``__init__``.
 
     Recurses so helper subpackages can't escape the guard by hiding
     the forbidden call in a nested module."""
     return sorted(p for p in _PROVIDERS_ROOT.rglob("*.py") if p.name != "__init__.py")
+
+
+def test_provider_files_sentinel() -> None:
+    """Non-parametrised safety net — proves ``_iter_provider_files``
+    resolves a non-empty set. If this test is the only one in the
+    class to run (zero parametrised cases), the guard below silently
+    passes and loses its regression value. This sentinel fails the
+    whole file if the glob returns less than the expected minimum,
+    so a missing directory / wrong cwd / broken pathing surfaces
+    immediately rather than during a real regression."""
+    files = _iter_provider_files()
+    assert len(files) >= _MIN_PROVIDER_FILES, (
+        f"_iter_provider_files() returned {len(files)} files — expected "
+        f"at least {_MIN_PROVIDER_FILES}. The writer-discipline guard "
+        f"would silently pass with zero parametrised cases. Check "
+        f"{_PROVIDERS_ROOT} exists and contains provider modules."
+    )
 
 
 # Attribute-name write shapes. The full regression surface is wider
