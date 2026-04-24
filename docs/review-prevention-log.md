@@ -882,7 +882,7 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 
 ### Empty-parametrize silent pass
 
-- First seen in: #445 (Claude review bot).
+- First seen in: #436 (surfaced by Claude review bot on PR #445).
 - Symptom: `tests/test_raw_persistence.py::TestProviderWriterDiscipline` used `@pytest.mark.parametrize("path", _iter_provider_files())`. When the generator resolves at collection time and returns `[]` (missing directory, wrong cwd, broken `rglob`, test run from an unexpected root), pytest skips every parametrised case silently with a green summary — the guard looks alive while checking nothing. Especially dangerous for regression-guard tests: the surface they're supposed to cover is exactly the kind of thing that rots without a loud failure.
 - Prevention: When a parametrised test's input is a dynamic glob / query / reflection, add a non-parametrised sentinel assertion that the input source returns at least the expected minimum cardinality. Name it `test_<source>_sentinel` so it runs alongside the guard and fails the file if the source degrades. Applies to any `@pytest.mark.parametrize(arg, generator())` where the generator could return empty — glob-based file scans, DB fixture enumerations, manifest reads, `pkgutil.iter_modules` walks, etc.
 - Enforced in: this prevention log; `tests/test_raw_persistence.py::test_provider_files_sentinel` pins `_iter_provider_files()` at `>= 10` entries.
