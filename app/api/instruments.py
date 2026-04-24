@@ -302,6 +302,10 @@ def list_instruments(
     )
 
     # -- Items query -------------------------------------------------------
+    # Only join the dividend-summary view when the filter needs it. The view
+    # scans every instrument with any dividend row, and adding it to an
+    # unrelated query (e.g. a plain ``/instruments`` call) is pure overhead.
+    items_dividend_join = count_dividend_join
     items_params: dict[str, object] = {**filter_params, "limit": limit, "offset": offset}
     items_sql = f"""SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
                i.currency, i.sector, i.is_tradable,
@@ -310,7 +314,7 @@ def list_instruments(
         FROM instruments i
         LEFT JOIN quotes q USING (instrument_id)
         LEFT JOIN coverage c USING (instrument_id)
-        LEFT JOIN instrument_dividend_summary ds USING (instrument_id)
+        {items_dividend_join}
         {where_sql}
         ORDER BY i.symbol, i.instrument_id
         LIMIT %(limit)s OFFSET %(offset)s"""  # noqa: S608  — hardcoded fragments only

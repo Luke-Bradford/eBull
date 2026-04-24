@@ -278,6 +278,20 @@ class TestListInstruments:
         assert "instrument_dividend_summary" in count_sql
         assert "COALESCE(ds.has_dividend, FALSE) = TRUE" in count_sql
 
+    def test_has_dividend_join_omitted_when_filter_absent(self) -> None:
+        """Review #426 WARNING: the dividend-summary view scan must not
+        hit every list call; only compose the JOIN when the filter is set."""
+        row = _make_instrument_row()
+        conn = _with_conn([[{"cnt": 1}], [row]])
+        resp = client.get("/instruments")
+
+        assert resp.status_code == 200
+        cur = conn.cursor.return_value
+        count_sql = cur.execute.call_args_list[0][0][0]
+        items_sql = cur.execute.call_args_list[1][0][0]
+        assert "instrument_dividend_summary" not in count_sql
+        assert "instrument_dividend_summary" not in items_sql
+
     def test_filter_by_has_dividend_false(self) -> None:
         row = _make_instrument_row()
         conn = _with_conn([[{"cnt": 1}], [row]])

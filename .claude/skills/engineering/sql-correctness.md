@@ -61,6 +61,32 @@ Pattern: do all I/O first, then open the transaction for the writes only.
 - `IN` clauses: `= ANY(%s)` with a list, not `IN %s` with a tuple
 - Literal `%` in LIKE patterns: `%%`
 
+## Conditional JOINs in filter-aware list queries
+
+A paginated list endpoint should only JOIN tables / views its active filters actually consume. A view backing a filter (e.g. `instrument_dividend_summary` for a `has_dividend` filter) scans every row in its source — adding the JOIN unconditionally to the items query penalises every caller, including the default no-filter case.
+
+```python
+# Wrong — dividend-summary view scanned on every list call.
+items_sql = f"""
+    SELECT ... FROM instruments i
+    LEFT JOIN coverage c USING (instrument_id)
+    LEFT JOIN instrument_dividend_summary ds USING (instrument_id)
+    {where_sql}
+"""
+
+# Correct — JOIN composed only when the filter is active, matching the
+# pattern already used for the COUNT query.
+dividend_join = "LEFT JOIN instrument_dividend_summary ds USING (instrument_id)" if has_dividend is not None else ""
+items_sql = f"""
+    SELECT ... FROM instruments i
+    LEFT JOIN coverage c USING (instrument_id)
+    {dividend_join}
+    {where_sql}
+"""
+```
+
+Self-check: `grep -n "LEFT JOIN.*_summary\|LEFT JOIN.*_view" app/api/*.py` — every match inside an `items_sql =` f-string must be gated by a conditional variable, not hardcoded.
+
 ## Single-row UPDATE must verify rowcount
 
 `UPDATE ... WHERE` silently affects zero rows when the predicate matches nothing. For any UPDATE that must affect exactly one row (singleton tables, primary-key lookups), check `result.rowcount`:
