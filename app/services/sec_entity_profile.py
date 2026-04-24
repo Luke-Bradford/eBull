@@ -18,6 +18,7 @@ from typing import Any
 
 import psycopg
 import psycopg.rows
+from psycopg.types.json import Jsonb
 
 
 @dataclass(frozen=True)
@@ -193,7 +194,7 @@ def upsert_entity_profile(
             "fiscal_year_end": profile.fiscal_year_end,
             "category": profile.category,
             "exchanges": profile.exchanges,
-            "former_names": psycopg.types.json.Jsonb(profile.former_names),
+            "former_names": Jsonb(profile.former_names),
             "has_insider_issuer": profile.has_insider_issuer,
             "has_insider_owner": profile.has_insider_owner,
         },
