@@ -46,6 +46,7 @@ function paid(): InstrumentDividends {
         reported_currency: "USD",
       },
     ],
+    upcoming: [],
   };
 }
 
@@ -64,6 +65,7 @@ function notPaid(): InstrumentDividends {
       dividend_currency: null,
     },
     history: [],
+    upcoming: [],
   };
 }
 
@@ -103,5 +105,30 @@ describe("DividendsPanel", () => {
     await waitFor(() => {
       expect(screen.getByText(/Failed to load/i)).toBeInTheDocument();
     });
+  });
+
+  it("renders the Next dividend banner when upcoming[] has an entry", async () => {
+    const withUpcoming = paid();
+    withUpcoming.upcoming = [
+      {
+        source_accession: "0000320193-26-000001",
+        declaration_date: "2026-01-15",
+        ex_date: "2026-02-10",
+        record_date: "2026-02-11",
+        pay_date: "2026-02-20",
+        dps_declared: "0.2500",
+        currency: "USD",
+      },
+    ];
+    mockFetch.mockResolvedValue(withUpcoming);
+    render(<DividendsPanel symbol="AAPL" />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Next dividend/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Ex-date/i)).toBeInTheDocument();
+    expect(screen.getByText(/2026-02-10/)).toBeInTheDocument();
+    expect(screen.getByText(/2026-02-11/)).toBeInTheDocument();
+    expect(screen.getByText(/2026-02-20/)).toBeInTheDocument();
   });
 });

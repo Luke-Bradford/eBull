@@ -262,6 +262,28 @@ class SecFilingsProvider(FilingsProvider):
 
         return _normalise_filing_event(provider_filing_id, raw)
 
+    def fetch_document_text(self, absolute_url: str) -> str | None:
+        """Fetch the raw text of a filing's primary document.
+
+        ``absolute_url`` is the fully-qualified ``https://www.sec.gov/
+        Archives/edgar/data/...`` URL stored in
+        ``filing_events.primary_document_url``. Returns the decoded
+        body on 2xx, ``None`` on 404 / 410 (filing withdrawn), and
+        re-raises on other HTTP errors so the caller can decide
+        whether to retry or skip.
+
+        Shares the tickers client's rate-limiter because both target
+        ``www.sec.gov`` — ``data.sec.gov`` uses a separate host that
+        counts under the same 10 req/s fair-use pool but is served
+        by ``self._http``. Using ``_http_tickers`` here keeps the
+        host-to-client mapping obvious (www.sec.gov ⇒ tickers client).
+        """
+        resp = self._http_tickers.get(absolute_url)
+        if resp.status_code in (404, 410):
+            return None
+        resp.raise_for_status()
+        return resp.text
+
     # ------------------------------------------------------------------
     # CIK mapping (for service layer to populate external_identifiers)
     # ------------------------------------------------------------------

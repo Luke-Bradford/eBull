@@ -237,6 +237,7 @@ JOB_RAW_DATA_RETENTION_SWEEP = "raw_data_retention_sweep"
 JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
 JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC = "orchestrator_high_frequency_sync"
 JOB_FUNDAMENTALS_SYNC = "fundamentals_sync"
+JOB_SEC_DIVIDEND_CALENDAR_INGEST = "sec_dividend_calendar_ingest"
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +471,19 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     # 2026-04-19 research-tool refocus — no UI consumer today. The
     # function body stays in scheduler.py + _INVOKERS so the operator
     # can still manually fire it from Admin "Run now" if needed.
+    ScheduledJob(
+        name=JOB_SEC_DIVIDEND_CALENDAR_INGEST,
+        description=(
+            "Parse 8-K Item 8.01 announcements into ``dividend_events`` "
+            "(#434). Runs 03:00 UTC — 30 min after fundamentals_sync so "
+            "newly-populated ``filing_events.items[]`` rows are visible. "
+            "Bounded to 500 filings per run; the ingester's LEFT JOIN "
+            "guard skips already-processed filings, so a backlog drains "
+            "over several runs without duplicating work."
+        ),
+        cadence=Cadence.daily(hour=3, minute=0),
+        catch_up_on_boot=False,
+    ),
     ScheduledJob(
         name=JOB_RAW_DATA_RETENTION_SWEEP,
         description=(
@@ -2987,4 +3001,38 @@ def raw_data_retention_sweep() -> None:
             total_deleted,
             total_bytes,
             dry_run,
+        )
+
+
+def sec_dividend_calendar_ingest() -> None:
+    """Parse 8-K Item 8.01 announcements into ``dividend_events`` (#434).
+
+    Scans filings where ``items`` contains ``'8.01'`` and no
+    ``dividend_events`` row exists yet, fetches the primary document
+    from SEC via :class:`SecFilingsProvider.fetch_document_text`,
+    parses the dividend calendar, and upserts one row per filing.
+
+    Bounded per run (``limit=500``) so a freshly-populated items[]
+    backlog doesn't tie up the SEC rate-limiter or the worker. The
+    ingester's LEFT JOIN guard makes re-runs idempotent — a backlog
+    drains over successive daily runs.
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.dividend_calendar import ingest_dividend_events
+
+    with _tracked_job(JOB_SEC_DIVIDEND_CALENDAR_INGEST) as tracker:
+        with (
+            psycopg.connect(settings.database_url) as conn,
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+        ):
+            result = ingest_dividend_events(conn, provider)
+
+        tracker.row_count = result.rows_inserted + result.rows_updated
+        logger.info(
+            "sec_dividend_calendar_ingest complete: scanned=%d inserted=%d updated=%d fetch_errors=%d parse_misses=%d",
+            result.filings_scanned,
+            result.rows_inserted,
+            result.rows_updated,
+            result.fetch_errors,
+            result.parse_misses,
         )

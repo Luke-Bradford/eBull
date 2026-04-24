@@ -7,7 +7,11 @@
  */
 
 import { fetchInstrumentDividends } from "@/api/instruments";
-import type { DividendPeriod, InstrumentDividends } from "@/api/instruments";
+import type {
+  DividendPeriod,
+  InstrumentDividends,
+  UpcomingDividend,
+} from "@/api/instruments";
 import {
   Section,
   SectionError,
@@ -72,17 +76,77 @@ export function DividendsPanel({ symbol }: DividendsPanelProps) {
         <SectionSkeleton rows={3} />
       ) : state.error !== null || state.data === null ? (
         <SectionError onRetry={state.refetch} />
-      ) : !state.data.summary.has_dividend || state.data.history.length === 0 ? (
-        <EmptyState
-          title="No dividend history on file"
-          description="This instrument has not reported a positive dividend in its SEC filings."
-        />
       ) : (
-        <DividendsBody data={state.data} />
+        <>
+          {/* Upcoming banner renders OUTSIDE the has_dividend gate so a
+              company announcing its first-ever dividend via 8-K (with
+              zero XBRL history yet) still shows the calendar instead
+              of the "never paid" empty state. */}
+          {state.data.upcoming[0] !== undefined && (
+            <NextDividendBanner upcoming={state.data.upcoming[0]} />
+          )}
+          {!state.data.summary.has_dividend ||
+          state.data.history.length === 0 ? (
+            <EmptyState
+              title="No dividend history on file"
+              description="This instrument has not reported a positive dividend in its SEC filings."
+            />
+          ) : (
+            <DividendsBody data={state.data} />
+          )}
+        </>
       )}
     </Section>
   );
 }
+
+function NextDividendBanner({ upcoming }: { upcoming: UpcomingDividend }) {
+  // Banner shows whichever calendar dates survived the 8-K regex parse.
+  // A row with only dps_declared (no dates yet) still renders — the
+  // banner's job is "operator awareness", not a filled-in calendar.
+  const exOrPay = upcoming.ex_date ?? upcoming.pay_date;
+  return (
+    <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm">
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="font-semibold text-amber-900">Next dividend</span>
+        {upcoming.dps_declared !== null && (
+          <span className="font-mono tabular-nums text-amber-900">
+            {formatDps(upcoming.dps_declared, upcoming.currency)}
+          </span>
+        )}
+      </div>
+      <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-amber-800">
+        {upcoming.ex_date !== null && (
+          <>
+            <dt className="text-amber-700">Ex-date</dt>
+            <dd>{upcoming.ex_date}</dd>
+          </>
+        )}
+        {upcoming.record_date !== null && (
+          <>
+            <dt className="text-amber-700">Record</dt>
+            <dd>{upcoming.record_date}</dd>
+          </>
+        )}
+        {upcoming.pay_date !== null && (
+          <>
+            <dt className="text-amber-700">Pay</dt>
+            <dd>{upcoming.pay_date}</dd>
+          </>
+        )}
+        {exOrPay === null && upcoming.declaration_date !== null && (
+          <>
+            <dt className="text-amber-700">Declared</dt>
+            <dd>
+              {upcoming.declaration_date} (calendar TBD)
+            </dd>
+          </>
+        )}
+      </dl>
+    </div>
+  );
+}
+
 
 function DividendsBody({ data }: { data: InstrumentDividends }) {
   const { summary, history } = data;

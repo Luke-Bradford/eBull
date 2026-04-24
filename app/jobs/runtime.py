@@ -70,6 +70,7 @@ from app.workers.scheduler import (
     JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
     JOB_RAW_DATA_RETENTION_SWEEP,
     JOB_RETRY_DEFERRED,
+    JOB_SEC_DIVIDEND_CALENDAR_INGEST,
     JOB_SEED_COST_MODELS,
     JOB_WEEKLY_REPORT,
     SCHEDULED_JOBS,
@@ -92,6 +93,7 @@ from app.workers.scheduler import (
     orchestrator_high_frequency_sync,
     raw_data_retention_sweep,
     retry_deferred_recommendations_job,
+    sec_dividend_calendar_ingest,
     seed_cost_models,
     weekly_report,
 )
@@ -138,6 +140,7 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_ORCHESTRATOR_FULL_SYNC: orchestrator_full_sync,
     JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC: orchestrator_high_frequency_sync,
     JOB_RAW_DATA_RETENTION_SWEEP: raw_data_retention_sweep,
+    JOB_SEC_DIVIDEND_CALENDAR_INGEST: sec_dividend_calendar_ingest,
 }
 
 

@@ -880,10 +880,21 @@ class DividendSummaryModel(BaseModel):
     dividend_currency: str | None
 
 
+class UpcomingDividendModel(BaseModel):
+    source_accession: str
+    declaration_date: date | None
+    ex_date: date | None
+    record_date: date | None
+    pay_date: date | None
+    dps_declared: Decimal | None
+    currency: str
+
+
 class InstrumentDividends(BaseModel):
     symbol: str
     summary: DividendSummaryModel
     history: list[DividendPeriodModel]
+    upcoming: list[UpcomingDividendModel]
 
 
 @router.get("/{symbol}/dividends", response_model=InstrumentDividends)
@@ -902,7 +913,11 @@ def get_instrument_dividends(
 
     Default ``limit=40`` covers ten years of quarterly history.
     """
-    from app.services.dividends import get_dividend_history, get_dividend_summary
+    from app.services.dividends import (
+        get_dividend_history,
+        get_dividend_summary,
+        get_upcoming_dividends,
+    )
 
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
@@ -926,6 +941,7 @@ def get_instrument_dividends(
     instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
     summary = get_dividend_summary(conn, instrument_id=instrument_id)
     history = get_dividend_history(conn, instrument_id=instrument_id, limit=limit)
+    upcoming = get_upcoming_dividends(conn, instrument_id=instrument_id)
 
     return InstrumentDividends(
         symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
@@ -950,6 +966,18 @@ def get_instrument_dividends(
                 reported_currency=p.reported_currency,
             )
             for p in history
+        ],
+        upcoming=[
+            UpcomingDividendModel(
+                source_accession=u.source_accession,
+                declaration_date=u.declaration_date,
+                ex_date=u.ex_date,
+                record_date=u.record_date,
+                pay_date=u.pay_date,
+                dps_declared=u.dps_declared,
+                currency=u.currency,
+            )
+            for u in upcoming
         ],
     )
 
