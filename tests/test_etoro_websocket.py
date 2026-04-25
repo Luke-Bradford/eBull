@@ -34,6 +34,7 @@ from app.services.etoro_websocket import (
     build_auth_message,
     build_private_subscribe_message,
     build_subscribe_message,
+    build_unsubscribe_message,
     fetch_watched_instrument_ids,
     is_private_event,
     parse_rate_message,
@@ -737,3 +738,210 @@ class TestListenResilience:
             worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await worker
+
+
+# ---------------------------------------------------------------------------
+# Dynamic page-view subscribe / unsubscribe (#485)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildUnsubscribeMessage:
+    def test_envelope_shape(self) -> None:
+        raw = build_unsubscribe_message([1001, 1002])
+        assert raw is not None
+        msg = json.loads(raw)
+        assert msg["operation"] == "Unsubscribe"
+        assert msg["data"]["topics"] == ["instrument:1001", "instrument:1002"]
+        # No ``snapshot`` field — unsubscribe envelope per eToro
+        # docs is topics-only.
+        assert "snapshot" not in msg["data"]
+        assert "id" in msg
+
+    def test_empty_returns_none(self) -> None:
+        assert build_unsubscribe_message([]) is None
+
+
+class _DynFakeWs:
+    """Minimal stand-in for ``ClientConnection`` used to capture
+    dynamic frames sent by the subscriber outside of ``_listen``."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+        self.fail_next_send: bool = False
+
+    async def send(self, payload: str) -> None:
+        if self.fail_next_send:
+            self.fail_next_send = False
+            raise OSError("simulated send failure")
+        self.sent.append(payload)
+
+
+def _make_dyn_subscriber() -> EtoroWebSocketSubscriber:
+    sentinel: Any = object()
+    return EtoroWebSocketSubscriber(
+        api_key="API",
+        user_key="USR",
+        env="demo",
+        pool=sentinel,
+        watched_ids_provider=lambda: [],
+        reconcile_runner=lambda: None,
+    )
+
+
+class TestDynamicAddInstruments:
+    async def test_first_add_sends_subscribe_frame(self) -> None:
+        sub = _make_dyn_subscriber()
+        fake = _DynFakeWs()
+        sub._ws = fake  # type: ignore[assignment]
+
+        await sub.add_instruments([1001, 1002])
+
+        assert len(fake.sent) == 1
+        msg = json.loads(fake.sent[0])
+        assert msg["operation"] == "Subscribe"
+        assert sorted(msg["data"]["topics"]) == ["instrument:1001", "instrument:1002"]
+        assert sub._dynamic_topic_refs == {1001: 1, 1002: 1}
+
+    async def test_second_add_for_same_id_bumps_ref_without_frame(self) -> None:
+        sub = _make_dyn_subscriber()
+        fake = _DynFakeWs()
+        sub._ws = fake  # type: ignore[assignment]
+
+        await sub.add_instruments([1001])
+        await sub.add_instruments([1001])
+
+        assert len(fake.sent) == 1  # only initial
+        assert sub._dynamic_topic_refs == {1001: 2}
+
+    async def test_pinned_topic_bumps_ref_without_subscribe_frame(self) -> None:
+        sub = _make_dyn_subscriber()
+        fake = _DynFakeWs()
+        sub._ws = fake  # type: ignore[assignment]
+        sub._pinned_topics = {1001}
+
+        await sub.add_instruments([1001])
+
+        assert fake.sent == []
+        assert sub._dynamic_topic_refs == {1001: 1}
+
+    async def test_add_with_no_live_ws_updates_refs_only(self) -> None:
+        """During a reconnect window ``_ws`` is None. Dynamic path
+        still tracks refs so the next connect re-subscribes from
+        accumulated state."""
+        sub = _make_dyn_subscriber()
+        sub._ws = None
+
+        await sub.add_instruments([1001])
+
+        assert sub._dynamic_topic_refs == {1001: 1}
+
+    async def test_send_failure_preserves_ref_counts(self) -> None:
+        sub = _make_dyn_subscriber()
+        fake = _DynFakeWs()
+        fake.fail_next_send = True
+        sub._ws = fake  # type: ignore[assignment]
+
+        await sub.add_instruments([1001])
+
+        assert sub._dynamic_topic_refs == {1001: 1}
+        assert fake.sent == []
+
+
+class TestDynamicRemoveInstruments:
+    async def test_decrement_to_zero_sends_unsubscribe(self) -> None:
+        sub = _make_dyn_subscriber()
+        fake = _DynFakeWs()
+        sub._ws = fake  # type: ignore[assignment]
+
+        await sub.add_instruments([1001])
+        await sub.remove_instruments([1001])
+
+        assert len(fake.sent) == 2
+        unsub = json.loads(fake.sent[1])
+        assert unsub["operation"] == "Unsubscribe"
+        assert unsub["data"]["topics"] == ["instrument:1001"]
+        assert sub._dynamic_topic_refs == {}
+
+    async def test_decrement_above_zero_does_not_unsubscribe(self) -> None:
+        sub = _make_dyn_subscriber()
+        fake = _DynFakeWs()
+        sub._ws = fake  # type: ignore[assignment]
+
+        await sub.add_instruments([1001])
+        await sub.add_instruments([1001])
+        await sub.remove_instruments([1001])
+
+        assert len(fake.sent) == 1
+        assert sub._dynamic_topic_refs == {1001: 1}
+
+    async def test_remove_pinned_never_unsubscribes(self) -> None:
+        """Held + watchlist (pinned) must survive every page-view
+        remove — baseline portfolio feed can't be torn down by a
+        tab close."""
+        sub = _make_dyn_subscriber()
+        fake = _DynFakeWs()
+        sub._ws = fake  # type: ignore[assignment]
+        sub._pinned_topics = {1001}
+
+        await sub.add_instruments([1001])
+        await sub.remove_instruments([1001])
+
+        assert fake.sent == []
+        assert sub._dynamic_topic_refs == {}
+
+    async def test_remove_unknown_id_is_noop(self) -> None:
+        sub = _make_dyn_subscriber()
+        fake = _DynFakeWs()
+        sub._ws = fake  # type: ignore[assignment]
+
+        await sub.remove_instruments([9999])
+
+        assert fake.sent == []
+        assert sub._dynamic_topic_refs == {}
+
+
+class TestReconnectSubscribesPinnedUnionDynamic:
+    """After reconnect, the Subscribe frame must cover the union of
+    (refreshed) pinned + accumulated dynamic ids. Without this, SSE
+    streams that survived the outage would stop receiving ticks."""
+
+    async def test_connect_subscribes_pinned_union_dynamic(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        sub = _make_dyn_subscriber()
+        # Dynamic set accumulated during an outage.
+        sub._dynamic_topic_refs = {2001: 1, 2002: 1}
+        # Override DB selector for startup pinned set.
+        sub._watched_ids_provider = lambda: [1001, 1002]  # type: ignore[method-assign]
+
+        fake_ws = MagicMock()
+        fake_ws.send = AsyncMock()
+        fake_ws.recv = AsyncMock(return_value='{"success": true}')
+        fake_ws.__aenter__ = AsyncMock(return_value=fake_ws)
+        fake_ws.__aexit__ = AsyncMock(return_value=False)
+
+        async def fake_listen(ws: Any) -> None:
+            return
+
+        sub._listen = fake_listen  # type: ignore[method-assign]
+
+        import app.services.etoro_websocket as ws_mod
+
+        original_connect = ws_mod.websockets.connect
+        ws_mod.websockets.connect = MagicMock(return_value=fake_ws)  # type: ignore[assignment]
+        try:
+            await sub._connect_and_listen()
+        finally:
+            ws_mod.websockets.connect = original_connect  # type: ignore[assignment]
+
+        sent_frames = [json.loads(c.args[0]) for c in fake_ws.send.call_args_list]
+        ops = [f["operation"] for f in sent_frames]
+        assert ops[:3] == ["Authenticate", "Subscribe", "Subscribe"]
+        instrument_topics = sorted(sent_frames[1]["data"]["topics"])
+        assert instrument_topics == [
+            "instrument:1001",
+            "instrument:1002",
+            "instrument:2001",
+            "instrument:2002",
+        ]
+        assert sub._pinned_topics == {1001, 1002}
