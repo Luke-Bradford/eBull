@@ -48,14 +48,16 @@ class TestCikCandidateQueryScope:
     def _run_scoped_query(self, conn: psycopg.Connection[tuple]) -> list[tuple[str, str]]:
         # Inline the production query verbatim so a future refactor
         # that removes the exchange filter is caught by this test
-        # failing — the mapper bug manifested as a missing filter,
-        # so asserting the filter's effect is the invariant that
-        # matters.
+        # failing. #503 PR 3 swapped the hardcoded id list for a
+        # JOIN against the ``exchanges`` table — same invariant
+        # ("only us_equity exchanges produce candidates"), expressed
+        # via the curated mapping.
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT symbol, instrument_id::text FROM instruments "
-                "WHERE is_tradable = TRUE "
-                "AND exchange IN ('2', '4', '5', '6', '7', '19', '20')"
+                "SELECT i.symbol, i.instrument_id::text FROM instruments i "
+                "JOIN exchanges e ON e.exchange_id = i.exchange "
+                "WHERE i.is_tradable = TRUE "
+                "AND e.asset_class = 'us_equity'"
             )
             return [(r[0], r[1]) for r in cur.fetchall()]
 
@@ -107,3 +109,22 @@ class TestCikCandidateQueryScope:
 
     def test_empty_universe_returns_empty(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         assert self._run_scoped_query(ebull_test_conn) == []
+
+    def test_unknown_exchange_classification_excluded(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """An instrument on an exchange the operator hasn't yet
+        classified (``asset_class = 'unknown'``) is excluded from
+        the SEC mapper. New eToro exchange ids land as ``unknown``
+        per the migration backfill so they don't silently pick up
+        SEC CIKs (Codex round 1 acceptance for #503 PR 3)."""
+        # Seed an exchange row classified as ``unknown``.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO exchanges (exchange_id, asset_class) "
+                "VALUES ('99', 'unknown') "
+                "ON CONFLICT (exchange_id) DO UPDATE SET asset_class = 'unknown'"
+            )
+        _seed_instrument(ebull_test_conn, instrument_id=4001, symbol="UNK", exchange="99")
+        ebull_test_conn.commit()
+
+        symbols = sorted(s for s, _ in self._run_scoped_query(ebull_test_conn))
+        assert "UNK" not in symbols
