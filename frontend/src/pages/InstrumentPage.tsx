@@ -155,7 +155,7 @@ function FinancialsTab({ symbol }: { symbol: string }) {
       {loading && <SectionSkeleton rows={4} />}
       {error !== null && <ErrorView error={error} />}
       {!loading && error === null && rows.length === 0 && (
-        <EmptyState title="No statement data" description="Neither the local SEC XBRL cache nor yfinance returned data for this statement." />
+        <EmptyState title="No statement data" description="The local SEC XBRL cache has no data for this statement." />
       )}
       {!loading && error === null && rows.length > 0 && (
         <div className="overflow-x-auto">

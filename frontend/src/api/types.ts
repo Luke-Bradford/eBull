@@ -213,17 +213,21 @@ export interface InstrumentPrice {
 }
 
 // Closed set of values emitted in InstrumentKeyStats.field_source.
-// Mirrors KeyStatsFieldSource in app/api/instruments.py.
-//   - "sec_xbrl"                 → computed from local SEC XBRL data
-//   - "yfinance"                 → pulled from yfinance snapshot
-//   - "unavailable"              → field genuinely absent everywhere
+// Mirrors KeyStatsFieldSource in app/api/instruments.py. yfinance was
+// retired in #498/#499 — every key stat is either SEC-derived or
+// honestly absent.
+//   - "sec_xbrl"                 → computed from XBRL concepts directly
+//   - "sec_dividend_summary"     → from instrument_dividend_summary
+//                                  (#426); distinct from raw XBRL so an
+//                                  audit trail can tell them apart
+//   - "unavailable"              → field genuinely absent
 //   - "sec_xbrl_price_missing"   → local SEC inputs present but live
 //                                  quote absent, so ratio is unresolvable
 //                                  (distinct from "unavailable" so UI
 //                                  can render a "waiting on price" hint)
 export type KeyStatsFieldSource =
   | "sec_xbrl"
-  | "yfinance"
+  | "sec_dividend_summary"
   | "unavailable"
   | "sec_xbrl_price_missing";
 
@@ -289,7 +293,7 @@ export interface InstrumentFinancials {
   statement: "income" | "balance" | "cashflow";
   period: "quarterly" | "annual";
   currency: string | null;
-  source: "financial_periods" | "yfinance";
+  source: "financial_periods" | "unavailable";
   rows: InstrumentFinancialRow[];
 }
 

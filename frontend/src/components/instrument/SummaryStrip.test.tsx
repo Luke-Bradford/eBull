@@ -42,7 +42,7 @@ function summary(overrides: Partial<InstrumentSummary> = {}): InstrumentSummary 
       currency: "USD",
     },
     key_stats: null,
-    source: { identity: "local_db+yfinance", price: "yfinance", key_stats: "yfinance" },
+    source: { identity: "local_db", price: "quotes", key_stats: "unavailable" },
     ...overrides,
   };
 }
