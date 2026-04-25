@@ -2,7 +2,11 @@
 eToro market data provider.
 
 Implements MarketDataProvider against the real eToro public API.
-Persists raw API responses before any normalisation.
+Raw API response disk dumps were retired in #471 — every structured
+field lands in SQL (``instruments``, ``price_daily``, ``quotes``,
+``exchanges``), and those tables are the audit trail (see
+``docs/review-prevention-log.md`` §"Raw payload persistence" for
+the scope-narrowed rule).
 
 Auth: three-header scheme (x-api-key, x-user-key, x-request-id).
 Base URL: https://public-api.etoro.com (configurable via settings.etoro_base_url).
@@ -41,11 +45,16 @@ _ETORO_READ_INTERVAL_S = 1.1
 
 class EtoroMarketDataProvider(MarketDataProvider):
     """
-    Reads tradable instruments, candles, and quotes from the eToro API.
+    Reads tradable instruments, candles, quotes, and the exchange
+    catalogue from the eToro API.
 
     Callers must supply both ``api_key`` and ``user_key`` (loaded from
-    the encrypted broker_credentials store). Raw responses are persisted
-    to data/raw/etoro/ before normalisation.
+    the encrypted broker_credentials store). Raw response disk dumps
+    were retired in #471 — every structured field now lands in SQL
+    (``instruments``, ``price_daily``, ``quotes``, ``exchanges``), so
+    the structured tables ARE the audit trail (see
+    ``docs/review-prevention-log.md`` §"Raw payload persistence",
+    scope-narrowed entry).
 
     Use as a context manager to ensure the HTTP client is closed:
 

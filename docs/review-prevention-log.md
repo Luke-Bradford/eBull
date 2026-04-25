@@ -529,9 +529,10 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Prevention: When catching `httpx.HTTPStatusError` in provider code to skip/continue, call `_persist_raw(tag + "_error", exc.response.text)` before logging or continuing. Network errors (`httpx.RequestError`) have no response body — log with `exc_info` only.
 - **Scope narrowed (#470, 2026-04-24):** the "raw payload persistence" imperative only applies to sources whose SQL normalisation is incomplete. Once every structured field lands in SQL (as for `sec`/`sec_fundamentals` post #449/#450/#451/#452/#463), raw disk persistence is redundant, not audit — operator explicitly directed drop-on-process.
 - **Further narrowed (#471, 2026-04-24):** `etoro` + `etoro_broker` SQL coverage audit completed and provider-side raw writes dropped. Coverage map:
-  - `etoro/instruments` → `instruments` table (provider_id, symbol, company_name, exchange, sector, is_tradable; `currency` enriched separately by FMP per the live-pricing spec).
+  - `etoro/instruments` → `instruments` table (provider_id, symbol, company_name, exchange, sector, is_tradable; `currency` enriched separately by FMP per the live-pricing spec; `instrument_type` added in #503 PR 4 for cross-validation against `exchanges.asset_class`).
   - `etoro/candles_*` → `price_daily` (price_date, open, high, low, close, volume).
   - `etoro/rates_batch*` → `quotes` (instrument_id, bid, ask, last_execution, date).
+  - `etoro/exchanges` → `exchanges` table (#503 PR 4: provider_id, description; operator-curated `country` + `asset_class` not derived from the API).
   - `etoro_broker/etoro_portfolio` → `broker_positions` + `cash_ledger` + `copy_mirror_positions` (full position + cash + mirror snapshot).
 - **Rule remaining scope:** stands for `companies_house` and `fmp` whose SQL coverage is thinner; raw payloads still serve as parser substrate there until coverage audits land.
 - Enforced in: this prevention log
