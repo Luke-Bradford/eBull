@@ -1111,16 +1111,19 @@ def daily_cik_refresh() -> None:
             # symbol, which stamped unrelated US-company CIKs onto
             # eToro crypto coins that happened to share a ticker
             # (e.g. BTC crypto got Grayscale Bitcoin Mini Trust's
-            # CIK because both answer to "BTC"). Exchange codes
-            # enumerated from the current valid mapping set plus
-            # eToro's stable US-listed venues (4=NASDAQ, 5=NYSE,
-            # 2=AMEX, 6=OTC, 7=US small-cap, 19/20=additional US
-            # venues). Crypto (8), futures (40), FX, and non-US
-            # equities are explicitly excluded.
+            # CIK because both answer to "BTC").
+            #
+            # #503 PR 3: filter migrates from a hardcoded list to the
+            # ``exchanges`` table (sql/067) so adding / correcting
+            # an exchange's classification is a single row update.
+            # Crypto (asset_class='crypto'), unknown ids
+            # (asset_class='unknown'), and non-US classes are
+            # excluded by the join.
             rows = conn.execute(
-                "SELECT symbol, instrument_id::text FROM instruments "
-                "WHERE is_tradable = TRUE "
-                "AND exchange IN ('2', '4', '5', '6', '7', '19', '20')"
+                "SELECT i.symbol, i.instrument_id::text FROM instruments i "
+                "JOIN exchanges e ON e.exchange_id = i.exchange "
+                "WHERE i.is_tradable = TRUE "
+                "AND e.asset_class = 'us_equity'"
             ).fetchall()
             instrument_symbols = [(row[0], row[1]) for row in rows]
 
