@@ -27,8 +27,10 @@ from app.services import etoro_websocket
 from app.services.etoro_websocket import (
     EtoroWebSocketSubscriber,
     QuoteUpdate,
+    _await_auth_envelope,
     _compute_spread_pct,
     _is_auth_success,
+    _looks_like_json_envelope,
     build_auth_message,
     build_private_subscribe_message,
     build_subscribe_message,
@@ -154,6 +156,85 @@ class TestIsAuthSuccess:
 
     def test_malformed_returns_false(self) -> None:
         assert _is_auth_success("not json") is False
+
+
+# ---------------------------------------------------------------------------
+# Auth-handshake noise drain (#474)
+# ---------------------------------------------------------------------------
+
+
+class TestLooksLikeJsonEnvelope:
+    def test_canonical_json_text(self) -> None:
+        assert _looks_like_json_envelope('{"success": true}') is True
+
+    def test_json_bytes(self) -> None:
+        assert _looks_like_json_envelope(b'{"success": true}') is True
+
+    def test_leading_null_byte_str(self) -> None:
+        assert _looks_like_json_envelope('\x00{"success": true}') is True
+
+    def test_leading_null_byte_bytes(self) -> None:
+        assert _looks_like_json_envelope(b'\x00{"success": true}') is True
+
+    def test_pure_null_byte_is_noise(self) -> None:
+        assert _looks_like_json_envelope(b"\x00") is False
+
+    def test_empty_is_noise(self) -> None:
+        assert _looks_like_json_envelope("") is False
+
+    def test_whitespace_only_is_noise(self) -> None:
+        assert _looks_like_json_envelope("   ") is False
+
+    def test_array_envelope_is_noise(self) -> None:
+        # eToro auth ack is always a JSON object envelope. Arrays /
+        # other shapes — if they ever arrived — are still drained.
+        assert _looks_like_json_envelope("[]") is False
+
+
+class TestAwaitAuthEnvelope:
+    """Integration coverage of the drain loop. Stubs the WS recv()
+    side via a tiny fake so the test runs without a real socket."""
+
+    class _FakeWs:
+        def __init__(self, frames: list[str | bytes]) -> None:
+            self._frames = frames
+
+        async def recv(self) -> str | bytes:
+            if not self._frames:
+                # Mimic a real ws stalling forever — the deadline in
+                # _await_auth_envelope's wait_for cuts in instead.
+                await asyncio.sleep(3600)
+                raise AssertionError("unreachable")
+            return self._frames.pop(0)
+
+    async def test_returns_first_json_envelope_after_noise(self) -> None:
+        fake = self._FakeWs([b"\x00", '{"success": true}'])
+        result = await _await_auth_envelope(fake, timeout_s=2.0)  # type: ignore[arg-type]
+        assert result == '{"success": true}'
+
+    async def test_returns_canonical_envelope_immediately(self) -> None:
+        fake = self._FakeWs(['{"success": true}'])
+        result = await _await_auth_envelope(fake, timeout_s=2.0)  # type: ignore[arg-type]
+        assert result == '{"success": true}'
+
+    async def test_drains_multiple_noise_frames(self) -> None:
+        fake = self._FakeWs([b"\x00", b"\x00\x00", "  ", '{"success": true}'])
+        result = await _await_auth_envelope(fake, timeout_s=2.0)  # type: ignore[arg-type]
+        assert result == '{"success": true}'
+
+    async def test_timeout_when_no_envelope_arrives(self) -> None:
+        # Empty frame queue → fake will await forever → deadline must
+        # fire and raise TimeoutError, not loop forever.
+        fake = self._FakeWs([])
+        with pytest.raises(TimeoutError):
+            await _await_auth_envelope(fake, timeout_s=0.1)  # type: ignore[arg-type]
+
+    async def test_timeout_after_noise_burst(self) -> None:
+        # Several noise frames followed by stalling — must still
+        # surface the timeout instead of draining forever.
+        fake = self._FakeWs([b"\x00", b"\x00", b"\x00"])
+        with pytest.raises(TimeoutError):
+            await _await_auth_envelope(fake, timeout_s=0.1)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
