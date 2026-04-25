@@ -233,7 +233,11 @@ def portfolio_sync_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
 
 
 def fx_rates_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
-    return _fresh_by_audit(conn, "fx_rates_refresh", timedelta(minutes=5))
+    # Cadence cut from 5 min → 24 h: ECB publishes reference rates
+    # once per working day at ~16:00 CET, so anything tighter than
+    # daily was burning >95% as 304 Not Modified hits. The lifespan
+    # bootstrap covers the empty-table case at boot (#502).
+    return _fresh_by_audit(conn, "fx_rates_refresh", timedelta(hours=24))
 
 
 def cost_models_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:

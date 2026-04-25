@@ -24,7 +24,6 @@ import logging
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
 from typing import Any, Literal
 
 import anthropic
@@ -2609,26 +2608,31 @@ def fundamentals_sync() -> None:
 
 
 def fx_rates_refresh() -> None:
-    """Refresh live FX rates and quotes.
+    """Refresh live FX rates from Frankfurter (ECB reference rates).
 
-    Two-source strategy:
+    Per the visibility-driven live-prices spec
+    (docs/superpowers/specs/2026-04-25-visibility-driven-live-prices-spec.md):
 
-    1. **Frankfurter (primary FX):** Fetch ECB reference rates for all
-       supported display currencies. No API key, no coverage prerequisite.
-       Conditional ETag (#275): sends If-None-Match against the last
-       persisted ETag. 304 responses are no-ops (ECB only publishes
-       once per working day ~16:00 CET, so >95% of 5-min polls are 304).
+    - Cadence cut from hourly to once daily at 17:00 CET. ECB
+      publishes reference rates once per working day ~16:00 CET, so
+      hourly polling was burning >95% as 304 Not Modified hits.
+      Daily matches the actual publish cadence.
+    - Phase 2 (eToro batch quotes) **dropped**. The WS live-tick
+      pipeline (#274) writes to the ``quotes`` table directly for
+      every instrument an SSE stream subscribes to, making the
+      batch-quote path redundant for visibility-driven workflows.
 
-    2. **eToro quotes (secondary):** Batch-fetch quotes for covered Tier 1/2
-       instruments. Extracts eToro-specific conversion rates as a supplement,
-       and upserts quotes for hourly freshness. Skips gracefully if eToro
-       credentials are missing or the rates endpoint fails.
+    Conditional ETag (#275): sends If-None-Match against the last
+    persisted ETag. A 304 is a no-op upsert.
 
-    Runs hourly at :00 (invoked by orchestrator_high_frequency_sync).
+    The lifespan also runs an inline "bootstrap" call (see
+    ``app.main._bootstrap_fx_rates``) when the ``live_fx_rates``
+    table is empty at boot, so a fresh DB has rates available
+    before the first request lands without waiting for the
+    daily cron.
     """
     from app.providers.implementations.frankfurter import fetch_latest_rates_conditional
     from app.services.fx import upsert_live_fx_rate
-    from app.services.market_data import compute_spread_pct
     from app.services.runtime_config import SUPPORTED_CURRENCIES
 
     FX_SOURCE = "frankfurter.latest"
@@ -2636,7 +2640,6 @@ def fx_rates_refresh() -> None:
 
     with _tracked_job(JOB_FX_RATES_REFRESH) as tracker:
         fx_rows_written = 0
-        quotes_updated = 0
 
         # --- Phase 1: Frankfurter ECB rates (conditional GET) ---
         # Fetch USD → every other supported currency.
@@ -2695,120 +2698,11 @@ def fx_rates_refresh() -> None:
                     result.etag,
                 )
         except Exception:
-            logger.warning("fx_rates_refresh: Frankfurter fetch failed, continuing with eToro fallback", exc_info=True)
+            logger.warning("fx_rates_refresh: Frankfurter fetch failed", exc_info=True)
 
-        # --- Phase 2: eToro quotes + conversion rates (best-effort) ---
-        creds = _load_etoro_credentials("fx_rates_refresh")
-        if creds is not None:
-            api_key, user_key = creds
-            try:
-                with (
-                    EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
-                    psycopg.connect(settings.database_url) as conn,
-                ):
-                    rows = conn.execute(
-                        """
-                        SELECT i.instrument_id, i.symbol, i.currency
-                        FROM instruments i
-                        JOIN coverage c ON c.instrument_id = i.instrument_id
-                        WHERE i.is_tradable = TRUE
-                          AND c.coverage_tier IN (1, 2)
-                        ORDER BY i.symbol
-                        """
-                    ).fetchall()
+        tracker.row_count = fx_rows_written
 
-                    if rows:
-                        instrument_ids = [row[0] for row in rows]
-                        currency_map: dict[int, str | None] = {row[0]: row[2] for row in rows}
-
-                        quotes = provider.get_quotes(instrument_ids)
-
-                        # Extract eToro-specific conversion rates as a supplement.
-                        fx_pairs: dict[str, tuple[Decimal, datetime]] = {}
-                        for q in quotes:
-                            if q.conversion_rate is None:
-                                continue
-                            ccy = currency_map.get(q.instrument_id)
-                            if ccy is None or ccy == "USD":
-                                continue
-                            existing = fx_pairs.get(ccy)
-                            if existing is None or q.timestamp > existing[1]:
-                                fx_pairs[ccy] = (q.conversion_rate, q.timestamp)
-
-                        with conn.transaction():
-                            for ccy, (rate, ts) in fx_pairs.items():
-                                upsert_live_fx_rate(
-                                    conn,
-                                    from_currency=ccy,
-                                    to_currency="USD",
-                                    rate=rate,
-                                    quoted_at=ts,
-                                )
-                                fx_rows_written += 1
-                        conn.commit()
-
-                        # Upsert quotes for hourly freshness.
-                        max_spread_pct = Decimal("1.0")
-                        for q in quotes:
-                            try:
-                                spread_pct = compute_spread_pct(q.bid, q.ask)
-                                spread_flag = spread_pct is not None and spread_pct > max_spread_pct
-                                with conn.transaction():
-                                    conn.execute(
-                                        """
-                                        INSERT INTO quotes (
-                                            instrument_id, quoted_at, bid, ask, last,
-                                            spread_pct, spread_flag
-                                        )
-                                        VALUES (
-                                            %(instrument_id)s, %(quoted_at)s, %(bid)s, %(ask)s,
-                                            %(last)s, %(spread_pct)s, %(spread_flag)s
-                                        )
-                                        ON CONFLICT (instrument_id) DO UPDATE SET
-                                            quoted_at   = EXCLUDED.quoted_at,
-                                            bid         = EXCLUDED.bid,
-                                            ask         = EXCLUDED.ask,
-                                            last        = EXCLUDED.last,
-                                            spread_pct  = EXCLUDED.spread_pct,
-                                            spread_flag = EXCLUDED.spread_flag
-                                        """,
-                                        {
-                                            "instrument_id": q.instrument_id,
-                                            "quoted_at": q.timestamp,
-                                            "bid": q.bid,
-                                            "ask": q.ask,
-                                            "last": q.last,
-                                            "spread_pct": spread_pct,
-                                            "spread_flag": spread_flag,
-                                        },
-                                    )
-                                    quotes_updated += 1
-                            except Exception:
-                                logger.warning(
-                                    "fx_rates_refresh: failed to upsert quote for instrument %d",
-                                    q.instrument_id,
-                                    exc_info=True,
-                                )
-                        conn.commit()
-
-                        if quotes_updated == 0:
-                            logger.warning(
-                                "fx_rates_refresh: 0 quotes written for %d covered instruments"
-                                " — quote staleness will degrade mark-to-market valuations",
-                                len(instrument_ids),
-                            )
-                    else:
-                        logger.info("fx_rates_refresh: no covered instruments for eToro quotes")
-            except Exception:
-                logger.warning("fx_rates_refresh: eToro quote fetch failed", exc_info=True)
-
-        tracker.row_count = fx_rows_written + quotes_updated
-
-    logger.info(
-        "fx_rates_refresh complete: fx_pairs=%d quotes=%d",
-        fx_rows_written,
-        quotes_updated,
-    )
+    logger.info("fx_rates_refresh complete: fx_pairs=%d", fx_rows_written)
 
 
 def daily_tax_reconciliation() -> None:

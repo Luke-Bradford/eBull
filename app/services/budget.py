@@ -58,6 +58,21 @@ class BudgetConfigCorrupt(RuntimeError):
     """
 
 
+class FxRateUnavailable(RuntimeError):
+    """Raised when ``compute_budget_state`` cannot load the GBP→USD
+    rate it needs to convert the operator's estimated tax liability
+    into the USD basis the rest of the budget is denominated in.
+
+    Previously this path silently degraded ``estimated_tax_usd = 0``
+    on a missing rate, which is an execution-safety hole — the
+    execution guard's cash-availability check would treat all of
+    the operator's cash as deployable instead of reserving the tax
+    bill. Per the visibility-driven live-prices spec
+    (#502 PR C), this is now fail-closed: callers on the BUY/ADD
+    path must catch and translate into a guard block.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -516,17 +531,26 @@ def compute_budget_state(conn: psycopg.Connection[Any]) -> BudgetState:
     else:
         estimated_tax_gbp = higher_est
 
-    # FX conversion
+    # FX conversion. A missing GBP→USD rate is a fail-closed
+    # condition on the BUY/ADD path: previously this defaulted to
+    # ``estimated_tax_usd = 0``, which would let an order through
+    # with no tax provision, treating all the operator's cash as
+    # deployable. The execution guard catches FxRateUnavailable and
+    # blocks. (#502 PR C, Codex round 2 finding 2 on PR #500.)
     gbp_usd_rate = _load_gbp_usd_rate(conn)
-    if gbp_usd_rate is not None:
-        estimated_tax_usd = estimated_tax_gbp * gbp_usd_rate
-    else:
+    if gbp_usd_rate is None:
         if estimated_tax_gbp > _ZERO:
-            logger.warning(
-                "No GBP->USD rate available; using 0 for tax_usd (tax_gbp=%s)",
-                estimated_tax_gbp,
+            raise FxRateUnavailable(
+                f"GBP→USD rate missing; cannot convert estimated_tax_gbp={estimated_tax_gbp} "
+                "for budget computation. Bootstrap rate fetch may have failed; check "
+                "live_fx_rates table and Frankfurter connectivity."
             )
+        # No GBP tax to convert → safe to use zero. Common in
+        # non-UK operator configs where the tax estimate is in USD
+        # already and gbp tax is structurally zero.
         estimated_tax_usd = _ZERO
+    else:
+        estimated_tax_usd = estimated_tax_gbp * gbp_usd_rate
 
     # Cash buffer reserve — intentionally % of total AUM (working_budget),
     # not % of cash_balance.  Using cash as the base would create a feedback

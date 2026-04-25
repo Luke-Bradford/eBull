@@ -143,6 +143,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.exception("orchestrator reaper failed — continuing startup")
 
+    # FX bootstrap (#502). Some non-SSE handlers (portfolio, copy-
+    # trading, budget/execution) read ``live_fx_rates`` synchronously
+    # during request handling and degrade or fail-closed if the
+    # table is empty. After PR C cut the cron from hourly to daily,
+    # a fresh DB or wiped table would have no rates available until
+    # the next 17:00 CET tick. Fire one inline Frankfurter fetch
+    # here so the operator's first request post-boot has rates
+    # ready. Runs BEFORE ``start_runtime()`` so APScheduler's
+    # catch-up cannot race the inline write on the same row.
+    try:
+        _bootstrap_fx_rates(pool)
+    except Exception:
+        logger.exception("fx bootstrap failed — continuing startup, daily cron will retry")
+
     # Start the in-process job runtime (#13). All SCHEDULED_JOBS are
     # registered with APScheduler; catch-up fires overdue jobs at boot.
     job_runtime: JobRuntime | None
@@ -201,6 +215,48 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     pool.close()
     logger.info("Connection pool closed.")
+
+
+def _bootstrap_fx_rates(pool: ConnectionPool[Any]) -> None:
+    """Populate ``live_fx_rates`` synchronously when the table is empty.
+
+    Per the visibility-driven live-prices spec
+    (docs/superpowers/specs/2026-04-25-visibility-driven-live-prices-spec.md
+    PR C), the daily Frankfurter cron does not guarantee rates are
+    in the table at boot — a fresh DB, a wiped table, or a process
+    restart between ECB publishes would all leave readers seeing
+    no rows. Non-SSE handlers (``/portfolio``, ``/portfolio/copy-trading``,
+    ``budget``) read ``live_fx_rates`` synchronously and either
+    degrade or fail-closed if it is empty.
+
+    Strategy: count the table; if non-empty, no-op. If empty, call
+    ``fx_rates_refresh`` directly. Calling the actual job (rather
+    than duplicating its body) means the FX watermark + ``job_runs``
+    audit row advance the same way they would on a normal cron tick
+    — so APScheduler's boot catch-up sees the job as fresh and
+    does not fire a second back-to-back Frankfurter hit (Codex
+    round 2 finding 1 on PR for #502).
+
+    Runs BEFORE ``start_runtime()`` so the scheduler boot path
+    cannot race this call on the same row (spec v3 ordering pin).
+    """
+    from app.workers.scheduler import fx_rates_refresh
+
+    with pool.connection() as conn:
+        row = conn.execute("SELECT COUNT(*) FROM live_fx_rates").fetchone()
+        existing = int(row[0]) if row and row[0] is not None else 0
+        if existing > 0:
+            logger.info("fx bootstrap: %d existing rows, skipping inline fetch", existing)
+            return
+
+    logger.info("fx bootstrap: live_fx_rates is empty, running fx_rates_refresh inline")
+    try:
+        fx_rates_refresh()
+    except Exception:
+        logger.warning(
+            "fx bootstrap: fx_rates_refresh raised; daily cron will retry",
+            exc_info=True,
+        )
 
 
 async def _maybe_start_etoro_ws(pool: ConnectionPool[Any], bus: QuoteBus) -> EtoroWebSocketSubscriber | None:

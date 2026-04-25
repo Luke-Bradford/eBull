@@ -50,7 +50,7 @@ import psycopg
 import psycopg.rows
 from psycopg.types.json import Jsonb
 
-from app.services.budget import BudgetConfigCorrupt, BudgetState, compute_budget_state
+from app.services.budget import BudgetConfigCorrupt, BudgetState, FxRateUnavailable, compute_budget_state
 from app.services.portfolio import _load_mirror_equity
 from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
 from app.services.transaction_cost import (
@@ -706,6 +706,7 @@ def evaluate_recommendation(
     cost_config: dict[str, Any] | None = None
     cost_config_corrupt: bool = False
     cost_model_row: dict[str, Any] | None = None
+    budget_fx_unavailable: bool = False
 
     if action in ("BUY", "ADD"):
         coverage = _load_coverage(conn, instrument_id)
@@ -732,6 +733,15 @@ def evaluate_recommendation(
             budget = compute_budget_state(conn)
         except BudgetConfigCorrupt:
             budget = None
+        except FxRateUnavailable:
+            # Fail closed on missing FX rate (#502 PR C). The budget
+            # check below treats this as a hard "block BUY/ADD"
+            # outcome — better than silently degrading
+            # ``estimated_tax_usd = 0`` and letting an order through
+            # with no tax provision. The guard surfaces a clear
+            # ``fx_rate_unavailable`` rule failure on the audit row.
+            budget = None
+            budget_fx_unavailable = True
         if budget is not None and budget.cash_balance is not None:
             cash_for_aum = float(budget.cash_balance)
         else:
@@ -787,7 +797,19 @@ def evaluate_recommendation(
         else:
             rule_results.append(_check_transaction_cost(quote, cost_model_row, cost_config))
 
-        if budget is None:
+        if budget_fx_unavailable:
+            rule_results.append(
+                RuleResult(
+                    rule="budget_available",
+                    passed=False,
+                    detail=(
+                        "FX rate (GBP→USD) unavailable; cannot compute estimated tax "
+                        "reserve in USD. Refusing BUY/ADD until live_fx_rates is "
+                        "populated (Frankfurter cron or lifespan bootstrap)."
+                    ),
+                )
+            )
+        elif budget is None:
             rule_results.append(
                 RuleResult(
                     rule="budget_available",

@@ -121,7 +121,7 @@ class TestSimpleAuditOnlyPredicates:
         [
             (universe_is_fresh, "nightly_universe_sync", timedelta(days=7)),
             (portfolio_sync_is_fresh, "daily_portfolio_sync", timedelta(minutes=5)),
-            (fx_rates_is_fresh, "fx_rates_refresh", timedelta(minutes=5)),
+            (fx_rates_is_fresh, "fx_rates_refresh", timedelta(hours=24)),
             (cost_models_is_fresh, "seed_cost_models", timedelta(hours=24)),
             (weekly_reports_is_fresh, "weekly_report", timedelta(days=7)),
             (monthly_reports_is_fresh, "monthly_report", timedelta(days=31)),
@@ -132,6 +132,26 @@ class TestSimpleAuditOnlyPredicates:
         conn = _mock_conn_with_row((now - window / 2, "success", None, (window / 2).total_seconds()))
         fresh, _ = predicate(conn)
         assert fresh is True
+
+
+class TestFxRatesIsFreshWindow:
+    """Pin the ``fx_rates_is_fresh`` window at 24h (#502 PR C). The
+    parametrized fresh-only assertion in the suite above passes any
+    test param matching the production constant, so a regression that
+    moves both back to 5 minutes would not be caught — these explicit
+    boundary tests fail loud if the cadence shifts."""
+
+    def test_fresh_at_twelve_hours_ago(self) -> None:
+        now = datetime.now(UTC)
+        conn = _mock_conn_with_row((now - timedelta(hours=12), "success", None, timedelta(hours=12).total_seconds()))
+        fresh, _ = fx_rates_is_fresh(conn)
+        assert fresh is True
+
+    def test_stale_at_twenty_five_hours_ago(self) -> None:
+        now = datetime.now(UTC)
+        conn = _mock_conn_with_row((now - timedelta(hours=25), "success", None, timedelta(hours=25).total_seconds()))
+        fresh, _ = fx_rates_is_fresh(conn)
+        assert fresh is False
 
 
 class TestCandlesIsFresh:
