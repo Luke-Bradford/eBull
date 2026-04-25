@@ -102,3 +102,31 @@ def test_no_sec_cik_returns_404_no_sec_coverage(client: TestClient, endpoint: st
         _clear()
     assert resp.status_code == 404
     assert "SEC coverage" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/instruments/AAPL/eight_k_filings",
+        "/instruments/AAPL/dividends",
+        "/instruments/AAPL/insider_summary",
+        "/instruments/AAPL/insider_transactions",
+    ],
+)
+def test_with_sec_cik_does_not_short_circuit_with_no_sec_coverage(client: TestClient, endpoint: str) -> None:
+    """Companion: when the instrument DOES have a SEC CIK, the
+    gate must NOT fire. Without this, a future regression that
+    inverts the predicate (e.g. ``not _has_sec_cik`` swapped) or
+    aliases the wrong flag (Codex round 1 finding on PR #506)
+    would pass the negative test alone. The downstream service
+    layer is not stubbed here — the response may still 5xx /
+    return empty for other reasons — but the response MUST NOT
+    carry the gate's "SEC coverage" 404 detail."""
+    conn = _conn_for_handler(has_cik=True)
+    _install(conn)
+    try:
+        resp = client.get(endpoint)
+    finally:
+        _clear()
+    if resp.status_code == 404:
+        assert "SEC coverage" not in resp.json().get("detail", "")

@@ -1771,12 +1771,15 @@ def get_instrument_summary(
         "key_stats": key_stats_source,
     }
 
-    # Coverage gates (#503 PR 2). ``has_sec_cik`` reuses the same
-    # ``_has_sec_cik`` helper that gates the local-SEC-XBRL
-    # preference path above, so the gate the frontend reads is the
-    # same gate the backend already trusted. ``has_filings_coverage``
-    # is provider-agnostic — today equals "instrument has any
-    # filing_events row" since SEC is the only filings provider.
+    # Coverage gates (#503 PR 2). Resolve via dedicated calls — do
+    # NOT alias ``use_local_sec`` here. Today the two flags are the
+    # same boolean (both come from ``_has_sec_cik``), but
+    # ``use_local_sec`` is named for the local-XBRL preference path
+    # and could narrow in future (e.g. "has CIK AND has ingested
+    # XBRL"). The frontend gate must follow ``_has_sec_cik`` exactly,
+    # not whatever predicate the local-pref path wants. Codex
+    # review on PR #506 caught the aliasing risk.
+    has_sec_cik = _has_sec_cik(conn, instrument_id_int)
     has_filings_coverage = _has_filings_coverage(conn, instrument_id_int)
 
     return InstrumentSummary(
@@ -1787,7 +1790,7 @@ def get_instrument_summary(
         price=price_block,
         key_stats=stats_block,
         source=source,
-        has_sec_cik=use_local_sec,
+        has_sec_cik=has_sec_cik,
         has_filings_coverage=has_filings_coverage,
     )
 
