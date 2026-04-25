@@ -81,6 +81,7 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "filing_documents",  # #452 — child of filing_events
     "instrument_business_summary_sections",  # #449 — FK → instruments
     "instrument_business_summary",  # #428 — 10-K Item 1 body, FK → instruments
+    "instrument_sec_profile",  # #427 — SEC entity profile, FK → instruments
     # #429 Form 4 tables. Child-to-parent truncation order: transactions
     # and footnotes FK into filings; filers also FK into filings;
     # filings FKs into instruments (so instrument truncation further
