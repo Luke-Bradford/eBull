@@ -190,6 +190,15 @@ class TestLooksLikeJsonEnvelope:
         # other shapes — if they ever arrived — are still drained.
         assert _looks_like_json_envelope("[]") is False
 
+    def test_null_byte_then_whitespace_then_json(self) -> None:
+        # Regression for review WARNING: a two-pass strip
+        # (``.lstrip().lstrip("\\x00")``) misses this shape because
+        # the leading null blocks the whitespace strip on pass one.
+        # Single-pass strip across both classes handles it.
+        assert _looks_like_json_envelope(b'\x00 {"success": true}') is True
+        assert _looks_like_json_envelope(b'\x00\x00 {"success": true}') is True
+        assert _looks_like_json_envelope(' \x00{"success": true}') is True
+
 
 class TestAwaitAuthEnvelope:
     """Integration coverage of the drain loop. Stubs the WS recv()

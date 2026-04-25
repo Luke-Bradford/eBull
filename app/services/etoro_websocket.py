@@ -635,7 +635,11 @@ def _looks_like_json_envelope(raw: str | bytes) -> bool:
         text = raw.decode("utf-8", errors="ignore")
     else:
         text = raw
-    stripped = text.lstrip().lstrip("\x00")
+    # Single-pass strip across whitespace + null so any interleaving
+    # (``\x00 {``, `` \x00{``, ``\x00\x00 {``) is handled. A two-pass
+    # ``.lstrip().lstrip("\x00")`` would miss ``\x00 {`` because the
+    # leading null blocks the whitespace strip.
+    stripped = text.lstrip("\x00 \t\r\n\v\f")
     return stripped.startswith("{")
 
 
