@@ -171,19 +171,32 @@ export function ResearchTab({
   const stats = summary.key_stats;
   const fs = stats?.field_source ?? undefined;
 
+  // SEC-specific panels gate on ``has_sec_cik`` so crypto +
+  // non-US instruments don't render orphan SEC content (#503 PR 2).
+  // Key statistics stays mounted regardless — its empty state
+  // already says "no provider returned key stats" which is honest
+  // for any instrument without coverage.
+  const hasSec = summary.has_sec_cik;
+
   return (
     <div className="grid gap-4 md:grid-cols-2">
-      <SecProfilePanel symbol={summary.identity.symbol} />
-      <DividendsPanel symbol={summary.identity.symbol} />
-      <div className="md:col-span-2">
-        <BusinessSectionsPanel symbol={summary.identity.symbol} />
-      </div>
-      <div className="md:col-span-2">
-        <InsiderActivityPanel symbol={summary.identity.symbol} />
-      </div>
-      <div className="md:col-span-2">
-        <EightKEventsPanel symbol={summary.identity.symbol} />
-      </div>
+      {hasSec ? <SecProfilePanel symbol={summary.identity.symbol} /> : null}
+      {hasSec ? <DividendsPanel symbol={summary.identity.symbol} /> : null}
+      {hasSec ? (
+        <div className="md:col-span-2">
+          <BusinessSectionsPanel symbol={summary.identity.symbol} />
+        </div>
+      ) : null}
+      {hasSec ? (
+        <div className="md:col-span-2">
+          <InsiderActivityPanel symbol={summary.identity.symbol} />
+        </div>
+      ) : null}
+      {hasSec ? (
+        <div className="md:col-span-2">
+          <EightKEventsPanel symbol={summary.identity.symbol} />
+        </div>
+      ) : null}
 
       <Section title="Key statistics">
         {stats === null ? (

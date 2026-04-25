@@ -252,6 +252,18 @@ export interface InstrumentSummary {
   price: InstrumentPrice | null;
   key_stats: InstrumentKeyStats | null;
   source: Record<string, string>;
+  /** True iff the instrument has a primary SEC CIK in
+   *  external_identifiers. Frontend uses this to gate
+   *  SEC-specific panels (SecProfile, InsiderActivity,
+   *  Dividends, business summary). Crypto + non-US instruments
+   *  see false. */
+  has_sec_cik: boolean;
+  /** True iff any filings provider has rows for the instrument
+   *  (today: SEC; tomorrow: Companies House / regional). Gates
+   *  the source-agnostic Filings tab + right-rail "recent
+   *  filings" widget. Wider than has_sec_cik so adding a non-SEC
+   *  filings provider later doesn't bake in a follow-up. */
+  has_filings_coverage: boolean;
 }
 
 // #316 Slice A — daily OHLCV bars

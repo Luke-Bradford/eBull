@@ -189,6 +189,23 @@ class InstrumentSummary(BaseModel):
     price: InstrumentPrice | None
     key_stats: InstrumentKeyStats | None
     source: dict[str, str]
+    # Coverage gates — frontend uses these to hide irrelevant
+    # tabs / panels rather than render an empty state for an
+    # instrument the source does not cover (#503 PR 2).
+    #
+    # ``has_sec_cik``: True iff the instrument has a primary SEC
+    # CIK in ``external_identifiers``. Gates SEC-specific panels:
+    # SecProfilePanel, InsiderActivityPanel, DividendsPanel,
+    # business-summary section.
+    #
+    # ``has_filings_coverage``: True iff any provider has filed
+    # filings for the instrument (today: SEC; tomorrow:
+    # Companies House / regional sources). Gates the
+    # source-agnostic Filings tab + right-rail "recent filings"
+    # widget. Wider than ``has_sec_cik`` so adding a non-SEC
+    # provider later doesn't bake in a follow-up.
+    has_sec_cik: bool
+    has_filings_coverage: bool
 
 
 class InstrumentDetail(BaseModel):
@@ -802,6 +819,11 @@ def get_instrument_8k_filings(
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
 
     instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    if not _has_sec_cik(conn, instrument_id):
+        # No SEC CIK means no canonical 8-K source — return empty
+        # rather than render orphan rows from a prior bad CIK link
+        # (see migration 066 / spec PR 2).
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} has no SEC coverage")
     filings = list_8k_filings(conn, instrument_id=instrument_id, limit=limit)
     return EightKFilingsResponse(
         symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
@@ -1119,6 +1141,11 @@ def get_instrument_dividends(
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
 
     instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    if not _has_sec_cik(conn, instrument_id):
+        # No SEC CIK = no canonical dividend source. 404 instead
+        # of returning orphan rows from a prior bad CIK link
+        # (see migration 066 / spec PR 2).
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} has no SEC coverage")
     summary = get_dividend_summary(conn, instrument_id=instrument_id)
     history = get_dividend_history(conn, instrument_id=instrument_id, limit=limit)
     upcoming = get_upcoming_dividends(conn, instrument_id=instrument_id)
@@ -1228,6 +1255,11 @@ def get_instrument_insider_summary(
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
 
     instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    if not _has_sec_cik(conn, instrument_id):
+        # Insider transactions are SEC Form 4 — no SEC CIK = no
+        # canonical source. 404 instead of returning orphan rows
+        # from a prior bad CIK link (see migration 066 / spec PR 2).
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} has no SEC coverage")
     summary = get_insider_summary(conn, instrument_id=instrument_id)
     return InsiderSummaryModel(
         symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
@@ -1335,6 +1367,11 @@ def get_instrument_insider_transactions(
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
 
     instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    if not _has_sec_cik(conn, instrument_id):
+        # Form 4 is an SEC filing — no SEC CIK = no canonical
+        # source. 404 instead of returning orphan rows from a
+        # prior bad CIK link (see migration 066 / spec PR 2).
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} has no SEC coverage")
     detail_rows = list_insider_transactions(conn, instrument_id=instrument_id, limit=limit)
     return InsiderTransactionsListModel(
         symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
@@ -1381,6 +1418,23 @@ def _has_sec_cik(conn: psycopg.Connection[object], instrument_id: int) -> bool:
             "WHERE instrument_id = %(iid)s AND provider = 'sec' "
             "AND identifier_type = 'cik' AND is_primary = TRUE "
             "LIMIT 1",
+            {"iid": instrument_id},
+        )
+        return cur.fetchone() is not None
+
+
+def _has_filings_coverage(conn: psycopg.Connection[object], instrument_id: int) -> bool:
+    """True if any filings provider has filed filings for the instrument.
+
+    Provider-agnostic coverage gate (#503 PR 2). Today the only
+    populated provider is SEC, so this is currently equivalent to
+    ``EXISTS row in filing_events``. Once Companies House / other
+    regional providers are wired, the same gate keeps working
+    without a frontend change.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM filing_events WHERE instrument_id = %(iid)s LIMIT 1",
             {"iid": instrument_id},
         )
         return cur.fetchone() is not None
@@ -1717,6 +1771,17 @@ def get_instrument_summary(
         "key_stats": key_stats_source,
     }
 
+    # Coverage gates (#503 PR 2). Resolve via dedicated calls — do
+    # NOT alias ``use_local_sec`` here. Today the two flags are the
+    # same boolean (both come from ``_has_sec_cik``), but
+    # ``use_local_sec`` is named for the local-XBRL preference path
+    # and could narrow in future (e.g. "has CIK AND has ingested
+    # XBRL"). The frontend gate must follow ``_has_sec_cik`` exactly,
+    # not whatever predicate the local-pref path wants. Codex
+    # review on PR #506 caught the aliasing risk.
+    has_sec_cik = _has_sec_cik(conn, instrument_id_int)
+    has_filings_coverage = _has_filings_coverage(conn, instrument_id_int)
+
     return InstrumentSummary(
         instrument_id=row["instrument_id"],  # type: ignore[arg-type]
         is_tradable=row["is_tradable"],  # type: ignore[arg-type]
@@ -1725,6 +1790,8 @@ def get_instrument_summary(
         price=price_block,
         key_stats=stats_block,
         source=source,
+        has_sec_cik=has_sec_cik,
+        has_filings_coverage=has_filings_coverage,
     )
 
 

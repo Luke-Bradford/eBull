@@ -43,6 +43,8 @@ function summary(overrides: Partial<InstrumentSummary> = {}): InstrumentSummary 
     },
     key_stats: null,
     source: { identity: "local_db", price: "quotes", key_stats: "unavailable" },
+    has_sec_cik: true,
+    has_filings_coverage: true,
     ...overrides,
   };
 }
