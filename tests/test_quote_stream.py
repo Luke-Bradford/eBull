@@ -262,11 +262,10 @@ class TestEventStreamGenerator:
 
         original = sse_quotes._HEARTBEAT_INTERVAL_S
         sse_quotes._HEARTBEAT_INTERVAL_S = 0.05
+        bus = QuoteBus()
+        req = self._FakeRequest()
+        gen = sse_quotes._event_stream(req, bus, frozenset({1001}))  # type: ignore[arg-type]
         try:
-            bus = QuoteBus()
-            req = self._FakeRequest()
-            gen = sse_quotes._event_stream(req, bus, frozenset({1001}))
-
             # Open frame.
             first = await gen.__anext__()
             assert first.startswith(": stream open at ")
