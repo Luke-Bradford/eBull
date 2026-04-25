@@ -65,6 +65,20 @@ from app.services.sync_orchestrator.layer_types import LayerState
 from app.services.sync_orchestrator.reaper import reap_orphaned_syncs
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+
+# Third-party loggers default to INFO, which is far too noisy for our
+# workload. The SEC ingester fan-out emits 500-1000 httpx requests
+# per hourly tick; without this hoist, every fetch logs an INFO line
+# to stdout. Under sustained load the resulting print-throughput
+# starves the asyncio event loop on stdout I/O — unrelated request
+# handlers go unresponsive while the SEC backfill is mid-run.
+# WARNING preserves error visibility (4xx/5xx, retries) without the
+# per-request flood.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+# httpcore is the connection-level layer underneath httpx; its
+# DEBUG/INFO is even noisier (one line per socket event).
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 
