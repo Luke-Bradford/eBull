@@ -22,7 +22,7 @@ import psycopg
 import psycopg.rows
 from psycopg.types.json import Jsonb
 
-from app.services.budget import compute_budget_state
+from app.services.budget import FxRateUnavailable, compute_budget_state
 
 logger = logging.getLogger(__name__)
 
@@ -252,8 +252,25 @@ def _score_changes(
 
 
 def _budget_snapshot(conn: psycopg.Connection[Any]) -> dict[str, Any]:
-    """Current budget state via compute_budget_state."""
-    budget = compute_budget_state(conn)
+    """Current budget state via compute_budget_state.
+
+    Reporting paths must NOT hard-fail on a missing GBP→USD rate
+    (#502 PR C, Codex round 2 finding 2). Reports are read-only
+    snapshots — surfacing "FX unavailable" in-line is the right
+    degrade for a weekly/monthly report, vs the execution-guard
+    fail-closed posture which actually blocks orders.
+    """
+    try:
+        budget = compute_budget_state(conn)
+    except FxRateUnavailable:
+        logger.warning("_budget_snapshot: GBP→USD rate unavailable; emitting null tax/budget figures")
+        return {
+            "cash_balance": None,
+            "deployed_capital": None,
+            "estimated_tax_usd": None,
+            "available_for_deployment": None,
+            "fx_unavailable": True,
+        }
     return {
         "cash_balance": _dec(budget.cash_balance),
         "deployed_capital": _dec(budget.deployed_capital),
@@ -509,8 +526,19 @@ def _thesis_accuracy(
 
 
 def _tax_provision_snapshot(conn: psycopg.Connection[Any]) -> dict[str, Any]:
-    """Current tax provision from the budget service."""
-    budget = compute_budget_state(conn)
+    """Current tax provision from the budget service. Degrades to a
+    null snapshot when FX is unavailable rather than hard-failing
+    the monthly report (#502 PR C)."""
+    try:
+        budget = compute_budget_state(conn)
+    except FxRateUnavailable:
+        logger.warning("_tax_provision_snapshot: GBP→USD rate unavailable; emitting null")
+        return {
+            "estimated_tax_gbp": None,
+            "estimated_tax_usd": None,
+            "tax_year": None,
+            "fx_unavailable": True,
+        }
     return {
         "estimated_tax_gbp": _dec(budget.estimated_tax_gbp),
         "estimated_tax_usd": _dec(budget.estimated_tax_usd),

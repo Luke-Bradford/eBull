@@ -533,8 +533,15 @@ class TestComputeBudgetState:
         assert state.available_for_deployment is None
         assert state.cash_buffer_reserve == Decimal("0")
 
-    def test_no_fx_rate_uses_zero_tax(self) -> None:
-        """When GBP->USD rate is None, tax_usd=0 and a warning is logged."""
+    def test_missing_gbp_usd_rate_fails_closed_when_tax_owed(self) -> None:
+        """When GBP→USD rate is missing AND there is a non-zero GBP
+        tax estimate, ``compute_budget_state`` raises FxRateUnavailable
+        rather than silently degrading ``tax_usd = 0``. Previously the
+        zero would have let an order through with no tax provision —
+        an execution-safety hole (Codex round 2 finding 2 on PR #500;
+        #502 PR C)."""
+        from app.services.budget import FxRateUnavailable
+
         conn, mirror_val = _budget_conn(gbp_usd_rate=None)
         with (
             unittest.mock.patch(
@@ -545,14 +552,35 @@ class TestComputeBudgetState:
                 "app.services.budget._load_mirror_equity",
                 return_value=mirror_val,
             ),
-            unittest.mock.patch("app.services.budget.logger") as mock_logger,
+            pytest.raises(FxRateUnavailable),
+        ):
+            compute_budget_state(conn)
+
+    def test_missing_gbp_usd_rate_when_zero_tax_owed_returns_zero(self) -> None:
+        """When GBP→USD rate is missing AND the GBP tax estimate is
+        already zero, the computation succeeds with ``tax_usd = 0``
+        — there is no figure to convert. Common in non-UK operator
+        configs."""
+        conn, mirror_val = _budget_conn(
+            gbp_usd_rate=None,
+            total_gains=Decimal("0"),
+            net_gain=Decimal("0"),
+        )
+        with (
+            unittest.mock.patch(
+                "app.services.budget._current_uk_tax_year",
+                return_value="2025/26",
+            ),
+            unittest.mock.patch(
+                "app.services.budget._load_mirror_equity",
+                return_value=mirror_val,
+            ),
         ):
             state = compute_budget_state(conn)
 
         assert state.gbp_usd_rate is None
+        assert state.estimated_tax_gbp == Decimal("0")
         assert state.estimated_tax_usd == Decimal("0")
-        assert state.estimated_tax_gbp > Decimal("0")
-        mock_logger.warning.assert_called_once()
 
     def test_negative_available_when_over_reserved(self) -> None:
         """When tax + buffer > cash, available is negative."""

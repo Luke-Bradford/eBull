@@ -34,6 +34,7 @@ from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.services.budget import (
     BudgetConfigCorrupt,
+    FxRateUnavailable,
     compute_budget_state,
     get_budget_config,
     list_capital_events,
@@ -159,6 +160,15 @@ def get_budget(
     except BudgetConfigCorrupt:
         logger.exception("budget config corrupt — cannot compute budget state")
         raise HTTPException(status_code=503, detail="budget configuration unavailable")
+    except FxRateUnavailable:
+        # Surface as 503 so the operator UI shows "FX unavailable"
+        # rather than a stale-zero tax estimate that misleads
+        # downstream BUY decisions.
+        logger.exception("budget compute failed: FX rate unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="FX rate unavailable; budget cannot be computed without a GBP→USD rate",
+        )
 
     return BudgetStateResponse(
         cash_balance=float(state.cash_balance) if state.cash_balance is not None else None,
