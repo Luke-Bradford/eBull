@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.resilient_client import ResilientClient
@@ -99,8 +100,5 @@ def test_filing_index_raises_on_500() -> None:
     provider = SecFilingsProvider(user_agent="test test@example.com")
     _rewire_tickers_transport(provider, httpx.MockTransport(handler))
 
-    try:
+    with pytest.raises(httpx.HTTPStatusError):
         provider.fetch_filing_index("0000320193-24-000001")
-    except httpx.HTTPStatusError:
-        return
-    raise AssertionError("expected HTTPStatusError on 500 response")
