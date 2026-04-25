@@ -66,13 +66,30 @@ function ErrorView({ error, onRetry }: { error: unknown; onRetry?: () => void })
 
 type TabId = "research" | "financials" | "positions" | "news" | "filings";
 
-const TABS: { id: TabId; label: string }[] = [
+const ALL_TABS: { id: TabId; label: string }[] = [
   { id: "research", label: "Research" },
   { id: "financials", label: "Financials" },
   { id: "positions", label: "Positions" },
   { id: "news", label: "News" },
   { id: "filings", label: "Filings" },
 ];
+
+/**
+ * Filter the visible tabs to those an instrument's coverage
+ * actually populates (#503 PR 2). SEC-only tabs (Financials)
+ * hide when ``has_sec_cik`` is false; the source-agnostic
+ * Filings tab hides when no provider has filings for the
+ * instrument. Crypto + non-US instruments end up with
+ * Research / Positions / News only.
+ */
+function visibleTabs(summary: InstrumentSummary | null): typeof ALL_TABS {
+  if (summary === null) return ALL_TABS;
+  return ALL_TABS.filter((t) => {
+    if (t.id === "financials") return summary.has_sec_cik;
+    if (t.id === "filings") return summary.has_filings_coverage;
+    return true;
+  });
+}
 
 function formatDecimal(
   value: string | null | undefined,
@@ -463,7 +480,11 @@ function InstrumentPageBody({
   // tab-switching doesn't spam browser history.
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = searchParams.get("tab");
-  const activeTab: TabId = TABS.some((t) => t.id === tabParam)
+  const tabs = visibleTabs(summary);
+  // Fall back to "research" both when the tab param isn't a known
+  // id AND when the instrument's coverage hides the requested tab
+  // (e.g. ``?tab=filings`` on a crypto instrument).
+  const activeTab: TabId = tabs.some((t) => t.id === tabParam)
     ? (tabParam as TabId)
     : "research";
   const setActiveTab = useCallback(
@@ -600,7 +621,7 @@ function InstrumentPageBody({
       <div className="grid gap-4 lg:grid-cols-12">
         <div className="space-y-4 lg:col-span-8">
           <nav className="flex gap-1 border-b border-slate-200">
-            {TABS.map((tab) => (
+            {tabs.map((tab) => (
               <button
                 key={tab.id}
                 type="button"
@@ -645,6 +666,7 @@ function InstrumentPageBody({
             instrumentId={summary.instrument_id}
             sector={summary.identity.sector}
             currentSymbol={summary.identity.symbol}
+            hasFilingsCoverage={summary.has_filings_coverage}
           />
         </div>
       </div>
