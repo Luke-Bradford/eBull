@@ -38,6 +38,7 @@ from app.services.etoro_websocket import (
     fetch_watched_instrument_ids,
     is_private_event,
     parse_rate_message,
+    parse_rate_messages,
     upsert_quote,
 )
 
@@ -125,11 +126,189 @@ class TestParseRateMessage:
         assert parse_rate_message("") is None
 
     def test_missing_required_field_returns_none(self) -> None:
-        # No InstrumentID
+        # No InstrumentID and no topic — parser cannot recover the id.
         raw = json.dumps(
             {"type": "Trading.Instrument.Rate", "data": {"Bid": "1", "Ask": "2", "Date": "2026-04-24T14:30:00Z"}}
         )
         assert parse_rate_message(raw) is None
+
+
+class TestParseRateMessageOfficialEnvelope:
+    """Regression for #503 — the actual eToro WS frame shape per the
+    official documentation
+    (https://api-portal.etoro.com/api-reference/websocket/topics.md):
+
+        {
+          "messages": [
+            {
+              "topic": "instrument:100000",
+              "content": "{\\"Ask\\":\\"...\\", ...}",
+              "id": "...",
+              "type": "Trading.Instrument.Rate"
+            }
+          ]
+        }
+
+    Pre-#503 the parser only recognised ``{type, data}`` at the top
+    level, dropping every real frame on the floor. ``quotes`` table
+    looked populated only because the (now-retired) Phase 2 of
+    ``fx_rates_refresh`` was writing rows via REST. Post-#502 with
+    Phase 2 gone, the WS path was the sole writer and Tier 3
+    instruments (BTC, LRC) silently never updated. These tests pin
+    the actual envelope shape so future drift fails loud."""
+
+    def test_messages_envelope_with_string_encoded_content(self) -> None:
+        """The documented eToro shape: ``messages: [...]`` outer wrap,
+        ``content`` field carrying a JSON-encoded string."""
+        inner_content = json.dumps(
+            {
+                "Ask": "84917.73",
+                "Bid": "83232.21",
+                "LastExecution": "84072.94",
+                "Date": "2025-04-01T08:36:02.8305456Z",
+                "PriceRateID": "106439224591",
+            }
+        )
+        raw = json.dumps(
+            {
+                "messages": [
+                    {
+                        "topic": "instrument:100000",
+                        "content": inner_content,
+                        "id": "f1992278-2c4a-4b8f-92d6-8b99f5e1cb00",
+                        "type": "Trading.Instrument.Rate",
+                    }
+                ]
+            }
+        )
+        update = parse_rate_message(raw)
+        assert update is not None
+        assert update.instrument_id == 100000
+        assert update.bid == Decimal("83232.21")
+        assert update.ask == Decimal("84917.73")
+        assert update.last == Decimal("84072.94")
+
+    def test_messages_envelope_recovers_id_from_topic(self) -> None:
+        """eToro's ``content`` does not carry ``InstrumentID`` — the
+        parser must derive it from the message's ``topic`` field
+        (``instrument:<id>``)."""
+        inner_content = json.dumps(
+            {
+                "Ask": "100",
+                "Bid": "99",
+                "LastExecution": "99.5",
+                "Date": "2026-04-25T10:00:00Z",
+            }
+        )
+        raw = json.dumps(
+            {
+                "messages": [
+                    {
+                        "topic": "instrument:100050",
+                        "content": inner_content,
+                        "id": "x",
+                        "type": "Trading.Instrument.Rate",
+                    }
+                ]
+            }
+        )
+        update = parse_rate_message(raw)
+        assert update is not None
+        assert update.instrument_id == 100050
+
+    def test_parse_rate_messages_returns_every_tick_in_a_batch(self) -> None:
+        """A single WS frame can carry multiple rates. The listener
+        must process every one — pre-#503 only the first matched."""
+        msgs = []
+        for iid, bid, ask in [(100000, "83232.21", "84917.73"), (100050, "0.10", "0.11")]:
+            content = json.dumps(
+                {
+                    "Ask": ask,
+                    "Bid": bid,
+                    "LastExecution": bid,
+                    "Date": "2026-04-25T10:00:00Z",
+                }
+            )
+            msgs.append(
+                {
+                    "topic": f"instrument:{iid}",
+                    "content": content,
+                    "id": str(iid),
+                    "type": "Trading.Instrument.Rate",
+                }
+            )
+        raw = json.dumps({"messages": msgs})
+        updates = parse_rate_messages(raw)
+        assert len(updates) == 2
+        assert {u.instrument_id for u in updates} == {100000, 100050}
+
+    def test_messages_envelope_skips_non_rate_inner_messages(self) -> None:
+        """A frame may interleave private events with rate ticks; the
+        rate parser must skip the private ones, not abort."""
+        rate_content = json.dumps(
+            {
+                "Ask": "100",
+                "Bid": "99",
+                "LastExecution": "99.5",
+                "Date": "2026-04-25T10:00:00Z",
+            }
+        )
+        raw = json.dumps(
+            {
+                "messages": [
+                    {
+                        "topic": "private",
+                        "content": "{}",
+                        "id": "p",
+                        "type": "Trading.OrderForCloseMultiple.Update",
+                    },
+                    {
+                        "topic": "instrument:100000",
+                        "content": rate_content,
+                        "id": "r",
+                        "type": "Trading.Instrument.Rate",
+                    },
+                ]
+            }
+        )
+        updates = parse_rate_messages(raw)
+        assert len(updates) == 1
+        assert updates[0].instrument_id == 100000
+
+
+class TestIsPrivateEventOfficialEnvelope:
+    """Companion regression for the ``messages`` envelope on the
+    private-channel path."""
+
+    def test_messages_envelope_recognises_private_event(self) -> None:
+        raw = json.dumps(
+            {
+                "messages": [
+                    {
+                        "topic": "private",
+                        "content": "{}",
+                        "id": "p",
+                        "type": "Trading.OrderForCloseMultiple.Update",
+                    }
+                ]
+            }
+        )
+        assert is_private_event(raw) is True
+
+    def test_messages_envelope_skips_when_no_private_inner(self) -> None:
+        raw = json.dumps(
+            {
+                "messages": [
+                    {
+                        "topic": "instrument:1",
+                        "content": "{}",
+                        "id": "r",
+                        "type": "Trading.Instrument.Rate",
+                    }
+                ]
+            }
+        )
+        assert is_private_event(raw) is False
 
 
 class TestSpreadPct:
