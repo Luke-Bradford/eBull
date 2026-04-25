@@ -52,7 +52,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.api.auth import require_session_or_service_token
-from app.services.etoro_websocket import QuoteUpdate
+from app.services.etoro_websocket import EtoroWebSocketSubscriber, QuoteUpdate
 from app.services.fx import convert_quote_fields, load_live_fx_rates
 from app.services.quote_stream import QuoteBus
 from app.services.runtime_config import get_runtime_config
@@ -179,6 +179,7 @@ async def _event_stream(
     bus: QuoteBus,
     instrument_ids: frozenset[int],
     ctx: _DisplayContext,
+    ws_subscriber: EtoroWebSocketSubscriber | None,
 ) -> AsyncGenerator[str]:
     """Generator yielded by StreamingResponse.
 
@@ -188,29 +189,58 @@ async def _event_stream(
     way we then check ``request.is_disconnected()`` so a tab close
     tears down the subscription within at most one heartbeat
     cycle.
-    """
-    async with bus.subscribe(instrument_ids) as queue:
-        # Open frame is yielded *after* subscribe so any tick
-        # published between this point and the next iteration
-        # actually reaches the subscriber. If the open frame went
-        # first, a fast publish could land before the bus knows
-        # about us — fine in production where ticks arrive over
-        # seconds, but a real bug for tests and for any caller
-        # that publishes synchronously after opening the stream.
-        yield f": stream open at {datetime.now(UTC).isoformat()} display={ctx.display_ccy}\n\n"
 
-        while True:
-            if await request.is_disconnected():
-                return
-            try:
-                update = await asyncio.wait_for(queue.get(), timeout=_HEARTBEAT_INTERVAL_S)
-            except TimeoutError:
-                # Heartbeat: SSE comments are lines starting with ':'
-                # and are ignored by EventSource clients but keep
-                # the connection alive through proxies.
-                yield ": heartbeat\n\n"
-                continue
-            yield _format_tick(update, ctx)
+    If an eToro WS subscriber is available, the stream also
+    ref-counts the requested instrument IDs into the subscriber's
+    dynamic topic set — so ticks start flowing for any page the
+    operator opens, not just held + watchlist (#485). The
+    ``finally`` below drops the ref count so pages closed / tabs
+    killed release their subscriptions in bounded time.
+    """
+    id_list = sorted(instrument_ids)
+    # ``add_instruments`` call is placed INSIDE the try so a
+    # cancellation during its own await is still followed by the
+    # finally (remove_instruments). ``add_instruments`` commits its
+    # ref-count update under the subscriber's lock with no await in
+    # the critical section, so even a mid-call cancel leaves the
+    # ref incremented — the finally's decrement is correct. Without
+    # this structure, a client disconnect that fires between
+    # ``add_instruments`` entry and the ``try`` block would leak
+    # the dynamic ref permanently.
+    try:
+        if ws_subscriber is not None and id_list:
+            await ws_subscriber.add_instruments(id_list)
+        async with bus.subscribe(instrument_ids) as queue:
+            # Open frame is yielded *after* subscribe so any tick
+            # published between this point and the next iteration
+            # actually reaches the subscriber. If the open frame went
+            # first, a fast publish could land before the bus knows
+            # about us — fine in production where ticks arrive over
+            # seconds, but a real bug for tests and for any caller
+            # that publishes synchronously after opening the stream.
+            yield f": stream open at {datetime.now(UTC).isoformat()} display={ctx.display_ccy}\n\n"
+
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    update = await asyncio.wait_for(queue.get(), timeout=_HEARTBEAT_INTERVAL_S)
+                except TimeoutError:
+                    # Heartbeat: SSE comments are lines starting
+                    # with ':' and are ignored by EventSource
+                    # clients but keep the connection alive through
+                    # proxies.
+                    yield ": heartbeat\n\n"
+                    continue
+                yield _format_tick(update, ctx)
+    finally:
+        # Drop the dynamic WS subscription. Runs on normal close,
+        # disconnect, or any raised exception — critical so a
+        # burst of closed tabs doesn't leak topic refs. If the ws
+        # is mid-reconnect ``remove_instruments`` just decrements
+        # in-memory state and the next connect won't re-subscribe.
+        if ws_subscriber is not None and id_list:
+            await ws_subscriber.remove_instruments(id_list)
 
 
 @router.get("/quotes")
@@ -254,8 +284,15 @@ async def quotes_stream(
 
     ctx = await asyncio.to_thread(_load)
 
+    # WS subscriber may be absent (pre-setup, credentials missing,
+    # WS auth failing) — live feed still degrades gracefully: the
+    # bus returns no ticks, the SSE stream sends heartbeats, UI
+    # falls back to its 5s poll. Pass whatever's on app.state and
+    # let ``_event_stream`` handle the None branch.
+    ws_subscriber: EtoroWebSocketSubscriber | None = getattr(request.app.state, "etoro_ws", None)
+
     return StreamingResponse(
-        _event_stream(request, bus, instrument_ids, ctx),
+        _event_stream(request, bus, instrument_ids, ctx, ws_subscriber),
         media_type="text/event-stream",
         headers={
             # Disable proxy buffering so each tick flushes immediately.

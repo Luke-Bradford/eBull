@@ -116,6 +116,26 @@ def build_subscribe_message(instrument_ids: list[int]) -> str | None:
     )
 
 
+def build_unsubscribe_message(instrument_ids: list[int]) -> str | None:
+    """Compose the ``Unsubscribe`` op JSON for a list of instrument IDs.
+
+    Mirrors eToro's documented Subscribe envelope (same id/operation
+    structure, ``topics`` array payload) per
+    https://api-portal.etoro.com/api-reference/websocket/example-code.
+    Returns ``None`` on empty input so the caller skips a no-op frame.
+    """
+    if not instrument_ids:
+        return None
+    topics = [f"instrument:{iid}" for iid in instrument_ids]
+    return json.dumps(
+        {
+            "id": str(uuid.uuid4()),
+            "operation": "Unsubscribe",
+            "data": {"topics": topics},
+        }
+    )
+
+
 _PRIVATE_TOPIC = "private"
 
 
@@ -359,6 +379,39 @@ class EtoroWebSocketSubscriber:
         self._reconcile_idle = threading.Event()
         self._reconcile_idle.set()
 
+        # Dynamic topic registry (#485). Page-view-driven subscribers
+        # (SSE clients opening an instrument page) bump ref counts on
+        # ``add_instruments`` and drop them on ``remove_instruments``;
+        # the subscriber sends live Subscribe/Unsubscribe frames to
+        # eToro so the operator sees ticks for any ticker they're
+        # *actually looking at*, not only held + watchlist.
+        #
+        # Ref-counting avoids race conditions between overlapping
+        # SSE streams on the same instrument: the Nth client's
+        # close() must not yank the topic out from under the
+        # remaining N-1.
+        #
+        # ``_pinned_topics`` is the startup held ∪ watchlist set —
+        # we subscribe to these unconditionally at connect time and
+        # never unsubscribe via the dynamic path, even if
+        # ``remove_instruments`` is called for the same id. That
+        # guarantees the baseline portfolio feed can't be torn down
+        # accidentally by a page navigation.
+        self._dynamic_topic_refs: dict[int, int] = {}
+        self._pinned_topics: set[int] = set()
+        # Live WS connection, set inside ``_connect_and_listen`` once
+        # the auth handshake succeeds and cleared on disconnect. The
+        # dynamic add/remove path reads this to send frames from
+        # external request handlers; ``None`` means the connection
+        # is in a reconnect window and the request-handler path
+        # updates only the in-memory ref counts — the next connect
+        # seeds both pinned + dynamic sets from the committed state.
+        self._ws: ClientConnection | None = None
+        # Serialises concurrent add_instruments / remove_instruments
+        # calls that can arrive from multiple SSE clients on the
+        # same event loop. Small lock, held briefly.
+        self._topic_lock = asyncio.Lock()
+
     def _default_watched_ids(self) -> list[int]:
         with self._pool.connection() as conn:
             return fetch_watched_instrument_ids(conn)
@@ -554,29 +607,148 @@ class EtoroWebSocketSubscriber:
             # Selector hits the DB; offload to a worker thread so
             # the connect path doesn't block the event loop.
             ids = await asyncio.to_thread(self._watched_ids_provider)
-            sub_msg = build_subscribe_message(ids)
-            if sub_msg is not None:
-                await ws.send(sub_msg)
-                logger.info(
-                    "EtoroWebSocketSubscriber: subscribed to %d instrument topics",
-                    len(ids),
-                )
-            else:
-                logger.info(
-                    "EtoroWebSocketSubscriber: no watched instruments — "
-                    "connection will idle for rates until a position / "
-                    "watchlist add"
-                )
 
-            # Always subscribe to the private channel — even if the
-            # operator has no instruments yet, opening a position will
-            # emit a private event that triggers reconcile, which in
-            # turn picks up the new watched-IDs set on the next
-            # reconnect cycle.
-            await ws.send(build_private_subscribe_message())
-            logger.info("EtoroWebSocketSubscriber: subscribed to private channel")
+            # Hold the lock across snapshot + ``_ws`` publish + the
+            # batched initial Subscribe send. This serialises
+            # against every concurrent add/remove: a remove that
+            # would Unsubscribe a topic present in our batched
+            # snapshot cannot fire until we finish sending, so
+            # eToro never sees an out-of-order
+            # ``Unsubscribe(T) → Subscribe(..., T)`` that would
+            # strand T subscribed despite the operator not wanting
+            # it. Sending under the lock also means the batched
+            # frame and any concurrent delta frames are serialised
+            # in wire order.
+            #
+            # The private subscribe + listen loop run outside the
+            # lock but inside the ``_ws``-clearing try/finally, so
+            # any failure after startup-subscribe completes still
+            # clears ``_ws`` before the outer reconnect backoff.
+            try:
+                async with self._topic_lock:
+                    self._pinned_topics = set(ids)
+                    topics_to_send = sorted(self._pinned_topics | set(self._dynamic_topic_refs.keys()))
+                    self._ws = ws
+                    sub_msg = build_subscribe_message(topics_to_send)
+                    if sub_msg is not None:
+                        await ws.send(sub_msg)
+                        logger.info(
+                            "EtoroWebSocketSubscriber: subscribed to %d instrument topics (pinned=%d dynamic=%d)",
+                            len(topics_to_send),
+                            len(self._pinned_topics),
+                            len(self._dynamic_topic_refs),
+                        )
+                    else:
+                        logger.info(
+                            "EtoroWebSocketSubscriber: no watched instruments — "
+                            "connection will idle for rates until a position / "
+                            "watchlist add or a page-view subscribe"
+                        )
 
-            await self._listen(ws)
+                # Always subscribe to the private channel — even if
+                # the operator has no instruments yet, opening a
+                # position will emit a private event that triggers
+                # reconcile, which in turn picks up the new
+                # watched-IDs set on the next reconnect cycle.
+                await ws.send(build_private_subscribe_message())
+                logger.info("EtoroWebSocketSubscriber: subscribed to private channel")
+
+                await self._listen(ws)
+            finally:
+                # Clear ``_ws`` under the lock so any in-flight
+                # add/remove either completed its frame send (not
+                # holding the lock while sending, see those methods)
+                # or queues here on the lock and, on re-entry,
+                # observes ``_ws = None`` — deferring to the next
+                # reconnect cycle rather than sending on a dead
+                # socket.
+                async with self._topic_lock:
+                    self._ws = None
+
+    async def add_instruments(self, instrument_ids: list[int]) -> None:
+        """Bump ref counts for page-view subscribers; send a
+        Subscribe frame for any newly-tracked topics.
+
+        Idempotent for the *same* caller across overlapping calls
+        (bumping the count keeps the topic subscribed). Safe to call
+        from FastAPI request handlers — the frame send happens via
+        the shared ws ref; if the ws is mid-reconnect the counts are
+        still updated and the next connect cycle resubscribes.
+
+        Cancellation-safety: the ref-count update is pure-Python
+        under the lock with no ``await`` in the critical section,
+        so a CancelledError during this method always occurs AFTER
+        state commit. Callers pair this with a ``remove_instruments``
+        in their finally to guarantee no leaked refs.
+        """
+        if not instrument_ids:
+            return
+        newly_tracked: list[int] = []
+        async with self._topic_lock:
+            for iid in instrument_ids:
+                prior = self._dynamic_topic_refs.get(iid, 0)
+                self._dynamic_topic_refs[iid] = prior + 1
+                if prior == 0 and iid not in self._pinned_topics:
+                    newly_tracked.append(iid)
+            # Snapshot the ws ref under the lock to avoid a race
+            # with the connect-finally clearing it between our
+            # None-check and ``.send``. Release the lock before
+            # awaiting send — we don't want to block other
+            # add/remove callers for the full send duration, and
+            # send on a just-closed socket raises into our
+            # try/except below (safe, logged).
+            ws_ref = self._ws
+        if newly_tracked and ws_ref is not None:
+            msg = build_subscribe_message(newly_tracked)
+            if msg is not None:
+                try:
+                    await ws_ref.send(msg)
+                    logger.info(
+                        "EtoroWebSocketSubscriber: page-view subscribe %d topics",
+                        len(newly_tracked),
+                    )
+                except Exception:
+                    logger.warning(
+                        "EtoroWebSocketSubscriber: dynamic Subscribe send failed; "
+                        "next reconnect will resubscribe from ref counts",
+                        exc_info=True,
+                    )
+
+    async def remove_instruments(self, instrument_ids: list[int]) -> None:
+        """Decrement ref counts; send Unsubscribe for topics that
+        hit zero AND aren't in the pinned set.
+
+        Pinned topics (held + watchlist at connect time) are never
+        unsubscribed via this path — they survive every page-view
+        churn until the next reconnect refreshes the pinned set.
+        """
+        if not instrument_ids:
+            return
+        to_unsubscribe: list[int] = []
+        async with self._topic_lock:
+            for iid in instrument_ids:
+                if iid not in self._dynamic_topic_refs:
+                    continue
+                self._dynamic_topic_refs[iid] -= 1
+                if self._dynamic_topic_refs[iid] <= 0:
+                    del self._dynamic_topic_refs[iid]
+                    if iid not in self._pinned_topics:
+                        to_unsubscribe.append(iid)
+            ws_ref = self._ws
+        if to_unsubscribe and ws_ref is not None:
+            msg = build_unsubscribe_message(to_unsubscribe)
+            if msg is not None:
+                try:
+                    await ws_ref.send(msg)
+                    logger.info(
+                        "EtoroWebSocketSubscriber: page-view unsubscribe %d topics",
+                        len(to_unsubscribe),
+                    )
+                except Exception:
+                    logger.warning(
+                        "EtoroWebSocketSubscriber: dynamic Unsubscribe send failed",
+                        exc_info=True,
+                    )
 
     async def _listen(self, ws: ClientConnection) -> None:
         async for raw in ws:

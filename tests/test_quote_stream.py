@@ -9,6 +9,7 @@ right order.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -289,7 +290,7 @@ class TestEventStreamGenerator:
         bus = QuoteBus()
         req = self._FakeRequest()
 
-        gen = _event_stream(req, bus, frozenset({1001}), _empty_ctx())  # type: ignore[arg-type]
+        gen = _event_stream(req, bus, frozenset({1001}), _empty_ctx(), None)  # type: ignore[arg-type]
 
         # First yield: open comment.
         first = await gen.__anext__()
@@ -327,7 +328,7 @@ class TestEventStreamGenerator:
         sse_quotes._HEARTBEAT_INTERVAL_S = 0.05
         bus = QuoteBus()
         req = self._FakeRequest()
-        gen = sse_quotes._event_stream(req, bus, frozenset({1001}), _empty_ctx())  # type: ignore[arg-type]
+        gen = sse_quotes._event_stream(req, bus, frozenset({1001}), _empty_ctx(), None)  # type: ignore[arg-type]
         try:
             # Open frame.
             first = await gen.__anext__()
@@ -344,7 +345,7 @@ class TestEventStreamGenerator:
     async def test_filtered_instrument_does_not_yield(self) -> None:
         bus = QuoteBus()
         req = self._FakeRequest()
-        gen = _event_stream(req, bus, frozenset({1001}), _empty_ctx())  # type: ignore[arg-type]
+        gen = _event_stream(req, bus, frozenset({1001}), _empty_ctx(), None)  # type: ignore[arg-type]
 
         # Drain initial open frame.
         await gen.__anext__()
@@ -360,6 +361,80 @@ class TestEventStreamGenerator:
         # Cleanup: close the generator so the queue subscription tears
         # down without leaking the open Subscriber.
         await gen.aclose()
+
+    async def test_cancel_during_add_still_calls_remove(self) -> None:
+        """Regression for Codex high finding on #485: if the SSE
+        request is cancelled DURING ``add_instruments``, the ref
+        count has already been committed (pure-Python under a
+        lock, no await in the critical section). The generator's
+        finally must still run ``remove_instruments`` or the ref
+        leaks forever. The fix placed the add INSIDE the try; this
+        test verifies the invariant."""
+        bus = QuoteBus()
+        req = self._FakeRequest()
+
+        class _SlowSubscriber:
+            def __init__(self) -> None:
+                self.added: list[list[int]] = []
+                self.removed: list[list[int]] = []
+
+            async def add_instruments(self, ids: list[int]) -> None:
+                self.added.append(ids)
+                # Simulate the commit-then-await pattern of the
+                # real implementation: state is captured before the
+                # await, so any cancel here still leaves refs
+                # committed.
+                await asyncio.sleep(10)
+
+            async def remove_instruments(self, ids: list[int]) -> None:
+                self.removed.append(ids)
+
+        ws_sub = _SlowSubscriber()
+        gen = _event_stream(req, bus, frozenset({1001}), _empty_ctx(), ws_sub)  # type: ignore[arg-type]
+
+        # Start the generator + cancel mid-add.
+        next_task = asyncio.create_task(gen.__anext__())
+        await asyncio.sleep(0.02)  # let add_instruments begin its sleep
+        next_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await next_task
+        # Generator close drives the finally.
+        await gen.aclose()
+
+        assert ws_sub.added == [[1001]]
+        assert ws_sub.removed == [[1001]]
+
+    async def test_ws_subscriber_add_on_open_remove_on_close(self) -> None:
+        """#485 wiring: SSE stream must register the requested
+        instrument IDs with the WS subscriber on open and release
+        them on close/disconnect. Otherwise opening a page for a
+        ticker outside held+watchlist receives no ticks (the
+        eToro-side Subscribe frame is never sent)."""
+        bus = QuoteBus()
+        req = self._FakeRequest()
+
+        class _RecordingSubscriber:
+            def __init__(self) -> None:
+                self.added: list[list[int]] = []
+                self.removed: list[list[int]] = []
+
+            async def add_instruments(self, ids: list[int]) -> None:
+                self.added.append(ids)
+
+            async def remove_instruments(self, ids: list[int]) -> None:
+                self.removed.append(ids)
+
+        ws_sub = _RecordingSubscriber()
+        gen = _event_stream(req, bus, frozenset({1001, 1002}), _empty_ctx(), ws_sub)  # type: ignore[arg-type]
+
+        # Open frame triggers registration.
+        await gen.__anext__()
+        assert ws_sub.added == [[1001, 1002]]
+        assert ws_sub.removed == []
+
+        # Simulate disconnect path.
+        await gen.aclose()
+        assert ws_sub.removed == [[1001, 1002]]
 
 
 # ---------------------------------------------------------------------------
