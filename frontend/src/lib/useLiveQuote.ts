@@ -82,7 +82,11 @@ export function useLiveQuote(instrumentId: number | null | undefined): LiveQuote
     setConnected(false);
     setUnavailable(false);
 
-    const url = `/sse/quotes?ids=${encodeURIComponent(String(instrumentId))}`;
+    // Route through ``/api/*`` so the Vite dev proxy (see
+    // frontend/vite.config.ts) strips the prefix and forwards to
+    // the backend's ``/sse/quotes`` route. In prod the same prefix
+    // lands on the reverse proxy's catch-all.
+    const url = `/api/sse/quotes?ids=${encodeURIComponent(String(instrumentId))}`;
     const source = new EventSource(url, { withCredentials: true });
     sourceRef.current = source;
 
