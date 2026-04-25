@@ -71,7 +71,7 @@ describe("useLiveQuote", () => {
   it("opens a stream for the given instrument id and yields ticks", () => {
     const { result } = renderHook(() => useLiveQuote(1001));
     expect(FakeEventSource.instances).toHaveLength(1);
-    expect(FakeEventSource.instances[0]!.url).toBe("/sse/quotes?ids=1001");
+    expect(FakeEventSource.instances[0]!.url).toBe("/api/sse/quotes?ids=1001");
 
     act(() => {
       FakeEventSource.instances[0]!.fireOpen();
@@ -128,7 +128,7 @@ describe("useLiveQuote", () => {
 
     rerender({ id: 2002 });
     expect(FakeEventSource.instances).toHaveLength(2);
-    expect(FakeEventSource.instances[1]!.url).toBe("/sse/quotes?ids=2002");
+    expect(FakeEventSource.instances[1]!.url).toBe("/api/sse/quotes?ids=2002");
     // First stream was closed.
     expect(FakeEventSource.instances[0]!.readyState).toBe(FakeEventSource.CLOSED);
   });
