@@ -66,6 +66,45 @@ def load_live_fx_rates_with_metadata(
     return {(r[0], r[1]): {"rate": r[2], "quoted_at": r[3]} for r in rows}
 
 
+def convert_quote_fields(
+    bid: Decimal,
+    ask: Decimal,
+    last: Decimal | None,
+    *,
+    native_ccy: str,
+    display_ccy: str,
+    rates: dict[tuple[str, str], Decimal],
+) -> tuple[Decimal, Decimal, Decimal | None] | None:
+    """Convert a triple of quote prices (bid/ask/last) into ``display_ccy``.
+
+    Returns ``None`` when no FX rate is available for the pair —
+    callers fall back to the native triple. ``last`` may be None
+    independently and is passed through that way after conversion.
+
+    Why a single helper for the triple instead of three ``convert``
+    calls: SSE delivery hot-path runs this per tick. Looking up the
+    pair once and reusing the rate avoids three dict lookups + three
+    branching tries when only the input numbers differ.
+    """
+    if native_ccy == display_ccy:
+        return bid, ask, last
+    direct = rates.get((native_ccy, display_ccy))
+    if direct is not None:
+        rate = direct
+    else:
+        inv = rates.get((display_ccy, native_ccy))
+        if inv is None:
+            return None
+        # Inverse path: use 1/inv. Decimal division preserves
+        # precision better than float reciprocal.
+        rate = Decimal(1) / inv
+    return (
+        bid * rate,
+        ask * rate,
+        None if last is None else last * rate,
+    )
+
+
 def upsert_live_fx_rate(
     conn: psycopg.Connection[Any],
     *,
