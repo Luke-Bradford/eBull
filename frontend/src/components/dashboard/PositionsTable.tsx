@@ -1,8 +1,11 @@
+import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import type { PositionItem, PortfolioMirrorItem } from "@/api/types";
 import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatMoney, formatNumber, formatPct, pnlPct } from "@/lib/format";
 import { EmptyState } from "@/components/states/EmptyState";
+import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
+import { LivePriceCell } from "@/components/quotes/LivePriceCell";
 
 /**
  * Positions table — unified view of direct positions and copy-trading mirrors.
@@ -51,7 +54,16 @@ export function PositionsTable({
     return mvB - mvA;
   });
 
+  // Live quote ids for the visible position rows. Mirror rows render
+  // their own aggregated equity, not a per-instrument price, so they
+  // don't contribute ids here.
+  const liveQuoteIds = useMemo(
+    () => positions.map((p) => p.instrument_id),
+    [positions],
+  );
+
   return (
+    <LiveQuoteProvider instrumentIds={liveQuoteIds}>
     <div className="overflow-x-auto">
       <table className="w-full text-left text-sm">
         <thead className="text-xs uppercase text-slate-500">
@@ -76,6 +88,7 @@ export function PositionsTable({
         </tbody>
       </table>
     </div>
+    </LiveQuoteProvider>
   );
 }
 
@@ -98,7 +111,11 @@ function PositionRow({ p, currency }: { p: PositionItem; currency: string }) {
       <Td align="right">{formatNumber(p.current_units)}</Td>
       <Td align="right">{formatMoney(p.cost_basis, currency)}</Td>
       <Td align="right">
-        {p.current_price != null ? formatMoney(p.current_price, currency) : "—"}
+        <LivePriceCell
+          instrumentId={p.instrument_id}
+          fallback={p.current_price}
+          currency={currency}
+        />
       </Td>
       <Td align="right">{formatMoney(p.market_value, currency)}</Td>
       <Td align="right">
