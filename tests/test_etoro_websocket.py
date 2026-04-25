@@ -788,7 +788,7 @@ def _make_dyn_subscriber() -> EtoroWebSocketSubscriber:
     )
 
 
-class TestDynamicAddInstruments:
+class TestRefCountedAddInstruments:
     async def test_first_add_sends_subscribe_frame(self) -> None:
         sub = _make_dyn_subscriber()
         fake = _DynFakeWs()
@@ -800,7 +800,7 @@ class TestDynamicAddInstruments:
         msg = json.loads(fake.sent[0])
         assert msg["operation"] == "Subscribe"
         assert sorted(msg["data"]["topics"]) == ["instrument:1001", "instrument:1002"]
-        assert sub._dynamic_topic_refs == {1001: 1, 1002: 1}
+        assert sub._topic_refs == {1001: 1, 1002: 1}
 
     async def test_second_add_for_same_id_bumps_ref_without_frame(self) -> None:
         sub = _make_dyn_subscriber()
@@ -811,29 +811,18 @@ class TestDynamicAddInstruments:
         await sub.add_instruments([1001])
 
         assert len(fake.sent) == 1  # only initial
-        assert sub._dynamic_topic_refs == {1001: 2}
-
-    async def test_pinned_topic_bumps_ref_without_subscribe_frame(self) -> None:
-        sub = _make_dyn_subscriber()
-        fake = _DynFakeWs()
-        sub._ws = fake  # type: ignore[assignment]
-        sub._pinned_topics = {1001}
-
-        await sub.add_instruments([1001])
-
-        assert fake.sent == []
-        assert sub._dynamic_topic_refs == {1001: 1}
+        assert sub._topic_refs == {1001: 2}
 
     async def test_add_with_no_live_ws_updates_refs_only(self) -> None:
-        """During a reconnect window ``_ws`` is None. Dynamic path
-        still tracks refs so the next connect re-subscribes from
+        """During a reconnect window ``_ws`` is None. Add path still
+        tracks refs so the next connect re-subscribes from
         accumulated state."""
         sub = _make_dyn_subscriber()
         sub._ws = None
 
         await sub.add_instruments([1001])
 
-        assert sub._dynamic_topic_refs == {1001: 1}
+        assert sub._topic_refs == {1001: 1}
 
     async def test_send_failure_preserves_ref_counts(self) -> None:
         sub = _make_dyn_subscriber()
@@ -843,11 +832,11 @@ class TestDynamicAddInstruments:
 
         await sub.add_instruments([1001])
 
-        assert sub._dynamic_topic_refs == {1001: 1}
+        assert sub._topic_refs == {1001: 1}
         assert fake.sent == []
 
 
-class TestDynamicRemoveInstruments:
+class TestRefCountedRemoveInstruments:
     async def test_decrement_to_zero_sends_unsubscribe(self) -> None:
         sub = _make_dyn_subscriber()
         fake = _DynFakeWs()
@@ -860,7 +849,7 @@ class TestDynamicRemoveInstruments:
         unsub = json.loads(fake.sent[1])
         assert unsub["operation"] == "Unsubscribe"
         assert unsub["data"]["topics"] == ["instrument:1001"]
-        assert sub._dynamic_topic_refs == {}
+        assert sub._topic_refs == {}
 
     async def test_decrement_above_zero_does_not_unsubscribe(self) -> None:
         sub = _make_dyn_subscriber()
@@ -872,22 +861,28 @@ class TestDynamicRemoveInstruments:
         await sub.remove_instruments([1001])
 
         assert len(fake.sent) == 1
-        assert sub._dynamic_topic_refs == {1001: 1}
+        assert sub._topic_refs == {1001: 1}
 
-    async def test_remove_pinned_never_unsubscribes(self) -> None:
-        """Held + watchlist (pinned) must survive every page-view
-        remove — baseline portfolio feed can't be torn down by a
-        tab close."""
+    async def test_held_position_ref_survives_page_view_remove(self) -> None:
+        """With unified ref counting, a held position is just a ref
+        held by the source-reconcile worker. A page-view's remove
+        decrements its own ref but the source ref keeps the topic
+        subscribed — the wire-level Unsubscribe never fires while
+        any source still holds a ref."""
         sub = _make_dyn_subscriber()
         fake = _DynFakeWs()
         sub._ws = fake  # type: ignore[assignment]
-        sub._pinned_topics = {1001}
 
+        # Source worker adds a ref (held position).
+        await sub.add_instruments([1001])
+        # Page-view layer adds + removes its own ref.
         await sub.add_instruments([1001])
         await sub.remove_instruments([1001])
 
-        assert fake.sent == []
-        assert sub._dynamic_topic_refs == {}
+        # Only the initial Subscribe frame went out; no Unsubscribe.
+        assert len(fake.sent) == 1
+        assert json.loads(fake.sent[0])["operation"] == "Subscribe"
+        assert sub._topic_refs == {1001: 1}
 
     async def test_remove_unknown_id_is_noop(self) -> None:
         sub = _make_dyn_subscriber()
@@ -897,22 +892,23 @@ class TestDynamicRemoveInstruments:
         await sub.remove_instruments([9999])
 
         assert fake.sent == []
-        assert sub._dynamic_topic_refs == {}
+        assert sub._topic_refs == {}
 
 
-class TestReconnectSubscribesPinnedUnionDynamic:
-    """After reconnect, the Subscribe frame must cover the union of
-    (refreshed) pinned + accumulated dynamic ids. Without this, SSE
-    streams that survived the outage would stop receiving ticks."""
+class TestReconnectSubscribesFromTopicRefs:
+    """After reconnect, the Subscribe frame covers ``_topic_refs.keys()``.
+    Source-reconcile and page-view callers populated the dict prior to
+    the connect; the connect path simply replays the current set in
+    one batch so SSE streams that survived the outage keep receiving
+    ticks."""
 
-    async def test_connect_subscribes_pinned_union_dynamic(self) -> None:
+    async def test_connect_subscribes_current_topic_refs(self) -> None:
         from unittest.mock import AsyncMock, MagicMock
 
         sub = _make_dyn_subscriber()
-        # Dynamic set accumulated during an outage.
-        sub._dynamic_topic_refs = {2001: 1, 2002: 1}
-        # Override DB selector for startup pinned set.
-        sub._watched_ids_provider = lambda: [1001, 1002]  # type: ignore[method-assign]
+        # Refs accumulated before reconnect: 1001/1002 from source
+        # worker (held + watchlist), 2001/2002 from page-view path.
+        sub._topic_refs = {1001: 1, 1002: 1, 2001: 1, 2002: 1}
 
         fake_ws = MagicMock()
         fake_ws.send = AsyncMock()
@@ -944,4 +940,263 @@ class TestReconnectSubscribesPinnedUnionDynamic:
             "instrument:2001",
             "instrument:2002",
         ]
-        assert sub._pinned_topics == {1001, 1002}
+
+
+class TestSourceReconcileWorker:
+    """``_refresh_source_topics`` diffs the held-∪-watchlist DB set
+    against ``_source_topic_set`` and translates the diff into add/
+    remove calls. Held positions and watchlist entries become refs
+    held by the source worker; the unified ``_topic_refs`` dict is
+    what every other path reads from."""
+
+    async def test_initial_refresh_adds_all_source_ids(self) -> None:
+        sub = _make_dyn_subscriber()
+        sub._watched_ids_provider = lambda: [1001, 1002]  # type: ignore[method-assign]
+        # No live ws — ref-count update only, no frame send. Mirrors
+        # the start()-before-connect ordering.
+        sub._ws = None
+
+        await sub._refresh_source_topics()
+
+        assert sub._topic_refs == {1001: 1, 1002: 1}
+        assert sub._source_topic_set == {1001, 1002}
+
+    async def test_subsequent_refresh_only_diffs(self) -> None:
+        sub = _make_dyn_subscriber()
+        sub._watched_ids_provider = lambda: [1001, 1002]  # type: ignore[method-assign]
+        sub._ws = None
+
+        await sub._refresh_source_topics()
+
+        # Second tick: 1002 removed from held/watchlist, 1003 added.
+        sub._watched_ids_provider = lambda: [1001, 1003]  # type: ignore[method-assign]
+        await sub._refresh_source_topics()
+
+        assert sub._topic_refs == {1001: 1, 1003: 1}
+        assert sub._source_topic_set == {1001, 1003}
+
+    async def test_refresh_does_not_disturb_page_view_refs(self) -> None:
+        """A page-view ref on the same instrument id keeps the topic
+        subscribed even when the source set drops it."""
+        sub = _make_dyn_subscriber()
+        sub._watched_ids_provider = lambda: [1001]  # type: ignore[method-assign]
+        sub._ws = None
+
+        # Source ref + an independent page-view ref on 1001.
+        await sub._refresh_source_topics()
+        await sub.add_instruments([1001])  # page-view
+
+        # Source set drops 1001 (sold the position).
+        sub._watched_ids_provider = lambda: []  # type: ignore[method-assign]
+        await sub._refresh_source_topics()
+
+        # Page-view ref keeps the topic alive.
+        assert sub._topic_refs == {1001: 1}
+        assert sub._source_topic_set == set()
+
+    async def test_provider_failure_does_not_commit_source_set(self) -> None:
+        """If ``_watched_ids_provider`` raises, ``_source_topic_set``
+        stays unchanged so the next tick retries from the same
+        baseline rather than masking the error."""
+        sub = _make_dyn_subscriber()
+        sub._source_topic_set = {1001}
+        sub._topic_refs = {1001: 1}
+        sub._ws = None
+
+        def boom() -> list[int]:
+            raise RuntimeError("DB hiccup")
+
+        sub._watched_ids_provider = boom  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError):
+            await sub._refresh_source_topics()
+
+        assert sub._source_topic_set == {1001}
+        assert sub._topic_refs == {1001: 1}
+
+    async def test_signal_kicks_immediate_refresh(self) -> None:
+        """Setting ``_source_reconcile_signal`` causes the worker
+        coroutine to refresh without waiting for the periodic tick."""
+        sub = _make_dyn_subscriber()
+        provider_calls: list[list[int]] = []
+
+        def provider() -> list[int]:
+            provider_calls.append([1001])
+            return [1001]
+
+        sub._watched_ids_provider = provider  # type: ignore[method-assign]
+        sub._ws = None
+
+        worker = asyncio.create_task(sub._source_reconcile_worker())
+        try:
+            sub._source_reconcile_signal.set()
+            # Wait for the provider to be invoked at least once via
+            # the signal path (well under the periodic interval).
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if provider_calls:
+                    break
+            assert provider_calls, "source worker did not refresh on signal"
+            assert sub._topic_refs == {1001: 1}
+        finally:
+            sub._stop_event.set()
+            worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await worker
+
+    async def test_concurrent_remove_blocks_until_add_send_completes(self) -> None:
+        """``add_instruments`` and ``remove_instruments`` must hold
+        the topic lock through the wire send so that a concurrent
+        remove cannot queue an Unsubscribe(T) frame that overtakes
+        an in-flight Subscribe(T). Without this, eToro can end up
+        unsubscribed from a topic ``_topic_refs`` still considers
+        live — a held-position feed teardown.
+
+        Regression test for the wire-ordering race Codex flagged on
+        PR for #490."""
+        sub = _make_dyn_subscriber()
+
+        sent_order: list[str] = []
+        block_subscribe = asyncio.Event()
+
+        class GatedWs:
+            async def send(self, payload: str) -> None:
+                op = json.loads(payload)["operation"]
+                if op == "Subscribe":
+                    # Hold the Subscribe in flight until the test
+                    # sets the gate, so a concurrent remove can race
+                    # against us if locking is wrong.
+                    await block_subscribe.wait()
+                sent_order.append(op)
+
+        sub._ws = GatedWs()  # type: ignore[assignment]
+
+        # add_2001 will trigger a 0→1 transition → Subscribe send →
+        # blocks on the gate while still holding the topic lock.
+        async def add_2001() -> None:
+            await sub.add_instruments([2001])
+
+        # remove_2001 attempts to acquire the same lock; if locking
+        # is correct it cannot enter until add_2001 releases.
+        async def remove_2001() -> None:
+            await asyncio.sleep(0.05)  # let add reach the gate first
+            await sub.remove_instruments([2001])
+
+        add_task = asyncio.create_task(add_2001())
+        remove_task = asyncio.create_task(remove_2001())
+
+        # Yield enough for add to reach the gated send and remove to
+        # block on the lock.
+        await asyncio.sleep(0.1)
+        assert not add_task.done()
+        assert not remove_task.done()
+
+        # Release the gate — Subscribe flushes, add releases the
+        # lock, remove acquires + sends Unsubscribe.
+        block_subscribe.set()
+        await asyncio.gather(add_task, remove_task)
+
+        # Wire order must be Subscribe THEN Unsubscribe; reversed
+        # would tear down the feed.
+        assert sent_order == ["Subscribe", "Unsubscribe"]
+
+    async def test_cancel_during_send_does_not_double_add_on_next_refresh(self) -> None:
+        """If a CancelledError lands during the awaited send inside
+        ``_refresh_source_topics``, ``_source_topic_set`` must already
+        be committed so the next refresh sees no diff and does not
+        bump refs again. Regression for the cancel-leak Codex flagged
+        on PR for #490."""
+        sub = _make_dyn_subscriber()
+
+        class SlowWs:
+            async def send(self, payload: str) -> None:
+                await asyncio.sleep(10)
+
+        sub._ws = SlowWs()  # type: ignore[assignment]
+        sub._watched_ids_provider = lambda: [1001]  # type: ignore[method-assign]
+
+        task = asyncio.create_task(sub._refresh_source_topics())
+        # Yield long enough for the refresh to enter the lock and reach
+        # the awaited send.
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if sub._source_topic_set == {1001}:
+                break
+        assert sub._source_topic_set == {1001}, "source set not committed before send"
+        assert sub._topic_refs == {1001: 1}
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        # Drop the slow ws so the next refresh doesn't block.
+        sub._ws = None
+        await sub._refresh_source_topics()
+
+        # No double-add: ref count should still be 1, not 2.
+        assert sub._topic_refs == {1001: 1}
+        assert sub._source_topic_set == {1001}
+
+    async def test_startup_refresh_failure_signals_worker_for_immediate_retry(self) -> None:
+        """When ``_refresh_source_topics`` raises during ``start()``,
+        the source-reconcile signal must be set so the worker's first
+        iteration runs immediately rather than waiting for the
+        periodic timeout. Held/watchlist feeds shouldn't be dark for
+        ``_SOURCE_RECONCILE_INTERVAL_S`` after a transient startup
+        DB hiccup."""
+        sentinel: Any = object()
+        sub = EtoroWebSocketSubscriber(
+            api_key="API",
+            user_key="USR",
+            env="demo",
+            pool=sentinel,
+            watched_ids_provider=lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+            reconcile_runner=lambda: None,
+        )
+
+        # Replace _run so start() doesn't try to open a real WS.
+        async def fake_run() -> None:
+            await sub._stop_event.wait()
+
+        sub._run = fake_run  # type: ignore[method-assign]
+
+        try:
+            await sub.start()
+            assert sub._source_reconcile_signal.is_set(), (
+                "startup-refresh failure must pre-set the source-reconcile signal"
+            )
+        finally:
+            await sub.stop()
+
+    async def test_portfolio_reconcile_signals_source_worker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """After ``_reconcile_worker`` runs a successful portfolio
+        reconcile, it must set ``_source_reconcile_signal`` so the
+        topic-set worker picks up any newly opened/closed position
+        within seconds rather than waiting for the periodic tick."""
+        monkeypatch.setattr(etoro_websocket, "_RECONCILE_DEBOUNCE_S", 0.05)
+
+        sentinel: Any = object()
+        sub = EtoroWebSocketSubscriber(
+            api_key="API",
+            user_key="USR",
+            env="demo",
+            pool=sentinel,
+            watched_ids_provider=lambda: [],
+            reconcile_runner=lambda: None,
+        )
+
+        worker = asyncio.create_task(sub._reconcile_worker())
+        await asyncio.sleep(0)
+        try:
+            assert not sub._source_reconcile_signal.is_set()
+            sub._schedule_reconcile()
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if sub._source_reconcile_signal.is_set():
+                    break
+            assert sub._source_reconcile_signal.is_set(), "post-reconcile hook did not fire source-reconcile signal"
+        finally:
+            sub._stop_event.set()
+            worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await worker

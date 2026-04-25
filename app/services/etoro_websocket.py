@@ -68,6 +68,15 @@ _RECONNECT_BACKOFF_S = 5.0
 # isn't hammered. 3 seconds is short enough that the operator sees
 # fresh state inside a "feel alive" window without churn.
 _RECONCILE_DEBOUNCE_S = 3.0
+# Periodic interval for the held-∪-watchlist refresh loop. Position
+# open/close events trigger an immediate refresh via the private-
+# channel reconcile (see ``_reconcile_worker``); the periodic timer
+# is the fallback that catches watchlist edits and any state change
+# that arrived without a private push (e.g. cron-level corrections).
+# 60s is the operator-visible "felt-stale" window — fast enough that
+# a watchlist add reaches the WS before the next page navigation,
+# slow enough that the DB poll cost is negligible.
+_SOURCE_RECONCILE_INTERVAL_S = 60.0
 
 
 # ---------------------------------------------------------------------
@@ -379,33 +388,38 @@ class EtoroWebSocketSubscriber:
         self._reconcile_idle = threading.Event()
         self._reconcile_idle.set()
 
-        # Dynamic topic registry (#485). Page-view-driven subscribers
-        # (SSE clients opening an instrument page) bump ref counts on
-        # ``add_instruments`` and drop them on ``remove_instruments``;
-        # the subscriber sends live Subscribe/Unsubscribe frames to
-        # eToro so the operator sees ticks for any ticker they're
-        # *actually looking at*, not only held + watchlist.
+        # Unified topic registry (#490). Every reason to subscribe —
+        # held position, watchlist entry, page-view SSE — adds a ref;
+        # the topic is sent to eToro iff its refcount > 0. Ref-counting
+        # is the single mechanism for both "long-lived" (held /
+        # watchlist) and "short-lived" (page-view) subscriptions, so
+        # we never stream ticks for an instrument no source still
+        # cares about.
         #
-        # Ref-counting avoids race conditions between overlapping
-        # SSE streams on the same instrument: the Nth client's
-        # close() must not yank the topic out from under the
-        # remaining N-1.
-        #
-        # ``_pinned_topics`` is the startup held ∪ watchlist set —
-        # we subscribe to these unconditionally at connect time and
-        # never unsubscribe via the dynamic path, even if
-        # ``remove_instruments`` is called for the same id. That
-        # guarantees the baseline portfolio feed can't be torn down
-        # accidentally by a page navigation.
-        self._dynamic_topic_refs: dict[int, int] = {}
-        self._pinned_topics: set[int] = set()
+        # Held-∪-watchlist refs are owned by ``_source_reconcile_worker``
+        # which periodically diffs the DB-backed source set against
+        # ``_source_topic_set`` and translates the diff into add/remove
+        # calls. ``_source_topic_set`` is the worker's private record
+        # of which ids it currently holds a ref for, so it can drop
+        # only its own refs without disturbing page-view refs that
+        # share the same instrument id.
+        self._topic_refs: dict[int, int] = {}
+        self._source_topic_set: set[int] = set()
+        # Signal raised by other paths to ask the source worker to
+        # reconcile immediately rather than waiting for the next
+        # periodic tick. Triggered by the private-channel reconcile
+        # (positions changed) so a freshly opened or closed position
+        # gets its feed adjusted within seconds, not within the
+        # periodic interval.
+        self._source_reconcile_signal = asyncio.Event()
+        self._source_reconcile_task: asyncio.Task[None] | None = None
         # Live WS connection, set inside ``_connect_and_listen`` once
         # the auth handshake succeeds and cleared on disconnect. The
-        # dynamic add/remove path reads this to send frames from
-        # external request handlers; ``None`` means the connection
-        # is in a reconnect window and the request-handler path
-        # updates only the in-memory ref counts — the next connect
-        # seeds both pinned + dynamic sets from the committed state.
+        # add/remove path reads this to send frames from external
+        # request handlers; ``None`` means the connection is in a
+        # reconnect window and the request-handler path updates only
+        # the in-memory ref counts — the next connect seeds the
+        # subscribe set from ``_topic_refs.keys()``.
         self._ws: ClientConnection | None = None
         # Serialises concurrent add_instruments / remove_instruments
         # calls that can arrive from multiple SSE clients on the
@@ -458,7 +472,30 @@ class EtoroWebSocketSubscriber:
             return
         self._stop_event.clear()
         self._reconcile_signal.clear()
+        self._source_reconcile_signal.clear()
         self._reconcile_worker_task = asyncio.create_task(self._reconcile_worker(), name="etoro-ws-reconcile-worker")
+        # Populate source-managed refs before launching the WS task so
+        # the connect path's batched Subscribe carries the full topic
+        # set in one frame instead of "empty + delta". A failure here
+        # is logged and swallowed; we also pre-set the reconcile
+        # signal so the worker's first iteration runs immediately
+        # rather than waiting up to ``_SOURCE_RECONCILE_INTERVAL_S``
+        # for the periodic timeout — without this, a transient
+        # startup DB blip would leave held/watchlist feeds
+        # unsubscribed for a full minute (Codex review on PR for
+        # #490).
+        try:
+            await self._refresh_source_topics()
+        except Exception:
+            logger.warning(
+                "EtoroWebSocketSubscriber: initial source-topic refresh failed; "
+                "kicking source worker to retry immediately",
+                exc_info=True,
+            )
+            self._source_reconcile_signal.set()
+        self._source_reconcile_task = asyncio.create_task(
+            self._source_reconcile_worker(), name="etoro-ws-source-reconcile"
+        )
         self._task = asyncio.create_task(self._run(), name="etoro-ws-subscriber")
         logger.info("EtoroWebSocketSubscriber: started")
 
@@ -470,6 +507,20 @@ class EtoroWebSocketSubscriber:
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         self._task = None
+        # Cancel the source-reconcile worker before the private-event
+        # reconcile worker. It may be awaiting ``asyncio.to_thread``
+        # on the watched-ids selector; the cancel raises
+        # CancelledError out of the await but lets any in-flight
+        # add/remove send finish first because both honour
+        # CancelledError on their own awaits. No thread-completion
+        # barrier needed — the source worker only does DB *reads*, so
+        # there is no in-flight write that the lifespan needs to drain
+        # before closing the pool.
+        if self._source_reconcile_task is not None:
+            self._source_reconcile_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._source_reconcile_task
+            self._source_reconcile_task = None
         # Cancel the reconcile worker. The worker coroutine may be
         # awaiting ``asyncio.to_thread`` — the cancel raises
         # CancelledError out of the await, but the OS thread running
@@ -556,11 +607,118 @@ class EtoroWebSocketSubscriber:
             try:
                 await asyncio.to_thread(self._run_reconcile_in_thread)
                 logger.info("EtoroWebSocketSubscriber: reconcile complete")
+                # Portfolio state likely changed — kick the source-
+                # topic worker so a freshly opened or closed position
+                # gets its feed adjusted within seconds rather than
+                # waiting for the next periodic tick.
+                self._source_reconcile_signal.set()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.warning(
                     "EtoroWebSocketSubscriber: reconcile failed",
+                    exc_info=True,
+                )
+
+    async def _refresh_source_topics(self) -> None:
+        """Diff the held-∪-watchlist DB set against ``_source_topic_set``
+        and translate the diff into ref-count updates + Subscribe /
+        Unsubscribe frames, all under the topic lock.
+
+        Single critical section: ref-count math, ``_source_topic_set``
+        commit, and wire send all happen under ``_topic_lock`` so
+        that a CancelledError mid-method cannot leave
+        ``_source_topic_set`` stale relative to ``_topic_refs`` — if
+        cancellation lands during the awaited send, the in-memory
+        state already matches the post-refresh shape and the next
+        reconcile diff against the same source set sees no work,
+        avoiding the double-add leak (Codex review on PR for #490).
+        Wire delivery may be partial on cancellation; the next
+        reconnect resubscribes from ``_topic_refs.keys()``.
+
+        The ``_watched_ids_provider`` DB read happens *outside* the
+        lock so add/remove callers don't block on a slow DB.
+        """
+        new_set = set(await asyncio.to_thread(self._watched_ids_provider))
+        async with self._topic_lock:
+            to_add = sorted(new_set - self._source_topic_set)
+            to_remove = sorted(self._source_topic_set - new_set)
+            newly_tracked: list[int] = []
+            to_unsubscribe: list[int] = []
+            for iid in to_add:
+                prior = self._topic_refs.get(iid, 0)
+                self._topic_refs[iid] = prior + 1
+                if prior == 0:
+                    newly_tracked.append(iid)
+            for iid in to_remove:
+                if iid not in self._topic_refs:
+                    continue
+                self._topic_refs[iid] -= 1
+                if self._topic_refs[iid] <= 0:
+                    del self._topic_refs[iid]
+                    to_unsubscribe.append(iid)
+            # Commit source-set BEFORE the awaited sends so a cancel
+            # during send leaves source bookkeeping consistent with
+            # the ref-count map. Wire delivery may be partial; the
+            # next reconnect's batched Subscribe replays from
+            # ``_topic_refs.keys()`` and recovers.
+            self._source_topic_set = new_set
+            if newly_tracked and self._ws is not None:
+                msg = build_subscribe_message(newly_tracked)
+                if msg is not None:
+                    try:
+                        await self._ws.send(msg)
+                        logger.info(
+                            "EtoroWebSocketSubscriber: source-refresh subscribe %d topics",
+                            len(newly_tracked),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "EtoroWebSocketSubscriber: source-refresh Subscribe send failed",
+                            exc_info=True,
+                        )
+            if to_unsubscribe and self._ws is not None:
+                msg = build_unsubscribe_message(to_unsubscribe)
+                if msg is not None:
+                    try:
+                        await self._ws.send(msg)
+                        logger.info(
+                            "EtoroWebSocketSubscriber: source-refresh unsubscribe %d topics",
+                            len(to_unsubscribe),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "EtoroWebSocketSubscriber: source-refresh Unsubscribe send failed",
+                            exc_info=True,
+                        )
+
+    async def _source_reconcile_worker(self) -> None:
+        """Periodically refresh the held-∪-watchlist source set.
+
+        Runs every ``_SOURCE_RECONCILE_INTERVAL_S`` as a fallback
+        and also fires immediately when ``_source_reconcile_signal``
+        is set. The signal is set after the private-channel
+        portfolio reconcile completes (positions just changed) so
+        a freshly-opened position gets its feed within seconds.
+        Watchlist edits hit the periodic path — operator-perceived
+        latency is bounded by the interval but cost is negligible.
+        """
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._source_reconcile_signal.wait(),
+                    timeout=_SOURCE_RECONCILE_INTERVAL_S,
+                )
+                self._source_reconcile_signal.clear()
+            except TimeoutError:
+                pass  # periodic firing
+            try:
+                await self._refresh_source_topics()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "EtoroWebSocketSubscriber: source-topic reconcile failed; next tick will retry",
                     exc_info=True,
                 )
 
@@ -604,21 +762,23 @@ class EtoroWebSocketSubscriber:
             if not _is_auth_success(auth_reply):
                 raise RuntimeError(f"eToro WS auth failed: {auth_reply!r}")
 
-            # Selector hits the DB; offload to a worker thread so
-            # the connect path doesn't block the event loop.
-            ids = await asyncio.to_thread(self._watched_ids_provider)
-
-            # Hold the lock across snapshot + ``_ws`` publish + the
-            # batched initial Subscribe send. This serialises
-            # against every concurrent add/remove: a remove that
-            # would Unsubscribe a topic present in our batched
-            # snapshot cannot fire until we finish sending, so
-            # eToro never sees an out-of-order
-            # ``Unsubscribe(T) → Subscribe(..., T)`` that would
-            # strand T subscribed despite the operator not wanting
-            # it. Sending under the lock also means the batched
-            # frame and any concurrent delta frames are serialised
-            # in wire order.
+            # Hold the lock across the ``_ws`` publish + batched
+            # initial Subscribe send. This serialises against every
+            # concurrent add/remove: a remove that would Unsubscribe
+            # a topic present in our batched snapshot cannot fire
+            # until we finish sending, so eToro never sees an
+            # out-of-order ``Unsubscribe(T) → Subscribe(..., T)``
+            # that would strand T subscribed despite no source
+            # wanting it. Sending under the lock also means the
+            # batched frame and any concurrent delta frames are
+            # serialised in wire order.
+            #
+            # ``_topic_refs`` is the single source of truth for what
+            # to subscribe to. The source-reconcile worker
+            # populated held + watchlist refs at start-up; page-view
+            # add/remove may have layered additional refs on top
+            # during a reconnect window. Re-subscribing from
+            # ``_topic_refs.keys()`` covers both classes in one frame.
             #
             # The private subscribe + listen loop run outside the
             # lock but inside the ``_ws``-clearing try/finally, so
@@ -626,21 +786,18 @@ class EtoroWebSocketSubscriber:
             # clears ``_ws`` before the outer reconnect backoff.
             try:
                 async with self._topic_lock:
-                    self._pinned_topics = set(ids)
-                    topics_to_send = sorted(self._pinned_topics | set(self._dynamic_topic_refs.keys()))
+                    topics_to_send = sorted(self._topic_refs.keys())
                     self._ws = ws
                     sub_msg = build_subscribe_message(topics_to_send)
                     if sub_msg is not None:
                         await ws.send(sub_msg)
                         logger.info(
-                            "EtoroWebSocketSubscriber: subscribed to %d instrument topics (pinned=%d dynamic=%d)",
+                            "EtoroWebSocketSubscriber: subscribed to %d instrument topics",
                             len(topics_to_send),
-                            len(self._pinned_topics),
-                            len(self._dynamic_topic_refs),
                         )
                     else:
                         logger.info(
-                            "EtoroWebSocketSubscriber: no watched instruments — "
+                            "EtoroWebSocketSubscriber: no tracked instruments — "
                             "connection will idle for rates until a position / "
                             "watchlist add or a page-view subscribe"
                         )
@@ -666,14 +823,18 @@ class EtoroWebSocketSubscriber:
                     self._ws = None
 
     async def add_instruments(self, instrument_ids: list[int]) -> None:
-        """Bump ref counts for page-view subscribers; send a
-        Subscribe frame for any newly-tracked topics.
+        """Bump ref counts for the given instrument ids; send a
+        Subscribe frame for any topics whose refcount just went 0→1.
 
-        Idempotent for the *same* caller across overlapping calls
-        (bumping the count keeps the topic subscribed). Safe to call
-        from FastAPI request handlers — the frame send happens via
-        the shared ws ref; if the ws is mid-reconnect the counts are
-        still updated and the next connect cycle resubscribes.
+        Single mechanism for every reason to subscribe — the source
+        worker uses it for held/watchlist refs and the SSE handler
+        uses it for page-view refs. The Nth caller's add does not
+        change wire state if N-1 callers already hold a ref.
+
+        Safe to call from FastAPI request handlers and from internal
+        async workers. If the ws is mid-reconnect the counts are
+        still updated and the next connect cycle re-subscribes from
+        ``_topic_refs.keys()``.
 
         Cancellation-safety: the ref-count update is pure-Python
         under the lock with no ``await`` in the critical section,
@@ -683,72 +844,78 @@ class EtoroWebSocketSubscriber:
         """
         if not instrument_ids:
             return
-        newly_tracked: list[int] = []
         async with self._topic_lock:
+            newly_tracked: list[int] = []
             for iid in instrument_ids:
-                prior = self._dynamic_topic_refs.get(iid, 0)
-                self._dynamic_topic_refs[iid] = prior + 1
-                if prior == 0 and iid not in self._pinned_topics:
+                prior = self._topic_refs.get(iid, 0)
+                self._topic_refs[iid] = prior + 1
+                if prior == 0:
                     newly_tracked.append(iid)
-            # Snapshot the ws ref under the lock to avoid a race
-            # with the connect-finally clearing it between our
-            # None-check and ``.send``. Release the lock before
-            # awaiting send — we don't want to block other
-            # add/remove callers for the full send duration, and
-            # send on a just-closed socket raises into our
-            # try/except below (safe, logged).
-            ws_ref = self._ws
-        if newly_tracked and ws_ref is not None:
-            msg = build_subscribe_message(newly_tracked)
-            if msg is not None:
-                try:
-                    await ws_ref.send(msg)
-                    logger.info(
-                        "EtoroWebSocketSubscriber: page-view subscribe %d topics",
-                        len(newly_tracked),
-                    )
-                except Exception:
-                    logger.warning(
-                        "EtoroWebSocketSubscriber: dynamic Subscribe send failed; "
-                        "next reconnect will resubscribe from ref counts",
-                        exc_info=True,
-                    )
+            # Send under the lock so wire ordering matches state
+            # ordering. Releasing the lock between state-mutation
+            # and send would let a concurrent ``remove_instruments``
+            # queue an Unsubscribe(T) frame that overtakes our
+            # Subscribe(T) on the wire — eToro would end up with T
+            # subscribed despite ``_topic_refs[T] == 1``, tearing
+            # down a held-position feed (Codex review on PR for
+            # #490). The cost is that other callers wait for the
+            # send to flush; ws.send() is non-blocking on a healthy
+            # socket so contention is small in practice.
+            if newly_tracked and self._ws is not None:
+                msg = build_subscribe_message(newly_tracked)
+                if msg is not None:
+                    try:
+                        await self._ws.send(msg)
+                        logger.info(
+                            "EtoroWebSocketSubscriber: subscribe %d topics",
+                            len(newly_tracked),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "EtoroWebSocketSubscriber: Subscribe send failed; "
+                            "next reconnect will resubscribe from ref counts",
+                            exc_info=True,
+                        )
 
     async def remove_instruments(self, instrument_ids: list[int]) -> None:
         """Decrement ref counts; send Unsubscribe for topics that
-        hit zero AND aren't in the pinned set.
+        hit zero.
 
-        Pinned topics (held + watchlist at connect time) are never
-        unsubscribed via this path — they survive every page-view
-        churn until the next reconnect refreshes the pinned set.
+        With the unified ref-count model there is no special "pinned"
+        class that survives a remove — held positions hold their own
+        ref through the source-reconcile worker, so a page-view's
+        remove on a held instrument decrements the page-view ref
+        but the source ref keeps the topic subscribed. Only when
+        every source has dropped its ref does the wire-level
+        Unsubscribe go out.
         """
         if not instrument_ids:
             return
-        to_unsubscribe: list[int] = []
         async with self._topic_lock:
+            to_unsubscribe: list[int] = []
             for iid in instrument_ids:
-                if iid not in self._dynamic_topic_refs:
+                if iid not in self._topic_refs:
                     continue
-                self._dynamic_topic_refs[iid] -= 1
-                if self._dynamic_topic_refs[iid] <= 0:
-                    del self._dynamic_topic_refs[iid]
-                    if iid not in self._pinned_topics:
-                        to_unsubscribe.append(iid)
-            ws_ref = self._ws
-        if to_unsubscribe and ws_ref is not None:
-            msg = build_unsubscribe_message(to_unsubscribe)
-            if msg is not None:
-                try:
-                    await ws_ref.send(msg)
-                    logger.info(
-                        "EtoroWebSocketSubscriber: page-view unsubscribe %d topics",
-                        len(to_unsubscribe),
-                    )
-                except Exception:
-                    logger.warning(
-                        "EtoroWebSocketSubscriber: dynamic Unsubscribe send failed",
-                        exc_info=True,
-                    )
+                self._topic_refs[iid] -= 1
+                if self._topic_refs[iid] <= 0:
+                    del self._topic_refs[iid]
+                    to_unsubscribe.append(iid)
+            # See ``add_instruments`` for the rationale on sending
+            # under the lock — same wire-ordering invariant.
+            if to_unsubscribe and self._ws is not None:
+                msg = build_unsubscribe_message(to_unsubscribe)
+                if msg is not None:
+                    try:
+                        await self._ws.send(msg)
+                        logger.info(
+                            "EtoroWebSocketSubscriber: unsubscribe %d topics",
+                            len(to_unsubscribe),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "EtoroWebSocketSubscriber: Unsubscribe send failed",
+                            exc_info=True,
+                        )
 
     async def _listen(self, ws: ClientConnection) -> None:
         async for raw in ws:
