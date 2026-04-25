@@ -500,7 +500,13 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "re-fetching already-parsed instruments."
         ),
         cadence=Cadence.daily(hour=3, minute=15),
-        catch_up_on_boot=False,
+        # #476: catch up on boot so an empty ``instrument_business_summary``
+        # table populates on the next operator restart instead of waiting
+        # for the daily 03:15 UTC window. Cost is bounded — the ingester
+        # TTL-gates already-parsed instruments and caps at 200 filings
+        # per run (~22s at the SEC 9 req/s floor), so the worst case is
+        # one 22s burst of requests per boot per 24h window.
+        catch_up_on_boot=True,
     ),
     ScheduledJob(
         name=JOB_SEC_INSIDER_TRANSACTIONS_INGEST,
