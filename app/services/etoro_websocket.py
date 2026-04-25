@@ -169,52 +169,85 @@ _PRIVATE_EVENT_PREFIXES: tuple[str, ...] = (
     "Trading.Credit",
 )
 
-
-def is_private_event(raw: str) -> bool:
-    """True if ``raw`` is a private-channel push that should trigger
-    a portfolio reconcile. Returns False for malformed JSON, non-
-    private types, or unknown shapes — the reconciler is a coarse
-    invalidation, not a precise event handler."""
-    try:
-        msg = json.loads(raw)
-    except json.JSONDecodeError:
-        return False
-    if not isinstance(msg, dict):
-        return False
-    msg_type = msg.get("type")
-    if not isinstance(msg_type, str):
-        return False
-    return any(msg_type.startswith(p) for p in _PRIVATE_EVENT_PREFIXES)
+_RATE_MESSAGE_TYPE = "Trading.Instrument.Rate"
 
 
-def parse_rate_message(raw: str) -> QuoteUpdate | None:
-    """Parse a ``Trading.Instrument.Rate`` push.
+def _iter_inner_messages(raw: str) -> list[dict[str, object]]:
+    """Normalise an eToro WS frame into the list of inner messages it
+    carries.
 
-    eToro's WS protocol wraps each push in an envelope:
-    ``{type: "Trading.Instrument.Rate", data: {InstrumentID, Bid,
-    Ask, LastExecution, Date, ...}}``. Returns ``None`` for any other
-    message type or any field-shape failure — callers continue
-    listening rather than failing the whole connection.
+    Per the official documentation
+    (https://api-portal.etoro.com/api-reference/websocket/topics.md),
+    each frame is wrapped in a ``{"messages": [...]}`` envelope; each
+    inner message has the shape
+    ``{"topic": ..., "content": "<json-string>", "id": ..., "type": ...}``.
+    The ``content`` field is itself a JSON-encoded string, NOT a
+    parsed object — callers must ``json.loads`` it to get the
+    actual rate payload.
+
+    We also accept a top-level inner-message shape (no outer
+    ``messages`` wrapper) for backwards compatibility with our
+    historical test fixtures and any future framing change.
+    Returns ``[]`` for malformed JSON, non-dict envelopes, or
+    envelopes that carry neither shape.
     """
     try:
-        msg = json.loads(raw)
+        envelope = json.loads(raw)
     except json.JSONDecodeError:
+        return []
+    if not isinstance(envelope, dict):
+        return []
+    inner = envelope.get("messages")
+    if isinstance(inner, list):
+        return [m for m in inner if isinstance(m, dict)]
+    # Top-level inner-message shape: {"type": "...", ...}.
+    if isinstance(envelope.get("type"), str):
+        return [envelope]
+    return []
+
+
+def _parse_rate_content(msg: dict[str, object]) -> QuoteUpdate | None:
+    """Parse one inner ``Trading.Instrument.Rate`` message into a
+    :class:`QuoteUpdate`.
+
+    Handles both the documented envelope shape — where ``content``
+    is a JSON-encoded string carrying the actual fields — and the
+    legacy ``data`` shape (parsed object directly under ``data``)
+    used by older test fixtures. Returns ``None`` on any field-
+    shape failure so the listener loop drops the bad frame and
+    keeps reading.
+    """
+    if msg.get("type") != _RATE_MESSAGE_TYPE:
         return None
-    if not isinstance(msg, dict):
+
+    payload: object | None
+    raw_content = msg.get("content")
+    if isinstance(raw_content, str):
+        try:
+            payload = json.loads(raw_content)
+        except json.JSONDecodeError:
+            return None
+    else:
+        payload = msg.get("data")
+    if not isinstance(payload, dict):
         return None
-    if msg.get("type") != "Trading.Instrument.Rate":
-        return None
-    data = msg.get("data")
-    if not isinstance(data, dict):
-        return None
+
+    # InstrumentID lives on the payload (eToro's official shape) but
+    # for the legacy fixtures it may also live alongside on the
+    # outer message; topic parsing covers the documented case where
+    # InstrumentID is absent from the content.
+    instrument_id_raw: object = payload.get("InstrumentID")
+    if instrument_id_raw is None:
+        topic = msg.get("topic")
+        if isinstance(topic, str) and topic.startswith("instrument:"):
+            instrument_id_raw = topic.removeprefix("instrument:")
     try:
-        instrument_id = int(data["InstrumentID"])
-        bid = Decimal(str(data["Bid"]))
-        ask = Decimal(str(data["Ask"]))
-        last_raw = data.get("LastExecution")
+        instrument_id = int(str(instrument_id_raw))
+        bid = Decimal(str(payload["Bid"]))
+        ask = Decimal(str(payload["Ask"]))
+        last_raw = payload.get("LastExecution")
         last = Decimal(str(last_raw)) if last_raw is not None else None
-        date_str = str(data["Date"])
-        # eToro's ISO date includes 'Z' suffix; normalise to UTC.
+        date_str = str(payload["Date"])
         if date_str.endswith("Z"):
             date_str = date_str[:-1] + "+00:00"
         quoted_at = datetime.fromisoformat(date_str)
@@ -227,6 +260,47 @@ def parse_rate_message(raw: str) -> QuoteUpdate | None:
         last=last,
         quoted_at=quoted_at,
     )
+
+
+def is_private_event(raw: str) -> bool:
+    """True if ``raw`` carries any private-channel push that should
+    trigger a portfolio reconcile. Operates on the
+    ``{"messages": [...]}`` envelope (the eToro v1 shape) as well
+    as the top-level inner-message shape used by older fixtures.
+    """
+    for msg in _iter_inner_messages(raw):
+        msg_type = msg.get("type")
+        if isinstance(msg_type, str) and any(msg_type.startswith(p) for p in _PRIVATE_EVENT_PREFIXES):
+            return True
+    return False
+
+
+def parse_rate_message(raw: str) -> QuoteUpdate | None:
+    """Parse the *first* ``Trading.Instrument.Rate`` push in a raw WS
+    frame. For frames carrying multiple ticks (eToro batches), use
+    :func:`parse_rate_messages` to receive every update.
+
+    Kept for backward-compat with existing single-tick test fixtures.
+    """
+    for msg in _iter_inner_messages(raw):
+        update = _parse_rate_content(msg)
+        if update is not None:
+            return update
+    return None
+
+
+def parse_rate_messages(raw: str) -> list[QuoteUpdate]:
+    """Extract every ``Trading.Instrument.Rate`` push in a raw WS
+    frame. eToro's WS may batch multiple rates into one frame; the
+    listener loop must process all of them or the rate-stream will
+    silently drop ticks for high-frequency instruments.
+    """
+    updates: list[QuoteUpdate] = []
+    for msg in _iter_inner_messages(raw):
+        update = _parse_rate_content(msg)
+        if update is not None:
+            updates.append(update)
+    return updates
 
 
 def _compute_spread_pct(bid: Decimal, ask: Decimal) -> Decimal | None:
@@ -755,40 +829,44 @@ class EtoroWebSocketSubscriber:
         async for raw in ws:
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8", errors="ignore")
-            # Private events come first because they're cheap to test
-            # for and we never want a reconcile-trigger to be
-            # confused with a rate push (the type prefix check
-            # already disambiguates, but ordering keeps the dispatch
-            # readable).
+            # eToro batches inner messages of mixed types in a single
+            # ``messages: [...]`` frame (#503/#504 fix). A frame may
+            # carry one private event AND several rate ticks at once;
+            # an early ``continue`` after the private check would
+            # silently drop those rates. Dispatch BOTH paths on
+            # every frame: schedule a reconcile if any inner message
+            # is a private event, AND publish every rate tick the
+            # frame carries.
             if is_private_event(raw):
                 self._schedule_reconcile()
-                continue
-            update = parse_rate_message(raw)
-            if update is None:
-                continue
-            # Publish first, on the event loop, before the DB
-            # offload. SSE subscribers see the tick within the same
-            # async tick the WS read finished on; the DB round-trip
-            # only gates persistence (which the page-load path reads
-            # to bootstrap before SSE takes over). Loop-affinity on
-            # ``QuoteBus.publish`` requires this be called from the
-            # event loop, so doing it before ``to_thread`` is the
-            # only correct ordering — calling it from inside the
-            # worker thread would race the asyncio.Queue internals.
-            if self._bus is not None:
-                self._bus.publish(update)
-            try:
-                # ``pool.connection()`` is sync — calling it from the
-                # event loop would block the loop for the full DB
-                # round-trip on every tick. Offload to a worker
-                # thread so the WS read loop stays hot.
-                await asyncio.to_thread(self._sync_upsert, update)
-            except Exception:
-                logger.warning(
-                    "EtoroWebSocketSubscriber: upsert failed instrument_id=%d",
-                    update.instrument_id,
-                    exc_info=True,
-                )
+            updates = parse_rate_messages(raw)
+            for update in updates:
+                # Publish first, on the event loop, before the DB
+                # offload. SSE subscribers see the tick within the
+                # same async tick the WS read finished on; the DB
+                # round-trip only gates persistence (which the
+                # page-load path reads to bootstrap before SSE
+                # takes over). Loop-affinity on
+                # ``QuoteBus.publish`` requires this be called
+                # from the event loop, so doing it before
+                # ``to_thread`` is the only correct ordering —
+                # calling it from inside the worker thread would
+                # race the asyncio.Queue internals.
+                if self._bus is not None:
+                    self._bus.publish(update)
+                try:
+                    # ``pool.connection()`` is sync — calling it
+                    # from the event loop would block the loop for
+                    # the full DB round-trip on every tick.
+                    # Offload to a worker thread so the WS read
+                    # loop stays hot.
+                    await asyncio.to_thread(self._sync_upsert, update)
+                except Exception:
+                    logger.warning(
+                        "EtoroWebSocketSubscriber: upsert failed instrument_id=%d",
+                        update.instrument_id,
+                        exc_info=True,
+                    )
 
 
 def _looks_like_json_envelope(raw: str | bytes) -> bool:
