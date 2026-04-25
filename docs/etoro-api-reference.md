@@ -106,7 +106,7 @@ GET+POST requests cannot exceed the API limit.
 - Cache static data locally (instrument IDs are immutable)
 - Batch rate requests (max 100 IDs per call; eBull uses 50 for safety)
 - Sequence per-instrument calls with throttle delay
-- Persist raw responses to `data/raw/etoro/` before normalisation
+- Land every structured field in SQL — raw disk dumps for eToro were retired in #471 (`instruments` / `price_daily` / `quotes` / `exchanges` tables ARE the audit trail)
 
 ---
 
@@ -480,11 +480,14 @@ Standard shape:
 
 ```
 eToro API call
-  -> Raw JSON persisted to data/raw/etoro/ (timestamped)
   -> Normalisation (pure functions, unit-testable)
-  -> Database UPSERT
+  -> Database UPSERT (instruments / price_daily / quotes / exchanges)
   -> Feature computation (price_features, etc.)
 ```
+
+Raw disk dumps were retired in #471 — the SQL tables above ARE the
+audit trail. See `docs/review-prevention-log.md` §"Raw payload
+persistence" for the scope-narrowed rule.
 
 ### Key implementation files
 

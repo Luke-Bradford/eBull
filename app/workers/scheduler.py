@@ -43,6 +43,7 @@ from app.services.coverage import bootstrap_missing_coverage_rows, review_covera
 from app.services.deferred_retry import retry_deferred_recommendations
 from app.services.enrichment import refresh_enrichment
 from app.services.entry_timing import evaluate_entry_conditions
+from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.fundamentals import refresh_fundamentals
@@ -242,6 +243,7 @@ JOB_SEC_INSIDER_TRANSACTIONS_INGEST = "sec_insider_transactions_ingest"
 JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
 JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
 JOB_SEC_FILING_DOCUMENTS_INGEST = "sec_filing_documents_ingest"
+JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +576,25 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # 225 GB rehash unnecessarily — a missed window waits for the
         # next natural fire.
         catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_EXCHANGES_METADATA_REFRESH,
+        description=(
+            "Weekly refresh of the eToro exchanges catalogue. Pulls "
+            "/api/v1/market-data/exchanges and upserts ``description`` "
+            "on the ``exchanges`` table. Operator-curated ``country`` / "
+            "``asset_class`` are NOT touched. New exchange ids land as "
+            "``asset_class='unknown'`` so the operator audit query sees "
+            "them and the SEC mapper still excludes them until manually "
+            "classified (#503 PR 4)."
+        ),
+        # Sundays 04:00 UTC — well after orchestrator_full_sync (03:00)
+        # and before the working week begins. Catalogue churn is rare
+        # so even a missed week is harmless; catch-up on boot is on so
+        # a fresh DB picks up real descriptions instead of NULLs without
+        # waiting for the next Sunday.
+        cadence=Cadence.weekly(weekday=6, hour=4, minute=0),
+        catch_up_on_boot=True,
     ),
     # -- On-demand jobs are NOT listed here.  They stay in _INVOKERS
     # (runtime.py) so "Run now" in the Admin UI works, but they are
@@ -2706,6 +2727,38 @@ def fx_rates_refresh() -> None:
         tracker.row_count = fx_rows_written
 
     logger.info("fx_rates_refresh complete: fx_pairs=%d", fx_rows_written)
+
+
+def exchanges_metadata_refresh() -> None:
+    """Refresh ``exchanges.description`` from eToro's exchanges endpoint.
+
+    Weekly cron — eToro's exchange catalogue rarely churns (~tens of
+    rows; new exchange ids land maybe a few times a year). Operator-
+    curated columns (``country``, ``asset_class``) are left alone; only
+    ``description`` is upserted from the API.
+
+    See ``app.services.exchanges.refresh_exchanges_metadata`` for the
+    upsert semantics and the no-clobber-on-empty guard.
+    """
+    creds = _load_etoro_credentials(JOB_EXCHANGES_METADATA_REFRESH)
+    if creds is None:
+        _record_prereq_skip(JOB_EXCHANGES_METADATA_REFRESH, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+
+    with _tracked_job(JOB_EXCHANGES_METADATA_REFRESH) as tracker:
+        with (
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            summary = refresh_exchanges_metadata(provider, conn)
+            tracker.row_count = summary.inserted + summary.description_updated
+            logger.info(
+                "exchanges_metadata_refresh complete: fetched=%d inserted=%d description_updated=%d",
+                summary.fetched,
+                summary.inserted,
+                summary.description_updated,
+            )
 
 
 def daily_tax_reconciliation() -> None:

@@ -2,7 +2,11 @@
 eToro market data provider.
 
 Implements MarketDataProvider against the real eToro public API.
-Persists raw API responses before any normalisation.
+Raw API response disk dumps were retired in #471 — every structured
+field lands in SQL (``instruments``, ``price_daily``, ``quotes``,
+``exchanges``), and those tables are the audit trail (see
+``docs/review-prevention-log.md`` §"Raw payload persistence" for
+the scope-narrowed rule).
 
 Auth: three-header scheme (x-api-key, x-user-key, x-request-id).
 Base URL: https://public-api.etoro.com (configurable via settings.etoro_base_url).
@@ -18,7 +22,13 @@ from uuid import uuid4
 import httpx
 
 from app.config import settings
-from app.providers.market_data import InstrumentRecord, MarketDataProvider, OHLCVBar, Quote
+from app.providers.market_data import (
+    ExchangeRecord,
+    InstrumentRecord,
+    MarketDataProvider,
+    OHLCVBar,
+    Quote,
+)
 from app.providers.resilient_client import ResilientClient
 
 logger = logging.getLogger(__name__)
@@ -35,11 +45,16 @@ _ETORO_READ_INTERVAL_S = 1.1
 
 class EtoroMarketDataProvider(MarketDataProvider):
     """
-    Reads tradable instruments, candles, and quotes from the eToro API.
+    Reads tradable instruments, candles, quotes, and the exchange
+    catalogue from the eToro API.
 
     Callers must supply both ``api_key`` and ``user_key`` (loaded from
-    the encrypted broker_credentials store). Raw responses are persisted
-    to data/raw/etoro/ before normalisation.
+    the encrypted broker_credentials store). Raw response disk dumps
+    were retired in #471 — every structured field now lands in SQL
+    (``instruments``, ``price_daily``, ``quotes``, ``exchanges``), so
+    the structured tables ARE the audit trail (see
+    ``docs/review-prevention-log.md`` §"Raw payload persistence",
+    scope-narrowed entry).
 
     Use as a context manager to ensure the HTTP client is closed:
 
@@ -93,6 +108,23 @@ class EtoroMarketDataProvider(MarketDataProvider):
         response.raise_for_status()
         raw = response.json()
         return _normalise_instruments(raw)
+
+    def get_exchanges(self) -> list[ExchangeRecord]:
+        """Fetch the eToro exchange catalogue.
+
+        Returns every ``exchangeId`` eToro tags instruments with, plus
+        the human-readable description (e.g. ``London Stock Exchange``).
+        Used by ``app.services.exchanges.refresh_exchanges_metadata`` to
+        populate ``exchanges.description``; ``country`` and
+        ``asset_class`` stay operator-curated and untouched.
+        """
+        response = self._http.get(
+            "/api/v1/market-data/exchanges",
+            headers=self._request_headers(),
+        )
+        response.raise_for_status()
+        raw = response.json()
+        return _normalise_exchanges(raw)
 
     # ------------------------------------------------------------------
     # Candles
@@ -244,6 +276,7 @@ def _normalise_instrument(item: Mapping[str, object]) -> InstrumentRecord | None
         industry=None,  # secondary lookup deferred
         country=None,  # not available in instruments endpoint
         is_tradable=True,  # only tradable instruments are returned by the API
+        instrument_type=_str_or_none(item.get("instrumentTypeName")),
     )
 
 
@@ -385,6 +418,39 @@ def _normalise_rate(item: Mapping[str, object]) -> Quote | None:
         last=Decimal(str(raw_last)) if raw_last is not None else None,
         conversion_rate=conversion_rate,
     )
+
+
+def _normalise_exchanges(raw: object) -> list[ExchangeRecord]:
+    """Normalise an eToro exchanges API response into ExchangeRecord list.
+
+    Per the eToro portal docs, the endpoint returns a bare list of
+    ``{exchangeID, exchangeDescription}`` dicts. We pin that contract
+    here — anything else (including a wrapping object) raises
+    ``ValueError`` so a silent schema drift fails loudly during the
+    weekly cron run rather than parsing the wrong list and reporting
+    a harmless-looking empty feed (a Codex round 2 finding).
+    """
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"Expected list from eToro exchanges endpoint (per portal docs), "
+            f"got {type(raw).__name__}. If eToro changed the response shape, "
+            f"update _normalise_exchanges to handle the new wrapper."
+        )
+
+    records: list[ExchangeRecord] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        provider_id = item.get("exchangeID") or item.get("exchangeId")
+        if provider_id is None:
+            continue
+        records.append(
+            ExchangeRecord(
+                provider_id=str(provider_id),
+                description=_str_or_none(item.get("exchangeDescription")),
+            )
+        )
+    return records
 
 
 def _str_or_none(value: object) -> str | None:
