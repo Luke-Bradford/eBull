@@ -829,19 +829,16 @@ class EtoroWebSocketSubscriber:
         async for raw in ws:
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8", errors="ignore")
-            # Private events come first because they're cheap to test
-            # for and we never want a reconcile-trigger to be
-            # confused with a rate push (the type prefix check
-            # already disambiguates, but ordering keeps the dispatch
-            # readable).
+            # eToro batches inner messages of mixed types in a single
+            # ``messages: [...]`` frame (#503/#504 fix). A frame may
+            # carry one private event AND several rate ticks at once;
+            # an early ``continue`` after the private check would
+            # silently drop those rates. Dispatch BOTH paths on
+            # every frame: schedule a reconcile if any inner message
+            # is a private event, AND publish every rate tick the
+            # frame carries.
             if is_private_event(raw):
                 self._schedule_reconcile()
-                continue
-            # eToro batches multiple ticks per WS frame inside the
-            # ``messages: [...]`` envelope (#503 fix). Drop any
-            # frame that yields zero rates; otherwise iterate every
-            # update so high-frequency instruments don't lose ticks
-            # to batching.
             updates = parse_rate_messages(raw)
             for update in updates:
                 # Publish first, on the event loop, before the DB

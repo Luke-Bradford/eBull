@@ -276,6 +276,52 @@ class TestParseRateMessageOfficialEnvelope:
         assert updates[0].instrument_id == 100000
 
 
+class TestMixedBatchFrame:
+    """Prevention regression for the ``_listen`` ``continue`` bug
+    (#504 review BLOCKING). A single ``messages: [...]`` frame may
+    carry one private-event inner message AND one or more rate-tick
+    inner messages. Pre-fix, ``_listen`` saw ``is_private_event``
+    return True and ``continue``d before reaching the rate parser,
+    silently dropping every rate in that frame. The two assertions
+    below pin the contract: BOTH ``is_private_event`` and
+    ``parse_rate_messages`` must surface their respective inner
+    messages on the same frame."""
+
+    def test_mixed_frame_yields_private_event_and_rate_tick(self) -> None:
+        rate_content = json.dumps(
+            {
+                "Ask": "100",
+                "Bid": "99",
+                "LastExecution": "99.5",
+                "Date": "2026-04-25T10:00:00Z",
+            }
+        )
+        raw = json.dumps(
+            {
+                "messages": [
+                    {
+                        "topic": "private",
+                        "content": "{}",
+                        "id": "p",
+                        "type": "Trading.OrderForCloseMultiple.Update",
+                    },
+                    {
+                        "topic": "instrument:100000",
+                        "content": rate_content,
+                        "id": "r",
+                        "type": "Trading.Instrument.Rate",
+                    },
+                ]
+            }
+        )
+        # Both predicates must report their finding from the same
+        # frame — _listen must dispatch both paths.
+        assert is_private_event(raw) is True
+        updates = parse_rate_messages(raw)
+        assert len(updates) == 1
+        assert updates[0].instrument_id == 100000
+
+
 class TestIsPrivateEventOfficialEnvelope:
     """Companion regression for the ``messages`` envelope on the
     private-channel path."""
