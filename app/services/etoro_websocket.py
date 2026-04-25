@@ -55,6 +55,8 @@ import psycopg_pool
 import websockets
 from websockets.asyncio.client import ClientConnection
 
+from app.services.quote_stream import QuoteBus
+
 logger = logging.getLogger(__name__)
 
 
@@ -310,6 +312,7 @@ class EtoroWebSocketSubscriber:
         user_key: str,
         env: str,
         pool: psycopg_pool.ConnectionPool[Any],
+        bus: QuoteBus | None = None,
         watched_ids_provider: Callable[[], list[int]] | None = None,
         reconcile_runner: Callable[[], None] | None = None,
     ) -> None:
@@ -317,6 +320,11 @@ class EtoroWebSocketSubscriber:
         self._user_key = user_key
         self._env = env
         self._pool = pool
+        # Optional pub/sub fan-out for sub-second UI delivery (Slice 3).
+        # When None, ticks are still upserted to ``quotes`` but no SSE
+        # consumer is notified — useful for the daemon-only deploy
+        # mode and for tests that exercise only the upsert path.
+        self._bus = bus
         # Default selector hits the DB; tests inject a stub.
         self._watched_ids_provider = watched_ids_provider or self._default_watched_ids
         # Default reconcile runner builds an EtoroBrokerProvider and
@@ -589,6 +597,17 @@ class EtoroWebSocketSubscriber:
             update = parse_rate_message(raw)
             if update is None:
                 continue
+            # Publish first, on the event loop, before the DB
+            # offload. SSE subscribers see the tick within the same
+            # async tick the WS read finished on; the DB round-trip
+            # only gates persistence (which the page-load path reads
+            # to bootstrap before SSE takes over). Loop-affinity on
+            # ``QuoteBus.publish`` requires this be called from the
+            # event loop, so doing it before ``to_thread`` is the
+            # only correct ordering — calling it from inside the
+            # worker thread would race the asyncio.Queue internals.
+            if self._bus is not None:
+                self._bus.publish(update)
             try:
                 # ``pool.connection()`` is sync — calling it from the
                 # event loop would block the loop for the full DB
