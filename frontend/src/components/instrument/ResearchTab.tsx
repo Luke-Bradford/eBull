@@ -48,6 +48,10 @@ function FieldSourceTag({ source }: { source: string | undefined }) {
       tone = "bg-emerald-50 text-emerald-700";
       label = "SEC";
       break;
+    case "sec_dividend_summary":
+      tone = "bg-emerald-50 text-emerald-700";
+      label = "SEC · div";
+      break;
     case "sec_xbrl_price_missing":
       tone = "bg-amber-50 text-amber-700";
       label = "SEC · price?";

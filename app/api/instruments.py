@@ -100,8 +100,15 @@ class InstrumentPrice(BaseModel):
 # in frontend/src/api/types.ts — consumers rely on this being exhaustive.
 # Per settled decision (eToro = market data, SEC = official filings, FMP =
 # normalized fundamentals), yfinance has no role; #498/#499 retired it.
+#
+# ``sec_dividend_summary`` distinguishes values sourced from
+# ``instrument_dividend_summary.ttm_yield_pct`` (#426) from values
+# computed against XBRL concepts directly — the dividend summary is
+# *not* a raw XBRL field and conflating the two would mislead any
+# audit trail that filters on provenance.
 KeyStatsFieldSource = Literal[
     "sec_xbrl",
+    "sec_dividend_summary",
     "unavailable",
     "sec_xbrl_price_missing",
 ]
@@ -1476,9 +1483,9 @@ def _build_local_stats(
 
     field_source: dict[str, KeyStatsFieldSource] = {}
 
-    def _pick(field: str, local_value: Decimal | None) -> Decimal | None:
+    def _pick(field: str, local_value: Decimal | None, *, source: KeyStatsFieldSource = "sec_xbrl") -> Decimal | None:
         if local_value is not None:
-            field_source[field] = "sec_xbrl"
+            field_source[field] = source
             return local_value
         field_source[field] = "unavailable"
         return None
@@ -1506,7 +1513,7 @@ def _build_local_stats(
 
     pe_final = _pick("pe_ratio", local_pe)
     pb_final = _pick("pb_ratio", local_pb)
-    div_final = _pick("dividend_yield", dividend_yield)
+    div_final = _pick("dividend_yield", dividend_yield, source="sec_dividend_summary")
     payout_final = _pick("payout_ratio", None)
     roe_final = _pick("roe", local_roe)
     roa_final = _pick("roa", local_roa)
@@ -1689,7 +1696,17 @@ def get_instrument_summary(
             current_price=current_price,
             dividend_yield=dividend_yield,
         )
-        key_stats_source = "sec_xbrl"
+        # Block-level source label reflects which inputs actually
+        # contributed: combined when both SEC fundamentals and the
+        # dividend summary are populated, individual when only one
+        # provided values. Avoids mislabelling a dividend-only block
+        # as ``sec_xbrl`` (Codex review on PR for #499).
+        if use_local_sec and has_local_values and dividend_yield is not None:
+            key_stats_source = "sec_xbrl+sec_dividend_summary"
+        elif use_local_sec and has_local_values:
+            key_stats_source = "sec_xbrl"
+        else:
+            key_stats_source = "sec_dividend_summary"
     else:
         stats_block = None
         key_stats_source = "unavailable"

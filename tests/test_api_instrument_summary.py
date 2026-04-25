@@ -271,7 +271,11 @@ def test_sec_path_populates_key_stats() -> None:
     assert stats.dividend_yield == Decimal("0.5")
     assert stats.field_source is not None
     assert stats.field_source["pe_ratio"] == "sec_xbrl"
-    assert stats.field_source["dividend_yield"] == "sec_xbrl"
+    # Dividend yield carries its own provenance — sourced from
+    # instrument_dividend_summary, NOT raw XBRL. Prevention assert
+    # for the mislabel Codex caught on the first PR round.
+    assert stats.field_source["dividend_yield"] == "sec_dividend_summary"
+    assert stats.field_source["dividend_yield"] != "sec_xbrl"
     # Fields the SEC pipeline doesn't yet derive — surfaced as
     # unavailable, never silently filled from elsewhere.
     assert stats.payout_ratio is None
@@ -409,4 +413,8 @@ def test_dividend_only_partial_stats_surface(client: TestClient) -> None:
     body = resp.json()
     assert body["key_stats"] is not None
     assert body["key_stats"]["dividend_yield"] == "3.50"
-    assert body["source"]["key_stats"] == "sec_xbrl"
+    # Block-level source tag must NOT mislabel a dividend-only block
+    # as ``sec_xbrl`` — the dividend summary is its own provenance
+    # (Codex review on PR for #499).
+    assert body["source"]["key_stats"] == "sec_dividend_summary"
+    assert body["key_stats"]["field_source"]["dividend_yield"] == "sec_dividend_summary"

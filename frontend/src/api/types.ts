@@ -216,7 +216,10 @@ export interface InstrumentPrice {
 // Mirrors KeyStatsFieldSource in app/api/instruments.py. yfinance was
 // retired in #498/#499 — every key stat is either SEC-derived or
 // honestly absent.
-//   - "sec_xbrl"                 → computed from local SEC XBRL data
+//   - "sec_xbrl"                 → computed from XBRL concepts directly
+//   - "sec_dividend_summary"     → from instrument_dividend_summary
+//                                  (#426); distinct from raw XBRL so an
+//                                  audit trail can tell them apart
 //   - "unavailable"              → field genuinely absent
 //   - "sec_xbrl_price_missing"   → local SEC inputs present but live
 //                                  quote absent, so ratio is unresolvable
@@ -224,6 +227,7 @@ export interface InstrumentPrice {
 //                                  can render a "waiting on price" hint)
 export type KeyStatsFieldSource =
   | "sec_xbrl"
+  | "sec_dividend_summary"
   | "unavailable"
   | "sec_xbrl_price_missing";
 
