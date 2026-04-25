@@ -35,6 +35,7 @@ from app.api.portfolio import router as portfolio_router
 from app.api.recommendations import router as recommendations_router
 from app.api.reports import router as reports_router
 from app.api.scores import router as scores_router
+from app.api.sse_quotes import router as sse_quotes_router
 from app.api.sync import router as sync_router
 from app.api.system import router as system_router
 from app.api.theses import instrument_thesis_router
@@ -58,6 +59,7 @@ from app.services.operators import (
     NoOperatorError,
     sole_operator_id,
 )
+from app.services.quote_stream import QuoteBus
 from app.services.sync_orchestrator.layer_state import compute_layer_states_from_db
 from app.services.sync_orchestrator.layer_types import LayerState
 from app.services.sync_orchestrator.reaper import reap_orphaned_syncs
@@ -152,11 +154,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.exception("failed to register orchestrator executor")
 
-    # eToro WebSocket live-price subscriber (#274 Slice 1). Starts
+    # In-process quote-tick fan-out bus (#274 Slice 3). Created here
+    # so it lives for the full app lifetime; the WS subscriber
+    # publishes to it, the SSE endpoint reads from it. Always
+    # constructed even if the WS subscriber fails to start — the
+    # bus is harmless when nothing publishes, and the SSE endpoint
+    # simply emits heartbeats until ticks flow.
+    quote_bus = QuoteBus()
+    app.state.quote_bus = quote_bus
+
+    # eToro WebSocket live-price subscriber (#274 Slice 1+2+3). Starts
     # only when broker credentials are loadable — otherwise the
     # operator hasn't completed setup yet and there's nothing to
     # subscribe to. WS failures must NOT block the rest of the app.
-    ws_subscriber = await _maybe_start_etoro_ws(pool)
+    ws_subscriber = await _maybe_start_etoro_ws(pool, quote_bus)
     app.state.etoro_ws = ws_subscriber
 
     yield
@@ -178,7 +189,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Connection pool closed.")
 
 
-async def _maybe_start_etoro_ws(pool: ConnectionPool[Any]) -> EtoroWebSocketSubscriber | None:
+async def _maybe_start_etoro_ws(pool: ConnectionPool[Any], bus: QuoteBus) -> EtoroWebSocketSubscriber | None:
     """Boot the WS subscriber when credentials are available.
 
     Pulled out of ``lifespan`` so the credential-load + subscriber
@@ -223,6 +234,7 @@ async def _maybe_start_etoro_ws(pool: ConnectionPool[Any]) -> EtoroWebSocketSubs
         user_key=user_key,
         env=settings.etoro_env,
         pool=pool,
+        bus=bus,
     )
     try:
         await subscriber.start()
@@ -254,6 +266,7 @@ app.include_router(portfolio_router)
 app.include_router(recommendations_router)
 app.include_router(reports_router)
 app.include_router(scores_router)
+app.include_router(sse_quotes_router)
 app.include_router(sync_router)
 app.include_router(system_router)
 app.include_router(theses_router)
