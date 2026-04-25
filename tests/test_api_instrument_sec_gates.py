@@ -113,7 +113,7 @@ def test_no_sec_cik_returns_404_no_sec_coverage(client: TestClient, endpoint: st
         "/instruments/AAPL/insider_transactions",
     ],
 )
-def test_with_sec_cik_does_not_short_circuit_with_no_sec_coverage(client: TestClient, endpoint: str) -> None:
+def test_with_sec_cik_does_not_404_with_no_sec_coverage(client: TestClient, endpoint: str) -> None:
     """Companion: when the instrument DOES have a SEC CIK, the
     gate must NOT fire. Without this, a future regression that
     inverts the predicate (e.g. ``not _has_sec_cik`` swapped) or
