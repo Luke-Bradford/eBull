@@ -17,6 +17,7 @@ import type {
   InstrumentPositionDetail,
   ThesisDetail,
 } from "@/api/types";
+import { liveTickDisplayPrice, useLiveQuote } from "@/lib/useLiveQuote";
 
 const THESIS_STALE_DAYS = 30;
 
@@ -97,6 +98,16 @@ export function SummaryStrip({
   generatingThesis,
 }: SummaryStripProps): JSX.Element {
   const { identity, price } = summary;
+  // Live-quote overlay (#488). When an SSE tick arrives for this
+  // instrument, it overrides the REST snapshot's current/currency.
+  // Day change columns keep using the snapshot — the live tick
+  // only carries bid/ask/last, not the daily anchor. Hook opens a
+  // stream on mount (triggering a dynamic eToro Subscribe per #487)
+  // and closes on unmount.
+  const live = useLiveQuote(summary.instrument_id);
+  const livePrice = liveTickDisplayPrice(live.tick);
+  const displayCurrent = livePrice?.value ?? price?.current ?? null;
+  const displayCurrency = livePrice?.currency ?? price?.currency ?? null;
   const changeNum = price?.day_change_pct != null ? Number(price.day_change_pct) : null;
   const changeColor =
     changeNum === null
@@ -141,16 +152,23 @@ export function SummaryStrip({
             Tier {summary.coverage_tier}
           </span>
         ) : null}
-        {price ? (
+        {price || livePrice ? (
           <>
-            <span className="ml-auto text-2xl font-semibold tabular-nums text-slate-800">
-              {formatPrice(price.current, price.currency)}
+            <span className="ml-auto flex items-baseline gap-1.5 text-2xl font-semibold tabular-nums text-slate-800">
+              {formatPrice(displayCurrent, displayCurrency)}
+              {live.connected ? (
+                <span
+                  data-testid="live-pulse"
+                  title="Live price stream active"
+                  className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-500"
+                />
+              ) : null}
             </span>
             <span className={`text-sm tabular-nums ${changeColor}`}>
-              {price.day_change != null && Number(price.day_change) >= 0
+              {price?.day_change != null && Number(price.day_change) >= 0
                 ? "+"
                 : ""}
-              {price.day_change ?? "—"} ({formatPct(price.day_change_pct, true)})
+              {price?.day_change ?? "—"} ({formatPct(price?.day_change_pct, true)})
             </span>
           </>
         ) : null}
