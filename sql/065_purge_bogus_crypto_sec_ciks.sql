@@ -32,8 +32,18 @@ WHERE e.instrument_id = i.instrument_id
 
 -- Also drop the orphaned profile rows so the SEC-profile endpoint
 -- cleanly 404s for these crypto instruments instead of rendering
--- stale data from a prior (now-purged) CIK binding.
+-- stale data from a prior (now-purged) CIK binding. Narrowly scoped
+-- to rows whose external_identifiers link was just removed — any
+-- crypto profile row that still has a SEC CIK link (none exist
+-- today, but defensive) is left alone so this migration cannot
+-- silently over-delete.
 DELETE FROM instrument_sec_profile p
 USING instruments i
 WHERE p.instrument_id = i.instrument_id
-  AND i.exchange = '8';
+  AND i.exchange = '8'
+  AND NOT EXISTS (
+      SELECT 1 FROM external_identifiers e
+      WHERE e.instrument_id = p.instrument_id
+        AND e.provider = 'sec'
+        AND e.identifier_type = 'cik'
+  );

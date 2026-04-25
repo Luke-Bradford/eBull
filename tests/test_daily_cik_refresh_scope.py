@@ -72,15 +72,22 @@ class TestCikCandidateQueryScope:
         )
 
     def test_non_tradable_instrument_excluded(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        _seed_instrument(ebull_test_conn, instrument_id=1001, symbol="AAPL", exchange="4", is_tradable=False)
-        _seed_instrument(ebull_test_conn, instrument_id=1002, symbol="MSFT", exchange="4", is_tradable=True)
+        # ``ebull_test_conn`` truncates ``instruments`` per-test (see
+        # tests/fixtures/ebull_test_db.py _PLANNER_TABLES), so tests
+        # within this class start clean. Using a distinct id range
+        # from ``test_all_us_exchanges_included`` is belt-and-braces
+        # for a future fixture-scope refactor that re-uses state.
+        _seed_instrument(ebull_test_conn, instrument_id=2001, symbol="AAPL", exchange="4", is_tradable=False)
+        _seed_instrument(ebull_test_conn, instrument_id=2002, symbol="MSFT", exchange="4", is_tradable=True)
         ebull_test_conn.commit()
 
         symbols = sorted(s for s, _ in self._run_scoped_query(ebull_test_conn))
         assert symbols == ["MSFT"]
 
     def test_all_us_exchanges_included(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
-        for idx, exch in enumerate(_US_EXCHANGES, start=1000):
+        # Start id range at 3000 so it cannot overlap with the
+        # `test_non_tradable_instrument_excluded` 2001/2002 range.
+        for idx, exch in enumerate(_US_EXCHANGES, start=3000):
             _seed_instrument(
                 ebull_test_conn,
                 instrument_id=idx,
