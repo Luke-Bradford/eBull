@@ -15,6 +15,8 @@ import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
 import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
+import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
+import { LivePriceCell } from "@/components/quotes/LivePriceCell";
 import type {
   BrokerPositionItem,
   PositionItem,
@@ -70,6 +72,17 @@ export function PortfolioPage() {
   // render.
   const focusedIdxRef = useRef(focusedIdx);
   const pageRowsRef = useRef<RowItem[]>([]);
+
+  // Instrument ids for every held position the page may render —
+  // fed to the page-level LiveQuoteProvider so a single SSE stream
+  // covers every visible row. Mirror rows render an avatar + total,
+  // not a per-instrument price, so they don't contribute ids here;
+  // their underlying instruments only matter on the copy-trading
+  // detail page.
+  const liveQuoteIds = useMemo(() => {
+    if (portfolio.data === null) return [];
+    return portfolio.data.positions.map((p) => p.instrument_id);
+  }, [portfolio.data]);
 
   // Positions + mirrors merged, sorted by dollar value, filtered by
   // search, then paged. Both row types contribute to "account worth",
@@ -217,6 +230,7 @@ export function PortfolioPage() {
       ) : portfolio.loading || portfolio.data === null ? (
         <SectionSkeleton rows={8} />
       ) : (
+        <LiveQuoteProvider instrumentIds={liveQuoteIds}>
         <div className="space-y-3">
           <SummaryBar data={portfolio.data} currency={currency} />
           {allRows.length === 0 ? (
@@ -271,6 +285,7 @@ export function PortfolioPage() {
             </>
           )}
         </div>
+        </LiveQuoteProvider>
       )}
 
       {addFor !== null ? (
@@ -576,7 +591,11 @@ function PositionRow({
         {p.avg_cost != null ? formatMoney(p.avg_cost, currency) : "—"}
       </td>
       <td className="px-2 py-2 text-right tabular-nums">
-        {p.current_price != null ? formatMoney(p.current_price, currency) : "—"}
+        <LivePriceCell
+          instrumentId={p.instrument_id}
+          fallback={p.current_price}
+          currency={currency}
+        />
       </td>
       <td className="px-2 py-2 text-right tabular-nums text-slate-600">
         {formatMoney(p.cost_basis, currency)}

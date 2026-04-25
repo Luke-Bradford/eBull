@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { fetchMirrorDetail } from "@/api/copyTrading";
 import { useAsync } from "@/lib/useAsync";
@@ -6,6 +6,8 @@ import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatMoney, formatNumber, formatPct, formatDateTime, pnlPct } from "@/lib/format";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
+import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
+import { LivePriceCell } from "@/components/quotes/LivePriceCell";
 import type { MirrorSummary, MirrorPositionItem } from "@/api/types";
 
 /**
@@ -180,6 +182,15 @@ function GroupedPositionsTable({
   positions: MirrorPositionItem[];
   currency: string;
 }) {
+  // Collect every instrument id rendered (group rows AND any
+  // expanded sub-rows share the same id) so one SSE stream covers
+  // the whole table. Same-id-twice de-dup is handled by the
+  // provider; both cells consume from the same context tick.
+  const liveQuoteIds = useMemo(
+    () => positions.map((p) => p.instrument_id),
+    [positions],
+  );
+
   if (positions.length === 0) {
     return <p className="text-xs text-slate-500">No open positions in this mirror.</p>;
   }
@@ -187,6 +198,7 @@ function GroupedPositionsTable({
   const groups = groupByInstrument(positions);
 
   return (
+    <LiveQuoteProvider instrumentIds={liveQuoteIds}>
     <div className="overflow-x-auto">
       <table className="w-full text-left text-sm">
         <thead className="text-xs uppercase text-slate-500">
@@ -206,6 +218,7 @@ function GroupedPositionsTable({
         </tbody>
       </table>
     </div>
+    </LiveQuoteProvider>
   );
 }
 
@@ -246,7 +259,11 @@ function InstrumentGroupRow({
         </td>
         <td className="px-2 py-2 text-right tabular-nums">{formatNumber(group.total_units)}</td>
         <td className="px-2 py-2 text-right tabular-nums">
-          {group.current_price != null ? formatMoney(group.current_price, currency) : "—"}
+          <LivePriceCell
+            instrumentId={group.instrument_id}
+            fallback={group.current_price}
+            currency={currency}
+          />
         </td>
         <td className="px-2 py-2 text-right tabular-nums">
           {formatMoney(group.total_market_value, currency)}
@@ -292,7 +309,11 @@ function SubPositionRow({
       <td className="px-2 py-1.5 text-right" />
       <td className="px-2 py-1.5 text-right tabular-nums">{formatNumber(position.units)}</td>
       <td className="px-2 py-1.5 text-right tabular-nums">
-        {position.current_price != null ? formatMoney(position.current_price, currency) : "—"}
+        <LivePriceCell
+          instrumentId={position.instrument_id}
+          fallback={position.current_price}
+          currency={currency}
+        />
       </td>
       <td className="px-2 py-1.5 text-right tabular-nums">
         {formatMoney(position.market_value, currency)}
