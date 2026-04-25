@@ -17,10 +17,22 @@ import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from app.api.sse_quotes import _event_stream, _format_tick, _parse_instrument_ids
+from app.api.sse_quotes import (
+    _DisplayContext,
+    _event_stream,
+    _format_tick,
+    _parse_instrument_ids,
+)
 from app.api.sse_quotes import router as sse_router
 from app.services.etoro_websocket import QuoteUpdate
 from app.services.quote_stream import QuoteBus
+
+
+def _empty_ctx(display_ccy: str = "USD") -> _DisplayContext:
+    """Trivial display context: no instruments → no conversion path,
+    so _format_tick emits the native triple with display=null. Used
+    by tests that don't care about the Slice 4 conversion."""
+    return _DisplayContext(display_ccy=display_ccy, instrument_ccys={}, rates={})
 
 
 def _make_update(instrument_id: int, bid: str = "100", ask: str = "101") -> QuoteUpdate:
@@ -40,25 +52,76 @@ def _make_update(instrument_id: int, bid: str = "100", ask: str = "101") -> Quot
 
 class TestFormatTick:
     def test_envelope_shape(self) -> None:
-        frame = _format_tick(_make_update(1001, bid="100.50", ask="100.70"))
+        frame = _format_tick(_make_update(1001, bid="100.50", ask="100.70"), _empty_ctx())
         assert frame.endswith("\n\n")
         assert frame.startswith("data: ")
         body = json.loads(frame[len("data: ") :].strip())
         assert body == {
             "instrument_id": 1001,
+            "native_currency": None,
             "bid": "100.50",
             "ask": "100.70",
             "last": None,
             "quoted_at": "2026-04-25T12:00:00+00:00",
+            "display": None,
         }
 
     def test_decimal_precision_preserved(self) -> None:
         # Critical: lossy float conversion would defeat spread-pct
         # invariants downstream. ``str(Decimal)`` round-trips.
-        frame = _format_tick(_make_update(1001, bid="186.4567", ask="186.4569"))
+        frame = _format_tick(_make_update(1001, bid="186.4567", ask="186.4569"), _empty_ctx())
         body = json.loads(frame[len("data: ") :].strip())
         assert body["bid"] == "186.4567"
         assert body["ask"] == "186.4569"
+
+    def test_display_block_emitted_with_known_ccy_and_rate(self) -> None:
+        ctx = _DisplayContext(
+            display_ccy="GBP",
+            instrument_ccys={1001: "USD"},
+            rates={("USD", "GBP"): Decimal("0.75")},
+        )
+        frame = _format_tick(_make_update(1001, bid="100", ask="200"), ctx)
+        body = json.loads(frame[len("data: ") :].strip())
+        assert body["native_currency"] == "USD"
+        assert body["bid"] == "100"
+        assert body["ask"] == "200"
+        assert body["display"] == {
+            "currency": "GBP",
+            "bid": "75.00",
+            "ask": "150.00",
+            "last": None,
+        }
+
+    def test_display_block_null_when_no_rate(self) -> None:
+        # Native ccy known but no FX pair available — payload still
+        # delivered (raw triple) with display=null so UI knows to
+        # fall back.
+        ctx = _DisplayContext(
+            display_ccy="JPY",
+            instrument_ccys={1001: "USD"},
+            rates={},  # No USD↔JPY rate
+        )
+        frame = _format_tick(_make_update(1001), ctx)
+        body = json.loads(frame[len("data: ") :].strip())
+        assert body["native_currency"] == "USD"
+        assert body["display"] is None
+
+    def test_same_currency_pass_through(self) -> None:
+        # Native = display, no FX lookup needed. Display block carries
+        # the raw triple unchanged.
+        ctx = _DisplayContext(
+            display_ccy="USD",
+            instrument_ccys={1001: "USD"},
+            rates={},
+        )
+        frame = _format_tick(_make_update(1001, bid="50", ask="51"), ctx)
+        body = json.loads(frame[len("data: ") :].strip())
+        assert body["display"] == {
+            "currency": "USD",
+            "bid": "50",
+            "ask": "51",
+            "last": None,
+        }
 
 
 class TestParseInstrumentIds:
@@ -226,7 +289,7 @@ class TestEventStreamGenerator:
         bus = QuoteBus()
         req = self._FakeRequest()
 
-        gen = _event_stream(req, bus, frozenset({1001}))  # type: ignore[arg-type]
+        gen = _event_stream(req, bus, frozenset({1001}), _empty_ctx())  # type: ignore[arg-type]
 
         # First yield: open comment.
         first = await gen.__anext__()
@@ -264,7 +327,7 @@ class TestEventStreamGenerator:
         sse_quotes._HEARTBEAT_INTERVAL_S = 0.05
         bus = QuoteBus()
         req = self._FakeRequest()
-        gen = sse_quotes._event_stream(req, bus, frozenset({1001}))  # type: ignore[arg-type]
+        gen = sse_quotes._event_stream(req, bus, frozenset({1001}), _empty_ctx())  # type: ignore[arg-type]
         try:
             # Open frame.
             first = await gen.__anext__()
@@ -281,7 +344,7 @@ class TestEventStreamGenerator:
     async def test_filtered_instrument_does_not_yield(self) -> None:
         bus = QuoteBus()
         req = self._FakeRequest()
-        gen = _event_stream(req, bus, frozenset({1001}))  # type: ignore[arg-type]
+        gen = _event_stream(req, bus, frozenset({1001}), _empty_ctx())  # type: ignore[arg-type]
 
         # Drain initial open frame.
         await gen.__anext__()

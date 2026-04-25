@@ -1,4 +1,4 @@
-"""Server-Sent Events endpoint for live quote ticks (#274 Slice 3).
+"""Server-Sent Events endpoint for live quote ticks (#274 Slices 3+4).
 
 Operator UI uses ``EventSource`` to subscribe to a filtered live feed
 of WebSocket-driven quote updates. Each tick from the eToro WS
@@ -16,6 +16,24 @@ quote-stream use-case has no need for.
 **Auth:** reuses the existing operator-session dependency. SSE
 connections inherit the same Cookie that the rest of the API uses,
 so no separate token plumbing is needed.
+
+**Slice 4 (display currency):** ticks land on the bus in the
+instrument's *native* currency (eToro's quote currency, captured in
+``instruments.currency``). At stream open we snapshot the
+instrument-currency map, the live FX rate table, and the operator's
+``runtime_config.display_currency``; per-tick we attach a
+``display`` block with the converted bid/ask/last so the UI can
+render the operator's preferred currency without doing FX maths.
+The native triple is preserved alongside the display triple for
+clients that want both. If no FX rate exists for a pair, the
+display block is ``null`` and the UI falls back to the native
+values.
+
+A snapshot at stream open is acceptable because (a) FX rates change
+every 5 min via ``fx_rates_refresh`` — slower than typical session
+length, (b) ``display_currency`` rarely changes, (c) EventSource
+auto-reconnects so a refresh on the next connect cycle picks up
+any change.
 """
 
 from __future__ import annotations
@@ -24,14 +42,20 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 
+import psycopg
+import psycopg.rows
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.api.auth import require_session_or_service_token
 from app.services.etoro_websocket import QuoteUpdate
+from app.services.fx import convert_quote_fields, load_live_fx_rates
 from app.services.quote_stream import QuoteBus
+from app.services.runtime_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -48,22 +72,86 @@ router = APIRouter(
 _HEARTBEAT_INTERVAL_S = 15.0
 
 
-def _format_tick(update: QuoteUpdate) -> str:
+@dataclass(frozen=True)
+class _DisplayContext:
+    """Per-stream snapshot of FX + currency data.
+
+    Captured once at stream open; reused on every tick. See module
+    docstring for why a snapshot is acceptable here.
+    """
+
+    display_ccy: str
+    instrument_ccys: dict[int, str]
+    rates: dict[tuple[str, str], Decimal]
+
+
+def _format_tick(update: QuoteUpdate, ctx: _DisplayContext) -> str:
     """Serialise one tick as a single SSE ``data:`` frame.
 
-    Uses ``str(Decimal)`` to preserve full precision rather than
-    casting to float. Frontend parses these strings back into the
-    Decimal-equivalent representation; lossy float conversion in
-    transit would defeat the spread-pct invariants.
+    Always emits the native triple (``bid``/``ask``/``last``) so
+    clients keep a stable contract. The ``display`` block carries
+    the converted triple plus the target currency code; it is
+    ``null`` when conversion isn't possible (unknown native currency
+    or missing FX rate). Decimal precision is preserved via
+    ``str(Decimal)`` — float would round-trip lossy and break
+    downstream spread-pct invariants.
     """
-    payload = {
+    native_ccy = ctx.instrument_ccys.get(update.instrument_id)
+    display_block: dict[str, object] | None = None
+    if native_ccy is not None:
+        converted = convert_quote_fields(
+            update.bid,
+            update.ask,
+            update.last,
+            native_ccy=native_ccy,
+            display_ccy=ctx.display_ccy,
+            rates=ctx.rates,
+        )
+        if converted is not None:
+            d_bid, d_ask, d_last = converted
+            display_block = {
+                "currency": ctx.display_ccy,
+                "bid": str(d_bid),
+                "ask": str(d_ask),
+                "last": None if d_last is None else str(d_last),
+            }
+
+    payload: dict[str, object] = {
         "instrument_id": update.instrument_id,
+        "native_currency": native_ccy,
         "bid": str(update.bid),
         "ask": str(update.ask),
         "last": None if update.last is None else str(update.last),
         "quoted_at": update.quoted_at.isoformat(),
+        "display": display_block,
     }
     return f"data: {json.dumps(payload)}\n\n"
+
+
+def _load_display_context(conn: psycopg.Connection[object], instrument_ids: frozenset[int]) -> _DisplayContext:
+    """Build the per-stream FX + currency snapshot.
+
+    Restricts the instrument-currency lookup to ``instrument_ids``
+    so a watchlist of 5 doesn't drag the entire universe (5k+ rows)
+    into memory per SSE connection.
+    """
+    display_ccy = get_runtime_config(conn).display_currency
+    instrument_ccys: dict[int, str] = {}
+    if instrument_ids:
+        with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+            cur.execute(
+                "SELECT instrument_id, currency FROM instruments WHERE instrument_id = ANY(%s)",
+                (list(instrument_ids),),
+            )
+            for iid, ccy in cur.fetchall():
+                if ccy is not None:
+                    instrument_ccys[int(iid)] = str(ccy)
+    rates = load_live_fx_rates(conn)
+    return _DisplayContext(
+        display_ccy=display_ccy,
+        instrument_ccys=instrument_ccys,
+        rates=rates,
+    )
 
 
 def _parse_instrument_ids(raw: str) -> frozenset[int]:
@@ -90,6 +178,7 @@ async def _event_stream(
     request: Request,
     bus: QuoteBus,
     instrument_ids: frozenset[int],
+    ctx: _DisplayContext,
 ) -> AsyncGenerator[str]:
     """Generator yielded by StreamingResponse.
 
@@ -108,7 +197,7 @@ async def _event_stream(
         # about us — fine in production where ticks arrive over
         # seconds, but a real bug for tests and for any caller
         # that publishes synchronously after opening the stream.
-        yield f": stream open at {datetime.now(UTC).isoformat()}\n\n"
+        yield f": stream open at {datetime.now(UTC).isoformat()} display={ctx.display_ccy}\n\n"
 
         while True:
             if await request.is_disconnected():
@@ -121,7 +210,7 @@ async def _event_stream(
                 # the connection alive through proxies.
                 yield ": heartbeat\n\n"
                 continue
-            yield _format_tick(update)
+            yield _format_tick(update, ctx)
 
 
 @router.get("/quotes")
@@ -150,8 +239,23 @@ async def quotes_stream(
         )
 
     instrument_ids = _parse_instrument_ids(ids)
+
+    # Snapshot the FX + currency context before the stream starts so
+    # the per-tick path is a pure dict lookup. ``pool.connection()``
+    # is sync and would block the event loop for the full DB round-
+    # trip — offload to a worker thread so a slow DB / reconnect
+    # burst can't stall unrelated async work. Mirrors the WS
+    # subscriber's ``_sync_upsert`` offload pattern.
+    pool = request.app.state.db_pool
+
+    def _load() -> _DisplayContext:
+        with pool.connection() as conn:
+            return _load_display_context(conn, instrument_ids)
+
+    ctx = await asyncio.to_thread(_load)
+
     return StreamingResponse(
-        _event_stream(request, bus, instrument_ids),
+        _event_stream(request, bus, instrument_ids, ctx),
         media_type="text/event-stream",
         headers={
             # Disable proxy buffering so each tick flushes immediately.
