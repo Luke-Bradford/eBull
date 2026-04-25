@@ -262,22 +262,22 @@ class SecFilingsProvider(FilingsProvider):
         ``filing_documents`` service for the per-document manifest
         (#452).
 
-        Provider-level JSON payload: the raw response is persisted
-        to ``data/raw/sec/sec_filing_*`` as the audit-trail contract
-        from prevention-log entries #171 / #177 requires — the
-        per-document structural capture lands in ``filing_documents``
-        via the service layer, and the raw dump is retained for
-        audit alongside it (structured JSON payloads remain on disk;
-        body text does not — see docs/review-prevention-log.md
-        "Every structured field from an upstream document lands in
-        SQL").
+        **Host pin (#477):** the ``/Archives/edgar/data/...`` path
+        is served only by ``www.sec.gov``. ``data.sec.gov`` (the
+        host backing ``self._http`` for /submissions/, /api/xbrl/)
+        404s every request against this path. We use
+        ``self._http_tickers`` (configured for ``www.sec.gov``,
+        same 10 req/s shared throttle) with a fully-qualified URL
+        so the host-to-client mapping is explicit at the call site.
+        Mirrors :func:`fetch_document_text` which has the same
+        host requirement.
         """
         raw_id = provider_filing_id.replace("-", "")
         if len(raw_id) != 18:
             raise FilingNotFound(f"Invalid accession number format: {provider_filing_id}")
         cik_padded = raw_id[:10]
-        path = f"/Archives/edgar/data/{int(cik_padded)}/{raw_id}/{raw_id}-index.json"
-        resp = self._http.get(path)
+        absolute_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik_padded)}/{raw_id}/{raw_id}-index.json"
+        resp = self._http_tickers.get(absolute_url)
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
