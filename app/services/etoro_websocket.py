@@ -547,11 +547,7 @@ class EtoroWebSocketSubscriber:
     async def _connect_and_listen(self) -> None:
         async with websockets.connect(_WS_URL) as ws:
             await ws.send(build_auth_message(self._api_key, self._user_key))
-            # Drain the auth response — eToro replies with
-            # {"success": true} or an error envelope. We wait for one
-            # frame so a bad key surfaces immediately rather than
-            # silently looping subscribe attempts.
-            auth_reply = await asyncio.wait_for(ws.recv(), timeout=10.0)
+            auth_reply = await _await_auth_envelope(ws, timeout_s=10.0)
             if not _is_auth_success(auth_reply):
                 raise RuntimeError(f"eToro WS auth failed: {auth_reply!r}")
 
@@ -620,6 +616,60 @@ class EtoroWebSocketSubscriber:
                     update.instrument_id,
                     exc_info=True,
                 )
+
+
+def _looks_like_json_envelope(raw: str | bytes) -> bool:
+    """Coarse pre-filter for the auth-handshake drain loop.
+
+    eToro's WS occasionally emits a leading control byte (observed
+    ``b'\\x00'`` in dev, likely an internal heartbeat / keepalive
+    prelude) before the actual auth response. ``_is_auth_success``
+    parses JSON and rejects on non-success, so the noise frame
+    would tip us into a 5-second reconnect loop forever.
+
+    Strip whitespace + control bytes and check whether the first
+    real character is ``{``. JSON envelopes always start there;
+    anything else is noise we should keep reading past.
+    """
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8", errors="ignore")
+    else:
+        text = raw
+    # Single-pass strip across whitespace + null so any interleaving
+    # (``\x00 {``, `` \x00{``, ``\x00\x00 {``) is handled. A two-pass
+    # ``.lstrip().lstrip("\x00")`` would miss ``\x00 {`` because the
+    # leading null blocks the whitespace strip.
+    stripped = text.lstrip("\x00 \t\r\n\v\f")
+    return stripped.startswith("{")
+
+
+async def _await_auth_envelope(ws: ClientConnection, *, timeout_s: float) -> str | bytes:
+    """Drain non-JSON frames during the auth handshake.
+
+    Reads frames until one looks like a JSON envelope or the
+    cumulative ``timeout_s`` deadline elapses. Returns the first
+    JSON-envelope frame so the caller can run ``_is_auth_success``
+    on it.
+
+    Why this matters: a single ``recv()`` with a strict JSON parse
+    treats *any* leading frame as the auth ack. eToro emits a
+    control-byte prelude on some connections (dev observation:
+    ``b'\\x00'``); without draining we reconnect-loop every
+    backoff window and never authenticate. See #474.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError("eToro WS auth: no JSON envelope within deadline")
+        frame = await asyncio.wait_for(ws.recv(), timeout=remaining)
+        if _looks_like_json_envelope(frame):
+            return frame
+        # Log at DEBUG so this is visible when investigating but
+        # silent in production. Frame may be bytes; repr keeps the
+        # control characters readable.
+        logger.debug("EtoroWebSocketSubscriber: skipping noise frame %r during auth", frame)
 
 
 def _is_auth_success(raw: str | bytes) -> bool:
