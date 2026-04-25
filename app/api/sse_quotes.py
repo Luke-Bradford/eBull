@@ -47,6 +47,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import psycopg
+import psycopg.rows
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 
@@ -137,8 +138,6 @@ def _load_display_context(conn: psycopg.Connection[object], instrument_ids: froz
     display_ccy = get_runtime_config(conn).display_currency
     instrument_ccys: dict[int, str] = {}
     if instrument_ids:
-        import psycopg.rows
-
         with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
             cur.execute(
                 "SELECT instrument_id, currency FROM instruments WHERE instrument_id = ANY(%s)",
