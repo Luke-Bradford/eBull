@@ -1106,8 +1106,22 @@ def daily_cik_refresh() -> None:
                 tracker.row_count = 0
                 return
 
+            # #475: Scope to US-listed exchanges only. SEC's
+            # company_tickers.json only covers US-registered companies;
+            # the mapper used to match every tradable instrument by
+            # symbol, which stamped unrelated US-company CIKs onto
+            # eToro crypto coins that happened to share a ticker
+            # (e.g. BTC crypto got Grayscale Bitcoin Mini Trust's
+            # CIK because both answer to "BTC"). Exchange codes
+            # enumerated from the current valid mapping set plus
+            # eToro's stable US-listed venues (4=NASDAQ, 5=NYSE,
+            # 2=AMEX, 6=OTC, 7=US small-cap, 19/20=additional US
+            # venues). Crypto (8), futures (40), FX, and non-US
+            # equities are explicitly excluded.
             rows = conn.execute(
-                "SELECT symbol, instrument_id::text FROM instruments WHERE is_tradable = TRUE"
+                "SELECT symbol, instrument_id::text FROM instruments "
+                "WHERE is_tradable = TRUE "
+                "AND exchange IN ('2', '4', '5', '6', '7', '19', '20')"
             ).fetchall()
             instrument_symbols = [(row[0], row[1]) for row in rows]
 
