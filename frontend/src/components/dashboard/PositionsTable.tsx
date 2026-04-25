@@ -1,10 +1,8 @@
-import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import type { PositionItem, PortfolioMirrorItem } from "@/api/types";
 import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatMoney, formatNumber, formatPct, pnlPct } from "@/lib/format";
 import { EmptyState } from "@/components/states/EmptyState";
-import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { LivePriceCell } from "@/components/quotes/LivePriceCell";
 
 /**
@@ -54,16 +52,13 @@ export function PositionsTable({
     return mvB - mvA;
   });
 
-  // Live quote ids for the visible position rows. Mirror rows render
-  // their own aggregated equity, not a per-instrument price, so they
-  // don't contribute ids here.
-  const liveQuoteIds = useMemo(
-    () => positions.map((p) => p.instrument_id),
-    [positions],
-  );
-
+  // The live-quote stream is owned by the parent page (Dashboard or
+  // Portfolio) so the instrument-id union — held positions + every
+  // active-mirror underlying — is computed once at the page level
+  // off ``PortfolioResponse.live_quote_instrument_ids``. Wrapping
+  // here would either duplicate the SSE stream or hard-fix the set
+  // to held positions only (regression for #501 mirror underlyings).
   return (
-    <LiveQuoteProvider instrumentIds={liveQuoteIds}>
     <div className="overflow-x-auto">
       <table className="w-full text-left text-sm">
         <thead className="text-xs uppercase text-slate-500">
@@ -88,7 +83,6 @@ export function PositionsTable({
         </tbody>
       </table>
     </div>
-    </LiveQuoteProvider>
   );
 }
 

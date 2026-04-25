@@ -14,6 +14,7 @@ import { PortfolioValueChart } from "@/components/dashboard/PortfolioValueChart"
 import { RollingPnlStrip } from "@/components/dashboard/RollingPnlStrip";
 import { SummaryCards } from "@/components/dashboard/SummaryCards";
 import { PositionsTable } from "@/components/dashboard/PositionsTable";
+import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { RecentRecommendations } from "@/components/dashboard/RecentRecommendations";
 import { BootstrapProgress, isBootstrapping } from "@/components/dashboard/BootstrapProgress";
 import { WatchlistPanel } from "@/components/dashboard/WatchlistPanel";
@@ -134,10 +135,14 @@ export function DashboardPage() {
             {portfolio.loading ? (
               <SectionSkeleton rows={4} />
             ) : (
-              <PositionsTable
-                positions={portfolio.data?.positions ?? []}
-                mirrors={portfolio.data?.mirrors ?? []}
-              />
+              <LiveQuoteProvider
+                instrumentIds={portfolio.data?.live_quote_instrument_ids ?? []}
+              >
+                <PositionsTable
+                  positions={portfolio.data?.positions ?? []}
+                  mirrors={portfolio.data?.mirrors ?? []}
+                />
+              </LiveQuoteProvider>
             )}
           </Section>
         </>

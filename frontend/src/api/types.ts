@@ -360,6 +360,10 @@ export interface PortfolioResponse {
   mirror_equity: number;
   display_currency: string;
   fx_rates_used: Record<string, FxRateUsed>;
+  /** Held position ids ∪ active-mirror underlying ids. Drives the
+   *  page-level LiveQuoteProvider so mirror equity recomputes as
+   *  underlyings tick. */
+  live_quote_instrument_ids: number[];
 }
 
 // /portfolio/rolling-pnl — #315 Phase 2 rolling unrealised P&L

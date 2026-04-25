@@ -111,6 +111,13 @@ class PortfolioResponse(BaseModel):
     mirror_equity: float = 0.0
     display_currency: str = "GBP"
     fx_rates_used: dict[str, dict[str, object]] = {}
+    # Union of every instrument_id rendered (or contributing to a
+    # rendered total) on the portfolio page: held positions plus the
+    # underlying instruments inside every active mirror. The frontend
+    # feeds this set to its page-level LiveQuoteProvider so that
+    # mirror equity / pnl figures update as the underlying ticks
+    # come in, not just held-position rows.
+    live_quote_instrument_ids: list[int] = []
 
 
 class NativeTradeItem(BaseModel):
@@ -514,6 +521,15 @@ def get_portfolio(
         pos_rows, raw_cash is not None, raw_mirror_equity, display_currency, rates_meta
     )
 
+    # Union of every instrument_id the page should subscribe to live
+    # ticks for: held position ids + underlying instrument ids inside
+    # every active mirror. Mirror rows render an aggregated equity,
+    # but their underlying tickers must still feed the live-tick
+    # stream so the displayed mirror_equity recomputes as ticks land.
+    held_ids = {p.instrument_id for p in positions}
+    mirror_underlying_ids = _load_mirror_underlying_instrument_ids(conn)
+    live_quote_instrument_ids = sorted(held_ids | set(mirror_underlying_ids))
+
     return PortfolioResponse(
         positions=positions,
         mirrors=mirrors,
@@ -523,7 +539,30 @@ def get_portfolio(
         mirror_equity=mirror_equity,
         display_currency=display_currency,
         fx_rates_used=fx_rates_used,
+        live_quote_instrument_ids=live_quote_instrument_ids,
     )
+
+
+def _load_mirror_underlying_instrument_ids(conn: psycopg.Connection[object]) -> list[int]:
+    """Distinct instrument ids open across every active mirror.
+
+    Used by ``get_portfolio`` to feed the page-level
+    ``LiveQuoteProvider`` with mirror underlyings so the operator
+    sees mirror equity recompute as the underlying tickers tick —
+    not only when they navigate into a copy-trader detail page.
+    Empty when no active mirror has any open positions.
+    """
+    sql = """
+        SELECT DISTINCT cmp.instrument_id
+        FROM copy_mirror_positions cmp
+        JOIN copy_mirrors m USING (mirror_id)
+        WHERE m.active
+          AND cmp.instrument_id IS NOT NULL
+        ORDER BY cmp.instrument_id
+    """
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        cur.execute(sql)
+        return [int(row[0]) for row in cur.fetchall()]
 
 
 # ---------------------------------------------------------------------------

@@ -117,12 +117,13 @@ def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
 
 
 def _with_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
-    # The endpoint runs four DB queries in order:
+    # The endpoint runs five DB queries in order:
     #   1. positions  2. cash  3. broker_positions  4. mirror_breakdowns
+    #   5. mirror underlying instrument_ids (#502 PR follow-up)
     # Existing callers supply [positions, cash] only — pad with empty
-    # broker_positions and mirror_breakdowns results.
+    # broker_positions, mirror_breakdowns, and mirror-underlying results.
     padded = list(cursor_results)
-    while len(padded) < 4:
+    while len(padded) < 5:
         padded.append([])
     conn = _mock_conn(padded)
 
