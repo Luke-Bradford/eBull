@@ -31,6 +31,7 @@ pytestmark = pytest.mark.integration
 # the migration applies cleanly with all DELETEs).
 _PURGE_DELETES_SEC_ONLY: tuple[tuple[str, str], ...] = (
     ("filing_events", "fe"),
+    ("insider_filings", "i"),
     ("eight_k_filings", "ek"),
     ("instrument_business_summary_sections", "ibss"),
     ("instrument_business_summary", "ibs"),

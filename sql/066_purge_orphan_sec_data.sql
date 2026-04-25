@@ -92,14 +92,12 @@ WHERE NOT EXISTS (
 );
 
 DELETE FROM insider_filings i
-USING instruments inst
-WHERE inst.instrument_id = i.instrument_id
-  AND NOT EXISTS (
-      SELECT 1 FROM external_identifiers ei
-      WHERE ei.instrument_id = i.instrument_id
-        AND ei.provider = 'sec'
-        AND ei.identifier_type = 'cik'
-  );
+WHERE NOT EXISTS (
+    SELECT 1 FROM external_identifiers ei
+    WHERE ei.instrument_id = i.instrument_id
+      AND ei.provider = 'sec'
+      AND ei.identifier_type = 'cik'
+);
 
 DELETE FROM eight_k_filings ek
 WHERE NOT EXISTS (
