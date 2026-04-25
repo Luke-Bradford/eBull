@@ -507,9 +507,10 @@ class EtoroWebSocketSubscriber:
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         self._task = None
-        # Cancel the source-reconcile worker first. It may be awaiting
-        # ``asyncio.to_thread`` on the watched-ids selector; the cancel
-        # raises CancelledError out of the await but lets any in-flight
+        # Cancel the source-reconcile worker before the private-event
+        # reconcile worker. It may be awaiting ``asyncio.to_thread``
+        # on the watched-ids selector; the cancel raises
+        # CancelledError out of the await but lets any in-flight
         # add/remove send finish first because both honour
         # CancelledError on their own awaits. No thread-completion
         # barrier needed — the source worker only does DB *reads*, so
