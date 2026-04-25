@@ -1,39 +1,39 @@
-"""eToro WebSocket live-price subscriber (#274 Slices 1+2).
+"""eToro WebSocket live-price subscriber.
 
 Connects to ``wss://ws.etoro.com/ws``, authenticates with the
-operator's eToro API + user keys, subscribes to ``instrument:<id>``
-topics for every instrument the operator currently holds OR has on
-their watchlist, and upserts each ``Trading.Instrument.Rate`` push
-into the existing ``quotes`` table.
+operator's eToro API + user keys, and subscribes to
+``instrument:<id>`` topics on demand from page-view SSE streams.
+Each ``Trading.Instrument.Rate`` push is upserted into the
+``quotes`` table and fanned out via :class:`QuoteBus` to any
+subscribed SSE consumer.
 
-**Slice 1 scope** (rates-only):
+**Visibility-driven subscription model** (#498):
+The subscriber holds no opinion about which instruments to stream.
+``add_instruments`` and ``remove_instruments`` callers (the SSE
+endpoint at :func:`app.api.sse_quotes._event_stream`) bump and drop
+ref counts on ``_topic_refs``; a topic is sent to eToro iff its
+refcount > 0. Held positions and watchlist entries are **not**
+auto-subscribed — what the operator has on screen drives the
+upstream subscription, nothing else. Boots quiet: a fresh process
+authenticates the WS but sends no Subscribe frame until an SSE
+stream lands.
 
-- Single-instance dev assumption: one process owns the WS connection.
-  Multi-worker advisory-lock arbitration is a Slice 4 concern.
-- ``quotes`` table writes only. SSE / Redis fan-out is Slice 3.
-- Frontend continues to poll ``/quotes`` endpoints; the 5-second
-  client cadence + WS-driven SQL freshness combine into the
-  "few-second live price" experience.
+**Private channel + reconcile**:
+The subscriber also subscribes to the ``private`` topic. eToro
+pushes ``Trading.OrderFor*`` / ``Trading.Position*`` /
+``Trading.Credit*`` envelopes here whenever the operator's
+portfolio state changes. Each private push schedules a debounced
+REST reconcile — ``EtoroBrokerProvider.get_portfolio()`` followed
+by ``sync_portfolio()`` against the live DB. Multi-leg trades and
+rapid order bursts collapse into one reconcile per
+``_RECONCILE_DEBOUNCE_S`` window so the public REST limit
+(60 GET/min) is respected even when the private firehose is noisy.
 
-**Slice 2 scope** (private channel + reconcile):
-
-- Also subscribes to the ``private`` topic. eToro pushes
-  ``Trading.OrderFor*`` / ``Trading.Position*`` / ``Trading.Credit*``
-  envelopes here whenever the operator's portfolio state changes
-  (orders accepted / rejected, positions opened / closed, cash
-  credit moves).
-- Each private push schedules a debounced REST reconcile —
-  ``EtoroBrokerProvider.get_portfolio()`` followed by
-  ``sync_portfolio()`` against the live DB. Multi-leg trades and
-  rapid order bursts collapse into one reconcile per
-  ``_RECONCILE_DEBOUNCE_S`` window so the public REST limit
-  (60 GET/min) is respected even when the private firehose is
-  noisy.
-
-Reconnect policy: any I/O error or close triggers a 5-second backoff
-then re-authenticate + re-subscribe. The set of instrument topics is
-recomputed on every reconnect so a freshly-opened position /
-watchlist add is picked up after at most one reconnect cycle.
+**Reconnect policy**: any I/O error or close triggers a 5-second
+backoff then re-authenticate + re-subscribe. The reconnect's
+batched Subscribe replays whatever ``_topic_refs.keys()`` currently
+holds, so an SSE stream that survived the outage continues to
+receive ticks once auth completes.
 """
 
 from __future__ import annotations
@@ -68,15 +68,6 @@ _RECONNECT_BACKOFF_S = 5.0
 # isn't hammered. 3 seconds is short enough that the operator sees
 # fresh state inside a "feel alive" window without churn.
 _RECONCILE_DEBOUNCE_S = 3.0
-# Periodic interval for the held-∪-watchlist refresh loop. Position
-# open/close events trigger an immediate refresh via the private-
-# channel reconcile (see ``_reconcile_worker``); the periodic timer
-# is the fallback that catches watchlist edits and any state change
-# that arrived without a private push (e.g. cron-level corrections).
-# 60s is the operator-visible "felt-stale" window — fast enough that
-# a watchlist add reaches the WS before the next page navigation,
-# slow enough that the DB poll cost is negligible.
-_SOURCE_RECONCILE_INTERVAL_S = 60.0
 
 
 # ---------------------------------------------------------------------
@@ -388,31 +379,12 @@ class EtoroWebSocketSubscriber:
         self._reconcile_idle = threading.Event()
         self._reconcile_idle.set()
 
-        # Unified topic registry (#490). Every reason to subscribe —
-        # held position, watchlist entry, page-view SSE — adds a ref;
-        # the topic is sent to eToro iff its refcount > 0. Ref-counting
-        # is the single mechanism for both "long-lived" (held /
-        # watchlist) and "short-lived" (page-view) subscriptions, so
-        # we never stream ticks for an instrument no source still
-        # cares about.
-        #
-        # Held-∪-watchlist refs are owned by ``_source_reconcile_worker``
-        # which periodically diffs the DB-backed source set against
-        # ``_source_topic_set`` and translates the diff into add/remove
-        # calls. ``_source_topic_set`` is the worker's private record
-        # of which ids it currently holds a ref for, so it can drop
-        # only its own refs without disturbing page-view refs that
-        # share the same instrument id.
+        # Visibility-driven topic registry. Every page-view SSE stream
+        # bumps a ref on its visible instrument ids; the topic is sent
+        # to eToro iff its refcount > 0 (#498). No DB-backed selector
+        # auto-pins held positions or watchlist — what the operator
+        # has on screen drives the upstream subscription, nothing else.
         self._topic_refs: dict[int, int] = {}
-        self._source_topic_set: set[int] = set()
-        # Signal raised by other paths to ask the source worker to
-        # reconcile immediately rather than waiting for the next
-        # periodic tick. Triggered by the private-channel reconcile
-        # (positions changed) so a freshly opened or closed position
-        # gets its feed adjusted within seconds, not within the
-        # periodic interval.
-        self._source_reconcile_signal = asyncio.Event()
-        self._source_reconcile_task: asyncio.Task[None] | None = None
         # Live WS connection, set inside ``_connect_and_listen`` once
         # the auth handshake succeeds and cleared on disconnect. The
         # add/remove path reads this to send frames from external
@@ -472,30 +444,12 @@ class EtoroWebSocketSubscriber:
             return
         self._stop_event.clear()
         self._reconcile_signal.clear()
-        self._source_reconcile_signal.clear()
         self._reconcile_worker_task = asyncio.create_task(self._reconcile_worker(), name="etoro-ws-reconcile-worker")
-        # Populate source-managed refs before launching the WS task so
-        # the connect path's batched Subscribe carries the full topic
-        # set in one frame instead of "empty + delta". A failure here
-        # is logged and swallowed; we also pre-set the reconcile
-        # signal so the worker's first iteration runs immediately
-        # rather than waiting up to ``_SOURCE_RECONCILE_INTERVAL_S``
-        # for the periodic timeout — without this, a transient
-        # startup DB blip would leave held/watchlist feeds
-        # unsubscribed for a full minute (Codex review on PR for
-        # #490).
-        try:
-            await self._refresh_source_topics()
-        except Exception:
-            logger.warning(
-                "EtoroWebSocketSubscriber: initial source-topic refresh failed; "
-                "kicking source worker to retry immediately",
-                exc_info=True,
-            )
-            self._source_reconcile_signal.set()
-        self._source_reconcile_task = asyncio.create_task(
-            self._source_reconcile_worker(), name="etoro-ws-source-reconcile"
-        )
+        # Subscriber boots with an empty ``_topic_refs``; the WS
+        # connection comes up but doesn't subscribe to anything until
+        # an SSE stream opens and calls ``add_instruments`` for the
+        # ids on screen. Visibility drives the upstream subscription,
+        # not held / watchlist state (#498).
         self._task = asyncio.create_task(self._run(), name="etoro-ws-subscriber")
         logger.info("EtoroWebSocketSubscriber: started")
 
@@ -507,20 +461,6 @@ class EtoroWebSocketSubscriber:
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         self._task = None
-        # Cancel the source-reconcile worker before the private-event
-        # reconcile worker. It may be awaiting ``asyncio.to_thread``
-        # on the watched-ids selector; the cancel raises
-        # CancelledError out of the await but lets any in-flight
-        # add/remove send finish first because both honour
-        # CancelledError on their own awaits. No thread-completion
-        # barrier needed — the source worker only does DB *reads*, so
-        # there is no in-flight write that the lifespan needs to drain
-        # before closing the pool.
-        if self._source_reconcile_task is not None:
-            self._source_reconcile_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._source_reconcile_task
-            self._source_reconcile_task = None
         # Cancel the reconcile worker. The worker coroutine may be
         # awaiting ``asyncio.to_thread`` — the cancel raises
         # CancelledError out of the await, but the OS thread running
@@ -607,118 +547,11 @@ class EtoroWebSocketSubscriber:
             try:
                 await asyncio.to_thread(self._run_reconcile_in_thread)
                 logger.info("EtoroWebSocketSubscriber: reconcile complete")
-                # Portfolio state likely changed — kick the source-
-                # topic worker so a freshly opened or closed position
-                # gets its feed adjusted within seconds rather than
-                # waiting for the next periodic tick.
-                self._source_reconcile_signal.set()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.warning(
                     "EtoroWebSocketSubscriber: reconcile failed",
-                    exc_info=True,
-                )
-
-    async def _refresh_source_topics(self) -> None:
-        """Diff the held-∪-watchlist DB set against ``_source_topic_set``
-        and translate the diff into ref-count updates + Subscribe /
-        Unsubscribe frames, all under the topic lock.
-
-        Single critical section: ref-count math, ``_source_topic_set``
-        commit, and wire send all happen under ``_topic_lock`` so
-        that a CancelledError mid-method cannot leave
-        ``_source_topic_set`` stale relative to ``_topic_refs`` — if
-        cancellation lands during the awaited send, the in-memory
-        state already matches the post-refresh shape and the next
-        reconcile diff against the same source set sees no work,
-        avoiding the double-add leak (Codex review on PR for #490).
-        Wire delivery may be partial on cancellation; the next
-        reconnect resubscribes from ``_topic_refs.keys()``.
-
-        The ``_watched_ids_provider`` DB read happens *outside* the
-        lock so add/remove callers don't block on a slow DB.
-        """
-        new_set = set(await asyncio.to_thread(self._watched_ids_provider))
-        async with self._topic_lock:
-            to_add = sorted(new_set - self._source_topic_set)
-            to_remove = sorted(self._source_topic_set - new_set)
-            newly_tracked: list[int] = []
-            to_unsubscribe: list[int] = []
-            for iid in to_add:
-                prior = self._topic_refs.get(iid, 0)
-                self._topic_refs[iid] = prior + 1
-                if prior == 0:
-                    newly_tracked.append(iid)
-            for iid in to_remove:
-                if iid not in self._topic_refs:
-                    continue
-                self._topic_refs[iid] -= 1
-                if self._topic_refs[iid] <= 0:
-                    del self._topic_refs[iid]
-                    to_unsubscribe.append(iid)
-            # Commit source-set BEFORE the awaited sends so a cancel
-            # during send leaves source bookkeeping consistent with
-            # the ref-count map. Wire delivery may be partial; the
-            # next reconnect's batched Subscribe replays from
-            # ``_topic_refs.keys()`` and recovers.
-            self._source_topic_set = new_set
-            if newly_tracked and self._ws is not None:
-                msg = build_subscribe_message(newly_tracked)
-                if msg is not None:
-                    try:
-                        await self._ws.send(msg)
-                        logger.info(
-                            "EtoroWebSocketSubscriber: source-refresh subscribe %d topics",
-                            len(newly_tracked),
-                        )
-                    except Exception:
-                        logger.warning(
-                            "EtoroWebSocketSubscriber: source-refresh Subscribe send failed",
-                            exc_info=True,
-                        )
-            if to_unsubscribe and self._ws is not None:
-                msg = build_unsubscribe_message(to_unsubscribe)
-                if msg is not None:
-                    try:
-                        await self._ws.send(msg)
-                        logger.info(
-                            "EtoroWebSocketSubscriber: source-refresh unsubscribe %d topics",
-                            len(to_unsubscribe),
-                        )
-                    except Exception:
-                        logger.warning(
-                            "EtoroWebSocketSubscriber: source-refresh Unsubscribe send failed",
-                            exc_info=True,
-                        )
-
-    async def _source_reconcile_worker(self) -> None:
-        """Periodically refresh the held-∪-watchlist source set.
-
-        Runs every ``_SOURCE_RECONCILE_INTERVAL_S`` as a fallback
-        and also fires immediately when ``_source_reconcile_signal``
-        is set. The signal is set after the private-channel
-        portfolio reconcile completes (positions just changed) so
-        a freshly-opened position gets its feed within seconds.
-        Watchlist edits hit the periodic path — operator-perceived
-        latency is bounded by the interval but cost is negligible.
-        """
-        while not self._stop_event.is_set():
-            try:
-                await asyncio.wait_for(
-                    self._source_reconcile_signal.wait(),
-                    timeout=_SOURCE_RECONCILE_INTERVAL_S,
-                )
-                self._source_reconcile_signal.clear()
-            except TimeoutError:
-                pass  # periodic firing
-            try:
-                await self._refresh_source_topics()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.warning(
-                    "EtoroWebSocketSubscriber: source-topic reconcile failed; next tick will retry",
                     exc_info=True,
                 )
 
@@ -774,11 +607,13 @@ class EtoroWebSocketSubscriber:
             # serialised in wire order.
             #
             # ``_topic_refs`` is the single source of truth for what
-            # to subscribe to. The source-reconcile worker
-            # populated held + watchlist refs at start-up; page-view
-            # add/remove may have layered additional refs on top
-            # during a reconnect window. Re-subscribing from
-            # ``_topic_refs.keys()`` covers both classes in one frame.
+            # to subscribe to. Page-view SSE streams populate it via
+            # ``add_instruments`` / ``remove_instruments`` as the
+            # operator opens and closes pages; refs accumulated during
+            # a reconnect window survive here. Re-subscribing from
+            # ``_topic_refs.keys()`` replays the current visibility
+            # set in one frame so any SSE that survived the outage
+            # keeps receiving ticks.
             #
             # The private subscribe + listen loop run outside the
             # lock but inside the ``_ws``-clearing try/finally, so
@@ -798,8 +633,7 @@ class EtoroWebSocketSubscriber:
                     else:
                         logger.info(
                             "EtoroWebSocketSubscriber: no tracked instruments — "
-                            "connection will idle for rates until a position / "
-                            "watchlist add or a page-view subscribe"
+                            "connection will idle until a page-view subscribe"
                         )
 
                 # Always subscribe to the private channel — even if
@@ -826,21 +660,22 @@ class EtoroWebSocketSubscriber:
         """Bump ref counts for the given instrument ids; send a
         Subscribe frame for any topics whose refcount just went 0→1.
 
-        Single mechanism for every reason to subscribe — the source
-        worker uses it for held/watchlist refs and the SSE handler
-        uses it for page-view refs. The Nth caller's add does not
-        change wire state if N-1 callers already hold a ref.
+        Single mechanism for every page-view ref — the SSE endpoint
+        in :mod:`app.api.sse_quotes` calls this on stream open with
+        the ids the operator currently has on screen. The Nth caller's
+        add does not change wire state if N-1 callers already hold a
+        ref (multi-tab on the same instrument shares one Subscribe).
 
-        Safe to call from FastAPI request handlers and from internal
-        async workers. If the ws is mid-reconnect the counts are
-        still updated and the next connect cycle re-subscribes from
-        ``_topic_refs.keys()``.
+        Safe to call from FastAPI request handlers. If the ws is
+        mid-reconnect the counts are still updated and the next
+        connect cycle re-subscribes from ``_topic_refs.keys()``.
 
         Cancellation-safety: the ref-count update is pure-Python
-        under the lock with no ``await`` in the critical section,
-        so a CancelledError during this method always occurs AFTER
-        state commit. Callers pair this with a ``remove_instruments``
-        in their finally to guarantee no leaked refs.
+        under the lock with no ``await`` in the critical section
+        before the wire send, so a CancelledError during the awaited
+        send leaves the counts committed. Callers pair this with a
+        ``remove_instruments`` in their finally to guarantee no
+        leaked refs.
         """
         if not instrument_ids:
             return
@@ -881,13 +716,12 @@ class EtoroWebSocketSubscriber:
         """Decrement ref counts; send Unsubscribe for topics that
         hit zero.
 
-        With the unified ref-count model there is no special "pinned"
-        class that survives a remove — held positions hold their own
-        ref through the source-reconcile worker, so a page-view's
-        remove on a held instrument decrements the page-view ref
-        but the source ref keeps the topic subscribed. Only when
-        every source has dropped its ref does the wire-level
-        Unsubscribe go out.
+        Symmetric with :meth:`add_instruments` — the SSE endpoint
+        calls this on stream close with the ids the page was viewing.
+        When two tabs share the same id the first close drops the
+        refcount from 2→1 (no Unsubscribe), the second from 1→0
+        (Unsubscribe goes out). No wire teardown until every page-view
+        ref has dropped.
         """
         if not instrument_ids:
             return
