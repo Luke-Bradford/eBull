@@ -22,20 +22,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.db import get_conn
-from app.providers.implementations.yfinance_provider import YFinanceKeyStats, YFinanceProvider
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/instruments", tags=["instruments"])
-
-
-def get_yfinance_provider() -> YFinanceProvider:
-    """FastAPI dependency: constructs a fresh YFinanceProvider per request.
-
-    The provider is stateless, so there is no pooling concern. Tests
-    override this via ``app.dependency_overrides`` to inject a stub.
-    """
-    return YFinanceProvider()
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +98,10 @@ class InstrumentPrice(BaseModel):
 
 # Closed set of values for `InstrumentKeyStats.field_source` entries. Mirror
 # in frontend/src/api/types.ts — consumers rely on this being exhaustive.
+# Per settled decision (eToro = market data, SEC = official filings, FMP =
+# normalized fundamentals), yfinance has no role; #498/#499 retired it.
 KeyStatsFieldSource = Literal[
     "sec_xbrl",
-    "yfinance",
     "unavailable",
     "sec_xbrl_price_missing",
 ]
@@ -131,7 +122,7 @@ class InstrumentKeyStats(BaseModel):
 
 class InstrumentFinancialRow(BaseModel):
     period_end: date
-    period_type: str  # Q1/Q2/Q3/Q4/FY (from financial_periods) or yfinance label
+    period_type: str  # Q1/Q2/Q3/Q4/FY (from financial_periods)
     values: dict[str, Decimal | None]
 
 
@@ -140,7 +131,7 @@ class InstrumentFinancials(BaseModel):
     statement: str  # "income" | "balance" | "cashflow"
     period: str  # "quarterly" | "annual"
     currency: str | None
-    source: str  # "financial_periods" (local SEC XBRL) | "yfinance"
+    source: str  # "financial_periods" (local SEC XBRL) | "unavailable"
     rows: list[InstrumentFinancialRow]
 
 
@@ -169,16 +160,19 @@ class InstrumentCandles(BaseModel):
 
 
 class InstrumentSummary(BaseModel):
-    """Per-ticker research summary (Phase 2.2).
+    """Per-ticker research summary.
 
-    Identity comes from the local ``instruments`` row; price + key stats
-    come from yfinance. All leaf fields are nullable so the UI can render
-    partial data when a provider degrades.
+    Sources, per the settled provider strategy (#498/#499):
+      - Identity: local ``instruments`` row (sourced from eToro
+        universe sync + SEC profile enrichment).
+      - Price: ``quotes`` table (eToro WS / market data refresh).
+      - Market cap: SEC XBRL share count × eToro close.
+      - Key stats: SEC XBRL via ``financial_periods_ttm`` +
+        ``instrument_dividend_summary``.
 
-    ``source`` reports which provider populated each section so the
-    future-spec per-field attribution (SEC EDGAR / Finnhub / yfinance)
-    has a landing spot — right now everything non-identity is yfinance,
-    so the map is simple; phase 2.3 will expand it.
+    All leaf fields are nullable so the UI can render partial data
+    when SEC coverage is missing. ``source`` reports which provider
+    populated each section.
     """
 
     instrument_id: int
@@ -408,8 +402,9 @@ def _fetch_local_financials(
     ``period == 'quarterly'`` matches period_type IN ('Q1','Q2','Q3','Q4').
     ``period == 'annual'`` matches period_type = 'FY'.
 
-    Returns (rows, currency). Empty rows = no local data, let caller fall
-    back to yfinance.
+    Returns (rows, currency). Empty rows = no local data; the caller
+    returns an empty payload (no yfinance fallback per #498/#499 —
+    SEC XBRL is the only fundamentals source for US instruments).
     """
     period_types: list[str] = ["Q1", "Q2", "Q3", "Q4"] if period == "quarterly" else ["FY"]
 
@@ -452,17 +447,17 @@ def get_instrument_financials(
     period: Literal["quarterly", "annual"] = Query(default="quarterly"),
     statement: Literal["income", "balance", "cashflow"] = Query(default="income"),
     conn: psycopg.Connection[object] = Depends(get_conn),
-    yfinance_provider: YFinanceProvider = Depends(get_yfinance_provider),
 ) -> InstrumentFinancials:
-    """Per-ticker financial statement (Phase 2.3 of the 2026-04-19 refocus).
+    """Per-ticker financial statement.
 
-    Pull priority:
-      1. Local ``financial_periods`` rows (SEC XBRL-sourced) if the
-         instrument has them.
-      2. yfinance fallback otherwise.
+    Sourced exclusively from local ``financial_periods`` rows (SEC
+    XBRL-derived). Per the settled provider strategy (#498/#499),
+    yfinance is no longer consulted. Non-US issuers without SEC
+    coverage will return an empty row list until FMP normalisation
+    fills the gap.
 
-    Returns an empty row list (not 500, not 404) when neither source has
-    data — the UI shows "no statement data available".
+    Returns an empty row list (not 500, not 404) when no SEC data
+    exists — the UI shows "no statement data available".
     """
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
@@ -489,7 +484,6 @@ def get_instrument_financials(
     if inst_row is None:
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
 
-    # Try local first.
     local_rows, local_currency = _fetch_local_financials(
         conn,
         int(inst_row["instrument_id"]),  # type: ignore[arg-type]
@@ -506,47 +500,15 @@ def get_instrument_financials(
             rows=local_rows,
         )
 
-    # Fallback to yfinance.
-    y_fin = yfinance_provider.get_financials(
-        str(inst_row["symbol"]),  # type: ignore[index]
-        statement=statement,
-        period=period,
-    )
-    if y_fin is None:
-        return InstrumentFinancials(
-            symbol=str(inst_row["symbol"]),  # type: ignore[index]
-            statement=statement,
-            period=period,
-            currency=None,
-            source="yfinance",
-            rows=[],
-        )
-
-    # yfinance statement rows don't carry a period_type label. For the
-    # quarterly path we infer Q1-Q4 from the period_end month (fiscal
-    # quarters end Mar/Jun/Sep/Dec for the vast majority of issuers).
-    # Annual rows are tagged "FY". This matches the local-path labels so
-    # the frontend treats both sources uniformly.
-    def _yf_period_type(d: date) -> str:
-        if period == "annual":
-            return "FY"
-        return {3: "Q1", 6: "Q2", 9: "Q3", 12: "Q4"}.get(d.month, "Q?")
-
-    yf_rows = [
-        InstrumentFinancialRow(
-            period_end=row.period_end,
-            period_type=_yf_period_type(row.period_end),
-            values=dict(row.values.items()),
-        )
-        for row in y_fin.rows
-    ]
+    # No SEC coverage → empty payload. Frontend renders the empty-
+    # state hint; no fallback to a non-canonical source.
     return InstrumentFinancials(
         symbol=str(inst_row["symbol"]),  # type: ignore[index]
         statement=statement,
         period=period,
-        currency=y_fin.currency,
-        source="yfinance",
-        rows=yf_rows,
+        currency=None,
+        source="unavailable",
+        rows=[],
     )
 
 
@@ -1464,7 +1426,7 @@ def _fetch_local_fundamentals(
     except psycopg.Error:
         # DB errors masquerading as "no local data" would be invisible
         # in the source map. Log the failure loudly; caller treats the
-        # empty dict as fall-through to yfinance.
+        # empty dict as "stats unavailable".
         logger.warning(
             "_fetch_local_fundamentals: DB query failed for instrument_id=%d",
             instrument_id,
@@ -1486,35 +1448,38 @@ def _fetch_local_fundamentals(
     return out
 
 
-def _merge_stats_with_local(
-    yfinance_stats: YFinanceKeyStats | None,
+def _build_local_stats(
     local: dict[str, Decimal | None],
     current_price: Decimal | None,
+    dividend_yield: Decimal | None,
 ) -> InstrumentKeyStats | None:
-    """Merge local SEC-derived stats onto a yfinance KeyStats object.
+    """Build an :class:`InstrumentKeyStats` from SEC XBRL-derived data only.
 
-    Local data wins per-field when present:
-      - pe_ratio    = current_price / eps
-      - pb_ratio    = current_price / book_value
-      - debt_to_equity = debt / shareholders_equity
-      - roe         = net_income / shareholders_equity
-      - roa         = net_income / total_assets
+    Per the settled provider strategy (#498/#499), yfinance is no
+    longer consulted; key stats are computed exclusively from local
+    SEC data:
 
-    Fields the local snapshot can't produce (dividend yield, payout ratio,
-    revenue_growth_yoy, earnings_growth_yoy) always fall back to yfinance.
+      - pe_ratio        = current_price / eps
+      - pb_ratio        = current_price / book_value
+      - debt_to_equity  = debt / shareholders_equity
+      - roe             = net_income / shareholders_equity
+      - roa             = net_income / total_assets
+      - dividend_yield  = passed in from
+        ``instrument_dividend_summary.ttm_yield_pct`` (#426)
+
+    Fields the local SEC pipeline doesn't yet produce (payout ratio,
+    revenue / earnings growth YoY) return ``None`` with
+    ``field_source = "unavailable"`` until those derivations land.
     """
-    if yfinance_stats is None and not local:
+    if not local and current_price is None and dividend_yield is None:
         return None
 
     field_source: dict[str, KeyStatsFieldSource] = {}
 
-    def _pick(field: str, local_value: Decimal | None, yfinance_value: Decimal | None) -> Decimal | None:
+    def _pick(field: str, local_value: Decimal | None) -> Decimal | None:
         if local_value is not None:
             field_source[field] = "sec_xbrl"
             return local_value
-        if yfinance_value is not None:
-            field_source[field] = "yfinance"
-            return yfinance_value
         field_source[field] = "unavailable"
         return None
 
@@ -1534,38 +1499,25 @@ def _merge_stats_with_local(
 
     # When local EPS / book_value are present but current_price is not,
     # pe/pb remain unresolvable — but that's "waiting on price", not
-    # "no local data". Surface that distinction in field_source so the
-    # UI can render a "price missing" hint instead of an ambiguous em-dash.
+    # "no local data". Surface that distinction so the UI can render a
+    # "price missing" hint rather than an ambiguous em-dash.
     price_blocked_pe = local_pe is None and current_price is None and local.get("eps") is not None
     price_blocked_pb = local_pb is None and current_price is None and local.get("book_value") is not None
 
-    pe_final = _pick("pe_ratio", local_pe, yfinance_stats.pe_ratio if yfinance_stats else None)
-    pb_final = _pick("pb_ratio", local_pb, yfinance_stats.pb_ratio if yfinance_stats else None)
-    div_final = _pick("dividend_yield", None, yfinance_stats.dividend_yield if yfinance_stats else None)
-    payout_final = _pick("payout_ratio", None, yfinance_stats.payout_ratio if yfinance_stats else None)
-    roe_final = _pick("roe", local_roe, yfinance_stats.roe if yfinance_stats else None)
-    roa_final = _pick("roa", local_roa, yfinance_stats.roa if yfinance_stats else None)
-    de_final = _pick(
-        "debt_to_equity",
-        local_de,
-        yfinance_stats.debt_to_equity if yfinance_stats else None,
-    )
-    rev_growth_final = _pick(
-        "revenue_growth_yoy",
-        None,
-        yfinance_stats.revenue_growth_yoy if yfinance_stats else None,
-    )
-    earn_growth_final = _pick(
-        "earnings_growth_yoy",
-        None,
-        yfinance_stats.earnings_growth_yoy if yfinance_stats else None,
-    )
+    pe_final = _pick("pe_ratio", local_pe)
+    pb_final = _pick("pb_ratio", local_pb)
+    div_final = _pick("dividend_yield", dividend_yield)
+    payout_final = _pick("payout_ratio", None)
+    roe_final = _pick("roe", local_roe)
+    roa_final = _pick("roa", local_roa)
+    de_final = _pick("debt_to_equity", local_de)
+    rev_growth_final = _pick("revenue_growth_yoy", None)
+    earn_growth_final = _pick("earnings_growth_yoy", None)
 
-    # Rewrite field_source for pe/pb when local SEC data exists but the
-    # current price is missing — distinguishes "waiting on price" from
-    # "genuinely unavailable" so the UI can render an actionable hint.
-    # Rewrite BEFORE constructing the Pydantic model since Pydantic v2
-    # copies the dict into the field, severing post-construction mutation.
+    # Rewrite pe/pb source when SEC data exists but the current price
+    # is missing — distinguishes "waiting on price" from "genuinely
+    # unavailable". Must run BEFORE Pydantic copies the dict into the
+    # model field.
     if price_blocked_pe and pe_final is None:
         field_source["pe_ratio"] = "sec_xbrl_price_missing"
     if price_blocked_pb and pb_final is None:
@@ -1589,19 +1541,29 @@ def _merge_stats_with_local(
 def get_instrument_summary(
     symbol: str,
     conn: psycopg.Connection[object] = Depends(get_conn),
-    yfinance_provider: YFinanceProvider = Depends(get_yfinance_provider),
     instrument_id: int | None = Query(default=None, ge=1, alias="id"),
 ) -> InstrumentSummary:
-    """Per-ticker research summary (Phase 2.2 of the 2026-04-19 refocus).
+    """Per-ticker research summary.
 
-    Merges local identity/tier data with yfinance-sourced price + key
-    stats. A missing symbol returns 404. yfinance failures return null
-    sections rather than 500 — the UI renders what it has.
+    Sources, per the settled provider strategy (#498/#499 — yfinance
+    retired):
 
-    `?id=<instrument_id>` override: when a symbol collides across
-    exchanges, the caller can pin a specific instrument_id. The server
-    verifies that id's symbol matches the path symbol — a mismatch is a
-    404, not a silent wrong-instrument response. See
+    - Identity: local ``instruments`` row.
+    - Price: ``quotes`` table (eToro WS / market data refresh).
+    - Market cap: SEC XBRL share count × ``quotes.last``.
+    - Key stats: SEC XBRL via ``financial_periods_ttm`` +
+      ``instrument_dividend_summary``.
+
+    Fields with no canonical eToro / SEC source today (52-week range,
+    day change, payout ratio, growth YoY) return ``None`` rather
+    than reaching for an unsanctioned provider. The frontend renders
+    "—" for those until a follow-up wires SEC-derived computations.
+
+    A missing symbol returns 404. ``?id=<instrument_id>`` override:
+    when a symbol collides across exchanges, the caller can pin a
+    specific instrument_id. The server verifies that id's symbol
+    matches the path symbol — a mismatch is a 404, not a silent
+    wrong-instrument response. See
     docs/superpowers/specs/2026-04-20-per-stock-research-page.md §2.
     """
     symbol_clean = symbol.strip().upper()
@@ -1610,17 +1572,18 @@ def get_instrument_summary(
 
     # `symbol` is not UNIQUE across exchanges (see migration 043);
     # ORDER BY `is_primary_listing DESC, instrument_id ASC` makes the
-    # winner deterministic when two listings share a ticker. See
-    # docs/superpowers/specs/2026-04-20-per-stock-research-page.md §2.
+    # winner deterministic when two listings share a ticker.
     if instrument_id is not None:
         # instrument_id is the PK so the lookup is already unique; no
         # ORDER BY / LIMIT needed.
         lookup_sql = """
             SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
                    i.currency, i.sector, i.industry, i.country,
-                   i.is_tradable, c.coverage_tier
+                   i.is_tradable, c.coverage_tier,
+                   q.bid, q.ask, q.last
             FROM instruments i
             LEFT JOIN coverage c USING (instrument_id)
+            LEFT JOIN quotes q USING (instrument_id)
             WHERE i.instrument_id = %(id)s AND UPPER(i.symbol) = %(symbol)s
         """
         params: dict[str, object] = {"id": instrument_id, "symbol": symbol_clean}
@@ -1628,9 +1591,11 @@ def get_instrument_summary(
         lookup_sql = """
             SELECT i.instrument_id, i.symbol, i.company_name, i.exchange,
                    i.currency, i.sector, i.industry, i.country,
-                   i.is_tradable, c.coverage_tier
+                   i.is_tradable, c.coverage_tier,
+                   q.bid, q.ask, q.last
             FROM instruments i
             LEFT JOIN coverage c USING (instrument_id)
+            LEFT JOIN quotes q USING (instrument_id)
             WHERE UPPER(i.symbol) = %(symbol)s
             ORDER BY i.is_primary_listing DESC, i.instrument_id ASC
             LIMIT 1
@@ -1643,61 +1608,53 @@ def get_instrument_summary(
     if row is None:
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
 
-    # One yfinance .info call instead of three — Codex review caught that
-    # get_profile / get_quote / get_key_stats each triggered their own
-    # network fetch. get_snapshot fetches .info once and derives all three.
-    snapshot = yfinance_provider.get_snapshot(row["symbol"])  # type: ignore[arg-type]
-    profile = snapshot.profile
-    quote = snapshot.quote
-    stats = snapshot.key_stats
-
-    # Local DB is authoritative for every identity field that has a non-null
-    # value — yfinance fills only the gaps. company_name is schema-non-null,
-    # so display_name falls to yfinance only if the local row somehow has an
-    # empty string (defence-in-depth). SEC-sourced entity metadata
-    # (description, SIC, exchanges, former names) is exposed via the
-    # dedicated ``GET /instruments/{symbol}/sec_profile`` endpoint (#427);
-    # the frontend consumes both endpoints in parallel so this handler's
-    # query pattern stays unchanged.
+    # Identity: local DB only. Fields the operator's universe sync
+    # left null stay null — no third-party fill-in.
     identity = InstrumentIdentity(
         symbol=row["symbol"],  # type: ignore[arg-type]
-        display_name=row["company_name"] or (profile.display_name if profile is not None else None),  # type: ignore[arg-type]
-        sector=row["sector"] or (profile.sector if profile is not None else None),  # type: ignore[arg-type]
-        industry=row["industry"] or (profile.industry if profile is not None else None),  # type: ignore[arg-type]
-        exchange=row["exchange"] or (profile.exchange if profile is not None else None),  # type: ignore[arg-type]
-        country=row["country"] or (profile.country if profile is not None else None),  # type: ignore[arg-type]
-        currency=row["currency"] or (profile.currency if profile is not None else None),  # type: ignore[arg-type]
-        market_cap=profile.market_cap if profile is not None else None,
+        display_name=row["company_name"] or None,  # type: ignore[arg-type]
+        sector=row["sector"],  # type: ignore[arg-type]
+        industry=row["industry"],  # type: ignore[arg-type]
+        exchange=row["exchange"],  # type: ignore[arg-type]
+        country=row["country"],  # type: ignore[arg-type]
+        currency=row["currency"],  # type: ignore[arg-type]
+        market_cap=None,
     )
 
+    # Price: ``quotes`` row. ``last`` is preferred, ``bid`` is the
+    # fallback when last hasn't been written (some providers only
+    # publish bid/ask). Day change + 52w range stay null until a
+    # SEC-derived computation lands; the frontend renders "—".
+    quote_last = row.get("last")
+    quote_bid = row.get("bid")
+    current_price: Decimal | None = None
+    if quote_last is not None:
+        current_price = Decimal(str(quote_last))
+    elif quote_bid is not None:
+        current_price = Decimal(str(quote_bid))
     price_block = (
         InstrumentPrice(
-            current=quote.price,
-            day_change=quote.day_change,
-            day_change_pct=quote.day_change_pct,
-            week_52_high=quote.week_52_high,
-            week_52_low=quote.week_52_low,
-            currency=quote.currency,
+            current=current_price,
+            day_change=None,
+            day_change_pct=None,
+            week_52_high=None,
+            week_52_low=None,
+            currency=row["currency"],  # type: ignore[arg-type]
         )
-        if quote is not None
+        if current_price is not None
         else None
     )
 
-    # Prefer local SEC XBRL fields for US tickers (#357). Local values
-    # override yfinance per-field; fields the snapshot can't compute
-    # (dividend yield, growth) fall back to yfinance cleanly.
     instrument_id_int = int(row["instrument_id"])  # type: ignore[arg-type]
     local_fundamentals: dict[str, Decimal | None] = {}
     use_local_sec = _has_sec_cik(conn, instrument_id_int)
     if use_local_sec:
         local_fundamentals = _fetch_local_fundamentals(conn, instrument_id_int)
 
-    # #432 (yfinance retire, batch 1): prefer compute-from-XBRL market
-    # cap over yfinance when SEC has a fresh share count. Runs after
-    # the existing local-fundamentals block so its cursor slot is the
-    # LAST in the sequence — keeps the test harness shape stable.
-    # Returns None for non-US / pre-seed; we then fall back to
-    # whatever yfinance provided on the identity built above.
+    # Market cap: SEC XBRL share count × eToro close (`compute_market_cap`).
+    # Returns None for instruments without SEC coverage; market cap
+    # then stays null on the identity rather than reaching for a
+    # non-canonical source.
     try:
         from app.services.xbrl_derived_stats import compute_market_cap
 
@@ -1708,37 +1665,38 @@ def get_instrument_summary(
     if computed_cap is not None:
         identity = identity.model_copy(update={"market_cap": computed_cap.value})
 
-    # Treat a dict of all-None as "no local data" — the fundamentals_snapshot
-    # table may exist with sparse rows during bootstrap.
+    # Dividend yield: SEC dividend summary (#426). Empty when the
+    # instrument has never paid a dividend; key stats path falls
+    # through cleanly.
+    dividend_yield: Decimal | None = None
+    try:
+        from app.services.dividends import get_dividend_summary
+
+        div_summary = get_dividend_summary(conn, instrument_id=instrument_id_int)
+        dividend_yield = div_summary.ttm_yield_pct
+    except Exception:
+        logger.warning("get_dividend_summary failed", exc_info=True)
+
     has_local_values = any(v is not None for v in local_fundamentals.values())
-    if use_local_sec and has_local_values:
-        stats_block = _merge_stats_with_local(
-            stats,
+    # Build the stats block when ANY input is available — SEC
+    # fundamentals, dividend yield, or both. Without this gate, an
+    # instrument with a dividend yield but no SEC fundamentals row
+    # would silently drop the yield (Codex round 2 finding on PR for
+    # #498/#499).
+    if (use_local_sec and has_local_values) or dividend_yield is not None:
+        stats_block = _build_local_stats(
             local_fundamentals,
-            current_price=(quote.price if quote is not None else None),
+            current_price=current_price,
+            dividend_yield=dividend_yield,
         )
-        key_stats_source = "local_sec_xbrl+yfinance"
-    elif stats is not None:
-        stats_block = InstrumentKeyStats(
-            pe_ratio=stats.pe_ratio,
-            pb_ratio=stats.pb_ratio,
-            dividend_yield=stats.dividend_yield,
-            payout_ratio=stats.payout_ratio,
-            roe=stats.roe,
-            roa=stats.roa,
-            debt_to_equity=stats.debt_to_equity,
-            revenue_growth_yoy=stats.revenue_growth_yoy,
-            earnings_growth_yoy=stats.earnings_growth_yoy,
-            field_source=None,
-        )
-        key_stats_source = "yfinance"
+        key_stats_source = "sec_xbrl"
     else:
         stats_block = None
         key_stats_source = "unavailable"
 
     source = {
-        "identity": "local_db+yfinance",
-        "price": "yfinance" if quote is not None else "unavailable",
+        "identity": "local_db",
+        "price": "quotes" if current_price is not None else "unavailable",
         "key_stats": key_stats_source,
     }
 

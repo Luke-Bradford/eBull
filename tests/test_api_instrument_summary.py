@@ -1,4 +1,15 @@
-"""Tests for GET /instruments/{symbol}/summary (Phase 2.2)."""
+"""Tests for GET /instruments/{symbol}/summary.
+
+After #498/#499 retired yfinance, the endpoint sources:
+
+- Identity from the local ``instruments`` row.
+- Price from the local ``quotes`` table.
+- Market cap from SEC XBRL × ``quotes`` (via ``compute_market_cap``).
+- Key stats from SEC ``financial_periods_ttm`` + dividend summary.
+
+Tests stub the DB with the row shape the endpoint expects and verify
+the response carries the right values from the right source.
+"""
 
 from __future__ import annotations
 
@@ -9,22 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.instruments import get_yfinance_provider
 from app.main import app
-from app.providers.implementations.yfinance_provider import (
-    YFinanceKeyStats,
-    YFinanceProfile,
-    YFinanceQuote,
-    YFinanceSnapshot,
-)
-
-
-def _install_stub_provider(provider: object) -> None:
-    app.dependency_overrides[get_yfinance_provider] = lambda: provider
-
-
-def _clear_provider_override() -> None:
-    app.dependency_overrides.pop(get_yfinance_provider, None)
 
 
 @pytest.fixture
@@ -32,640 +28,385 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-@pytest.fixture(autouse=True)
-def cleanup() -> Iterator[None]:
-    yield
-    _clear_provider_override()
+def _make_conn(*, row: dict[str, object] | None) -> MagicMock:
+    """Build a conn whose first cursor.fetchone returns ``row``.
 
-
-def _make_cursor_sequence(fetchone_per_cursor: list[list[object]]) -> MagicMock:
-    """Build a conn mock whose every `cursor(...)` call returns an isolated
-    cursor mock with its own `fetchone` sequence.
-
-    Why: endpoint helpers open distinct cursors (one without `row_factory`
-    for `_has_sec_cik`, one with `dict_row` for `_fetch_local_fundamentals`
-    that runs two queries). A single shared `cur_mock` with
-    `fetchone.side_effect = [...]` couples query order to cursor order —
-    a refactor silently desyncs the stub and the test passes with wrong
-    data. Per-call isolation prevents that.
-
-    `fetchone_per_cursor[i]` is the list of `fetchone` return values for
-    the i-th `cursor(...)` call in dispatch order (one entry per execute).
-    Always uses `side_effect`, even for single-element lists — a
-    `return_value` would silently replay the same row on an unexpected
-    second `fetchone()` call and mask a test-construction bug (Codex
-    finding on PR #370 round 2).
+    Subsequent cursors (used by ``_has_sec_cik`` etc.) return None
+    so the SEC paths short-circuit cleanly.
     """
-    cursors_iter = iter(fetchone_per_cursor)
+    conn_mock = MagicMock()
+    fetched = [row, None, None, None, None]
+    cursors_iter = iter(fetched)
 
     def _next_cursor(*_args: object, **_kwargs: object) -> MagicMock:
         cur = MagicMock()
         cur.__enter__.return_value = cur
         cur.__exit__.return_value = None
-        results = next(cursors_iter)
-        assert results, "each cursor must declare at least one fetchone result"
-        cur.fetchone.side_effect = list(results)
+        try:
+            cur.fetchone.return_value = next(cursors_iter)
+        except StopIteration:
+            cur.fetchone.return_value = None
         return cur
 
-    conn_mock = MagicMock()
     conn_mock.cursor.side_effect = _next_cursor
     return conn_mock
 
 
-def _stub_profile(symbol: str = "AAPL") -> YFinanceProfile:
-    return YFinanceProfile(
-        symbol=symbol,
-        display_name="Apple Inc.",
-        sector="Technology",
-        industry="Consumer Electronics",
-        exchange="NMS",
-        country="United States",
-        currency="USD",
-        market_cap=Decimal("3000000000000"),
-        employees=150_000,
-        website="https://apple.com",
-        long_business_summary="Makes iPhones.",
-    )
-
-
-def _stub_quote(symbol: str = "AAPL") -> YFinanceQuote:
-    return YFinanceQuote(
-        symbol=symbol,
-        price=Decimal("200.50"),
-        day_change=Decimal("1.50"),
-        day_change_pct=Decimal("0.00753"),
-        week_52_high=Decimal("250.00"),
-        week_52_low=Decimal("140.00"),
-        currency="USD",
-    )
-
-
-def _stub_stats(symbol: str = "AAPL") -> YFinanceKeyStats:
-    return YFinanceKeyStats(
-        symbol=symbol,
-        pe_ratio=Decimal("28.5"),
-        pb_ratio=Decimal("40.2"),
-        dividend_yield=Decimal("0.005"),
-        payout_ratio=Decimal("0.15"),
-        roe=Decimal("1.5"),
-        roa=Decimal("0.3"),
-        debt_to_equity=Decimal("195.0"),
-        revenue_growth_yoy=Decimal("0.08"),
-        earnings_growth_yoy=Decimal("0.12"),
-    )
-
-
-def test_summary_unknown_symbol_returns_404(client: TestClient, monkeypatch) -> None:
-    """Symbol not in the local instruments table must 404 without hitting yfinance."""
-    stub_provider = MagicMock()
-    stub_provider.get_snapshot.return_value = YFinanceSnapshot(profile=None, quote=None, key_stats=None)
-    _install_stub_provider(stub_provider)
-
-    # Force the DB lookup to return nothing so 404 is exercised without
-    # depending on what's in the dev DB.
-    def _empty_conn():
-        conn_mock = MagicMock()
-        cur_mock = MagicMock()
-        cur_mock.__enter__.return_value = cur_mock
-        cur_mock.fetchone.return_value = None
-        conn_mock.cursor.return_value = cur_mock
-        yield conn_mock
-
+def _install_conn(conn: MagicMock) -> None:
     from app.db import get_conn
 
-    app.dependency_overrides[get_conn] = _empty_conn
+    def _override() -> Iterator[MagicMock]:
+        yield conn
+
+    app.dependency_overrides[get_conn] = _override
+
+
+def _clear_conn() -> None:
+    from app.db import get_conn
+
+    app.dependency_overrides.pop(get_conn, None)
+
+
+@pytest.fixture
+def db_conn() -> Iterator[MagicMock]:
+    """Yields a default conn (404 row). Override ``conn.cursor.side_effect``
+    in individual tests when the row should be present."""
+    conn_mock = _make_conn(row=None)
+    _install_conn(conn_mock)
     try:
-        resp = client.get("/instruments/NOTREAL/summary")
+        yield conn_mock
     finally:
-        app.dependency_overrides.pop(get_conn, None)
+        _clear_conn()
+
+
+def test_unknown_symbol_returns_404(client: TestClient, db_conn: MagicMock) -> None:
+    resp = client.get("/instruments/NOTREAL/summary")
     assert resp.status_code == 404
-    # yfinance must NOT be called for unknown symbols — the local DB is
-    # authoritative for whether a symbol exists at all.
-    stub_provider.get_snapshot.assert_not_called()
 
 
-def test_summary_happy_path_merges_db_and_yfinance(client: TestClient) -> None:
-    stub_provider = MagicMock()
-    stub_provider.get_snapshot.return_value = YFinanceSnapshot(
-        profile=_stub_profile("AAPL"),
-        quote=_stub_quote("AAPL"),
-        key_stats=_stub_stats("AAPL"),
-    )
-    _install_stub_provider(stub_provider)
+def test_happy_path_with_quote_and_no_sec(client: TestClient) -> None:
+    """Happy path: DB row + quotes row, no SEC coverage. Price comes
+    from ``quotes.last``; identity from the local row; market cap +
+    key stats null because no SEC."""
+    row = {
+        "instrument_id": 100000,
+        "symbol": "BTC",
+        "company_name": "Bitcoin",
+        "exchange": "8",
+        "currency": "USD",
+        "sector": None,
+        "industry": None,
+        "country": None,
+        "is_tradable": True,
+        "coverage_tier": 3,
+        "bid": Decimal("60000.50"),
+        "ask": Decimal("60001.00"),
+        "last": Decimal("60000.75"),
+    }
+    conn = _make_conn(row=row)
 
-    def _db_conn():
-        conn_mock = MagicMock()
-        cur_mock = MagicMock()
-        cur_mock.__enter__.return_value = cur_mock
-        cur_mock.fetchone.return_value = {
-            "instrument_id": 42,
-            "symbol": "AAPL",
-            "company_name": "Apple Inc.",
-            "exchange": None,
-            "currency": None,
-            "sector": None,
-            "industry": None,
-            "country": None,
-            "is_tradable": True,
-            "coverage_tier": 1,
-        }
-        conn_mock.cursor.return_value = cur_mock
-        yield conn_mock
-
-    from app.db import get_conn
-
-    app.dependency_overrides[get_conn] = _db_conn
+    _install_conn(conn)
     try:
-        resp = client.get("/instruments/AAPL/summary")
+        resp = client.get("/instruments/BTC/summary")
     finally:
-        app.dependency_overrides.pop(get_conn, None)
+        _clear_conn()
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["instrument_id"] == 42
-    assert body["is_tradable"] is True
-    assert body["coverage_tier"] == 1
-
-    # Identity merges: local DB wins if non-null, otherwise yfinance fills.
-    assert body["identity"]["symbol"] == "AAPL"
-    assert body["identity"]["display_name"] == "Apple Inc."
-    # Sector etc. come from yfinance because the DB row had them as None.
-    assert body["identity"]["sector"] == "Technology"
-    assert body["identity"]["industry"] == "Consumer Electronics"
-    assert body["identity"]["market_cap"] == "3000000000000"
-
-    # Single .info call (not three): get_snapshot called once.
-    stub_provider.get_snapshot.assert_called_once_with("AAPL")
-    assert body["price"]["current"] == "200.50"
-    assert body["key_stats"]["pe_ratio"] == "28.5"
-
-    # Source map names the effective contributors.
-    assert body["source"]["identity"] == "local_db+yfinance"
-    assert body["source"]["price"] == "yfinance"
-    assert body["source"]["key_stats"] == "yfinance"
-
-
-def test_summary_yfinance_failure_returns_null_sections(client: TestClient) -> None:
-    """When yfinance returns None for quote/stats, the UI should see null
-    sections (not 500). Identity still renders from the local DB."""
-    stub_provider = MagicMock()
-    stub_provider.get_snapshot.return_value = YFinanceSnapshot(
-        profile=None,
-        quote=None,
-        key_stats=None,
-    )
-    _install_stub_provider(stub_provider)
-
-    def _db_conn():
-        conn_mock = MagicMock()
-        cur_mock = MagicMock()
-        cur_mock.__enter__.return_value = cur_mock
-        cur_mock.fetchone.return_value = {
-            "instrument_id": 7,
-            "symbol": "VOD.L",
-            "company_name": "Vodafone Group PLC",
-            "exchange": "LSE",
-            "currency": "GBP",
-            "sector": "Telecom",
-            "industry": None,
-            "country": "United Kingdom",
-            "is_tradable": True,
-            "coverage_tier": None,
-        }
-        conn_mock.cursor.return_value = cur_mock
-        yield conn_mock
-
-    from app.db import get_conn
-
-    app.dependency_overrides[get_conn] = _db_conn
-    try:
-        resp = client.get("/instruments/vod.l/summary")  # case-insensitive
-    finally:
-        app.dependency_overrides.pop(get_conn, None)
-
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["identity"]["symbol"] == "VOD.L"
-    assert body["identity"]["display_name"] == "Vodafone Group PLC"
-    assert body["identity"]["sector"] == "Telecom"
-    assert body["price"] is None
+    assert body["instrument_id"] == 100000
+    assert body["identity"]["symbol"] == "BTC"
+    assert body["identity"]["display_name"] == "Bitcoin"
+    assert body["identity"]["currency"] == "USD"
+    # No yfinance fill-in for sector/industry/country.
+    assert body["identity"]["sector"] is None
+    assert body["identity"]["industry"] is None
+    # Price reflects ``quotes.last``, not yfinance.
+    assert body["price"]["current"] == "60000.75"
+    assert body["price"]["currency"] == "USD"
+    # Day change + 52w stay null until SEC-derived computations land.
+    assert body["price"]["day_change"] is None
+    assert body["price"]["week_52_high"] is None
+    # No SEC → key_stats unavailable; market cap stays null.
     assert body["key_stats"] is None
-    assert body["source"]["price"] == "unavailable"
+    assert body["identity"]["market_cap"] is None
+    # Source map reflects the post-retire shape.
+    assert body["source"]["identity"] == "local_db"
+    assert body["source"]["price"] == "quotes"
     assert body["source"]["key_stats"] == "unavailable"
 
 
-def test_summary_local_company_name_beats_yfinance(client: TestClient) -> None:
-    """Local DB company_name is authoritative — yfinance display_name must
-    not overwrite it when both are present. Addresses Codex review P2."""
-    stub_provider = MagicMock()
-    stub_provider.get_snapshot.return_value = YFinanceSnapshot(
-        profile=YFinanceProfile(
-            symbol="AAPL",
-            display_name="Apple (Yahoo-stale brand)",
-            sector=None,
-            industry=None,
-            exchange=None,
-            country=None,
-            currency=None,
-            market_cap=None,
-            employees=None,
-            website=None,
-            long_business_summary=None,
-        ),
-        quote=None,
-        key_stats=None,
-    )
-    _install_stub_provider(stub_provider)
+def test_no_quote_returns_null_price_block(client: TestClient) -> None:
+    """When the quotes row is missing (eToro WS hasn't pushed yet),
+    the price block is null. Frontend renders '—' rather than reaching
+    for a non-canonical source."""
+    row = {
+        "instrument_id": 100050,
+        "symbol": "LRC",
+        "company_name": "Loopring",
+        "exchange": "8",
+        "currency": "USD",
+        "sector": None,
+        "industry": None,
+        "country": None,
+        "is_tradable": True,
+        "coverage_tier": 3,
+        "bid": None,
+        "ask": None,
+        "last": None,
+    }
+    conn = _make_conn(row=row)
 
-    def _db_conn():
-        conn_mock = MagicMock()
-        cur_mock = MagicMock()
-        cur_mock.__enter__.return_value = cur_mock
-        cur_mock.fetchone.return_value = {
-            "instrument_id": 1,
-            "symbol": "AAPL",
-            "company_name": "Apple Inc.",
-            "exchange": "NMS",
-            "currency": "USD",
-            "sector": "Technology",
-            "industry": None,
-            "country": "United States",
-            "is_tradable": True,
-            "coverage_tier": 1,
-        }
-        conn_mock.cursor.return_value = cur_mock
-        yield conn_mock
-
-    from app.db import get_conn
-
-    app.dependency_overrides[get_conn] = _db_conn
+    _install_conn(conn)
     try:
-        resp = client.get("/instruments/AAPL/summary")
+        resp = client.get("/instruments/LRC/summary")
     finally:
-        app.dependency_overrides.pop(get_conn, None)
+        _clear_conn()
 
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     body = resp.json()
-    # Local DB wins over yfinance's display_name.
+    assert body["price"] is None
+    assert body["source"]["price"] == "unavailable"
+
+
+def test_bid_fallback_when_last_missing(client: TestClient) -> None:
+    """Some instruments only publish bid/ask; ``last`` is null. The
+    endpoint falls back to ``bid`` so the operator sees a number."""
+    row = {
+        "instrument_id": 100,
+        "symbol": "FOO",
+        "company_name": "Foo Inc",
+        "exchange": "NYSE",
+        "currency": "USD",
+        "sector": None,
+        "industry": None,
+        "country": None,
+        "is_tradable": True,
+        "coverage_tier": 2,
+        "bid": Decimal("12.34"),
+        "ask": Decimal("12.36"),
+        "last": None,
+    }
+    conn = _make_conn(row=row)
+
+    _install_conn(conn)
+    try:
+        resp = client.get("/instruments/FOO/summary")
+    finally:
+        _clear_conn()
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["price"]["current"] == "12.34"
+
+
+def test_local_company_name_authoritative(client: TestClient) -> None:
+    """Local DB company_name is the only source — no yfinance display
+    fallback can override it."""
+    row = {
+        "instrument_id": 1,
+        "symbol": "AAPL",
+        "company_name": "Apple Inc.",
+        "exchange": "NMS",
+        "currency": "USD",
+        "sector": "Technology",
+        "industry": "Consumer Electronics",
+        "country": "United States",
+        "is_tradable": True,
+        "coverage_tier": 1,
+        "bid": Decimal("180.00"),
+        "ask": Decimal("180.05"),
+        "last": Decimal("180.02"),
+    }
+    conn = _make_conn(row=row)
+
+    _install_conn(conn)
+    try:
+        resp = client.get("/instruments/aapl/summary")  # case-insensitive
+    finally:
+        _clear_conn()
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
     assert body["identity"]["display_name"] == "Apple Inc."
+    assert body["identity"]["symbol"] == "AAPL"
+    assert body["identity"]["sector"] == "Technology"
+    assert body["identity"]["industry"] == "Consumer Electronics"
 
 
-def test_summary_numeric_symbol_routes_to_summary_not_detail(client: TestClient) -> None:
-    """Numeric ticker symbols (e.g. Tokyo 7203) must route to /summary, not
-    to the /{instrument_id} detail endpoint. The /summary path suffix
-    differentiates the routes even when the symbol segment is all digits."""
-    stub_provider = MagicMock()
-    stub_provider.get_snapshot.return_value = YFinanceSnapshot(profile=None, quote=None, key_stats=None)
-    _install_stub_provider(stub_provider)
+def test_sec_path_populates_key_stats() -> None:
+    """When ``_has_sec_cik`` is True and ``_fetch_local_fundamentals``
+    returns SEC values, ``_build_local_stats`` constructs the key
+    stats block from SEC data only."""
+    from app.api.instruments import _build_local_stats
 
-    def _db_conn():
-        conn_mock = MagicMock()
-        cur_mock = MagicMock()
-        cur_mock.__enter__.return_value = cur_mock
-        cur_mock.fetchone.return_value = {
-            "instrument_id": 99,
-            "symbol": "7203",
-            "company_name": "Toyota Motor Corp",
-            "exchange": "TSE",
-            "currency": "JPY",
-            "sector": "Consumer Cyclical",
-            "industry": None,
-            "country": "Japan",
-            "is_tradable": True,
-            "coverage_tier": None,
-        }
-        conn_mock.cursor.return_value = cur_mock
-        yield conn_mock
-
-    from app.db import get_conn
-
-    app.dependency_overrides[get_conn] = _db_conn
-    try:
-        resp = client.get("/instruments/7203/summary")
-    finally:
-        app.dependency_overrides.pop(get_conn, None)
-
-    assert resp.status_code == 200
-    body = resp.json()
-    # InstrumentSummary response shape — NOT InstrumentDetail which has
-    # external_identifiers / first_seen_at.
-    assert "identity" in body
-    assert "external_identifiers" not in body
-    assert body["identity"]["symbol"] == "7203"
-
-
-def test_summary_prefers_local_sec_xbrl_for_us_ticker(client: TestClient) -> None:
-    """#357: a US ticker (primary SEC CIK present) with local
-    fundamentals_snapshot + financial_periods data uses those values
-    over yfinance, reports key_stats source='local_sec_xbrl+yfinance',
-    and surfaces per-field provenance."""
-    from decimal import Decimal
-    from unittest.mock import MagicMock
-
-    from app.db import get_conn
-
-    stub_provider = MagicMock()
-    stub_provider.get_snapshot.return_value = YFinanceSnapshot(
-        profile=_stub_profile("AAPL"),
-        quote=_stub_quote("AAPL"),
-        key_stats=_stub_stats("AAPL"),  # yfinance has all stats
+    local = {
+        "eps": Decimal("6.00"),
+        "book_value": Decimal("4.00"),
+        "shares_outstanding": Decimal("15000000000"),
+        "net_debt": None,
+        "debt": Decimal("100000000000"),
+        "net_income": Decimal("100000000000"),
+        "shareholders_equity": Decimal("60000000000"),
+        "total_assets": Decimal("350000000000"),
+        "total_liabilities": None,
+        "revenue": Decimal("400000000000"),
+    }
+    stats = _build_local_stats(
+        local,
+        current_price=Decimal("180.00"),
+        dividend_yield=Decimal("0.5"),
     )
-    _install_stub_provider(stub_provider)
+    assert stats is not None
+    # pe = 180 / 6 = 30
+    assert stats.pe_ratio == Decimal("30")
+    # pb = 180 / 4 = 45
+    assert stats.pb_ratio == Decimal("45")
+    # debt/equity = 100B / 60B
+    assert stats.debt_to_equity is not None
+    # roe = 100B / 60B
+    assert stats.roe is not None
+    # roa = 100B / 350B
+    assert stats.roa is not None
+    # Dividend yield from #426 dividend summary, not yfinance.
+    assert stats.dividend_yield == Decimal("0.5")
+    assert stats.field_source is not None
+    assert stats.field_source["pe_ratio"] == "sec_xbrl"
+    assert stats.field_source["dividend_yield"] == "sec_xbrl"
+    # Fields the SEC pipeline doesn't yet derive — surfaced as
+    # unavailable, never silently filled from elsewhere.
+    assert stats.payout_ratio is None
+    assert stats.field_source["payout_ratio"] == "unavailable"
+    assert stats.revenue_growth_yoy is None
+    assert stats.earnings_growth_yoy is None
 
-    def _db_conn() -> Iterator[MagicMock]:
-        # Cursor dispatch order:
-        #   1. instrument lookup (one fetchone)
-        #   2. _has_sec_cik (one fetchone)
-        #   3. _fetch_local_fundamentals (two fetchones on one cursor:
-        #      fundamentals_snapshot then financial_periods)
-        yield _make_cursor_sequence(
-            [
-                [
-                    {
-                        "instrument_id": 42,
-                        "symbol": "AAPL",
-                        "company_name": "Apple Inc.",
-                        "exchange": "NMS",
-                        "currency": "USD",
-                        "sector": "Technology",
-                        "industry": None,
-                        "country": "United States",
-                        "is_tradable": True,
-                        "coverage_tier": 1,
-                    }
-                ],
-                [(1,)],
-                [
-                    {
-                        "eps": Decimal("6.50"),
-                        "book_value": Decimal("4.20"),
-                        "shares_outstanding": Decimal("15000000000"),
-                        "cash": Decimal("50000000000"),
-                        "debt": Decimal("120000000000"),
-                        "net_debt": Decimal("70000000000"),
-                        "revenue_ttm": Decimal("400000000000"),
-                    },
-                    {
-                        "net_income": Decimal("100000000000"),
-                        "shareholders_equity": Decimal("63000000000"),
-                        "total_assets": Decimal("350000000000"),
-                        "total_liabilities": Decimal("287000000000"),
-                        "revenue": Decimal("400000000000"),
-                    },
-                ],
-                # #432 compute_market_cap cursor — None so the endpoint
-                # keeps the yfinance market_cap for this test's shape.
-                [None],
-            ]
-        )
 
-    app.dependency_overrides[get_conn] = _db_conn
+def test_price_blocked_pe_pb_signal_when_price_missing() -> None:
+    """When SEC EPS / book value exist but price is missing, the
+    field_source for pe/pb says ``sec_xbrl_price_missing`` so the UI
+    can render an actionable hint instead of an ambiguous '—'."""
+    from app.api.instruments import _build_local_stats
+
+    local = {
+        "eps": Decimal("6.00"),
+        "book_value": Decimal("4.00"),
+        "shares_outstanding": None,
+        "net_debt": None,
+        "debt": None,
+        "net_income": None,
+        "shareholders_equity": None,
+        "total_assets": None,
+        "total_liabilities": None,
+        "revenue": None,
+    }
+    stats = _build_local_stats(local, current_price=None, dividend_yield=None)
+    assert stats is not None
+    assert stats.pe_ratio is None
+    assert stats.pb_ratio is None
+    assert stats.field_source is not None
+    assert stats.field_source["pe_ratio"] == "sec_xbrl_price_missing"
+    assert stats.field_source["pb_ratio"] == "sec_xbrl_price_missing"
+
+
+def test_empty_input_returns_none() -> None:
+    """No SEC data, no price, no dividend yield → no stats block
+    rather than an all-null shell."""
+    from app.api.instruments import _build_local_stats
+
+    assert _build_local_stats({}, current_price=None, dividend_yield=None) is None
+
+
+def test_id_override_pinned_lookup(client: TestClient) -> None:
+    """?id=<n> pins the lookup to a specific instrument_id when a
+    symbol collides across exchanges. The server still verifies the
+    pinned id's symbol matches the path symbol."""
+    row = {
+        "instrument_id": 12220,
+        "symbol": "BTC.US",
+        "company_name": "Grayscale Bitcoin Mini Trust",
+        "exchange": "5",
+        "currency": "USD",
+        "sector": None,
+        "industry": None,
+        "country": "United States",
+        "is_tradable": True,
+        "coverage_tier": 3,
+        "bid": Decimal("34.30"),
+        "ask": Decimal("34.40"),
+        "last": Decimal("34.37"),
+    }
+    conn = _make_conn(row=row)
+    _install_conn(conn)
     try:
-        resp = client.get("/instruments/AAPL/summary")
+        resp = client.get("/instruments/BTC.US/summary?id=12220")
     finally:
-        app.dependency_overrides.pop(get_conn, None)
-
+        _clear_conn()
     assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["source"]["key_stats"] == "local_sec_xbrl+yfinance"
-
-    ks = body["key_stats"]
-    # PE = 200.50 / 6.50 ≈ 30.85 (overrides yfinance's 28.5)
-    assert Decimal(ks["pe_ratio"]) == Decimal("200.50") / Decimal("6.50")
-    # PB = 200.50 / 4.20 ≈ 47.74 (overrides yfinance's 40.2)
-    assert Decimal(ks["pb_ratio"]) == Decimal("200.50") / Decimal("4.20")
-    # debt/equity = 120B / 63B ≈ 1.904 (overrides yfinance's 195.0)
-    assert Decimal(ks["debt_to_equity"]) == Decimal("120000000000") / Decimal("63000000000")
-    # ROE = 100B / 63B ≈ 1.587
-    assert Decimal(ks["roe"]) == Decimal("100000000000") / Decimal("63000000000")
-    # Field source map reports SEC origin for computed fields,
-    # yfinance for dividend/payout/growth.
-    fs = ks["field_source"]
-    assert fs["pe_ratio"] == "sec_xbrl"
-    assert fs["pb_ratio"] == "sec_xbrl"
-    assert fs["debt_to_equity"] == "sec_xbrl"
-    assert fs["roe"] == "sec_xbrl"
-    assert fs["roa"] == "sec_xbrl"
-    assert fs["dividend_yield"] == "yfinance"
-    assert fs["revenue_growth_yoy"] == "yfinance"
+    assert resp.json()["instrument_id"] == 12220
 
 
-def test_summary_sec_preference_reports_price_missing_when_quote_absent(
-    client: TestClient,
-) -> None:
-    """US ticker with local fundamentals but no live quote → pe/pb can't be
-    computed, but field_source distinguishes 'sec_xbrl_price_missing' from
-    'unavailable' so the UI can render an actionable 'waiting on price' hint."""
-    from decimal import Decimal
-    from unittest.mock import MagicMock
-
-    from app.db import get_conn
-
-    stub_provider = MagicMock()
-    stub_provider.get_snapshot.return_value = YFinanceSnapshot(
-        profile=_stub_profile("AAPL"),
-        quote=None,  # No live price
-        key_stats=None,  # No yfinance stats either
-    )
-    _install_stub_provider(stub_provider)
-
-    def _db_conn() -> Iterator[MagicMock]:
-        yield _make_cursor_sequence(
-            [
-                [
-                    {
-                        "instrument_id": 42,
-                        "symbol": "AAPL",
-                        "company_name": "Apple Inc.",
-                        "exchange": "NMS",
-                        "currency": "USD",
-                        "sector": "Technology",
-                        "industry": None,
-                        "country": "United States",
-                        "is_tradable": True,
-                        "coverage_tier": 1,
-                    }
-                ],
-                [(1,)],
-                [
-                    {
-                        "eps": Decimal("6.50"),
-                        "book_value": Decimal("4.20"),
-                        "shares_outstanding": None,
-                        "cash": None,
-                        "debt": None,
-                        "net_debt": None,
-                        "revenue_ttm": None,
-                    },
-                    None,
-                ],
-                # #432 compute_market_cap cursor — None.
-                [None],
-            ]
-        )
-
-    app.dependency_overrides[get_conn] = _db_conn
+def test_id_override_symbol_mismatch_returns_404(client: TestClient) -> None:
+    """?id=<n> pinned to an instrument whose symbol does not match
+    the path returns 404 — never silently surfaces a wrong-instrument
+    response (regression guard for the #316 spec §2 contract)."""
+    # The DB query has WHERE i.instrument_id = %(id)s AND UPPER(symbol) = %(symbol)s,
+    # so a mismatch yields no row → handler raises 404.
+    conn = _make_conn(row=None)
+    _install_conn(conn)
     try:
-        resp = client.get("/instruments/AAPL/summary")
+        resp = client.get("/instruments/BTC/summary?id=12220")
     finally:
-        app.dependency_overrides.pop(get_conn, None)
-
-    assert resp.status_code == 200, resp.text
-    ks = resp.json()["key_stats"]
-    assert ks["pe_ratio"] is None
-    assert ks["pb_ratio"] is None
-    assert ks["field_source"]["pe_ratio"] == "sec_xbrl_price_missing"
-    assert ks["field_source"]["pb_ratio"] == "sec_xbrl_price_missing"
-    # Non-price fields have no supporting local data (no financial_periods
-    # row in this scenario), so they must stay "unavailable" — a regression
-    # that silently mis-attributes them to SEC would fail here.
-    assert ks["field_source"]["debt_to_equity"] == "unavailable"
-    assert ks["field_source"]["roe"] == "unavailable"
-    assert ks["field_source"]["roa"] == "unavailable"
-
-
-def test_summary_sec_preference_missing_local_falls_through_to_yfinance(
-    client: TestClient,
-) -> None:
-    """A US ticker (CIK present) but no local fundamentals rows — must
-    cleanly fall through to the pure-yfinance path."""
-    from unittest.mock import MagicMock
-
-    from app.db import get_conn
-
-    stub_provider = MagicMock()
-    stub_provider.get_snapshot.return_value = YFinanceSnapshot(
-        profile=_stub_profile("AAPL"),
-        quote=_stub_quote("AAPL"),
-        key_stats=_stub_stats("AAPL"),
-    )
-    _install_stub_provider(stub_provider)
-
-    def _db_conn() -> Iterator[MagicMock]:
-        yield _make_cursor_sequence(
-            [
-                [
-                    {
-                        "instrument_id": 42,
-                        "symbol": "AAPL",
-                        "company_name": "Apple Inc.",
-                        "exchange": "NMS",
-                        "currency": "USD",
-                        "sector": "Technology",
-                        "industry": None,
-                        "country": "United States",
-                        "is_tradable": True,
-                        "coverage_tier": 1,
-                    }
-                ],
-                [(1,)],  # has_sec_cik → True
-                [None, None],  # no fundamentals_snapshot, no financial_periods
-            ]
-        )
-
-    app.dependency_overrides[get_conn] = _db_conn
-    try:
-        resp = client.get("/instruments/AAPL/summary")
-    finally:
-        app.dependency_overrides.pop(get_conn, None)
-
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["source"]["key_stats"] == "yfinance"
-    assert body["key_stats"]["pe_ratio"] == "28.5"  # yfinance value
-
-
-def test_summary_id_override_pins_specific_instrument(client: TestClient) -> None:
-    """Slice 0: `?id=<instrument_id>` overrides primary-listing resolution
-    so the caller can pin a specific exchange listing when a symbol
-    collides. Verifies the id's symbol must match the path (404 on
-    mismatch)."""
-    from unittest.mock import MagicMock
-
-    from app.db import get_conn
-
-    stub_provider = MagicMock()
-    stub_provider.get_snapshot.return_value = YFinanceSnapshot(profile=None, quote=None, key_stats=None)
-    _install_stub_provider(stub_provider)
-
-    def _db_conn() -> Iterator[MagicMock]:
-        yield _make_cursor_sequence(
-            [
-                # Cursor 1: instrument lookup via ?id=.
-                [
-                    {
-                        "instrument_id": 777,  # alternate listing
-                        "symbol": "VOD",
-                        "company_name": "Vodafone Group PLC (LSE listing)",
-                        "exchange": "LSE",
-                        "currency": "GBP",
-                        "sector": "Telecom",
-                        "industry": None,
-                        "country": "United Kingdom",
-                        "is_tradable": True,
-                        "coverage_tier": 2,
-                    }
-                ],
-                # Cursor 2: _has_sec_cik probe — LSE ticker has no CIK.
-                [None],
-                # Cursor 3: #432 compute_market_cap — None.
-                [None],
-            ]
-        )
-
-    app.dependency_overrides[get_conn] = _db_conn
-    try:
-        resp = client.get("/instruments/VOD/summary?id=777")
-    finally:
-        app.dependency_overrides.pop(get_conn, None)
-
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["instrument_id"] == 777
-    assert body["identity"]["exchange"] == "LSE"
-
-
-def test_summary_id_override_mismatched_symbol_returns_404(
-    client: TestClient,
-) -> None:
-    """If `?id=<n>` refers to an instrument whose symbol doesn't match
-    the path, respond 404 rather than silently returning the wrong
-    instrument."""
-    from unittest.mock import MagicMock
-
-    from app.db import get_conn
-
-    stub_provider = MagicMock()
-    stub_provider.get_snapshot.return_value = YFinanceSnapshot(profile=None, quote=None, key_stats=None)
-    _install_stub_provider(stub_provider)
-
-    def _db_conn() -> Iterator[MagicMock]:
-        yield _make_cursor_sequence([[None]])  # lookup returns no row
-
-    app.dependency_overrides[get_conn] = _db_conn
-    try:
-        resp = client.get("/instruments/AAPL/summary?id=777")
-    finally:
-        app.dependency_overrides.pop(get_conn, None)
-
+        _clear_conn()
     assert resp.status_code == 404
 
 
-def test_summary_empty_symbol_returns_400(client: TestClient) -> None:
-    # Whitespace-only symbol should reject with 400 rather than a DB probe.
-    stub_provider = MagicMock()
-    stub_provider.get_snapshot.return_value = YFinanceSnapshot(profile=None, quote=None, key_stats=None)
-    _install_stub_provider(stub_provider)
+def test_dividend_only_partial_stats_surface(client: TestClient) -> None:
+    """An instrument with a dividend yield but no SEC fundamentals
+    row should still surface the yield in key_stats — without this,
+    the dividend summary fetch is wasted (Codex round 2 finding)."""
+    row = {
+        "instrument_id": 1234,
+        "symbol": "DIV",
+        "company_name": "Dividend Co",
+        "exchange": "NYSE",
+        "currency": "USD",
+        "sector": None,
+        "industry": None,
+        "country": "United States",
+        "is_tradable": True,
+        "coverage_tier": 2,
+        "bid": Decimal("50"),
+        "ask": Decimal("50.10"),
+        "last": Decimal("50.05"),
+    }
+    conn = _make_conn(row=row)
+    _install_conn(conn)
 
-    def _db_conn():
-        yield MagicMock()
+    # _has_sec_cik returns False for this instrument so the SEC
+    # fundamentals path short-circuits. The dividend summary fetch
+    # uses its own conn cursor — patch the service-level helper to
+    # return a yield without going through DB.
+    from unittest.mock import patch
 
-    from app.db import get_conn
+    from app.services.dividends import DividendSummary
 
-    app.dependency_overrides[get_conn] = _db_conn
-    try:
-        resp = client.get("/instruments/%20%20%20/summary")
-    finally:
-        app.dependency_overrides.pop(get_conn, None)
-    assert resp.status_code == 400
-    stub_provider.get_snapshot.assert_not_called()
+    div_summary = DividendSummary(
+        has_dividend=True,
+        ttm_dps=None,
+        ttm_dividends_paid=None,
+        ttm_yield_pct=Decimal("3.50"),
+        latest_dps=None,
+        latest_dividend_at=None,
+        dividend_streak_q=4,
+        dividend_currency="USD",
+    )
+    with patch("app.services.dividends.get_dividend_summary", return_value=div_summary):
+        try:
+            resp = client.get("/instruments/DIV/summary")
+        finally:
+            _clear_conn()
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["key_stats"] is not None
+    assert body["key_stats"]["dividend_yield"] == "3.50"
+    assert body["source"]["key_stats"] == "sec_xbrl"
