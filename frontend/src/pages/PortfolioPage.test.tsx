@@ -140,6 +140,7 @@ function portfolioWith(
     mirror_equity: mirrors.reduce((s, m) => s + m.mirror_equity, 0),
     display_currency: "GBP",
     fx_rates_used: {},
+    live_quote_instrument_ids: positions.map((p) => p.instrument_id),
   };
 }
 

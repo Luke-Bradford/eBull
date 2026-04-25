@@ -40,6 +40,7 @@ export async function fetchPortfolioMock(): Promise<PortfolioResponse> {
     mirror_equity: 0,
     display_currency: "USD",
     fx_rates_used: {},
+    live_quote_instrument_ids: [],
   };
 }
 

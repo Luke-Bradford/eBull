@@ -73,15 +73,17 @@ export function PortfolioPage() {
   const focusedIdxRef = useRef(focusedIdx);
   const pageRowsRef = useRef<RowItem[]>([]);
 
-  // Instrument ids for every held position the page may render —
-  // fed to the page-level LiveQuoteProvider so a single SSE stream
-  // covers every visible row. Mirror rows render an avatar + total,
-  // not a per-instrument price, so they don't contribute ids here;
-  // their underlying instruments only matter on the copy-trading
-  // detail page.
+  // Held position ids + every active-mirror underlying id, fed to
+  // the page-level LiveQuoteProvider so a single SSE stream covers
+  // both held rows AND the underlyings inside copy-trader rows.
+  // Without the mirror underlyings, mirror_equity / unrealized_pnl
+  // figures rendered on the page would only update when the
+  // operator opens a copy-trader detail page. The backend computes
+  // the union in `_load_mirror_underlying_instrument_ids` and ships
+  // it on `PortfolioResponse.live_quote_instrument_ids`.
   const liveQuoteIds = useMemo(() => {
     if (portfolio.data === null) return [];
-    return portfolio.data.positions.map((p) => p.instrument_id);
+    return portfolio.data.live_quote_instrument_ids;
   }, [portfolio.data]);
 
   // Positions + mirrors merged, sorted by dollar value, filtered by
