@@ -1830,7 +1830,7 @@ def get_instrument_summary(
 
 
 def _resolve_capabilities_payload(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
+    conn: psycopg.Connection[object],
     *,
     instrument_id: int,
     exchange_id: str | None,

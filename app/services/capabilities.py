@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from typing import Literal
 
 import psycopg
+import psycopg.rows
+import psycopg.sql
 
 # Closed set of provider tags. Empty list (= []) is the canonical
 # absence-of-provider state — covers both "no public source
@@ -195,7 +197,7 @@ _PRESENCE_QUERIES: dict[tuple[str, str], str] = {
 
 
 def resolve_capabilities(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
+    conn: psycopg.Connection[object],
     *,
     instrument_id: int,
     exchange_id: str,
@@ -214,7 +216,7 @@ def resolve_capabilities(
     ``providers AND any(data_present.values())``.
     """
     raw_capabilities: dict[str, list[str]] = {}
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
         cur.execute(
             "SELECT capabilities FROM exchanges WHERE exchange_id = %s",
             (exchange_id,),
@@ -237,7 +239,7 @@ def resolve_capabilities(
     # CIK. The schema preserves historical non-primary CIKs (per
     # sql/003_external_identifiers.sql) but they don't imply
     # current SEC coverage.
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
         cur.execute(
             """
             SELECT provider, identifier_type, is_primary
@@ -304,7 +306,7 @@ def resolve_capabilities(
 
 
 def _compute_data_present(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
+    conn: psycopg.Connection[object],
     *,
     instrument_id: int,
     capability: str,
@@ -330,8 +332,12 @@ def _compute_data_present(
         if query is None:
             out[provider] = False
             continue
-        with conn.cursor() as cur:
-            cur.execute(query, (instrument_id,))
+        # Wrap in psycopg.sql.SQL so pyright accepts the str-typed
+        # value from the dict lookup as a valid execute() query —
+        # the dict values are all hand-authored constants in this
+        # module so they're known-safe to wrap as SQL.
+        with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+            cur.execute(psycopg.sql.SQL(query), (instrument_id,))  # type: ignore[arg-type]
             row = cur.fetchone()
         out[provider] = bool(row[0]) if row else False
     return out
