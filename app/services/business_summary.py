@@ -325,12 +325,18 @@ _HEADING_WRAP_RE = re.compile(
 # apostrophe and misses the heading entirely. We match liberally up
 # to ``>`` (style attrs never contain ``>``) and rely on the
 # ``font-weight`` substring for the heading test.
-# Adjacent ``</span><span attrs>`` boundary — collapsed to a single
-# space before heading-tag wrapping (#550). Targets the drop-cap
-# pattern where iXBRL filings break a logical heading across two
-# sibling spans (first letter styled differently). Only matches
-# when there's no plain text between the tags — pure tag adjacency.
-_SPAN_BOUNDARY_RE = re.compile(r"</span>\s*<span\b[^>]*>", re.IGNORECASE)
+# Adjacent **bold-styled** ``</span><span style="...font-weight:bold...">``
+# boundary — collapsed before heading-tag wrapping (#550). Targets
+# the drop-cap pattern where iXBRL filings break a logical heading
+# across two sibling bold spans. Scoped to bold-on-both-sides so
+# regular body-prose span boundaries (colour/size changes inside
+# a paragraph) are not concatenated into run-together words —
+# Codex review on #550.
+_BOLD_SPAN_BOUNDARY_RE = re.compile(
+    r"</span>\s*<span\b[^>]*?style\s*=\s*[\"'][^>]*?"
+    r"font-weight\s*:\s*(?:bold|bolder|[7-9]\d\d)[^>]*?>",
+    re.IGNORECASE,
+)
 
 
 _BOLD_STYLE_WRAP_RE = re.compile(
@@ -470,13 +476,13 @@ def _wrap_heading_tags(raw_html: str) -> str:
     # collapsed boundary loses styling continuity within paragraphs
     # but the tradeoff is acceptable for sectioning — body content
     # passes through ``_strip_html`` later anyway.
-    # Empty-string collapse: drop-cap split-word headings (MSFT's
-    # "ITEM 1. B" + "USINESS") need the spans joined as "BUSINESS",
-    # not "B USINESS". Risk: legitimate two-word-per-span layouts
-    # would lose their word boundary (rare in practice — issuers
-    # use a trailing space inside the span, not between sibling
-    # spans, when laying out separate words).
-    collapsed = _SPAN_BOUNDARY_RE.sub("", raw_html)
+    # Empty-string collapse of adjacent BOLD-STYLED span boundaries
+    # only. Drop-cap split-word headings (MSFT's "ITEM 1. B" +
+    # "USINESS") need the spans joined as "BUSINESS", not
+    # "B USINESS". Scoped to bold-on-the-trailing-side so regular
+    # body-prose span boundaries (colour/size changes within a
+    # paragraph) don't get concatenated into run-together words.
+    collapsed = _BOLD_SPAN_BOUNDARY_RE.sub("", raw_html)
     pass1 = _HEADING_WRAP_RE.sub(_wrap, collapsed)
     return _BOLD_STYLE_WRAP_RE.sub(_wrap, pass1)
 
