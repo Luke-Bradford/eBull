@@ -18,7 +18,16 @@ from __future__ import annotations
 import psycopg
 import pytest
 
-_US_EXCHANGES: tuple[str, ...] = ("2", "4", "5", "6", "7", "19", "20")
+# Canonical US exchange_ids that exist as us_equity in the test DB
+# post-migrations 067 + 069. Was ("2", "4", "5", "6", "7", "19",
+# "20") on the pre-#514 seed, but ids 2 (Commodity), 6 (FRA),
+# 7 (LSE) were misclassified by migration 067 and got
+# reclassified to commodity / eu_equity / uk_equity by migration
+# 069. Production has an additional id `33` (Regular Trading
+# Hours) that #513's exchanges_metadata_refresh adds to the live
+# DB; it isn't in the test DB because the refresh job only runs
+# against eToro at runtime, not in the migration seed.
+_US_EXCHANGES: tuple[str, ...] = ("4", "5", "19", "20")
 
 
 def _seed_instrument(
