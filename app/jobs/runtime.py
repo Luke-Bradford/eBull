@@ -452,36 +452,81 @@ class JobRuntime:
             fut = self._manual_executor.submit(wrapped)
             fut.add_done_callback(self._log_future_exception)
 
-    def shutdown(self) -> None:
-        """Stop the scheduler and wait for in-flight jobs to drain.
+    def shutdown(self, *, timeout_s: float = 30.0) -> None:
+        """Stop the scheduler with a bounded wait for in-flight jobs.
 
         Called from the FastAPI lifespan teardown *before* the
         connection pool is closed so any job currently writing to
-        ``job_runs`` can finish cleanly. ``wait=True`` blocks until
-        the scheduler's worker threads return.
+        ``job_runs`` can finish cleanly.
 
-        Trade-off (PR #131 round 1 review WARNING 2): a hung job
-        will block lifespan teardown for as long as it takes the
-        process to be killed. The alternative -- ``wait=False`` --
-        would let in-flight jobs continue running while the lifespan
-        proceeds to close the connection pool, at which point the
-        job's writes to ``job_runs`` would fail against a closed
-        pool. That is strictly worse: a hung job under ``wait=True``
-        produces a visible "lifespan teardown stuck" symptom that
-        the operator notices and can investigate, whereas under
-        ``wait=False`` the symptom is silent corruption of job
-        tracking state. We accept the blocking behaviour for v1.
+        Two-phase teardown:
+
+        1. Graceful: try ``shutdown(wait=True)`` for up to
+           ``timeout_s`` seconds. If in-flight jobs return cleanly,
+           every ``job_runs`` write lands.
+
+        2. Bounded escalation: if the graceful wait exceeds the
+           timeout, log loud and fall back to ``shutdown(wait=False)``
+           so the lifespan teardown can proceed. In-flight jobs
+           continue running in the background; their late writes to
+           ``job_runs`` will fail against the (about to close)
+           connection pool.
+
+        Pre-fix history: the original implementation (PR #131) used
+        unbounded ``wait=True``. A hung job (e.g. SEC HTTP call
+        wedged behind a watcher-driven uvicorn reload) blocked the
+        lifespan teardown indefinitely; the old worker held port
+        8000 and the new worker couldn't bind, requiring a manual
+        process kill. Bounded wait converts a hard hang into
+        best-effort teardown + a visible operator-facing warning.
         """
         if not self._started:
             return
-        try:
-            self._scheduler.shutdown(wait=True)
-        except Exception:
-            logger.exception("JobRuntime scheduler shutdown raised")
-        try:
-            self._manual_executor.shutdown(wait=True)
-        except Exception:
-            logger.exception("JobRuntime manual executor shutdown raised")
+        import threading
+
+        def _graceful_scheduler() -> None:
+            try:
+                self._scheduler.shutdown(wait=True)
+            except Exception:
+                logger.exception("JobRuntime scheduler shutdown raised")
+
+        def _graceful_executor() -> None:
+            try:
+                self._manual_executor.shutdown(wait=True)
+            except Exception:
+                logger.exception("JobRuntime manual executor shutdown raised")
+
+        # Run each shutdown on a daemon thread so the join can time
+        # out without leaking a non-daemon thread that blocks
+        # interpreter exit.
+        sched_thread = threading.Thread(target=_graceful_scheduler, daemon=True)
+        sched_thread.start()
+        sched_thread.join(timeout=timeout_s)
+        if sched_thread.is_alive():
+            logger.warning(
+                "JobRuntime scheduler shutdown exceeded %.0fs — escalating to wait=False; "
+                "in-flight jobs will be abandoned and any late job_runs write will fail",
+                timeout_s,
+            )
+            try:
+                self._scheduler.shutdown(wait=False)
+            except Exception:
+                logger.exception("JobRuntime scheduler wait=False shutdown raised")
+
+        exec_thread = threading.Thread(target=_graceful_executor, daemon=True)
+        exec_thread.start()
+        exec_thread.join(timeout=timeout_s)
+        if exec_thread.is_alive():
+            logger.warning(
+                "JobRuntime manual executor shutdown exceeded %.0fs — escalating; "
+                "in-flight manual triggers will be abandoned",
+                timeout_s,
+            )
+            try:
+                self._manual_executor.shutdown(wait=False)
+            except Exception:
+                logger.exception("JobRuntime manual executor wait=False shutdown raised")
+
         self._started = False
         logger.info("JobRuntime stopped")
 

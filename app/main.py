@@ -204,14 +204,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     if ws_subscriber is not None:
         try:
-            await ws_subscriber.stop()
+            # Bound the WS stop. ``EtoroWebSocketSubscriber.stop()``
+            # already has internal 30s caps on its reconcile-thread
+            # wait, but a stuck WS task cancel (rare but observed
+            # during watcher-driven reload races) would otherwise
+            # block the lifespan teardown indefinitely. 35s gives the
+            # internal 30s wait headroom + a 5s outer envelope.
+            await asyncio.wait_for(ws_subscriber.stop(), timeout=35.0)
+        except TimeoutError:
+            logger.warning("EtoroWebSocketSubscriber.stop exceeded 35s — proceeding with teardown")
         except Exception:
             logger.exception("EtoroWebSocketSubscriber.stop failed")
 
     # Shut the runtime down BEFORE closing the pool so any in-flight
     # job can still write to job_runs as part of its cleanup. The
-    # scheduler.shutdown(wait=True) inside shutdown_runtime() blocks
-    # until worker threads return.
+    # bounded wait inside JobRuntime.shutdown escalates to wait=False
+    # after timeout_s so a hung job cannot block teardown indefinitely.
     shutdown_runtime(job_runtime)
     app.state.job_runtime = None
 
