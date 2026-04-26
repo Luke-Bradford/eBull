@@ -63,7 +63,7 @@ describe("InsiderActivityPanel — summary strip", () => {
     mockSummary.mockResolvedValue(makeSummary());
     mockTransactions.mockResolvedValue(emptyTxns());
 
-    render(<InsiderActivityPanel symbol="GME" />);
+    render(<InsiderActivityPanel symbol="GME" provider="sec_form4" />);
 
     await waitFor(() => {
       expect(screen.getByText(/Net change/i)).toBeInTheDocument();
@@ -93,7 +93,7 @@ describe("InsiderActivityPanel — summary strip", () => {
     );
     mockTransactions.mockResolvedValue(emptyTxns());
 
-    render(<InsiderActivityPanel symbol="GME" />);
+    render(<InsiderActivityPanel symbol="GME" provider="sec_form4" />);
 
     await waitFor(() => {
       expect(screen.getByText(/Net change/i)).toBeInTheDocument();

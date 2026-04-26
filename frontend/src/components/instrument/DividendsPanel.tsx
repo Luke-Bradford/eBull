@@ -1,6 +1,13 @@
 /**
- * DividendsPanel — TTM yield + per-quarter history for the instrument
- * page. Backed by GET /instruments/{symbol}/dividends.
+ * DividendsPanel — provider-agnostic shell for the per-instrument
+ * dividends capability (#515 PR 3b). Backed by GET
+ * /instruments/{symbol}/dividends?provider=<provider>.
+ *
+ * The shell renders the normalised dividend shape returned by the
+ * endpoint regardless of which provider populated it. Today only
+ * ``sec_dividend_summary`` is wired; per-region integration PRs
+ * (Companies House dividends, KRX dividends, …) reuse the same shell
+ * + endpoint contract — no panel code changes required.
  *
  * Never-paid instruments render an explicit empty state rather than a
  * 404 or a zero row.
@@ -18,11 +25,16 @@ import {
   SectionSkeleton,
 } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
+import { providerLabel } from "@/lib/capabilityProviders";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback } from "react";
 
 export interface DividendsPanelProps {
   readonly symbol: string;
+  /** Capability provider tag, resolved via
+   *  ``summary.capabilities.dividends.providers`` upstream. The
+   *  shell forwards it to the endpoint as ``?provider=<tag>``. */
+  readonly provider: string;
 }
 
 function formatDps(raw: string | null, currency: string | null): string {
@@ -64,14 +76,18 @@ function HistoryBar({ period, max }: { period: DividendPeriod; max: number }) {
   );
 }
 
-export function DividendsPanel({ symbol }: DividendsPanelProps) {
+export function DividendsPanel({ symbol, provider }: DividendsPanelProps) {
   const state = useAsync<InstrumentDividends>(
-    useCallback(() => fetchInstrumentDividends(symbol), [symbol]),
-    [symbol],
+    useCallback(
+      () => fetchInstrumentDividends(symbol, provider),
+      [symbol, provider],
+    ),
+    [symbol, provider],
   );
+  const title = `Dividends · ${providerLabel(provider)}`;
 
   return (
-    <Section title="Dividends">
+    <Section title={title}>
       {state.loading ? (
         <SectionSkeleton rows={3} />
       ) : state.error !== null || state.data === null ? (
@@ -89,7 +105,7 @@ export function DividendsPanel({ symbol }: DividendsPanelProps) {
           state.data.history.length === 0 ? (
             <EmptyState
               title="No dividend history on file"
-              description="This instrument has not reported a positive dividend in its SEC filings."
+              description="This instrument has not reported a positive dividend in this provider's data."
             />
           ) : (
             <DividendsBody data={state.data} />

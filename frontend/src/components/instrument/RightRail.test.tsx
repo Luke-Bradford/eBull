@@ -192,7 +192,7 @@ function renderRail(props: {
         instrumentId={instrumentId}
         sector={sector}
         currentSymbol={currentSymbol}
-        hasFilingsCoverage={true}
+        filingsActive={true}
       />
     </MemoryRouter>,
   );

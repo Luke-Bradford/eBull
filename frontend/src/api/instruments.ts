@@ -81,9 +81,14 @@ export interface InstrumentDividends {
 
 export function fetchInstrumentDividends(
   symbol: string,
+  provider?: string,
 ): Promise<InstrumentDividends> {
+  const params = new URLSearchParams();
+  if (provider !== undefined) params.set("provider", provider);
+  const qs = params.toString();
+  const suffix = qs.length > 0 ? `?${qs}` : "";
   return apiFetch<InstrumentDividends>(
-    `/instruments/${encodeURIComponent(symbol)}/dividends`,
+    `/instruments/${encodeURIComponent(symbol)}/dividends${suffix}`,
   );
 }
 
@@ -167,8 +172,10 @@ export interface EightKFilingsResponse {
 export function fetchEightKFilings(
   symbol: string,
   limit: number = 25,
+  provider?: string,
 ): Promise<EightKFilingsResponse> {
   const params = new URLSearchParams({ limit: String(limit) });
+  if (provider !== undefined) params.set("provider", provider);
   return apiFetch<EightKFilingsResponse>(
     `/instruments/${encodeURIComponent(symbol)}/eight_k_filings?${params.toString()}`,
   );
@@ -264,17 +271,26 @@ export interface InsiderTransactionsList {
   rows: InsiderTransactionDetail[];
 }
 
-export function fetchInsiderSummary(symbol: string): Promise<InsiderSummary> {
+export function fetchInsiderSummary(
+  symbol: string,
+  provider?: string,
+): Promise<InsiderSummary> {
+  const params = new URLSearchParams();
+  if (provider !== undefined) params.set("provider", provider);
+  const qs = params.toString();
+  const suffix = qs.length > 0 ? `?${qs}` : "";
   return apiFetch<InsiderSummary>(
-    `/instruments/${encodeURIComponent(symbol)}/insider_summary`,
+    `/instruments/${encodeURIComponent(symbol)}/insider_summary${suffix}`,
   );
 }
 
 export function fetchInsiderTransactions(
   symbol: string,
   limit: number = 100,
+  provider?: string,
 ): Promise<InsiderTransactionsList> {
   const params = new URLSearchParams({ limit: String(limit) });
+  if (provider !== undefined) params.set("provider", provider);
   return apiFetch<InsiderTransactionsList>(
     `/instruments/${encodeURIComponent(symbol)}/insider_transactions?${params.toString()}`,
   );

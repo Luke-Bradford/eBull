@@ -5,6 +5,12 @@
  * Composes existing data into one operator view: key stats with
  * field_source provenance, thesis memo if present, break conditions.
  * Red-flag surfacing and peer context come in Slice 2 (right rail).
+ *
+ * Capability panels (Dividends, Insider activity, Corporate events)
+ * iterate ``summary.capabilities[type]`` and render one shell per
+ * active (data-present) provider — so a cross-listed instrument with
+ * multiple providers renders multiple panels labelled with each
+ * provider tag (#515 PR 3b).
  */
 import { Section } from "@/components/dashboard/Section";
 import { BusinessSectionsPanel } from "@/components/instrument/BusinessSectionsPanel";
@@ -13,7 +19,8 @@ import { EightKEventsPanel } from "@/components/instrument/EightKEventsPanel";
 import { InsiderActivityPanel } from "@/components/instrument/InsiderActivityPanel";
 import { SecProfilePanel } from "@/components/instrument/SecProfilePanel";
 import { EmptyState } from "@/components/states/EmptyState";
-import type { InstrumentSummary, ThesisDetail } from "@/api/types";
+import type { CapabilityCell, InstrumentSummary, ThesisDetail } from "@/api/types";
+import { activeProviders } from "@/lib/capabilityProviders";
 
 function formatDecimal(
   value: string | null | undefined,
@@ -163,6 +170,8 @@ export interface ResearchTabProps {
   thesisErrored?: boolean;
 }
 
+const EMPTY_CELL: CapabilityCell = { providers: [], data_present: {} };
+
 export function ResearchTab({
   summary,
   thesis,
@@ -171,32 +180,51 @@ export function ResearchTab({
   const stats = summary.key_stats;
   const fs = stats?.field_source ?? undefined;
 
-  // SEC-specific panels gate on ``has_sec_cik`` so crypto +
-  // non-US instruments don't render orphan SEC content (#503 PR 2).
-  // Key statistics stays mounted regardless — its empty state
-  // already says "no provider returned key stats" which is honest
-  // for any instrument without coverage.
+  // SEC profile + 10-K Item 1 panels are still SEC-specific (not yet
+  // refactored into provider-agnostic shells); gate on the SEC
+  // identifier signal directly. The three capability panels below
+  // (Dividends, Insider, Corporate events) iterate
+  // `summary.capabilities[type]` and render one shell per active
+  // provider — provider-agnostic by construction.
   const hasSec = summary.has_sec_cik;
+  const dividends = summary.capabilities.dividends ?? EMPTY_CELL;
+  const insider = summary.capabilities.insider ?? EMPTY_CELL;
+  const events = summary.capabilities.corporate_events ?? EMPTY_CELL;
+  const dividendProviders = activeProviders(dividends);
+  const insiderProviders = activeProviders(insider);
+  const eventProviders = activeProviders(events);
 
   return (
     <div className="grid gap-4 md:grid-cols-2">
       {hasSec ? <SecProfilePanel symbol={summary.identity.symbol} /> : null}
-      {hasSec ? <DividendsPanel symbol={summary.identity.symbol} /> : null}
+      {dividendProviders.map((p) => (
+        <DividendsPanel
+          key={`dividends-${p}`}
+          symbol={summary.identity.symbol}
+          provider={p}
+        />
+      ))}
       {hasSec ? (
         <div className="md:col-span-2">
           <BusinessSectionsPanel symbol={summary.identity.symbol} />
         </div>
       ) : null}
-      {hasSec ? (
-        <div className="md:col-span-2">
-          <InsiderActivityPanel symbol={summary.identity.symbol} />
+      {insiderProviders.map((p) => (
+        <div key={`insider-${p}`} className="md:col-span-2">
+          <InsiderActivityPanel
+            symbol={summary.identity.symbol}
+            provider={p}
+          />
         </div>
-      ) : null}
-      {hasSec ? (
-        <div className="md:col-span-2">
-          <EightKEventsPanel symbol={summary.identity.symbol} />
+      ))}
+      {eventProviders.map((p) => (
+        <div key={`events-${p}`} className="md:col-span-2">
+          <EightKEventsPanel
+            symbol={summary.identity.symbol}
+            provider={p}
+          />
         </div>
-      ) : null}
+      ))}
 
       <Section title="Key statistics">
         {stats === null ? (

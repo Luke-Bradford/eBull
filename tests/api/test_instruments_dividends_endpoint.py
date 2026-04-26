@@ -35,7 +35,7 @@ def _build_app(conn: MagicMock) -> FastAPI:
     return app
 
 
-def _cursor_with(rows: list[dict[str, object] | None]) -> MagicMock:
+def _cursor_with(rows: list[dict[str, object] | tuple[object, ...] | None]) -> MagicMock:
     cur = MagicMock()
     cur.__enter__ = MagicMock(return_value=cur)
     cur.__exit__ = MagicMock(return_value=False)
@@ -67,12 +67,18 @@ def test_dividends_endpoint_returns_summary_and_history() -> None:
     ]
 
     conn = MagicMock()
-    conn.cursor.return_value = _cursor_with([{"instrument_id": 1, "symbol": "AAPL"}])
+    # Endpoint calls fetchone twice: symbol lookup, then ``_has_sec_cik``
+    # SEC-CIK gate. The third call (``get_upcoming_dividends`` is fully
+    # patched below) never reaches conn so the side_effect ends here.
+    conn.cursor.return_value = _cursor_with(
+        [{"instrument_id": 1, "symbol": "AAPL"}, (1,)],
+    )
     app = _build_app(conn)
 
     with (
         patch("app.services.dividends.get_dividend_summary", return_value=summary),
         patch("app.services.dividends.get_dividend_history", return_value=history),
+        patch("app.services.dividends.get_upcoming_dividends", return_value=[]),
         TestClient(app) as client,
     ):
         resp = client.get("/instruments/AAPL/dividends")

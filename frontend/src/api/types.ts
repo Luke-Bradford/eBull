@@ -268,22 +268,21 @@ export interface InstrumentSummary {
   key_stats: InstrumentKeyStats | null;
   source: Record<string, string>;
   /** True iff the instrument has a primary SEC CIK in
-   *  external_identifiers. Frontend uses this to gate
-   *  SEC-specific panels (SecProfile, InsiderActivity,
-   *  Dividends, business summary). Crypto + non-US instruments
-   *  see false.
-   *  Deprecated: prefer reading `capabilities` per-cell.
-   *  PR 3b retires this field once frontend reads `capabilities`
-   *  directly. */
+   *  external_identifiers. Frontend uses this to gate the
+   *  remaining SEC-specific panels (SecProfile, BusinessSections)
+   *  not yet refactored into provider-agnostic shells. Crypto +
+   *  non-US instruments see false. Retired as a shim for the
+   *  three capability panels (Dividends / InsiderActivity /
+   *  EightKEvents — #515 PR 3b); a follow-up PR removes it
+   *  altogether once SecProfile + BusinessSections also land
+   *  provider-agnostic shells. */
   has_sec_cik: boolean;
-  /** True iff any filings provider has rows for the instrument
-   *  (today: SEC; tomorrow: Companies House / regional). Gates
-   *  the source-agnostic Filings tab + right-rail "recent
-   *  filings" widget. Wider than has_sec_cik so adding a non-SEC
-   *  filings provider later doesn't bake in a follow-up.
-   *  Deprecated: prefer reading `capabilities.filings`.
-   *  PR 3b retires this field once frontend reads `capabilities`
-   *  directly. */
+  /** Legacy filings-coverage flag.
+   *  Frontend no longer reads this — the Filings tab and
+   *  right-rail widget gate via
+   *  ``capabilities.filings.data_present`` instead (#515 PR 3b).
+   *  Field still ships on the wire for one release; a follow-up
+   *  PR drops it from the response model + this interface. */
   has_filings_coverage: boolean;
   /** Per-capability resolution (#515 PR 3). Keyed by capability
    *  name (one of the 11 v1 keys: filings / fundamentals /

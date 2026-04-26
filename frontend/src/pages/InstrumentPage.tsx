@@ -76,19 +76,49 @@ const ALL_TABS: { id: TabId; label: string }[] = [
 
 /**
  * Filter the visible tabs to those an instrument's coverage
- * actually populates (#503 PR 2). SEC-only tabs (Financials)
- * hide when ``has_sec_cik`` is false; the source-agnostic
- * Filings tab hides when no provider has filings for the
- * instrument. Crypto + non-US instruments end up with
- * Research / Positions / News only.
+ * actually populates (#503 PR 2 / #515 PR 3b).
+ *
+ * Filings: provider-agnostic gate via
+ * ``summary.capabilities.filings`` — any active provider shows
+ * the tab.
+ *
+ * Financials: still SEC-XBRL-only at the data layer
+ * (``/instruments/{symbol}/financials`` reads
+ * ``financial_periods`` exclusively), so the tab gates on the
+ * ``sec_xbrl`` provider specifically. An instrument with only
+ * non-SEC fundamentals (e.g. FMP-only) would render an empty
+ * statement table — gating on the broader ``fundamentals``
+ * capability would regress that. Once the financials surface
+ * lands a provider-agnostic refactor (follow-up to #515), this
+ * gate widens to ``hasActiveCapability(summary, "fundamentals")``.
  */
 function visibleTabs(summary: InstrumentSummary | null): typeof ALL_TABS {
   if (summary === null) return ALL_TABS;
   return ALL_TABS.filter((t) => {
-    if (t.id === "financials") return summary.has_sec_cik;
-    if (t.id === "filings") return summary.has_filings_coverage;
+    if (t.id === "financials")
+      return hasActiveProvider(summary, "fundamentals", "sec_xbrl");
+    if (t.id === "filings") return hasActiveCapability(summary, "filings");
     return true;
   });
+}
+
+function hasActiveCapability(
+  summary: InstrumentSummary,
+  capability: string,
+): boolean {
+  const cell = summary.capabilities[capability];
+  if (cell === undefined) return false;
+  return cell.providers.some((p) => cell.data_present[p] === true);
+}
+
+function hasActiveProvider(
+  summary: InstrumentSummary,
+  capability: string,
+  provider: string,
+): boolean {
+  const cell = summary.capabilities[capability];
+  if (cell === undefined) return false;
+  return cell.data_present[provider] === true;
 }
 
 function formatDecimal(
@@ -666,7 +696,7 @@ function InstrumentPageBody({
             instrumentId={summary.instrument_id}
             sector={summary.identity.sector}
             currentSymbol={summary.identity.symbol}
-            hasFilingsCoverage={summary.has_filings_coverage}
+            filingsActive={hasActiveCapability(summary, "filings")}
           />
         </div>
       </div>
