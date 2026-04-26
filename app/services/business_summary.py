@@ -421,6 +421,68 @@ class ParsedCrossReference:
     context: str  # sentence-sized phrase around the reference
 
 
+# ---------------------------------------------------------------------
+# Table extraction — sentinel substitution (#559)
+# ---------------------------------------------------------------------
+
+_TABLE_SENTINEL = "␞"  # SYMBOL FOR RECORD SEPARATOR — never appears in 10-K prose
+_TABLE_BLOCK_RE = re.compile(r"<table\b[^>]*>.*?</table\s*>", re.IGNORECASE | re.DOTALL)
+_TR_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr\s*>", re.IGNORECASE | re.DOTALL)
+_CELL_RE = re.compile(r"<(?:t[hd])\b[^>]*>(.*?)</t[hd]\s*>", re.IGNORECASE | re.DOTALL)
+
+
+@dataclass(frozen=True)
+class ParsedTable:
+    """One <table> block extracted from a section body.
+
+    ``headers`` is the first row's cell contents (treated as headers
+    even when the source uses <td> rather than <th> — many 10-K
+    issuers do).  ``rows`` are subsequent rows. Cells are plain text
+    after entity decode + tag strip.
+    """
+
+    order: int
+    headers: tuple[str, ...]
+    rows: tuple[tuple[str, ...], ...]
+
+
+def _parse_table_html(table_html: str) -> ParsedTable | None:
+    """Extract a single <table> block into a ParsedTable, or None
+    when the table has zero data rows (a layout table with no real
+    content)."""
+    cells_per_row: list[tuple[str, ...]] = []
+    for tr_match in _TR_RE.finditer(table_html):
+        cells = tuple(_strip_html(cell).strip() for cell in _CELL_RE.findall(tr_match.group(1)))
+        if any(c for c in cells):  # skip rows that strip to all empty
+            cells_per_row.append(cells)
+    if not cells_per_row:
+        return None
+    headers, *body_rows = cells_per_row
+    return ParsedTable(
+        order=0,  # caller assigns the final order
+        headers=headers,
+        rows=tuple(body_rows),
+    )
+
+
+def _extract_tables(raw_html: str) -> tuple[str, tuple[ParsedTable, ...]]:
+    """Replace every <table> block in ``raw_html`` with a sentinel
+    ``␞TABLE_N␞`` and return the rewritten HTML + the
+    parsed tables in source order."""
+    tables: list[ParsedTable] = []
+
+    def _sub(m: re.Match[str]) -> str:
+        parsed = _parse_table_html(m.group(0))
+        if parsed is None:
+            return " "  # drop layout-only tables
+        order = len(tables)
+        tables.append(ParsedTable(order=order, headers=parsed.headers, rows=parsed.rows))
+        return f" {_TABLE_SENTINEL}TABLE_{order}{_TABLE_SENTINEL} "
+
+    rewritten = _TABLE_BLOCK_RE.sub(_sub, raw_html)
+    return rewritten, tuple(tables)
+
+
 @dataclass(frozen=True)
 class ParsedBusinessSection:
     """One subsection extracted from Item 1."""
@@ -430,6 +492,7 @@ class ParsedBusinessSection:
     section_label: str  # heading as it appeared in the filing, verbatim
     body: str
     cross_references: tuple[ParsedCrossReference, ...]
+    tables: tuple[ParsedTable, ...] = ()
 
 
 # Cross-reference regex. Matches the common forms "Item 1A", "Item 7",
@@ -547,6 +610,45 @@ def _wrap_heading_tags(raw_html: str) -> str:
     return _BOLD_STYLE_WRAP_RE.sub(_wrap, pass1)
 
 
+def _attach_tables(
+    sections: list[ParsedBusinessSection],
+    all_tables: tuple[ParsedTable, ...],
+) -> list[ParsedBusinessSection]:
+    """Walk each section body, find ``␞TABLE_N␞`` markers,
+    and attach the matching ParsedTable. Re-numbers tables per
+    section so the renderer can index by ``section.tables[order]``."""
+    result: list[ParsedBusinessSection] = []
+    for s in sections:
+        attached: list[ParsedTable] = []
+        body = s.body
+        for table in all_tables:
+            marker = f"{_TABLE_SENTINEL}TABLE_{table.order}{_TABLE_SENTINEL}"
+            if marker in body:
+                local_order = len(attached)
+                attached.append(
+                    ParsedTable(
+                        order=local_order,
+                        headers=table.headers,
+                        rows=table.rows,
+                    )
+                )
+                body = body.replace(
+                    marker,
+                    f"{_TABLE_SENTINEL}TABLE_{local_order}{_TABLE_SENTINEL}",
+                )
+        result.append(
+            ParsedBusinessSection(
+                section_order=s.section_order,
+                section_key=s.section_key,
+                section_label=s.section_label,
+                body=body,
+                cross_references=s.cross_references,
+                tables=tuple(attached),
+            )
+        )
+    return result
+
+
 def extract_business_sections(raw_html: str) -> tuple[ParsedBusinessSection, ...]:
     """Extract Item 1 as an ordered list of subsections.
 
@@ -566,9 +668,13 @@ def extract_business_sections(raw_html: str) -> tuple[ParsedBusinessSection, ...
     """
     if not raw_html:
         return ()
+    # Extract <table> blocks first, replacing each with a ␞TABLE_N␞
+    # sentinel so the table content survives the subsequent HTML strip
+    # as structured data rather than prose noise (#559).
+    table_stripped_html, all_tables = _extract_tables(raw_html)
     # Pre-strip: wrap heading-tag inner text with sentinels so the
     # boundaries survive the subsequent plain-text collapse.
-    marked_html = _wrap_heading_tags(raw_html)
+    marked_html = _wrap_heading_tags(table_stripped_html)
     text = _strip_html(marked_html)
 
     matches_1 = list(_ITEM_1_RE.finditer(text))
@@ -652,6 +758,8 @@ def extract_business_sections(raw_html: str) -> tuple[ParsedBusinessSection, ...
                     cross_references=_extract_cross_references(body_clean),
                 )
             )
+        if all_tables:
+            sections = _attach_tables(sections, all_tables)
         return tuple(sections)
 
     # Pre-heading general block.
@@ -685,6 +793,8 @@ def extract_business_sections(raw_html: str) -> tuple[ParsedBusinessSection, ...
             )
         )
 
+    if all_tables:
+        sections = _attach_tables(sections, all_tables)
     return tuple(sections)
 
 
