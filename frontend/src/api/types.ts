@@ -244,6 +244,21 @@ export interface InstrumentKeyStats {
   field_source?: Record<string, KeyStatsFieldSource> | null;
 }
 
+/** One (capability × instrument) cell in the summary response.
+ *  Mirrors `app.services.capabilities.CapabilityCell` (#515 PR 3).
+ */
+export interface CapabilityCell {
+  /** Operator-decided source list (possibly empty if no source
+   *  picked, possibly multi-source). Closed enum kept loose
+   *  here as `string[]` so a future provider added in a follow-up
+   *  PR doesn't force a frontend release at the same time. */
+  providers: string[];
+  /** Per-provider data-presence (keyed identically to providers).
+   *  True iff at least one row has been ingested for this
+   *  instrument from this provider. */
+  data_present: Record<string, boolean>;
+}
+
 export interface InstrumentSummary {
   instrument_id: number;
   is_tradable: boolean;
@@ -256,14 +271,27 @@ export interface InstrumentSummary {
    *  external_identifiers. Frontend uses this to gate
    *  SEC-specific panels (SecProfile, InsiderActivity,
    *  Dividends, business summary). Crypto + non-US instruments
-   *  see false. */
+   *  see false.
+   *  Deprecated: prefer reading `capabilities` per-cell.
+   *  PR 3b retires this field once frontend reads `capabilities`
+   *  directly. */
   has_sec_cik: boolean;
   /** True iff any filings provider has rows for the instrument
    *  (today: SEC; tomorrow: Companies House / regional). Gates
    *  the source-agnostic Filings tab + right-rail "recent
    *  filings" widget. Wider than has_sec_cik so adding a non-SEC
-   *  filings provider later doesn't bake in a follow-up. */
+   *  filings provider later doesn't bake in a follow-up.
+   *  Deprecated: prefer reading `capabilities.filings`.
+   *  PR 3b retires this field once frontend reads `capabilities`
+   *  directly. */
   has_filings_coverage: boolean;
+  /** Per-capability resolution (#515 PR 3). Keyed by capability
+   *  name (one of the 11 v1 keys: filings / fundamentals /
+   *  dividends / insider / analyst / ratings / esg / ownership /
+   *  corporate_events / business_summary / officers). Frontend
+   *  renders a panel iff `providers.length > 0` AND any
+   *  `data_present` value is true. */
+  capabilities: Record<string, CapabilityCell>;
 }
 
 // #316 Slice A — daily OHLCV bars

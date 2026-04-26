@@ -45,6 +45,19 @@ function summary(overrides: Partial<InstrumentSummary> = {}): InstrumentSummary 
     source: { identity: "local_db", price: "quotes", key_stats: "unavailable" },
     has_sec_cik: true,
     has_filings_coverage: true,
+    capabilities: {
+      filings: { providers: ["sec_edgar"], data_present: { sec_edgar: true } },
+      fundamentals: { providers: [], data_present: {} },
+      dividends: { providers: [], data_present: {} },
+      insider: { providers: [], data_present: {} },
+      analyst: { providers: [], data_present: {} },
+      ratings: { providers: [], data_present: {} },
+      esg: { providers: [], data_present: {} },
+      ownership: { providers: [], data_present: {} },
+      corporate_events: { providers: [], data_present: {} },
+      business_summary: { providers: [], data_present: {} },
+      officers: { providers: [], data_present: {} },
+    },
     ...overrides,
   };
 }
