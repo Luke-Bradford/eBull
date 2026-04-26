@@ -420,25 +420,45 @@ def _normalise_rate(item: Mapping[str, object]) -> Quote | None:
     )
 
 
+_EXCHANGES_WRAPPER_KEY = "exchangeInfo"
+
+
 def _normalise_exchanges(raw: object) -> list[ExchangeRecord]:
     """Normalise an eToro exchanges API response into ExchangeRecord list.
 
-    Per the eToro portal docs, the endpoint returns a bare list of
-    ``{exchangeID, exchangeDescription}`` dicts. We pin that contract
-    here — anything else (including a wrapping object) raises
-    ``ValueError`` so a silent schema drift fails loudly during the
-    weekly cron run rather than parsing the wrong list and reporting
-    a harmless-looking empty feed (a Codex round 2 finding).
+    The live API wraps the list in ``{"exchangeInfo": [...]}`` even
+    though the portal docs show a bare list. We pin the actual shape
+    here (one explicit known wrapper key) — anything else raises
+    ``ValueError`` so a silent schema drift fails loudly rather than
+    parsing the wrong list and reporting a harmless-looking empty
+    feed (Codex round 2 finding from #503 PR 4).
+
+    The bare-list shape is also accepted as a fallback in case eToro
+    eventually aligns the live API with the portal docs; a future
+    silent flip from one to the other is a no-op for us.
     """
-    if not isinstance(raw, list):
+    items: list[object]
+    if isinstance(raw, dict):
+        wrapped = raw.get(_EXCHANGES_WRAPPER_KEY)
+        if not isinstance(wrapped, list):
+            raise ValueError(
+                f"eToro exchanges endpoint returned a dict, but key "
+                f"{_EXCHANGES_WRAPPER_KEY!r} is missing or not a list. "
+                f"Top-level keys: {list(raw.keys())}. If eToro renamed "
+                f"the wrapper key, update _normalise_exchanges."
+            )
+        items = wrapped
+    elif isinstance(raw, list):
+        items = list(raw)
+    else:
         raise ValueError(
-            f"Expected list from eToro exchanges endpoint (per portal docs), "
-            f"got {type(raw).__name__}. If eToro changed the response shape, "
-            f"update _normalise_exchanges to handle the new wrapper."
+            f"Expected dict (with {_EXCHANGES_WRAPPER_KEY!r} key) or list "
+            f"from eToro exchanges endpoint, got {type(raw).__name__}. "
+            f"If eToro changed the response shape, update _normalise_exchanges."
         )
 
     records: list[ExchangeRecord] = []
-    for item in raw:
+    for item in items:
         if not isinstance(item, dict):
             continue
         provider_id = item.get("exchangeID") or item.get("exchangeId")
