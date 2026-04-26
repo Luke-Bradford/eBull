@@ -111,6 +111,34 @@ def test_diverged_row_lists_only_changed_capabilities() -> None:
     assert diff["current_providers"] == ["operator_custom"]
 
 
+def test_reordered_providers_are_not_drift() -> None:
+    """Provider order is meaningful at runtime but isn't drift —
+    an operator who reordered ``ownership`` from
+    ``[sec_13f, sec_13d_13g]`` to ``[sec_13d_13g, sec_13f]`` keeps
+    the same set; the endpoint must NOT report drift on that row."""
+    reordered = dict(_US_EQUITY_SEED)
+    reordered["ownership"] = ["sec_13d_13g", "sec_13f"]
+    cur = _make_cur(
+        [
+            {
+                "exchange_id": "4",
+                "name": "Nasdaq",
+                "asset_class": "us_equity",
+                "capabilities": reordered,
+            },
+        ]
+    )
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+
+    app = _build_app(conn)
+    with TestClient(app) as client:
+        resp = client.get("/admin/capability-overrides")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total_overrides"] == 0
+
+
 def test_non_us_equity_seed_is_empty() -> None:
     """Non-us_equity rows have empty seed defaults; any populated
     capability counts as drift."""

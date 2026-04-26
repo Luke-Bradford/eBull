@@ -127,7 +127,15 @@ def list_overrides(
             for cap in V1_CAPABILITIES:
                 seed_list = list(seed.get(cap, []))
                 current_list = list(current.get(cap, []))
-                if seed_list != current_list:
+                # Drift compares the *set* of providers, not the
+                # ordering. Provider order is meaningful at runtime
+                # (resolver renders panels in declared order), but
+                # reordering without changing the set isn't useful
+                # drift signal — an operator who reordered
+                # intentionally doesn't want to see it as drift, and
+                # JSONB array round-trips can in principle reorder.
+                # Codex review on #531.
+                if sorted(seed_list) != sorted(current_list):
                     diffs.append(
                         CapabilityCellDiff(
                             capability=cap,
