@@ -224,10 +224,19 @@ def test_us_equity_set_unaffected_for_canonical_us_ids(
 
 
 def test_migration_069_is_idempotent(ebull_test_conn: psycopg.Connection[tuple]) -> None:
-    """Re-running a 069 UPDATE after the first pass is a no-op
-    because the row's asset_class no longer matches the WHERE
-    clause's old value. Pin that an operator who hand-corrects
-    a row before re-running migrations doesn't get clobbered."""
+    """Re-running the FULL migration SQL after the first pass is
+    a no-op because every row's asset_class no longer matches the
+    WHERE clause's old value. Pin that an operator who hand-
+    corrects rows before re-running migrations doesn't get
+    clobbered.
+
+    Verification: snapshot ``updated_at`` per row after the first
+    pass, run the entire ``_RECLASSIFY_SQL`` block again, then
+    assert no row's ``updated_at`` advanced. Covers all 23
+    UPDATEs in one sweep — Codex round 1 finding on PR #525
+    flagged that the previous version only verified the single
+    id-7 UPDATE.
+    """
     touched = _seed_pre_069_state(ebull_test_conn)
     try:
         with ebull_test_conn.cursor() as cur:
@@ -236,28 +245,35 @@ def test_migration_069_is_idempotent(ebull_test_conn: psycopg.Connection[tuple])
 
         with ebull_test_conn.cursor() as cur:
             cur.execute(
-                "SELECT exchange_id, asset_class, country FROM exchanges "
+                "SELECT exchange_id, asset_class, country, updated_at FROM exchanges "
                 "WHERE exchange_id = ANY(%s) ORDER BY exchange_id",
                 (touched,),
             )
-            baseline = cur.fetchall()
+            after_first = cur.fetchall()
 
-            cur.execute(
-                """
-                UPDATE exchanges SET asset_class = 'uk_equity', country = 'GB', updated_at = NOW()
-                 WHERE exchange_id = '7' AND asset_class = 'us_equity'
-                """
-            )
-            second_run_rowcount = cur.rowcount
+        # Run the entire migration SQL block again. None of the 23
+        # UPDATE statements should match any row (every row's
+        # asset_class now differs from the gating value).
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(_RECLASSIFY_SQL)
+        ebull_test_conn.commit()
 
+        with ebull_test_conn.cursor() as cur:
             cur.execute(
-                "SELECT exchange_id, asset_class, country FROM exchanges "
+                "SELECT exchange_id, asset_class, country, updated_at FROM exchanges "
                 "WHERE exchange_id = ANY(%s) ORDER BY exchange_id",
                 (touched,),
             )
-            after = cur.fetchall()
+            after_second = cur.fetchall()
 
-        assert second_run_rowcount == 0, "Idempotency broken: second run UPDATEd a row"
-        assert after == baseline
+        # Tuple-equality covers asset_class, country, AND
+        # updated_at — any UPDATE that fired would bump the
+        # ``NOW()``-set updated_at and break the equality.
+        drift = [
+            f"  {row1[0]}: first {row1} vs second {row2}"
+            for row1, row2 in zip(after_first, after_second, strict=True)
+            if row1 != row2
+        ]
+        assert not drift, "Idempotency broken — rows changed on second pass:\n" + "\n".join(drift)
     finally:
         _cleanup(ebull_test_conn, touched)
