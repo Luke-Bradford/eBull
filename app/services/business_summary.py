@@ -36,6 +36,7 @@ import html
 import logging
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Literal, Protocol
 
 import psycopg
@@ -1184,6 +1185,56 @@ def get_business_sections(
             )
         )
     return tuple(rows)
+
+
+# ---------------------------------------------------------------------
+# 10-K filing history (#559)
+# ---------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TenKHistoryRow:
+    """One 10-K or 10-K/A filing entry for the history rail."""
+
+    accession_number: str
+    filing_date: date
+    filing_type: str
+
+
+def list_10k_history(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+) -> tuple[TenKHistoryRow, ...]:
+    """Return all 10-K and 10-K/A filings for an instrument, newest first.
+
+    Reads from ``filing_events`` for ``filing_type IN ('10-K', '10-K/A')``,
+    ordered ``filing_date DESC, provider_filing_id DESC``. The
+    ``provider_filing_id`` column carries the SEC accession number and is
+    exposed as ``accession_number`` in :class:`TenKHistoryRow`.
+
+    Empty tuple when no matching filings exist.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT provider_filing_id, filing_date, filing_type
+            FROM filing_events
+            WHERE instrument_id = %s
+              AND filing_type IN ('10-K', '10-K/A')
+            ORDER BY filing_date DESC, provider_filing_id DESC
+            """,
+            (instrument_id,),
+        )
+        raw_rows = cur.fetchall()
+    return tuple(
+        TenKHistoryRow(
+            accession_number=str(r[0]),
+            filing_date=r[1],
+            filing_type=str(r[2]),
+        )
+        for r in raw_rows
+    )
 
 
 # ---------------------------------------------------------------------
