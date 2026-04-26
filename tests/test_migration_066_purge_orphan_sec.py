@@ -160,16 +160,19 @@ def test_multi_source_predicate_filters_on_source_column(
     # ``source_ref`` and ``reported_currency`` are NOT NULL (#530
     # also fixes that — pre-fix the INSERT silently inserted NULLs
     # against the constraint).
-    for period_end, source in (("2024-12-31", "sec_edgar"), ("2025-12-31", "fmp")):
+    for period_end, fiscal_year, source in (
+        ("2024-12-31", 2024, "sec_edgar"),
+        ("2025-12-31", 2025, "fmp"),
+    ):
         conn.execute(
             """
             INSERT INTO financial_periods
                 (instrument_id, period_end_date, period_type,
                  source, source_ref, fiscal_year, reported_currency)
-            VALUES (%s, %s, 'FY', %s, %s, 2025, 'USD')
+            VALUES (%s, %s, 'FY', %s, %s, %s, 'USD')
             ON CONFLICT DO NOTHING
             """,
-            (9000004, period_end, source, f"test-{source}"),
+            (9000004, period_end, source, f"test-{source}", fiscal_year),
         )
 
     conn.execute(
