@@ -74,8 +74,22 @@ def _seed_instrument_t3_no_candles(
         )
 
 
-def _cleanup_exchange(conn: psycopg.Connection[tuple], exchange_ids: list[str]) -> None:
+def _cleanup(
+    conn: psycopg.Connection[tuple],
+    *,
+    exchange_ids: list[str],
+    instrument_ids: list[int],
+) -> None:
+    """Drop the seeded fixture rows. Coverage cascades from
+    instruments; price_daily does not always cascade (depends on
+    constraint shape) so it's deleted explicitly. Both arguments
+    are required so a parametrized test that reuses an instrument
+    id across cases (Codex review on PR #524) cannot leave a stale
+    row that PK-collides on the next run."""
     with conn.cursor() as cur:
+        cur.execute("DELETE FROM price_daily WHERE instrument_id = ANY(%s)", (instrument_ids,))
+        cur.execute("DELETE FROM coverage WHERE instrument_id = ANY(%s)", (instrument_ids,))
+        cur.execute("DELETE FROM instruments WHERE instrument_id = ANY(%s)", (instrument_ids,))
         cur.execute("DELETE FROM exchanges WHERE exchange_id = ANY(%s)", (exchange_ids,))
     conn.commit()
 
@@ -101,7 +115,19 @@ def test_crypto_instrument_qualifies_without_fundamentals(
             symbols = sorted(r[1] for r in cur.fetchall())
         assert "TESTBTC" in symbols
     finally:
-        _cleanup_exchange(ebull_test_conn, ["test_crypto"])
+        _cleanup(
+            ebull_test_conn,
+            exchange_ids=["test_crypto"],
+            instrument_ids=[950100],
+        )
+
+
+# Distinct instrument_id per parametrized case — function-scoped
+# `ebull_test_conn` truncates between cases, but if a future
+# refactor moves the fixture to class scope the parametrized cases
+# would collide on a single id. Belt-and-braces (Codex round 1
+# review on PR #524).
+_PARAMETRIZED_INSTRUMENT_IDS = {"fx": 950201, "commodity": 950202, "index": 950203}
 
 
 @pytest.mark.parametrize("asset_class", ["fx", "commodity", "index"])
@@ -112,11 +138,13 @@ def test_other_non_fundamentals_classes_qualify(
     """Same OR branch covers fx / commodity / index — none of these
     asset classes carry fundamentals rows by design."""
     exchange_id = f"test_{asset_class}"
-    _seed_exchange(ebull_test_conn, exchange_id=exchange_id, asset_class=asset_class)
+    instrument_id = _PARAMETRIZED_INSTRUMENT_IDS[asset_class]
     symbol = f"T{asset_class.upper()[:3]}"
+
+    _seed_exchange(ebull_test_conn, exchange_id=exchange_id, asset_class=asset_class)
     _seed_instrument_t3_no_candles(
         ebull_test_conn,
-        instrument_id=950200,
+        instrument_id=instrument_id,
         symbol=symbol,
         exchange=exchange_id,
     )
@@ -128,7 +156,11 @@ def test_other_non_fundamentals_classes_qualify(
             symbols = sorted(r[1] for r in cur.fetchall())
         assert symbol in symbols
     finally:
-        _cleanup_exchange(ebull_test_conn, [exchange_id])
+        _cleanup(
+            ebull_test_conn,
+            exchange_ids=[exchange_id],
+            instrument_ids=[instrument_id],
+        )
 
 
 def test_us_equity_without_fundamentals_still_gated(
@@ -154,7 +186,11 @@ def test_us_equity_without_fundamentals_still_gated(
             symbols = sorted(r[1] for r in cur.fetchall())
         assert "TESTUSEQ" not in symbols
     finally:
-        _cleanup_exchange(ebull_test_conn, ["test_us_pr0"])
+        _cleanup(
+            ebull_test_conn,
+            exchange_ids=["test_us_pr0"],
+            instrument_ids=[950300],
+        )
 
 
 def test_crypto_with_existing_candles_excluded(
@@ -187,4 +223,8 @@ def test_crypto_with_existing_candles_excluded(
             symbols = sorted(r[1] for r in cur.fetchall())
         assert "TESTDONE" not in symbols
     finally:
-        _cleanup_exchange(ebull_test_conn, ["test_crypto_done"])
+        _cleanup(
+            ebull_test_conn,
+            exchange_ids=["test_crypto_done"],
+            instrument_ids=[950400],
+        )
