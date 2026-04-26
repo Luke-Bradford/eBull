@@ -325,18 +325,40 @@ _HEADING_WRAP_RE = re.compile(
 # apostrophe and misses the heading entirely. We match liberally up
 # to ``>`` (style attrs never contain ``>``) and rely on the
 # ``font-weight`` substring for the heading test.
-# Adjacent **bold-styled** ``</span><span style="...font-weight:bold...">``
-# boundary — collapsed before heading-tag wrapping (#550). Targets
-# the drop-cap pattern where iXBRL filings break a logical heading
-# across two sibling bold spans. Scoped to bold-on-both-sides so
-# regular body-prose span boundaries (colour/size changes inside
-# a paragraph) are not concatenated into run-together words —
-# Codex review on #550.
-_BOLD_SPAN_BOUNDARY_RE = re.compile(
-    r"</span>\s*<span\b[^>]*?style\s*=\s*[\"'][^>]*?"
-    r"font-weight\s*:\s*(?:bold|bolder|[7-9]\d\d)[^>]*?>",
+# Adjacent bold-bold ``<span style="...bold...">X</span><span style="...bold...">Y</span>``
+# pair — collapsed before heading-tag wrapping (#550). Targets the
+# drop-cap pattern where iXBRL filings break a logical heading across
+# two sibling bold spans. Scoped to bold-on-BOTH-sides — body prose
+# transitions from a non-bold span into a bold inline span (e.g.
+# ``text</span><span style="font-weight:bold">term</span>``) are
+# preserved so the trailing word doesn't collide with the leading
+# text into a run-together word.
+#
+# Codex review on #550 round 2 — the previous regex constrained only
+# the trailing span; this version captures leading + trailing as a
+# pair and replaces via callback so body prose is never touched.
+_BOLD_SPAN_PAIR_RE = re.compile(
+    r"(?P<lead_open><span\b[^>]*?style\s*=\s*[\"'][^>]*?"
+    r"font-weight\s*:\s*(?:bold|bolder|[7-9]\d\d)[^>]*?>)"
+    r"(?P<lead_inner>[^<]*)"
+    r"</span>\s*"
+    r"(?P<trail_open><span\b[^>]*?style\s*=\s*[\"'][^>]*?"
+    r"font-weight\s*:\s*(?:bold|bolder|[7-9]\d\d)[^>]*?>)",
     re.IGNORECASE,
 )
+
+
+def _merge_bold_span_pair(m: re.Match[str]) -> str:
+    """Collapse a bold-bold drop-cap pair into the leading span only.
+
+    Drops the ``</span>`` close + whitespace + opening of the trailing
+    bold span, leaving ``<span style=bold>X`` + ``Y`` text continuous
+    inside the leading span (the original trailing span's closer is
+    still in the surrounding HTML and pairs with the now-unified
+    open). Empty-string concat (no separator) so "ITEM 1. B" + "USINESS"
+    becomes "ITEM 1. BUSINESS", not "ITEM 1. B USINESS".
+    """
+    return m.group("lead_open") + m.group("lead_inner")
 
 
 _BOLD_STYLE_WRAP_RE = re.compile(
@@ -476,13 +498,11 @@ def _wrap_heading_tags(raw_html: str) -> str:
     # collapsed boundary loses styling continuity within paragraphs
     # but the tradeoff is acceptable for sectioning — body content
     # passes through ``_strip_html`` later anyway.
-    # Empty-string collapse of adjacent BOLD-STYLED span boundaries
-    # only. Drop-cap split-word headings (MSFT's "ITEM 1. B" +
-    # "USINESS") need the spans joined as "BUSINESS", not
-    # "B USINESS". Scoped to bold-on-the-trailing-side so regular
-    # body-prose span boundaries (colour/size changes within a
-    # paragraph) don't get concatenated into run-together words.
-    collapsed = _BOLD_SPAN_BOUNDARY_RE.sub("", raw_html)
+    # Drop-cap collapse — bold-bold span pairs only (#550). The
+    # callback replaces only the close-then-open boundary, never
+    # touching body-prose spans where the leading side isn't bold.
+    # See ``_merge_bold_span_pair`` doc.
+    collapsed = _BOLD_SPAN_PAIR_RE.sub(_merge_bold_span_pair, raw_html)
     pass1 = _HEADING_WRAP_RE.sub(_wrap, collapsed)
     return _BOLD_STYLE_WRAP_RE.sub(_wrap, pass1)
 
