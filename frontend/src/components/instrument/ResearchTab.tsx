@@ -13,7 +13,7 @@
  * provider tag (#515 PR 3b).
  */
 import { Section } from "@/components/dashboard/Section";
-import { BusinessSectionsPanel } from "@/components/instrument/BusinessSectionsPanel";
+import { BusinessSectionsTeaser } from "@/components/instrument/BusinessSectionsTeaser";
 import { DividendsPanel } from "@/components/instrument/DividendsPanel";
 import { EightKEventsPanel } from "@/components/instrument/EightKEventsPanel";
 import { InsiderActivityPanel } from "@/components/instrument/InsiderActivityPanel";
@@ -206,7 +206,7 @@ export function ResearchTab({
       ))}
       {hasSec ? (
         <div className="md:col-span-2">
-          <BusinessSectionsPanel symbol={summary.identity.symbol} />
+          <BusinessSectionsTeaser symbol={summary.identity.symbol} />
         </div>
       ) : null}
       {insiderProviders.map((p) => (
