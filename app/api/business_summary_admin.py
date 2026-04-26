@@ -119,7 +119,7 @@ def list_failures(
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            psycopg.sql.SQL(
+            psycopg.sql.SQL(  # type: ignore[arg-type]
                 f"""
             SELECT bs.last_failure_reason AS reason,
                    COUNT(*) AS count,
@@ -142,7 +142,7 @@ def list_failures(
             )
 
         cur.execute(
-            psycopg.sql.SQL(
+            psycopg.sql.SQL(  # type: ignore[arg-type]
                 f"""
             SELECT COUNT(*) AS total
               FROM instrument_business_summary bs
@@ -155,7 +155,7 @@ def list_failures(
         total = int(total_row["total"]) if total_row else 0  # type: ignore[arg-type]
 
         cur.execute(
-            psycopg.sql.SQL(
+            psycopg.sql.SQL(  # type: ignore[arg-type]
                 f"""
             SELECT bs.instrument_id,
                    i.symbol,
