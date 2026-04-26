@@ -35,12 +35,55 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import psycopg
 from psycopg.types.json import Jsonb
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------
+# Failure-reason taxonomy + exponential backoff (#533)
+# ---------------------------------------------------------------------
+
+
+# Closed set of failure categories the ingester records on each
+# parse miss. Operator-facing — surfaced verbatim in the admin
+# failure dashboard. Adding a new value means updating both this
+# Literal and the admin UI's reason→label map.
+FailureReason = Literal[
+    "fetch_http_5xx",  # SEC server error
+    "fetch_http_4xx",  # 4xx other than 404/410 (which return None)
+    "fetch_timeout",  # connection timeout / read timeout
+    "fetch_other",  # unclassified fetch failure (provider returned None or unknown exception)
+    "no_item_1_marker",  # Item 1 heading absent from document (10-K/A Part-III amendments etc.)
+    "body_too_short",  # marker found but slice below ``_MIN_BODY_LEN`` (TOC-only)
+    "parse_exception",  # extractor raised
+    "upsert_exception",  # DB write raised
+    "legacy_tombstone",  # backfill marker for tombstones predating #533
+]
+
+
+# Backoff schedule: attempt_count → days until next retry. Caps at
+# 365 days (effective quarantine) — a row that has missed 4 times
+# in a row is almost always a real classification or content issue
+# the operator needs to address (filing_type leak, broken URL,
+# parser gap), not a transient blip.
+_BACKOFF_SCHEDULE_DAYS: dict[int, int] = {
+    1: 1,
+    2: 7,
+    3: 30,
+}
+_QUARANTINE_DAYS = 365
+
+
+def _next_retry_days(attempt_count: int) -> int:
+    """Return the number of days until the next retry given the
+    attempt counter. ``attempt_count`` is the count AFTER the
+    current failure has been recorded (i.e. 1 means "first failure",
+    not "before any failure"). Quarantine kicks in at 4+."""
+    return _BACKOFF_SCHEDULE_DAYS.get(attempt_count, _QUARANTINE_DAYS)
 
 
 # ---------------------------------------------------------------------
@@ -518,7 +561,9 @@ def upsert_business_summary(
 
     Returns ``True`` on INSERT, ``False`` on UPDATE. The UPDATE path
     overwrites the body + source_accession + timestamps so a later
-    10-K supersedes an older one cleanly."""
+    10-K supersedes an older one cleanly. Resets the failure-tracking
+    columns (#533) so a previously-quarantined instrument that now
+    parses successfully exits quarantine cleanly."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -526,10 +571,13 @@ def upsert_business_summary(
                 (instrument_id, body, source_accession)
             VALUES (%s, %s, %s)
             ON CONFLICT (instrument_id) DO UPDATE SET
-                body             = EXCLUDED.body,
-                source_accession = EXCLUDED.source_accession,
-                fetched_at       = NOW(),
-                last_parsed_at   = NOW()
+                body                = EXCLUDED.body,
+                source_accession    = EXCLUDED.source_accession,
+                fetched_at          = NOW(),
+                last_parsed_at      = NOW(),
+                attempt_count       = 0,
+                last_failure_reason = NULL,
+                next_retry_at       = NULL
             RETURNING (xmax = 0) AS inserted
             """,
             (instrument_id, body, source_accession),
@@ -608,31 +656,58 @@ def record_parse_attempt(
     *,
     instrument_id: int,
     source_accession: str,
+    reason: FailureReason,
 ) -> None:
     """Stamp a parse attempt without ever overwriting a real body.
 
     INSERT path (first-time failure): writes a tombstone row with
-    ``body = ''`` and the failing ``source_accession`` so the next
-    ingester pass sees a row with ``source_accession`` == the same
-    accession and ``last_parsed_at`` < 7 days — and skips it.
+    ``body = ''`` and ``attempt_count = 1``, plus the chosen
+    ``next_retry_at`` from the backoff schedule. The next ingester
+    pass sees a row with ``next_retry_at`` in the future and skips
+    it.
 
-    UPDATE path (prior row exists, failed retry): only bumps
-    ``last_parsed_at`` + ``source_accession``. Preserves any real
-    ``body`` from an earlier successful parse so a transient error
-    on a later 10-K can never destroy the extracted narrative
-    (Codex #434 / #446 BLOCKING pattern applied to #428).
+    UPDATE path (prior row exists, failed retry): increments
+    ``attempt_count`` and recomputes ``next_retry_at`` from the
+    schedule. Preserves any real ``body`` from an earlier successful
+    parse so a transient error on a later 10-K can never destroy
+    the extracted narrative (Codex #434 / #446 BLOCKING pattern
+    applied to #428). Records ``last_failure_reason`` so the
+    operator-facing admin dashboard can surface the failure category.
+
+    Backoff schedule (in days): 1 → 1, 2 → 7, 3 → 30, 4+ → 365
+    (effective quarantine).
     """
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO instrument_business_summary
-                (instrument_id, body, source_accession)
-            VALUES (%s, '', %s)
+                (instrument_id, body, source_accession,
+                 attempt_count, last_failure_reason, next_retry_at)
+            VALUES (
+                %(iid)s, '', %(acc)s,
+                1, %(reason)s,
+                NOW() + (%(days_first)s || ' days')::INTERVAL
+            )
             ON CONFLICT (instrument_id) DO UPDATE SET
-                source_accession = EXCLUDED.source_accession,
-                last_parsed_at   = NOW()
+                source_accession    = EXCLUDED.source_accession,
+                last_parsed_at      = NOW(),
+                attempt_count       = instrument_business_summary.attempt_count + 1,
+                last_failure_reason = EXCLUDED.last_failure_reason,
+                next_retry_at       = NOW() + (
+                    CASE
+                        WHEN instrument_business_summary.attempt_count + 1 = 1 THEN '1 days'::INTERVAL
+                        WHEN instrument_business_summary.attempt_count + 1 = 2 THEN '7 days'::INTERVAL
+                        WHEN instrument_business_summary.attempt_count + 1 = 3 THEN '30 days'::INTERVAL
+                        ELSE '365 days'::INTERVAL
+                    END
+                )
             """,
-            (instrument_id, source_accession),
+            {
+                "iid": instrument_id,
+                "acc": source_accession,
+                "reason": reason,
+                "days_first": _next_retry_days(1),
+            },
         )
 
 
@@ -758,6 +833,28 @@ class IngestResult:
 _MIN_BODY_LEN = 120
 
 
+def _classify_fetch_exception(exc: Exception) -> FailureReason:
+    """Map a fetch-side exception to a FailureReason value.
+
+    Concrete HTTP errors with a status code on a ``response`` attribute
+    split into 5xx vs 4xx. Connection / read timeouts share one category
+    so the operator dashboard can group them cleanly. Anything else
+    falls through to ``fetch_other``.
+    """
+    response = getattr(exc, "response", None)
+    if response is not None:
+        status_code = getattr(response, "status_code", None)
+        if isinstance(status_code, int):
+            if status_code >= 500:
+                return "fetch_http_5xx"
+            if status_code >= 400:
+                return "fetch_http_4xx"
+    name = type(exc).__name__.lower()
+    if "timeout" in name or "connection" in name:
+        return "fetch_timeout"
+    return "fetch_other"
+
+
 def ingest_business_summaries(
     conn: psycopg.Connection[Any],
     fetcher: _DocFetcher,
@@ -766,7 +863,8 @@ def ingest_business_summaries(
 ) -> IngestResult:
     """Scan 10-K filings, fetch primary doc, extract Item 1, upsert.
 
-    Candidate selector (shape addresses Codex #428 findings):
+    Candidate selector (shape addresses Codex #428 findings, extended
+    in #533 with backoff/quarantine):
 
     1. ``fe.filing_type IN ('10-K', '10-K/A')`` — amendments retain
        their ``/A`` suffix through the SEC pipeline (see
@@ -776,8 +874,8 @@ def ingest_business_summaries(
     2. ``fe.primary_document_url IS NOT NULL`` — unparseable without.
     3. No ``instrument_business_summary`` row, OR the stored
        ``source_accession`` differs from this filing's accession
-       (later 10-K supersedes), OR the existing row is older than 7
-       days since last parse (TTL-gated retry).
+       (later 10-K supersedes), OR the existing row's ``next_retry_at``
+       has elapsed.
     4. Newest filing wins per instrument (``DISTINCT ON`` resolves to
        the latest filing_date, tie-break on filing_event_id); the
        outer query then sorts GLOBALLY newest-first so a backlog
@@ -816,7 +914,7 @@ def ingest_business_summaries(
                    ON bs.instrument_id = lpi.instrument_id
             WHERE bs.instrument_id IS NULL
                OR bs.source_accession <> lpi.provider_filing_id
-               OR bs.last_parsed_at < NOW() - INTERVAL '7 days'
+               OR (bs.next_retry_at IS NOT NULL AND bs.next_retry_at <= NOW())
             ORDER BY lpi.filing_date DESC, lpi.filing_event_id DESC
             LIMIT %s
             """,
@@ -834,27 +932,73 @@ def ingest_business_summaries(
     for instrument_id, accession, url in candidates:
         try:
             html = fetcher.fetch_document_text(url)
-        except Exception:
+        except Exception as exc:
+            reason = _classify_fetch_exception(exc)
             logger.warning(
-                "ingest_business_summaries: fetch failed accession=%s url=%s",
+                "ingest_business_summaries: fetch failed accession=%s url=%s reason=%s",
                 accession,
                 url,
+                reason,
                 exc_info=True,
             )
             fetch_errors += 1
-            record_parse_attempt(conn, instrument_id=instrument_id, source_accession=accession)
+            record_parse_attempt(
+                conn,
+                instrument_id=instrument_id,
+                source_accession=accession,
+                reason=reason,
+            )
             conn.commit()
             continue
         if html is None:
+            # Provider returned None on 404/410 (filing withdrawn) or
+            # other "no body" path. Classify as fetch_other so the
+            # operator dashboard separates it from real HTTP errors.
             fetch_errors += 1
-            record_parse_attempt(conn, instrument_id=instrument_id, source_accession=accession)
+            record_parse_attempt(
+                conn,
+                instrument_id=instrument_id,
+                source_accession=accession,
+                reason="fetch_other",
+            )
             conn.commit()
             continue
 
-        body = extract_business_section(html)
-        if body is None or len(body) < _MIN_BODY_LEN:
+        try:
+            body = extract_business_section(html)
+        except Exception:
+            logger.warning(
+                "ingest_business_summaries: parse exception accession=%s",
+                accession,
+                exc_info=True,
+            )
             parse_misses += 1
-            record_parse_attempt(conn, instrument_id=instrument_id, source_accession=accession)
+            record_parse_attempt(
+                conn,
+                instrument_id=instrument_id,
+                source_accession=accession,
+                reason="parse_exception",
+            )
+            conn.commit()
+            continue
+        if body is None:
+            parse_misses += 1
+            record_parse_attempt(
+                conn,
+                instrument_id=instrument_id,
+                source_accession=accession,
+                reason="no_item_1_marker",
+            )
+            conn.commit()
+            continue
+        if len(body) < _MIN_BODY_LEN:
+            parse_misses += 1
+            record_parse_attempt(
+                conn,
+                instrument_id=instrument_id,
+                source_accession=accession,
+                reason="body_too_short",
+            )
             conn.commit()
             continue
 
@@ -896,6 +1040,13 @@ def ingest_business_summaries(
                 accession,
                 exc_info=True,
             )
+            record_parse_attempt(
+                conn,
+                instrument_id=instrument_id,
+                source_accession=accession,
+                reason="upsert_exception",
+            )
+            conn.commit()
             continue
 
         if did_insert:
