@@ -281,3 +281,71 @@ class TestExtractBusinessSections:
         assert isinstance(sections[0], ParsedBusinessSection)
         if sections[0].cross_references:
             assert isinstance(sections[0].cross_references[0], ParsedCrossReference)
+
+    def test_ixbrl_bold_styled_span_heading(self) -> None:
+        """Modern iXBRL filings (#550) express subsection headings via
+        ``<span style="font-weight:bold">`` rather than ``<h*>``/``<b>``.
+        The detector must wrap those spans as headings so subsection
+        boundaries are preserved through the strip pass."""
+        html = """
+        <html><body>
+        <h2>Item 1. Business</h2>
+        <p>Overview text describing what we do.</p>
+        <div><span style="color:#000;font-weight:700;font-size:9pt">Human Capital</span></div>
+        <p>We employ many people across many countries.</p>
+        <div><span style="color:#000;font-weight:bold">Competition</span></div>
+        <p>Many competitors exist in our markets.</p>
+        <h2>Item 1A. Risk Factors</h2>
+        </body></html>
+        """
+        sections = extract_business_sections(html)
+        keys = [s.section_key for s in sections]
+        labels = [s.section_label for s in sections]
+        assert "human_capital" in keys, f"got {keys}"
+        assert "competition" in keys, f"got {keys}"
+        assert "Human Capital" in labels
+        assert "Competition" in labels
+
+    def test_ixbrl_drop_cap_heading_split_across_spans(self) -> None:
+        """MSFT-style drop-cap pattern (#550): a logical heading
+        ``ITEM 1. BUSINESS`` lives in two adjacent ``<span>`` tags
+        styled with a drop-cap on the first letter (``ITEM 1. B`` +
+        ``USINESS``). The pre-strip span-boundary collapse merges
+        those into a single span before heading detection runs."""
+        html = """
+        <html><body>
+        <p style="text-align:center"><span style="font-weight:bold">ITEM 1. B</span><span style="font-weight:bold">USINESS</span></p>
+        <p>Microsoft is a technology company that develops productivity software, cloud services, and devices.</p>
+        <h2>Item 1A. Risk Factors</h2>
+        </body></html>
+        """
+        sections = extract_business_sections(html)
+        # Body is the prose between Item 1. Business and Item 1A.
+        # If span collapse worked, the "ITEM 1. BUSINESS" heading is
+        # detected and the body text below it lands as a section.
+        assert sections, "no sections extracted — drop-cap merge failed"
+        all_text = " ".join(s.body for s in sections)
+        assert "Microsoft is a technology company" in all_text
+
+    def test_item_1a_body_reference_does_not_extend_section_boundary(self) -> None:
+        """GME-style boundary regression (#550): Risk-factors body
+        text often references ``Item 1A`` in prose, producing
+        multiple ``Item 1A. Risk Factors`` matches across the doc.
+        The end boundary must be the FIRST Item 1A AFTER the Item 1
+        anchor — not the LAST occurrence — otherwise risk-factor
+        content leaks into the section list."""
+        html = """
+        <html><body>
+        <h2>Item 1. Business</h2>
+        <p>We make widgets.</p>
+        <h2>Item 1A. Risk Factors</h2>
+        <p>Our widgets may fail. See Item 1A. Risk Factors above for related disclosures.</p>
+        <h2>Item 2. Properties</h2>
+        </body></html>
+        """
+        sections = extract_business_sections(html)
+        all_text = " ".join(s.body for s in sections)
+        assert "We make widgets" in all_text
+        assert "Our widgets may fail" not in all_text, (
+            "section over-extended past Item 1A heading into risk-factor body"
+        )
