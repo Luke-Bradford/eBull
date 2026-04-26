@@ -102,16 +102,23 @@ def list_failures(
     The histogram is computed over the same filter set so the totals
     line up with the visible rows when an operator is filtering by
     reason / state."""
-    where_clauses = ["bs.next_retry_at IS NOT NULL"]
+    # Compose WHERE clauses as psycopg.sql.SQL fragments. Each
+    # fragment is a bare-string literal (clauses below are
+    # hand-coded; user input lands as bound params), so the
+    # composed query stays safe from injection while keeping
+    # ``cursor.execute`` happy with a real ``Composed`` object
+    # rather than a runtime str.
+    sql = psycopg.sql
+    where_parts: list[psycopg.sql.Composable] = [sql.SQL("bs.next_retry_at IS NOT NULL")]
     params: dict[str, object] = {"limit": limit, "offset": offset}
     if reason is not None:
-        where_clauses.append("bs.last_failure_reason = %(reason)s")
+        where_parts.append(sql.SQL("bs.last_failure_reason = %(reason)s"))
         params["reason"] = reason
     if state == "quarantined":
-        where_clauses.append("bs.attempt_count >= 4")
+        where_parts.append(sql.SQL("bs.attempt_count >= 4"))
     elif state == "active":
-        where_clauses.append("bs.attempt_count < 4")
-    where_sql = " AND ".join(where_clauses)
+        where_parts.append(sql.SQL("bs.attempt_count < 4"))
+    where_sql = sql.SQL(" AND ").join(where_parts)
 
     histogram: list[FailureReasonCount] = []
     rows: list[FailureRow] = []
@@ -119,17 +126,17 @@ def list_failures(
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            psycopg.sql.SQL(  # pyright: ignore[reportArgumentType]
-                f"""
+            sql.SQL(
+                """
             SELECT bs.last_failure_reason AS reason,
                    COUNT(*) AS count,
                    COUNT(*) FILTER (WHERE bs.attempt_count >= 4) AS quarantined_count
               FROM instrument_business_summary bs
-             WHERE {where_sql}
+             WHERE {where}
              GROUP BY bs.last_failure_reason
              ORDER BY count DESC
             """
-            ),
+            ).format(where=where_sql),
             params,
         )
         for r in cur.fetchall():
@@ -142,21 +149,21 @@ def list_failures(
             )
 
         cur.execute(
-            psycopg.sql.SQL(  # pyright: ignore[reportArgumentType]
-                f"""
+            sql.SQL(
+                """
             SELECT COUNT(*) AS total
               FROM instrument_business_summary bs
-             WHERE {where_sql}
+             WHERE {where}
             """
-            ),
+            ).format(where=where_sql),
             params,
         )
         total_row = cur.fetchone()
         total = int(total_row["total"]) if total_row else 0  # type: ignore[arg-type]
 
         cur.execute(
-            psycopg.sql.SQL(  # pyright: ignore[reportArgumentType]
-                f"""
+            sql.SQL(
+                """
             SELECT bs.instrument_id,
                    i.symbol,
                    i.company_name,
@@ -167,11 +174,11 @@ def list_failures(
                    bs.next_retry_at
               FROM instrument_business_summary bs
               JOIN instruments i ON i.instrument_id = bs.instrument_id
-             WHERE {where_sql}
+             WHERE {where}
              ORDER BY bs.attempt_count DESC, bs.last_parsed_at DESC
              LIMIT %(limit)s OFFSET %(offset)s
             """
-            ),
+            ).format(where=where_sql),
             params,
         )
         for r in cur.fetchall():
