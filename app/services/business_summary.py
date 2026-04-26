@@ -1103,31 +1103,50 @@ def get_business_sections(
     conn: psycopg.Connection[Any],
     *,
     instrument_id: int,
+    accession: str | None = None,
 ) -> tuple[BusinessSectionRow, ...]:
     """Return Item 1 subsections for an instrument in source order.
 
-    Empty tuple when no sections are stored. Filters to the most
-    recent accession — later 10-Ks supersede via the ingester, so
-    this keeps the UI on the freshest filing.
+    ``accession=None`` (default) → latest filing, determined by the
+    most recent ``fetched_at`` across all accessions for this instrument
+    (the existing behaviour).
+
+    ``accession="0001326380-26-..."`` → sections for that exact filing
+    only, filtered by ``source_accession = %s`` and ordered by
+    ``section_order``.
+
+    Empty tuple when no sections match.
     """
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT section_order, section_key, section_label, body,
-                   cross_references, source_accession, tables_json
-            FROM instrument_business_summary_sections
-            WHERE instrument_id = %s
-              AND source_accession = (
-                  SELECT source_accession
-                  FROM instrument_business_summary_sections
-                  WHERE instrument_id = %s
-                  ORDER BY fetched_at DESC
-                  LIMIT 1
-              )
-            ORDER BY section_order ASC
-            """,
-            (instrument_id, instrument_id),
-        )
+        if accession is None:
+            cur.execute(
+                """
+                SELECT section_order, section_key, section_label, body,
+                       cross_references, source_accession, tables_json
+                FROM instrument_business_summary_sections
+                WHERE instrument_id = %s
+                  AND source_accession = (
+                      SELECT source_accession
+                      FROM instrument_business_summary_sections
+                      WHERE instrument_id = %s
+                      ORDER BY fetched_at DESC
+                      LIMIT 1
+                  )
+                ORDER BY section_order ASC
+                """,
+                (instrument_id, instrument_id),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT section_order, section_key, section_label, body,
+                       cross_references, source_accession, tables_json
+                FROM instrument_business_summary_sections
+                WHERE instrument_id = %s AND source_accession = %s
+                ORDER BY section_order ASC
+                """,
+                (instrument_id, accession),
+            )
         raw_rows = cur.fetchall()
     rows: list[BusinessSectionRow] = []
     for r in raw_rows:
