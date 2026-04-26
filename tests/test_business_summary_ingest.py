@@ -441,3 +441,288 @@ class TestBusinessSectionsIngest:
         offering_sections = [s for s in sections if s.section_label == "Offerings"]
         assert len(offering_sections) == 1
         assert offering_sections[0].section_key == "other"
+
+
+class TestFailureBackoffAndQuarantine:
+    """#533 — failure-reason taxonomy + exponential backoff + quarantine.
+
+    Pins the contract that the ingester records a per-failure
+    category + bumps attempt_count + writes a backoff-scheduled
+    next_retry_at. Hopeless cases (Part-III amendments without
+    Item 1 etc.) escalate from 1d → 7d → 30d → 365d quarantine
+    instead of cycling weekly forever.
+    """
+
+    _NO_ITEM_1_HTML = "<html><body><p>Item 15(a)(3) of Part IV of the Original 10-K.</p></body></html>"
+
+    def test_first_parse_miss_records_no_item_1_marker_reason_and_1d_backoff(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        iid = _seed_instrument(ebull_test_conn, symbol="MISSITEM1", iid=601)
+        _seed_10k(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="A1",
+            url="https://www.sec.gov/Archives/no_item1.htm",
+        )
+        fetcher = _StubFetcher({"https://www.sec.gov/Archives/no_item1.htm": self._NO_ITEM_1_HTML})
+        ingest_business_summaries(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT attempt_count, last_failure_reason, next_retry_at, last_parsed_at "
+                "FROM instrument_business_summary WHERE instrument_id = %s",
+                (iid,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        attempt_count, reason, next_retry_at, last_parsed_at = row
+        assert attempt_count == 1
+        assert reason == "no_item_1_marker"
+        # 1-day backoff after first miss.
+        delta = (next_retry_at - last_parsed_at).total_seconds()
+        assert 23 * 3600 <= delta <= 25 * 3600
+
+    def test_repeated_misses_escalate_to_quarantine(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """4 consecutive failures push next_retry_at to NOW + 365d
+        (effective quarantine). The candidate query then excludes
+        the row. Pin via direct ``record_parse_attempt`` calls so the
+        backoff arithmetic is unambiguous."""
+        from app.services.business_summary import record_parse_attempt
+
+        iid = _seed_instrument(ebull_test_conn, symbol="QUAR", iid=602)
+        for _ in range(4):
+            record_parse_attempt(
+                ebull_test_conn,
+                instrument_id=iid,
+                source_accession="A1",
+                reason="no_item_1_marker",
+            )
+            ebull_test_conn.commit()
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT attempt_count, next_retry_at, last_parsed_at "
+                "FROM instrument_business_summary WHERE instrument_id = %s",
+                (iid,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        attempt_count, next_retry_at, last_parsed_at = row
+        assert attempt_count == 4
+        # 365-day quarantine — at least 360 days out.
+        delta_days = (next_retry_at - last_parsed_at).total_seconds() / 86400
+        assert 360 <= delta_days <= 366
+
+    def test_quarantined_row_excluded_from_candidate_query(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """A row whose next_retry_at is in the future falls out of
+        the candidate set even when filing_events has a fresh 10-K."""
+        iid = _seed_instrument(ebull_test_conn, symbol="QUAR2", iid=603)
+        _seed_10k(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="A1",
+            url="https://www.sec.gov/Archives/x.htm",
+        )
+        # Pre-quarantine the row.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO instrument_business_summary "
+                "(instrument_id, body, source_accession, attempt_count, "
+                " last_failure_reason, next_retry_at) "
+                "VALUES (%s, '', 'A1', 4, 'no_item_1_marker', NOW() + INTERVAL '365 days')",
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        fetcher = _StubFetcher({"https://www.sec.gov/Archives/x.htm": _ITEM_1_HTML})
+        result = ingest_business_summaries(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+        assert result.filings_scanned == 0
+        assert fetcher.calls == []
+
+    def test_successful_upsert_resets_failure_columns(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """A previously-quarantined instrument that now parses
+        successfully exits quarantine cleanly (attempt_count=0,
+        next_retry_at NULL, last_failure_reason NULL)."""
+        iid = _seed_instrument(ebull_test_conn, symbol="EXITQ", iid=604)
+        # Pre-existing tombstone with attempt_count=2.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO instrument_business_summary "
+                "(instrument_id, body, source_accession, attempt_count, "
+                " last_failure_reason, next_retry_at) "
+                "VALUES (%s, '', 'A1', 2, 'no_item_1_marker', NOW() - INTERVAL '1 hour')",
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        # Schedule a fresh 10-K with valid Item 1 (different accession
+        # so the candidate query picks it up via the
+        # source_accession <> stored branch — even though
+        # next_retry_at has elapsed).
+        _seed_10k(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="A2",
+            url="https://www.sec.gov/Archives/exitq.htm",
+            filing_date="2026-04-01",
+        )
+        fetcher = _StubFetcher({"https://www.sec.gov/Archives/exitq.htm": _ITEM_1_HTML})
+        ingest_business_summaries(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT body, attempt_count, last_failure_reason, next_retry_at "
+                "FROM instrument_business_summary WHERE instrument_id = %s",
+                (iid,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        body, attempt_count, reason, next_retry_at = row
+        assert body and "global diversified" in body
+        assert attempt_count == 0
+        assert reason is None
+        assert next_retry_at is None
+
+    def test_upsert_exception_path_rolls_back_then_records_failure(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """Pin the upsert-exception ordering: rollback → record →
+        commit. If ``upsert_business_summary`` raises a DB error,
+        the connection is in aborted-transaction state and the
+        immediately-following ``record_parse_attempt`` would raise
+        ``InFailedSqlTransaction`` without a preceding rollback.
+
+        Forces the failure by monkey-patching
+        ``upsert_business_summary`` to raise psycopg.errors.DataError.
+        Then asserts the failure row exists with attempt_count=1 and
+        reason='upsert_exception' — proving the post-rollback record
+        + commit path actually wrote.
+        """
+        from unittest.mock import patch
+
+        import psycopg.errors
+
+        from app.services import business_summary as bs_module
+
+        iid = _seed_instrument(ebull_test_conn, symbol="UPSERTRAISE", iid=607)
+        _seed_10k(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="A1",
+            url="https://www.sec.gov/Archives/raise.htm",
+        )
+        fetcher = _StubFetcher({"https://www.sec.gov/Archives/raise.htm": _ITEM_1_HTML})
+
+        def boom(*args: object, **kwargs: object) -> bool:
+            # Synthesise a real psycopg DataError so the connection
+            # actually transitions to aborted-transaction state — the
+            # exact failure mode the rollback exists to guard against.
+            with ebull_test_conn.cursor() as cur:
+                try:
+                    cur.execute("SELECT CAST('not_a_number' AS INTEGER)")
+                except psycopg.errors.InvalidTextRepresentation:
+                    pass
+            raise psycopg.errors.DataError("synthetic upsert failure")
+
+        with patch.object(bs_module, "upsert_business_summary", side_effect=boom):
+            ingest_business_summaries(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT attempt_count, last_failure_reason FROM instrument_business_summary WHERE instrument_id = %s",
+                (iid,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 1
+        assert row[1] == "upsert_exception"
+
+    def test_admin_reset_requeues_failed_row_for_next_ingest(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Codex residual-risk pin: after the admin reset endpoint
+        clears the failure columns and stamps ``next_retry_at = NOW()``,
+        the next ``ingest_business_summaries`` run picks the row up
+        and re-attempts the same accession. Without ``NOW()`` (e.g.
+        plain ``NULL``) the row would disappear from the dashboard
+        without ever being retried."""
+        iid = _seed_instrument(ebull_test_conn, symbol="REQUEUE", iid=606)
+        _seed_10k(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="A1",
+            url="https://www.sec.gov/Archives/requeue.htm",
+        )
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO instrument_business_summary "
+                "(instrument_id, body, source_accession, attempt_count, "
+                " last_failure_reason, next_retry_at) "
+                "VALUES (%s, '', 'A1', 4, 'no_item_1_marker', NOW() + INTERVAL '365 days')",
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        skip_fetcher = _StubFetcher({"https://www.sec.gov/Archives/requeue.htm": _ITEM_1_HTML})
+        skipped = ingest_business_summaries(ebull_test_conn, cast("object", skip_fetcher))  # type: ignore[arg-type]
+        assert skipped.filings_scanned == 0
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE instrument_business_summary
+                   SET attempt_count       = 0,
+                       last_failure_reason = NULL,
+                       next_retry_at       = NOW()
+                 WHERE instrument_id  = %s
+                   AND next_retry_at IS NOT NULL
+                """,
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        good_fetcher = _StubFetcher({"https://www.sec.gov/Archives/requeue.htm": _ITEM_1_HTML})
+        result = ingest_business_summaries(ebull_test_conn, cast("object", good_fetcher))  # type: ignore[arg-type]
+        assert result.filings_scanned == 1
+        assert result.rows_inserted + result.rows_updated == 1
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT body, attempt_count, last_failure_reason, next_retry_at "
+                "FROM instrument_business_summary WHERE instrument_id = %s",
+                (iid,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        body, attempt_count, reason, next_retry_at = row
+        assert body and len(body) > 100
+        assert attempt_count == 0
+        assert reason is None
+        assert next_retry_at is None
+
+    def test_fetch_5xx_classified_as_fetch_http_5xx(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """An HTTPError with response.status_code=503 maps to
+        ``fetch_http_5xx`` reason, not ``fetch_other``."""
+        from types import SimpleNamespace
+
+        class _RaisingFetcher:
+            def fetch_document_text(self, absolute_url: str) -> str | None:
+                err = Exception("boom")
+                err.response = SimpleNamespace(status_code=503)  # type: ignore[attr-defined]
+                raise err
+
+        iid = _seed_instrument(ebull_test_conn, symbol="HTTP5", iid=605)
+        _seed_10k(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="A1",
+            url="https://www.sec.gov/Archives/x.htm",
+        )
+        ingest_business_summaries(ebull_test_conn, cast("object", _RaisingFetcher()))  # type: ignore[arg-type]
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT last_failure_reason FROM instrument_business_summary WHERE instrument_id = %s",
+                (iid,),
+            )
+            row = cur.fetchone()
+        assert row is not None and row[0] == "fetch_http_5xx"
