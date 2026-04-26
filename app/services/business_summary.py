@@ -833,6 +833,52 @@ class IngestResult:
 _MIN_BODY_LEN = 120
 
 
+def _find_prior_plain_10k(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    before_accession: str,
+) -> tuple[str, str] | None:
+    """Find the most recent plain ``10-K`` (NOT ``10-K/A``) filing for
+    ``instrument_id`` strictly older than the filing keyed by
+    ``before_accession``.
+
+    Returns ``(provider_filing_id, primary_document_url)`` or ``None``
+    when no prior plain 10-K exists.
+
+    Used by the 10-K/A fallback path (#534): when the latest filing is
+    an amendment that omits Item 1 (Part-III amendments do this
+    routinely), the ingester re-attempts parsing against the original
+    10-K so the operator still gets the authoritative business
+    narrative. Without this fallback, every Part-III amendment
+    instrument permanently lost its Item 1 view.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT fe.provider_filing_id,
+                   fe.primary_document_url
+              FROM filing_events fe
+             WHERE fe.provider = 'sec'
+               AND fe.filing_type = '10-K'
+               AND fe.instrument_id = %(iid)s
+               AND fe.primary_document_url IS NOT NULL
+               AND fe.filing_date < (
+                    SELECT filing_date FROM filing_events
+                     WHERE provider = 'sec' AND provider_filing_id = %(acc)s
+                     LIMIT 1
+                   )
+             ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
+             LIMIT 1
+            """,
+            {"iid": instrument_id, "acc": before_accession},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return str(row[0]), str(row[1])
+
+
 def _classify_fetch_exception(exc: Exception) -> FailureReason:
     """Map a fetch-side exception to a FailureReason value.
 
@@ -889,7 +935,7 @@ def ingest_business_summaries(
     """
     conn.commit()
 
-    candidates: list[tuple[int, str, str]] = []
+    candidates: list[tuple[int, str, str, str]] = []
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -898,6 +944,7 @@ def ingest_business_summaries(
                        fe.instrument_id,
                        fe.provider_filing_id,
                        fe.primary_document_url,
+                       fe.filing_type,
                        fe.filing_date,
                        fe.filing_event_id
                 FROM filing_events fe
@@ -908,7 +955,8 @@ def ingest_business_summaries(
             )
             SELECT lpi.instrument_id,
                    lpi.provider_filing_id,
-                   lpi.primary_document_url
+                   lpi.primary_document_url,
+                   lpi.filing_type
             FROM latest_per_instrument lpi
             LEFT JOIN instrument_business_summary bs
                    ON bs.instrument_id = lpi.instrument_id
@@ -921,7 +969,7 @@ def ingest_business_summaries(
             (limit,),
         )
         for row in cur.fetchall():
-            candidates.append((int(row[0]), str(row[1]), str(row[2])))
+            candidates.append((int(row[0]), str(row[1]), str(row[2]), str(row[3])))
     conn.commit()
 
     inserted = 0
@@ -929,7 +977,7 @@ def ingest_business_summaries(
     fetch_errors = 0
     parse_misses = 0
 
-    for instrument_id, accession, url in candidates:
+    for instrument_id, accession, url, filing_type in candidates:
         try:
             html = fetcher.fetch_document_text(url)
         except Exception as exc:
@@ -982,6 +1030,88 @@ def ingest_business_summaries(
             conn.commit()
             continue
         if body is None:
+            # 10-K/A fallback (#534): Part-III amendments routinely
+            # omit Item 1. Before tombstoning, retry against the most
+            # recent prior plain 10-K from the same instrument. If
+            # the fallback succeeds, persist with the fallback's
+            # accession so the next run sees a real body and the
+            # ``source_accession <> latest`` predicate alone keeps
+            # the row out of the candidate set until a fresh 10-K
+            # arrives.
+            fallback_used = False
+            if filing_type == "10-K/A":
+                prior = _find_prior_plain_10k(
+                    conn,
+                    instrument_id=instrument_id,
+                    before_accession=accession,
+                )
+                if prior is not None:
+                    fallback_acc, fallback_url = prior
+                    logger.info(
+                        "ingest_business_summaries: 10-K/A fallback accession=%s -> prior plain 10-K accession=%s",
+                        accession,
+                        fallback_acc,
+                    )
+                    fallback_html: str | None = None
+                    try:
+                        fallback_html = fetcher.fetch_document_text(fallback_url)
+                    except Exception:
+                        logger.warning(
+                            "ingest_business_summaries: 10-K/A fallback fetch failed accession=%s url=%s",
+                            fallback_acc,
+                            fallback_url,
+                            exc_info=True,
+                        )
+                    if fallback_html is not None:
+                        try:
+                            fallback_body = extract_business_section(fallback_html)
+                        except Exception:
+                            logger.warning(
+                                "ingest_business_summaries: 10-K/A fallback parse exception accession=%s",
+                                fallback_acc,
+                                exc_info=True,
+                            )
+                            fallback_body = None
+                        if fallback_body is not None and len(fallback_body) >= _MIN_BODY_LEN:
+                            try:
+                                did_insert = upsert_business_summary(
+                                    conn,
+                                    instrument_id=instrument_id,
+                                    body=fallback_body,
+                                    source_accession=fallback_acc,
+                                )
+                                fallback_sections = extract_business_sections(fallback_html)
+                                if fallback_sections:
+                                    try:
+                                        upsert_business_sections(
+                                            conn,
+                                            instrument_id=instrument_id,
+                                            source_accession=fallback_acc,
+                                            sections=fallback_sections,
+                                        )
+                                    except Exception:
+                                        logger.warning(
+                                            "ingest_business_summaries: 10-K/A fallback section "
+                                            "upsert failed accession=%s",
+                                            fallback_acc,
+                                            exc_info=True,
+                                        )
+                                conn.commit()
+                                if did_insert:
+                                    inserted += 1
+                                else:
+                                    updated += 1
+                                fallback_used = True
+                            except Exception:
+                                conn.rollback()
+                                logger.warning(
+                                    "ingest_business_summaries: 10-K/A fallback upsert failed accession=%s",
+                                    fallback_acc,
+                                    exc_info=True,
+                                )
+            if fallback_used:
+                continue
+
             parse_misses += 1
             record_parse_attempt(
                 conn,
