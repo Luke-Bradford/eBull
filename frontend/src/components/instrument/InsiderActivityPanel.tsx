@@ -1,7 +1,13 @@
 /**
- * InsiderActivityPanel — Form 4 insider transaction activity for the
- * instrument page. Backed by GET /instruments/{symbol}/insider_summary
- * + /insider_transactions (#429).
+ * InsiderActivityPanel — provider-agnostic shell for the per-instrument
+ * insider capability (#515 PR 3b). Backed by GET
+ * /instruments/{symbol}/insider_summary + /insider_transactions, both
+ * passed ``?provider=<provider>``.
+ *
+ * Today only ``sec_form4`` is wired; per-region integration PRs reuse
+ * the same shell + endpoint contract — non-SEC insider sources don't
+ * require panel code changes.
+ *
  *
  * Layout:
  *
@@ -35,11 +41,15 @@ import {
   SectionSkeleton,
 } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
+import { providerLabel } from "@/lib/capabilityProviders";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback } from "react";
 
 export interface InsiderActivityPanelProps {
   readonly symbol: string;
+  /** Capability provider tag, resolved via
+   *  ``summary.capabilities.insider.providers`` upstream. */
+  readonly provider: string;
 }
 
 // Human labels for the SEC transaction codes most operators will
@@ -363,18 +373,28 @@ function Body({
   );
 }
 
-export function InsiderActivityPanel({ symbol }: InsiderActivityPanelProps) {
+export function InsiderActivityPanel({
+  symbol,
+  provider,
+}: InsiderActivityPanelProps) {
   const summaryState = useAsync<InsiderSummary>(
-    useCallback(() => fetchInsiderSummary(symbol), [symbol]),
-    [symbol],
+    useCallback(
+      () => fetchInsiderSummary(symbol, provider),
+      [symbol, provider],
+    ),
+    [symbol, provider],
   );
   const txnsState = useAsync<InsiderTransactionsList>(
-    useCallback(() => fetchInsiderTransactions(symbol, 50), [symbol]),
-    [symbol],
+    useCallback(
+      () => fetchInsiderTransactions(symbol, 50, provider),
+      [symbol, provider],
+    ),
+    [symbol, provider],
   );
+  const title = `Insider activity · ${providerLabel(provider)}`;
 
   return (
-    <Section title="Insider activity (Form 4)">
+    <Section title={title}>
       {summaryState.loading || txnsState.loading ? (
         <SectionSkeleton rows={4} />
       ) : summaryState.error !== null || txnsState.error !== null ? (

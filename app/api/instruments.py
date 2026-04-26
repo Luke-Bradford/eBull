@@ -809,15 +809,47 @@ class EightKFilingsResponse(BaseModel):
     filings: list[EightKFilingModel]
 
 
+# Per-endpoint allowed `provider` values. Frontend hooks pass the
+# capability's resolved provider tag so the endpoint can route to the
+# right backend once non-SEC sources land. Today every endpoint only
+# wires a single provider; per-region integration PRs add more.
+_EIGHT_K_PROVIDERS: tuple[str, ...] = ("sec_8k_events",)
+_DIVIDEND_PROVIDERS: tuple[str, ...] = ("sec_dividend_summary",)
+_INSIDER_PROVIDERS: tuple[str, ...] = ("sec_form4",)
+
+
+def _validate_provider(provider: str | None, allowed: tuple[str, ...]) -> None:
+    """Reject an unknown ``?provider=`` value.
+
+    ``provider=None`` (param omitted) falls back to the endpoint's
+    historical default behaviour for backward compatibility — every
+    existing caller pre-#515 PR 3b passes nothing. New frontend hooks
+    always pass the capability-resolved provider tag explicitly.
+    """
+    if provider is None:
+        return
+    if provider not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported provider {provider!r}; allowed: {list(allowed)}",
+        )
+
+
 @router.get("/{symbol}/eight_k_filings", response_model=EightKFilingsResponse)
 def get_instrument_8k_filings(
     symbol: str,
     limit: int = 50,
+    provider: str | None = Query(
+        default=None,
+        description="Capability provider tag. Today only 'sec_8k_events'.",
+    ),
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> EightKFilingsResponse:
     """Return recent 8-K filings for an instrument with full structured
     item bodies + exhibit pointers (#450)."""
     from app.services.eight_k_events import list_8k_filings
+
+    _validate_provider(provider, _EIGHT_K_PROVIDERS)
 
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
@@ -1125,6 +1157,10 @@ class InstrumentDividends(BaseModel):
 def get_instrument_dividends(
     symbol: str,
     limit: int = Query(default=40, ge=1, le=400),
+    provider: str | None = Query(
+        default=None,
+        description="Capability provider tag. Today only 'sec_dividend_summary'.",
+    ),
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> InstrumentDividends:
     """Dividend history + TTM yield summary for a single instrument.
@@ -1142,6 +1178,8 @@ def get_instrument_dividends(
         get_dividend_summary,
         get_upcoming_dividends,
     )
+
+    _validate_provider(provider, _DIVIDEND_PROVIDERS)
 
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
@@ -1246,6 +1284,10 @@ class InsiderSummaryModel(BaseModel):
 @router.get("/{symbol}/insider_summary", response_model=InsiderSummaryModel)
 def get_instrument_insider_summary(
     symbol: str,
+    provider: str | None = Query(
+        default=None,
+        description="Capability provider tag. Today only 'sec_form4'.",
+    ),
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> InsiderSummaryModel:
     """Return the 90-day insider-transaction summary (#429 / #458).
@@ -1256,6 +1298,8 @@ def get_instrument_insider_summary(
     contribute; derivative grants / option exercises are excluded.
     """
     from app.services.insider_transactions import get_insider_summary
+
+    _validate_provider(provider, _INSIDER_PROVIDERS)
 
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
@@ -1352,6 +1396,10 @@ class InsiderTransactionsListModel(BaseModel):
 def get_instrument_insider_transactions(
     symbol: str,
     limit: int = 100,
+    provider: str | None = Query(
+        default=None,
+        description="Capability provider tag. Today only 'sec_form4'.",
+    ),
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> InsiderTransactionsListModel:
     """Return recent Form 4 insider transactions for an instrument.
@@ -1366,6 +1414,8 @@ def get_instrument_insider_transactions(
     layer (per the "every structured field queryable in SQL" rule).
     """
     from app.services.insider_transactions import list_insider_transactions
+
+    _validate_provider(provider, _INSIDER_PROVIDERS)
 
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:

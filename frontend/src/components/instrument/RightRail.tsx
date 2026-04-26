@@ -31,23 +31,24 @@ export interface RightRailProps {
   instrumentId: number;
   sector: string | null;
   currentSymbol: string;
-  /** Provider-agnostic filings coverage gate (#503 PR 2). When
-   *  false (crypto, non-US instruments without coverage), the
-   *  Recent filings section is hidden — rendering "no filings
-   *  ingested yet" for an instrument the source does not cover
-   *  misleads the operator into thinking the pipeline is broken. */
-  hasFilingsCoverage: boolean;
+  /** True when at least one filings provider has rows for this
+   *  instrument — derived upstream from
+   *  ``summary.capabilities.filings`` (#515 PR 3b). When false
+   *  (crypto, non-US instruments without coverage), the Recent
+   *  filings section is hidden so the rail doesn't render a
+   *  misleading "no filings ingested yet" empty state. */
+  filingsActive: boolean;
 }
 
 export function RightRail({
   instrumentId,
   sector,
   currentSymbol,
-  hasFilingsCoverage,
+  filingsActive,
 }: RightRailProps): JSX.Element {
   return (
     <aside className="space-y-4">
-      {hasFilingsCoverage ? <RecentFilings instrumentId={instrumentId} /> : null}
+      {filingsActive ? <RecentFilings instrumentId={instrumentId} /> : null}
       {/* `key={sector}` forces a full remount when the sector changes
           so `useAsync` re-initialises with `loading=true, data=null`
           on the first render for the new sector — otherwise one frame

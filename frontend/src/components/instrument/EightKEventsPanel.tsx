@@ -1,6 +1,12 @@
 /**
- * EightKEventsPanel — recent 8-K filings timeline for the instrument
- * page. Backed by GET /instruments/{symbol}/eight_k_filings (#450).
+ * EightKEventsPanel — provider-agnostic shell for the per-instrument
+ * corporate-events capability (#515 PR 3b). Backed by GET
+ * /instruments/{symbol}/eight_k_filings?provider=<provider>.
+ *
+ * Today only ``sec_8k_events`` is wired. Per-region integration PRs
+ * adapting (e.g.) HKEX corporate announcements to the same normalised
+ * filing-card shape reuse this shell unchanged.
+ *
  *
  * Each filing renders as a timeline card with:
  *   - Date of report + document type (8-K vs 8-K/A)
@@ -25,11 +31,15 @@ import {
   SectionSkeleton,
 } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
+import { providerLabel } from "@/lib/capabilityProviders";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback, useState } from "react";
 
 export interface EightKEventsPanelProps {
   readonly symbol: string;
+  /** Capability provider tag, resolved via
+   *  ``summary.capabilities.corporate_events.providers`` upstream. */
+  readonly provider: string;
 }
 
 function severityTone(severity: string | null): string {
@@ -158,13 +168,17 @@ function Body({ data }: { data: EightKFilingsResponse }) {
   );
 }
 
-export function EightKEventsPanel({ symbol }: EightKEventsPanelProps) {
+export function EightKEventsPanel({ symbol, provider }: EightKEventsPanelProps) {
   const state = useAsync<EightKFilingsResponse>(
-    useCallback(() => fetchEightKFilings(symbol, 25), [symbol]),
-    [symbol],
+    useCallback(
+      () => fetchEightKFilings(symbol, 25, provider),
+      [symbol, provider],
+    ),
+    [symbol, provider],
   );
+  const title = `Corporate events · ${providerLabel(provider)}`;
   return (
-    <Section title="8-K events">
+    <Section title={title}>
       {state.loading ? (
         <SectionSkeleton rows={4} />
       ) : state.error !== null ? (

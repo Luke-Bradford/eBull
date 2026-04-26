@@ -76,7 +76,7 @@ afterEach(() => vi.clearAllMocks());
 describe("DividendsPanel", () => {
   it("renders summary + per-quarter history for a paying instrument", async () => {
     mockFetch.mockResolvedValue(paid());
-    render(<DividendsPanel symbol="AAPL" />);
+    render(<DividendsPanel symbol="AAPL" provider="sec_dividend_summary" />);
 
     await waitFor(() => {
       expect(screen.getByText(/TTM yield/i)).toBeInTheDocument();
@@ -90,7 +90,7 @@ describe("DividendsPanel", () => {
 
   it("renders empty state when never-paid", async () => {
     mockFetch.mockResolvedValue(notPaid());
-    render(<DividendsPanel symbol="GOOG" />);
+    render(<DividendsPanel symbol="GOOG" provider="sec_dividend_summary" />);
 
     await waitFor(() => {
       expect(screen.getByText(/No dividend history on file/i)).toBeInTheDocument();
@@ -100,7 +100,7 @@ describe("DividendsPanel", () => {
 
   it("renders error state + retry on fetch failure", async () => {
     mockFetch.mockRejectedValue(new Error("boom"));
-    render(<DividendsPanel symbol="AAPL" />);
+    render(<DividendsPanel symbol="AAPL" provider="sec_dividend_summary" />);
 
     await waitFor(() => {
       expect(screen.getByText(/Failed to load/i)).toBeInTheDocument();
@@ -121,7 +121,7 @@ describe("DividendsPanel", () => {
       },
     ];
     mockFetch.mockResolvedValue(withUpcoming);
-    render(<DividendsPanel symbol="AAPL" />);
+    render(<DividendsPanel symbol="AAPL" provider="sec_dividend_summary" />);
 
     await waitFor(() => {
       expect(screen.getByText(/Next dividend/i)).toBeInTheDocument();
