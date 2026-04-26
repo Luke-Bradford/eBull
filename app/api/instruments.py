@@ -166,6 +166,18 @@ class InstrumentCandles(BaseModel):
     rows: list[CandleBar]
 
 
+class CapabilityCellPayload(BaseModel):
+    """One (capability × instrument) cell in the summary response.
+
+    Mirrors ``app.services.capabilities.CapabilityCell`` — the API
+    layer translates the dataclass to this Pydantic model so the
+    OpenAPI schema is generated correctly.
+    """
+
+    providers: list[str]
+    data_present: dict[str, bool]
+
+
 class InstrumentSummary(BaseModel):
     """Per-ticker research summary.
 
@@ -206,6 +218,16 @@ class InstrumentSummary(BaseModel):
     # provider later doesn't bake in a follow-up.
     has_sec_cik: bool
     has_filings_coverage: bool
+    # Per-capability resolution (#515 PR 3). Keyed by capability
+    # name (filings / fundamentals / dividends / …); each value
+    # carries the operator-decided ``providers`` list and a
+    # per-provider ``data_present`` dict. Frontend renders a
+    # panel iff providers is non-empty AND any data_present
+    # value is true. has_sec_cik / has_filings_coverage above are
+    # kept for now as a thin shim during the migration window;
+    # PR 3b retires them once frontend reads ``capabilities``
+    # directly.
+    capabilities: dict[str, CapabilityCellPayload]
 
 
 class InstrumentDetail(BaseModel):
@@ -1782,6 +1804,17 @@ def get_instrument_summary(
     has_sec_cik = _has_sec_cik(conn, instrument_id_int)
     has_filings_coverage = _has_filings_coverage(conn, instrument_id_int)
 
+    # Per-capability resolution (#515 PR 3). Frontend gates panels
+    # on providers + data_present rather than the older has_sec_cik
+    # / has_filings_coverage shim. Latter kept in the response for
+    # the migration window — PR 3b retires them once frontend reads
+    # ``capabilities`` directly.
+    capabilities = _resolve_capabilities_payload(
+        conn,
+        instrument_id=instrument_id_int,
+        exchange_id=identity.exchange,
+    )
+
     return InstrumentSummary(
         instrument_id=row["instrument_id"],  # type: ignore[arg-type]
         is_tradable=row["is_tradable"],  # type: ignore[arg-type]
@@ -1792,7 +1825,44 @@ def get_instrument_summary(
         source=source,
         has_sec_cik=has_sec_cik,
         has_filings_coverage=has_filings_coverage,
+        capabilities=capabilities,
     )
+
+
+def _resolve_capabilities_payload(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    *,
+    instrument_id: int,
+    exchange_id: str | None,
+) -> dict[str, CapabilityCellPayload]:
+    """Translate the resolver dataclass into the Pydantic payload.
+
+    When the instrument's exchange is unknown (e.g. NULL exchange
+    column from a partial universe sync), every capability comes
+    back with empty ``providers`` — the resolver still runs so the
+    response shape is uniform.
+    """
+    from app.services.capabilities import resolve_capabilities
+
+    # Pass an unmatchable sentinel for NULL-exchange rows so the
+    # resolver still runs — per-instrument augmentation via
+    # ``external_identifiers`` (e.g. a SEC CIK) must flow through
+    # even when the exchange row is missing. Codex round-1 finding
+    # on PR #5XX: returning empty cells short-circuited the SEC
+    # CIK augment and contradicted has_sec_cik on partially-synced
+    # instruments.
+    resolved = resolve_capabilities(
+        conn,
+        instrument_id=instrument_id,
+        exchange_id=exchange_id if exchange_id is not None else "",
+    )
+    return {
+        cap: CapabilityCellPayload(
+            providers=list(cell.providers),
+            data_present=cell.data_present,
+        )
+        for cap, cell in resolved.cells.items()
+    }
 
 
 @router.get("/{instrument_id}", response_model=InstrumentDetail)
