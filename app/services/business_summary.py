@@ -421,6 +421,150 @@ class ParsedCrossReference:
     context: str  # sentence-sized phrase around the reference
 
 
+# ---------------------------------------------------------------------
+# Table extraction — sentinel substitution (#559)
+# ---------------------------------------------------------------------
+
+_TABLE_SENTINEL = "␞"  # SYMBOL FOR RECORD SEPARATOR — never appears in 10-K prose
+# Used as scan anchors by _scan_outer_tables; the actual table extent is
+# determined by the depth-aware walker, not by these patterns directly.
+_TABLE_OPEN_RE = re.compile(r"<table\b[^>]*>", re.IGNORECASE)
+_TABLE_CLOSE_RE = re.compile(r"</table\s*>", re.IGNORECASE)
+# DOTALL: cell / row contents span multiple lines in iXBRL filings.
+_TR_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr\s*>", re.IGNORECASE | re.DOTALL)
+_CELL_RE = re.compile(r"<(?:t[hd])\b[^>]*>(.*?)</t[hd]\s*>", re.IGNORECASE | re.DOTALL)
+
+_MAX_TABLE_ROWS = 200  # truncate beyond — pathological 10-Ks rarely list >200 rows
+_MAX_CELL_LEN = 200  # truncate cell content beyond — single cells should be short
+
+
+def _scan_outer_tables(raw_html: str) -> list[tuple[int, int]]:
+    """Return (start, end) offsets for every OUTERMOST <table>...</table>
+    block in ``raw_html``. Nested tables are ignored — only their outer
+    wrapper appears in the result list. ``end`` is exclusive (one past
+    the last char of </table>).
+
+    Walks the HTML character by character using regex anchors (cheap —
+    10-K bodies are typically <2 MB). Increments depth on each <table
+    opening, decrements on each </table closing; only emits a span when
+    depth returns to 0.
+    """
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    depth = 0
+    span_start = -1
+    while pos < len(raw_html):
+        open_match = _TABLE_OPEN_RE.search(raw_html, pos)
+        close_match = _TABLE_CLOSE_RE.search(raw_html, pos)
+        if open_match is None and close_match is None:
+            break
+        if open_match is not None and (close_match is None or open_match.start() < close_match.start()):
+            if depth == 0:
+                span_start = open_match.start()
+            depth += 1
+            pos = open_match.end()
+        else:
+            assert close_match is not None
+            depth -= 1
+            if depth == 0 and span_start != -1:
+                spans.append((span_start, close_match.end()))
+                span_start = -1
+            elif depth < 0:
+                # Stray closing tag — reset and continue defensively.
+                depth = 0
+                span_start = -1
+            pos = close_match.end()
+    return spans
+
+
+@dataclass(frozen=True)
+class ParsedTable:
+    """One <table> block extracted from a section body.
+
+    ``headers`` is the first row's cell contents (treated as headers
+    even when the source uses <td> rather than <th> — many 10-K
+    issuers do).  ``rows`` are subsequent rows. Cells are plain text
+    after entity decode + tag strip.
+    """
+
+    order: int
+    headers: tuple[str, ...]
+    rows: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True)
+class _RawTable:
+    """Intermediate carrier from _parse_table_html — caller assigns
+    the final ``order`` once it knows the global position."""
+
+    headers: tuple[str, ...]
+    rows: tuple[tuple[str, ...], ...]
+
+
+def _parse_table_html(table_html: str) -> _RawTable | None:
+    """Extract a single OUTER <table>...</table> block. Nested inner
+    tables are blanked before row scan so their cells don't bleed into
+    the outer table's row list. Applies caps: at most _MAX_TABLE_ROWS
+    rows and _MAX_CELL_LEN chars per cell."""
+    # Strip the outer <table> wrapper so _scan_outer_tables on the
+    # inner content finds nested tables only, not the outer one.
+    inner_open = _TABLE_OPEN_RE.search(table_html)
+    inner_close_idx = table_html.rfind("</table")
+    if inner_open is None or inner_close_idx == -1:
+        return None
+    inner = table_html[inner_open.end() : inner_close_idx]
+    nested = _scan_outer_tables(inner)
+    if nested:
+        # Replace each nested table block with a single space so the
+        # outer row scanner doesn't pick up its cells.
+        pieces: list[str] = []
+        cursor = 0
+        for start, end in nested:
+            pieces.append(inner[cursor:start])
+            pieces.append(" ")
+            cursor = end
+        pieces.append(inner[cursor:])
+        scrubbed = "".join(pieces)
+    else:
+        scrubbed = inner
+    cells_per_row: list[tuple[str, ...]] = []
+    for tr_match in _TR_RE.finditer(scrubbed):
+        cells = tuple(_strip_html(cell).strip() for cell in _CELL_RE.findall(tr_match.group(1)))
+        if any(c for c in cells):
+            cells_per_row.append(cells)
+    if not cells_per_row:
+        return None
+    headers, *body_rows = cells_per_row
+    headers = tuple(c[:_MAX_CELL_LEN] for c in headers)
+    body_rows = tuple(tuple(c[:_MAX_CELL_LEN] for c in row) for row in body_rows[:_MAX_TABLE_ROWS])
+    return _RawTable(headers=headers, rows=body_rows)
+
+
+def _extract_tables(raw_html: str) -> tuple[str, tuple[ParsedTable, ...]]:
+    """Replace every OUTERMOST <table> block in ``raw_html`` with a
+    sentinel ``␞TABLE_N␞`` and return the rewritten HTML + the
+    parsed tables in source order."""
+    spans = _scan_outer_tables(raw_html)
+    if not spans:
+        return raw_html, ()
+    tables: list[ParsedTable] = []
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        pieces.append(raw_html[cursor:start])
+        outer_html = raw_html[start:end]
+        parsed = _parse_table_html(outer_html)
+        if parsed is None:
+            pieces.append(" ")  # drop layout-only tables
+        else:
+            order = len(tables)
+            tables.append(ParsedTable(order=order, headers=parsed.headers, rows=parsed.rows))
+            pieces.append(f" {_TABLE_SENTINEL}TABLE_{order}{_TABLE_SENTINEL} ")
+        cursor = end
+    pieces.append(raw_html[cursor:])
+    return "".join(pieces), tuple(tables)
+
+
 @dataclass(frozen=True)
 class ParsedBusinessSection:
     """One subsection extracted from Item 1."""
@@ -430,6 +574,7 @@ class ParsedBusinessSection:
     section_label: str  # heading as it appeared in the filing, verbatim
     body: str
     cross_references: tuple[ParsedCrossReference, ...]
+    tables: tuple[ParsedTable, ...] = ()
 
 
 # Cross-reference regex. Matches the common forms "Item 1A", "Item 7",
@@ -547,6 +692,45 @@ def _wrap_heading_tags(raw_html: str) -> str:
     return _BOLD_STYLE_WRAP_RE.sub(_wrap, pass1)
 
 
+def _attach_tables(
+    sections: list[ParsedBusinessSection],
+    all_tables: tuple[ParsedTable, ...],
+) -> list[ParsedBusinessSection]:
+    """Walk each section body, find ``␞TABLE_N␞`` markers,
+    and attach the matching ParsedTable. Re-numbers tables per
+    section so the renderer can index by ``section.tables[order]``."""
+    result: list[ParsedBusinessSection] = []
+    for s in sections:
+        attached: list[ParsedTable] = []
+        body = s.body
+        for table in all_tables:
+            marker = f"{_TABLE_SENTINEL}TABLE_{table.order}{_TABLE_SENTINEL}"
+            if marker in body:
+                local_order = len(attached)
+                attached.append(
+                    ParsedTable(
+                        order=local_order,
+                        headers=table.headers,
+                        rows=table.rows,
+                    )
+                )
+                body = body.replace(
+                    marker,
+                    f"{_TABLE_SENTINEL}TABLE_{local_order}{_TABLE_SENTINEL}",
+                )
+        result.append(
+            ParsedBusinessSection(
+                section_order=s.section_order,
+                section_key=s.section_key,
+                section_label=s.section_label,
+                body=body,
+                cross_references=s.cross_references,
+                tables=tuple(attached),
+            )
+        )
+    return result
+
+
 def extract_business_sections(raw_html: str) -> tuple[ParsedBusinessSection, ...]:
     """Extract Item 1 as an ordered list of subsections.
 
@@ -566,9 +750,13 @@ def extract_business_sections(raw_html: str) -> tuple[ParsedBusinessSection, ...
     """
     if not raw_html:
         return ()
+    # Extract <table> blocks first, replacing each with a ␞TABLE_N␞
+    # sentinel so the table content survives the subsequent HTML strip
+    # as structured data rather than prose noise (#559).
+    table_stripped_html, all_tables = _extract_tables(raw_html)
     # Pre-strip: wrap heading-tag inner text with sentinels so the
     # boundaries survive the subsequent plain-text collapse.
-    marked_html = _wrap_heading_tags(raw_html)
+    marked_html = _wrap_heading_tags(table_stripped_html)
     text = _strip_html(marked_html)
 
     matches_1 = list(_ITEM_1_RE.finditer(text))
@@ -652,6 +840,8 @@ def extract_business_sections(raw_html: str) -> tuple[ParsedBusinessSection, ...
                     cross_references=_extract_cross_references(body_clean),
                 )
             )
+        if all_tables:
+            sections = _attach_tables(sections, all_tables)
         return tuple(sections)
 
     # Pre-heading general block.
@@ -685,6 +875,8 @@ def extract_business_sections(raw_html: str) -> tuple[ParsedBusinessSection, ...
             )
         )
 
+    if all_tables:
+        sections = _attach_tables(sections, all_tables)
     return tuple(sections)
 
 
@@ -773,12 +965,23 @@ def upsert_business_sections(
                         for ref in section.cross_references
                     ]
                 )
+                tables_json = Jsonb(
+                    [
+                        {
+                            "order": t.order,
+                            "headers": list(t.headers),
+                            "rows": [list(r) for r in t.rows],
+                        }
+                        for t in section.tables
+                    ]
+                )
                 cur.execute(
                     """
                     INSERT INTO instrument_business_summary_sections
                         (instrument_id, source_accession, section_order,
-                         section_key, section_label, body, cross_references)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                         section_key, section_label, body, cross_references,
+                         tables_json)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         instrument_id,
@@ -788,6 +991,7 @@ def upsert_business_sections(
                         section.section_label,
                         section.body,
                         cross_refs_json,
+                        tables_json,
                     ),
                 )
                 inserted += 1
@@ -892,6 +1096,7 @@ class BusinessSectionRow:
     body: str
     cross_references: tuple[ParsedCrossReference, ...]
     source_accession: str
+    tables: tuple[ParsedTable, ...] = ()
 
 
 def get_business_sections(
@@ -909,7 +1114,7 @@ def get_business_sections(
         cur.execute(
             """
             SELECT section_order, section_key, section_label, body,
-                   cross_references, source_accession
+                   cross_references, source_accession, tables_json
             FROM instrument_business_summary_sections
             WHERE instrument_id = %s
               AND source_accession = (
@@ -927,7 +1132,7 @@ def get_business_sections(
     rows: list[BusinessSectionRow] = []
     for r in raw_rows:
         refs_raw = r[4] or []
-        refs_list = refs_raw if isinstance(refs_raw, list) else []
+        refs_list: list[Any] = refs_raw if isinstance(refs_raw, list) else []
         refs = tuple(
             ParsedCrossReference(
                 reference_type=str(ref.get("reference_type", "")),
@@ -937,6 +1142,17 @@ def get_business_sections(
             for ref in refs_list
             if isinstance(ref, dict)
         )
+        tables_raw = r[6] or []
+        tables_list: list[Any] = tables_raw if isinstance(tables_raw, list) else []
+        tables = tuple(
+            ParsedTable(
+                order=int(tbl.get("order", 0)),
+                headers=tuple(str(h) for h in tbl.get("headers", [])),
+                rows=tuple(tuple(str(c) for c in row) for row in tbl.get("rows", []) if isinstance(row, list)),
+            )
+            for tbl in tables_list
+            if isinstance(tbl, dict)
+        )
         rows.append(
             BusinessSectionRow(
                 section_order=int(r[0]),
@@ -945,6 +1161,7 @@ def get_business_sections(
                 body=str(r[3]),
                 cross_references=refs,
                 source_accession=str(r[5]),
+                tables=tables,
             )
         )
     return tuple(rows)
