@@ -2,9 +2,9 @@
 
 Covers:
 
-* The eToro exchanges normaliser — pins the bare-list contract per
-  the eToro portal docs, raises ``ValueError`` on any dict-wrapped
-  payload (Codex round 2 finding), and skips malformed rows.
+* The eToro exchanges normaliser — pins the live ``{"exchangeInfo":
+  [...]}`` shape (the portal docs show a bare list, but the live
+  API returns the wrapper; both are accepted, anything else raises).
 * ``refresh_exchanges_metadata`` semantics:
 
   - inserts new rows with ``asset_class='unknown'``
@@ -51,15 +51,38 @@ class TestNormaliseExchanges:
         assert records[1].provider_id == "2"
         assert records[1].description == "XETRA"
 
-    def test_dict_shape_raises(self) -> None:
-        """A wrapped-dict response is NOT silently accepted — eToro's
-        portal documents the bare-list shape, and Codex round 2 flagged
-        that picking ``first list-typed value`` would silently mis-parse
-        a future ``{"meta": [...], "exchanges": [...]}`` payload as an
-        empty feed. Raise loudly so the weekly cron run surfaces the
-        schema drift."""
-        with pytest.raises(ValueError, match="Expected list"):
+    def test_live_wrapper_shape(self) -> None:
+        """The live eToro API returns ``{"exchangeInfo": [...]}`` even
+        though the portal docs show a bare list. Pin the actual
+        production shape — discovered when the cron crashed on first
+        run with ValueError after the round-2 tightening rejected
+        the wrapper. We accept the wrapper explicitly by known key
+        only; unknown wrappers still raise."""
+        raw = {
+            "exchangeInfo": [
+                {"exchangeID": 1, "exchangeDescription": "FX"},
+                {"exchangeID": 5, "exchangeDescription": "NASDAQ"},
+            ]
+        }
+        records = _normalise_exchanges(raw)
+        assert len(records) == 2
+        assert records[0].provider_id == "1"
+        assert records[0].description == "FX"
+        assert records[1].provider_id == "5"
+        assert records[1].description == "NASDAQ"
+
+    def test_unknown_wrapper_key_raises(self) -> None:
+        """A dict without the expected ``exchangeInfo`` key raises so
+        a silent schema drift fails the cron run loudly rather than
+        parsing the wrong list and reporting an empty feed."""
+        with pytest.raises(ValueError, match="exchangeInfo"):
             _normalise_exchanges({"exchanges": [{"exchangeID": 8}]})
+
+    def test_wrapper_value_not_list_raises(self) -> None:
+        """``exchangeInfo`` key present but value is not a list →
+        raise rather than silently iterating a non-iterable."""
+        with pytest.raises(ValueError, match="exchangeInfo"):
+            _normalise_exchanges({"exchangeInfo": {"unexpected": "shape"}})
 
     def test_camelCase_id_variant_accepted(self) -> None:
         """eToro is inconsistent — some endpoints use ``exchangeId``,
@@ -95,7 +118,7 @@ class TestNormaliseExchanges:
         assert _normalise_exchanges([]) == []
 
     def test_unknown_shape_raises(self) -> None:
-        with pytest.raises(ValueError, match="Expected list"):
+        with pytest.raises(ValueError, match="Expected dict"):
             _normalise_exchanges("not a payload")
 
 
