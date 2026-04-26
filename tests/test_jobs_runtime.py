@@ -881,62 +881,47 @@ class TestShutdownBoundedWait:
     ``wait=False`` after ``timeout_s`` seconds and returns.
     """
 
-    def test_hung_scheduler_graceful_shutdown_does_not_block(
+    def test_hung_scheduler_does_not_block_shutdown(
         self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When ``shutdown(wait=True)`` hangs, the bounded wait
-        escalates to ``shutdown(wait=False)`` and returns. The mock
-        differentiates the two calls so the wait=False escalation
-        path is exercised end-to-end."""
+        """When ``shutdown(wait=True)`` hangs, ``JobRuntime.shutdown``
+        abandons the daemon thread after ``timeout_s`` and returns.
+        No concurrent ``shutdown(wait=False)`` re-entry — that's
+        unsafe for APScheduler (Codex review)."""
         import time
 
         rt = _make_runtime({"j1": lambda: None})
         rt.start()
 
-        scheduler_shutdown_calls: list[bool] = []
+        def _hang(*args: object, **kwargs: object) -> None:
+            threading.Event().wait()  # blocks forever
 
-        def _hang_only_when_wait_true(*args: object, **kwargs: object) -> None:
-            wait = bool(kwargs.get("wait", True))
-            scheduler_shutdown_calls.append(wait)
-            if wait:
-                threading.Event().wait()  # blocks forever
-
-        monkeypatch.setattr(rt._scheduler, "shutdown", _hang_only_when_wait_true)
+        monkeypatch.setattr(rt._scheduler, "shutdown", _hang)
         monkeypatch.setattr(rt._manual_executor, "shutdown", lambda *a, **kw: None)
 
         start = time.monotonic()
         rt.shutdown(timeout_s=0.5)
         elapsed = time.monotonic() - start
-        # Bounded by 0.5s timeout + thread join overhead.
+        # Bounded by 0.5s timeout + thread join overhead. Without the
+        # fix this would hang forever; allow generous slack.
         assert elapsed < 5.0, f"shutdown took {elapsed:.2f}s, expected <5s"
-        # Both phases ran: graceful (wait=True) hung; escalation
-        # (wait=False) was invoked as the bounded fallback.
-        assert True in scheduler_shutdown_calls
-        assert False in scheduler_shutdown_calls
 
-    def test_hung_executor_graceful_shutdown_does_not_block(
+    def test_hung_executor_does_not_block_shutdown(
         self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Same bounded-wait escalation for the manual executor."""
+        """Same bounded wait + abandon for the manual executor."""
         import time
 
         rt = _make_runtime({"j1": lambda: None})
         rt.start()
 
-        executor_shutdown_calls: list[bool] = []
-
-        def _hang_only_when_wait_true(*args: object, **kwargs: object) -> None:
-            wait = bool(kwargs.get("wait", True))
-            executor_shutdown_calls.append(wait)
-            if wait:
-                threading.Event().wait()
+        def _hang(*args: object, **kwargs: object) -> None:
+            threading.Event().wait()
 
         monkeypatch.setattr(rt._scheduler, "shutdown", lambda *a, **kw: None)
-        monkeypatch.setattr(rt._manual_executor, "shutdown", _hang_only_when_wait_true)
+        monkeypatch.setattr(rt._manual_executor, "shutdown", _hang)
 
         start = time.monotonic()
         rt.shutdown(timeout_s=0.5)
         elapsed = time.monotonic() - start
         assert elapsed < 5.0, f"shutdown took {elapsed:.2f}s"
-        assert True in executor_shutdown_calls
-        assert False in executor_shutdown_calls

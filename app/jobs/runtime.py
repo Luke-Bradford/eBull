@@ -496,36 +496,36 @@ class JobRuntime:
             except Exception:
                 logger.exception("JobRuntime manual executor shutdown raised")
 
-        # Run each shutdown on a daemon thread so the join can time
-        # out without leaking a non-daemon thread that blocks
-        # interpreter exit.
+        # Run each shutdown on a DAEMON thread. If the join times out,
+        # we ABANDON the daemon thread rather than make a concurrent
+        # ``shutdown(wait=False)`` call: APScheduler / ThreadPoolExecutor
+        # don't document concurrent ``shutdown`` re-entry as safe and
+        # the second call could corrupt internal state or race with
+        # the still-blocked first call (Codex review on this PR).
+        # Daemon=True ensures the abandoned thread does not block
+        # interpreter exit; the underlying scheduler / executor goes
+        # to undefined state but that's acceptable for lifespan
+        # teardown — the process is on its way out either way and a
+        # uvicorn reload spawns a fresh runtime.
         sched_thread = threading.Thread(target=_graceful_scheduler, daemon=True)
         sched_thread.start()
         sched_thread.join(timeout=timeout_s)
         if sched_thread.is_alive():
             logger.warning(
-                "JobRuntime scheduler shutdown exceeded %.0fs — escalating to wait=False; "
-                "in-flight jobs will be abandoned and any late job_runs write will fail",
+                "JobRuntime scheduler shutdown exceeded %.0fs — abandoning the daemon thread "
+                "and proceeding with teardown; in-flight scheduled jobs will not be drained",
                 timeout_s,
             )
-            try:
-                self._scheduler.shutdown(wait=False)
-            except Exception:
-                logger.exception("JobRuntime scheduler wait=False shutdown raised")
 
         exec_thread = threading.Thread(target=_graceful_executor, daemon=True)
         exec_thread.start()
         exec_thread.join(timeout=timeout_s)
         if exec_thread.is_alive():
             logger.warning(
-                "JobRuntime manual executor shutdown exceeded %.0fs — escalating; "
-                "in-flight manual triggers will be abandoned",
+                "JobRuntime manual executor shutdown exceeded %.0fs — abandoning the daemon "
+                "thread and proceeding; in-flight manual triggers will not be drained",
                 timeout_s,
             )
-            try:
-                self._manual_executor.shutdown(wait=False)
-            except Exception:
-                logger.exception("JobRuntime manual executor wait=False shutdown raised")
 
         self._started = False
         logger.info("JobRuntime stopped")
