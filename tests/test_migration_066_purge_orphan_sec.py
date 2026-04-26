@@ -149,15 +149,27 @@ def test_multi_source_predicate_filters_on_source_column(
 
     _seed_instrument(conn, 9000004, "MULT")  # no CIK
 
-    for source in ("sec_edgar", "fmp"):
+    # Seed two distinct (period_end_date, source) rows so the PK
+    # ``(instrument_id, period_end_date, period_type)`` does not
+    # collide. Pre-#530 the test seeded both rows with the same
+    # period_end_date, expecting two sources to coexist on the same
+    # PK — the schema doesn't allow that, so the second INSERT was
+    # silently dropped by ``ON CONFLICT DO NOTHING`` and the test
+    # was effectively single-row.
+    #
+    # ``source_ref`` and ``reported_currency`` are NOT NULL (#530
+    # also fixes that — pre-fix the INSERT silently inserted NULLs
+    # against the constraint).
+    for period_end, source in (("2024-12-31", "sec_edgar"), ("2025-12-31", "fmp")):
         conn.execute(
             """
             INSERT INTO financial_periods
-                (instrument_id, period_end_date, period_type, source, fiscal_year)
-            VALUES (%s, '2025-12-31', 'FY', %s, 2025)
+                (instrument_id, period_end_date, period_type,
+                 source, source_ref, fiscal_year, reported_currency)
+            VALUES (%s, %s, 'FY', %s, %s, 2025, 'USD')
             ON CONFLICT DO NOTHING
             """,
-            (9000004, source),
+            (9000004, period_end, source, f"test-{source}"),
         )
 
     conn.execute(
