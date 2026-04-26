@@ -8,6 +8,7 @@ import psycopg
 import pytest
 
 from app.services.business_summary import (
+    bootstrap_business_summaries,
     get_business_sections,
     get_business_summary,
     ingest_business_summaries,
@@ -812,3 +813,71 @@ class TestTenKAFallback:
         assert body == ""
         assert source_accession == "AMEND-B"
         assert reason == "no_item_1_marker"
+
+
+class TestBootstrapDrain:
+    """#535 — bootstrap drain mode loops the standard ingester until
+    the queue empties or the deadline elapses. Used for first-time
+    backfill of the SEC-CIK universe."""
+
+    def test_drains_multiple_chunks_until_queue_empty(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Seed 3 instruments + 3 10-Ks, run bootstrap with chunk_limit=2.
+        Loop must execute twice (chunk1=2, chunk2=1, chunk3=0 = stop)
+        and persist all 3 bodies."""
+        urls = {}
+        for i in range(3):
+            iid = _seed_instrument(ebull_test_conn, symbol=f"BS{i}", iid=801 + i)
+            url = f"https://www.sec.gov/Archives/bs{i}.htm"
+            _seed_10k(
+                ebull_test_conn,
+                instrument_id=iid,
+                accession=f"BS-{i}",
+                url=url,
+                filing_date=f"2026-0{i + 1}-15",
+            )
+            urls[url] = _ITEM_1_HTML
+
+        fetcher = _StubFetcher(urls)
+        result = bootstrap_business_summaries(
+            ebull_test_conn,
+            cast("object", fetcher),  # type: ignore[arg-type]
+            chunk_limit=2,
+            max_runtime_seconds=30,
+        )
+        assert result.rows_inserted == 3
+        # 2 + 1 from the candidate cycles (the third call sees zero).
+        assert result.filings_scanned == 3
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM instrument_business_summary WHERE instrument_id IN (801,802,803) AND body != ''"
+            )
+            row = cur.fetchone()
+        assert row is not None and row[0] == 3
+
+    def test_idempotent_repeat_is_a_noop(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """A second bootstrap run on a drained queue performs zero
+        fetches and reports zero scanned."""
+        iid = _seed_instrument(ebull_test_conn, symbol="BSIDEM", iid=810)
+        _seed_10k(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="A1",
+            url="https://www.sec.gov/Archives/idem.htm",
+        )
+        fetcher = _StubFetcher({"https://www.sec.gov/Archives/idem.htm": _ITEM_1_HTML})
+        bootstrap_business_summaries(
+            ebull_test_conn,
+            cast("object", fetcher),  # type: ignore[arg-type]
+            chunk_limit=10,
+            max_runtime_seconds=30,
+        )
+        rerun_fetcher = _StubFetcher({"https://www.sec.gov/Archives/idem.htm": _ITEM_1_HTML})
+        result = bootstrap_business_summaries(
+            ebull_test_conn,
+            cast("object", rerun_fetcher),  # type: ignore[arg-type]
+            chunk_limit=10,
+            max_runtime_seconds=30,
+        )
+        assert result.filings_scanned == 0
+        assert rerun_fetcher.calls == []

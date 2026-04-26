@@ -238,6 +238,7 @@ JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC = "orchestrator_high_frequency_sync"
 JOB_FUNDAMENTALS_SYNC = "fundamentals_sync"
 JOB_SEC_DIVIDEND_CALENDAR_INGEST = "sec_dividend_calendar_ingest"
 JOB_SEC_BUSINESS_SUMMARY_INGEST = "sec_business_summary_ingest"
+JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP = "sec_business_summary_bootstrap"
 JOB_SEC_INSIDER_TRANSACTIONS_INGEST = "sec_insider_transactions_ingest"
 JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
 JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
@@ -546,6 +547,20 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "key."
         ),
         cadence=Cadence.hourly(minute=20),
+        catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP,
+        description=(
+            "One-shot drain of the 10-K Item 1 candidate set (#535). "
+            "Loops the standard ingester at a higher chunk limit "
+            "until the queue empties or the deadline (1 hour) elapses. "
+            "Designed for first-time backfill of the SEC-CIK universe "
+            "and operator-driven catch-up. Manual trigger via "
+            "POST /jobs/sec_business_summary_bootstrap/run; auto-fires "
+            "weekly Sunday 04:00 UTC as a safety net."
+        ),
+        cadence=Cadence.weekly(weekday=6, hour=4, minute=0),
         catch_up_on_boot=False,
     ),
     ScheduledJob(
@@ -3077,6 +3092,43 @@ def sec_dividend_calendar_ingest() -> None:
         tracker.row_count = result.rows_inserted + result.rows_updated
         logger.info(
             "sec_dividend_calendar_ingest complete: scanned=%d inserted=%d updated=%d fetch_errors=%d parse_misses=%d",
+            result.filings_scanned,
+            result.rows_inserted,
+            result.rows_updated,
+            result.fetch_errors,
+            result.parse_misses,
+        )
+
+
+def sec_business_summary_bootstrap() -> None:
+    """One-shot drain of the 10-K Item 1 candidate set (#535).
+
+    Calls :func:`bootstrap_business_summaries`, which loops the
+    standard ingester at a higher chunk limit until the queue
+    empties or the per-run deadline (1 hour) elapses. Bounded by
+    the SEC fair-use rate-limit budget and the candidate query's
+    backoff filter (quarantined rows stay excluded).
+
+    Designed for first-time backfill of the SEC-CIK universe and
+    operator-driven catch-up after extended outages. Manual-trigger
+    only via ``POST /jobs/sec_business_summary_bootstrap/run``;
+    auto-fires weekly Sunday 04:00 UTC as a safety net to catch
+    anything the daily cron's bounded limit can't keep up with.
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.business_summary import bootstrap_business_summaries
+
+    with _tracked_job(JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP) as tracker:
+        with (
+            psycopg.connect(settings.database_url) as conn,
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+        ):
+            result = bootstrap_business_summaries(conn, provider)
+
+        tracker.row_count = result.rows_inserted + result.rows_updated
+        logger.info(
+            "sec_business_summary_bootstrap complete: "
+            "scanned=%d inserted=%d updated=%d fetch_errors=%d parse_misses=%d",
             result.filings_scanned,
             result.rows_inserted,
             result.rows_updated,

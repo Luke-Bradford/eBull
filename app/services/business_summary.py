@@ -879,6 +879,67 @@ def _find_prior_plain_10k(
     return str(row[0]), str(row[1])
 
 
+def bootstrap_business_summaries(
+    conn: psycopg.Connection[Any],
+    fetcher: _DocFetcher,
+    *,
+    chunk_limit: int = 500,
+    max_runtime_seconds: int = 3600,
+) -> IngestResult:
+    """One-shot drain of the entire business_summary candidate set.
+
+    Calls :func:`ingest_business_summaries` repeatedly with a chunked
+    limit until either the candidate query returns zero rows or the
+    runtime deadline elapses. Idempotent — safe to re-run; subsequent
+    invocations no-op fast once the queue is empty.
+
+    Designed for first-time backfill of the 4031-instrument SEC-CIK
+    universe (#535). Steady-state daily ingest (limit=200) is too
+    slow at first-time bootstrap; this drain processes the entire
+    backlog in one bounded session under SEC fair-use limits.
+
+    Returns aggregate :class:`IngestResult` summing every chunk's
+    counts. Quarantined rows (next_retry_at > NOW()) stay excluded
+    via the standard candidate query — bootstrap doesn't override
+    backoff.
+    """
+    import time
+
+    deadline = time.monotonic() + max_runtime_seconds
+    total_scanned = 0
+    total_inserted = 0
+    total_updated = 0
+    total_fetch_errors = 0
+    total_parse_misses = 0
+
+    while time.monotonic() < deadline:
+        chunk = ingest_business_summaries(conn, fetcher, limit=chunk_limit)
+        total_scanned += chunk.filings_scanned
+        total_inserted += chunk.rows_inserted
+        total_updated += chunk.rows_updated
+        total_fetch_errors += chunk.fetch_errors
+        total_parse_misses += chunk.parse_misses
+        if chunk.filings_scanned == 0:
+            break
+
+    logger.info(
+        "bootstrap_business_summaries complete: scanned=%d inserted=%d updated=%d fetch_errors=%d parse_misses=%d",
+        total_scanned,
+        total_inserted,
+        total_updated,
+        total_fetch_errors,
+        total_parse_misses,
+    )
+
+    return IngestResult(
+        filings_scanned=total_scanned,
+        rows_inserted=total_inserted,
+        rows_updated=total_updated,
+        fetch_errors=total_fetch_errors,
+        parse_misses=total_parse_misses,
+    )
+
+
 def _classify_fetch_exception(exc: Exception) -> FailureReason:
     """Map a fetch-side exception to a FailureReason value.
 
