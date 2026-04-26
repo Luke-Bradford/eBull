@@ -296,6 +296,30 @@ export function fetchInsiderTransactions(
   );
 }
 
+export interface InstrumentHeadcount {
+  symbol: string;
+  employees: number;
+  period_end_date: string;
+  source_accession: string;
+}
+
+/** Latest reported employee count from SEC iXBRL DEI cover-page
+ *  facts (#551). Returns null on 404 (non-SEC issuer or fact not
+ *  ingested yet); rethrows other errors. */
+export async function fetchInstrumentEmployees(
+  symbol: string,
+): Promise<InstrumentHeadcount | null> {
+  try {
+    return await apiFetch<InstrumentHeadcount>(
+      `/instruments/${encodeURIComponent(symbol)}/employees`,
+    );
+  } catch (err) {
+    const { ApiError } = await import("@/api/client");
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
+}
+
 export function fetchInstrumentDetail(
   instrumentId: number,
 ): Promise<InstrumentDetail> {

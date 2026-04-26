@@ -7,6 +7,7 @@ import { SecProfilePanel } from "./SecProfilePanel";
 
 vi.mock("@/api/instruments", () => ({
   fetchInstrumentSecProfile: vi.fn(),
+  fetchInstrumentEmployees: vi.fn().mockResolvedValue(null),
 }));
 
 import { fetchInstrumentSecProfile } from "@/api/instruments";

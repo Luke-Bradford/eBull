@@ -9,8 +9,14 @@
  * (backed by #429 ingestion) and is no longer summarised here.
  */
 
-import { fetchInstrumentSecProfile } from "@/api/instruments";
-import type { InstrumentSecProfile } from "@/api/instruments";
+import {
+  fetchInstrumentEmployees,
+  fetchInstrumentSecProfile,
+} from "@/api/instruments";
+import type {
+  InstrumentHeadcount,
+  InstrumentSecProfile,
+} from "@/api/instruments";
 import {
   Section,
   SectionError,
@@ -29,6 +35,10 @@ export function SecProfilePanel({ symbol }: SecProfilePanelProps) {
     useCallback(() => fetchInstrumentSecProfile(symbol), [symbol]),
     [symbol],
   );
+  const headcount = useAsync<InstrumentHeadcount | null>(
+    useCallback(() => fetchInstrumentEmployees(symbol), [symbol]),
+    [symbol],
+  );
 
   return (
     <Section title="Company profile (SEC)">
@@ -42,13 +52,19 @@ export function SecProfilePanel({ symbol }: SecProfilePanelProps) {
           description="This instrument has no primary CIK mapping, or the daily SEC ingest has not yet seeded its entity row. Non-US tickers will not have one."
         />
       ) : (
-        <Body profile={state.data} />
+        <Body profile={state.data} headcount={headcount.data} />
       )}
     </Section>
   );
 }
 
-function Body({ profile }: { profile: InstrumentSecProfile }) {
+function Body({
+  profile,
+  headcount,
+}: {
+  profile: InstrumentSecProfile;
+  headcount: InstrumentHeadcount | null;
+}) {
   return (
     <div className="space-y-3 text-sm">
       {profile.description !== null && profile.description.length > 0 && (
@@ -95,6 +111,17 @@ function Body({ profile }: { profile: InstrumentSecProfile }) {
           <>
             <dt className="text-slate-500">Incorporated</dt>
             <dd>{profile.state_of_incorporation_desc}</dd>
+          </>
+        )}
+        {headcount !== null && (
+          <>
+            <dt className="text-slate-500">Employees</dt>
+            <dd>
+              {headcount.employees.toLocaleString()}
+              <span className="ml-1 text-xs text-slate-400">
+                (as of {headcount.period_end_date})
+              </span>
+            </dd>
           </>
         )}
         <dt className="text-slate-500">CIK</dt>
