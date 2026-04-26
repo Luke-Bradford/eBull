@@ -25,9 +25,11 @@ from app.config import settings
 from app.providers.market_data import (
     ExchangeRecord,
     InstrumentRecord,
+    InstrumentTypeRecord,
     MarketDataProvider,
     OHLCVBar,
     Quote,
+    StocksIndustryRecord,
 )
 from app.providers.resilient_client import ResilientClient
 
@@ -108,6 +110,37 @@ class EtoroMarketDataProvider(MarketDataProvider):
         response.raise_for_status()
         raw = response.json()
         return _normalise_instruments(raw)
+
+    def get_instrument_types(self) -> list[InstrumentTypeRecord]:
+        """Fetch eToro's instrument-types lookup catalogue.
+
+        Maps numeric ``instrumentTypeID`` (Forex / Commodity / CFD
+        / Stocks / ETF / Bonds / …) to a human-readable
+        description. Used by ``app.services.etoro_lookups.refresh_etoro_lookups``
+        to populate the ``etoro_instrument_types`` table; the
+        frontend joins on it to render meaningful labels instead
+        of numeric ids.
+        """
+        response = self._http.get(
+            "/api/v1/market-data/instrument-types",
+            headers=self._request_headers(),
+        )
+        response.raise_for_status()
+        return _normalise_instrument_types(response.json())
+
+    def get_stocks_industries(self) -> list[StocksIndustryRecord]:
+        """Fetch eToro's stocks-industries lookup catalogue.
+
+        Maps numeric ``industryID`` to industry name (Basic
+        Materials / Healthcare / Technology / …). Same role as
+        ``get_instrument_types`` for the sector label.
+        """
+        response = self._http.get(
+            "/api/v1/market-data/stocks-industries",
+            headers=self._request_headers(),
+        )
+        response.raise_for_status()
+        return _normalise_stocks_industries(response.json())
 
     def get_exchanges(self) -> list[ExchangeRecord]:
         """Fetch the eToro exchange catalogue.
@@ -277,6 +310,7 @@ def _normalise_instrument(item: Mapping[str, object]) -> InstrumentRecord | None
         country=None,  # not available in instruments endpoint
         is_tradable=True,  # only tradable instruments are returned by the API
         instrument_type=_str_or_none(item.get("instrumentTypeName")),
+        instrument_type_id=_int_or_none(item.get("instrumentTypeID")),
     )
 
 
@@ -421,42 +455,92 @@ def _normalise_rate(item: Mapping[str, object]) -> Quote | None:
 
 
 _EXCHANGES_WRAPPER_KEY = "exchangeInfo"
+_INSTRUMENT_TYPES_WRAPPER_KEY = "instrumentTypes"
+_STOCKS_INDUSTRIES_WRAPPER_KEY = "stocksIndustries"
+
+
+def _unwrap_lookup(raw: object, wrapper_key: str) -> list[object]:
+    """Shared shape-validator for the lookup endpoints.
+
+    eToro's lookup endpoints (``exchanges`` / ``instrument-types``
+    / ``stocks-industries``) all wrap a list under a single known
+    key. Bare-list fallback accepted in case eToro aligns the
+    live API with their portal docs in the future. Anything else
+    raises so a silent schema drift fails the cron run loudly
+    rather than reporting an empty feed.
+    """
+    if isinstance(raw, dict):
+        wrapped = raw.get(wrapper_key)
+        if not isinstance(wrapped, list):
+            raise ValueError(
+                f"eToro lookup endpoint returned a dict, but key {wrapper_key!r} "
+                f"is missing or not a list. Top-level keys: {list(raw.keys())}. "
+                f"If eToro renamed the wrapper key, update the lookup normaliser."
+            )
+        return wrapped
+    if isinstance(raw, list):
+        return list(raw)
+    raise ValueError(
+        f"Expected dict (with {wrapper_key!r} key) or list from eToro lookup endpoint, got {type(raw).__name__}."
+    )
+
+
+def _normalise_instrument_types(raw: object) -> list[InstrumentTypeRecord]:
+    """Normalise an eToro instrument-types response into typed records."""
+    items = _unwrap_lookup(raw, _INSTRUMENT_TYPES_WRAPPER_KEY)
+    records: list[InstrumentTypeRecord] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        type_id = item.get("instrumentTypeID")
+        if type_id is None:
+            continue
+        try:
+            type_id_int = int(type_id)
+        except TypeError, ValueError:
+            continue
+        records.append(
+            InstrumentTypeRecord(
+                type_id=type_id_int,
+                description=_str_or_none(item.get("instrumentTypeDescription")),
+            )
+        )
+    return records
+
+
+def _normalise_stocks_industries(raw: object) -> list[StocksIndustryRecord]:
+    """Normalise an eToro stocks-industries response into typed records."""
+    items = _unwrap_lookup(raw, _STOCKS_INDUSTRIES_WRAPPER_KEY)
+    records: list[StocksIndustryRecord] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        industry_id = item.get("industryID")
+        if industry_id is None:
+            continue
+        try:
+            industry_id_int = int(industry_id)
+        except TypeError, ValueError:
+            continue
+        records.append(
+            StocksIndustryRecord(
+                industry_id=industry_id_int,
+                name=_str_or_none(item.get("industryName")),
+            )
+        )
+    return records
 
 
 def _normalise_exchanges(raw: object) -> list[ExchangeRecord]:
     """Normalise an eToro exchanges API response into ExchangeRecord list.
 
     The live API wraps the list in ``{"exchangeInfo": [...]}`` even
-    though the portal docs show a bare list. We pin the actual shape
-    here (one explicit known wrapper key) — anything else raises
-    ``ValueError`` so a silent schema drift fails loudly rather than
-    parsing the wrong list and reporting a harmless-looking empty
-    feed (Codex round 2 finding from #503 PR 4).
-
-    The bare-list shape is also accepted as a fallback in case eToro
-    eventually aligns the live API with the portal docs; a future
-    silent flip from one to the other is a no-op for us.
+    though the portal docs show a bare list. ``_unwrap_lookup``
+    pins the shape — anything else raises ``ValueError`` so a
+    silent schema drift fails loudly rather than parsing the
+    wrong list and reporting a harmless-looking empty feed.
     """
-    items: list[object]
-    if isinstance(raw, dict):
-        wrapped = raw.get(_EXCHANGES_WRAPPER_KEY)
-        if not isinstance(wrapped, list):
-            raise ValueError(
-                f"eToro exchanges endpoint returned a dict, but key "
-                f"{_EXCHANGES_WRAPPER_KEY!r} is missing or not a list. "
-                f"Top-level keys: {list(raw.keys())}. If eToro renamed "
-                f"the wrapper key, update _normalise_exchanges."
-            )
-        items = wrapped
-    elif isinstance(raw, list):
-        items = list(raw)
-    else:
-        raise ValueError(
-            f"Expected dict (with {_EXCHANGES_WRAPPER_KEY!r} key) or list "
-            f"from eToro exchanges endpoint, got {type(raw).__name__}. "
-            f"If eToro changed the response shape, update _normalise_exchanges."
-        )
-
+    items = _unwrap_lookup(raw, _EXCHANGES_WRAPPER_KEY)
     records: list[ExchangeRecord] = []
     for item in items:
         if not isinstance(item, dict):

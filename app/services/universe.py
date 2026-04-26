@@ -65,41 +65,46 @@ def sync_universe(
                 INSERT INTO instruments (
                     instrument_id, symbol, company_name, exchange, currency,
                     sector, industry, country, is_tradable, instrument_type,
+                    instrument_type_id,
                     first_seen_at, last_seen_at
                 )
                 VALUES (
                     %(provider_id)s, %(symbol)s, %(company_name)s, %(exchange)s,
                     %(currency)s, %(sector)s, %(industry)s, %(country)s, %(is_tradable)s,
-                    %(instrument_type)s, NOW(), NOW()
+                    %(instrument_type)s, %(instrument_type_id)s, NOW(), NOW()
                 )
                 ON CONFLICT (instrument_id) DO UPDATE SET
-                    symbol          = EXCLUDED.symbol,
-                    company_name    = EXCLUDED.company_name,
-                    exchange        = EXCLUDED.exchange,
-                    currency        = COALESCE(EXCLUDED.currency, instruments.currency),
-                    sector          = EXCLUDED.sector,
-                    industry        = EXCLUDED.industry,
-                    country         = EXCLUDED.country,
-                    is_tradable     = EXCLUDED.is_tradable,
+                    symbol             = EXCLUDED.symbol,
+                    company_name       = EXCLUDED.company_name,
+                    exchange           = EXCLUDED.exchange,
+                    currency           = COALESCE(EXCLUDED.currency, instruments.currency),
+                    sector             = EXCLUDED.sector,
+                    industry           = EXCLUDED.industry,
+                    country            = EXCLUDED.country,
+                    is_tradable        = EXCLUDED.is_tradable,
                     -- COALESCE preserves a previously-known type when a
-                    -- transient eToro response omits ``instrumentTypeName``.
-                    -- Otherwise a single empty-field response would erase
-                    -- the cross-validation signal we need against
-                    -- ``exchanges.asset_class`` (#503 PR 4).
-                    instrument_type = COALESCE(EXCLUDED.instrument_type, instruments.instrument_type),
-                    last_seen_at    = NOW()
+                    -- transient eToro response omits ``instrumentTypeName``
+                    -- / ``instrumentTypeID``. Otherwise a single empty-
+                    -- field response would erase the cross-validation
+                    -- signal we need against ``exchanges.asset_class``
+                    -- (#503 PR 4).
+                    instrument_type    = COALESCE(EXCLUDED.instrument_type, instruments.instrument_type),
+                    instrument_type_id = COALESCE(EXCLUDED.instrument_type_id, instruments.instrument_type_id),
+                    last_seen_at       = NOW()
                 WHERE (
-                    instruments.symbol          IS DISTINCT FROM EXCLUDED.symbol          OR
-                    instruments.company_name    IS DISTINCT FROM EXCLUDED.company_name    OR
-                    instruments.exchange        IS DISTINCT FROM EXCLUDED.exchange        OR
+                    instruments.symbol             IS DISTINCT FROM EXCLUDED.symbol             OR
+                    instruments.company_name       IS DISTINCT FROM EXCLUDED.company_name       OR
+                    instruments.exchange           IS DISTINCT FROM EXCLUDED.exchange           OR
                     (EXCLUDED.currency IS NOT NULL AND
-                     instruments.currency IS DISTINCT FROM EXCLUDED.currency)             OR
-                    instruments.sector          IS DISTINCT FROM EXCLUDED.sector          OR
-                    instruments.industry        IS DISTINCT FROM EXCLUDED.industry        OR
-                    instruments.country         IS DISTINCT FROM EXCLUDED.country         OR
-                    instruments.is_tradable     IS DISTINCT FROM EXCLUDED.is_tradable     OR
+                     instruments.currency IS DISTINCT FROM EXCLUDED.currency)                   OR
+                    instruments.sector             IS DISTINCT FROM EXCLUDED.sector             OR
+                    instruments.industry           IS DISTINCT FROM EXCLUDED.industry           OR
+                    instruments.country            IS DISTINCT FROM EXCLUDED.country            OR
+                    instruments.is_tradable        IS DISTINCT FROM EXCLUDED.is_tradable        OR
                     (EXCLUDED.instrument_type IS NOT NULL AND
-                     instruments.instrument_type IS DISTINCT FROM EXCLUDED.instrument_type)
+                     instruments.instrument_type IS DISTINCT FROM EXCLUDED.instrument_type)     OR
+                    (EXCLUDED.instrument_type_id IS NOT NULL AND
+                     instruments.instrument_type_id IS DISTINCT FROM EXCLUDED.instrument_type_id)
                 )
                 """,
                 {
@@ -113,6 +118,7 @@ def sync_universe(
                     "country": rec.country,
                     "is_tradable": rec.is_tradable,
                     "instrument_type": rec.instrument_type,
+                    "instrument_type_id": rec.instrument_type_id,
                 },
             )
 
