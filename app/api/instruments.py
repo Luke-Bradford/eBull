@@ -706,7 +706,6 @@ def get_instrument_sec_profile(
     been seeded yet (pre-first-seed or non-US ticker without a primary
     CIK).
     """
-    from app.services.business_summary import get_business_summary
     from app.services.sec_entity_profile import get_entity_profile
 
     symbol_clean = symbol.strip().upper()
@@ -736,13 +735,15 @@ def get_instrument_sec_profile(
             detail="no SEC profile on file for this instrument",
         )
 
-    # #428: prefer the authoritative 10-K Item 1 body over the short
-    # entity-level ``description`` from submissions.json. The
-    # submissions description is a ~1-sentence blurb SEC surfaces in
-    # their own UI; Item 1 is the multi-paragraph authoritative text
-    # investors expect on an instrument page.
-    item_1_body = get_business_summary(conn, instrument_id=instrument_id)
-    description = item_1_body if item_1_body is not None else profile.description
+    # Description = SEC submissions.json blurb only. Pre-#552 this
+    # path preferred the authoritative 10-K Item 1 body and the
+    # SecProfilePanel rendered the full multi-paragraph narrative
+    # inline — that produced a wall-of-text on the instrument page
+    # that pushed all other panels off-screen. The 10-K narrative now
+    # lives behind the BusinessSectionsTeaser + drilldown route
+    # (#552); the SecProfile description reverts to the short
+    # submissions blurb that fits the instrument page panel.
+    description = profile.description
 
     return InstrumentSecProfile(
         symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
