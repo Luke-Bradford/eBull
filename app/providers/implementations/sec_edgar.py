@@ -53,6 +53,22 @@ _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 # SEC rate-limit: 10 req/s. We use a conservative inter-request floor.
 _MIN_REQUEST_INTERVAL_S = 0.11
 
+# Process-wide shared timestamp for the SEC rate limiter (#537).
+# Every ``SecFilingsProvider`` and ``SecFundamentalsProvider``
+# instance inside this Python process funnels its
+# ``ResilientClient(min_request_interval_s=...)`` through this single
+# timestamp so concurrent jobs (e.g. ``sec_8k_events_ingest`` +
+# ``sec_insider_transactions_ingest`` both firing on the hour)
+# share one global 10 req/s budget. Without this, each provider
+# instance carried its own clock and concurrent jobs could burst
+# past the SEC fair-use limit, triggering UA throttling and
+# cascading 4xx/5xx tombstones across every downstream parser.
+#
+# Multi-process / multi-worker concurrency is out of scope here;
+# revive when #479 (multi-worker WS subscriber) lands and look
+# at a Postgres advisory-lock token bucket.
+_PROCESS_RATE_LIMIT_CLOCK: list[float] = [0.0]
+
 
 def _zero_pad_cik(cik: str | int) -> str:
     """Return a 10-digit zero-padded CIK string."""
@@ -179,19 +195,20 @@ class SecFilingsProvider(FilingsProvider):
             headers={"User-Agent": user_agent, "Accept": "application/json"},
             timeout=30.0,
         )
-        # Both clients share the same SEC rate limit (10 req/s).
-        # Shared timestamp ensures interleaved calls to different hosts
-        # don't exceed the combined limit.
-        shared_ts: list[float] = [0.0]
+        # Both clients share the same SEC rate limit (10 req/s) via
+        # a PROCESS-wide shared timestamp (#537). Pre-#537 each
+        # provider instance had its own list[float], so concurrent
+        # ingest jobs each spawning their own SecFilingsProvider
+        # could collectively burst past the SEC fair-use limit.
         self._http = ResilientClient(
             self._client,
             min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
-            shared_last_request=shared_ts,
+            shared_last_request=_PROCESS_RATE_LIMIT_CLOCK,
         )
         self._http_tickers = ResilientClient(
             self._tickers_client,
             min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
-            shared_last_request=shared_ts,
+            shared_last_request=_PROCESS_RATE_LIMIT_CLOCK,
         )
 
     def __enter__(self) -> SecFilingsProvider:
