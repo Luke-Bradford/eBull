@@ -351,9 +351,7 @@ class TestExtractBusinessSections:
             "</body></html>"
         )
         sections = extract_business_sections(html)
-        all_text = " ".join(
-            list(s.body for s in sections) + [s.section_label for s in sections]
-        )
+        all_text = " ".join(list(s.body for s in sections) + [s.section_label for s in sections])
         # No run-together word: "termCustomer" must NOT appear. The
         # bold ``Customer`` may be detected as a heading label rather
         # than body text — that's an acceptable parser outcome; the
