@@ -27,6 +27,7 @@ from typing import Literal
 
 import psycopg
 import psycopg.rows
+import psycopg.sql
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
@@ -118,7 +119,8 @@ def list_failures(
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            f"""
+            psycopg.sql.SQL(
+                f"""
             SELECT bs.last_failure_reason AS reason,
                    COUNT(*) AS count,
                    COUNT(*) FILTER (WHERE bs.attempt_count >= 4) AS quarantined_count
@@ -126,7 +128,8 @@ def list_failures(
              WHERE {where_sql}
              GROUP BY bs.last_failure_reason
              ORDER BY count DESC
-            """,
+            """
+            ),
             params,
         )
         for r in cur.fetchall():
@@ -139,18 +142,21 @@ def list_failures(
             )
 
         cur.execute(
-            f"""
+            psycopg.sql.SQL(
+                f"""
             SELECT COUNT(*) AS total
               FROM instrument_business_summary bs
              WHERE {where_sql}
-            """,
+            """
+            ),
             params,
         )
         total_row = cur.fetchone()
         total = int(total_row["total"]) if total_row else 0  # type: ignore[arg-type]
 
         cur.execute(
-            f"""
+            psycopg.sql.SQL(
+                f"""
             SELECT bs.instrument_id,
                    i.symbol,
                    i.company_name,
@@ -164,7 +170,8 @@ def list_failures(
              WHERE {where_sql}
              ORDER BY bs.attempt_count DESC, bs.last_parsed_at DESC
              LIMIT %(limit)s OFFSET %(offset)s
-            """,
+            """
+            ),
             params,
         )
         for r in cur.fetchall():
