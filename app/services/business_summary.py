@@ -157,24 +157,24 @@ def extract_business_section(raw_html: str) -> str | None:
     if not matches_1:
         return None
 
-    # Take the LAST Item 1A occurrence, not the first. The table of
-    # contents at the top of a 10-K lists "Item 1A. Risk Factors"
-    # once as a link target — the real heading appears again later.
-    # Using the last occurrence ensures the body region we slice
-    # actually contains the Item 1 narrative between the real Item
-    # 1 heading (also the last occurrence) and the real Item 1A
-    # heading. Same logic applies to Item 1.
-    matches_1a = list(_ITEM_1A_RE.finditer(text))
-    end = matches_1a[-1].start() if matches_1a else len(text)
+    # Pick the LAST Item 1 occurrence as the anchor — TOC at the top
+    # of a 10-K lists "Item 1. Business" once as a link target; the
+    # real heading appears later.
+    last_item_1 = matches_1[-1]
+    start = last_item_1.end()
 
-    # Pick the last Item 1 marker that precedes Item 1A (or EOF).
-    # Filings that have only a TOC mention fall into the first
-    # match, which is a tight slice — callers should enforce a
-    # minimum body length before storing (done in the ingester).
-    candidates = [m for m in matches_1 if m.start() < end]
-    if not candidates:
-        return None
-    start = candidates[-1].end()
+    # End boundary = FIRST Item 1A AFTER the chosen Item 1 anchor
+    # (#550). Pre-#550 the parser picked the LAST Item 1A in the
+    # whole document, which on filings whose Risk Factors body
+    # references "Item 1A" again later (GME's 10-K mentions
+    # "Item 1A" inside body prose) over-extended the slice into the
+    # next 100 KB of risk-factors content. Anchoring to first-after-
+    # Item-1 correctly skips both the TOC link (which is BEFORE the
+    # last Item 1 heading) and any body references (which are
+    # AFTER the next Item 1A heading).
+    matches_1a = list(_ITEM_1A_RE.finditer(text))
+    matches_1a_after = [m for m in matches_1a if m.start() > start]
+    end = matches_1a_after[0].start() if matches_1a_after else len(text)
 
     body = text[start:end].strip()
     if not body:
@@ -301,6 +301,76 @@ _HEADING_WRAP_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Match any tag carrying a ``font-weight: bold`` (or ``700+`` /
+# ``bolder``) inline style. Modern iXBRL filings (#550) express
+# subsection headings via inline-styled <span>/<p>/<div> rather than
+# explicit <h*>/<b>/<strong> tags. The previous heading detector
+# (``_HEADING_WRAP_RE`` above) missed these entirely — GME's recent
+# 10-K parsed to a single 102 KB ``general`` block as a result.
+#
+# We match the *opening* tag's style attribute, then capture the
+# inner text up to the matching closing tag of the same name. Tag
+# alternation is restricted to common heading-host tags so a stray
+# bold-styled <a> link or <em> doesn't get promoted to a heading.
+#
+# Intentionally narrow on the style pattern: ``font-weight: bold``,
+# ``font-weight:bold``, ``font-weight:700|800|900``, ``font-weight:bolder``.
+# Filings use a mix of these. Numeric weights below 700 are NOT
+# treated as bold (medium / semibold are common body styling).
+#
+# Style-attribute matching avoids constraining on quote characters
+# inside the value: SEC filings routinely embed both quote types in
+# the same style attribute (e.g. ``style="font-family:'Arial'"``),
+# and a strict ``[^"']`` exclusion stops at the first inner
+# apostrophe and misses the heading entirely. We match liberally up
+# to ``>`` (style attrs never contain ``>``) and rely on the
+# ``font-weight`` substring for the heading test.
+# Adjacent bold-bold ``<span style="...bold...">X</span><span style="...bold...">Y</span>``
+# pair — collapsed before heading-tag wrapping (#550). Targets the
+# drop-cap pattern where iXBRL filings break a logical heading across
+# two sibling bold spans. Scoped to bold-on-BOTH-sides — body prose
+# transitions from a non-bold span into a bold inline span (e.g.
+# ``text</span><span style="font-weight:bold">term</span>``) are
+# preserved so the trailing word doesn't collide with the leading
+# text into a run-together word.
+#
+# Codex review on #550 round 2 — the previous regex constrained only
+# the trailing span; this version captures leading + trailing as a
+# pair and replaces via callback so body prose is never touched.
+_BOLD_SPAN_PAIR_RE = re.compile(
+    r"(?P<lead_open><span\b[^>]*?style\s*=\s*[\"'][^>]*?"
+    r"font-weight\s*:\s*(?:bold|bolder|[7-9]\d\d)[^>]*?>)"
+    r"(?P<lead_inner>[^<]*)"
+    r"</span>\s*"
+    r"(?P<trail_open><span\b[^>]*?style\s*=\s*[\"'][^>]*?"
+    r"font-weight\s*:\s*(?:bold|bolder|[7-9]\d\d)[^>]*?>)",
+    re.IGNORECASE,
+)
+
+
+def _merge_bold_span_pair(m: re.Match[str]) -> str:
+    """Collapse a bold-bold drop-cap pair into the leading span only.
+
+    Drops the ``</span>`` close + whitespace + opening of the trailing
+    bold span, leaving ``<span style=bold>X`` + ``Y`` text continuous
+    inside the leading span (the original trailing span's closer is
+    still in the surrounding HTML and pairs with the now-unified
+    open). Empty-string concat (no separator) so "ITEM 1. B" + "USINESS"
+    becomes "ITEM 1. BUSINESS", not "ITEM 1. B USINESS".
+    """
+    return m.group("lead_open") + m.group("lead_inner")
+
+
+_BOLD_STYLE_WRAP_RE = re.compile(
+    r"<(?P<tag>span|p|div|font|i|em)\b"
+    r"(?P<attrs>[^>]*?style\s*=\s*[\"'][^>]*?"
+    r"font-weight\s*:\s*(?:bold|bolder|[7-9]\d\d)"
+    r"[^>]*?)>"
+    r"(?P<inner>.*?)"
+    r"</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 @dataclass(frozen=True)
 class ParsedCrossReference:
@@ -404,13 +474,37 @@ def _wrap_heading_tags(raw_html: str) -> str:
     """Wrap the inner text of every heading-candidate tag in
     ``<␟…␟>`` sentinels so the subsequent HTML strip preserves a
     machine-detectable boundary at each original heading position.
+
+    Two passes:
+
+    1. Explicit heading tags (``<h1>``..``<h6>``, ``<b>``, ``<strong>``).
+    2. Bold-styled inline tags (``<span style="font-weight:bold">``,
+       etc.) — modern iXBRL filings express subsection headings this
+       way (#550). Without this pass GME's 10-K parsed to a single
+       102 KB ``general`` block.
+
+    Order matters: explicit tags first so a ``<b>`` already wrapped
+    in pass 1 is unaffected by pass 2's broader style match.
     """
 
     def _wrap(m: re.Match[str]) -> str:
         inner = m.group("inner")
         return f" {_HEADING_SENTINEL}{inner}{_HEADING_SENTINEL} "
 
-    return _HEADING_WRAP_RE.sub(_wrap, raw_html)
+    # Pre-step: collapse adjacent ``</span><span ...>`` boundaries
+    # so a heading split across sibling spans with a drop-cap (e.g.
+    # MSFT's "ITEM 1. B" + "USINESS" pattern, common in modern
+    # iXBRL filings) becomes a single span before wrapping. The
+    # collapsed boundary loses styling continuity within paragraphs
+    # but the tradeoff is acceptable for sectioning — body content
+    # passes through ``_strip_html`` later anyway.
+    # Drop-cap collapse — bold-bold span pairs only (#550). The
+    # callback replaces only the close-then-open boundary, never
+    # touching body-prose spans where the leading side isn't bold.
+    # See ``_merge_bold_span_pair`` doc.
+    collapsed = _BOLD_SPAN_PAIR_RE.sub(_merge_bold_span_pair, raw_html)
+    pass1 = _HEADING_WRAP_RE.sub(_wrap, collapsed)
+    return _BOLD_STYLE_WRAP_RE.sub(_wrap, pass1)
 
 
 def extract_business_sections(raw_html: str) -> tuple[ParsedBusinessSection, ...]:
@@ -440,12 +534,16 @@ def extract_business_sections(raw_html: str) -> tuple[ParsedBusinessSection, ...
     matches_1 = list(_ITEM_1_RE.finditer(text))
     if not matches_1:
         return ()
+    # Anchor on the LAST Item 1 occurrence (skips TOC link). End on
+    # the FIRST Item 1A AFTER that anchor (#550) — picking the LAST
+    # Item 1A would over-extend through any later body references
+    # to "Item 1A" and pull risk-factor content into the section
+    # set. This mirrors the boundary fix in ``extract_business_section``.
+    last_item_1 = matches_1[-1]
+    start = last_item_1.end()
     matches_1a = list(_ITEM_1A_RE.finditer(text))
-    end = matches_1a[-1].start() if matches_1a else len(text)
-    candidates = [m for m in matches_1 if m.start() < end]
-    if not candidates:
-        return ()
-    start = candidates[-1].end()
+    matches_1a_after = [m for m in matches_1a if m.start() > start]
+    end = matches_1a_after[0].start() if matches_1a_after else len(text)
 
     # If the Item 1 heading was itself wrapped in sentinels, the first
     # sentinel immediately after ``start`` is the closing of that
@@ -491,9 +589,14 @@ def extract_business_sections(raw_html: str) -> tuple[ParsedBusinessSection, ...
         cursor = close_idx + 1
 
     # Build the section list. Strip sentinels from each body slice so
-    # the stored ``body`` is clean narrative.
+    # the stored ``body`` is clean narrative. Body cap (#550) mirrors
+    # the blob's ``MAX_BODY_BYTES`` so a single section can't blow out
+    # the panel UI when heading detection partially fails.
     def _clean(s: str) -> str:
-        return s.replace(_HEADING_SENTINEL, " ").strip()
+        cleaned = s.replace(_HEADING_SENTINEL, " ").strip()
+        if len(cleaned.encode("utf-8")) > MAX_BODY_BYTES:
+            cleaned = cleaned.encode("utf-8")[:MAX_BODY_BYTES].decode("utf-8", errors="ignore")
+        return cleaned
 
     sections: list[ParsedBusinessSection] = []
     if not headings:
