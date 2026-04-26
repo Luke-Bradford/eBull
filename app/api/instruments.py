@@ -1001,12 +1001,19 @@ class BusinessCrossReferenceModel(BaseModel):
     context: str
 
 
+class BusinessTableModel(BaseModel):
+    order: int
+    headers: list[str]
+    rows: list[list[str]]
+
+
 class BusinessSectionModel(BaseModel):
     section_order: int
     section_key: str
     section_label: str
     body: str
     cross_references: list[BusinessCrossReferenceModel]
+    tables: list[BusinessTableModel] = []
 
 
 class BusinessSectionsResponse(BaseModel):
@@ -1080,6 +1087,14 @@ def get_instrument_business_sections(
                         context=ref.context,
                     )
                     for ref in s.cross_references
+                ],
+                tables=[
+                    BusinessTableModel(
+                        order=tbl.order,
+                        headers=list(tbl.headers),
+                        rows=[list(row) for row in tbl.rows],
+                    )
+                    for tbl in s.tables
                 ],
             )
             for s in sections
