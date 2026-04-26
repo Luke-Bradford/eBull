@@ -891,12 +891,23 @@ def upsert_business_sections(
                         for ref in section.cross_references
                     ]
                 )
+                tables_json = Jsonb(
+                    [
+                        {
+                            "order": t.order,
+                            "headers": list(t.headers),
+                            "rows": [list(r) for r in t.rows],
+                        }
+                        for t in section.tables
+                    ]
+                )
                 cur.execute(
                     """
                     INSERT INTO instrument_business_summary_sections
                         (instrument_id, source_accession, section_order,
-                         section_key, section_label, body, cross_references)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                         section_key, section_label, body, cross_references,
+                         tables_json)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         instrument_id,
@@ -906,6 +917,7 @@ def upsert_business_sections(
                         section.section_label,
                         section.body,
                         cross_refs_json,
+                        tables_json,
                     ),
                 )
                 inserted += 1
@@ -1010,6 +1022,7 @@ class BusinessSectionRow:
     body: str
     cross_references: tuple[ParsedCrossReference, ...]
     source_accession: str
+    tables: tuple[ParsedTable, ...] = ()
 
 
 def get_business_sections(
@@ -1027,7 +1040,7 @@ def get_business_sections(
         cur.execute(
             """
             SELECT section_order, section_key, section_label, body,
-                   cross_references, source_accession
+                   cross_references, source_accession, tables_json
             FROM instrument_business_summary_sections
             WHERE instrument_id = %s
               AND source_accession = (
@@ -1045,7 +1058,7 @@ def get_business_sections(
     rows: list[BusinessSectionRow] = []
     for r in raw_rows:
         refs_raw = r[4] or []
-        refs_list = refs_raw if isinstance(refs_raw, list) else []
+        refs_list: list[Any] = refs_raw if isinstance(refs_raw, list) else []
         refs = tuple(
             ParsedCrossReference(
                 reference_type=str(ref.get("reference_type", "")),
@@ -1055,6 +1068,17 @@ def get_business_sections(
             for ref in refs_list
             if isinstance(ref, dict)
         )
+        tables_raw = r[6] or []
+        tables_list: list[Any] = tables_raw if isinstance(tables_raw, list) else []
+        tables = tuple(
+            ParsedTable(
+                order=int(tbl.get("order", 0)),
+                headers=tuple(str(h) for h in tbl.get("headers", [])),
+                rows=tuple(tuple(str(c) for c in row) for row in tbl.get("rows", []) if isinstance(row, list)),
+            )
+            for tbl in tables_list
+            if isinstance(tbl, dict)
+        )
         rows.append(
             BusinessSectionRow(
                 section_order=int(r[0]),
@@ -1063,6 +1087,7 @@ def get_business_sections(
                 body=str(r[3]),
                 cross_references=refs,
                 source_accession=str(r[5]),
+                tables=tables,
             )
         )
     return tuple(rows)

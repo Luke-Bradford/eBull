@@ -2,10 +2,28 @@
 
 from __future__ import annotations
 
+import psycopg
+import pytest
+
 from app.services.business_summary import (
+    ParsedBusinessSection,
     ParsedTable,
     extract_business_sections,
+    get_business_sections,
+    upsert_business_sections,
 )
+
+
+def _seed_instrument(conn: psycopg.Connection[tuple], symbol: str = "GSE", iid: int = 99) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO instruments (instrument_id, symbol, company_name) VALUES (%s, %s, %s) RETURNING instrument_id",
+            (iid, symbol, "Test Co Tables"),
+        )
+        row = cur.fetchone()
+        assert row is not None
+    conn.commit()
+    return int(row[0])
 
 
 def test_table_block_extracted_as_parsed_table() -> None:
@@ -83,3 +101,49 @@ def test_two_sections_each_with_one_table_get_local_indices():
         )
         # Body must reference the LOCAL index, not the global one.
         assert "␞TABLE_0␞" in s.body, f"section {s.section_label!r}: body should reference TABLE_0 locally"
+
+
+@pytest.mark.integration
+def test_upsert_persists_tables_json(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """tables_json round-trips: write via upsert_business_sections, read
+    back via get_business_sections, and the ParsedTable is intact."""
+    instrument_id = _seed_instrument(ebull_test_conn)
+    accession = "0000950170-26-999999"
+
+    section = ParsedBusinessSection(
+        section_order=0,
+        section_key="general",
+        section_label="General",
+        body="We operate ␞TABLE_0␞ stores globally.",
+        cross_references=(),
+        tables=(
+            ParsedTable(
+                order=0,
+                headers=("Segment", "Stores"),
+                rows=(
+                    ("United States", "1,598"),
+                    ("Europe", "308"),
+                ),
+            ),
+        ),
+    )
+
+    count = upsert_business_sections(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        source_accession=accession,
+        sections=(section,),
+    )
+    assert count == 1
+
+    rows = get_business_sections(ebull_test_conn, instrument_id=instrument_id)
+    assert len(rows) == 1
+    result = rows[0]
+    assert len(result.tables) == 1
+    tbl = result.tables[0]
+    assert tbl.headers == ("Segment", "Stores")
+    assert tbl.rows == (
+        ("United States", "1,598"),
+        ("Europe", "308"),
+    )
+    assert tbl.order == 0
