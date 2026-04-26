@@ -4,9 +4,11 @@ Pins three contracts:
 
 1. ``exchanges.capabilities`` JSONB column exists with the
    ``jsonb_typeof = 'object'`` CHECK constraint.
-2. Every ``us_equity`` row gets the canonical SEC + FMP seed (the
+2. Every ``us_equity`` row gets the canonical SEC seed (the
    ``filings`` cell uses ``sec_edgar``, NOT ``sec_xbrl`` — Codex
-   round-1 finding caught the conflation).
+   round-1 finding caught the conflation). FMP was seeded by the
+   original 071 migration but #532's migration 072 retracts it
+   to keep the seed aligned with the FMP-free runtime.
 3. Every non-``us_equity`` row gets the empty-but-correctly-shaped
    default object so the resolver doesn't have to special-case
    missing keys.
@@ -77,15 +79,14 @@ def test_us_equity_seed_includes_sec_edgar_for_filings(
 def test_us_equity_seed_full_shape(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    """Pin the full us_equity capability seed so a future drift
-    in the migration's UPDATE values is caught (e.g. someone
-    swaps fmp into ratings by accident)."""
+    """Pin the full us_equity capability seed (post-072) so a
+    future drift in the migration's UPDATE values is caught."""
     expected = {
         "filings": ["sec_edgar"],
-        "fundamentals": ["sec_xbrl", "fmp"],
+        "fundamentals": ["sec_xbrl"],
         "dividends": ["sec_dividend_summary"],
         "insider": ["sec_form4"],
-        "analyst": ["fmp"],
+        "analyst": [],
         "ratings": [],
         "esg": [],
         "ownership": ["sec_13f", "sec_13d_13g"],

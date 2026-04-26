@@ -23,7 +23,7 @@ Long-horizon AI-assisted investment engine for eToro.
 Backend services implemented:
 - Universe sync
 - Market data (OHLCV, quotes, features)
-- Filings and fundamentals (SEC EDGAR, Companies House, FMP)
+- Filings and fundamentals (SEC EDGAR, Companies House)
 - News and sentiment
 - Thesis engine (#6)
 - Scoring and ranking engine

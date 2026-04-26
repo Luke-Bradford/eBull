@@ -1,8 +1,7 @@
 """
 Fundamentals provider interface.
 
-FMP is the v1 implementation. All domain code imports this interface only —
-never the concrete provider.
+Domain code imports this interface only — never the concrete provider.
 """
 
 from abc import ABC, abstractmethod

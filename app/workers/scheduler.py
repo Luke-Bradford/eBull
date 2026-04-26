@@ -35,13 +35,11 @@ from psycopg.types.json import Jsonb
 from app.config import settings
 from app.providers.implementations.companies_house import CompaniesHouseFilingsProvider
 from app.providers.implementations.etoro import EtoroMarketDataProvider
-from app.providers.implementations.fmp import FmpFundamentalsProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
 from app.services.coverage import bootstrap_missing_coverage_rows, review_coverage, seed_coverage
 from app.services.deferred_retry import retry_deferred_recommendations
-from app.services.enrichment import refresh_enrichment
 from app.services.entry_timing import evaluate_entry_conditions
 from app.services.etoro_lookups import refresh_etoro_lookups
 from app.services.exchanges import refresh_exchanges_metadata
@@ -77,7 +75,7 @@ from app.services.sync_orchestrator.progress import report_progress
 from app.services.sync_orchestrator.row_count_spikes import check_row_count_spike
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
 from app.services.thesis import find_stale_instruments, generate_thesis
-from app.services.universe import enrich_instrument_currencies, sync_universe
+from app.services.universe import sync_universe
 from app.services.watermarks import get_watermark, set_watermark
 
 logger = logging.getLogger(__name__)
@@ -919,29 +917,6 @@ def nightly_universe_sync() -> None:
                     bootstrap_result.bootstrapped,
                 )
 
-            # Enrich instrument currencies from FMP for instruments that
-            # are missing currency data or haven't been enriched in 90 days.
-            # Uses a separate autocommit connection so each per-instrument
-            # UPDATE commits independently, and HTTP I/O (FMP API calls)
-            # does not hold a transaction open.
-            if settings.fmp_api_key:
-                try:
-                    with (
-                        FmpFundamentalsProvider(api_key=settings.fmp_api_key) as fmp_provider,
-                        psycopg.connect(settings.database_url, autocommit=True) as enrich_conn,
-                    ):
-                        enriched = enrich_instrument_currencies(fmp_provider, enrich_conn)
-                        row_count += enriched
-                        tracker.row_count = row_count
-                        logger.info("Currency enrichment: enriched=%d", enriched)
-                except Exception:
-                    logger.warning(
-                        "Currency enrichment failed; universe sync and coverage still committed",
-                        exc_info=True,
-                    )
-            else:
-                logger.info("Currency enrichment skipped: FMP API key not configured")
-
             tracker.row_count = row_count
 
 
@@ -1215,7 +1190,6 @@ def daily_research_refresh() -> None:
 
     Runs daily. Fetches:
       - SEC XBRL fundamentals (primary, free) for US instruments with a CIK
-      - FMP fundamentals (fallback) for remaining instruments if API key is set
       - SEC EDGAR filing metadata for US instruments with a known CIK
       - Companies House filing metadata for UK instruments with a company_number
 
@@ -1268,8 +1242,7 @@ def daily_research_refresh() -> None:
         # skip this call entirely. ``fundamentals_sync`` phase 1b already
         # refreshes ``fundamentals_snapshot`` for every CIK-mapped
         # tradable instrument daily at 02:30 UTC — same data, one HTTP
-        # path. Keeps FMP (non-US) + enrichment + CH filings below
-        # unchanged.
+        # path. Companies House filings below run regardless.
         sec_symbols = [(sym, iid) for sym, iid in symbols if sym.upper() in cik_map]
         if settings.enable_sec_fundamentals_dedupe:
             logger.info(
@@ -1292,49 +1265,6 @@ def daily_research_refresh() -> None:
             )
         else:
             logger.info("daily_research_refresh: no CIK mappings, skipping SEC fundamentals")
-
-        # Fundamentals — FMP (fallback for non-US instruments)
-        fmp_symbols = [(sym, iid) for sym, iid in symbols if sym.upper() not in cik_map]
-        if settings.fmp_api_key:
-            if fmp_symbols:
-                with (
-                    FmpFundamentalsProvider(api_key=settings.fmp_api_key) as fmp,
-                    psycopg.connect(settings.database_url) as conn,
-                ):
-                    fmp_summary = refresh_fundamentals(fmp, conn, fmp_symbols)
-                total_rows += fmp_summary.snapshots_upserted
-                logger.info(
-                    "FMP fundamentals refresh (non-US fallback): attempted=%d upserted=%d skipped=%d",
-                    fmp_summary.symbols_attempted,
-                    fmp_summary.snapshots_upserted,
-                    fmp_summary.symbols_skipped,
-                )
-        elif fmp_symbols:
-            logger.warning(
-                "FMP_API_KEY not set; %d non-US instruments will have no fundamentals",
-                len(fmp_symbols),
-            )
-
-        # Enrichment — profile, earnings, analyst estimates (FMP)
-        if settings.fmp_api_key:
-            try:
-                with (
-                    FmpFundamentalsProvider(api_key=settings.fmp_api_key) as fmp,
-                    psycopg.connect(settings.database_url) as conn,
-                ):
-                    enrich_summary = refresh_enrichment(fmp, conn, symbols)
-                    conn.commit()
-                total_rows += enrich_summary.profiles_upserted + enrich_summary.earnings_upserted
-                logger.info(
-                    "Enrichment refresh: attempted=%d profiles=%d earnings=%d estimates=%d skipped=%d",
-                    enrich_summary.symbols_attempted,
-                    enrich_summary.profiles_upserted,
-                    enrich_summary.earnings_upserted,
-                    enrich_summary.estimates_upserted,
-                    enrich_summary.symbols_skipped,
-                )
-            except Exception:
-                logger.warning("Enrichment refresh failed", exc_info=True)
 
         # Filings — SEC EDGAR
         # Chunk L: when ``enable_filings_fetch_dedupe`` is True, skip

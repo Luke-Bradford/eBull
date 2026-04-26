@@ -44,8 +44,12 @@ Before designing or coding for an issue:
   - portfolio/account data
   - execution
 
-### Fundamentals provider
-- FMP is the normalized fundamentals provider in v1.
+### Fundamentals provider posture
+
+- Free regulated-source-only (#532). No paid third-party fundamentals provider.
+- US: SEC XBRL via EDGAR Company Facts API.
+- UK / EU / Asia / MENA / Canada: per-region integration PRs land their own
+  free regulated-source providers (Companies House, ESMA, etc.).
 
 ### Official filings providers
 - SEC EDGAR is the official filings source for US issuers.

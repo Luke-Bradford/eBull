@@ -2,7 +2,7 @@
 
 Per the 2026-04-19 research-tool refocus §1.1 (Chunk 4), this module merges:
 
-- fundamentals.py — FMP snapshot upserts (kept as Section 1)
+- fundamentals.py — fundamentals_snapshot upserts (kept as Section 1)
 - financial_facts.py — XBRL fact storage + ingestion run tracking (Section 2)
 - financial_normalization.py — period derivation + canonical merge (Section 3)
 - sec_incremental.py — SEC change-driven planner/executor (Section 4)
@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 class FundamentalsRefreshSummary:
     symbols_attempted: int
     snapshots_upserted: int
-    symbols_skipped: int  # no FMP coverage or identifier missing
+    symbols_skipped: int  # no provider coverage or identifier missing
 
 
 def refresh_fundamentals(
@@ -66,10 +66,11 @@ def refresh_fundamentals(
     """
     For each symbol, fetch the latest fundamentals snapshot and upsert it.
 
-    symbols is a list of (symbol, instrument_id) tuples. FMP uses the ticker
-    symbol as its primary identifier, so no external_identifiers lookup is
-    needed for FMP in v1. If the provider returns None for a symbol, that
-    symbol is skipped and counted.
+    symbols is a list of (symbol, instrument_id) tuples. Providers may
+    use the ticker symbol as their primary identifier or look up the
+    instrument's ``external_identifiers`` row themselves. If the
+    provider returns None for a symbol, that symbol is skipped and
+    counted.
     """
     upserted = 0
     skipped = 0
@@ -1032,7 +1033,6 @@ def _canonical_merge_instrument(
                      CASE source
                          WHEN 'sec_edgar' THEN 1
                          WHEN 'companies_house' THEN 2
-                         WHEN 'fmp' THEN 3
                          ELSE 99
                      END,
                      filed_date DESC NULLS LAST

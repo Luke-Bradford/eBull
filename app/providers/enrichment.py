@@ -3,9 +3,7 @@ Enrichment provider interface.
 
 Supplies supplemental instrument data beyond core fundamentals: company profile
 metadata, forward-looking earnings calendar, and analyst consensus estimates.
-
-FMP is the v1 implementation. All domain code imports this interface only —
-never the concrete provider.
+Domain code imports this interface only — never the concrete provider.
 """
 
 from __future__ import annotations

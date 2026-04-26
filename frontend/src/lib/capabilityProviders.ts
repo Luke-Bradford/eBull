@@ -21,8 +21,6 @@ const PROVIDER_LABEL: Record<string, string> = {
   sec_form4: "SEC Form 4",
   sec_13f: "SEC 13F",
   sec_13d_13g: "SEC 13D/G",
-  // US — non-SEC enrichment
-  fmp: "FMP",
   // UK
   companies_house: "Companies House",
   lse_rns: "LSE RNS",
