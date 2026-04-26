@@ -533,6 +533,8 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
   - `etoro/candles_*` → `price_daily` (price_date, open, high, low, close, volume).
   - `etoro/rates_batch*` → `quotes` (instrument_id, bid, ask, last_execution, date).
   - `etoro/exchanges` → `exchanges` table (#503 PR 4: provider_id, description; operator-curated `country` + `asset_class` not derived from the API).
+  - `etoro/instrument-types` → `etoro_instrument_types` table (#515 PR 1: instrument_type_id, description).
+  - `etoro/stocks-industries` → `etoro_stocks_industries` table (#515 PR 1: industry_id, name).
   - `etoro_broker/etoro_portfolio` → `broker_positions` + `cash_ledger` + `copy_mirror_positions` (full position + cash + mirror snapshot).
 - **Rule remaining scope:** stands for `companies_house` and `fmp` whose SQL coverage is thinner; raw payloads still serve as parser substrate there until coverage audits land.
 - Enforced in: this prevention log

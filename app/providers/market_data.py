@@ -29,6 +29,11 @@ class InstrumentRecord:
     # exchanges.asset_class downstream — a stock-typed instrument on a
     # crypto-classified exchange is a data-integrity flag (#503 PR 4).
     instrument_type: str | None = None
+    # eToro instrumentTypeID — the numeric foreign key into
+    # ``etoro_instrument_types`` so the frontend can render the
+    # description label by joining on a stable id rather than a
+    # text match. Captured alongside the name in #515 PR 1.
+    instrument_type_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,22 @@ class ExchangeRecord:
 
     provider_id: str  # provider-native exchange id (e.g. eToro exchangeId)
     description: str | None  # eToro's human-readable name; None if not provided
+
+
+@dataclass(frozen=True)
+class InstrumentTypeRecord:
+    """An entry from eToro's instrument-types lookup catalogue."""
+
+    type_id: int  # eToro instrumentTypeID
+    description: str | None  # e.g. "Stocks", "ETF", "Crypto"
+
+
+@dataclass(frozen=True)
+class StocksIndustryRecord:
+    """An entry from eToro's stocks-industries lookup catalogue."""
+
+    industry_id: int  # eToro industryID
+    name: str | None  # e.g. "Healthcare", "Technology"
 
 
 @dataclass(frozen=True)
@@ -103,6 +124,26 @@ class MarketDataProvider(ABC):
 
         Returns None if the instrument is not recognised or not
         currently quoted.
+        """
+
+    @abstractmethod
+    def get_instrument_types(self) -> list[InstrumentTypeRecord]:
+        """Return the provider's instrument-type lookup catalogue.
+
+        eBull joins these rows on ``instruments.instrument_type_id``
+        to render the human-readable label ("Stocks", "ETF",
+        "Crypto", …). Implementations that don't expose a separate
+        catalogue endpoint may return an empty list.
+        """
+
+    @abstractmethod
+    def get_stocks_industries(self) -> list[StocksIndustryRecord]:
+        """Return the provider's stocks-industries lookup catalogue.
+
+        eBull joins on ``instruments.sector`` (which stores the
+        provider's numeric industry id) to render industry names.
+        Empty list permitted for providers that don't ship a
+        catalogue.
         """
 
     @abstractmethod

@@ -204,6 +204,7 @@ def _make_record(
     provider_id: str,
     symbol: str,
     instrument_type: str | None,
+    instrument_type_id: int | None = None,
 ) -> InstrumentRecord:
     return InstrumentRecord(
         provider_id=provider_id,
@@ -216,6 +217,7 @@ def _make_record(
         country=None,
         is_tradable=True,
         instrument_type=instrument_type,
+        instrument_type_id=instrument_type_id,
     )
 
 
@@ -223,6 +225,17 @@ def _read_instrument_type(conn: psycopg.Connection[tuple], instrument_id: int) -
     with conn.cursor() as cur:
         cur.execute(
             "SELECT instrument_type FROM instruments WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
+def _read_instrument_type_id(conn: psycopg.Connection[tuple], instrument_id: int) -> int | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_type_id FROM instruments WHERE instrument_id = %s",
             (instrument_id,),
         )
         row = cur.fetchone()
@@ -283,3 +296,75 @@ class TestUniverseInstrumentTypeUpsert:
         ebull_test_conn.commit()
 
         assert _read_instrument_type(ebull_test_conn, 950003) == "ETF"
+
+    def test_initial_insert_persists_instrument_type_id(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """instrument_type_id ships alongside the text label so the
+        new lookup-table join works on a stable int key (#515 PR 1)."""
+        provider = MagicMock()
+        provider.get_tradable_instruments.return_value = [
+            _make_record(
+                provider_id="950010",
+                symbol="ZZZ10",
+                instrument_type="Stocks",
+                instrument_type_id=5,
+            ),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_instrument_type_id(ebull_test_conn, 950010) == 5
+
+    def test_subsequent_null_id_does_not_clobber(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """COALESCE protects instrument_type_id the same way it
+        protects instrument_type — a transient response without
+        instrumentTypeID must NOT erase a previously-known value."""
+        provider = MagicMock()
+        provider.get_tradable_instruments.return_value = [
+            _make_record(
+                provider_id="950011",
+                symbol="ZZZ11",
+                instrument_type="Crypto",
+                instrument_type_id=10,
+            ),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_instrument_type_id(ebull_test_conn, 950011) == 10
+
+        provider.get_tradable_instruments.return_value = [
+            _make_record(
+                provider_id="950011",
+                symbol="ZZZ11",
+                instrument_type=None,
+                instrument_type_id=None,
+            ),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_instrument_type_id(ebull_test_conn, 950011) == 10
+
+    def test_subsequent_id_change_overwrites(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """A real id change (eToro reclassifies the instrument) still
+        propagates — COALESCE only blocks NULL clobbers."""
+        provider = MagicMock()
+        provider.get_tradable_instruments.return_value = [
+            _make_record(
+                provider_id="950012",
+                symbol="ZZZ12",
+                instrument_type="Stocks",
+                instrument_type_id=5,
+            ),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+
+        provider.get_tradable_instruments.return_value = [
+            _make_record(
+                provider_id="950012",
+                symbol="ZZZ12",
+                instrument_type="ETF",
+                instrument_type_id=6,
+            ),
+        ]
+        sync_universe(provider, ebull_test_conn)
+        ebull_test_conn.commit()
+        assert _read_instrument_type_id(ebull_test_conn, 950012) == 6

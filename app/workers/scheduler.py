@@ -43,6 +43,7 @@ from app.services.coverage import bootstrap_missing_coverage_rows, review_covera
 from app.services.deferred_retry import retry_deferred_recommendations
 from app.services.enrichment import refresh_enrichment
 from app.services.entry_timing import evaluate_entry_conditions
+from app.services.etoro_lookups import refresh_etoro_lookups
 from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
@@ -244,6 +245,7 @@ JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
 JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
 JOB_SEC_FILING_DOCUMENTS_INGEST = "sec_filing_documents_ingest"
 JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
+JOB_ETORO_LOOKUPS_REFRESH = "etoro_lookups_refresh"
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +596,25 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # a fresh DB picks up real descriptions instead of NULLs without
         # waiting for the next Sunday.
         cadence=Cadence.weekly(weekday=6, hour=4, minute=0),
+        catch_up_on_boot=True,
+    ),
+    ScheduledJob(
+        name=JOB_ETORO_LOOKUPS_REFRESH,
+        description=(
+            "Weekly refresh of eToro's instrument-types + "
+            "stocks-industries lookup catalogues into "
+            "``etoro_instrument_types`` / ``etoro_stocks_industries`` "
+            "(#515 PR 1). Frontend joins on these tables so the "
+            "instrument page renders 'Stocks' / 'Healthcare' instead "
+            "of numeric ids. Catalogues rarely churn; ~10s rows total "
+            "across both endpoints so the refresh is bounded."
+        ),
+        # Sundays 04:30 UTC — staggered 30 min after
+        # exchanges_metadata_refresh so both jobs don't hit eToro
+        # back-to-back. Catch-up on boot for the same reason as the
+        # exchanges refresh: fresh DB picks up labels without waiting
+        # a week.
+        cadence=Cadence.weekly(weekday=6, hour=4, minute=30),
         catch_up_on_boot=True,
     ),
     # -- On-demand jobs are NOT listed here.  They stay in _INVOKERS
@@ -2773,6 +2794,45 @@ def exchanges_metadata_refresh() -> None:
                 summary.fetched,
                 summary.inserted,
                 summary.description_updated,
+            )
+
+
+def etoro_lookups_refresh() -> None:
+    """Refresh ``etoro_instrument_types`` + ``etoro_stocks_industries``
+    reference tables from eToro's public lookup endpoints.
+
+    Weekly cron — both catalogues rarely churn (a few rows added
+    per year at most). The refresh is bounded (10s of rows total)
+    so it doesn't compete with the universe sync. See
+    ``app.services.etoro_lookups.refresh_etoro_lookups`` for the
+    upsert semantics.
+    """
+    creds = _load_etoro_credentials(JOB_ETORO_LOOKUPS_REFRESH)
+    if creds is None:
+        _record_prereq_skip(JOB_ETORO_LOOKUPS_REFRESH, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+
+    with _tracked_job(JOB_ETORO_LOOKUPS_REFRESH) as tracker:
+        with (
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            summary = refresh_etoro_lookups(provider, conn)
+            tracker.row_count = (
+                summary.instrument_types_inserted
+                + summary.instrument_types_updated
+                + summary.industries_inserted
+                + summary.industries_updated
+            )
+            logger.info(
+                "etoro_lookups_refresh complete: types=%d/%d/%d industries=%d/%d/%d (fetched/inserted/updated)",
+                summary.instrument_types_fetched,
+                summary.instrument_types_inserted,
+                summary.instrument_types_updated,
+                summary.industries_fetched,
+                summary.industries_inserted,
+                summary.industries_updated,
             )
 
 

@@ -1,0 +1,49 @@
+{
+  "instrumentID": 2013,
+  "instrumentDisplayName": "Barclays",
+  "instrumentTypeID": 5,
+  "exchangeID": 7,
+  "images": [
+    {
+      "instrumentID": 2013,
+      "width": 35.0,
+      "height": 35.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/barc.l/35x35.png"
+    },
+    {
+      "instrumentID": 2013,
+      "width": 50.0,
+      "height": 50.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/barc.l/50x50.png"
+    },
+    {
+      "instrumentID": 2013,
+      "width": 80.0,
+      "height": 80.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/barc.l/80x80.png"
+    },
+    {
+      "instrumentID": 2013,
+      "width": 90.0,
+      "height": 90.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/barc.l/90x90.png"
+    },
+    {
+      "instrumentID": 2013,
+      "width": 150.0,
+      "height": 150.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/barc.l/150x150.png"
+    },
+    {
+      "instrumentID": 2013,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/2013/2013_00B0EC_F7F7F7.svg",
+      "backgroundColor": "#00B0EC",
+      "textColor": "#F7F7F7"
+    }
+  ],
+  "symbolFull": "BARC.L",
+  "stocksIndustryID": 4,
+  "priceSource": "LSE PLC",
+  "hasExpirationDate": false,
+  "isInternalInstrument": false
+}

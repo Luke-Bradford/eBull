@@ -1,0 +1,49 @@
+{
+  "instrumentID": 1001,
+  "instrumentDisplayName": "Apple",
+  "instrumentTypeID": 5,
+  "exchangeID": 4,
+  "images": [
+    {
+      "instrumentID": 1001,
+      "width": 35.0,
+      "height": 35.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/aapl/35x35.png"
+    },
+    {
+      "instrumentID": 1001,
+      "width": 80.0,
+      "height": 80.0,
+      "uri": "/medium/Apple.png"
+    },
+    {
+      "instrumentID": 1001,
+      "width": 50.0,
+      "height": 50.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/aapl/50x50.png"
+    },
+    {
+      "instrumentID": 1001,
+      "width": 150.0,
+      "height": 150.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/aapl/150x150.png"
+    },
+    {
+      "instrumentID": 1001,
+      "width": 90.0,
+      "height": 90.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/aapl/90x90.png"
+    },
+    {
+      "instrumentID": 1001,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/1001/1001_494D5A_F7F7F7.svg",
+      "backgroundColor": "#494D5A",
+      "textColor": "#F7F7F7"
+    }
+  ],
+  "symbolFull": "AAPL",
+  "stocksIndustryID": 3,
+  "priceSource": "NASDAQ",
+  "hasExpirationDate": false,
+  "isInternalInstrument": false
+}
