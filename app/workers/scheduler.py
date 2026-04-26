@@ -924,11 +924,45 @@ def nightly_universe_sync() -> None:
             tracker.row_count = row_count
 
 
+# Max T3 instruments to include in candle refresh for bootstrap
+# scoring. Prevents hitting API rate limits while giving enough T3
+# instruments price data to enable T3→T2 promotion via the
+# scoring/coverage pipeline.
 _T3_BOOTSTRAP_BATCH_SIZE = 200
-"""Max T3 instruments to include in candle refresh for bootstrap scoring.
 
-Prevents hitting API rate limits while giving enough T3 instruments price
-data to enable T3→T2 promotion via the scoring/coverage pipeline.
+# T3 candle bootstrap eligibility query.
+# Module-level constant so the test suite imports the same SQL the
+# scheduler executes — eliminates the drift risk Codex flagged on
+# PR 0 (#515): a copy-pasted test SQL could stay green after a
+# production regression. Tests import _T3_BOOTSTRAP_SELECT directly.
+#
+# Eligibility branches (post-#515 PR 0):
+#   1. Tradable + tier 3 + no candles + has fundamentals (original).
+#   2. OR tradable + tier 3 + no candles + non-fundamentals-bearing
+#      asset class (crypto / fx / commodity / index — those classes
+#      never get a fundamentals_snapshot row by design).
+# Instruments on exchanges with asset_class='unknown' stay gated;
+# operator curates the row first via the #503 PR 4 admin path.
+_T3_BOOTSTRAP_SELECT = """
+SELECT i.instrument_id, i.symbol
+FROM instruments i
+JOIN coverage c ON c.instrument_id = i.instrument_id
+LEFT JOIN exchanges e ON e.exchange_id = i.exchange
+WHERE i.is_tradable = TRUE
+  AND c.coverage_tier = 3
+  AND NOT EXISTS (
+      SELECT 1 FROM price_daily p
+      WHERE p.instrument_id = i.instrument_id
+  )
+  AND (
+      EXISTS (
+          SELECT 1 FROM fundamentals_snapshot f
+          WHERE f.instrument_id = i.instrument_id
+      )
+      OR e.asset_class IN ('crypto', 'fx', 'commodity', 'index')
+  )
+ORDER BY i.symbol, i.instrument_id
+LIMIT %(limit)s
 """
 
 
@@ -993,33 +1027,14 @@ def daily_candle_refresh() -> None:
                 """
             ).fetchall()
 
-            # T3: bootstrap batch — instruments with fundamentals but no
-            # candle data yet, capped to avoid API rate limit pressure.
-            # NOT EXISTS(price_daily) is intentional: once an instrument
-            # has any candle data it drops out of the bootstrap pool.
+            # T3: bootstrap batch (see _T3_BOOTSTRAP_SELECT comment).
             # refresh_market_data fetches ~400 candles per instrument in
             # a single API call, so a "partial" bootstrap still gives
             # enough data for momentum scoring.  If the API call fails
             # entirely, no rows are inserted and the instrument retries
             # next run.
             t3_rows = conn.execute(
-                """
-                SELECT i.instrument_id, i.symbol
-                FROM instruments i
-                JOIN coverage c ON c.instrument_id = i.instrument_id
-                WHERE i.is_tradable = TRUE
-                  AND c.coverage_tier = 3
-                  AND EXISTS (
-                      SELECT 1 FROM fundamentals_snapshot f
-                      WHERE f.instrument_id = i.instrument_id
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM price_daily p
-                      WHERE p.instrument_id = i.instrument_id
-                  )
-                ORDER BY i.symbol, i.instrument_id
-                LIMIT %(limit)s
-                """,
+                _T3_BOOTSTRAP_SELECT,
                 {"limit": _T3_BOOTSTRAP_BATCH_SIZE},
             ).fetchall()
 
