@@ -726,3 +726,89 @@ class TestFailureBackoffAndQuarantine:
             )
             row = cur.fetchone()
         assert row is not None and row[0] == "fetch_http_5xx"
+
+
+class TestTenKAFallback:
+    """#534 — 10-K/A amendments missing Item 1 fall back to the most
+    recent prior plain 10-K. Without the fallback, every Part-III
+    amendment instrument permanently lost its Item 1 narrative."""
+
+    _PART_III_HTML = (
+        "<html><body><p>Item 15(a)(3) of Part IV of the Original 10-K. "
+        "Item 10. Directors. Item 11. Executive Compensation.</p></body></html>"
+    )
+
+    def test_amendment_no_item1_falls_back_to_prior_plain_10k(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn, symbol="FBACK1", iid=701)
+        # Original 10-K with full Item 1.
+        _seed_10k(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="ORIG-10K",
+            url="https://www.sec.gov/Archives/orig.htm",
+            filing_date="2025-02-15",
+        )
+        # Later 10-K/A Part-III amendment missing Item 1.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO filing_events (instrument_id, filing_date, filing_type, provider, "
+                "provider_filing_id, primary_document_url) VALUES (%s, '2026-03-01', '10-K/A', 'sec', "
+                "'AMEND-A', 'https://www.sec.gov/Archives/amend.htm')",
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        fetcher = _StubFetcher(
+            {
+                "https://www.sec.gov/Archives/amend.htm": self._PART_III_HTML,
+                "https://www.sec.gov/Archives/orig.htm": _ITEM_1_HTML,
+            }
+        )
+        result = ingest_business_summaries(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+        assert result.rows_inserted + result.rows_updated == 1
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT body, source_accession, attempt_count, last_failure_reason "
+                "FROM instrument_business_summary WHERE instrument_id = %s",
+                (iid,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        body, source_accession, attempt_count, reason = row
+        assert body and "global diversified" in body
+        # Stored under the fallback's accession, NOT the amendment's.
+        assert source_accession == "ORIG-10K"
+        assert attempt_count == 0
+        assert reason is None
+
+    def test_amendment_no_item1_no_fallback_falls_through_to_tombstone(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """A 10-K/A with no prior plain 10-K available still records
+        a no_item_1_marker tombstone (no silent skip)."""
+        iid = _seed_instrument(ebull_test_conn, symbol="FBACK2", iid=702)
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO filing_events (instrument_id, filing_date, filing_type, provider, "
+                "provider_filing_id, primary_document_url) VALUES (%s, '2026-03-01', '10-K/A', 'sec', "
+                "'AMEND-B', 'https://www.sec.gov/Archives/amend2.htm')",
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        fetcher = _StubFetcher({"https://www.sec.gov/Archives/amend2.htm": self._PART_III_HTML})
+        ingest_business_summaries(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT body, source_accession, last_failure_reason "
+                "FROM instrument_business_summary WHERE instrument_id = %s",
+                (iid,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        body, source_accession, reason = row
+        assert body == ""
+        assert source_accession == "AMEND-B"
+        assert reason == "no_item_1_marker"
