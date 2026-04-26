@@ -312,13 +312,17 @@ class TestExtractBusinessSections:
         styled with a drop-cap on the first letter (``ITEM 1. B`` +
         ``USINESS``). The pre-strip span-boundary collapse merges
         those into a single span before heading detection runs."""
-        html = """
-        <html><body>
-        <p style="text-align:center"><span style="font-weight:bold">ITEM 1. B</span><span style="font-weight:bold">USINESS</span></p>
-        <p>Microsoft is a technology company that develops productivity software, cloud services, and devices.</p>
-        <h2>Item 1A. Risk Factors</h2>
-        </body></html>
-        """
+        html = (
+            "<html><body>"
+            '<p style="text-align:center">'
+            '<span style="font-weight:bold">ITEM 1. B</span>'
+            '<span style="font-weight:bold">USINESS</span>'
+            "</p>"
+            "<p>Microsoft is a technology company that develops productivity software, "
+            "cloud services, and devices.</p>"
+            "<h2>Item 1A. Risk Factors</h2>"
+            "</body></html>"
+        )
         sections = extract_business_sections(html)
         # Body is the prose between Item 1. Business and Item 1A.
         # If span collapse worked, the "ITEM 1. BUSINESS" heading is
