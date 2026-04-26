@@ -46,6 +46,7 @@ from app.providers.fundamentals import (
     XbrlConceptCatalogEntry,
     XbrlFact,
 )
+from app.providers.implementations.sec_edgar import _PROCESS_RATE_LIMIT_CLOCK
 from app.providers.resilient_client import ResilientClient
 
 logger = logging.getLogger(__name__)
@@ -340,8 +341,6 @@ class SecFundamentalsProvider(FundamentalsProvider):
         )
         # Process-wide shared rate-limit clock (#537) — see
         # ``app.providers.implementations.sec_edgar._PROCESS_RATE_LIMIT_CLOCK``.
-        from app.providers.implementations.sec_edgar import _PROCESS_RATE_LIMIT_CLOCK
-
         self._http = ResilientClient(
             self._client,
             min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
