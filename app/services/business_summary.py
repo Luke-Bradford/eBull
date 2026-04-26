@@ -426,13 +426,55 @@ class ParsedCrossReference:
 # ---------------------------------------------------------------------
 
 _TABLE_SENTINEL = "␞"  # SYMBOL FOR RECORD SEPARATOR — never appears in 10-K prose
-# Non-greedy: matches on the FIRST </table>. Nested tables capture as the
-# innermost match; the outer wrapper rows are silently dropped. Acceptable
-# for v1 — fix in a later pass if nested-table data loss is observed in prod.
-_TABLE_BLOCK_RE = re.compile(r"<table\b[^>]*>.*?</table\s*>", re.IGNORECASE | re.DOTALL)
+# Used as scan anchors by _scan_outer_tables; the actual table extent is
+# determined by the depth-aware walker, not by these patterns directly.
+_TABLE_OPEN_RE = re.compile(r"<table\b[^>]*>", re.IGNORECASE)
+_TABLE_CLOSE_RE = re.compile(r"</table\s*>", re.IGNORECASE)
 # DOTALL: cell / row contents span multiple lines in iXBRL filings.
 _TR_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr\s*>", re.IGNORECASE | re.DOTALL)
 _CELL_RE = re.compile(r"<(?:t[hd])\b[^>]*>(.*?)</t[hd]\s*>", re.IGNORECASE | re.DOTALL)
+
+_MAX_TABLE_ROWS = 200  # truncate beyond — pathological 10-Ks rarely list >200 rows
+_MAX_CELL_LEN = 200  # truncate cell content beyond — single cells should be short
+
+
+def _scan_outer_tables(raw_html: str) -> list[tuple[int, int]]:
+    """Return (start, end) offsets for every OUTERMOST <table>...</table>
+    block in ``raw_html``. Nested tables are ignored — only their outer
+    wrapper appears in the result list. ``end`` is exclusive (one past
+    the last char of </table>).
+
+    Walks the HTML character by character using regex anchors (cheap —
+    10-K bodies are typically <2 MB). Increments depth on each <table
+    opening, decrements on each </table closing; only emits a span when
+    depth returns to 0.
+    """
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    depth = 0
+    span_start = -1
+    while pos < len(raw_html):
+        open_match = _TABLE_OPEN_RE.search(raw_html, pos)
+        close_match = _TABLE_CLOSE_RE.search(raw_html, pos)
+        if open_match is None and close_match is None:
+            break
+        if open_match is not None and (close_match is None or open_match.start() < close_match.start()):
+            if depth == 0:
+                span_start = open_match.start()
+            depth += 1
+            pos = open_match.end()
+        else:
+            assert close_match is not None
+            depth -= 1
+            if depth == 0 and span_start != -1:
+                spans.append((span_start, close_match.end()))
+                span_start = -1
+            elif depth < 0:
+                # Stray closing tag — reset and continue defensively.
+                depth = 0
+                span_start = -1
+            pos = close_match.end()
+    return spans
 
 
 @dataclass(frozen=True)
@@ -460,35 +502,67 @@ class _RawTable:
 
 
 def _parse_table_html(table_html: str) -> _RawTable | None:
-    """Extract a single <table> block, or None when the table has
-    zero data rows (a layout table with no real content)."""
+    """Extract a single OUTER <table>...</table> block. Nested inner
+    tables are blanked before row scan so their cells don't bleed into
+    the outer table's row list. Applies caps: at most _MAX_TABLE_ROWS
+    rows and _MAX_CELL_LEN chars per cell."""
+    # Strip the outer <table> wrapper so _scan_outer_tables on the
+    # inner content finds nested tables only, not the outer one.
+    inner_open = _TABLE_OPEN_RE.search(table_html)
+    inner_close_idx = table_html.rfind("</table")
+    if inner_open is None or inner_close_idx == -1:
+        return None
+    inner = table_html[inner_open.end() : inner_close_idx]
+    nested = _scan_outer_tables(inner)
+    if nested:
+        # Replace each nested table block with a single space so the
+        # outer row scanner doesn't pick up its cells.
+        pieces: list[str] = []
+        cursor = 0
+        for start, end in nested:
+            pieces.append(inner[cursor:start])
+            pieces.append(" ")
+            cursor = end
+        pieces.append(inner[cursor:])
+        scrubbed = "".join(pieces)
+    else:
+        scrubbed = inner
     cells_per_row: list[tuple[str, ...]] = []
-    for tr_match in _TR_RE.finditer(table_html):
+    for tr_match in _TR_RE.finditer(scrubbed):
         cells = tuple(_strip_html(cell).strip() for cell in _CELL_RE.findall(tr_match.group(1)))
         if any(c for c in cells):
             cells_per_row.append(cells)
     if not cells_per_row:
         return None
     headers, *body_rows = cells_per_row
-    return _RawTable(headers=headers, rows=tuple(body_rows))
+    headers = tuple(c[:_MAX_CELL_LEN] for c in headers)
+    body_rows = tuple(tuple(c[:_MAX_CELL_LEN] for c in row) for row in body_rows[:_MAX_TABLE_ROWS])
+    return _RawTable(headers=headers, rows=body_rows)
 
 
 def _extract_tables(raw_html: str) -> tuple[str, tuple[ParsedTable, ...]]:
-    """Replace every <table> block in ``raw_html`` with a sentinel
-    ``␞TABLE_N␞`` and return the rewritten HTML + the
+    """Replace every OUTERMOST <table> block in ``raw_html`` with a
+    sentinel ``␞TABLE_N␞`` and return the rewritten HTML + the
     parsed tables in source order."""
+    spans = _scan_outer_tables(raw_html)
+    if not spans:
+        return raw_html, ()
     tables: list[ParsedTable] = []
-
-    def _sub(m: re.Match[str]) -> str:
-        parsed = _parse_table_html(m.group(0))
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        pieces.append(raw_html[cursor:start])
+        outer_html = raw_html[start:end]
+        parsed = _parse_table_html(outer_html)
         if parsed is None:
-            return " "  # drop layout-only tables
-        order = len(tables)
-        tables.append(ParsedTable(order=order, headers=parsed.headers, rows=parsed.rows))
-        return f" {_TABLE_SENTINEL}TABLE_{order}{_TABLE_SENTINEL} "
-
-    rewritten = _TABLE_BLOCK_RE.sub(_sub, raw_html)
-    return rewritten, tuple(tables)
+            pieces.append(" ")  # drop layout-only tables
+        else:
+            order = len(tables)
+            tables.append(ParsedTable(order=order, headers=parsed.headers, rows=parsed.rows))
+            pieces.append(f" {_TABLE_SENTINEL}TABLE_{order}{_TABLE_SENTINEL} ")
+        cursor = end
+    pieces.append(raw_html[cursor:])
+    return "".join(pieces), tuple(tables)
 
 
 @dataclass(frozen=True)

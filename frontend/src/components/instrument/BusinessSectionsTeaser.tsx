@@ -37,7 +37,10 @@ function pickTeaser(sections: ReadonlyArray<BusinessSection>): string {
   // if the first is unexpectedly empty.
   for (const s of sections) {
     if (s.body && s.body.length > 0) {
-      const text = s.body.replace(/\s+/g, " ").trim();
+      const text = s.body
+        .replace(/␞TABLE_\d+␞/g, "") // strip embedded-table sentinels
+        .replace(/\s+/g, " ")
+        .trim();
       if (text.length <= TEASER_LEN) return text;
       const slice = text.slice(0, TEASER_LEN);
       const lastSpace = slice.lastIndexOf(" ");

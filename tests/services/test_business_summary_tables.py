@@ -147,3 +147,81 @@ def test_upsert_persists_tables_json(ebull_test_conn: psycopg.Connection[tuple])
         ("Europe", "308"),
     )
     assert tbl.order == 0
+
+
+def test_nested_tables_outer_only_extracted_no_prose_leak():
+    """Outer <table> wrapping inner <table> should yield ONE ParsedTable
+    matching the outer cells, with no inner-table text bleeding into
+    the prose body."""
+    raw = """
+    <html><body>
+    <p>Item 1. Business</p>
+    <p>Pre-prose.</p>
+    <table>
+      <tr><th>Outer A</th><th>Outer B</th></tr>
+      <tr>
+        <td>Outer Left</td>
+        <td>
+          <table>
+            <tr><th>InnerH</th></tr>
+            <tr><td>InnerCell</td></tr>
+          </table>
+        </td>
+      </tr>
+      <tr><td>Outer C</td><td>Outer D</td></tr>
+    </table>
+    <p>Post-prose.</p>
+    <p>Item 1A. Risk Factors</p>
+    </body></html>
+    """
+    sections = extract_business_sections(raw)
+    assert sections, "expected at least one section"
+    s0 = sections[0]
+    # Exactly one table — the outer.
+    assert len(s0.tables) == 1, f"expected 1 outer table, got {len(s0.tables)}: {[t.headers for t in s0.tables]}"
+    t = s0.tables[0]
+    assert t.headers == ("Outer A", "Outer B"), f"headers should be the outer table's, got {t.headers}"
+    # Inner-table cells must NOT leak into prose body.
+    assert "InnerCell" not in s0.body, f"inner table cell leaked into prose: {s0.body!r}"
+    assert "InnerH" not in s0.body, f"inner table heading leaked into prose: {s0.body!r}"
+    # Outer-table cell text also must not appear in prose.
+    assert "Outer A" not in s0.body
+    assert "Outer Left" not in s0.body
+
+
+def test_table_with_excess_rows_is_truncated():
+    """A table with > _MAX_TABLE_ROWS rows must truncate to the cap."""
+    rows_html = "".join(f"<tr><td>R{i}A</td><td>R{i}B</td></tr>" for i in range(300))
+    raw = f"""
+    <html><body>
+    <p>Item 1. Business</p>
+    <table>
+      <tr><th>A</th><th>B</th></tr>
+      {rows_html}
+    </table>
+    <p>Item 1A. Risk Factors</p>
+    </body></html>
+    """
+    sections = extract_business_sections(raw)
+    assert sections
+    t = sections[0].tables[0]
+    assert len(t.rows) == 200, f"expected 200 rows after cap, got {len(t.rows)}"
+
+
+def test_cell_content_capped():
+    """Cell content longer than _MAX_CELL_LEN must truncate."""
+    long_cell = "X" * 500
+    raw = f"""
+    <html><body>
+    <p>Item 1. Business</p>
+    <table>
+      <tr><th>A</th></tr>
+      <tr><td>{long_cell}</td></tr>
+    </table>
+    <p>Item 1A. Risk Factors</p>
+    </body></html>
+    """
+    sections = extract_business_sections(raw)
+    assert sections
+    cell = sections[0].tables[0].rows[0][0]
+    assert len(cell) == 200, f"expected 200-char cap, got {len(cell)}"

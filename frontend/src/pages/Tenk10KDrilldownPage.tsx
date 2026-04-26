@@ -33,7 +33,7 @@ function SectionBody({ section }: { section: BusinessSection }) {
     <article id={sectionAnchorId(section)} className="border-l-2 border-slate-200 pl-4">
       <h3 className="text-base font-semibold text-slate-800">{section.section_label}</h3>
       <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-700">
-        {section.body}
+        {section.body.replace(/␞TABLE_\d+␞/g, "")}
       </p>
       {section.cross_references.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1 text-[11px]">
