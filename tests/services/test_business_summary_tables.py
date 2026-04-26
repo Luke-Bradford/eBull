@@ -35,9 +35,7 @@ def test_table_block_extracted_as_parsed_table() -> None:
         ("Europe", "308"),
         ("Australia", "300"),
     )
-    assert "TABLE_0" in s0.body or "␞TABLE_0␞" in s0.body, (
-        "body should retain a sentinel marking the table's insertion point"
-    )
+    assert "␞TABLE_0␞" in s0.body, "body should retain a sentinel marking the table's insertion point"
 
 
 def test_section_with_no_tables_has_empty_tuple() -> None:
@@ -51,3 +49,37 @@ def test_section_with_no_tables_has_empty_tuple() -> None:
     sections = extract_business_sections(raw)
     assert sections
     assert sections[0].tables == ()
+
+
+def test_two_sections_each_with_one_table_get_local_indices():
+    """Two sections each containing a distinct <table> should both
+    end up with ``tables[0]`` (per-section local indexing)."""
+    raw = """
+    <html><body>
+    <p>Item 1. Business</p>
+    <p><b>Segments</b></p>
+    <p>Segment data:</p>
+    <table>
+      <tr><th>Segment</th><th>Stores</th></tr>
+      <tr><td>US</td><td>1,598</td></tr>
+    </table>
+    <p><b>Human Capital</b></p>
+    <p>Headcount data:</p>
+    <table>
+      <tr><th>Region</th><th>Headcount</th></tr>
+      <tr><td>US</td><td>5,000</td></tr>
+    </table>
+    <p>Item 1A. Risk Factors</p>
+    </body></html>
+    """
+    sections = extract_business_sections(raw)
+    sections_with_tables = [s for s in sections if s.tables]
+    assert len(sections_with_tables) >= 2, (
+        f"expected at least two sections with tables; got {[(s.section_label, len(s.tables)) for s in sections]}"
+    )
+    for s in sections_with_tables:
+        assert s.tables[0].order == 0, (
+            f"section {s.section_label!r}: table 0 should have local order 0, got {s.tables[0].order}"
+        )
+        # Body must reference the LOCAL index, not the global one.
+        assert "␞TABLE_0␞" in s.body, f"section {s.section_label!r}: body should reference TABLE_0 locally"

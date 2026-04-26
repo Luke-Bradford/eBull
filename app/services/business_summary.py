@@ -426,7 +426,11 @@ class ParsedCrossReference:
 # ---------------------------------------------------------------------
 
 _TABLE_SENTINEL = "␞"  # SYMBOL FOR RECORD SEPARATOR — never appears in 10-K prose
+# Non-greedy: matches on the FIRST </table>. Nested tables capture as the
+# innermost match; the outer wrapper rows are silently dropped. Acceptable
+# for v1 — fix in a later pass if nested-table data loss is observed in prod.
 _TABLE_BLOCK_RE = re.compile(r"<table\b[^>]*>.*?</table\s*>", re.IGNORECASE | re.DOTALL)
+# DOTALL: cell / row contents span multiple lines in iXBRL filings.
 _TR_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr\s*>", re.IGNORECASE | re.DOTALL)
 _CELL_RE = re.compile(r"<(?:t[hd])\b[^>]*>(.*?)</t[hd]\s*>", re.IGNORECASE | re.DOTALL)
 
@@ -446,23 +450,27 @@ class ParsedTable:
     rows: tuple[tuple[str, ...], ...]
 
 
-def _parse_table_html(table_html: str) -> ParsedTable | None:
-    """Extract a single <table> block into a ParsedTable, or None
-    when the table has zero data rows (a layout table with no real
-    content)."""
+@dataclass(frozen=True)
+class _RawTable:
+    """Intermediate carrier from _parse_table_html — caller assigns
+    the final ``order`` once it knows the global position."""
+
+    headers: tuple[str, ...]
+    rows: tuple[tuple[str, ...], ...]
+
+
+def _parse_table_html(table_html: str) -> _RawTable | None:
+    """Extract a single <table> block, or None when the table has
+    zero data rows (a layout table with no real content)."""
     cells_per_row: list[tuple[str, ...]] = []
     for tr_match in _TR_RE.finditer(table_html):
         cells = tuple(_strip_html(cell).strip() for cell in _CELL_RE.findall(tr_match.group(1)))
-        if any(c for c in cells):  # skip rows that strip to all empty
+        if any(c for c in cells):
             cells_per_row.append(cells)
     if not cells_per_row:
         return None
     headers, *body_rows = cells_per_row
-    return ParsedTable(
-        order=0,  # caller assigns the final order
-        headers=headers,
-        rows=tuple(body_rows),
-    )
+    return _RawTable(headers=headers, rows=tuple(body_rows))
 
 
 def _extract_tables(raw_html: str) -> tuple[str, tuple[ParsedTable, ...]]:
