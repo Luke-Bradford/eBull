@@ -775,6 +775,80 @@ def get_instrument_sec_profile(
 
 
 # ---------------------------------------------------------------------------
+# Headcount endpoint (#551 — XBRL ``dei:EntityNumberOfEmployees``)
+# ---------------------------------------------------------------------------
+
+
+class InstrumentHeadcount(BaseModel):
+    """Most-recent reported employee count for one instrument.
+
+    Sourced from the SEC iXBRL ``dei:EntityNumberOfEmployees`` fact
+    via ``financial_facts_raw``. Block-tagging mandate post-2020 means
+    near-complete coverage on US issuers — the panel is silent (404)
+    when the instrument has no SEC CIK or no DEI fact ingested yet.
+    """
+
+    symbol: str
+    employees: int
+    period_end_date: date
+    source_accession: str
+
+
+@router.get("/{symbol}/employees", response_model=InstrumentHeadcount)
+def get_instrument_employees(
+    symbol: str,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InstrumentHeadcount:
+    """Latest ``dei:EntityNumberOfEmployees`` fact for an instrument.
+
+    Returns 404 when no fact is on file (non-SEC issuer, fundamentals
+    sync hasn't seeded yet, or DEI cover-page tagging absent).
+    """
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT period_end, val, accession_number
+              FROM financial_facts_raw
+             WHERE instrument_id = %s
+               AND concept = 'EntityNumberOfEmployees'
+             ORDER BY period_end DESC, fetched_at DESC
+             LIMIT 1
+            """,
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No employee count on file for {symbol}")
+
+    return InstrumentHeadcount(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        employees=int(row["val"]),  # type: ignore[arg-type]
+        period_end_date=row["period_end"],  # type: ignore[arg-type]
+        source_accession=str(row["accession_number"]),
+    )
+
+
+# ---------------------------------------------------------------------------
 # 8-K structured-events endpoint (#450)
 # ---------------------------------------------------------------------------
 
