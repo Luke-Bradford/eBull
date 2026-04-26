@@ -873,3 +873,55 @@ class TestStartCatchUpEnvGate:
             assert calls == ["called"], "EBULL_SKIP_CATCH_UP=0 must still fire catch-up"
         finally:
             rt.shutdown()
+
+
+class TestShutdownBoundedWait:
+    """Bounded shutdown — a hung scheduler/executor must NOT block
+    lifespan teardown indefinitely. The shutdown call escalates to
+    ``wait=False`` after ``timeout_s`` seconds and returns.
+    """
+
+    def test_hung_scheduler_does_not_block_shutdown(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When ``shutdown(wait=True)`` hangs, ``JobRuntime.shutdown``
+        abandons the daemon thread after ``timeout_s`` and returns.
+        No concurrent ``shutdown(wait=False)`` re-entry — that's
+        unsafe for APScheduler (Codex review)."""
+        import time
+
+        rt = _make_runtime({"j1": lambda: None})
+        rt.start()
+
+        def _hang(*args: object, **kwargs: object) -> None:
+            threading.Event().wait()  # blocks forever
+
+        monkeypatch.setattr(rt._scheduler, "shutdown", _hang)
+        monkeypatch.setattr(rt._manual_executor, "shutdown", lambda *a, **kw: None)
+
+        start = time.monotonic()
+        rt.shutdown(timeout_s=0.5)
+        elapsed = time.monotonic() - start
+        # Bounded by 0.5s timeout + thread join overhead. Without the
+        # fix this would hang forever; allow generous slack.
+        assert elapsed < 5.0, f"shutdown took {elapsed:.2f}s, expected <5s"
+
+    def test_hung_executor_does_not_block_shutdown(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same bounded wait + abandon for the manual executor."""
+        import time
+
+        rt = _make_runtime({"j1": lambda: None})
+        rt.start()
+
+        def _hang(*args: object, **kwargs: object) -> None:
+            threading.Event().wait()
+
+        monkeypatch.setattr(rt._scheduler, "shutdown", lambda *a, **kw: None)
+        monkeypatch.setattr(rt._manual_executor, "shutdown", _hang)
+
+        start = time.monotonic()
+        rt.shutdown(timeout_s=0.5)
+        elapsed = time.monotonic() - start
+        assert elapsed < 5.0, f"shutdown took {elapsed:.2f}s"
