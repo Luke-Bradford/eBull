@@ -139,3 +139,53 @@ def test_business_sections_mixed_coverage() -> None:
 
     assert sections_with_tables, "expected at least one section with tables"
     assert sections_without_tables, "expected at least one section without tables"
+
+
+_FAKE_SECTIONS_OLD: tuple[BusinessSectionRow, ...] = (
+    BusinessSectionRow(
+        section_order=0,
+        section_key="general",
+        section_label="General",
+        body="Old filing body.",
+        cross_references=(),
+        source_accession="acc-old",
+        tables=(),
+    ),
+)
+
+
+def test_business_sections_with_accession_returns_that_filing() -> None:
+    """?accession= param is forwarded to get_business_sections and the
+    response carries that specific accession."""
+    conn = MagicMock()
+    conn.cursor.return_value = _cursor_returning_instrument()
+    app = _build_app(conn)
+
+    with patch(
+        "app.services.business_summary.get_business_sections",
+        return_value=_FAKE_SECTIONS_OLD,
+    ) as mock_get:
+        client = TestClient(app)
+        r = client.get("/instruments/GME/business_sections?accession=acc-old")
+
+    assert r.status_code == 200
+    # Verify the accession param was forwarded to the service call.
+    mock_get.assert_called_once_with(conn, instrument_id=1, accession="acc-old")
+    data = r.json()
+    assert data["source_accession"] == "acc-old"
+
+
+def test_business_sections_unknown_accession_404() -> None:
+    """?accession= for an unknown filing returns HTTP 404."""
+    conn = MagicMock()
+    conn.cursor.return_value = _cursor_returning_instrument()
+    app = _build_app(conn)
+
+    with patch(
+        "app.services.business_summary.get_business_sections",
+        return_value=(),
+    ):
+        client = TestClient(app)
+        r = client.get("/instruments/GME/business_sections?accession=does-not-exist")
+
+    assert r.status_code == 404
