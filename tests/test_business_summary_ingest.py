@@ -584,6 +584,60 @@ class TestFailureBackoffAndQuarantine:
         assert reason is None
         assert next_retry_at is None
 
+    def test_upsert_exception_path_rolls_back_then_records_failure(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """Pin the upsert-exception ordering: rollback → record →
+        commit. If ``upsert_business_summary`` raises a DB error,
+        the connection is in aborted-transaction state and the
+        immediately-following ``record_parse_attempt`` would raise
+        ``InFailedSqlTransaction`` without a preceding rollback.
+
+        Forces the failure by monkey-patching
+        ``upsert_business_summary`` to raise psycopg.errors.DataError.
+        Then asserts the failure row exists with attempt_count=1 and
+        reason='upsert_exception' — proving the post-rollback record
+        + commit path actually wrote.
+        """
+        from unittest.mock import patch
+
+        import psycopg.errors
+
+        from app.services import business_summary as bs_module
+
+        iid = _seed_instrument(ebull_test_conn, symbol="UPSERTRAISE", iid=607)
+        _seed_10k(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="A1",
+            url="https://www.sec.gov/Archives/raise.htm",
+        )
+        fetcher = _StubFetcher({"https://www.sec.gov/Archives/raise.htm": _ITEM_1_HTML})
+
+        def boom(*args: object, **kwargs: object) -> bool:
+            # Synthesise a real psycopg DataError so the connection
+            # actually transitions to aborted-transaction state — the
+            # exact failure mode the rollback exists to guard against.
+            with ebull_test_conn.cursor() as cur:
+                try:
+                    cur.execute("SELECT CAST('not_a_number' AS INTEGER)")
+                except psycopg.errors.InvalidTextRepresentation:
+                    pass
+            raise psycopg.errors.DataError("synthetic upsert failure")
+
+        with patch.object(bs_module, "upsert_business_summary", side_effect=boom):
+            ingest_business_summaries(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT attempt_count, last_failure_reason FROM instrument_business_summary WHERE instrument_id = %s",
+                (iid,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 1
+        assert row[1] == "upsert_exception"
+
     def test_admin_reset_requeues_failed_row_for_next_ingest(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """Codex residual-risk pin: after the admin reset endpoint
         clears the failure columns and stamps ``next_retry_at = NOW()``,
