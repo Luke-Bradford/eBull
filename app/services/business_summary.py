@@ -32,6 +32,7 @@ queryable row — no silent drops; unmapped headings surface as
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 from dataclasses import dataclass
@@ -95,22 +96,61 @@ def _next_retry_days(attempt_count: int) -> int:
 _IXBRL_TAG_RE = re.compile(r"<ix:[^>]*>|</ix:[^>]*>", re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _NBSP_RE = re.compile(r"&nbsp;|&#160;|&#xa0;| ", re.IGNORECASE)
-_WHITESPACE_RE = re.compile(r"\s+")
+
+# Block-level boundary tags that should produce a paragraph break in
+# the stripped output. Closing tags (``</p>``, ``</div>``, ``</li>``,
+# ``</tr>``, ``</h*>``) plus self-closing line breaks (``<br>``,
+# ``<br/>``). Pre-fix the stripped output collapsed every block
+# boundary to a single space, producing run-on text where every
+# original paragraph fused into one wall.
+_BLOCK_BREAK_RE = re.compile(
+    r"</p\s*>|</div\s*>|</li\s*>|</tr\s*>|</h[1-6]\s*>|<br\s*/?>",
+    re.IGNORECASE,
+)
+
+# Inline whitespace (spaces, tabs) but NOT newlines — preserves the
+# paragraph breaks injected by ``_BLOCK_BREAK_RE``. Followed by a
+# pass that collapses 3+ consecutive newlines to exactly two so the
+# final body has at most one blank line between paragraphs.
+_INLINE_WHITESPACE_RE = re.compile(r"[ \t\r\f\v]+")
+_EXCESS_NEWLINES_RE = re.compile(r"\n{3,}")
 
 
 def _strip_html(raw: str) -> str:
-    """Strip HTML + iXBRL to a whitespace-collapsed plain-text stream.
+    """Strip HTML + iXBRL to a plain-text stream with paragraph
+    structure preserved.
 
     iXBRL tags are stripped independently first because their
     attribute content (``contextref``, ``unitref``, ...) otherwise
     leaks through a naive ``<[^>]+>`` pass when the browser-tolerant
     markup has nested/unbalanced tags that confuse the simpler
-    regex. Attribute content is never user-facing narrative."""
+    regex. Attribute content is never user-facing narrative.
+
+    Block-boundary tags (``</p>``, ``</div>``, ``</li>``, ``<br>``,
+    ``</h*>``) become double newlines BEFORE the generic tag strip so
+    the resulting text retains paragraph breaks. Inline whitespace
+    (spaces / tabs) collapses to single space; consecutive newlines
+    cap at two (one blank line between paragraphs).
+
+    HTML entities (``&#8220;``, ``&amp;``, ``&rsquo;``, etc.) get
+    decoded via ``html.unescape`` so the rendered narrative reads as
+    natural prose instead of ``GameStop Corp. (&#8220;GameStop&#8221;)``.
+    """
+    # Block boundaries → paragraph break sentinel BEFORE the generic
+    # tag strip so the boundary survives.
+    with_breaks = _BLOCK_BREAK_RE.sub("\n\n", raw)
     # Strip iXBRL element wrappers; the inner text survives.
-    no_ix = _IXBRL_TAG_RE.sub(" ", raw)
+    no_ix = _IXBRL_TAG_RE.sub(" ", with_breaks)
     no_tags = _HTML_TAG_RE.sub(" ", no_ix)
     no_nbsp = _NBSP_RE.sub(" ", no_tags)
-    return _WHITESPACE_RE.sub(" ", no_nbsp).strip()
+    # Decode HTML entities — &#8220; → ", &amp; → &, &rsquo; → ', etc.
+    decoded = html.unescape(no_nbsp)
+    # Collapse runs of inline whitespace (NOT newlines) to single space.
+    inline_collapsed = _INLINE_WHITESPACE_RE.sub(" ", decoded)
+    # Cap consecutive newlines at two so the body has at most one
+    # blank line between paragraphs.
+    paragraph_collapsed = _EXCESS_NEWLINES_RE.sub("\n\n", inline_collapsed)
+    return paragraph_collapsed.strip()
 
 
 # ---------------------------------------------------------------------

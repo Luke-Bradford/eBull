@@ -125,6 +125,49 @@ class TestExtractBusinessSection:
     def test_empty_input_returns_none(self) -> None:
         assert extract_business_section("") is None
 
+    def test_html_entities_decoded(self) -> None:
+        """SEC filings use ``&#8220;`` (left double quote), ``&#8221;``,
+        ``&rsquo;``, ``&amp;`` etc. Pre-fix these leaked through to
+        the stored body as literal entity text. Post-fix they decode
+        to the natural Unicode characters so the rendered narrative
+        reads as natural prose."""
+        body = extract_business_section(
+            "<html><body>"
+            "<h2>Item 1. Business</h2>"
+            "<p>GameStop Corp. (&#8220;GameStop,&#8221; &#8220;we&#8221;) "
+            "offers games &amp; collectibles.</p>"
+            "<h2>Item 1A. Risk Factors</h2>"
+            "</body></html>"
+        )
+        assert body is not None
+        assert "&#8220;" not in body
+        assert "&amp;" not in body
+        # Curly quotes preserved as Unicode.
+        assert "“" in body or '"' in body  # left curly quote
+        assert "&" in body  # ampersand decoded
+
+    def test_paragraph_breaks_preserved_between_block_tags(self) -> None:
+        """Block-level tag boundaries (``</p>``, ``</div>``, ``<br>``)
+        produce paragraph breaks in the stripped output instead of
+        collapsing to a single space. Operator gets a readable
+        narrative with paragraph structure intact, not a wall of
+        run-on text."""
+        body = extract_business_section(
+            "<html><body>"
+            "<h2>Item 1. Business</h2>"
+            "<p>First paragraph about products.</p>"
+            "<p>Second paragraph about markets.</p>"
+            "<p>Third paragraph about competition.</p>"
+            "<h2>Item 1A. Risk Factors</h2>"
+            "</body></html>"
+        )
+        assert body is not None
+        # Paragraphs separated by at least one newline.
+        assert "products.\n" in body or "products.\n\n" in body
+        assert "markets.\n" in body or "markets.\n\n" in body
+        # No three+ consecutive newlines (capped at two).
+        assert "\n\n\n" not in body
+
     def test_whitespace_collapsed_to_single_space(self) -> None:
         """Multi-line + nbsp in the source collapses to a single
         space stream so the stored body is clean to render."""
