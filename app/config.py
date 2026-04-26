@@ -24,7 +24,6 @@ class Settings(BaseSettings):
     etoro_env: str = "demo"
     etoro_base_url: str = "https://public-api.etoro.com"
 
-    fmp_api_key: str | None = None
     companies_house_api_key: str | None = None
     # SEC EDGAR requires no API key (public API, 10 req/s fair-use limit)
     sec_user_agent: str = "eBull dev@example.com"
@@ -157,9 +156,8 @@ class Settings(BaseSettings):
     # owns ``fundamentals_snapshot`` refresh for CIK-mapped tradable
     # instruments. Collapses the dual SEC ``companyfacts`` fetch path
     # identified in issue #414 so only one scheduled job hits
-    # ``data.sec.gov/api/xbrl/companyfacts/…`` each day. FMP fallback,
-    # FMP enrichment (profile / earnings / estimates), and Companies
-    # House filings all continue to run in ``daily_research_refresh``
+    # ``data.sec.gov/api/xbrl/companyfacts/…`` each day. Companies
+    # House filings continue to run in ``daily_research_refresh``
     # regardless of this flag.
     # Ship as False (default) → operator flips True → observe ~1 day
     # → follow-up PR deletes the guarded SEC-fundamentals block in

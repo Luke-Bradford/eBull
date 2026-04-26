@@ -471,58 +471,12 @@ def test_non_primary_sec_cik_does_not_augment(
         )
 
 
-def test_fmp_serves_fundamentals_and_analyst_via_distinct_tables(
-    ebull_test_conn: psycopg.Connection[tuple],
-) -> None:
-    """The ``fmp`` provider tag backs both ``fundamentals`` (via
-    fundamentals_snapshot) and ``analyst`` (via analyst_estimates).
-    A row in fundamentals_snapshot must NOT make
-    analyst.data_present[fmp] = True. Codex round-2 finding on
-    PR 3a: pre-fix, the resolver shared a single SQL EXISTS per
-    provider, mis-reporting analyst coverage off fundamentals
-    data alone."""
-    _seed_exchange_with_capabilities(
-        ebull_test_conn,
-        exchange_id="test_cap_009",
-        asset_class="us_equity",
-        capabilities={
-            **{cap: [] for cap in V1_CAPABILITIES},
-            "fundamentals": ["fmp"],
-            "analyst": ["fmp"],
-        },
-    )
-    _seed_instrument(
-        ebull_test_conn,
-        instrument_id=960009,
-        symbol="CAP9",
-        exchange="test_cap_009",
-    )
-    with ebull_test_conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO fundamentals_snapshot
-                (instrument_id, as_of_date)
-            VALUES (%s, '2026-04-25')
-            """,
-            (960009,),
-        )
-    ebull_test_conn.commit()
-
-    try:
-        resolved = resolve_capabilities(
-            ebull_test_conn,
-            instrument_id=960009,
-            exchange_id="test_cap_009",
-        )
-        assert resolved.cells["fundamentals"].data_present == {"fmp": True}
-        # No row in analyst_estimates → analyst.data_present must
-        # be False even though fmp also serves fundamentals.
-        assert resolved.cells["analyst"].data_present == {"fmp": False}
-    finally:
-        with ebull_test_conn.cursor() as cur:
-            cur.execute("DELETE FROM fundamentals_snapshot WHERE instrument_id = %s", (960009,))
-        _cleanup(
-            ebull_test_conn,
-            instrument_ids=[960009],
-            exchange_ids=["test_cap_009"],
-        )
+# Note: pre-#532 this slot held
+# ``test_fmp_serves_fundamentals_and_analyst_via_distinct_tables``,
+# pinning that the (capability, provider) keying did not bleed
+# fundamentals data into analyst's data_present. FMP was retired
+# in #532 (free regulated-source-only posture); the keying logic
+# itself remains correct and is exercised by the existing SEC
+# tests above. If a future provider serves multiple capabilities
+# via distinct tables, restore this style of test pinned on the
+# new provider.

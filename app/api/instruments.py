@@ -98,8 +98,8 @@ class InstrumentPrice(BaseModel):
 
 # Closed set of values for `InstrumentKeyStats.field_source` entries. Mirror
 # in frontend/src/api/types.ts — consumers rely on this being exhaustive.
-# Per settled decision (eToro = market data, SEC = official filings, FMP =
-# normalized fundamentals), yfinance has no role; #498/#499 retired it.
+# Per settled decision (eToro = market data, SEC = official filings),
+# yfinance has no role; #498/#499 retired it.
 #
 # ``sec_dividend_summary`` distinguishes values sourced from
 # ``instrument_dividend_summary.ttm_yield_pct`` (#426) from values
@@ -497,10 +497,11 @@ def get_instrument_financials(
     """Per-ticker financial statement.
 
     Sourced exclusively from local ``financial_periods`` rows (SEC
-    XBRL-derived). Per the settled provider strategy (#498/#499),
-    yfinance is no longer consulted. Non-US issuers without SEC
-    coverage will return an empty row list until FMP normalisation
-    fills the gap.
+    XBRL-derived). Per the settled provider strategy (#498/#499 +
+    #532), yfinance and paid third-party providers have no role.
+    Non-US issuers without regulated-source coverage in this repo
+    return an empty row list — per-region integration PRs add free
+    regulated providers (Companies House, ESMA, etc.).
 
     Returns an empty row list (not 500, not 404) when no SEC data
     exists — the UI shows "no statement data available".

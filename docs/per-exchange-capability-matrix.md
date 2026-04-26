@@ -38,15 +38,15 @@ Per the #515 spec, PR 3 does the explicit reconciliation: the schema migration a
 
 ## US (already covered — document only)
 
-Investigation: NONE — SEC EDGAR + FMP already wired since pre-#515.
+Investigation: NONE — SEC EDGAR already wired since pre-#515. FMP retired in #532 (free regulated-source-only posture).
 
 | Capability | `4` Nasdaq | `5` NYSE | `19` OTC Markets | `20` CBOE | `33` RTH |
 |------------|------------|----------|------------------|-----------|----------|
 | filings | `["sec_xbrl"]` | `["sec_xbrl"]` | `["sec_xbrl"]` | `["sec_xbrl"]` | `["sec_xbrl"]` |
-| fundamentals | `["sec_xbrl", "fmp"]` | `["sec_xbrl", "fmp"]` | `["sec_xbrl", "fmp"]` | `["sec_xbrl", "fmp"]` | `["sec_xbrl", "fmp"]` |
+| fundamentals | `["sec_xbrl"]` | `["sec_xbrl"]` | `["sec_xbrl"]` | `["sec_xbrl"]` | `["sec_xbrl"]` |
 | dividends | `["sec_8k_item_801"]` | `["sec_8k_item_801"]` | `["sec_8k_item_801"]` | `["sec_8k_item_801"]` | `["sec_8k_item_801"]` |
 | insider | `["sec_form4"]` | `["sec_form4"]` | `["sec_form4"]` | `["sec_form4"]` | `["sec_form4"]` |
-| analyst | `["fmp"]` | `["fmp"]` | `["fmp"]` | `["fmp"]` | `["fmp"]` |
+| analyst | `[]` | `[]` | `[]` | `[]` | `[]` |
 | ratings | `[]` | `[]` | `[]` | `[]` | `[]` |
 | esg | `[]` | `[]` | `[]` | `[]` | `[]` |
 | ownership | `["sec_13f", "sec_13d_13g"]` | `["sec_13f", "sec_13d_13g"]` | `["sec_13f", "sec_13d_13g"]` | `["sec_13f", "sec_13d_13g"]` | `["sec_13f", "sec_13d_13g"]` |
@@ -77,13 +77,13 @@ Venues: `7` LSE, `42` LSE_AIM, `43` LSE AIM Auction, `44` LSE Auction.
 | business_summary | _pending #516_ | _pending #516_ | _pending #516_ | _pending #516_ |
 | officers | _pending #516_ | _pending #516_ | _pending #516_ | _pending #516_ |
 
-Source candidates to evaluate: Companies House (free, full filings + officers + accounts), LSE RNS (free announcements). Working hypothesis: filings/officers via Companies House; dividends + corporate_events via LSE RNS; fundamentals possibly via FMP if Companies House XBRL coverage is thin.
+Source candidates to evaluate: Companies House (free, full filings + officers + accounts), LSE RNS (free announcements). Working hypothesis: filings/officers via Companies House; dividends + corporate_events via LSE RNS; fundamentals via Companies House XBRL where coverage exists, otherwise empty (free regulated-source-only posture per #532).
 
 ## EU — investigation ticket #517
 
 Venues: 22 EU venues across `6` FRA / `9` Paris / `10` Madrid / `11` Borsa Italiana / `12` SIX / `14` Oslo / `15` Stockholm / `16` Copenhagen / `17` Helsinki / `22` Lisbon / `23` Brussels / `30` Amsterdam / `32` Vienna / `34` Dublin EN / `35` Prague / `36` Warsaw / `37` Budapest / `38` Xetra ETFs / `50` Nasdaq Iceland / `51` Tallinn / `52` Vilnius / `53` Riga.
 
-Source candidates: ESMA register (pan-EU regulatory data), national regulators (BaFin/AMF/CONSOB/AFM/CMVM/...), Euronext announcements (Paris/Amsterdam/Brussels/Lisbon/Dublin), FMP for fundamentals where coverage exists.
+Source candidates: ESMA register (pan-EU regulatory data), national regulators (BaFin/AMF/CONSOB/AFM/CMVM/...), Euronext announcements (Paris/Amsterdam/Brussels/Lisbon/Dublin). No paid providers (free regulated-source-only posture per #532).
 
 One per-venue capability table follows; every cell `_pending #517_` until investigation lands.
 

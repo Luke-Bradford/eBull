@@ -79,7 +79,6 @@ def test_flag_false_calls_sec_refresh_filings(monkeypatch) -> None:
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test"
     stub_settings.companies_house_api_key = None
-    stub_settings.fmp_api_key = None
     stub_settings.enable_filings_fetch_dedupe = False
     stub_settings.enable_sec_fundamentals_dedupe = False
     monkeypatch.setattr(scheduler, "settings", stub_settings)
@@ -101,7 +100,6 @@ def test_flag_true_skips_sec_refresh_filings(monkeypatch) -> None:
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test"
     stub_settings.companies_house_api_key = None
-    stub_settings.fmp_api_key = None
     stub_settings.enable_filings_fetch_dedupe = True
     stub_settings.enable_sec_fundamentals_dedupe = False
     monkeypatch.setattr(scheduler, "settings", stub_settings)
@@ -125,7 +123,6 @@ def test_flag_true_leaves_ch_filings_path_available(monkeypatch) -> None:
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test"
     stub_settings.companies_house_api_key = "ch-key"
-    stub_settings.fmp_api_key = None
     stub_settings.enable_filings_fetch_dedupe = True
     stub_settings.enable_sec_fundamentals_dedupe = False
     monkeypatch.setattr(scheduler, "settings", stub_settings)
@@ -160,7 +157,6 @@ def test_sec_fundamentals_flag_false_calls_refresh_fundamentals(monkeypatch) -> 
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test"
     stub_settings.companies_house_api_key = None
-    stub_settings.fmp_api_key = None
     stub_settings.enable_filings_fetch_dedupe = True  # irrelevant to this test
     stub_settings.enable_sec_fundamentals_dedupe = False
     monkeypatch.setattr(scheduler, "settings", stub_settings)
@@ -169,22 +165,20 @@ def test_sec_fundamentals_flag_false_calls_refresh_fundamentals(monkeypatch) -> 
 
     scheduler.daily_research_refresh()
 
-    # refresh_fundamentals fires once for the SEC-fundamentals block
-    # (no FMP fallback because fmp_api_key is unset and all symbols
-    # have CIKs, so fmp_symbols is empty).
+    # refresh_fundamentals fires once for the SEC-fundamentals block.
+    # FMP was retired in #532; no fallback path remains.
     assert refresh_fund_mock.call_count == 1
 
 
 def test_sec_fundamentals_flag_true_skips_refresh_fundamentals(monkeypatch) -> None:
     """#414 behaviour — flag on, SEC XBRL ``refresh_fundamentals`` block
     skipped. ``fundamentals_sync`` phase 1b is now the single path that
-    hits ``data.sec.gov/api/xbrl/companyfacts/…``. FMP fallback and
-    enrichment paths are untouched."""
+    hits ``data.sec.gov/api/xbrl/companyfacts/…``. Companies House
+    filings path is unaffected."""
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test"
     stub_settings.companies_house_api_key = None
-    stub_settings.fmp_api_key = None
     stub_settings.enable_filings_fetch_dedupe = True
     stub_settings.enable_sec_fundamentals_dedupe = True
     monkeypatch.setattr(scheduler, "settings", stub_settings)
@@ -193,63 +187,6 @@ def test_sec_fundamentals_flag_true_skips_refresh_fundamentals(monkeypatch) -> N
 
     scheduler.daily_research_refresh()
 
-    # No SEC XBRL path AND no FMP path (fmp_api_key unset), so
-    # refresh_fundamentals is never called.
+    # No SEC XBRL path means refresh_fundamentals is never called.
+    # FMP was retired in #532 — no fallback path remains.
     refresh_fund_mock.assert_not_called()
-
-
-def test_sec_fundamentals_flag_true_preserves_fmp_path(monkeypatch) -> None:
-    """Flag affects only the SEC XBRL block — FMP fallback for non-US
-    tickers still fires when FMP_API_KEY is set."""
-    stub_settings = MagicMock()
-    stub_settings.database_url = "postgresql://test"
-    stub_settings.sec_user_agent = "test"
-    stub_settings.companies_house_api_key = None
-    stub_settings.fmp_api_key = "fmp-key"
-    stub_settings.enable_filings_fetch_dedupe = True
-    stub_settings.enable_sec_fundamentals_dedupe = True
-    monkeypatch.setattr(scheduler, "settings", stub_settings)
-
-    # Override cik_rows to empty — all symbols become FMP fallback.
-    tracker = MagicMock()
-    cm = MagicMock()
-    cm.__enter__.return_value = tracker
-    cm.__exit__.return_value = False
-    monkeypatch.setattr(scheduler, "_tracked_job", MagicMock(return_value=cm))
-
-    fake_conn = MagicMock()
-    fake_conn.execute.return_value.fetchall.side_effect = [
-        [("FOO", "1"), ("BAR", "2")],  # tradable rows (non-US)
-        [],  # cik rows empty → all go to FMP
-    ]
-    conn_cm = MagicMock()
-    conn_cm.__enter__.return_value = fake_conn
-    conn_cm.__exit__.return_value = False
-    monkeypatch.setattr(scheduler.psycopg, "connect", MagicMock(return_value=conn_cm))
-
-    fmp_cm = MagicMock()
-    fmp_cm.__enter__.return_value = MagicMock()
-    fmp_cm.__exit__.return_value = False
-    monkeypatch.setattr(scheduler, "FmpFundamentalsProvider", MagicMock(return_value=fmp_cm))
-    monkeypatch.setattr(scheduler, "SecFundamentalsProvider", MagicMock())
-
-    refresh_fund_mock = MagicMock(return_value=MagicMock(symbols_attempted=2, snapshots_upserted=2, symbols_skipped=0))
-    monkeypatch.setattr(scheduler, "refresh_fundamentals", refresh_fund_mock)
-    monkeypatch.setattr(
-        scheduler,
-        "refresh_enrichment",
-        MagicMock(
-            return_value=MagicMock(
-                symbols_attempted=2,
-                profiles_upserted=0,
-                earnings_upserted=0,
-                estimates_upserted=0,
-                symbols_skipped=0,
-            )
-        ),
-    )
-
-    scheduler.daily_research_refresh()
-
-    # FMP fallback fires once — no SEC XBRL block.
-    assert refresh_fund_mock.call_count == 1

@@ -48,8 +48,6 @@ CapabilityProvider = Literal[
     "sec_form4",
     "sec_13f",
     "sec_13d_13g",
-    # US — non-SEC enrichment
-    "fmp",
     # UK
     "companies_house",
     "lse_rns",
@@ -154,11 +152,9 @@ class ResolvedCapabilities:
 # Mapping from (capability, provider) tuple to the SQL EXISTS
 # test that says "is there at least one row this instrument has
 # from this source for this capability?". Keyed on the tuple
-# because one provider tag (e.g. ``fmp``) can serve multiple
-# capabilities by reading different tables (``fundamentals_snapshot``
-# for ``fundamentals`` vs ``analyst_estimates`` for ``analyst``) —
-# a flat-per-provider lookup misreports ``analyst`` coverage off
-# fundamentals data alone (Codex round-2 finding on PR 3a).
+# because one provider tag could in principle serve multiple
+# capabilities by reading different tables. The (capability,
+# provider) keying makes that future-proof without ambiguity.
 #
 # Capability-agnostic providers (``sec_xbrl`` / ``sec_form4`` etc.)
 # repeat the same SQL across the (capability, provider) pairs they
@@ -184,9 +180,6 @@ _PRESENCE_QUERIES: dict[tuple[str, str], str] = {
     ("insider", "sec_form4"): ("SELECT EXISTS(SELECT 1 FROM insider_transactions t WHERE t.instrument_id = %s)"),
     # ``ownership`` (sec_13f / sec_13d_13g) — no eBull table yet,
     # falls through to the dict-miss → False branch below.
-    # FMP serves two capabilities via two different tables.
-    ("fundamentals", "fmp"): ("SELECT EXISTS(SELECT 1 FROM fundamentals_snapshot s WHERE s.instrument_id = %s)"),
-    ("analyst", "fmp"): ("SELECT EXISTS(SELECT 1 FROM analyst_estimates a WHERE a.instrument_id = %s)"),
     # UK / EU / Asia / MENA / crypto / commodity / FX / Canada
     # providers — no eBull tables yet for any of these, so missing
     # entries fall through to ``data_present = False`` via the
@@ -258,13 +251,12 @@ def resolve_capabilities(
             # capabilities to whatever the exchange row already
             # provides.
             augmentations.setdefault("filings", []).append("sec_edgar")
-            augmentations.setdefault("fundamentals", []).extend(["sec_xbrl", "fmp"])
+            augmentations.setdefault("fundamentals", []).append("sec_xbrl")
             augmentations.setdefault("dividends", []).append("sec_dividend_summary")
             augmentations.setdefault("insider", []).append("sec_form4")
             augmentations.setdefault("ownership", []).extend(["sec_13f", "sec_13d_13g"])
             augmentations.setdefault("corporate_events", []).append("sec_8k_events")
             augmentations.setdefault("business_summary", []).append("sec_10k_item1")
-            augmentations.setdefault("analyst", []).append("fmp")
 
     cells: dict[CapabilityName, CapabilityCell] = {}
     for cap in V1_CAPABILITIES:
@@ -321,10 +313,8 @@ def _compute_data_present(
 
     The (capability, provider) keying matters because the same
     provider tag can serve multiple capabilities by reading
-    different tables — ``fmp`` backs both ``fundamentals``
-    (fundamentals_snapshot) and ``analyst`` (analyst_estimates).
-    A flat-per-provider lookup misreports analyst coverage from
-    fundamentals data (Codex round 2 finding on PR 3a).
+    different tables. The keying makes that future-proof without
+    ambiguity (Codex round 2 finding on PR 3a).
     """
     out: dict[str, bool] = {}
     for provider in providers:

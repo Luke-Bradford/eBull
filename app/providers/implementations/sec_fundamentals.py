@@ -5,8 +5,10 @@ Implements FundamentalsProvider against the SEC Company Facts API
 (https://data.sec.gov/api/xbrl/companyfacts/).  Completely free, no API key
 required, 10 req/s rate limit.
 
-This is the primary fundamentals source for US-listed companies.  FMP remains
-as a fallback for non-US equities.
+This is the primary fundamentals source for US-listed companies. Non-US
+issuers without regulated-source coverage in this repo (yet) return empty
+rows from fundamentals queries; per-region integration PRs add their own
+free regulated-source providers (Companies House, ESMA, etc.).
 
 Data extraction strategy:
   - Income / cash-flow items (flow over a period): take the most recent 10-K
