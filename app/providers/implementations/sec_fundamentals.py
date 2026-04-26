@@ -46,15 +46,18 @@ from app.providers.fundamentals import (
     XbrlConceptCatalogEntry,
     XbrlFact,
 )
+from app.providers.implementations.sec_edgar import _PROCESS_RATE_LIMIT_CLOCK
 from app.providers.resilient_client import ResilientClient
 
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://data.sec.gov"
 
-# SEC rate-limit: 10 req/s.  Shared with the filings provider if both are
-# running, but in practice they run in separate phases of daily_research_refresh
-# so no cross-provider coordination is needed.
+# SEC rate-limit: 10 req/s. Funnelled through the same process-wide
+# clock as ``SecFilingsProvider`` so concurrent jobs (e.g. fundamentals
+# sync + 8-K events ingest both firing on the hour) share one global
+# 10 req/s budget rather than each carrying their own clock and
+# collectively bursting past the SEC fair-use limit (#537).
 _MIN_REQUEST_INTERVAL_S = 0.11
 
 # XBRL tags, in priority order, for each concept.
@@ -336,9 +339,12 @@ class SecFundamentalsProvider(FundamentalsProvider):
             headers={"User-Agent": user_agent, "Accept": "application/json"},
             timeout=30.0,
         )
+        # Process-wide shared rate-limit clock (#537) — see
+        # ``app.providers.implementations.sec_edgar._PROCESS_RATE_LIMIT_CLOCK``.
         self._http = ResilientClient(
             self._client,
             min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
+            shared_last_request=_PROCESS_RATE_LIMIT_CLOCK,
         )
         # symbol → CIK cache, populated by caller before bulk refresh
         self._cik_cache: dict[str, str] = {}
