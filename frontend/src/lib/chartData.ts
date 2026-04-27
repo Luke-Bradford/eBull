@@ -212,12 +212,13 @@ export function fillIntrasessionGaps(
  * Returns `null` for any row whose timestamp can't be parsed; the
  * chart's existing valid-row gate filters those out.
  */
-// Max gap to backfill, by endpoint. Anything bigger is treated as
-// "market closed" and left as a visual gap.
-//   * Intraday: 2 hours covers post-RTH AH lulls + lunch lulls
-//   * Daily: 7 days covers weekends + long weekends
-const _INTRADAY_MAX_GAP_S = 2 * 60 * 60;
-const _DAILY_MAX_GAP_S = 7 * 24 * 60 * 60;
+// Note: gap-fill was previously applied here; reverted because
+// lightweight-charts is ordinal by default — bars at equal x-axis
+// spacing regardless of real-time gap. TradingView does the same.
+// Filling sparse AH bars with carry-forward synthetic candles
+// produced a long flat line in the rendered chart that didn't
+// match the gold-standard look. `fillIntrasessionGaps` is kept
+// exported in case a future caller wants opt-in.
 
 export async function fetchChartCandles(
   symbol: string,
@@ -226,8 +227,33 @@ export async function fetchChartCandles(
   const plan = CHART_RANGE_PLAN[range];
   if (plan.kind === "intraday") {
     const res = await fetchInstrumentIntradayCandles(symbol, plan.interval, plan.count);
-    const raw = res.rows.flatMap((b) => {
-      const time = isoToEpochSeconds(b.timestamp);
+    return {
+      symbol: res.symbol,
+      range,
+      kind: "intraday",
+      rows: res.rows.flatMap((b) => {
+        const time = isoToEpochSeconds(b.timestamp);
+        if (time === null) return [];
+        return [
+          {
+            time,
+            open: b.open,
+            high: b.high,
+            low: b.low,
+            close: b.close,
+            volume: b.volume === null ? null : String(b.volume),
+          },
+        ];
+      }),
+    };
+  }
+  const res = await fetchInstrumentCandles(symbol, plan.range);
+  return {
+    symbol: res.symbol,
+    range,
+    kind: "daily",
+    rows: res.rows.flatMap((b) => {
+      const time = dateToEpochSeconds(b.date);
       if (time === null) return [];
       return [
         {
@@ -236,37 +262,9 @@ export async function fetchChartCandles(
           high: b.high,
           low: b.low,
           close: b.close,
-          volume: b.volume === null ? null : String(b.volume),
+          volume: b.volume,
         },
       ];
-    });
-    const bucketSeconds = INTERVAL_SECONDS[plan.interval] ?? 60;
-    return {
-      symbol: res.symbol,
-      range,
-      kind: "intraday",
-      rows: fillIntrasessionGaps(raw, bucketSeconds, _INTRADAY_MAX_GAP_S),
-    };
-  }
-  const res = await fetchInstrumentCandles(symbol, plan.range);
-  const raw = res.rows.flatMap((b) => {
-    const time = dateToEpochSeconds(b.date);
-    if (time === null) return [];
-    return [
-      {
-        time,
-        open: b.open,
-        high: b.high,
-        low: b.low,
-        close: b.close,
-        volume: b.volume,
-      },
-    ];
-  });
-  return {
-    symbol: res.symbol,
-    range,
-    kind: "daily",
-    rows: fillIntrasessionGaps(raw, 86400, _DAILY_MAX_GAP_S),
+    }),
   };
 }

@@ -636,7 +636,12 @@ export function ChartCanvas({
       },
     });
   const liveActive = connected && !unavailable && instrumentId !== null && range !== undefined;
-  const lastTickHHMM = lastAppliedAt !== null ? new Date(lastAppliedAt).toISOString().slice(11, 16) : null;
+  const lastTickHHMM = lastAppliedAt !== null
+    ? (() => {
+        const d = new Date(lastAppliedAt);
+        return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      })()
+    : null;
 
   return (
     <div className="relative">
@@ -654,7 +659,7 @@ export function ChartCanvas({
           {lastTickHHMM !== null ? (
             <>
               <span className="text-slate-400">·</span>
-              <span className="text-slate-500">{lastTickHHMM}Z</span>
+              <span className="text-slate-500">{lastTickHHMM}</span>
             </>
           ) : null}
         </div>

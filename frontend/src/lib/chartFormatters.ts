@@ -27,19 +27,32 @@ const _MONTH_ABBR = [
   "Dec",
 ] as const;
 
+function _padDateLocal(d: Date): string {
+  // Browser-local YYYY-MM-DD. ISO `toISOString()` would force UTC.
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 /**
- * Hover label.
- *   - Daily/weekly/monthly: `YYYY-MM-DD`
- *   - Intraday: `YYYY-MM-DD HH:MMZ` so the operator sees the full
- *     timestamp and the trailing `Z` makes it obvious the time is UTC.
+ * Hover label rendered in the **browser's local timezone** so a UK
+ * operator on BST sees `21:30` for a 20:30 UTC bar — matching the
+ * convention TradingView and Robinhood use when the user is in a
+ * different zone from the exchange. The chart's epoch-second time
+ * value is universal; only the rendered label localises.
+ *
+ *   - Daily/weekly/monthly: `YYYY-MM-DD` (local date)
+ *   - Intraday: `YYYY-MM-DD HH:MM` (local time, no zone suffix —
+ *     the chart's controls/range carry the calendar context).
  */
 export function formatHoverLabel(epochSeconds: number, intraday: boolean): string {
   const d = new Date(epochSeconds * 1000);
-  const date = d.toISOString().slice(0, 10);
+  const date = _padDateLocal(d);
   if (!intraday) return date;
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mm = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${date} ${hh}:${mm}Z`;
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${date} ${hh}:${mm}`;
 }
 
 /**
@@ -51,21 +64,25 @@ export function formatHoverLabel(epochSeconds: number, intraday: boolean): strin
  * year. Single formatter handles both daily and intraday modes
  * because the library only emits the higher-resolution discriminators
  * when the chart is actually intraday.
+ *
+ * **Local timezone**: getters use the browser's local zone (e.g. BST
+ * for a UK operator). The chart's underlying time values are still
+ * UTC epoch seconds; only the displayed labels localise.
  */
 export function tickFormatter(time: number, tickMarkType: number): string {
   const d = new Date(time * 1000);
   switch (tickMarkType) {
     case 0:
-      return String(d.getUTCFullYear());
+      return String(d.getFullYear());
     case 1:
-      return _MONTH_ABBR[d.getUTCMonth()] ?? "";
+      return _MONTH_ABBR[d.getMonth()] ?? "";
     case 2:
-      return `${_MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCDate()}`;
+      return `${_MONTH_ABBR[d.getMonth()]} ${d.getDate()}`;
     case 3:
     case 4:
     default: {
-      const hh = String(d.getUTCHours()).padStart(2, "0");
-      const mm = String(d.getUTCMinutes()).padStart(2, "0");
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
       return `${hh}:${mm}`;
     }
   }
