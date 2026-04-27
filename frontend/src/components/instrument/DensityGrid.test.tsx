@@ -102,7 +102,10 @@ describe("DensityGrid", () => {
     expect(screen.getByText("No SEC coverage")).toBeInTheDocument();
   });
 
-  it("no descendant uses overflow-auto (panes are content-driven, not scrollboxes)", () => {
+  it("individual panes have no overflow-auto (content-driven, not scrollboxes)", () => {
+    // summary has capabilities:{} so the dividends+insider combined card
+    // (which retains overflow-auto + max-h as a scroll-bound until Phase D)
+    // is not rendered — this test covers only the standard pane set.
     const { container } = render(
       <MemoryRouter>
         <DensityGrid
