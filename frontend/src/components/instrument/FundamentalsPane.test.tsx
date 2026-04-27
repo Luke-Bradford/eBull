@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { FundamentalsPane } from "@/components/instrument/FundamentalsPane";
@@ -201,9 +201,7 @@ describe("FundamentalsPane", () => {
         <FundamentalsPane summary={makeSummary(true)} />
       </MemoryRouter>,
     );
-    // Wait for both async fetches to settle, then assert no card.
-    await new Promise((r) => setTimeout(r, 30));
-    expect(container.firstChild).toBeNull();
+    await waitFor(() => expect(container.firstChild).toBeNull());
   });
 
   it("returns null when capability active but only 1 quarter has both income + balance data", async () => {
@@ -246,7 +244,6 @@ describe("FundamentalsPane", () => {
         <FundamentalsPane summary={makeSummary(true)} />
       </MemoryRouter>,
     );
-    await new Promise((r) => setTimeout(r, 30));
-    expect(container.firstChild).toBeNull();
+    await waitFor(() => expect(container.firstChild).toBeNull());
   });
 });
