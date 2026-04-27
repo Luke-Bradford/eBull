@@ -9,12 +9,18 @@
  *          linear regression line + range channel toggles
  *          (URL: `?trend=regression,channel`).
  * Phase 4: raw OHLCV table + CSV export (URL: `?view=raw`).
+ * Phase 5 (#601): range table flipped to 1D/5D/1M/3M/6M/YTD/1Y/5Y/MAX.
+ *          Sub-day ranges hit the live intraday endpoint; longer
+ *          ranges read `price_daily`. Compare overlays are disabled
+ *          on intraday ranges — fanning out N intraday fetches per
+ *          chart open would burn rate budget without analytical
+ *          payoff.
  */
 import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
-import { fetchInstrumentCandles, fetchInstrumentSummary } from "@/api/instruments";
-import type { CandleBar, CandleRange, InstrumentCandles, InstrumentSummary } from "@/api/types";
+import { fetchInstrumentSummary } from "@/api/instruments";
+import type { ChartRange, InstrumentSummary } from "@/api/types";
 import {
   ChartWorkspaceCanvas,
   INDICATOR_IDS,
@@ -24,21 +30,39 @@ import {
 import { RawOhlcvTable } from "@/pages/components/RawOhlcvTable";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
+import {
+  fetchChartCandles,
+  isIntraday,
+  type NormalisedBar,
+  type NormalisedChartCandles,
+} from "@/lib/chartData";
 import { useAsync } from "@/lib/useAsync";
 
-const RANGES: { id: CandleRange; label: string }[] = [
-  { id: "1w", label: "1W" },
+const RANGES: { id: ChartRange; label: string }[] = [
+  { id: "1d", label: "1D" },
+  { id: "5d", label: "5D" },
   { id: "1m", label: "1M" },
   { id: "3m", label: "3M" },
   { id: "6m", label: "6M" },
+  { id: "ytd", label: "YTD" },
   { id: "1y", label: "1Y" },
   { id: "5y", label: "5Y" },
   { id: "max", label: "MAX" },
 ];
 
-const VALID_RANGES: readonly CandleRange[] = ["1w", "1m", "3m", "6m", "1y", "5y", "max"];
+const VALID_RANGES: readonly ChartRange[] = [
+  "1d",
+  "5d",
+  "1m",
+  "3m",
+  "6m",
+  "ytd",
+  "1y",
+  "5y",
+  "max",
+];
 
-const DEFAULT_RANGE: CandleRange = "1y";
+const DEFAULT_RANGE: ChartRange = "1y";
 
 const INDICATOR_LABELS: Record<IndicatorId, string> = {
   sma20: "SMA 20",
@@ -65,30 +89,18 @@ function parseNum(v: string | null | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function dateToTime(date: string): number | null {
-  const parts = date.split("-");
-  if (parts.length !== 3) return null;
-  const y = Number(parts[0]);
-  const m = Number(parts[1]);
-  const d = Number(parts[2]);
-  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
-  const ts = Date.UTC(y, m - 1, d);
-  if (!Number.isFinite(ts)) return null;
-  return ts / 1000;
-}
-
 export function ChartPage(): JSX.Element {
   const { symbol = "" } = useParams<{ symbol: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Range param
   const rawRange = searchParams.get("range");
-  const range: CandleRange = VALID_RANGES.includes(rawRange as CandleRange)
-    ? (rawRange as CandleRange)
+  const range: ChartRange = VALID_RANGES.includes(rawRange as ChartRange)
+    ? (rawRange as ChartRange)
     : DEFAULT_RANGE;
 
   const setRange = useCallback(
-    (next: CandleRange) => {
+    (next: ChartRange) => {
       const params = new URLSearchParams(searchParams);
       if (next === DEFAULT_RANGE) {
         params.delete("range");
@@ -99,6 +111,8 @@ export function ChartPage(): JSX.Element {
     },
     [searchParams, setSearchParams],
   );
+
+  const intraday = isIntraday(range);
 
   // Indicator param — CSV of enabled indicator ids
   const indParam = searchParams.get("ind");
@@ -125,9 +139,12 @@ export function ChartPage(): JSX.Element {
     [searchParams, setSearchParams, enabledIndicators],
   );
 
-  // Compare param — CSV of compare symbols (max 3, uppercase, deduped)
+  // Compare param — CSV of compare symbols (max 3, uppercase, deduped).
+  // Disabled on intraday ranges — operator gets the persisted compare
+  // list back when they switch to a daily range.
   const compareParam = searchParams.get("compare");
   const compareSymbols: string[] = (() => {
+    if (intraday) return [];
     if (compareParam === null || compareParam.length === 0) return [];
     const seen = new Set<string>();
     const out: string[] = [];
@@ -231,19 +248,19 @@ export function ChartPage(): JSX.Element {
     [handleCompareSubmit],
   );
 
-  // Primary candle fetch.
+  // Primary candle fetch via the unified dispatch.
   const summaryAsync = useAsync<InstrumentSummary>(
     () => fetchInstrumentSummary(symbol),
     [symbol],
   );
-  const candlesAsync = useAsync<InstrumentCandles>(
-    () => fetchInstrumentCandles(symbol, range),
+  const candlesAsync = useAsync<NormalisedChartCandles>(
+    () => fetchChartCandles(symbol, range),
     [symbol, range],
   );
 
   // Compare candle fetches: parallel, keyed on [range, ...compareSymbols].
   // We use a single useEffect + useState<Map> to manage compare fetches.
-  const [compareData, setCompareData] = useState<Map<string, CandleBar[]>>(new Map());
+  const [compareData, setCompareData] = useState<Map<string, NormalisedBar[]>>(new Map());
   // Symbols whose fetch failed — shown with an error chip.
   const [compareErrors, setCompareErrors] = useState<string[]>([]);
   // Track the set of symbols + range for which we've started fetching.
@@ -267,10 +284,10 @@ export function ChartPage(): JSX.Element {
 
     let cancelled = false;
     void Promise.allSettled(
-      compareSymbols.map((sym) => fetchInstrumentCandles(sym, range)),
+      compareSymbols.map((sym) => fetchChartCandles(sym, range)),
     ).then((results) => {
       if (cancelled) return;
-      const m = new Map<string, CandleBar[]>();
+      const m = new Map<string, NormalisedBar[]>();
       const failures: string[] = [];
       results.forEach((r, i) => {
         const sym = compareSymbols[i]!;
@@ -308,8 +325,7 @@ export function ChartPage(): JSX.Element {
         parseNum(r.open) !== null &&
         parseNum(r.high) !== null &&
         parseNum(r.low) !== null &&
-        parseNum(r.close) !== null &&
-        dateToTime(r.date) !== null,
+        parseNum(r.close) !== null,
     ).length >= 2;
 
   return (
@@ -342,7 +358,7 @@ export function ChartPage(): JSX.Element {
 
       {/* Controls: range picker + view toggle + chart-only controls */}
       <div className="flex flex-wrap items-center gap-3">
-        <div className="flex gap-1">
+        <div className="flex flex-wrap gap-1">
           {RANGES.map((r) => (
             <button
               key={r.id}
@@ -441,8 +457,10 @@ export function ChartPage(): JSX.Element {
         )}
       </div>
 
-      {/* Chart-only: compare row */}
-      {view === "chart" && (
+      {/* Chart-only: compare row. Hidden on intraday ranges — fanning
+          out N intraday fetches per chart open would burn external
+          quota without analytical payoff at sub-day timeframes. */}
+      {view === "chart" && !intraday && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[11px] uppercase tracking-wider text-slate-500">Compare</span>
           {compareSymbols.map((sym) => {
@@ -507,7 +525,11 @@ export function ChartPage(): JSX.Element {
           <div className="p-4">
             <EmptyState
               title="No price data"
-              description="No candles in the local price_daily store for this range."
+              description={
+                intraday
+                  ? "No intraday bars from the provider for this range."
+                  : "No candles in the local price_daily store for this range."
+              }
             />
           </div>
         ) : null}
@@ -519,11 +541,12 @@ export function ChartPage(): JSX.Element {
             compares={compareSeries}
             showRegression={enabledTrends.includes("regression")}
             showChannel={enabledTrends.includes("channel")}
+            intraday={intraday}
             containerClassName="h-[70vh] w-full"
           />
         ) : null}
         {view === "raw" && !effectivelyLoading && candlesAsync.error === null && dataMatchesRange ? (
-          <RawOhlcvTable rows={rows ?? []} symbol={symbol} range={range} />
+          <RawOhlcvTable rows={rows ?? []} symbol={symbol} range={range} intraday={intraday} />
         ) : null}
       </div>
     </div>

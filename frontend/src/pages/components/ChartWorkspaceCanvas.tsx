@@ -22,7 +22,7 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 
-import type { CandleBar } from "@/api/types";
+import type { NormalisedBar } from "@/lib/chartData";
 import { chartTheme } from "@/lib/chartTheme";
 
 export type IndicatorId = "sma20" | "sma50" | "ema20" | "ema50";
@@ -45,7 +45,7 @@ export const COMPARE_COLORS: readonly string[] = chartTheme.compare;
 
 export interface CompareSeries {
   readonly symbol: string;
-  readonly rows: CandleBar[];
+  readonly rows: ReadonlyArray<NormalisedBar>;
 }
 
 interface NumericBar {
@@ -80,16 +80,39 @@ function parseNum(v: string | null | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function dateToTime(date: string): UTCTimestamp | null {
-  const parts = date.split("-");
-  if (parts.length !== 3) return null;
-  const y = Number(parts[0]);
-  const m = Number(parts[1]);
-  const d = Number(parts[2]);
-  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
-  const ts = Date.UTC(y, m - 1, d);
-  if (!Number.isFinite(ts)) return null;
-  return (ts / 1000) as UTCTimestamp;
+function formatHoverLabel(epochSeconds: number, intraday: boolean): string {
+  const d = new Date(epochSeconds * 1000);
+  const date = d.toISOString().slice(0, 10);
+  if (!intraday) return date;
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${date} ${hh}:${mm}Z`;
+}
+
+const _MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+/**
+ * Adaptive tick-mark formatter — uses lightweight-charts' tickMarkType
+ * to render date markers at day/month/year boundaries and time within
+ * a day. See PriceChart.tsx for the same formatter and rationale.
+ */
+function tickFormatter(time: number, tickMarkType: number): string {
+  const d = new Date(time * 1000);
+  switch (tickMarkType) {
+    case 0:
+      return String(d.getUTCFullYear());
+    case 1:
+      return _MONTH_ABBR[d.getUTCMonth()] ?? "";
+    case 2:
+      return `${_MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCDate()}`;
+    case 3:
+    case 4:
+    default: {
+      const hh = String(d.getUTCHours()).padStart(2, "0");
+      const mm = String(d.getUTCMinutes()).padStart(2, "0");
+      return `${hh}:${mm}`;
+    }
+  }
 }
 
 // Pure functions — exported for unit testing.
@@ -179,12 +202,14 @@ function computeIndicator(id: IndicatorId, closes: number[]): Array<number | nul
 }
 
 export interface ChartWorkspaceCanvasProps {
-  readonly rows: CandleBar[];
+  readonly rows: ReadonlyArray<NormalisedBar>;
   readonly symbol: string;
   readonly indicators: ReadonlyArray<IndicatorId>;
   readonly compares?: ReadonlyArray<CompareSeries>;
   readonly showRegression?: boolean;
   readonly showChannel?: boolean;
+  /** Show time on the x-axis (intraday data). */
+  readonly intraday?: boolean;
   readonly containerClassName?: string;
 }
 
@@ -195,6 +220,7 @@ export function ChartWorkspaceCanvas({
   compares = [],
   showRegression = false,
   showChannel = false,
+  intraday = false,
   containerClassName,
 }: ChartWorkspaceCanvasProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -217,9 +243,26 @@ export function ChartWorkspaceCanvas({
   // truth so the tooltip and the LineSeries always agree on color even
   // after add/remove cycles change Map insertion order.
   const compareColorRef = useRef<Map<string, string>>(new Map());
+  // Stable ref so the crosshair handler (subscribed once at mount)
+  // sees the current intraday flag without re-subscribing every time
+  // the prop changes.
+  const intradayRef = useRef<boolean>(intraday);
   const [hover, setHover] = useState<RichHoverState | null>(null);
 
   const compareMode = compares.length > 0;
+
+  // Keep intraday ref + time-axis options in sync with the prop.
+  useEffect(() => {
+    intradayRef.current = intraday;
+    const chart = chartRef.current;
+    if (chart) {
+      chart.timeScale().applyOptions({
+        timeVisible: intraday,
+        secondsVisible: false,
+        tickMarkFormatter: tickFormatter,
+      } as unknown as Parameters<ReturnType<IChartApi["timeScale"]>["applyOptions"]>[0]);
+    }
+  }, [intraday]);
 
   // One-shot chart construction — mirrors ChartCanvas setup.
   useEffect(() => {
@@ -300,7 +343,7 @@ export function ChartWorkspaceCanvas({
             color: compareColorRef.current.get(sym) ?? chartTheme.compare[0],
             value: norm[idx] ?? null,
           }));
-        const date = new Date(time * 1000).toISOString().slice(0, 10);
+        const date = formatHoverLabel(time, intradayRef.current);
         setHover({
           date,
           mode: "compare",
@@ -327,7 +370,10 @@ export function ChartWorkspaceCanvas({
         indicatorRows.push({ id, label: SMA_LABELS[id]!, value: v });
       }
 
-      const date = new Date(time * 1000).toISOString().slice(0, 10);
+      // Use the same date formatter as the compare path so intraday
+      // hovers show HH:MM (the date-only branch above used to drop
+      // the time component — Codex flagged this).
+      const date = formatHoverLabel(time, intradayRef.current);
       setHover({
         date,
         mode: "ohlcv",
@@ -369,15 +415,23 @@ export function ChartWorkspaceCanvas({
     if (!candle || !volume || !chart || !primaryLine) return;
 
     const clean: NumericBar[] = rows.flatMap((r) => {
-      const time = dateToTime(r.date);
       const open = parseNum(r.open);
       const high = parseNum(r.high);
       const low = parseNum(r.low);
       const close = parseNum(r.close);
-      if (time === null || open === null || high === null || low === null || close === null) {
+      if (open === null || high === null || low === null || close === null) {
         return [];
       }
-      return [{ time, open, high, low, close, volume: parseNum(r.volume) ?? 0 }];
+      return [
+        {
+          time: r.time as UTCTimestamp,
+          open,
+          high,
+          low,
+          close,
+          volume: parseNum(r.volume) ?? 0,
+        },
+      ];
     });
     cleanRowsRef.current = clean;
 
@@ -453,10 +507,18 @@ export function ChartWorkspaceCanvas({
       compareColorRef.current.set(cs.symbol, color);
 
       const compareClean: NumericBar[] = cs.rows.flatMap((r) => {
-        const time = dateToTime(r.date);
         const close = parseNum(r.close);
-        if (time === null || close === null) return [];
-        return [{ time, open: close, high: close, low: close, close, volume: 0 }];
+        if (close === null) return [];
+        return [
+          {
+            time: r.time as UTCTimestamp,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 0,
+          },
+        ];
       });
 
       // Build a time→close map so we can align with the primary series times.
@@ -647,6 +709,21 @@ export function ChartWorkspaceCanvas({
   );
 }
 
+function humanizeVolume(v: number): string {
+  if (!Number.isFinite(v) || v === 0) return "0";
+  const abs = Math.abs(v);
+  if (abs >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
+  if (abs >= 1e3) return `${(v / 1e3).toFixed(2)}K`;
+  return v.toLocaleString();
+}
+
+/**
+ * TradingView-style status-line tooltip — single inline row at top-left,
+ * no shadow box. Replaces the prior multi-row floating box that covered
+ * the price-axis on the workspace chart. Indicator readouts wrap onto
+ * a second row when present.
+ */
 function RichTooltip({ hover }: { hover: RichHoverState }): JSX.Element {
   const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 2 });
   const fmtPct = (v: number | null | undefined) => {
@@ -655,73 +732,74 @@ function RichTooltip({ hover }: { hover: RichHoverState }): JSX.Element {
   };
 
   if (hover.mode === "compare") {
+    const primaryClass =
+      (hover.primaryPct ?? 0) >= 0 ? "text-emerald-600" : "text-red-600";
     return (
-      <div className="absolute right-2 top-2 z-10 min-w-[180px] rounded bg-white/95 px-3 py-2 text-xs shadow-md">
-        <div className="text-slate-500">{hover.date}</div>
-        <dl className="mt-1 space-y-0.5 tabular-nums">
-          <div className="flex justify-between gap-3">
-            <span className="font-medium text-slate-800">{hover.primarySymbol}</span>
+      <div className="absolute left-2 top-2 z-10 flex flex-wrap items-baseline gap-x-2 text-[11px] tabular-nums leading-tight text-slate-700">
+        <span className="text-slate-500">{hover.date}</span>
+        <span className="text-slate-400">·</span>
+        <span className="font-medium text-slate-800">{hover.primarySymbol}</span>
+        <span className={primaryClass}>{fmtPct(hover.primaryPct)}</span>
+        {hover.comparePcts?.map((cp) => (
+          <span key={cp.symbol} className="flex items-baseline gap-1">
+            <span style={{ color: cp.color }} className="font-medium">
+              {cp.symbol}
+            </span>
             <span
               className={
-                (hover.primaryPct ?? 0) >= 0 ? "text-emerald-600" : "text-red-600"
+                cp.value !== null && cp.value >= 0 ? "text-emerald-600" : "text-red-600"
               }
             >
-              {fmtPct(hover.primaryPct)}
+              {fmtPct(cp.value)}
             </span>
-          </div>
-          {hover.comparePcts?.map((cp) => (
-            <div key={cp.symbol} className="flex justify-between gap-3">
-              <span style={{ color: cp.color }} className="font-medium">
-                {cp.symbol}
-              </span>
-              <span
-                className={cp.value !== null && cp.value >= 0 ? "text-emerald-600" : "text-red-600"}
-              >
-                {fmtPct(cp.value)}
-              </span>
-            </div>
-          ))}
-        </dl>
+          </span>
+        ))}
       </div>
     );
   }
 
-  // OHLCV mode
+  // OHLCV mode — single inline row, indicator chips wrap on overflow.
+  const deltaClass =
+    hover.changePct === null || hover.changePct === undefined
+      ? "text-slate-500"
+      : hover.changePct >= 0
+        ? "text-emerald-600"
+        : "text-red-600";
   return (
-    <div className="absolute right-2 top-2 z-10 min-w-[180px] rounded bg-white/95 px-3 py-2 text-xs shadow-md">
-      <div className="text-slate-500">{hover.date}</div>
-      <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 tabular-nums">
-        <dt className="text-slate-500">O</dt>
-        <dd>{fmt(hover.open ?? 0)}</dd>
-        <dt className="text-slate-500">H</dt>
-        <dd>{fmt(hover.high ?? 0)}</dd>
-        <dt className="text-slate-500">L</dt>
-        <dd>{fmt(hover.low ?? 0)}</dd>
-        <dt className="text-slate-500">C</dt>
-        <dd className="font-medium text-slate-800">{fmt(hover.close ?? 0)}</dd>
-        <dt className="text-slate-500">Vol</dt>
-        <dd>{fmt(hover.volume ?? 0)}</dd>
-        {hover.changePct !== null && hover.changePct !== undefined ? (
-          <>
-            <dt className="text-slate-500">Δ%</dt>
-            <dd className={hover.changePct >= 0 ? "text-emerald-600" : "text-red-600"}>
-              {hover.changePct >= 0 ? "+" : ""}
-              {hover.changePct.toFixed(2)}%
-            </dd>
-          </>
-        ) : null}
-      </dl>
+    <div className="absolute left-2 top-2 z-10 flex flex-wrap items-baseline gap-x-2 text-[11px] tabular-nums leading-tight text-slate-700">
+      <span className="text-slate-500">{hover.date}</span>
+      <span className="text-slate-400">·</span>
+      <span>
+        <span className="text-slate-400">O</span> {fmt(hover.open ?? 0)}
+      </span>
+      <span>
+        <span className="text-slate-400">H</span> {fmt(hover.high ?? 0)}
+      </span>
+      <span>
+        <span className="text-slate-400">L</span> {fmt(hover.low ?? 0)}
+      </span>
+      <span className="font-medium text-slate-800">
+        <span className="font-normal text-slate-400">C</span> {fmt(hover.close ?? 0)}
+      </span>
+      <span>
+        <span className="text-slate-400">V</span> {humanizeVolume(hover.volume ?? 0)}
+      </span>
+      {hover.changePct !== null && hover.changePct !== undefined ? (
+        <span className={deltaClass}>
+          {hover.changePct >= 0 ? "+" : ""}
+          {hover.changePct.toFixed(2)}%
+        </span>
+      ) : null}
       {hover.indicators !== undefined && hover.indicators.length > 0 ? (
-        <div className="mt-1 border-t border-slate-100 pt-1">
+        <>
+          <span className="text-slate-400">·</span>
           {hover.indicators.map((row) => (
-            <div key={row.id} className="flex justify-between text-[11px]">
-              <span className="text-slate-500">{row.label}</span>
-              <span className="tabular-nums" style={{ color: SMA_COLORS[row.id] }}>
-                {fmt(row.value)}
-              </span>
-            </div>
+            <span key={row.id} className="flex items-baseline gap-1">
+              <span className="text-slate-400">{row.label}</span>
+              <span style={{ color: SMA_COLORS[row.id] }}>{fmt(row.value)}</span>
+            </span>
           ))}
-        </div>
+        </>
       ) : null}
     </div>
   );

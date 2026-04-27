@@ -1,12 +1,15 @@
 import { useState, type JSX } from "react";
 
-import type { CandleBar, CandleRange } from "@/api/types";
+import type { ChartRange } from "@/api/types";
 import { EmptyState } from "@/components/states/EmptyState";
+import type { NormalisedBar } from "@/lib/chartData";
 
 export interface RawOhlcvTableProps {
-  readonly rows: ReadonlyArray<CandleBar>;
+  readonly rows: ReadonlyArray<NormalisedBar>;
   readonly symbol: string;
-  readonly range: CandleRange;
+  readonly range: ChartRange;
+  /** Show full ISO timestamp in the table when bars are intraday. */
+  readonly intraday?: boolean;
 }
 
 type SortDir = "asc" | "desc";
@@ -18,12 +21,26 @@ function formatNum(v: string | null | undefined): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
-function downloadCsv(rows: ReadonlyArray<CandleBar>, symbol: string, range: CandleRange): void {
-  const header = "date,open,high,low,close,volume\n";
+function formatTime(epochSeconds: number, intraday: boolean): string {
+  const d = new Date(epochSeconds * 1000);
+  const date = d.toISOString().slice(0, 10);
+  if (!intraday) return date;
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${date} ${hh}:${mm}Z`;
+}
+
+function downloadCsv(
+  rows: ReadonlyArray<NormalisedBar>,
+  symbol: string,
+  range: ChartRange,
+  intraday: boolean,
+): void {
+  const header = `${intraday ? "timestamp" : "date"},open,high,low,close,volume\n`;
   const body = rows
     .map(
       (r) =>
-        `${r.date},${r.open ?? ""},${r.high ?? ""},${r.low ?? ""},${r.close ?? ""},${r.volume ?? ""}`,
+        `${formatTime(r.time, intraday)},${r.open ?? ""},${r.high ?? ""},${r.low ?? ""},${r.close ?? ""},${r.volume ?? ""}`,
     )
     .join("\n");
   const csv = header + body;
@@ -38,7 +55,12 @@ function downloadCsv(rows: ReadonlyArray<CandleBar>, symbol: string, range: Cand
   URL.revokeObjectURL(url);
 }
 
-export function RawOhlcvTable({ rows, symbol, range }: RawOhlcvTableProps): JSX.Element {
+export function RawOhlcvTable({
+  rows,
+  symbol,
+  range,
+  intraday = false,
+}: RawOhlcvTableProps): JSX.Element {
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
   if (rows.length === 0) {
@@ -46,15 +68,17 @@ export function RawOhlcvTable({ rows, symbol, range }: RawOhlcvTableProps): JSX.
       <div className="p-4">
         <EmptyState
           title="No raw data"
-          description="No candle rows in the local price_daily store for this range."
+          description={
+            intraday
+              ? "No intraday bars from the provider for this range."
+              : "No candle rows in the local price_daily store for this range."
+          }
         />
       </div>
     );
   }
 
-  const sorted = [...rows].sort((a, b) =>
-    sortDir === "desc" ? b.date.localeCompare(a.date) : a.date.localeCompare(b.date),
-  );
+  const sorted = [...rows].sort((a, b) => (sortDir === "desc" ? b.time - a.time : a.time - b.time));
 
   return (
     <div className="p-4">
@@ -68,10 +92,8 @@ export function RawOhlcvTable({ rows, symbol, range }: RawOhlcvTableProps): JSX.
             // Always export in chronological order regardless of the
             // UI sort toggle — downstream tools (Excel, pandas, etc.)
             // expect time-series ascending.
-            const chronological = [...rows].sort((a, b) =>
-              a.date.localeCompare(b.date),
-            );
-            downloadCsv(chronological, symbol, range);
+            const chronological = [...rows].sort((a, b) => a.time - b.time);
+            downloadCsv(chronological, symbol, range, intraday);
           }}
           className="rounded bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700"
           data-testid="csv-download"
@@ -90,7 +112,7 @@ export function RawOhlcvTable({ rows, symbol, range }: RawOhlcvTableProps): JSX.
                   className="hover:underline"
                   data-testid="sort-date"
                 >
-                  Date {sortDir === "desc" ? "↓" : "↑"}
+                  {intraday ? "Time" : "Date"} {sortDir === "desc" ? "↓" : "↑"}
                 </button>
               </th>
               <th className="px-2 py-1 text-right">Open</th>
@@ -102,8 +124,8 @@ export function RawOhlcvTable({ rows, symbol, range }: RawOhlcvTableProps): JSX.
           </thead>
           <tbody>
             {sorted.map((r) => (
-              <tr key={r.date} className="border-b border-slate-100 last:border-0">
-                <td className="px-2 py-1 tabular-nums">{r.date}</td>
+              <tr key={r.time} className="border-b border-slate-100 last:border-0">
+                <td className="px-2 py-1 tabular-nums">{formatTime(r.time, intraday)}</td>
                 <td className="px-2 py-1 text-right tabular-nums">{formatNum(r.open)}</td>
                 <td className="px-2 py-1 text-right tabular-nums">{formatNum(r.high)}</td>
                 <td className="px-2 py-1 text-right tabular-nums">{formatNum(r.low)}</td>

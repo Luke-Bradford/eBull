@@ -4,8 +4,10 @@ import type {
   InstrumentCandles,
   InstrumentDetail,
   InstrumentFinancials,
+  InstrumentIntradayCandles,
   InstrumentListResponse,
   InstrumentSummary,
+  IntradayInterval,
 } from "@/api/types";
 
 export interface InstrumentsQuery {
@@ -387,5 +389,19 @@ export function fetchInstrumentCandles(
   const params = new URLSearchParams({ range });
   return apiFetch<InstrumentCandles>(
     `/instruments/${encodeURIComponent(symbol)}/candles?${params.toString()}`,
+  );
+}
+
+export function fetchInstrumentIntradayCandles(
+  symbol: string,
+  interval: IntradayInterval,
+  count: number,
+): Promise<InstrumentIntradayCandles> {
+  const params = new URLSearchParams({
+    interval,
+    count: String(count),
+  });
+  return apiFetch<InstrumentIntradayCandles>(
+    `/instruments/${encodeURIComponent(symbol)}/intraday-candles?${params.toString()}`,
   );
 }
