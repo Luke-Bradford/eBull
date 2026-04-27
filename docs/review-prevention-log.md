@@ -999,3 +999,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `DensityGrid` retained `overflow-auto` on the dividends+insider combined card (intentional scroll-bound), but the test asserting `.overflow-auto` count only rendered the default fixture where the combined card is hidden (`capabilities:{}`). The test passed with count=0, giving a future refactorer false confidence that *all* panes are free of overflow-auto.
 - Prevention: When a CSS class is conditionally applied (present in one render path, absent in another), add a test variant for the branch where the class IS present and assert the exact count. This regression-guards future refactors that remove the class from that branch.
 - Enforced in: this prevention log; PR #572 adds the active-branch variant asserting count=1.
+
+---
+
+### Navigation link outside data guard in async pane
+
+- First seen in: #573.
+- Symptom: `FundamentalsPane` rendered a "View statements →" `<Link>` as a sibling of the loading/error/empty conditional block inside `<Section>`, so the link was visible during skeleton and error states before data was confirmed present.
+- Prevention: Navigation links (and any affordance that implies data is loaded) inside `useAsync`-driven panes must live inside the resolved-data branch, not as unconditional siblings of the loading/error/empty ternary. At self-review: grep for `<Link` in any component that also has `useAsync`, and confirm each link is inside the `state.data !== null` branch or the resolved conditional arm.
+- Enforced in: this prevention log; PR #573 fix moves the "View statements" footer into the data-resolved `<>...</>` fragment.
