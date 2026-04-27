@@ -18,10 +18,10 @@ import type {
   InstrumentSecProfile,
 } from "@/api/instruments";
 import {
-  Section,
   SectionError,
   SectionSkeleton,
 } from "@/components/dashboard/Section";
+import { Pane } from "@/components/instrument/Pane";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback } from "react";
@@ -41,7 +41,7 @@ export function SecProfilePanel({ symbol }: SecProfilePanelProps) {
   );
 
   return (
-    <Section title="Company profile (SEC)">
+    <Pane title="Company profile" source={{ providers: ["sec_edgar"] }}>
       {state.loading ? (
         <SectionSkeleton rows={4} />
       ) : state.error !== null ? (
@@ -54,7 +54,7 @@ export function SecProfilePanel({ symbol }: SecProfilePanelProps) {
       ) : (
         <Body profile={state.data} headcount={headcount.data} />
       )}
-    </Section>
+    </Pane>
   );
 }
 
