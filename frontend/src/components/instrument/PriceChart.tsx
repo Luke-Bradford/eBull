@@ -193,13 +193,17 @@ export function PriceChart({
   );
 }
 
-function ChartCanvas({
-  rows,
-  symbol,
-}: {
+export interface ChartCanvasProps {
   rows: CandleBar[];
   symbol: string;
-}): JSX.Element {
+  containerClassName?: string;
+}
+
+export function ChartCanvas({
+  rows,
+  symbol,
+  containerClassName,
+}: ChartCanvasProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -357,7 +361,7 @@ function ChartCanvas({
       <div
         ref={containerRef}
         data-testid={`price-chart-${symbol}`}
-        className="h-[340px] w-full"
+        className={containerClassName ?? "h-[340px] w-full"}
       />
     </div>
   );

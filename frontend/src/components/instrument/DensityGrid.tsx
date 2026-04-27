@@ -18,6 +18,7 @@
 
 import type { InstrumentSummary, ThesisDetail } from "@/api/types";
 import { activeProviders } from "@/lib/capabilityProviders";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { BusinessSectionsTeaser } from "@/components/instrument/BusinessSectionsTeaser";
 import { DividendsPanel } from "@/components/instrument/DividendsPanel";
 import { FilingsPane } from "@/components/instrument/FilingsPane";
@@ -53,11 +54,27 @@ export function DensityGrid({
   const insiderActive = activeProviders(cap.insider ?? EMPTY_CELL).length > 0;
   const dividendProviders = activeProviders(cap.dividends ?? EMPTY_CELL);
   const hasNarrative = summary.has_sec_cik;
+  const navigate = useNavigate();
+  const [overviewParams] = useSearchParams();
 
-  // PriceChart isn't yet a self-Pane'd component — wrap it locally.
-  // #576 will own the chart route; until then no onExpand.
   const ChartPane = (
-    <Pane title="Price chart">
+    <Pane
+      title="Price chart"
+      onExpand={() => {
+        // Preserve the operator's currently-selected overview range when
+        // expanding to the full chart workspace. PriceChart syncs its
+        // range to ?chart=<id> on the instrument page; ChartPage reads
+        // ?range=<id>. Translate the param name across the boundary so
+        // a non-default range survives the route change.
+        const overviewRange = overviewParams.get("chart");
+        const target = `/instrument/${encodeURIComponent(symbol)}/chart`;
+        const url =
+          overviewRange !== null && overviewRange !== ""
+            ? `${target}?range=${encodeURIComponent(overviewRange)}`
+            : target;
+        navigate(url);
+      }}
+    >
       <PriceChart symbol={symbol} />
     </Pane>
   );
