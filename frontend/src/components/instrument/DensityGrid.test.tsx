@@ -29,6 +29,9 @@ vi.mock("@/components/instrument/DividendsPanel", () => ({
 vi.mock("@/components/instrument/InsiderActivityPanel", () => ({
   InsiderActivityPanel: () => <div>Insider</div>,
 }));
+vi.mock("@/components/instrument/FundamentalsPane", () => ({
+  FundamentalsPane: () => <div>Fundamentals stub</div>,
+}));
 
 const summary = {
   instrument_id: 1,
@@ -118,6 +121,61 @@ describe("DensityGrid", () => {
     );
     const overflowAuto = container.querySelectorAll(".overflow-auto");
     expect(overflowAuto.length).toBe(0);
+  });
+
+  it("renders FundamentalsPane only when sec_xbrl fundamentals capability is active", () => {
+    const summaryActive = {
+      instrument_id: 1,
+      has_sec_cik: true,
+      identity: {
+        symbol: "GME",
+        display_name: "GameStop",
+        market_cap: "1000000",
+        sector: null,
+      },
+      capabilities: {
+        fundamentals: {
+          providers: ["sec_xbrl"],
+          data_present: { sec_xbrl: true },
+        },
+      },
+      key_stats: null,
+    } as never;
+    const { rerender } = render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={summaryActive}
+          keyStatsBlock={<div>K</div>}
+          thesisBlock={<div>T</div>}
+          newsBlock={<div>N</div>}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("Fundamentals stub")).toBeInTheDocument();
+
+    const summaryInactive = {
+      instrument_id: 1,
+      has_sec_cik: true,
+      identity: {
+        symbol: "GME",
+        display_name: "GameStop",
+        market_cap: "1000000",
+        sector: null,
+      },
+      capabilities: {},
+      key_stats: null,
+    } as never;
+    rerender(
+      <MemoryRouter>
+        <DensityGrid
+          summary={summaryInactive}
+          keyStatsBlock={<div>K</div>}
+          thesisBlock={<div>T</div>}
+          newsBlock={<div>N</div>}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByText("Fundamentals stub")).toBeNull();
   });
 
   it("combined dividends/insider card uses exactly one overflow-auto scroll-bound (Phase D regression guard)", () => {

@@ -19,6 +19,7 @@
 import { BusinessSectionsTeaser } from "@/components/instrument/BusinessSectionsTeaser";
 import { DividendsPanel } from "@/components/instrument/DividendsPanel";
 import { FilingsPane } from "@/components/instrument/FilingsPane";
+import { FundamentalsPane } from "@/components/instrument/FundamentalsPane";
 import { InsiderActivityPanel } from "@/components/instrument/InsiderActivityPanel";
 import { PriceChart } from "@/components/instrument/PriceChart";
 import { SecProfilePanel } from "@/components/instrument/SecProfilePanel";
@@ -62,6 +63,14 @@ export function DensityGrid({
         <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
           {thesisBlock}
         </div>
+
+        {/* Fundamentals pane: full-width row, gated on sec_xbrl capability */}
+        {summary.capabilities["fundamentals"]?.providers.includes("sec_xbrl") &&
+         summary.capabilities["fundamentals"].data_present["sec_xbrl"] === true ? (
+          <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm lg:col-span-3">
+            <FundamentalsPane summary={summary} />
+          </div>
+        ) : null}
 
         {/* Right column row 2 */}
         <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
