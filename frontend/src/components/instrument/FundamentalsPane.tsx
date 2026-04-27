@@ -73,7 +73,9 @@ function joinPeriods(
 
 function formatLatest(values: ReadonlyArray<number>): string {
   if (values.length === 0) return "—";
-  const v = values[values.length - 1];
+  // length > 0 is guaranteed above; cast away the possible-undefined
+  // that TypeScript infers from array index access in strict mode.
+  const v = values[values.length - 1] as number;
   if (Math.abs(v) >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
   if (Math.abs(v) >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
   if (Math.abs(v) >= 1e3) return `${(v / 1e3).toFixed(2)}K`;
