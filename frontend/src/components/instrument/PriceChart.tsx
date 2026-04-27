@@ -32,6 +32,7 @@ import { fetchInstrumentCandles } from "@/api/instruments";
 import type { CandleBar, CandleRange, InstrumentCandles } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
+import { chartTheme } from "@/lib/chartTheme";
 import { useAsync } from "@/lib/useAsync";
 
 const RANGES: { id: CandleRange; label: string }[] = [
@@ -220,36 +221,36 @@ export function ChartCanvas({
     const chart = createChart(container, {
       autoSize: true,
       layout: {
-        background: { color: "#ffffff" },
-        textColor: "#64748b",
+        background: { color: chartTheme.bg },
+        textColor: chartTheme.textSecondary,
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: "#f1f5f9" },
-        horzLines: { color: "#f1f5f9" },
+        vertLines: { color: chartTheme.gridLine },
+        horzLines: { color: chartTheme.gridLine },
       },
       rightPriceScale: {
-        borderColor: "#e2e8f0",
+        borderColor: chartTheme.borderColor,
         // Leave room at the bottom for the volume overlay — matches
         // the TradingView default chart feel.
         scaleMargins: { top: 0.08, bottom: 0.3 },
       },
       timeScale: {
-        borderColor: "#e2e8f0",
+        borderColor: chartTheme.borderColor,
         timeVisible: false,
         secondsVisible: false,
       },
       crosshair: {
-        vertLine: { width: 1, color: "#94a3b8", style: 3 },
-        horzLine: { width: 1, color: "#94a3b8", style: 3 },
+        vertLine: { width: 1, color: chartTheme.crosshair, style: 3 },
+        horzLine: { width: 1, color: chartTheme.crosshair, style: 3 },
       },
     });
 
     const candle = chart.addSeries(CandlestickSeries, {
-      upColor: "#10b981",
-      downColor: "#ef4444",
-      wickUpColor: "#10b981",
-      wickDownColor: "#ef4444",
+      upColor: chartTheme.up,
+      downColor: chartTheme.down,
+      wickUpColor: chartTheme.up,
+      wickDownColor: chartTheme.down,
       borderVisible: false,
     });
 
@@ -338,7 +339,7 @@ export function ChartCanvas({
         return {
           time: b.time as Time,
           value: b.volume,
-          color: b.close >= prev ? "rgba(16,185,129,0.4)" : "rgba(239,68,68,0.4)",
+          color: b.close >= prev ? chartTheme.volumeUpAlpha : chartTheme.volumeDownAlpha,
         };
       }),
     );
