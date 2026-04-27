@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { DensityGrid } from "@/components/instrument/DensityGrid";
+import type { InstrumentSummary } from "@/api/types";
 
 // Mock child components that make their own API calls so the DensityGrid
 // unit test stays isolated.
@@ -15,13 +16,7 @@ vi.mock("@/components/instrument/BusinessSectionsTeaser", () => ({
   BusinessSectionsTeaser: () => <div>Company narrative (SEC 10-K Item 1)</div>,
 }));
 vi.mock("@/components/instrument/FilingsPane", () => ({
-  FilingsPane: () => (
-    <section>
-      <header>
-        <h2>Recent filings</h2>
-      </header>
-    </section>
-  ),
+  FilingsPane: () => <div>Recent filings</div>,
 }));
 vi.mock("@/components/instrument/DividendsPanel", () => ({
   DividendsPanel: () => <div>Dividends</div>,
@@ -30,221 +25,160 @@ vi.mock("@/components/instrument/InsiderActivitySummary", () => ({
   InsiderActivitySummary: () => <div>Insider summary</div>,
 }));
 vi.mock("@/components/instrument/FundamentalsPane", () => ({
-  FundamentalsPane: () => <div>Fundamentals stub</div>,
+  FundamentalsPane: () => <div>Fundamentals</div>,
+}));
+vi.mock("@/components/instrument/KeyStatsPane", () => ({
+  KeyStatsPane: () => <div>Key statistics</div>,
+}));
+vi.mock("@/components/instrument/ThesisPane", () => ({
+  ThesisPane: ({ thesis, errored }: { thesis: unknown; errored: boolean }) =>
+    thesis === null && !errored ? null : <div>Thesis pane</div>,
+}));
+vi.mock("@/components/instrument/RecentNewsPane", () => ({
+  RecentNewsPane: () => <div>Recent news</div>,
 }));
 
-const summary = {
-  instrument_id: 1,
-  has_sec_cik: true,
-  identity: {
-    symbol: "GME",
-    display_name: "GameStop",
-    market_cap: "1000000",
-    sector: null,
-  },
-  capabilities: {},
-  key_stats: null,
-} as never;
+const baseIdentity = {
+  symbol: "GME",
+  display_name: "GameStop",
+  market_cap: "1000000000",
+  sector: null,
+};
 
-describe("DensityGrid", () => {
-  it("renders the chart stub, the slot blocks, and FilingsPane title", () => {
+function makeSummary(
+  capabilities: InstrumentSummary["capabilities"],
+  has_sec_cik: boolean = true,
+): InstrumentSummary {
+  return {
+    instrument_id: 1,
+    is_tradable: true,
+    coverage_tier: 1,
+    identity: baseIdentity,
+    price: null,
+    key_stats: null,
+    source: {},
+    has_sec_cik,
+    has_filings_coverage: false,
+    capabilities,
+  } as InstrumentSummary;
+}
+
+describe("DensityGrid profiles", () => {
+  it("full-sec profile: chart + key stats + sec profile + fundamentals + filings + insider rendered", () => {
     render(
       <MemoryRouter>
         <DensityGrid
-          summary={summary}
-          keyStatsBlock={<div>KEY STATS BLOCK</div>}
-          thesisBlock={<div>THESIS BLOCK</div>}
-          newsBlock={<div>NEWS BLOCK</div>}
+          summary={makeSummary({
+            fundamentals: { providers: ["sec_xbrl"], data_present: { sec_xbrl: true } },
+            filings: { providers: ["sec_edgar"], data_present: { sec_edgar: true } },
+            insider: { providers: ["sec_form4"], data_present: { sec_form4: true } },
+          })}
+          thesis={null}
+          thesisErrored={false}
         />
       </MemoryRouter>,
     );
     expect(screen.getByTestId("price-chart-stub")).toBeInTheDocument();
-    expect(screen.getByText("KEY STATS BLOCK")).toBeInTheDocument();
-    expect(screen.getByText("THESIS BLOCK")).toBeInTheDocument();
-    expect(screen.getByText("NEWS BLOCK")).toBeInTheDocument();
-    expect(screen.getByText("Recent filings")).toBeInTheDocument();
-  });
-
-  it("shows the SEC profile pane when has_sec_cik is true", () => {
-    render(
-      <MemoryRouter>
-        <DensityGrid
-          summary={summary}
-          keyStatsBlock={<div>KEY STATS BLOCK</div>}
-          thesisBlock={<div>THESIS BLOCK</div>}
-          newsBlock={<div>NEWS BLOCK</div>}
-        />
-      </MemoryRouter>,
-    );
+    expect(screen.getByText("Key statistics")).toBeInTheDocument();
     expect(screen.getByText("SEC Profile")).toBeInTheDocument();
+    expect(screen.getByText("Fundamentals")).toBeInTheDocument();
+    expect(screen.getByText(/Recent filings/)).toBeInTheDocument();
+    expect(screen.getByText(/Insider summary/)).toBeInTheDocument();
   });
 
-  it("shows 'No SEC coverage' fallback when has_sec_cik is false", () => {
-    const noSec = {
-      instrument_id: 1,
-      has_sec_cik: false,
-      identity: {
-        symbol: "GME",
-        display_name: "GameStop",
-        market_cap: "1000000",
-        sector: null,
-      },
-      capabilities: {},
-      key_stats: null,
-    } as never;
+  it("partial-filings profile: no fundamentals; filings full-width; insider+dividends share row when both active", () => {
     render(
       <MemoryRouter>
         <DensityGrid
-          summary={noSec}
-          keyStatsBlock={<div>KEY STATS BLOCK</div>}
-          thesisBlock={<div>THESIS BLOCK</div>}
-          newsBlock={<div>NEWS BLOCK</div>}
+          summary={makeSummary({
+            filings: { providers: ["companies_house"], data_present: { companies_house: true } },
+            insider: { providers: ["sec_form4"], data_present: { sec_form4: true } },
+            dividends: { providers: ["sec_dividend_summary"], data_present: { sec_dividend_summary: true } },
+          })}
+          thesis={null}
+          thesisErrored={false}
         />
       </MemoryRouter>,
     );
-    expect(screen.getByText("No SEC coverage")).toBeInTheDocument();
+    expect(screen.queryByText("Fundamentals")).not.toBeInTheDocument();
+    expect(screen.getByText(/Recent filings/)).toBeInTheDocument();
+    expect(screen.getByText(/Insider summary/)).toBeInTheDocument();
+    expect(screen.getByText(/Dividends/)).toBeInTheDocument();
   });
 
-  it("individual panes have no overflow-auto (content-driven, not scrollboxes)", () => {
-    // summary has capabilities:{} so the dividends+insider combined card
-    // (which retains overflow-auto + max-h as a scroll-bound until Phase D)
-    // is not rendered — this test covers only the standard pane set.
+  it("partial-filings without insider or dividends: row absent", () => {
+    render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={makeSummary({
+            filings: { providers: ["companies_house"], data_present: { companies_house: true } },
+          })}
+          thesis={null}
+          thesisErrored={false}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByText(/Insider summary/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Dividends/)).not.toBeInTheDocument();
+  });
+
+  it("minimal profile: no filings/fundamentals/insider/narrative panes", () => {
+    render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={makeSummary({}, false)}
+          thesis={null}
+          thesisErrored={false}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByText(/Recent filings/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Fundamentals")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Insider summary/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Company narrative/)).not.toBeInTheDocument();
+    expect(screen.getByText("Key statistics")).toBeInTheDocument();
+    expect(screen.getByTestId("price-chart-stub")).toBeInTheDocument();
+  });
+
+  it("thesis pane absent when thesis is null and not errored", () => {
+    render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={makeSummary({})}
+          thesis={null}
+          thesisErrored={false}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByText("Thesis pane")).not.toBeInTheDocument();
+  });
+
+  it("thesis pane present when thesis is a real object", () => {
+    render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={makeSummary({})}
+          thesis={{ thesis_id: 1 } as never}
+          thesisErrored={false}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("Thesis pane")).toBeInTheDocument();
+  });
+
+  it("no overflow-auto wrappers anywhere in the grid", () => {
     const { container } = render(
       <MemoryRouter>
         <DensityGrid
-          summary={summary}
-          keyStatsBlock={<div>KEY STATS BLOCK</div>}
-          thesisBlock={<div>THESIS BLOCK</div>}
-          newsBlock={<div>NEWS BLOCK</div>}
+          summary={makeSummary({
+            dividends: { providers: ["sec_dividend_summary"], data_present: { sec_dividend_summary: true } },
+            insider: { providers: ["sec_form4"], data_present: { sec_form4: true } },
+          })}
+          thesis={null}
+          thesisErrored={false}
         />
       </MemoryRouter>,
     );
-    const overflowAuto = container.querySelectorAll(".overflow-auto");
-    expect(overflowAuto.length).toBe(0);
-  });
-
-  it("renders FundamentalsPane only when sec_xbrl fundamentals capability is active", () => {
-    const summaryActive = {
-      instrument_id: 1,
-      has_sec_cik: true,
-      identity: {
-        symbol: "GME",
-        display_name: "GameStop",
-        market_cap: "1000000",
-        sector: null,
-      },
-      capabilities: {
-        fundamentals: {
-          providers: ["sec_xbrl"],
-          data_present: { sec_xbrl: true },
-        },
-      },
-      key_stats: null,
-    } as never;
-    const { rerender } = render(
-      <MemoryRouter>
-        <DensityGrid
-          summary={summaryActive}
-          keyStatsBlock={<div>K</div>}
-          thesisBlock={<div>T</div>}
-          newsBlock={<div>N</div>}
-        />
-      </MemoryRouter>,
-    );
-    expect(screen.getByText("Fundamentals stub")).toBeInTheDocument();
-
-    const summaryInactive = {
-      instrument_id: 1,
-      has_sec_cik: true,
-      identity: {
-        symbol: "GME",
-        display_name: "GameStop",
-        market_cap: "1000000",
-        sector: null,
-      },
-      capabilities: {},
-      key_stats: null,
-    } as never;
-    rerender(
-      <MemoryRouter>
-        <DensityGrid
-          summary={summaryInactive}
-          keyStatsBlock={<div>K</div>}
-          thesisBlock={<div>T</div>}
-          newsBlock={<div>N</div>}
-        />
-      </MemoryRouter>,
-    );
-    expect(screen.queryByText("Fundamentals stub")).toBeNull();
-  });
-
-  it("combined dividends/insider card has no overflow-auto after Phase D (InsiderActivitySummary is compact)", () => {
-    // Phase D replaced InsiderActivityPanel (up to 50 rows) with
-    // InsiderActivitySummary (compact 5-field block), so the combined
-    // card no longer needs the scroll-bound wrapper.
-    const summaryWithInsider = {
-      instrument_id: 1,
-      has_sec_cik: true,
-      identity: {
-        symbol: "GME",
-        display_name: "GameStop",
-        market_cap: "1000000",
-        sector: null,
-      },
-      capabilities: {
-        insider: {
-          providers: ["sec_form4"],
-          data_present: { sec_form4: true },
-        },
-      },
-      key_stats: null,
-    } as never;
-    const { container } = render(
-      <MemoryRouter>
-        <DensityGrid
-          summary={summaryWithInsider}
-          keyStatsBlock={<div>KEY STATS BLOCK</div>}
-          thesisBlock={<div>THESIS BLOCK</div>}
-          newsBlock={<div>NEWS BLOCK</div>}
-        />
-      </MemoryRouter>,
-    );
-    const overflowAuto = container.querySelectorAll(".overflow-auto");
-    expect(overflowAuto.length).toBe(0);
-  });
-
-  it("combined card retains overflow-auto scroll-bound when dividends are active (DividendsPanel can be tall)", () => {
-    // DividendsPanel can render 40+ history rows; the combined card wrapper
-    // must keep the scroll-bound when dividends are present so the grid
-    // doesn't push other panes far below the fold.
-    const summaryWithDividends = {
-      instrument_id: 1,
-      has_sec_cik: true,
-      identity: {
-        symbol: "GME",
-        display_name: "GameStop",
-        market_cap: "1000000",
-        sector: null,
-      },
-      capabilities: {
-        dividends: {
-          providers: ["sec_dividend_summary"],
-          data_present: { sec_dividend_summary: true },
-        },
-      },
-      key_stats: null,
-    } as never;
-    const { container } = render(
-      <MemoryRouter>
-        <DensityGrid
-          summary={summaryWithDividends}
-          keyStatsBlock={<div>KEY STATS BLOCK</div>}
-          thesisBlock={<div>THESIS BLOCK</div>}
-          newsBlock={<div>NEWS BLOCK</div>}
-        />
-      </MemoryRouter>,
-    );
-    const overflowAuto = container.querySelectorAll(".overflow-auto");
-    expect(overflowAuto.length).toBe(1);
+    expect(container.querySelectorAll(".overflow-auto").length).toBe(0);
   });
 });

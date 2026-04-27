@@ -1,127 +1,191 @@
 /**
- * DensityGrid — Bloomberg-style 3-column grid for the instrument
- * Research tab (#559). Chart pane occupies the wide left column
- * (2fr) spanning 2 rows; right column (1fr + 1fr) stacks
- * key-stats / thesis / SEC profile / filings; bottom rows hold
- * business teaser / news; dividends + insider as a wide combined
- * card.
+ * DensityGrid — 12-column capability-aware grid for the instrument
+ * Research tab (#575). Three profiles determine which panes render:
  *
- * Responsive: at viewport widths below `lg` the grid degrades to
- * a single column. Pane order reflects priority: chart → key-stats
- * → thesis → filings → SEC-profile → segments → dividends-insider
- * → news. Each pane scrolls internally rather than pushing the
- * page taller.
+ *   full-sec        — fundamentals (sec_xbrl) + filings active
+ *   partial-filings — filings active but no sec_xbrl fundamentals
+ *   minimal         — no filings capability at all
  *
- * 8-K events are accessible via the FilingsPane row click →
- * /instrument/:symbol/filings/8-k (Phase 4).
+ * PriceChart and KeyStatsPane are present in all profiles.
+ * SecProfilePanel / BusinessSectionsTeaser gate on has_sec_cik.
+ * FundamentalsPane is exclusive to the full-sec profile.
+ * FilingsPane / InsiderActivitySummary / DividendsPanel / RecentNewsPane
+ * / ThesisPane appear in profile-specific positions.
+ *
+ * No overflow-auto scroll-boxes: every pane expands to content height
+ * so the grid stays a true content-driven layout.
  */
 
+import type { InstrumentSummary, ThesisDetail } from "@/api/types";
+import { activeProviders } from "@/lib/capabilityProviders";
 import { BusinessSectionsTeaser } from "@/components/instrument/BusinessSectionsTeaser";
 import { DividendsPanel } from "@/components/instrument/DividendsPanel";
 import { FilingsPane } from "@/components/instrument/FilingsPane";
 import { FundamentalsPane } from "@/components/instrument/FundamentalsPane";
 import { InsiderActivitySummary } from "@/components/instrument/InsiderActivitySummary";
+import { KeyStatsPane } from "@/components/instrument/KeyStatsPane";
+import { Pane } from "@/components/instrument/Pane";
 import { PriceChart } from "@/components/instrument/PriceChart";
+import { RecentNewsPane } from "@/components/instrument/RecentNewsPane";
 import { SecProfilePanel } from "@/components/instrument/SecProfilePanel";
-import { Section } from "@/components/dashboard/Section";
-import type { CapabilityCell, InstrumentSummary } from "@/api/types";
-import { activeProviders } from "@/lib/capabilityProviders";
+import { ThesisPane } from "@/components/instrument/ThesisPane";
+import { selectProfile } from "@/components/instrument/densityProfile";
+
+const EMPTY_CELL = { providers: [] as string[], data_present: {} as Record<string, boolean> };
 
 export interface DensityGridProps {
   readonly summary: InstrumentSummary;
-  readonly keyStatsBlock: JSX.Element;
-  readonly thesisBlock: JSX.Element;
-  readonly newsBlock: JSX.Element;
+  readonly thesis: ThesisDetail | null;
+  readonly thesisErrored: boolean;
 }
-
-const EMPTY_CELL: CapabilityCell = { providers: [], data_present: {} };
 
 export function DensityGrid({
   summary,
-  keyStatsBlock,
-  thesisBlock,
-  newsBlock,
+  thesis,
+  thesisErrored,
 }: DensityGridProps): JSX.Element {
   const symbol = summary.identity.symbol;
-  const hasSec = summary.has_sec_cik;
-  const dividends = summary.capabilities.dividends ?? EMPTY_CELL;
-  const insider = summary.capabilities.insider ?? EMPTY_CELL;
-  const dividendProviders = activeProviders(dividends);
-  const insiderProviders = activeProviders(insider);
+  const instrumentId = summary.instrument_id;
+  const profile = selectProfile(summary);
+  const cap = summary.capabilities;
+  const insiderActive = activeProviders(cap.insider ?? EMPTY_CELL).length > 0;
+  const dividendProviders = activeProviders(cap.dividends ?? EMPTY_CELL);
+  const filingsActive = activeProviders(cap.filings ?? EMPTY_CELL).length > 0;
+  const hasNarrative = summary.has_sec_cik;
 
-  return (
-    <div className="grid grid-cols-1 gap-2 lg:grid-cols-[2fr_1fr_1fr]">
-        {/* Chart pane: wide column (2fr) × 2 rows top-left */}
-        <div className="overflow-hidden rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm min-h-[440px] lg:col-start-1 lg:col-end-2 lg:row-start-1 lg:row-end-3">
-          <PriceChart symbol={symbol} />
-        </div>
+  // PriceChart isn't yet a self-Pane'd component — wrap it locally.
+  // #576 will own the chart route; until then no onExpand.
+  const ChartPane = (
+    <Pane title="Price chart">
+      <PriceChart symbol={symbol} />
+    </Pane>
+  );
 
-        {/* Right column row 1 */}
-        <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
-          {keyStatsBlock}
+  if (profile === "full-sec") {
+    return (
+      <div className="grid grid-cols-12 gap-2">
+        <div className="col-span-12 lg:col-span-8 lg:row-span-2">{ChartPane}</div>
+        <div className="col-span-12 lg:col-span-4">
+          <KeyStatsPane summary={summary} />
         </div>
-        <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
-          {thesisBlock}
+        <div className="col-span-12 lg:col-span-4">
+          {hasNarrative && <SecProfilePanel symbol={symbol} />}
         </div>
-
-        {/* Right column row 2 */}
-        <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
-          {hasSec ? (
-            <SecProfilePanel symbol={symbol} />
-          ) : (
-            <Section title="SEC profile">
-              <p className="text-xs text-slate-500">No SEC coverage</p>
-            </Section>
-          )}
+        <div className="col-span-12">
+          <FundamentalsPane summary={summary} />
         </div>
-        <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
-          <FilingsPane instrumentId={summary.instrument_id} symbol={symbol} summary={summary} />
+        {filingsActive && (
+          <div className="col-span-12 lg:col-span-7">
+            <FilingsPane instrumentId={instrumentId} symbol={symbol} summary={summary} />
+          </div>
+        )}
+        {insiderActive && (
+          <div className="col-span-12 lg:col-span-5">
+            <InsiderActivitySummary symbol={symbol} />
+          </div>
+        )}
+        {hasNarrative && (
+          <div className="col-span-12">
+            <BusinessSectionsTeaser symbol={symbol} />
+          </div>
+        )}
+        {dividendProviders.length > 0 && (
+          <div className="col-span-12">
+            {dividendProviders.map((p) => (
+              <DividendsPanel key={`div-${p}`} symbol={symbol} provider={p} />
+            ))}
+          </div>
+        )}
+        <div className="col-span-12">
+          <RecentNewsPane instrumentId={instrumentId} symbol={symbol} />
         </div>
-
-        {/* Fundamentals pane: full-width row after sec profile + filings,
-            gated on sec_xbrl capability. Placed after the row-2 right-column
-            panes so the chart/keyStats/thesis/secProfile/filings layout is
-            preserved regardless of whether fundamentals are active. */}
-        {summary.capabilities["fundamentals"]?.providers.includes("sec_xbrl") &&
-         summary.capabilities["fundamentals"].data_present["sec_xbrl"] === true ? (
-          <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm lg:col-span-3">
-            <FundamentalsPane summary={summary} />
+        {thesis !== null || thesisErrored ? (
+          <div className="col-span-12">
+            <ThesisPane thesis={thesis} errored={thesisErrored} />
           </div>
         ) : null}
+      </div>
+    );
+  }
 
-        {/* Bottom row: segments spans 2 cols, news spans 1 col */}
-        <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm lg:col-span-2">
-          {hasSec ? (
-            <BusinessSectionsTeaser symbol={symbol} />
-          ) : (
-            <Section title="Company narrative">
-              <p className="text-xs text-slate-500">No 10-K coverage</p>
-            </Section>
-          )}
+  if (profile === "partial-filings") {
+    return (
+      <div className="grid grid-cols-12 gap-2">
+        <div className="col-span-12 lg:col-span-8 lg:row-span-2">{ChartPane}</div>
+        <div className="col-span-12 lg:col-span-4">
+          <KeyStatsPane summary={summary} />
         </div>
-        <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
-          {newsBlock}
-        </div>
-
-        {/* Dividends + insider combined card — spans full width.
-            overflow-auto + max-h guard applies only when dividends are
-            active because DividendsPanel can render 40+ history bars.
-            InsiderActivitySummary is compact (5-field block) and does
-            not need height-capping. */}
-        {(dividendProviders.length > 0 || insiderProviders.length > 0) && (
-          <div
-            className={`rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm lg:col-span-3${dividendProviders.length > 0 ? " overflow-auto max-h-[360px]" : ""}`}
-          >
-            <div className="grid gap-3 md:grid-cols-2">
+        {hasNarrative && (
+          <div className="col-span-12 lg:col-span-4">
+            <SecProfilePanel symbol={symbol} />
+          </div>
+        )}
+        {filingsActive && (
+          <div className="col-span-12">
+            <FilingsPane instrumentId={instrumentId} symbol={symbol} summary={summary} />
+          </div>
+        )}
+        {insiderActive && dividendProviders.length > 0 ? (
+          <>
+            <div className="col-span-12 lg:col-span-7">
+              <InsiderActivitySummary symbol={symbol} />
+            </div>
+            <div className="col-span-12 lg:col-span-5">
               {dividendProviders.map((p) => (
                 <DividendsPanel key={`div-${p}`} symbol={symbol} provider={p} />
               ))}
-              {insiderProviders.length > 0 && (
-                <InsiderActivitySummary symbol={symbol} />
-              )}
             </div>
+          </>
+        ) : insiderActive ? (
+          <div className="col-span-12">
+            <InsiderActivitySummary symbol={symbol} />
+          </div>
+        ) : dividendProviders.length > 0 ? (
+          <div className="col-span-12">
+            {dividendProviders.map((p) => (
+              <DividendsPanel key={`div-${p}`} symbol={symbol} provider={p} />
+            ))}
+          </div>
+        ) : null}
+        {hasNarrative && (
+          <div className="col-span-12">
+            <BusinessSectionsTeaser symbol={symbol} />
           </div>
         )}
+        <div className="col-span-12">
+          <RecentNewsPane instrumentId={instrumentId} symbol={symbol} />
+        </div>
+        {thesis !== null || thesisErrored ? (
+          <div className="col-span-12">
+            <ThesisPane thesis={thesis} errored={thesisErrored} />
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  // minimal
+  return (
+    <div className="grid grid-cols-12 gap-2">
+      <div className="col-span-12 lg:col-span-8 lg:row-span-2">{ChartPane}</div>
+      <div className="col-span-12 lg:col-span-4">
+        <KeyStatsPane summary={summary} />
+      </div>
+      {(thesis !== null || thesisErrored) && (
+        <div className="col-span-12 lg:col-span-4">
+          <ThesisPane thesis={thesis} errored={thesisErrored} />
+        </div>
+      )}
+      {dividendProviders.length > 0 && (
+        <div className="col-span-12">
+          {dividendProviders.map((p) => (
+            <DividendsPanel key={`div-${p}`} symbol={symbol} provider={p} />
+          ))}
+        </div>
+      )}
+      <div className="col-span-12">
+        <RecentNewsPane instrumentId={instrumentId} symbol={symbol} />
+      </div>
     </div>
   );
 }
