@@ -33,7 +33,7 @@
  * eToro's quote stream doesn't expose; deferred to V2.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type MutableRefObject } from "react";
 import type { ISeriesApi, Time, UTCTimestamp } from "lightweight-charts";
 
 import { useLiveTick, useLiveQuoteConnection } from "@/components/quotes/LiveQuoteProvider";
@@ -48,10 +48,18 @@ interface LiveBarState {
   close: number;
 }
 
+/**
+ * The hook accepts the caller's lightweight-charts series **refs**
+ * (not their `.current` snapshots) so the dependency list stays
+ * stable across renders. Passing `{ candle: ref.current }` would
+ * make a fresh object on every parent render and re-fire the effect,
+ * re-applying the last tick's `series.update()` on every re-render —
+ * see Codex pre-push #602 review feedback.
+ */
 export interface LiveLastBarRefs {
-  candle: ISeriesApi<"Candlestick"> | null;
-  line: ISeriesApi<"Line"> | null;
-  area: ISeriesApi<"Area"> | null;
+  candle: MutableRefObject<ISeriesApi<"Candlestick"> | null>;
+  line: MutableRefObject<ISeriesApi<"Line"> | null> | null;
+  area: MutableRefObject<ISeriesApi<"Area"> | null> | null;
 }
 
 /**
@@ -219,8 +227,9 @@ export function useLiveLastBar({
     liveBarRef.current = result.next;
 
     const time = result.next.time as UTCTimestamp;
-    if (refs.candle !== null) {
-      refs.candle.update({
+    const candleSeries = refs.candle.current;
+    if (candleSeries !== null) {
+      candleSeries.update({
         time: time as Time,
         open: result.next.open,
         high: result.next.high,
@@ -228,13 +237,20 @@ export function useLiveLastBar({
         close: result.next.close,
       });
     }
-    if (refs.line !== null) {
-      refs.line.update({ time: time as Time, value: result.next.close });
+    const lineSeries = refs.line !== null ? refs.line.current : null;
+    if (lineSeries !== null) {
+      lineSeries.update({ time: time as Time, value: result.next.close });
     }
-    if (refs.area !== null) {
-      refs.area.update({ time: time as Time, value: result.next.close });
+    const areaSeries = refs.area !== null ? refs.area.current : null;
+    if (areaSeries !== null) {
+      areaSeries.update({ time: time as Time, value: result.next.close });
     }
-  }, [tick, bucketSeconds, historicalLastBar, refs, instrumentId]);
+    // ESLint: refs.* are MutableRefObjects with stable identity, so
+    // omitting them from deps is correct. The effect must re-fire only
+    // on tick / anchor / bucket / instrument changes — adding `refs`
+    // would re-fire on every parent render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick, bucketSeconds, historicalLastBar, instrumentId]);
 
   return { connected, unavailable };
 }

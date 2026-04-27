@@ -702,7 +702,7 @@ export function ChartWorkspaceCanvas({
     bucketSeconds,
     historicalLastBar: histLastBar,
     refs: {
-      candle: candleRef.current,
+      candle: candleRef,
       line: null, // workspace primaryLineRef is only used in compare mode
       area: null,
     },

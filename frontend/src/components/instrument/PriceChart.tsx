@@ -603,9 +603,9 @@ export function ChartCanvas({
     bucketSeconds,
     historicalLastBar: histLastBar,
     refs: {
-      candle: candleRef.current,
-      line: lineRef.current,
-      area: areaRef.current,
+      candle: candleRef,
+      line: lineRef,
+      area: areaRef,
     },
   });
   const liveActive = connected && !unavailable && instrumentId !== null && range !== undefined;
