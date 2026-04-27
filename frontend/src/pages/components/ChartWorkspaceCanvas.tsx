@@ -23,6 +23,7 @@ import {
 } from "lightweight-charts";
 
 import type { NormalisedBar } from "@/lib/chartData";
+import { formatHoverLabel, humanizeVolume, tickFormatter } from "@/lib/chartFormatters";
 import { chartTheme } from "@/lib/chartTheme";
 
 export type IndicatorId = "sma20" | "sma50" | "ema20" | "ema50";
@@ -80,40 +81,8 @@ function parseNum(v: string | null | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function formatHoverLabel(epochSeconds: number, intraday: boolean): string {
-  const d = new Date(epochSeconds * 1000);
-  const date = d.toISOString().slice(0, 10);
-  if (!intraday) return date;
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mm = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${date} ${hh}:${mm}Z`;
-}
-
-const _MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
-
-/**
- * Adaptive tick-mark formatter — uses lightweight-charts' tickMarkType
- * to render date markers at day/month/year boundaries and time within
- * a day. See PriceChart.tsx for the same formatter and rationale.
- */
-function tickFormatter(time: number, tickMarkType: number): string {
-  const d = new Date(time * 1000);
-  switch (tickMarkType) {
-    case 0:
-      return String(d.getUTCFullYear());
-    case 1:
-      return _MONTH_ABBR[d.getUTCMonth()] ?? "";
-    case 2:
-      return `${_MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCDate()}`;
-    case 3:
-    case 4:
-    default: {
-      const hh = String(d.getUTCHours()).padStart(2, "0");
-      const mm = String(d.getUTCMinutes()).padStart(2, "0");
-      return `${hh}:${mm}`;
-    }
-  }
-}
+// formatHoverLabel / tickFormatter / humanizeVolume share definitions
+// with PriceChart via @/lib/chartFormatters — see comment there.
 
 // Pure functions — exported for unit testing.
 
@@ -707,15 +676,6 @@ export function ChartWorkspaceCanvas({
       />
     </div>
   );
-}
-
-function humanizeVolume(v: number): string {
-  if (!Number.isFinite(v) || v === 0) return "0";
-  const abs = Math.abs(v);
-  if (abs >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
-  if (abs >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
-  if (abs >= 1e3) return `${(v / 1e3).toFixed(2)}K`;
-  return v.toLocaleString();
 }
 
 /**

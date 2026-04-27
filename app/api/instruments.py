@@ -646,10 +646,11 @@ def _resolve_range_days(range_: str, today: date) -> int | None:
     """
     if range_ == "ytd":
         # Days from Jan 1 of `today`'s year to `today` (inclusive of
-        # today's bar). January 1 itself returns 0 — the daily query
-        # will then return only today's row, which the chart handles
-        # with its empty-state when there are <2 bars.
-        return (today - date(today.year, 1, 1)).days
+        # today's bar). Clamp to ≥1 so January 1 returns at least
+        # yesterday's bar — without the clamp, Jan 1 returns 0 and the
+        # chart shows an empty state on what should be a sensible
+        # "single-day-into-the-year" view.
+        return max(1, (today - date(today.year, 1, 1)).days)
     return _CANDLE_RANGE_DAYS[range_]
 
 

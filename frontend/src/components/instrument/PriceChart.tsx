@@ -43,6 +43,7 @@ import {
   type NormalisedBar,
   type NormalisedChartCandles,
 } from "@/lib/chartData";
+import { formatHoverLabel, humanizeVolume, tickFormatter } from "@/lib/chartFormatters";
 import { chartTheme } from "@/lib/chartTheme";
 import { useAsync } from "@/lib/useAsync";
 
@@ -107,52 +108,10 @@ interface NumericBar {
   volume: number;
 }
 
-function formatHoverLabel(epochSeconds: number, intraday: boolean): string {
-  const d = new Date(epochSeconds * 1000);
-  const date = d.toISOString().slice(0, 10);
-  if (!intraday) return date;
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mm = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${date} ${hh}:${mm}Z`;
-}
-
-const _MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
-
-/**
- * Tick-mark formatter for the time scale.
- *
- * lightweight-charts passes a `tickMarkType` discriminator with each
- * tick: 0=Year, 1=Month, 2=DayOfMonth, 3=Time, 4=TimeWithSeconds. We
- * use that to render TradingView-style adaptive labels — within a day
- * the axis shows times (`HH:MM`), at the day boundary it shows the
- * date (`Apr 27`), and at month/year boundaries the abbreviated month
- * or year. This matches the operator's reference (TradingView /
- * Robinhood) so a multi-day intraday chart still tells you which day
- * you're hovering over.
- *
- * Daily / weekly / monthly ranges only ever receive Year/Month/Day
- * tick types — the intraday `Time` branch never fires for them, so
- * this single formatter works for both modes.
- */
-function tickFormatter(time: number, tickMarkType: number): string {
-  const d = new Date(time * 1000);
-  switch (tickMarkType) {
-    case 0: // Year
-      return String(d.getUTCFullYear());
-    case 1: // Month
-      return _MONTH_ABBR[d.getUTCMonth()] ?? "";
-    case 2: // DayOfMonth — start of a new day in intraday mode, or
-      // any tick in daily/weekly mode
-      return `${_MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCDate()}`;
-    case 3: // Time — within a day on intraday charts
-    case 4: // TimeWithSeconds (we never request this density)
-    default: {
-      const hh = String(d.getUTCHours()).padStart(2, "0");
-      const mm = String(d.getUTCMinutes()).padStart(2, "0");
-      return `${hh}:${mm}`;
-    }
-  }
-}
+// formatHoverLabel / tickFormatter / humanizeVolume now live in
+// @/lib/chartFormatters so PriceChart and ChartWorkspaceCanvas share
+// one definition (#601 review feedback — duplicated copies would
+// silently drift).
 
 export interface PriceChartProps {
   symbol: string;
@@ -609,15 +568,6 @@ export function ChartCanvas({
       />
     </div>
   );
-}
-
-function humanizeVolume(v: number): string {
-  if (!Number.isFinite(v) || v === 0) return "0";
-  const abs = Math.abs(v);
-  if (abs >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
-  if (abs >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
-  if (abs >= 1e3) return `${(v / 1e3).toFixed(2)}K`;
-  return v.toLocaleString();
 }
 
 /**
