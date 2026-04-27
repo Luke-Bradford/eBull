@@ -52,10 +52,11 @@ def refresh_market_data(
     provider: MarketDataProvider,
     conn: psycopg.Connection,  # type: ignore[type-arg]
     instruments: list[tuple[int, str]],  # [(instrument_id, symbol), ...]
-    lookback_days: int = 400,
+    lookback_days: int = 1000,
     max_spread_pct: Decimal = DEFAULT_MAX_SPREAD_PCT,
     *,
     skip_quotes: bool = False,
+    force_backfill: bool = False,
 ) -> MarketRefreshSummary:
     """
     For each instrument: fetch candles, upsert to price_daily, compute
@@ -65,6 +66,12 @@ def refresh_market_data(
     When skip_quotes is True, quote fetching and upserting are skipped
     entirely. Use this when a separate hourly job owns quote freshness
     (e.g. fx_rates_refresh).
+
+    When force_backfill is True, every instrument fetches the full
+    ``lookback_days`` window regardless of whether incremental mode
+    would otherwise apply. Used for the one-shot deepening invocation
+    (#603) — the daily scheduled refresh leaves it False so steady-state
+    eToro call weight stays at the incremental cadence.
 
     instruments is a list of (instrument_id, symbol) tuples — instrument_id
     must already exist in the instruments table. symbol is used for logging.
@@ -83,22 +90,30 @@ def refresh_market_data(
     # --- Candles: per-instrument (with freshness skip + two-mode fetch) ---
     # Two-mode fetch (#271):
     #   * Backfill mode — instrument has NO prior candles (new to the
-    #     universe, or gap detected). Pull full `lookback_days` history
-    #     (default 400 bars).
+    #     universe, or gap detected). Pull full `lookback_days` history.
+    #     Default 1000 — eToro's hard ceiling per request (#603 raised
+    #     from 400 → 1000). 1000 trading days ≈ 4 calendar years of
+    #     price points, which is the most we can fit in a single fetch.
+    #     The endpoint is count-based with no from_date pagination, so
+    #     we cannot deepen further without re-fetching everything.
     #   * Incremental mode — instrument already has candle history.
     #     Pull only INCREMENTAL_FETCH_BARS bars (yesterday + today +
     #     correction buffer). The upsert dedupes on (instrument_id,
     #     price_date) so overlap with existing rows is harmless.
     # On a typical day, ~100% of Tier 1/2 instruments are in incremental
-    # mode — eToro call weight drops from 400 bars × ~500 instruments
-    # (~200k rows) to 3 × 500 (~1500 rows).
+    # mode — eToro call weight stays at 3 × ~500 instruments (~1500
+    # rows). The 1000-bar default only fires on initial seed,
+    # gap-detect, or the one-shot ``force_backfill=True`` deepening.
     total = len(instruments)
     for idx, (instrument_id, symbol) in enumerate(instruments, start=1):
-        if _candles_are_fresh(conn, instrument_id, today):
+        if not force_backfill and _candles_are_fresh(conn, instrument_id, today):
             candles_skipped += 1
             report_progress(idx, total)
             continue
-        fetch_count = _candles_fetch_count(conn, instrument_id, default=lookback_days, today=today)
+        if force_backfill:
+            fetch_count = lookback_days
+        else:
+            fetch_count = _candles_fetch_count(conn, instrument_id, default=lookback_days, today=today)
         try:
             with conn.transaction():
                 bars = provider.get_daily_candles(instrument_id, fetch_count)
@@ -224,7 +239,7 @@ def _candles_fetch_count(
 ) -> int:
     """Decide the candlesCount for an instrument's fetch (#271).
 
-    Returns ``default`` (typically 400) in two cases:
+    Returns ``default`` (typically 1000 per #603) in two cases:
       * No prior candles at all — initial backfill mode.
       * Prior candles exist but the most recent is older than the
         incremental window (e.g. instrument was halted, re-added to
@@ -236,6 +251,11 @@ def _candles_fetch_count(
     within the incremental window — normal daily maintenance mode.
     The upsert dedupes on (instrument_id, price_date) so overlap is
     safe.
+
+    Note: this function does NOT extend an instrument's lookback when
+    ``default`` is bumped. An instrument that has 400 bars stays at
+    400 in incremental mode; deepening to 5y requires the one-shot
+    ``force_backfill=True`` invocation in ``refresh_market_data``.
     """
     row = conn.execute(
         """

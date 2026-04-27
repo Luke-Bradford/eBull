@@ -990,8 +990,9 @@ def daily_candle_refresh() -> None:
          already have fundamentals, ordered by symbol for determinism.
          Enables T3→T2 promotion by seeding candle history.
 
-    Fetches up to 400 daily candles per instrument (enough for 1y return
-    + buffer).  Quotes are skipped (owned by the hourly job).
+    Fetches up to 1000 daily candles per instrument (post-#603 — eToro's
+    hard ceiling, ≈4 calendar years of trading-day price points).
+    Quotes are skipped (owned by the hourly job).
 
     Runs daily at 22:00 UTC, after US market close. Watchlist scope
     (spec §1.3 bullet 2) lands once the watchlist table exists
@@ -1039,11 +1040,11 @@ def daily_candle_refresh() -> None:
             ).fetchall()
 
             # T3: bootstrap batch (see _T3_BOOTSTRAP_SELECT comment).
-            # refresh_market_data fetches ~400 candles per instrument in
-            # a single API call, so a "partial" bootstrap still gives
-            # enough data for momentum scoring.  If the API call fails
-            # entirely, no rows are inserted and the instrument retries
-            # next run.
+            # refresh_market_data fetches up to 1000 candles per
+            # instrument in a single API call (post-#603), so a
+            # "partial" bootstrap still gives enough data for momentum
+            # scoring. If the API call fails entirely, no rows are
+            # inserted and the instrument retries next run.
             t3_rows = conn.execute(
                 _T3_BOOTSTRAP_SELECT,
                 {"limit": _T3_BOOTSTRAP_BATCH_SIZE},

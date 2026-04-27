@@ -960,3 +960,62 @@ class TestCandlesFetchCount:
         assert (today - latest).days == _INCREMENTAL_FETCH_BARS
         conn = self._mock_conn(fetchone_return=(latest,))
         assert _candles_fetch_count(conn, 42, default=400, today=today) == _INCREMENTAL_FETCH_BARS
+
+
+class TestRefreshMarketDataForceBackfill:
+    """force_backfill=True bypasses freshness skip + uses lookback_days
+    regardless of incremental mode (#603)."""
+
+    def _mock_conn_fresh(self) -> MagicMock:
+        """Mock conn whose `_candles_are_fresh` returns True for everything."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        # _candles_are_fresh and _candles_fetch_count both call
+        # conn.execute(...).fetchone() — return today's date so the
+        # default-mode path skips and the force-mode path overrides.
+        cursor.fetchone.return_value = (date.today(),)
+        conn.execute.return_value = cursor
+        # transaction context manager passthrough
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=ctx)
+        ctx.__exit__ = MagicMock(return_value=False)
+        conn.transaction.return_value = ctx
+        return conn
+
+    def test_default_mode_skips_fresh_instruments(self) -> None:
+        from app.services.market_data import refresh_market_data
+
+        provider = MagicMock()
+        provider.get_daily_candles.return_value = []
+        provider.get_quotes.return_value = []
+        conn = self._mock_conn_fresh()
+
+        summary = refresh_market_data(
+            provider,
+            conn,
+            instruments=[(42, "AAPL")],
+            skip_quotes=True,
+        )
+        # Fresh instrument with no force flag → provider not called.
+        provider.get_daily_candles.assert_not_called()
+        assert summary.candle_rows_upserted == 0
+
+    def test_force_backfill_calls_provider_with_full_lookback(self) -> None:
+        from app.services.market_data import refresh_market_data
+
+        provider = MagicMock()
+        provider.get_daily_candles.return_value = []
+        provider.get_quotes.return_value = []
+        conn = self._mock_conn_fresh()
+
+        refresh_market_data(
+            provider,
+            conn,
+            instruments=[(42, "AAPL")],
+            lookback_days=1000,
+            skip_quotes=True,
+            force_backfill=True,
+        )
+        # force_backfill bypasses both freshness skip AND incremental
+        # fetch-count logic — provider gets the full lookback verbatim.
+        provider.get_daily_candles.assert_called_once_with(42, 1000)
