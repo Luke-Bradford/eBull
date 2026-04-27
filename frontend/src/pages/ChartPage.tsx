@@ -8,7 +8,7 @@
  * Phase 3: compare-ticker overlays (URL: `?compare=AAPL,MSFT,SPY`),
  *          linear regression line + range channel toggles
  *          (URL: `?trend=regression,channel`).
- * Phase 4 (raw OHLCV table + CSV export) deferred to next PR.
+ * Phase 4: raw OHLCV table + CSV export (URL: `?view=raw`).
  */
 import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
@@ -21,6 +21,7 @@ import {
   type CompareSeries,
   type IndicatorId,
 } from "@/pages/components/ChartWorkspaceCanvas";
+import { RawOhlcvTable } from "@/pages/components/RawOhlcvTable";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
@@ -193,6 +194,22 @@ export function ChartPage(): JSX.Element {
     [searchParams, setSearchParams, enabledTrends],
   );
 
+  // View param — "chart" (default) or "raw"
+  const view = searchParams.get("view") === "raw" ? "raw" : "chart";
+
+  const setView = useCallback(
+    (next: "chart" | "raw") => {
+      const params = new URLSearchParams(searchParams);
+      if (next === "chart") {
+        params.delete("view");
+      } else {
+        params.set("view", next);
+      }
+      setSearchParams(params, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
   // Compare input local state.
   const [compareInput, setCompareInput] = useState("");
   const compareInputRef = useRef<HTMLInputElement | null>(null);
@@ -323,7 +340,7 @@ export function ChartPage(): JSX.Element {
         )}
       </div>
 
-      {/* Controls: range picker + indicator toggles + trend toggles */}
+      {/* Controls: range picker + view toggle + chart-only controls */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex gap-1">
           {RANGES.map((r) => (
@@ -343,106 +360,138 @@ export function ChartPage(): JSX.Element {
           ))}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[11px] uppercase tracking-wider text-slate-500">Indicators</span>
-          {INDICATOR_IDS.map((id) => {
-            const active = enabledIndicators.includes(id);
-            return (
-              <button
-                key={id}
-                type="button"
-                onClick={() => toggleIndicator(id)}
-                className={`rounded border px-2 py-0.5 text-xs font-medium ${
-                  active
-                    ? "bg-white text-slate-700"
-                    : "bg-slate-50 text-slate-500 hover:bg-slate-100"
-                }`}
-                style={
-                  active
-                    ? { borderColor: INDICATOR_COLORS[id], color: INDICATOR_COLORS[id] }
-                    : { borderColor: "#e2e8f0" }
-                }
-                data-testid={`indicator-${id}`}
-              >
-                {INDICATOR_LABELS[id]}
-              </button>
-            );
-          })}
+        {/* View toggle */}
+        <div className="flex gap-1">
+          <button
+            type="button"
+            onClick={() => setView("chart")}
+            className={`rounded px-3 py-1 text-sm font-medium ${
+              view === "chart" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+            }`}
+            data-testid="view-chart"
+          >
+            Chart
+          </button>
+          <button
+            type="button"
+            onClick={() => setView("raw")}
+            className={`rounded px-3 py-1 text-sm font-medium ${
+              view === "raw" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+            }`}
+            data-testid="view-raw"
+          >
+            Raw data
+          </button>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[11px] uppercase tracking-wider text-slate-500">Trend</span>
-          {(["regression", "channel"] as const).map((id) => {
-            const active = enabledTrends.includes(id);
-            const label = id === "regression" ? "Regression" : "Range";
-            return (
-              <button
-                key={id}
-                type="button"
-                onClick={() => toggleTrend(id)}
-                className={`rounded border px-2 py-0.5 text-xs font-medium ${
-                  active
-                    ? "border-orange-400 bg-white text-orange-600"
-                    : "border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100"
-                }`}
-                data-testid={`trend-${id}`}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Compare row */}
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[11px] uppercase tracking-wider text-slate-500">Compare</span>
-        {compareSymbols.map((sym) => {
-          const hasFailed = compareErrors.includes(sym);
-          return (
-            <span
-              key={sym}
-              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
-                hasFailed
-                  ? "border-red-400 bg-red-50 text-red-700"
-                  : "border-slate-300 bg-slate-50 text-slate-700"
-              }`}
-              title={hasFailed ? "Failed to fetch — check ticker" : undefined}
-              aria-label={hasFailed ? `${sym} — failed to fetch` : sym}
-              data-testid={`compare-chip-${sym}`}
-              data-error={hasFailed ? "true" : undefined}
-            >
-              {sym}
-              <button
-                type="button"
-                aria-label={`Remove ${sym}`}
-                onClick={() => removeCompare(sym)}
-                className={`ml-0.5 rounded-full ${hasFailed ? "text-red-400 hover:text-red-600" : "text-slate-400 hover:text-slate-600"}`}
-                data-testid={`compare-remove-${sym}`}
-              >
-                ×
-              </button>
-            </span>
-          );
-        })}
-        {compareSymbols.length < MAX_COMPARES && (
-          <input
-            ref={compareInputRef}
-            type="text"
-            value={compareInput}
-            onChange={(e) => setCompareInput(e.target.value)}
-            onKeyDown={handleCompareKeyDown}
-            placeholder="Add ticker to compare..."
-            className="rounded border border-slate-200 bg-white px-2 py-0.5 text-xs text-slate-700 placeholder-slate-400 focus:border-slate-400 focus:outline-none"
-            data-testid="compare-input"
-          />
+        {/* Chart-only: indicator toggles */}
+        {view === "chart" && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] uppercase tracking-wider text-slate-500">Indicators</span>
+            {INDICATOR_IDS.map((id) => {
+              const active = enabledIndicators.includes(id);
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => toggleIndicator(id)}
+                  className={`rounded border px-2 py-0.5 text-xs font-medium ${
+                    active
+                      ? "bg-white text-slate-700"
+                      : "bg-slate-50 text-slate-500 hover:bg-slate-100"
+                  }`}
+                  style={
+                    active
+                      ? { borderColor: INDICATOR_COLORS[id], color: INDICATOR_COLORS[id] }
+                      : { borderColor: "#e2e8f0" }
+                  }
+                  data-testid={`indicator-${id}`}
+                >
+                  {INDICATOR_LABELS[id]}
+                </button>
+              );
+            })}
+          </div>
         )}
-        {compareSymbols.length >= MAX_COMPARES && (
-          <span className="text-[11px] text-slate-400">Max {MAX_COMPARES} symbols</span>
+
+        {/* Chart-only: trend toggles */}
+        {view === "chart" && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] uppercase tracking-wider text-slate-500">Trend</span>
+            {(["regression", "channel"] as const).map((id) => {
+              const active = enabledTrends.includes(id);
+              const label = id === "regression" ? "Regression" : "Range";
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => toggleTrend(id)}
+                  className={`rounded border px-2 py-0.5 text-xs font-medium ${
+                    active
+                      ? "border-orange-400 bg-white text-orange-600"
+                      : "border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100"
+                  }`}
+                  data-testid={`trend-${id}`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
         )}
       </div>
 
-      {/* Chart body */}
+      {/* Chart-only: compare row */}
+      {view === "chart" && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11px] uppercase tracking-wider text-slate-500">Compare</span>
+          {compareSymbols.map((sym) => {
+            const hasFailed = compareErrors.includes(sym);
+            return (
+              <span
+                key={sym}
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
+                  hasFailed
+                    ? "border-red-400 bg-red-50 text-red-700"
+                    : "border-slate-300 bg-slate-50 text-slate-700"
+                }`}
+                title={hasFailed ? "Failed to fetch — check ticker" : undefined}
+                aria-label={hasFailed ? `${sym} — failed to fetch` : sym}
+                data-testid={`compare-chip-${sym}`}
+                data-error={hasFailed ? "true" : undefined}
+              >
+                {sym}
+                <button
+                  type="button"
+                  aria-label={`Remove ${sym}`}
+                  onClick={() => removeCompare(sym)}
+                  className={`ml-0.5 rounded-full ${hasFailed ? "text-red-400 hover:text-red-600" : "text-slate-400 hover:text-slate-600"}`}
+                  data-testid={`compare-remove-${sym}`}
+                >
+                  ×
+                </button>
+              </span>
+            );
+          })}
+          {compareSymbols.length < MAX_COMPARES && (
+            <input
+              ref={compareInputRef}
+              type="text"
+              value={compareInput}
+              onChange={(e) => setCompareInput(e.target.value)}
+              onKeyDown={handleCompareKeyDown}
+              placeholder="Add ticker to compare..."
+              className="rounded border border-slate-200 bg-white px-2 py-0.5 text-xs text-slate-700 placeholder-slate-400 focus:border-slate-400 focus:outline-none"
+              data-testid="compare-input"
+            />
+          )}
+          {compareSymbols.length >= MAX_COMPARES && (
+            <span className="text-[11px] text-slate-400">Max {MAX_COMPARES} symbols</span>
+          )}
+        </div>
+      )}
+
+      {/* Body: chart or raw table */}
       <div className="rounded-md border border-slate-200 bg-white shadow-sm">
         {effectivelyLoading && candlesAsync.error === null ? (
           <div className="p-4">
@@ -454,7 +503,7 @@ export function ChartPage(): JSX.Element {
             <SectionError onRetry={candlesAsync.refetch} />
           </div>
         ) : null}
-        {!effectivelyLoading && candlesAsync.error === null && dataMatchesRange && !hasChartData ? (
+        {!effectivelyLoading && candlesAsync.error === null && dataMatchesRange && view === "chart" && !hasChartData ? (
           <div className="p-4">
             <EmptyState
               title="No price data"
@@ -462,7 +511,7 @@ export function ChartPage(): JSX.Element {
             />
           </div>
         ) : null}
-        {hasChartData && rows !== null ? (
+        {view === "chart" && hasChartData && rows !== null ? (
           <ChartWorkspaceCanvas
             rows={rows}
             symbol={symbol}
@@ -472,6 +521,9 @@ export function ChartPage(): JSX.Element {
             showChannel={enabledTrends.includes("channel")}
             containerClassName="h-[70vh] w-full"
           />
+        ) : null}
+        {view === "raw" && !effectivelyLoading && candlesAsync.error === null && dataMatchesRange ? (
+          <RawOhlcvTable rows={rows ?? []} symbol={symbol} range={range} />
         ) : null}
       </div>
     </div>

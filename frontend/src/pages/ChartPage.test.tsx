@@ -1,5 +1,5 @@
 /**
- * Tests for ChartPage (#576 Phase 1 + Phase 2 + Phase 3).
+ * Tests for ChartPage (#576 Phase 1 + Phase 2 + Phase 3 + Phase 4).
  *
  * lightweight-charts cannot render in jsdom (Canvas API absent), so we stub
  * ChartWorkspaceCanvas to a simple div. What we pin here is the page's contract:
@@ -23,11 +23,29 @@
  *   - Trend toggle Regression updates ?trend=regression
  *   - Pre-set ?trend=regression,channel activates both toggles
  *   - Compare + trend props forwarded to canvas stub
+ *
+ * Phase 4:
+ *   - View toggle defaults to chart (no ?view= param)
+ *   - Clicking "Raw data" sets ?view=raw and hides canvas
+ *   - Pre-set ?view=raw renders raw table stub instead of chart canvas
+ *   - Indicator / trend / compare controls hidden in raw view
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+
+// Stub RawOhlcvTable to avoid testing its internals in ChartPage tests.
+vi.mock("@/pages/components/RawOhlcvTable", () => ({
+  RawOhlcvTable: ({ rows, symbol, range }: { rows: unknown[]; symbol: string; range: string }) => (
+    <div
+      data-testid="raw-ohlcv-table-stub"
+      data-row-count={rows.length}
+      data-symbol={symbol}
+      data-range={range}
+    />
+  ),
+}));
 
 // Stub ChartWorkspaceCanvas so lightweight-charts is never touched in jsdom.
 vi.mock("@/pages/components/ChartWorkspaceCanvas", () => ({
@@ -458,5 +476,99 @@ describe("ChartPage — Phase 3 trend toggles", () => {
       expect(stub.getAttribute("data-show-regression")).toBe("true");
       expect(stub.getAttribute("data-show-channel")).toBe("false");
     });
+  });
+});
+
+describe("ChartPage — Phase 4 view toggle", () => {
+  it("defaults to chart view — chart canvas visible, raw table absent", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("raw-ohlcv-table-stub")).not.toBeInTheDocument();
+  });
+
+  it("clicking 'Raw data' button shows raw table and hides chart canvas", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("view-raw"));
+    await waitFor(() => {
+      expect(screen.getByTestId("raw-ohlcv-table-stub")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("chart-canvas-stub")).not.toBeInTheDocument();
+  });
+
+  it("clicking 'Chart' button from raw view restores chart canvas", async () => {
+    const user = userEvent.setup();
+    renderPage("/instrument/AAPL/chart?view=raw");
+    await waitFor(() => {
+      expect(screen.getByTestId("raw-ohlcv-table-stub")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("view-chart"));
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("raw-ohlcv-table-stub")).not.toBeInTheDocument();
+  });
+
+  it("pre-set ?view=raw renders raw table directly", async () => {
+    renderPage("/instrument/AAPL/chart?view=raw");
+    await waitFor(() => {
+      expect(screen.getByTestId("raw-ohlcv-table-stub")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("chart-canvas-stub")).not.toBeInTheDocument();
+  });
+
+  it("indicator toggles hidden in raw view", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("view-raw"));
+    await waitFor(() => {
+      expect(screen.getByTestId("raw-ohlcv-table-stub")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("indicator-sma20")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("indicator-ema50")).not.toBeInTheDocument();
+  });
+
+  it("trend toggles hidden in raw view", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("view-raw"));
+    await waitFor(() => {
+      expect(screen.getByTestId("raw-ohlcv-table-stub")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("trend-regression")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("trend-channel")).not.toBeInTheDocument();
+  });
+
+  it("compare input hidden in raw view", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("view-raw"));
+    await waitFor(() => {
+      expect(screen.getByTestId("raw-ohlcv-table-stub")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("compare-input")).not.toBeInTheDocument();
+  });
+
+  it("view toggle buttons are always visible (both views)", async () => {
+    renderPage("/instrument/AAPL/chart?view=raw");
+    await waitFor(() => {
+      expect(screen.getByTestId("raw-ohlcv-table-stub")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("view-chart")).toBeInTheDocument();
+    expect(screen.getByTestId("view-raw")).toBeInTheDocument();
   });
 });
