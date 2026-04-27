@@ -261,4 +261,22 @@ describe("DensityGrid profiles", () => {
     await user.click(openButton);
     expect(navigateMock).toHaveBeenCalledWith("/instrument/GME/chart?range=5y");
   });
+
+  it("clicking the chart card itself drills to the chart workspace (#587)", async () => {
+    navigateMock.mockClear();
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/instrument/GME?chart=1y"]}>
+        <DensityGrid
+          summary={makeSummary({})}
+          thesis={null}
+          thesisErrored={false}
+        />
+      </MemoryRouter>,
+    );
+    // PriceChart is mocked above to a div with testid `price-chart-stub`.
+    // Clicking the stub bubbles up to the Pane's article-level onClick.
+    await user.click(screen.getByTestId("price-chart-stub"));
+    expect(navigateMock).toHaveBeenCalledWith("/instrument/GME/chart?range=1y");
+  });
 });

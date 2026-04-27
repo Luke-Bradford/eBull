@@ -7,7 +7,12 @@ export interface PaneHeaderProps {
     readonly providers: ReadonlyArray<string>;
     readonly lastSync?: string;
   };
-  readonly onExpand?: () => void; // renders "Open →" button (button-only — no card-click)
+  /**
+   * Renders an "Open →" button. The handler is invoked on click; the
+   * click event's propagation is stopped so an enclosing Pane with
+   * `onCardClick` doesn't also fire.
+   */
+  readonly onExpand?: () => void;
 }
 
 export function PaneHeader({
@@ -43,7 +48,10 @@ export function PaneHeader({
         {onExpand !== undefined ? (
           <button
             type="button"
-            onClick={onExpand}
+            onClick={(e) => {
+              e.stopPropagation();
+              onExpand();
+            }}
             className="text-[11px] text-sky-700 hover:underline focus-visible:rounded focus-visible:outline-2 focus-visible:outline-sky-500"
           >
             Open →

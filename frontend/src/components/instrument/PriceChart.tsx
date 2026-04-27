@@ -1,26 +1,32 @@
 /**
- * PriceChart — candlestick + volume chart backed by TradingView's
- * lightweight-charts (#204). Replaces the Slice B hand-rolled SVG so
- * the operator gets proper OHLC rendering, pinch-zoom, and crosshair
- * tooltip without us maintaining drawing code.
+ * PriceChart — overview candlestick / line / area + volume chart backed
+ * by lightweight-charts (#204, polished in #587). Lives inside a
+ * clickable Pane on the instrument page; clicking the card drills to
+ * the full chart workspace at `/instrument/:symbol/chart`.
  *
- * Library choice: `lightweight-charts` v5, MIT, ~45 KB gzip, Canvas-
- * rendered. We import the specific series types (tree-shake-friendly);
- * the full bundle is not pulled in. Layering approach:
+ * Layering:
+ *   - candlestick / line / area series share the right price scale
+ *     (only one is visible at a time, toggled via `?type=`)
+ *   - volume series (Histogram) on its own overlay price scale pinned
+ *     to the bottom 30% via `scaleMargins`
  *
- *   candlestick series → right price scale (auto-scale)
- *   volume series (Histogram) → overlay price scale pinned to bottom
- *                               30% via scaleMargins
+ * URL params (replace, not push):
+ *   - `?chart=<range>` → 1w | 1m | 3m | 6m | 1y | 5y | max (default 1m)
+ *   - `?type=line|area` → series type (default candle, no param)
+ *   - `?scale=log` → logarithmic right price scale (default linear, no param)
  *
- * Range picker: 1w · 1m · 3m · 6m · 1y · 5y · max. URL-synced via
- * `?chart=<range>` so the operator's choice survives tab switches
- * inside the research page.
+ * Hover tooltip shows date + OHLC + volume + %Δ-from-prior; matches the
+ * pattern in `ChartWorkspaceCanvas.RichTooltip` so an operator's mental
+ * model is consistent between the overview pane and the workspace.
  */
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, type JSX } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
+  AreaSeries,
   CandlestickSeries,
   HistogramSeries,
+  LineSeries,
+  LineType,
   createChart,
   type IChartApi,
   type ISeriesApi,
@@ -55,6 +61,18 @@ const VALID_RANGES: readonly CandleRange[] = [
   "max",
 ];
 
+export type ChartType = "candle" | "line" | "area";
+const VALID_TYPES: readonly ChartType[] = ["candle", "line", "area"];
+const TYPES: { id: ChartType; label: string }[] = [
+  { id: "candle", label: "Candle" },
+  { id: "line", label: "Line" },
+  { id: "area", label: "Area" },
+];
+
+export type PriceScaleMode = "linear" | "log";
+// lightweight-charts: 0 = Normal (linear), 1 = Logarithmic.
+const SCALE_MODE_NUM: Record<PriceScaleMode, 0 | 1> = { linear: 0, log: 1 };
+
 function parseNum(v: string | null | undefined): number | null {
   if (v === null || v === undefined) return null;
   const n = Number(v);
@@ -83,9 +101,14 @@ function dateToTime(date: string): UTCTimestamp | null {
   return (ts / 1000) as UTCTimestamp;
 }
 
-interface HoverState {
+interface RichHoverState {
   date: string;
+  open: number;
+  high: number;
+  low: number;
   close: number;
+  volume: number;
+  changePct: number | null;
 }
 
 interface NumericBar {
@@ -111,6 +134,11 @@ export function PriceChart({
   const range: CandleRange = VALID_RANGES.includes(rawChart as CandleRange)
     ? (rawChart as CandleRange)
     : initialRange;
+  const rawType = searchParams.get("type");
+  const chartType: ChartType = VALID_TYPES.includes(rawType as ChartType)
+    ? (rawType as ChartType)
+    : "candle";
+  const priceScale: PriceScaleMode = searchParams.get("scale") === "log" ? "log" : "linear";
 
   const setRange = useCallback(
     (next: CandleRange) => {
@@ -124,6 +152,29 @@ export function PriceChart({
     },
     [searchParams, setSearchParams, initialRange],
   );
+
+  const setChartType = useCallback(
+    (next: ChartType) => {
+      const params = new URLSearchParams(searchParams);
+      if (next === "candle") {
+        params.delete("type");
+      } else {
+        params.set("type", next);
+      }
+      setSearchParams(params, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const togglePriceScale = useCallback(() => {
+    const params = new URLSearchParams(searchParams);
+    if (priceScale === "log") {
+      params.delete("scale");
+    } else {
+      params.set("scale", "log");
+    }
+    setSearchParams(params, { replace: true });
+  }, [searchParams, setSearchParams, priceScale]);
 
   const { data, error, loading, refetch } = useAsync<InstrumentCandles>(
     () => fetchInstrumentCandles(symbol, range),
@@ -156,7 +207,17 @@ export function PriceChart({
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between">
+      {/*
+        Controls swallow click events so they do NOT trigger the
+        Pane's card-click drill (which navigates to the full chart
+        workspace). Clicks anywhere else inside this component — chart
+        canvas, hover tooltip, empty state — bubble up to the Pane.
+      */}
+      <div
+        className="flex items-center justify-between gap-2"
+        onClick={(e) => e.stopPropagation()}
+        data-testid="chart-controls"
+      >
         <div className="flex gap-1">
           {RANGES.map((r) => (
             <button
@@ -174,6 +235,39 @@ export function PriceChart({
             </button>
           ))}
         </div>
+        <div className="flex items-center gap-2">
+          <div className="flex gap-1">
+            {TYPES.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setChartType(t.id)}
+                className={`rounded px-2 py-0.5 text-xs font-medium ${
+                  t.id === chartType
+                    ? "bg-slate-800 text-white"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                }`}
+                data-testid={`chart-type-${t.id}`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={togglePriceScale}
+            aria-pressed={priceScale === "log"}
+            className={`rounded px-2 py-0.5 text-xs font-medium ${
+              priceScale === "log"
+                ? "bg-slate-800 text-white"
+                : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+            }`}
+            data-testid="chart-scale-log"
+            title="Toggle logarithmic price scale"
+          >
+            Log
+          </button>
+        </div>
       </div>
 
       {effectivelyLoading && error === null ? (
@@ -188,7 +282,12 @@ export function PriceChart({
       ) : null}
 
       {hasChartData && rows !== null ? (
-        <ChartCanvas rows={rows} symbol={symbol} />
+        <ChartCanvas
+          rows={rows}
+          symbol={symbol}
+          chartType={chartType}
+          priceScale={priceScale}
+        />
       ) : null}
     </div>
   );
@@ -197,23 +296,33 @@ export function PriceChart({
 export interface ChartCanvasProps {
   rows: CandleBar[];
   symbol: string;
+  chartType?: ChartType;
+  priceScale?: PriceScaleMode;
   containerClassName?: string;
 }
 
 export function ChartCanvas({
   rows,
   symbol,
+  chartType = "candle",
+  priceScale = "linear",
   containerClassName,
 }: ChartCanvasProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const lineRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const areaRef = useRef<ISeriesApi<"Area"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
-  const [hover, setHover] = useState<HoverState | null>(null);
+  // Stable ref into `clean` for the crosshair handler — avoids stale
+  // closure capture when rows update.
+  const cleanRowsRef = useRef<NumericBar[]>([]);
+  const [hover, setHover] = useState<RichHoverState | null>(null);
 
   // One-shot chart construction. lightweight-charts owns the DOM
   // canvas and its own lifecycle; we give it an empty div and clean
-  // up on unmount via `chart.remove()`.
+  // up on unmount via `chart.remove()`. All three price series mount
+  // here; toggling `chartType` only flips visibility.
   useEffect(() => {
     const container = containerRef.current;
     if (container === null) return;
@@ -253,6 +362,27 @@ export function ChartCanvas({
       wickDownColor: chartTheme.down,
       borderVisible: false,
     });
+    // Robinhood-style smooth line. `LineType.Curved` (cardinal-spline)
+    // applies to both Line and Area series; we set it here once and the
+    // subsequent visibility toggles preserve the smoothing.
+    const line = chart.addSeries(LineSeries, {
+      color: chartTheme.primaryLine,
+      lineWidth: 2,
+      lineType: LineType.Curved,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      visible: false,
+    });
+    const area = chart.addSeries(AreaSeries, {
+      lineColor: chartTheme.primaryLine,
+      topColor: chartTheme.volumeUpAlpha,
+      bottomColor: "rgba(30,41,59,0.0)",
+      lineWidth: 2,
+      lineType: LineType.Curved,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      visible: false,
+    });
 
     // Volume on its own overlay price scale pinned to the bottom 25%.
     // priceScaleId: 'volume' is an arbitrary identifier — any string
@@ -266,8 +396,7 @@ export function ChartCanvas({
       .applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } });
 
     chart.subscribeCrosshairMove((param) => {
-      const cp = candleRef.current;
-      if (!param.time || !cp) {
+      if (!param.time) {
         setHover(null);
         return;
       }
@@ -279,34 +408,75 @@ export function ChartCanvas({
         setHover(null);
         return;
       }
-      const bar = param.seriesData.get(cp);
-      if (!bar || typeof bar !== "object" || !("close" in bar)) {
+      const time = param.time as UTCTimestamp;
+      const idx = cleanRowsRef.current.findIndex((b) => b.time === time);
+      if (idx < 0) {
         setHover(null);
         return;
       }
-      const date = new Date(param.time * 1000).toISOString().slice(0, 10);
-      setHover({ date, close: (bar as { close: number }).close });
+      const bar = cleanRowsRef.current[idx]!;
+      const prev = idx > 0 ? cleanRowsRef.current[idx - 1] : null;
+      const changePct =
+        prev !== null && prev !== undefined && prev.close !== 0
+          ? ((bar.close - prev.close) / prev.close) * 100
+          : null;
+      const date = new Date(time * 1000).toISOString().slice(0, 10);
+      setHover({
+        date,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+        volume: bar.volume,
+        changePct,
+      });
     });
 
     chartRef.current = chart;
     candleRef.current = candle;
+    lineRef.current = line;
+    areaRef.current = area;
     volumeRef.current = volume;
 
     return () => {
       chart.remove();
       chartRef.current = null;
       candleRef.current = null;
+      lineRef.current = null;
+      areaRef.current = null;
       volumeRef.current = null;
     };
   }, []);
+
+  // Toggle which price series is visible whenever `chartType` changes.
+  // The data effect always feeds all three series, so flipping
+  // visibility never reveals a stale series.
+  useEffect(() => {
+    const candle = candleRef.current;
+    const line = lineRef.current;
+    const area = areaRef.current;
+    if (!candle || !line || !area) return;
+    candle.applyOptions({ visible: chartType === "candle" });
+    line.applyOptions({ visible: chartType === "line" });
+    area.applyOptions({ visible: chartType === "area" });
+  }, [chartType]);
+
+  // Apply linear / logarithmic price scale.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.priceScale("right").applyOptions({ mode: SCALE_MODE_NUM[priceScale] });
+  }, [priceScale]);
 
   // Feed data on every rows change. lightweight-charts replaces the
   // series wholesale via setData — no incremental diffing needed.
   useEffect(() => {
     const candle = candleRef.current;
+    const line = lineRef.current;
+    const area = areaRef.current;
     const volume = volumeRef.current;
     const chart = chartRef.current;
-    if (!candle || !volume || !chart) return;
+    if (!candle || !line || !area || !volume || !chart) return;
 
     // Pre-convert to numeric bars so downstream `setData` calls work
     // with guaranteed-non-null values (no dead `?? 0` fallbacks). Rows
@@ -322,6 +492,7 @@ export function ChartCanvas({
       }
       return [{ time, open, high, low, close, volume: parseNum(r.volume) ?? 0 }];
     });
+    cleanRowsRef.current = clean;
 
     candle.setData(
       clean.map((b) => ({
@@ -332,6 +503,10 @@ export function ChartCanvas({
         close: b.close,
       })),
     );
+
+    const closeData = clean.map((b) => ({ time: b.time as Time, value: b.close }));
+    line.setData(closeData);
+    area.setData(closeData);
 
     volume.setData(
       clean.map((b, i) => {
@@ -349,21 +524,45 @@ export function ChartCanvas({
 
   return (
     <div className="relative">
-      {hover !== null ? (
-        <div className="absolute right-2 top-2 z-10 rounded bg-white/90 px-2 py-1 text-xs tabular-nums shadow-sm">
-          <span className="text-slate-400">{hover.date}</span>
-          <span className="ml-2 font-medium text-slate-700">
-            {hover.close.toLocaleString(undefined, {
-              maximumFractionDigits: 2,
-            })}
-          </span>
-        </div>
-      ) : null}
+      {hover !== null ? <RichTooltip hover={hover} /> : null}
       <div
         ref={containerRef}
         data-testid={`price-chart-${symbol}`}
         className={containerClassName ?? "h-[340px] w-full"}
       />
+    </div>
+  );
+}
+
+function RichTooltip({ hover }: { hover: RichHoverState }): JSX.Element {
+  const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return (
+    <div
+      className="absolute right-2 top-2 z-10 min-w-[160px] rounded bg-white/95 px-3 py-2 text-xs shadow-md"
+      data-testid="price-chart-tooltip"
+    >
+      <div className="text-slate-500">{hover.date}</div>
+      <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 tabular-nums">
+        <dt className="text-slate-500">O</dt>
+        <dd>{fmt(hover.open)}</dd>
+        <dt className="text-slate-500">H</dt>
+        <dd>{fmt(hover.high)}</dd>
+        <dt className="text-slate-500">L</dt>
+        <dd>{fmt(hover.low)}</dd>
+        <dt className="text-slate-500">C</dt>
+        <dd className="font-medium text-slate-800">{fmt(hover.close)}</dd>
+        <dt className="text-slate-500">Vol</dt>
+        <dd>{fmt(hover.volume)}</dd>
+        {hover.changePct !== null ? (
+          <>
+            <dt className="text-slate-500">Δ%</dt>
+            <dd className={hover.changePct >= 0 ? "text-emerald-600" : "text-red-600"}>
+              {hover.changePct >= 0 ? "+" : ""}
+              {hover.changePct.toFixed(2)}%
+            </dd>
+          </>
+        ) : null}
+      </dl>
     </div>
   );
 }
