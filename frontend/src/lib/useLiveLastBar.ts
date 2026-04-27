@@ -258,9 +258,22 @@ export function useLiveLastBar({
     // Session-visibility gate (pairs with PriceChart's PM/AH toggles).
     // Drop ticks whose session is hidden — without this a fresh bar
     // would be appended into a session the operator chose to hide.
+    //
+    // IMPORTANT: record the dedupe key BEFORE the early return so a
+    // subsequent toggle of `acceptPre`/`acceptAh` from false→true
+    // doesn't retroactively apply the stale tick when the effect
+    // re-fires. The filter is "going-forward" — a tick that was
+    // rejected stays rejected even if the user later opens that
+    // session. PR #610 round 3 review WARNING.
     const tickSession = classifyUsSession(tickEpoch);
-    if (tickSession === "pre" && !acceptPre) return;
-    if (tickSession === "ah" && !acceptAh) return;
+    if (tickSession === "pre" && !acceptPre) {
+      lastAppliedKeyRef.current = dedupeKey;
+      return;
+    }
+    if (tickSession === "ah" && !acceptAh) {
+      lastAppliedKeyRef.current = dedupeKey;
+      return;
+    }
 
     const result = aggregateTick({
       prev: liveBarRef.current,
