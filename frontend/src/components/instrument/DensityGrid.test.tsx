@@ -101,4 +101,19 @@ describe("DensityGrid", () => {
     );
     expect(screen.getByText("No SEC coverage")).toBeInTheDocument();
   });
+
+  it("no descendant uses overflow-auto (panes are content-driven, not scrollboxes)", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={summary}
+          keyStatsBlock={<div>KEY STATS BLOCK</div>}
+          thesisBlock={<div>THESIS BLOCK</div>}
+          newsBlock={<div>NEWS BLOCK</div>}
+        />
+      </MemoryRouter>,
+    );
+    const overflowAuto = container.querySelectorAll(".overflow-auto");
+    expect(overflowAuto.length).toBe(0);
+  });
 });
