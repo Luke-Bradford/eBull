@@ -1,8 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { DensityGrid } from "@/components/instrument/DensityGrid";
 import type { InstrumentSummary } from "@/api/types";
+
+const navigateMock = vi.fn();
+vi.mock("react-router-dom", async () => {
+  const actual = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
+  return { ...actual, useNavigate: () => navigateMock };
+});
 
 // Mock child components that make their own API calls so the DensityGrid
 // unit test stays isolated.
@@ -218,5 +225,23 @@ describe("DensityGrid profiles", () => {
       </MemoryRouter>,
     );
     expect(container.querySelectorAll(".overflow-auto").length).toBe(0);
+  });
+
+  it("chart pane has an Open button that navigates to /instrument/:symbol/chart", async () => {
+    navigateMock.mockClear();
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={makeSummary({})}
+          thesis={null}
+          thesisErrored={false}
+        />
+      </MemoryRouter>,
+    );
+    // PaneHeader renders the button labelled "Open →" when onExpand is set.
+    const openButton = screen.getByRole("button", { name: /open/i });
+    await user.click(openButton);
+    expect(navigateMock).toHaveBeenCalledWith("/instrument/GME/chart");
   });
 });

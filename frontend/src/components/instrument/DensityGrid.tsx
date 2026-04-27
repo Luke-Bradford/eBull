@@ -18,6 +18,7 @@
 
 import type { InstrumentSummary, ThesisDetail } from "@/api/types";
 import { activeProviders } from "@/lib/capabilityProviders";
+import { useNavigate } from "react-router-dom";
 import { BusinessSectionsTeaser } from "@/components/instrument/BusinessSectionsTeaser";
 import { DividendsPanel } from "@/components/instrument/DividendsPanel";
 import { FilingsPane } from "@/components/instrument/FilingsPane";
@@ -53,11 +54,13 @@ export function DensityGrid({
   const insiderActive = activeProviders(cap.insider ?? EMPTY_CELL).length > 0;
   const dividendProviders = activeProviders(cap.dividends ?? EMPTY_CELL);
   const hasNarrative = summary.has_sec_cik;
+  const navigate = useNavigate();
 
-  // PriceChart isn't yet a self-Pane'd component — wrap it locally.
-  // #576 will own the chart route; until then no onExpand.
   const ChartPane = (
-    <Pane title="Price chart">
+    <Pane
+      title="Price chart"
+      onExpand={() => navigate(`/instrument/${encodeURIComponent(symbol)}/chart`)}
+    >
       <PriceChart symbol={symbol} />
     </Pane>
   );
