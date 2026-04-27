@@ -8,15 +8,20 @@ export const EMPTY_CELL: { providers: string[]; data_present: Record<string, boo
   data_present: {},
 };
 
-export function selectProfile(summary: InstrumentSummary): DensityProfile {
-  const cap = summary.capabilities;
-  const fundCell = cap.fundamentals ?? EMPTY_CELL;
-  const hasFundamentals =
+export function hasFundamentalsActive(summary: InstrumentSummary): boolean {
+  const fundCell = summary.capabilities.fundamentals ?? EMPTY_CELL;
+  return (
     fundCell.providers.includes("sec_xbrl") &&
-    fundCell.data_present["sec_xbrl"] === true;
-  const hasFilings = activeProviders(cap.filings ?? EMPTY_CELL).length > 0;
+    fundCell.data_present["sec_xbrl"] === true
+  );
+}
 
-  if (hasFundamentals && hasFilings) return "full-sec";
-  if (hasFilings) return "partial-filings";
+export function selectProfile(summary: InstrumentSummary): DensityProfile {
+  const hasFunds = hasFundamentalsActive(summary);
+  const hasFilings =
+    activeProviders(summary.capabilities.filings ?? EMPTY_CELL).length > 0;
+
+  if (hasFunds && hasFilings) return "full-sec";
+  if (hasFunds || hasFilings || summary.has_sec_cik) return "partial-filings";
   return "minimal";
 }

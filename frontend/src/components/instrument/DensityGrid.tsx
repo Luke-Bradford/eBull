@@ -29,7 +29,11 @@ import { PriceChart } from "@/components/instrument/PriceChart";
 import { RecentNewsPane } from "@/components/instrument/RecentNewsPane";
 import { SecProfilePanel } from "@/components/instrument/SecProfilePanel";
 import { ThesisPane } from "@/components/instrument/ThesisPane";
-import { EMPTY_CELL, selectProfile } from "@/components/instrument/densityProfile";
+import {
+  EMPTY_CELL,
+  hasFundamentalsActive,
+  selectProfile,
+} from "@/components/instrument/densityProfile";
 
 export interface DensityGridProps {
   readonly summary: InstrumentSummary;
@@ -118,9 +122,16 @@ export function DensityGrid({
             <SecProfilePanel symbol={symbol} />
           </div>
         )}
-        <div className="col-span-12">
-          <FilingsPane instrumentId={instrumentId} symbol={symbol} summary={summary} />
-        </div>
+        {hasFundamentalsActive(summary) && (
+          <div className="col-span-12">
+            <FundamentalsPane summary={summary} />
+          </div>
+        )}
+        {activeProviders(cap.filings ?? EMPTY_CELL).length > 0 && (
+          <div className="col-span-12">
+            <FilingsPane instrumentId={instrumentId} symbol={symbol} summary={summary} />
+          </div>
+        )}
         {insiderActive && dividendProviders.length > 0 ? (
           <>
             <div className="col-span-12 lg:col-span-7">

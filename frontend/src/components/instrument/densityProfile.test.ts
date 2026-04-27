@@ -46,4 +46,38 @@ describe("selectProfile", () => {
     const summary = fixture({});
     expect(selectProfile(summary)).toBe("minimal");
   });
+
+  it("returns partial-filings when has_sec_cik is true even without fundamentals or filings", () => {
+    const summary: InstrumentSummary = {
+      instrument_id: 1,
+      is_tradable: true,
+      coverage_tier: 1,
+      identity: { symbol: "X", display_name: null, sector: null, market_cap: null } as never,
+      price: null,
+      key_stats: null,
+      source: {},
+      has_sec_cik: true,
+      has_filings_coverage: false,
+      capabilities: {},
+    } as InstrumentSummary;
+    expect(selectProfile(summary)).toBe("partial-filings");
+  });
+
+  it("returns partial-filings when only fundamentals active (no filings, no has_sec_cik)", () => {
+    const summary: InstrumentSummary = {
+      instrument_id: 1,
+      is_tradable: true,
+      coverage_tier: 1,
+      identity: { symbol: "X", display_name: null, sector: null, market_cap: null } as never,
+      price: null,
+      key_stats: null,
+      source: {},
+      has_sec_cik: false,
+      has_filings_coverage: false,
+      capabilities: {
+        fundamentals: { providers: ["sec_xbrl"], data_present: { sec_xbrl: true } },
+      },
+    } as InstrumentSummary;
+    expect(selectProfile(summary)).toBe("partial-filings");
+  });
 });

@@ -188,6 +188,22 @@ describe("DensityGrid profiles", () => {
     expect(screen.getByText("Thesis pane")).toBeInTheDocument();
   });
 
+  it("partial-filings profile renders FundamentalsPane when fundamentals are active without filings", () => {
+    render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={makeSummary({
+            fundamentals: { providers: ["sec_xbrl"], data_present: { sec_xbrl: true } },
+          })}
+          thesis={null}
+          thesisErrored={false}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("Fundamentals")).toBeInTheDocument();
+    expect(screen.queryByText(/Recent filings/)).not.toBeInTheDocument();
+  });
+
   it("no overflow-auto wrappers anywhere in the grid", () => {
     const { container } = render(
       <MemoryRouter>
