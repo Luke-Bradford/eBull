@@ -1,9 +1,10 @@
 /**
- * ChartWorkspaceCanvas — full-viewport chart canvas for ChartPage (#576 Phase 2).
+ * ChartWorkspaceCanvas — full-viewport chart canvas for ChartPage (#576 Phase 3).
  *
- * Extends the lightweight-charts setup with:
- *   - SMA/EMA overlay LineSeries (toggleable via `indicators` prop)
- *   - Rich OHLC + volume + Δ% + per-indicator crosshair tooltip
+ * Phase 2: SMA/EMA overlay LineSeries (toggleable via `indicators` prop),
+ *          rich OHLC + volume + Δ% + per-indicator crosshair tooltip.
+ * Phase 3: compare-ticker overlays (normalized % change), linear regression
+ *          line, range channel (highest-high / lowest-low), tooltip swap.
  *
  * Deliberately separate from ChartCanvas (compact instrument-page chart) so
  * the compact component stays focused and this one can evolve independently.
@@ -37,8 +38,20 @@ const SMA_LABELS: Record<string, string> = {
   ema50: "EMA(50)",
 };
 
+// Fixed palette for compare overlays — distinct from SMA colors.
+export const COMPARE_COLORS: readonly string[] = [
+  "#0ea5e9", // sky-500
+  "#a855f7", // purple-500
+  "#f59e0b", // amber-500
+];
+
 export type IndicatorId = "sma20" | "sma50" | "ema20" | "ema50";
 export const INDICATOR_IDS: IndicatorId[] = ["sma20", "sma50", "ema20", "ema50"];
+
+export interface CompareSeries {
+  readonly symbol: string;
+  readonly rows: CandleBar[];
+}
 
 interface NumericBar {
   time: UTCTimestamp;
@@ -51,13 +64,19 @@ interface NumericBar {
 
 interface RichHoverState {
   date: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-  changePct: number | null;
-  indicators: Array<{ id: IndicatorId; label: string; value: number }>;
+  mode: "ohlcv" | "compare";
+  // OHLCV mode
+  open?: number;
+  high?: number;
+  low?: number;
+  close?: number;
+  volume?: number;
+  changePct?: number | null;
+  indicators?: Array<{ id: IndicatorId; label: string; value: number }>;
+  // Compare mode
+  primaryPct?: number | null;
+  primarySymbol?: string;
+  comparePcts?: Array<{ symbol: string; color: string; value: number | null }>;
 }
 
 function parseNum(v: string | null | undefined): number | null {
@@ -107,6 +126,50 @@ export function computeEMA(closes: number[], period: number): Array<number | nul
   return out;
 }
 
+// Pure: normalize closes to % change from the first value.
+// The first non-null close is the base. NaN/null → returned as null.
+export function normalizeToPercent(closes: number[]): Array<number | null> {
+  if (closes.length === 0) return [];
+  const base = closes[0] as number;
+  if (!Number.isFinite(base) || base === 0) return closes.map(() => null);
+  return closes.map((c) => ((c - base) / base) * 100);
+}
+
+// Pure: linear regression over [(0, y0), (1, y1), ..., (n, yN)].
+// Returns the line evaluated at each x (plottable as a series).
+export function linearRegressionLine(closes: number[]): Array<number | null> {
+  const n = closes.length;
+  if (n < 2) return new Array(n).fill(null);
+  let sumX = 0,
+    sumY = 0,
+    sumXY = 0,
+    sumXX = 0;
+  for (let i = 0; i < n; i++) {
+    const y = closes[i] as number;
+    sumX += i;
+    sumY += y;
+    sumXY += i * y;
+    sumXX += i * i;
+  }
+  const denom = n * sumXX - sumX * sumX;
+  if (denom === 0) return new Array(n).fill(null);
+  const slope = (n * sumXY - sumX * sumY) / denom;
+  const intercept = (sumY - slope * sumX) / n;
+  return closes.map((_, i) => slope * i + intercept);
+}
+
+// Pure: returns {high, low} over the array.  Both null if length 0.
+export function rangeChannel(closes: number[]): { high: number | null; low: number | null } {
+  if (closes.length === 0) return { high: null, low: null };
+  let high = closes[0] as number;
+  let low = closes[0] as number;
+  for (const v of closes) {
+    if (v > high) high = v;
+    if (v < low) low = v;
+  }
+  return { high, low };
+}
+
 function computeIndicator(id: IndicatorId, closes: number[]): Array<number | null> {
   switch (id) {
     case "sma20":
@@ -124,6 +187,9 @@ export interface ChartWorkspaceCanvasProps {
   readonly rows: CandleBar[];
   readonly symbol: string;
   readonly indicators: ReadonlyArray<IndicatorId>;
+  readonly compares?: ReadonlyArray<CompareSeries>;
+  readonly showRegression?: boolean;
+  readonly showChannel?: boolean;
   readonly containerClassName?: string;
 }
 
@@ -131,17 +197,30 @@ export function ChartWorkspaceCanvas({
   rows,
   symbol,
   indicators,
+  compares = [],
+  showRegression = false,
+  showChannel = false,
   containerClassName,
 }: ChartWorkspaceCanvasProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  // Primary normalized line (used in compare mode instead of candles).
+  const primaryLineRef = useRef<ISeriesApi<"Line"> | null>(null);
   const indicatorRefs = useRef<Map<IndicatorId, ISeriesApi<"Line">>>(new Map());
+  const compareLineRefs = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
+  const regressionRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const channelHighRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const channelLowRef = useRef<ISeriesApi<"Line"> | null>(null);
   // Stable refs for crosshair closure — no stale-closure risk.
   const cleanRowsRef = useRef<NumericBar[]>([]);
   const indicatorValuesRef = useRef<Map<IndicatorId, Array<number | null>>>(new Map());
+  // Compare mode normalized values keyed by symbol; primary is keyed by symbol prop.
+  const compareNormRef = useRef<Map<string, Array<number | null>>>(new Map());
   const [hover, setHover] = useState<RichHoverState | null>(null);
+
+  const compareMode = compares.length > 0;
 
   // One-shot chart construction — mirrors ChartCanvas setup.
   useEffect(() => {
@@ -188,6 +267,13 @@ export function ChartWorkspaceCanvas({
     });
     chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } });
 
+    const primaryLine = chart.addSeries(LineSeries, {
+      color: "#1e293b",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+
     chart.subscribeCrosshairMove((param) => {
       if (!param.time || typeof param.time !== "number") {
         setHover(null);
@@ -200,6 +286,30 @@ export function ChartWorkspaceCanvas({
         return;
       }
       const bar = cleanRowsRef.current[idx]!;
+
+      if (compareNormRef.current.size > 0) {
+        // Compare mode: show normalized % values.
+        const primaryNorm = compareNormRef.current.get("__primary__");
+        const primaryPct = primaryNorm ? (primaryNorm[idx] ?? null) : null;
+        const comparePcts = Array.from(compareNormRef.current.entries())
+          .filter(([k]) => k !== "__primary__")
+          .map(([sym, norm], colorIdx) => ({
+            symbol: sym,
+            color: COMPARE_COLORS[colorIdx % COMPARE_COLORS.length] ?? "#0ea5e9",
+            value: norm[idx] ?? null,
+          }));
+        const date = new Date(time * 1000).toISOString().slice(0, 10);
+        setHover({
+          date,
+          mode: "compare",
+          primaryPct,
+          primarySymbol: symbol,
+          comparePcts,
+        });
+        return;
+      }
+
+      // OHLCV mode.
       const prev = idx > 0 ? cleanRowsRef.current[idx - 1] : null;
       const changePct =
         prev !== null && prev !== undefined && prev.close !== 0
@@ -218,6 +328,7 @@ export function ChartWorkspaceCanvas({
       const date = new Date(time * 1000).toISOString().slice(0, 10);
       setHover({
         date,
+        mode: "ohlcv",
         open: bar.open,
         high: bar.high,
         low: bar.low,
@@ -231,22 +342,29 @@ export function ChartWorkspaceCanvas({
     chartRef.current = chart;
     candleRef.current = candle;
     volumeRef.current = volume;
+    primaryLineRef.current = primaryLine;
 
     return () => {
       chart.remove();
       chartRef.current = null;
       candleRef.current = null;
       volumeRef.current = null;
+      primaryLineRef.current = null;
+      regressionRef.current = null;
+      channelHighRef.current = null;
+      channelLowRef.current = null;
       indicatorRefs.current.clear();
+      compareLineRefs.current.clear();
     };
-  }, []);
+  }, [symbol]);
 
-  // Feed candle + volume data on rows change.
+  // Feed candle + volume data on rows change; handle compare mode switching.
   useEffect(() => {
     const candle = candleRef.current;
     const volume = volumeRef.current;
+    const primaryLine = primaryLineRef.current;
     const chart = chartRef.current;
-    if (!candle || !volume || !chart) return;
+    if (!candle || !volume || !chart || !primaryLine) return;
 
     const clean: NumericBar[] = rows.flatMap((r) => {
       const time = dateToTime(r.date);
@@ -261,29 +379,122 @@ export function ChartWorkspaceCanvas({
     });
     cleanRowsRef.current = clean;
 
-    candle.setData(
-      clean.map((b) => ({
-        time: b.time as Time,
-        open: b.open,
-        high: b.high,
-        low: b.low,
-        close: b.close,
-      })),
-    );
+    if (compareMode) {
+      // In compare mode: hide candles + volume, show normalized primary line.
+      candle.setData([]);
+      volume.setData([]);
+      const closes = clean.map((b) => b.close);
+      const normalized = normalizeToPercent(closes);
+      compareNormRef.current.set("__primary__", normalized);
+      const lineData: LineData[] = [];
+      for (let i = 0; i < normalized.length; i++) {
+        const v = normalized[i];
+        const bar = clean[i];
+        if (v === null || v === undefined || !bar) continue;
+        lineData.push({ time: bar.time as Time, value: v });
+      }
+      primaryLine.applyOptions({ visible: true, color: "#1e293b", lineWidth: 2 });
+      primaryLine.setData(lineData);
+    } else {
+      // Normal mode: show candles + volume; hide primary normalized line.
+      compareNormRef.current.clear();
+      primaryLine.setData([]);
 
-    volume.setData(
-      clean.map((b, i) => {
-        const prev = i > 0 ? clean[i - 1]!.close : b.close;
-        return {
+      candle.setData(
+        clean.map((b) => ({
           time: b.time as Time,
-          value: b.volume,
-          color: b.close >= prev ? "rgba(16,185,129,0.4)" : "rgba(239,68,68,0.4)",
-        };
-      }),
-    );
+          open: b.open,
+          high: b.high,
+          low: b.low,
+          close: b.close,
+        })),
+      );
+
+      volume.setData(
+        clean.map((b, i) => {
+          const prev = i > 0 ? clean[i - 1]!.close : b.close;
+          return {
+            time: b.time as Time,
+            value: b.volume,
+            color: b.close >= prev ? "rgba(16,185,129,0.4)" : "rgba(239,68,68,0.4)",
+          };
+        }),
+      );
+    }
 
     chart.timeScale().fitContent();
-  }, [rows]);
+  }, [rows, compareMode]);
+
+  // Compare series: fetch + render normalized lines per compare symbol.
+  // Tears down series for symbols no longer in the list.
+  useEffect(() => {
+    const chart = chartRef.current;
+    const clean = cleanRowsRef.current;
+    if (!chart) return;
+
+    // Remove series for symbols no longer in compares.
+    for (const [sym, series] of compareLineRefs.current.entries()) {
+      if (!compares.some((c) => c.symbol === sym)) {
+        chart.removeSeries(series);
+        compareLineRefs.current.delete(sym);
+        compareNormRef.current.delete(sym);
+      }
+    }
+
+    if (!compareMode) return;
+
+    // Add/update series for each compare symbol.
+    compares.forEach((cs, colorIdx) => {
+      const color = COMPARE_COLORS[colorIdx % COMPARE_COLORS.length] ?? "#0ea5e9";
+
+      const compareClean: NumericBar[] = cs.rows.flatMap((r) => {
+        const time = dateToTime(r.date);
+        const close = parseNum(r.close);
+        if (time === null || close === null) return [];
+        return [{ time, open: close, high: close, low: close, close, volume: 0 }];
+      });
+
+      // Build a time→close map so we can align with the primary series times.
+      const compareMap = new Map<number, number>();
+      for (const b of compareClean) {
+        compareMap.set(b.time, b.close);
+      }
+
+      // Align compare closes to primary timestamps (use null when missing).
+      const alignedCloses: (number | null)[] = clean.map((b) => compareMap.get(b.time) ?? null);
+      // Compute base as first non-null value.
+      const firstNonNull = alignedCloses.find((v) => v !== null);
+      const base = firstNonNull ?? null;
+
+      const normalized: Array<number | null> = alignedCloses.map((v) => {
+        if (v === null || base === null || !Number.isFinite(base) || base === 0) return null;
+        return ((v - base) / base) * 100;
+      });
+      compareNormRef.current.set(cs.symbol, normalized);
+
+      let series = compareLineRefs.current.get(cs.symbol);
+      if (!series) {
+        series = chart.addSeries(LineSeries, {
+          color,
+          lineWidth: 2,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        });
+        compareLineRefs.current.set(cs.symbol, series);
+      } else {
+        series.applyOptions({ color });
+      }
+
+      const lineData: LineData[] = [];
+      for (let i = 0; i < normalized.length; i++) {
+        const v = normalized[i];
+        const bar = clean[i];
+        if (v === null || v === undefined || !bar) continue;
+        lineData.push({ time: bar.time as Time, value: v });
+      }
+      series.setData(lineData);
+    });
+  }, [compares, compareMode, rows]);
 
   // Add/remove indicator LineSeries based on `indicators` prop.
   // `rows` is in the dep array (alongside `indicators`) so this effect
@@ -330,9 +541,88 @@ export function ChartWorkspaceCanvas({
     }
   }, [indicators, rows]);
 
+  // Trend overlays: linear regression + range channel.
+  // Render over primary closes regardless of compare mode.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const clean = cleanRowsRef.current;
+    const closes = clean.map((b) => b.close);
+
+    // --- Linear regression ---
+    if (showRegression) {
+      const regValues = linearRegressionLine(closes);
+      if (!regressionRef.current) {
+        regressionRef.current = chart.addSeries(LineSeries, {
+          color: "#f97316", // orange-500
+          lineWidth: 1,
+          lineStyle: 2, // dashed
+          priceLineVisible: false,
+          lastValueVisible: false,
+        });
+      }
+      const regData: LineData[] = [];
+      for (let i = 0; i < regValues.length; i++) {
+        const v = regValues[i];
+        const bar = clean[i];
+        if (v === null || v === undefined || !bar) continue;
+        regData.push({ time: bar.time as Time, value: v });
+      }
+      regressionRef.current.setData(regData);
+    } else {
+      if (regressionRef.current) {
+        chart.removeSeries(regressionRef.current);
+        regressionRef.current = null;
+      }
+    }
+
+    // --- Channel: horizontal-ish dotted lines for range high + low ---
+    const { high, low } = rangeChannel(closes);
+    if (showChannel && high !== null && low !== null && clean.length >= 2) {
+      if (!channelHighRef.current) {
+        channelHighRef.current = chart.addSeries(LineSeries, {
+          color: "#10b981", // emerald-500
+          lineWidth: 1,
+          lineStyle: 3, // dotted
+          priceLineVisible: false,
+          lastValueVisible: false,
+        });
+      }
+      if (!channelLowRef.current) {
+        channelLowRef.current = chart.addSeries(LineSeries, {
+          color: "#ef4444", // red-500
+          lineWidth: 1,
+          lineStyle: 3, // dotted
+          priceLineVisible: false,
+          lastValueVisible: false,
+        });
+      }
+      // Flat lines spanning the entire range.
+      const firstBar = clean[0]!;
+      const lastBar = clean[clean.length - 1]!;
+      channelHighRef.current.setData([
+        { time: firstBar.time as Time, value: high },
+        { time: lastBar.time as Time, value: high },
+      ]);
+      channelLowRef.current.setData([
+        { time: firstBar.time as Time, value: low },
+        { time: lastBar.time as Time, value: low },
+      ]);
+    } else {
+      if (channelHighRef.current) {
+        chart.removeSeries(channelHighRef.current);
+        channelHighRef.current = null;
+      }
+      if (channelLowRef.current) {
+        chart.removeSeries(channelLowRef.current);
+        channelLowRef.current = null;
+      }
+    }
+  }, [showRegression, showChannel, rows]);
+
   return (
     <div className="relative">
-      {hover !== null ? <RichTooltip hover={hover} symbol={symbol} /> : null}
+      {hover !== null ? <RichTooltip hover={hover} /> : null}
       <div
         ref={containerRef}
         data-testid={`chart-workspace-${symbol}`}
@@ -342,25 +632,61 @@ export function ChartWorkspaceCanvas({
   );
 }
 
-function RichTooltip({ hover, symbol }: { hover: RichHoverState; symbol: string }): JSX.Element {
-  const fmt = (n: number) =>
-    n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+function RichTooltip({ hover }: { hover: RichHoverState }): JSX.Element {
+  const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const fmtPct = (v: number | null | undefined) => {
+    if (v === null || v === undefined) return "—";
+    return `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+  };
+
+  if (hover.mode === "compare") {
+    return (
+      <div className="absolute right-2 top-2 z-10 min-w-[180px] rounded bg-white/95 px-3 py-2 text-xs shadow-md">
+        <div className="text-slate-500">{hover.date}</div>
+        <dl className="mt-1 space-y-0.5 tabular-nums">
+          <div className="flex justify-between gap-3">
+            <span className="font-medium text-slate-800">{hover.primarySymbol}</span>
+            <span
+              className={
+                (hover.primaryPct ?? 0) >= 0 ? "text-emerald-600" : "text-red-600"
+              }
+            >
+              {fmtPct(hover.primaryPct)}
+            </span>
+          </div>
+          {hover.comparePcts?.map((cp) => (
+            <div key={cp.symbol} className="flex justify-between gap-3">
+              <span style={{ color: cp.color }} className="font-medium">
+                {cp.symbol}
+              </span>
+              <span
+                className={cp.value !== null && cp.value >= 0 ? "text-emerald-600" : "text-red-600"}
+              >
+                {fmtPct(cp.value)}
+              </span>
+            </div>
+          ))}
+        </dl>
+      </div>
+    );
+  }
+
+  // OHLCV mode
   return (
     <div className="absolute right-2 top-2 z-10 min-w-[180px] rounded bg-white/95 px-3 py-2 text-xs shadow-md">
-      <div className="font-semibold text-slate-800">{symbol}</div>
       <div className="text-slate-500">{hover.date}</div>
       <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 tabular-nums">
         <dt className="text-slate-500">O</dt>
-        <dd>{fmt(hover.open)}</dd>
+        <dd>{fmt(hover.open ?? 0)}</dd>
         <dt className="text-slate-500">H</dt>
-        <dd>{fmt(hover.high)}</dd>
+        <dd>{fmt(hover.high ?? 0)}</dd>
         <dt className="text-slate-500">L</dt>
-        <dd>{fmt(hover.low)}</dd>
+        <dd>{fmt(hover.low ?? 0)}</dd>
         <dt className="text-slate-500">C</dt>
-        <dd className="font-medium text-slate-800">{fmt(hover.close)}</dd>
+        <dd className="font-medium text-slate-800">{fmt(hover.close ?? 0)}</dd>
         <dt className="text-slate-500">Vol</dt>
-        <dd>{fmt(hover.volume)}</dd>
-        {hover.changePct !== null ? (
+        <dd>{fmt(hover.volume ?? 0)}</dd>
+        {hover.changePct !== null && hover.changePct !== undefined ? (
           <>
             <dt className="text-slate-500">Δ%</dt>
             <dd className={hover.changePct >= 0 ? "text-emerald-600" : "text-red-600"}>
@@ -370,7 +696,7 @@ function RichTooltip({ hover, symbol }: { hover: RichHoverState; symbol: string 
           </>
         ) : null}
       </dl>
-      {hover.indicators.length > 0 ? (
+      {hover.indicators !== undefined && hover.indicators.length > 0 ? (
         <div className="mt-1 border-t border-slate-100 pt-1">
           {hover.indicators.map((row) => (
             <div key={row.id} className="flex justify-between text-[11px]">

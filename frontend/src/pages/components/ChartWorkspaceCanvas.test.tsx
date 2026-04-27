@@ -1,13 +1,19 @@
 /**
- * Unit tests for ChartWorkspaceCanvas pure math helpers (#576 Phase 2).
+ * Unit tests for ChartWorkspaceCanvas pure math helpers (#576 Phase 2 + Phase 3).
  *
- * We test only the exported `computeSMA` and `computeEMA` functions —
+ * We test only the exported pure functions —
  * lightweight-charts cannot render in jsdom (Canvas API absent) so the
  * React component itself is not exercised here. The component's integration
  * is covered by ChartPage.test.tsx via a stub.
  */
 import { describe, expect, it } from "vitest";
-import { computeSMA, computeEMA } from "./ChartWorkspaceCanvas";
+import {
+  computeEMA,
+  computeSMA,
+  linearRegressionLine,
+  normalizeToPercent,
+  rangeChannel,
+} from "./ChartWorkspaceCanvas";
 
 describe("computeSMA", () => {
   it("returns correct rolling average for period 3", () => {
@@ -90,5 +96,126 @@ describe("computeEMA", () => {
     const lastSma = sma[sma.length - 1]!;
     const lastEma = ema[ema.length - 1]!;
     expect(lastEma).toBeGreaterThan(lastSma);
+  });
+});
+
+describe("normalizeToPercent", () => {
+  it("returns empty array for empty input", () => {
+    expect(normalizeToPercent([])).toEqual([]);
+  });
+
+  it("first element is always 0% (base = itself)", () => {
+    const result = normalizeToPercent([100, 110, 90]);
+    expect(result[0]).toBe(0);
+  });
+
+  it("flat series → all zeros", () => {
+    const result = normalizeToPercent([50, 50, 50, 50]);
+    for (const v of result) {
+      expect(v).toBeCloseTo(0);
+    }
+  });
+
+  it("computes correct percent change from base", () => {
+    // base=100; 110 → +10%; 90 → -10%; 150 → +50%
+    const result = normalizeToPercent([100, 110, 90, 150]);
+    expect(result[0]).toBeCloseTo(0);
+    expect(result[1]).toBeCloseTo(10);
+    expect(result[2]).toBeCloseTo(-10);
+    expect(result[3]).toBeCloseTo(50);
+  });
+
+  it("returns null array when base is zero", () => {
+    const result = normalizeToPercent([0, 10, 20]);
+    expect(result.every((v) => v === null)).toBe(true);
+  });
+
+  it("returns null array when base is non-finite", () => {
+    const result = normalizeToPercent([NaN, 10, 20]);
+    expect(result.every((v) => v === null)).toBe(true);
+  });
+
+  it("single element returns [0]", () => {
+    const result = normalizeToPercent([42]);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toBeCloseTo(0);
+  });
+});
+
+describe("linearRegressionLine", () => {
+  it("returns all null for empty array", () => {
+    const result = linearRegressionLine([]);
+    expect(result).toHaveLength(0);
+  });
+
+  it("returns [null] for single-element array", () => {
+    const result = linearRegressionLine([5]);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toBeNull();
+  });
+
+  it("exact line [1,2,3,4,5] → slope=1, intercept=1", () => {
+    // x=[0,1,2,3,4], y=[1,2,3,4,5] → y = x + 1
+    const result = linearRegressionLine([1, 2, 3, 4, 5]);
+    expect(result[0]).toBeCloseTo(1);
+    expect(result[1]).toBeCloseTo(2);
+    expect(result[2]).toBeCloseTo(3);
+    expect(result[3]).toBeCloseTo(4);
+    expect(result[4]).toBeCloseTo(5);
+  });
+
+  it("flat series → returns constant line equal to the value", () => {
+    const result = linearRegressionLine([7, 7, 7, 7]);
+    for (const v of result) {
+      expect(v).toBeCloseTo(7);
+    }
+  });
+
+  it("two-point line returns exact endpoints", () => {
+    // x=[0,1], y=[2,4] → slope=2, intercept=2 → [2, 4]
+    const result = linearRegressionLine([2, 4]);
+    expect(result[0]).toBeCloseTo(2);
+    expect(result[1]).toBeCloseTo(4);
+  });
+
+  it("descending series → negative slope", () => {
+    const result = linearRegressionLine([10, 8, 6, 4, 2]);
+    // slope should be -2
+    expect(result[0]).toBeCloseTo(10);
+    expect(result[4]).toBeCloseTo(2);
+  });
+
+  it("output length matches input length", () => {
+    const closes = [1, 3, 2, 5, 4, 7];
+    const result = linearRegressionLine(closes);
+    expect(result).toHaveLength(closes.length);
+  });
+});
+
+describe("rangeChannel", () => {
+  it("returns {high: null, low: null} for empty array", () => {
+    expect(rangeChannel([])).toEqual({ high: null, low: null });
+  });
+
+  it("single element: high === low === that element", () => {
+    expect(rangeChannel([42])).toEqual({ high: 42, low: 42 });
+  });
+
+  it("returns correct high and low", () => {
+    const result = rangeChannel([5, 3, 8, 1, 7]);
+    expect(result.high).toBe(8);
+    expect(result.low).toBe(1);
+  });
+
+  it("all same values → high === low", () => {
+    const result = rangeChannel([4, 4, 4, 4]);
+    expect(result.high).toBe(4);
+    expect(result.low).toBe(4);
+  });
+
+  it("handles negative values", () => {
+    const result = rangeChannel([-5, -2, -10, -1]);
+    expect(result.high).toBe(-1);
+    expect(result.low).toBe(-10);
   });
 });

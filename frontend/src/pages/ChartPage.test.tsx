@@ -1,9 +1,10 @@
 /**
- * Tests for ChartPage (#576 Phase 1 + Phase 2).
+ * Tests for ChartPage (#576 Phase 1 + Phase 2 + Phase 3).
  *
  * lightweight-charts cannot render in jsdom (Canvas API absent), so we stub
  * ChartWorkspaceCanvas to a simple div. What we pin here is the page's contract:
  *
+ * Phase 1 + 2:
  *   - Symbol + back-link render
  *   - Default range is 1Y
  *   - Clicking a range button updates the URL param to ?range=<id>
@@ -13,6 +14,15 @@
  *   - Four indicator toggle buttons render
  *   - Clicking a toggle updates the URL ?ind= param
  *   - Pre-set ?ind= in URL activates the matching toggles
+ *
+ * Phase 3:
+ *   - Compare input adds a chip + URL gets ?compare=AAPL
+ *   - Removing a compare chip clears it from URL
+ *   - Pre-set ?compare=AAPL,MSFT renders both chips active
+ *   - Cap at 3 — typing a 4th doesn't add
+ *   - Trend toggle Regression updates ?trend=regression
+ *   - Pre-set ?trend=regression,channel activates both toggles
+ *   - Compare + trend props forwarded to canvas stub
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -24,14 +34,23 @@ vi.mock("@/pages/components/ChartWorkspaceCanvas", () => ({
   ChartWorkspaceCanvas: ({
     symbol,
     indicators,
+    compares,
+    showRegression,
+    showChannel,
   }: {
     symbol: string;
     indicators: string[];
+    compares?: Array<{ symbol: string; rows: unknown[] }>;
+    showRegression?: boolean;
+    showChannel?: boolean;
   }) => (
     <div
       data-testid="chart-canvas-stub"
       data-symbol={symbol}
       data-indicators={indicators.join(",")}
+      data-compares={(compares ?? []).map((c) => c.symbol).join(",")}
+      data-show-regression={String(showRegression ?? false)}
+      data-show-channel={String(showChannel ?? false)}
     />
   ),
   INDICATOR_IDS: ["sma20", "sma50", "ema20", "ema50"],
@@ -52,8 +71,9 @@ const mockCandles = vi.mocked(fetchInstrumentCandles);
 function makeCandles(
   range: InstrumentCandles["range"],
   rows: InstrumentCandles["rows"] = [],
+  symbol = "AAPL",
 ): InstrumentCandles {
-  return { symbol: "AAPL", range, days: 365, rows };
+  return { symbol, range, days: 365, rows };
 }
 
 function makeSummary(): InstrumentSummary {
@@ -90,7 +110,9 @@ function renderPage(path = "/instrument/AAPL/chart") {
 
 beforeEach(() => {
   mockSummary.mockResolvedValue(makeSummary());
-  mockCandles.mockResolvedValue(makeCandles("1y", twoValidRows()));
+  mockCandles.mockImplementation((sym, range) =>
+    Promise.resolve(makeCandles(range, twoValidRows(), sym)),
+  );
 });
 
 afterEach(() => vi.clearAllMocks());
@@ -138,9 +160,6 @@ describe("ChartPage — range picker", () => {
   });
 
   it("clicking a range button updates the URL and refetches with new range", async () => {
-    mockCandles.mockImplementation((_, range) =>
-      Promise.resolve(makeCandles(range, twoValidRows())),
-    );
     const user = userEvent.setup();
     renderPage();
     await waitFor(() => {
@@ -153,9 +172,6 @@ describe("ChartPage — range picker", () => {
   });
 
   it("honours a pre-set ?range= query param from the URL", async () => {
-    mockCandles.mockImplementation((_, range) =>
-      Promise.resolve(makeCandles(range, twoValidRows())),
-    );
     renderPage("/instrument/AAPL/chart?range=5y");
     await waitFor(() => {
       expect(mockCandles).toHaveBeenCalledWith("AAPL", "5y");
@@ -253,9 +269,6 @@ describe("ChartPage — indicator toggles", () => {
   });
 
   it("pre-set ?ind=sma20,sma50 activates those two indicators", async () => {
-    mockCandles.mockImplementation((_, range) =>
-      Promise.resolve(makeCandles(range, twoValidRows())),
-    );
     renderPage("/instrument/AAPL/chart?ind=sma20,sma50");
     await waitFor(() => {
       const stub = screen.getByTestId("chart-canvas-stub");
@@ -266,14 +279,158 @@ describe("ChartPage — indicator toggles", () => {
   });
 
   it("ignores unrecognised indicator ids in ?ind=", async () => {
-    mockCandles.mockImplementation((_, range) =>
-      Promise.resolve(makeCandles(range, twoValidRows())),
-    );
     renderPage("/instrument/AAPL/chart?ind=sma20,rsi14,garbage");
     await waitFor(() => {
       const stub = screen.getByTestId("chart-canvas-stub");
       // Only sma20 is valid
       expect(stub.getAttribute("data-indicators")).toBe("sma20");
+    });
+  });
+});
+
+describe("ChartPage — Phase 3 compare overlays", () => {
+  it("compare input is rendered", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("compare-input")).toBeInTheDocument();
+  });
+
+  it("typing a symbol and pressing Enter adds a chip and updates URL", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+    const input = screen.getByTestId("compare-input");
+    await user.type(input, "MSFT{Enter}");
+    await waitFor(() => {
+      expect(screen.getByTestId("compare-chip-MSFT")).toBeInTheDocument();
+    });
+    // Canvas stub should receive MSFT in data-compares after fetch resolves
+    await waitFor(() => {
+      const stub = screen.getByTestId("chart-canvas-stub");
+      expect(stub.getAttribute("data-compares")).toContain("MSFT");
+    });
+  });
+
+  it("removing a compare chip clears it from the URL and canvas", async () => {
+    const user = userEvent.setup();
+    renderPage("/instrument/AAPL/chart?compare=MSFT");
+    await waitFor(() => {
+      expect(screen.getByTestId("compare-chip-MSFT")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("compare-remove-MSFT"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("compare-chip-MSFT")).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      const stub = screen.getByTestId("chart-canvas-stub");
+      expect(stub.getAttribute("data-compares")).toBe("");
+    });
+  });
+
+  it("pre-set ?compare=MSFT,GOOG renders both chips", async () => {
+    renderPage("/instrument/AAPL/chart?compare=MSFT,GOOG");
+    await waitFor(() => {
+      expect(screen.getByTestId("compare-chip-MSFT")).toBeInTheDocument();
+      expect(screen.getByTestId("compare-chip-GOOG")).toBeInTheDocument();
+    });
+  });
+
+  it("cap at 3 — compare input hidden when 3 symbols are present", async () => {
+    renderPage("/instrument/AAPL/chart?compare=MSFT,GOOG,SPY");
+    await waitFor(() => {
+      expect(screen.getByTestId("compare-chip-MSFT")).toBeInTheDocument();
+      expect(screen.getByTestId("compare-chip-GOOG")).toBeInTheDocument();
+      expect(screen.getByTestId("compare-chip-SPY")).toBeInTheDocument();
+    });
+    // Input should not be present at the max
+    expect(screen.queryByTestId("compare-input")).not.toBeInTheDocument();
+    // A hint about the max should appear
+    expect(screen.getByText(/Max 3/i)).toBeInTheDocument();
+  });
+
+  it("adding a 4th symbol via URL trims to first 3", async () => {
+    renderPage("/instrument/AAPL/chart?compare=MSFT,GOOG,SPY,NVDA");
+    await waitFor(() => {
+      // Only 3 chips rendered
+      expect(screen.getByTestId("compare-chip-MSFT")).toBeInTheDocument();
+      expect(screen.getByTestId("compare-chip-GOOG")).toBeInTheDocument();
+      expect(screen.getByTestId("compare-chip-SPY")).toBeInTheDocument();
+      expect(screen.queryByTestId("compare-chip-NVDA")).not.toBeInTheDocument();
+    });
+  });
+});
+
+describe("ChartPage — Phase 3 trend toggles", () => {
+  it("renders Regression and Range trend toggle buttons", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("trend-regression")).toBeInTheDocument();
+    expect(screen.getByTestId("trend-channel")).toBeInTheDocument();
+  });
+
+  it("clicking Regression sets ?trend=regression and forwards showRegression=true", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("trend-regression"));
+    await waitFor(() => {
+      const stub = screen.getByTestId("chart-canvas-stub");
+      expect(stub.getAttribute("data-show-regression")).toBe("true");
+    });
+  });
+
+  it("clicking Regression twice removes it (toggle off)", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("trend-regression"));
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("chart-canvas-stub").getAttribute("data-show-regression"),
+      ).toBe("true");
+    });
+    await user.click(screen.getByTestId("trend-regression"));
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("chart-canvas-stub").getAttribute("data-show-regression"),
+      ).toBe("false");
+    });
+  });
+
+  it("pre-set ?trend=regression,channel activates both toggles", async () => {
+    renderPage("/instrument/AAPL/chart?trend=regression,channel");
+    await waitFor(() => {
+      const stub = screen.getByTestId("chart-canvas-stub");
+      expect(stub.getAttribute("data-show-regression")).toBe("true");
+      expect(stub.getAttribute("data-show-channel")).toBe("true");
+    });
+  });
+
+  it("pre-set ?trend=channel activates only channel", async () => {
+    renderPage("/instrument/AAPL/chart?trend=channel");
+    await waitFor(() => {
+      const stub = screen.getByTestId("chart-canvas-stub");
+      expect(stub.getAttribute("data-show-regression")).toBe("false");
+      expect(stub.getAttribute("data-show-channel")).toBe("true");
+    });
+  });
+
+  it("ignores unrecognised trend ids", async () => {
+    renderPage("/instrument/AAPL/chart?trend=regression,bollinger");
+    await waitFor(() => {
+      const stub = screen.getByTestId("chart-canvas-stub");
+      expect(stub.getAttribute("data-show-regression")).toBe("true");
+      expect(stub.getAttribute("data-show-channel")).toBe("false");
     });
   });
 });
