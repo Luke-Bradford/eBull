@@ -233,8 +233,13 @@ export function ChartPage(): JSX.Element {
   const compareFetchKeyRef = useRef<string>("");
 
   useEffect(() => {
+    // Dedup repeat fires with the same (range + symbols) tuple. The
+    // effect's deps already gate on compareSymbols/range changing, but
+    // a strict-mode double-invocation or a parent re-render that
+    // produces a new array reference with the same contents would
+    // otherwise re-fetch unnecessarily.
     const key = [range, ...compareSymbols].join(",");
-    if (key === compareFetchKeyRef.current && compareSymbols.length === 0) return;
+    if (key === compareFetchKeyRef.current) return;
     compareFetchKeyRef.current = key;
 
     if (compareSymbols.length === 0) {
