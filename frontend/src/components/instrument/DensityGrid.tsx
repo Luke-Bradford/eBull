@@ -57,24 +57,23 @@ export function DensityGrid({
   const navigate = useNavigate();
   const [overviewParams] = useSearchParams();
 
+  const drillToWorkspace = () => {
+    // Preserve the operator's currently-selected overview range when
+    // expanding to the full chart workspace. PriceChart syncs its
+    // range to ?chart=<id> on the instrument page; ChartPage reads
+    // ?range=<id>. Translate the param name across the boundary so
+    // a non-default range survives the route change.
+    const overviewRange = overviewParams.get("chart");
+    const target = `/instrument/${encodeURIComponent(symbol)}/chart`;
+    const url =
+      overviewRange !== null && overviewRange !== ""
+        ? `${target}?range=${encodeURIComponent(overviewRange)}`
+        : target;
+    navigate(url);
+  };
+
   const ChartPane = (
-    <Pane
-      title="Price chart"
-      onExpand={() => {
-        // Preserve the operator's currently-selected overview range when
-        // expanding to the full chart workspace. PriceChart syncs its
-        // range to ?chart=<id> on the instrument page; ChartPage reads
-        // ?range=<id>. Translate the param name across the boundary so
-        // a non-default range survives the route change.
-        const overviewRange = overviewParams.get("chart");
-        const target = `/instrument/${encodeURIComponent(symbol)}/chart`;
-        const url =
-          overviewRange !== null && overviewRange !== ""
-            ? `${target}?range=${encodeURIComponent(overviewRange)}`
-            : target;
-        navigate(url);
-      }}
-    >
+    <Pane title="Price chart" onExpand={drillToWorkspace} onCardClick={drillToWorkspace}>
       <PriceChart symbol={symbol} />
     </Pane>
   );
