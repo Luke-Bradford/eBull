@@ -11,7 +11,8 @@
 
 import { fetchInsiderSummary } from "@/api/instruments";
 import type { InsiderSummary } from "@/api/instruments";
-import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { Pane } from "@/components/instrument/Pane";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback } from "react";
@@ -47,7 +48,11 @@ export function InsiderActivitySummary({
   );
 
   return (
-    <Section title="Insider activity (90d)">
+    <Pane
+      title="Insider activity"
+      scope="last 90 days"
+      source={{ providers: ["sec_form4"] }}
+    >
       {state.loading ? (
         <SectionSkeleton rows={2} />
       ) : state.error !== null ? (
@@ -96,7 +101,7 @@ export function InsiderActivitySummary({
           );
         })()
       )}
-    </Section>
+    </Pane>
   );
 }
 
