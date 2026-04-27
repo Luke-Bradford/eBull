@@ -26,6 +26,64 @@ class EtoroWsStatus(BaseModel):
     last_quote_max: str | None
 
 
+@router.get("/etoro-candles-probe")
+def etoro_candles_probe(request: Request, instrument_id: int = 1699, count: int = 90) -> dict:
+    """Probe eToro intraday candles directly. Returns last N OneMinute
+    bars + timestamps so we can see actual session coverage."""
+    import uuid
+
+    import httpx
+
+    from app.config import settings
+    from app.services.broker_credentials import load_credential_for_provider_use
+    from app.services.operators import sole_operator_id
+
+    pool = getattr(request.app.state, "db_pool", None)
+    if pool is None:
+        return {"error": "no pool"}
+    with pool.connection() as conn:
+        op_id = sole_operator_id(conn)
+        api = load_credential_for_provider_use(
+            conn,
+            operator_id=op_id,
+            provider="etoro",
+            label="api_key",
+            environment=settings.etoro_env,
+            caller="diag",
+        )
+        conn.commit()
+        user = load_credential_for_provider_use(
+            conn,
+            operator_id=op_id,
+            provider="etoro",
+            label="user_key",
+            environment=settings.etoro_env,
+            caller="diag",
+        )
+        conn.commit()
+
+    url = (
+        f"{settings.etoro_base_url}/api/v1/market-data/instruments/"
+        f"{instrument_id}/history/candles/asc/OneMinute/{count}"
+    )
+    headers = {"x-api-key": api, "x-user-key": user, "x-request-id": str(uuid.uuid4())}
+    with httpx.Client(timeout=15.0) as c:
+        r = c.get(url, headers=headers)
+        if r.status_code != 200:
+            return {"status": r.status_code, "body": r.text[:500]}
+        body = r.json()
+        outer = body.get("candles", [])
+        if not outer:
+            return {"empty": True}
+        inner = outer[0].get("candles", [])
+        return {
+            "count": len(inner),
+            "first": inner[0] if inner else None,
+            "last": inner[-1] if inner else None,
+            "samples_every_10": [inner[i] for i in range(0, len(inner), 10)],
+        }
+
+
 @router.get("/etoro-ws", response_model=EtoroWsStatus)
 def etoro_ws_status(request: Request) -> EtoroWsStatus:
     sub = getattr(request.app.state, "etoro_ws", None)

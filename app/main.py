@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
+from app.api._debug_ws import router as debug_ws_router
 from app.api.alerts import router as alerts_router
 from app.api.attribution import router as attribution_router
 from app.api.audit import router as audit_router
@@ -21,7 +22,6 @@ from app.api.auth_session import router as auth_session_router
 from app.api.auth_setup import router as auth_setup_router
 from app.api.broker_credentials import router as broker_credentials_router
 from app.api.budget import router as budget_router
-from app.api._debug_ws import router as debug_ws_router
 from app.api.business_summary_admin import router as business_summary_admin_router
 from app.api.capability_overrides_admin import router as capability_overrides_admin_router
 from app.api.config import KillSwitchRequest, KillSwitchResponse, post_kill_switch

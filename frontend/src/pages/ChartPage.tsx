@@ -259,13 +259,11 @@ export function ChartPage(): JSX.Element {
     [symbol, range],
   );
 
-  // Background poll fallback. SSE live-tick path covers smooth
-  // updates when eToro pushes; this guarantees the chart still
-  // freshens even when the WS goes silent. 15s for intraday,
-  // 60s for daily — backend cache + singleflight (#600) absorb
-  // the load.
+  // Coarser candle-window refetch as a backstop. SSE+REST live-rate
+  // polling on the backend (#602) keeps the in-progress bar fresh at
+  // 5s; this just picks up rare historical bar corrections.
   useEffect(() => {
-    const intervalMs = intraday ? 15_000 : 60_000;
+    const intervalMs = intraday ? 60_000 : 300_000;
     const id = setInterval(() => {
       candlesAsync.refetch();
     }, intervalMs);
