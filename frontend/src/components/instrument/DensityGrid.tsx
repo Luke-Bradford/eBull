@@ -78,7 +78,7 @@ export function DensityGrid({
   // hover/zoom.
   const ChartPane = (
     <Pane title="Price chart" onExpand={drillToWorkspace}>
-      <PriceChart symbol={symbol} />
+      <PriceChart symbol={symbol} instrumentId={instrumentId} />
     </Pane>
   );
 

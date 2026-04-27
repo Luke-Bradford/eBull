@@ -39,6 +39,7 @@ import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import {
   fetchChartCandles,
+  intervalSecondsFor,
   isIntraday,
   type NormalisedBar,
   type NormalisedChartCandles,
@@ -46,6 +47,7 @@ import {
 import { formatHoverLabel, humanizeVolume, tickFormatter } from "@/lib/chartFormatters";
 import { chartTheme } from "@/lib/chartTheme";
 import { useAsync } from "@/lib/useAsync";
+import { useLiveLastBar } from "@/lib/useLiveLastBar";
 
 const RANGES: { id: ChartRange; label: string }[] = [
   { id: "1d", label: "1D" },
@@ -115,11 +117,16 @@ interface NumericBar {
 
 export interface PriceChartProps {
   symbol: string;
+  /** Provider-native instrument id used for the SSE live-tick subscription
+   *  (#602). When omitted, the chart renders without live updates — the
+   *  historical fetch is unaffected. */
+  instrumentId?: number | null;
   initialRange?: ChartRange;
 }
 
 export function PriceChart({
   symbol,
+  instrumentId = null,
   initialRange = "1m",
 }: PriceChartProps): JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -283,6 +290,8 @@ export function PriceChart({
         <ChartCanvas
           rows={rows}
           symbol={symbol}
+          instrumentId={instrumentId}
+          range={range}
           chartType={chartType}
           priceScale={priceScale}
           intraday={intraday}
@@ -295,6 +304,13 @@ export function PriceChart({
 export interface ChartCanvasProps {
   rows: ReadonlyArray<NormalisedBar>;
   symbol: string;
+  /** When set, opens a live SSE quote stream and keeps the last bar
+   *  updating in real time via lightweight-charts series.update(). */
+  instrumentId?: number | null;
+  /** Required for live-tick aggregation — picks the bucket size that
+   *  matches the chart's interval. When omitted the live-tick path
+   *  is disabled. */
+  range?: ChartRange;
   chartType?: ChartType;
   priceScale?: PriceScaleMode;
   /** When true, hover label includes HH:MM and the time scale shows time. */
@@ -305,6 +321,8 @@ export interface ChartCanvasProps {
 export function ChartCanvas({
   rows,
   symbol,
+  instrumentId = null,
+  range,
   chartType = "candle",
   priceScale = "linear",
   intraday = false,
@@ -558,9 +576,52 @@ export function ChartCanvas({
     chart.timeScale().fitContent();
   }, [rows]);
 
+  // Live-tick aggregator (#602). Subscribes to the page-level
+  // LiveQuoteProvider stream for `instrumentId` and updates the last
+  // bar's H/L/C — or appends a new bar when a tick crosses the bucket
+  // boundary. Disabled when `instrumentId` or `range` is missing
+  // (caller hasn't wired live updates for this chart).
+  //
+  // Anchor against the LAST RENDERED bar from `cleanRowsRef`, not the
+  // raw `rows` tail — the rendering effect drops rows with null OHLC,
+  // so anchoring against `rows[rows.length - 1]` could bucket ticks
+  // against an invisible bar (Codex pre-push #602).
+  const lastRenderedBar = cleanRowsRef.current.length > 0
+    ? cleanRowsRef.current[cleanRowsRef.current.length - 1]!
+    : null;
+  const histLastBar = lastRenderedBar !== null
+    ? {
+        time: lastRenderedBar.time as number,
+        open: lastRenderedBar.open,
+        high: lastRenderedBar.high,
+        low: lastRenderedBar.low,
+      }
+    : null;
+  const bucketSeconds = range !== undefined ? intervalSecondsFor(range) : 60;
+  const { connected, unavailable } = useLiveLastBar({
+    instrumentId: range !== undefined ? instrumentId : null,
+    bucketSeconds,
+    historicalLastBar: histLastBar,
+    refs: {
+      candle: candleRef.current,
+      line: lineRef.current,
+      area: areaRef.current,
+    },
+  });
+  const liveActive = connected && !unavailable && instrumentId !== null && range !== undefined;
+
   return (
     <div className="relative">
       {hover !== null ? <RichTooltip hover={hover} /> : null}
+      {liveActive ? (
+        <div
+          className="absolute right-2 top-2 z-10 flex items-center gap-1 text-[10px] uppercase tracking-wider text-emerald-600"
+          data-testid="price-chart-live-indicator"
+        >
+          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+          Live
+        </div>
+      ) : null}
       <div
         ref={containerRef}
         data-testid={`price-chart-${symbol}`}

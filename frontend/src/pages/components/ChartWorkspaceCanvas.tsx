@@ -22,9 +22,11 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 
-import type { NormalisedBar } from "@/lib/chartData";
+import type { ChartRange } from "@/api/types";
+import { intervalSecondsFor, type NormalisedBar } from "@/lib/chartData";
 import { formatHoverLabel, humanizeVolume, tickFormatter } from "@/lib/chartFormatters";
 import { chartTheme } from "@/lib/chartTheme";
+import { useLiveLastBar } from "@/lib/useLiveLastBar";
 
 export type IndicatorId = "sma20" | "sma50" | "ema20" | "ema50";
 export const INDICATOR_IDS: IndicatorId[] = ["sma20", "sma50", "ema20", "ema50"];
@@ -173,6 +175,12 @@ function computeIndicator(id: IndicatorId, closes: number[]): Array<number | nul
 export interface ChartWorkspaceCanvasProps {
   readonly rows: ReadonlyArray<NormalisedBar>;
   readonly symbol: string;
+  /** Provider-native instrument id for live-tick subscription (#602).
+   *  When omitted the chart renders without live updates. */
+  readonly instrumentId?: number | null;
+  /** Required for live-tick aggregation — picks the bucket size that
+   *  matches the chart's interval. */
+  readonly range?: ChartRange;
   readonly indicators: ReadonlyArray<IndicatorId>;
   readonly compares?: ReadonlyArray<CompareSeries>;
   readonly showRegression?: boolean;
@@ -185,6 +193,8 @@ export interface ChartWorkspaceCanvasProps {
 export function ChartWorkspaceCanvas({
   rows,
   symbol,
+  instrumentId = null,
+  range,
   indicators,
   compares = [],
   showRegression = false,
@@ -666,9 +676,51 @@ export function ChartWorkspaceCanvas({
     }
   }, [showRegression, showChannel, rows, compares]);
 
+  // Live last-bar updates (#602). Disabled in compare mode — when the
+  // candle/volume series are hidden in favour of normalized lines,
+  // the aggregator's update() calls would land on hidden series and
+  // diverge from the per-symbol normalised data we render. Compare
+  // ranges are also already restricted to daily-only at the page
+  // level (#601).
+  const lastRenderedBar =
+    cleanRowsRef.current.length > 0
+      ? cleanRowsRef.current[cleanRowsRef.current.length - 1]!
+      : null;
+  const histLastBar =
+    lastRenderedBar !== null
+      ? {
+          time: lastRenderedBar.time as number,
+          open: lastRenderedBar.open,
+          high: lastRenderedBar.high,
+          low: lastRenderedBar.low,
+        }
+      : null;
+  const bucketSeconds = range !== undefined ? intervalSecondsFor(range) : 60;
+  const liveTargetId = !compareMode && range !== undefined ? instrumentId : null;
+  const { connected, unavailable } = useLiveLastBar({
+    instrumentId: liveTargetId,
+    bucketSeconds,
+    historicalLastBar: histLastBar,
+    refs: {
+      candle: candleRef.current,
+      line: null, // workspace primaryLineRef is only used in compare mode
+      area: null,
+    },
+  });
+  const liveActive = connected && !unavailable && liveTargetId !== null;
+
   return (
     <div className="relative">
       {hover !== null ? <RichTooltip hover={hover} /> : null}
+      {liveActive ? (
+        <div
+          className="absolute right-2 top-2 z-10 flex items-center gap-1 text-[10px] uppercase tracking-wider text-emerald-600"
+          data-testid="chart-workspace-live-indicator"
+        >
+          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+          Live
+        </div>
+      ) : null}
       <div
         ref={containerRef}
         data-testid={`chart-workspace-${symbol}`}
