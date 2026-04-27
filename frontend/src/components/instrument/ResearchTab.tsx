@@ -4,23 +4,13 @@
  *
  * Composes existing data into one operator view: key stats with
  * field_source provenance, thesis memo if present, break conditions.
- * Red-flag surfacing and peer context come in Slice 2 (right rail).
- *
- * Capability panels (Dividends, Insider activity, Corporate events)
- * iterate ``summary.capabilities[type]`` and render one shell per
- * active (data-present) provider — so a cross-listed instrument with
- * multiple providers renders multiple panels labelled with each
- * provider tag (#515 PR 3b).
+ * Phase 3 (#559): delegates layout to DensityGrid which puts the chart
+ * top-left and arranges all panes in a Bloomberg-style 3-column grid.
  */
 import { Section } from "@/components/dashboard/Section";
-import { BusinessSectionsTeaser } from "@/components/instrument/BusinessSectionsTeaser";
-import { DividendsPanel } from "@/components/instrument/DividendsPanel";
-import { EightKEventsPanel } from "@/components/instrument/EightKEventsPanel";
-import { InsiderActivityPanel } from "@/components/instrument/InsiderActivityPanel";
-import { SecProfilePanel } from "@/components/instrument/SecProfilePanel";
+import { DensityGrid } from "@/components/instrument/DensityGrid";
 import { EmptyState } from "@/components/states/EmptyState";
-import type { CapabilityCell, InstrumentSummary, ThesisDetail } from "@/api/types";
-import { activeProviders } from "@/lib/capabilityProviders";
+import type { InstrumentSummary, ThesisDetail } from "@/api/types";
 
 function formatDecimal(
   value: string | null | undefined,
@@ -170,8 +160,6 @@ export interface ResearchTabProps {
   thesisErrored?: boolean;
 }
 
-const EMPTY_CELL: CapabilityCell = { providers: [], data_present: {} };
-
 export function ResearchTab({
   summary,
   thesis,
@@ -180,77 +168,50 @@ export function ResearchTab({
   const stats = summary.key_stats;
   const fs = stats?.field_source ?? undefined;
 
-  // SEC profile + 10-K Item 1 panels are still SEC-specific (not yet
-  // refactored into provider-agnostic shells); gate on the SEC
-  // identifier signal directly. The three capability panels below
-  // (Dividends, Insider, Corporate events) iterate
-  // `summary.capabilities[type]` and render one shell per active
-  // provider — provider-agnostic by construction.
-  const hasSec = summary.has_sec_cik;
-  const dividends = summary.capabilities.dividends ?? EMPTY_CELL;
-  const insider = summary.capabilities.insider ?? EMPTY_CELL;
-  const events = summary.capabilities.corporate_events ?? EMPTY_CELL;
-  const dividendProviders = activeProviders(dividends);
-  const insiderProviders = activeProviders(insider);
-  const eventProviders = activeProviders(events);
+  const keyStatsBlock = (
+    <Section title="Key statistics">
+      {stats === null ? (
+        <EmptyState
+          title="No key stats"
+          description="No provider returned key stats for this ticker."
+        />
+      ) : (
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+          <KeyStat label="Market cap" value={formatMarketCap(summary.identity.market_cap)} />
+          <KeyStat label="P/E ratio" value={formatDecimal(stats.pe_ratio)} source={fs?.pe_ratio} />
+          <KeyStat label="P/B ratio" value={formatDecimal(stats.pb_ratio)} source={fs?.pb_ratio} />
+          <KeyStat label="Dividend yield" value={formatDecimal(stats.dividend_yield, { percent: true })} source={fs?.dividend_yield} />
+          <KeyStat label="Payout ratio" value={formatDecimal(stats.payout_ratio, { percent: true })} source={fs?.payout_ratio} />
+          <KeyStat label="ROE" value={formatDecimal(stats.roe, { percent: true })} source={fs?.roe} />
+          <KeyStat label="ROA" value={formatDecimal(stats.roa, { percent: true })} source={fs?.roa} />
+          <KeyStat label="Debt / Equity" value={formatDecimal(stats.debt_to_equity)} source={fs?.debt_to_equity} />
+          <KeyStat label="Revenue growth (YoY)" value={formatDecimal(stats.revenue_growth_yoy, { percent: true })} source={fs?.revenue_growth_yoy} />
+          <KeyStat label="Earnings growth (YoY)" value={formatDecimal(stats.earnings_growth_yoy, { percent: true })} source={fs?.earnings_growth_yoy} />
+        </dl>
+      )}
+    </Section>
+  );
+
+  const thesisBlock = (
+    <Section title="Thesis">
+      <ThesisPanel thesis={thesis} errored={thesisErrored} />
+    </Section>
+  );
+
+  const newsBlock = (
+    <Section title="Recent news">
+      <p className="text-xs text-slate-500">News tab still has the full feed.</p>
+    </Section>
+  );
 
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      {hasSec ? <SecProfilePanel symbol={summary.identity.symbol} /> : null}
-      {dividendProviders.map((p) => (
-        <DividendsPanel
-          key={`dividends-${p}`}
-          symbol={summary.identity.symbol}
-          provider={p}
-        />
-      ))}
-      {hasSec ? (
-        <div className="md:col-span-2">
-          <BusinessSectionsTeaser symbol={summary.identity.symbol} />
-        </div>
-      ) : null}
-      {insiderProviders.map((p) => (
-        <div key={`insider-${p}`} className="md:col-span-2">
-          <InsiderActivityPanel
-            symbol={summary.identity.symbol}
-            provider={p}
-          />
-        </div>
-      ))}
-      {eventProviders.map((p) => (
-        <div key={`events-${p}`} className="md:col-span-2">
-          <EightKEventsPanel
-            symbol={summary.identity.symbol}
-            provider={p}
-          />
-        </div>
-      ))}
-
-      <Section title="Key statistics">
-        {stats === null ? (
-          <EmptyState
-            title="No key stats"
-            description="No provider returned key stats for this ticker."
-          />
-        ) : (
-          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
-            <KeyStat label="Market cap" value={formatMarketCap(summary.identity.market_cap)} />
-            <KeyStat label="P/E ratio" value={formatDecimal(stats.pe_ratio)} source={fs?.pe_ratio} />
-            <KeyStat label="P/B ratio" value={formatDecimal(stats.pb_ratio)} source={fs?.pb_ratio} />
-            <KeyStat label="Dividend yield" value={formatDecimal(stats.dividend_yield, { percent: true })} source={fs?.dividend_yield} />
-            <KeyStat label="Payout ratio" value={formatDecimal(stats.payout_ratio, { percent: true })} source={fs?.payout_ratio} />
-            <KeyStat label="ROE" value={formatDecimal(stats.roe, { percent: true })} source={fs?.roe} />
-            <KeyStat label="ROA" value={formatDecimal(stats.roa, { percent: true })} source={fs?.roa} />
-            <KeyStat label="Debt / Equity" value={formatDecimal(stats.debt_to_equity)} source={fs?.debt_to_equity} />
-            <KeyStat label="Revenue growth (YoY)" value={formatDecimal(stats.revenue_growth_yoy, { percent: true })} source={fs?.revenue_growth_yoy} />
-            <KeyStat label="Earnings growth (YoY)" value={formatDecimal(stats.earnings_growth_yoy, { percent: true })} source={fs?.earnings_growth_yoy} />
-          </dl>
-        )}
-      </Section>
-
-      <Section title="Thesis">
-        <ThesisPanel thesis={thesis} errored={thesisErrored} />
-      </Section>
-    </div>
+    <DensityGrid
+      summary={summary}
+      thesis={thesis}
+      thesisErrored={thesisErrored}
+      keyStatsBlock={keyStatsBlock}
+      thesisBlock={thesisBlock}
+      newsBlock={newsBlock}
+    />
   );
 }

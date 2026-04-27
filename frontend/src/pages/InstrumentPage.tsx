@@ -40,7 +40,6 @@ import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
 import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
 import { Section, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
-import { PriceChart } from "@/components/instrument/PriceChart";
 import { ResearchTab } from "@/components/instrument/ResearchTab";
 import { RightRail } from "@/components/instrument/RightRail";
 import { SummaryStrip } from "@/components/instrument/SummaryStrip";
@@ -668,19 +667,11 @@ function InstrumentPageBody({
           </nav>
 
           {activeTab === "research" && (
-            <div className="space-y-4">
-              {/* Chart sits at the top of Research — the operator
-                  lands on the tab and sees price context before
-                  drilling into thesis + stats. Slice B of #316. */}
-              <div className="rounded-md border border-slate-200 bg-white p-3 shadow-sm">
-                <PriceChart symbol={symbol} />
-              </div>
-              <ResearchTab
-                summary={summary}
-                thesis={thesisAsync.data}
-                thesisErrored={thesisErrSticky}
-              />
-            </div>
+            <ResearchTab
+              summary={summary}
+              thesis={thesisAsync.data}
+              thesisErrored={thesisErrSticky}
+            />
           )}
           {activeTab === "financials" && <FinancialsTab symbol={symbol} />}
           {activeTab === "positions" && (
