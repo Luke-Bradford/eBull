@@ -31,7 +31,7 @@ describe("FilingsPane", () => {
       </MemoryRouter>,
     );
     const rows = await screen.findAllByText(/summary \d/);
-    expect(rows.length).toBeLessThanOrEqual(5);
+    expect(rows.length).toBe(5);
   });
 
   it("renders drilldown link to /filings/10-k for 10-K type", async () => {

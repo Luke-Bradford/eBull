@@ -207,8 +207,6 @@ export function ResearchTab({
   return (
     <DensityGrid
       summary={summary}
-      thesis={thesis}
-      thesisErrored={thesisErrored}
       keyStatsBlock={keyStatsBlock}
       thesisBlock={thesisBlock}
       newsBlock={newsBlock}

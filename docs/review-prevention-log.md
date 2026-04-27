@@ -972,3 +972,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `Tenk10KDrilldownPage` had two parallel `useAsync` calls (`sectionsState`, `historyState`) but only one branch checked `.error`. When `historyState.error !== null`, the right rail silently rendered an empty filings list with no retry / notice — user can't tell whether the data is genuinely empty or the fetch failed.
 - Prevention: When adding a `useAsync` call alongside others, every `xState.error` must appear somewhere in the render branch — either as a `SectionError` (with retry), an inline notice, or a deliberate skip. At self-review: grep for `useAsync` in the file and confirm each returned `error` field is referenced in the JSX.
 - Enforced in: this prevention log; PR #562 fix shows an inline amber notice in the right rail when `historyState.error !== null`.
+
+---
+
+### Dead props on component interfaces
+
+- First seen in: #566.
+- Symptom: `DensityGrid` declared `thesis` and `thesisErrored` on its `DensityGridProps` interface; callers passed them; the function signature destructured neither and used neither. Silent dead path — TypeScript accepts it, callers think they're influencing render, no behaviour changes.
+- Prevention: Every prop in an exported component interface must appear in the destructuring parameter list of the function. At self-review: visually scan each `interface XProps {...}` in a diff and confirm each field is destructured + referenced in the body. The TS strict check `noUnusedParameters` doesn't catch this case because the destructured object as a whole is used.
+- Enforced in: this prevention log; PR #566 fix removes the dead props from the interface and call site.

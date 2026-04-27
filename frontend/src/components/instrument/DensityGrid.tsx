@@ -22,13 +22,11 @@ import { InsiderActivityPanel } from "@/components/instrument/InsiderActivityPan
 import { PriceChart } from "@/components/instrument/PriceChart";
 import { SecProfilePanel } from "@/components/instrument/SecProfilePanel";
 import { Section } from "@/components/dashboard/Section";
-import type { CapabilityCell, InstrumentSummary, ThesisDetail } from "@/api/types";
+import type { CapabilityCell, InstrumentSummary } from "@/api/types";
 import { activeProviders } from "@/lib/capabilityProviders";
 
 export interface DensityGridProps {
   readonly summary: InstrumentSummary;
-  readonly thesis: ThesisDetail | null;
-  readonly thesisErrored: boolean;
   readonly keyStatsBlock: JSX.Element;
   readonly thesisBlock: JSX.Element;
   readonly newsBlock: JSX.Element;

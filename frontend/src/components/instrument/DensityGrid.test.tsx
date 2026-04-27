@@ -49,8 +49,6 @@ describe("DensityGrid", () => {
       <MemoryRouter>
         <DensityGrid
           summary={summary}
-          thesis={null}
-          thesisErrored={false}
           keyStatsBlock={<div>KEY STATS BLOCK</div>}
           thesisBlock={<div>THESIS BLOCK</div>}
           newsBlock={<div>NEWS BLOCK</div>}
@@ -69,8 +67,6 @@ describe("DensityGrid", () => {
       <MemoryRouter>
         <DensityGrid
           summary={summary}
-          thesis={null}
-          thesisErrored={false}
           keyStatsBlock={<div>KEY STATS BLOCK</div>}
           thesisBlock={<div>THESIS BLOCK</div>}
           newsBlock={<div>NEWS BLOCK</div>}
@@ -97,8 +93,6 @@ describe("DensityGrid", () => {
       <MemoryRouter>
         <DensityGrid
           summary={noSec}
-          thesis={null}
-          thesisErrored={false}
           keyStatsBlock={<div>KEY STATS BLOCK</div>}
           thesisBlock={<div>THESIS BLOCK</div>}
           newsBlock={<div>NEWS BLOCK</div>}
