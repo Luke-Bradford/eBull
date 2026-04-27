@@ -364,6 +364,32 @@ describe("ChartPage — Phase 3 compare overlays", () => {
   });
 });
 
+describe("ChartPage — compare fetch error handling", () => {
+  it("handles per-ticker fetch failure without crashing the batch", async () => {
+    mockCandles.mockImplementation((sym: string, range) => {
+      if (sym === "BAD") return Promise.reject(new Error("404 Not Found"));
+      return Promise.resolve(makeCandles(range, twoValidRows(), sym));
+    });
+
+    renderPage("/instrument/AAPL/chart?compare=MSFT,BAD");
+
+    // Wait for the canvas to appear (primary fetch succeeds).
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+
+    // MSFT chip renders normally (no error attribute).
+    await waitFor(() => {
+      expect(screen.getByTestId("compare-chip-MSFT")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("compare-chip-MSFT")).not.toHaveAttribute("data-error");
+
+    // BAD chip renders with error styling (data-error="true").
+    expect(screen.getByTestId("compare-chip-BAD")).toBeInTheDocument();
+    expect(screen.getByTestId("compare-chip-BAD")).toHaveAttribute("data-error", "true");
+  });
+});
+
 describe("ChartPage — Phase 3 trend toggles", () => {
   it("renders Regression and Range trend toggle buttons", async () => {
     renderPage();

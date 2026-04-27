@@ -227,6 +227,8 @@ export function ChartPage(): JSX.Element {
   // Compare candle fetches: parallel, keyed on [range, ...compareSymbols].
   // We use a single useEffect + useState<Map> to manage compare fetches.
   const [compareData, setCompareData] = useState<Map<string, CandleBar[]>>(new Map());
+  // Symbols whose fetch failed — shown with an error chip.
+  const [compareErrors, setCompareErrors] = useState<string[]>([]);
   // Track the set of symbols + range for which we've started fetching.
   const compareFetchKeyRef = useRef<string>("");
 
@@ -237,22 +239,27 @@ export function ChartPage(): JSX.Element {
 
     if (compareSymbols.length === 0) {
       setCompareData(new Map());
+      setCompareErrors([]);
       return;
     }
 
     let cancelled = false;
-    void Promise.all(
-      compareSymbols.map(async (sym) => {
-        const result = await fetchInstrumentCandles(sym, range);
-        return { sym, rows: result.rows };
-      }),
+    void Promise.allSettled(
+      compareSymbols.map((sym) => fetchInstrumentCandles(sym, range)),
     ).then((results) => {
       if (cancelled) return;
       const m = new Map<string, CandleBar[]>();
-      for (const { sym, rows } of results) {
-        m.set(sym, rows);
-      }
+      const failures: string[] = [];
+      results.forEach((r, i) => {
+        const sym = compareSymbols[i]!;
+        if (r.status === "fulfilled") {
+          m.set(sym, r.value.rows);
+        } else {
+          failures.push(sym);
+        }
+      });
       setCompareData(m);
+      setCompareErrors(failures);
     });
 
     return () => {
@@ -385,24 +392,34 @@ export function ChartPage(): JSX.Element {
       {/* Compare row */}
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[11px] uppercase tracking-wider text-slate-500">Compare</span>
-        {compareSymbols.map((sym) => (
-          <span
-            key={sym}
-            className="inline-flex items-center gap-1 rounded-full border border-slate-300 bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-700"
-            data-testid={`compare-chip-${sym}`}
-          >
-            {sym}
-            <button
-              type="button"
-              aria-label={`Remove ${sym}`}
-              onClick={() => removeCompare(sym)}
-              className="ml-0.5 rounded-full text-slate-400 hover:text-slate-600"
-              data-testid={`compare-remove-${sym}`}
+        {compareSymbols.map((sym) => {
+          const hasFailed = compareErrors.includes(sym);
+          return (
+            <span
+              key={sym}
+              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
+                hasFailed
+                  ? "border-red-400 bg-red-50 text-red-700"
+                  : "border-slate-300 bg-slate-50 text-slate-700"
+              }`}
+              title={hasFailed ? "Failed to fetch — check ticker" : undefined}
+              aria-label={hasFailed ? `${sym} — failed to fetch` : sym}
+              data-testid={`compare-chip-${sym}`}
+              data-error={hasFailed ? "true" : undefined}
             >
-              ×
-            </button>
-          </span>
-        ))}
+              {sym}
+              <button
+                type="button"
+                aria-label={`Remove ${sym}`}
+                onClick={() => removeCompare(sym)}
+                className={`ml-0.5 rounded-full ${hasFailed ? "text-red-400 hover:text-red-600" : "text-slate-400 hover:text-slate-600"}`}
+                data-testid={`compare-remove-${sym}`}
+              >
+                ×
+              </button>
+            </span>
+          );
+        })}
         {compareSymbols.length < MAX_COMPARES && (
           <input
             ref={compareInputRef}

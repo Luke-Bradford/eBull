@@ -542,12 +542,22 @@ export function ChartWorkspaceCanvas({
   }, [indicators, rows]);
 
   // Trend overlays: linear regression + range channel.
-  // Render over primary closes regardless of compare mode.
+  // In compare mode the visible axis is % change, so we compute trends on
+  // the normalized primary series to keep overlays on the same scale.
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
     const clean = cleanRowsRef.current;
-    const closes = clean.map((b) => b.close);
+    const rawCloses = clean.map((b) => b.close);
+    // When compare mode is active, the primary series is displayed as % change.
+    // Compute trends on the same normalized values so they render at the right
+    // scale.  normalizeToPercent returns all-nulls only when base === 0 or
+    // non-finite; in that degenerate case filter produces [] and the trend
+    // helpers return empty arrays — overlays simply render no points, which is
+    // correct.
+    const closes = compares.length > 0
+      ? normalizeToPercent(rawCloses).filter((v): v is number => v !== null)
+      : rawCloses;
 
     // --- Linear regression ---
     if (showRegression) {
@@ -618,7 +628,7 @@ export function ChartWorkspaceCanvas({
         channelLowRef.current = null;
       }
     }
-  }, [showRegression, showChannel, rows]);
+  }, [showRegression, showChannel, rows, compares]);
 
   return (
     <div className="relative">

@@ -192,6 +192,40 @@ describe("linearRegressionLine", () => {
   });
 });
 
+describe("normalized regression — compare mode invariants", () => {
+  it("steadily-increasing series: normalized regression slope is positive and starts near 0", () => {
+    // Simulate a primary series rising from 100 to 110 over 5 bars.
+    const closes = [100, 102.5, 105, 107.5, 110];
+    const normalized = normalizeToPercent(closes).filter((v): v is number => v !== null);
+    // First normalized value is always 0 (base = itself).
+    expect(normalized[0]).toBeCloseTo(0);
+    const regression = linearRegressionLine(normalized);
+    // Slope must be positive for a rising series.
+    const first = regression[0] as number;
+    const last = regression[regression.length - 1] as number;
+    expect(last).toBeGreaterThan(first);
+    // Regression at index 0 should be near 0 (intercept close to start of series).
+    expect(first).toBeCloseTo(0, 0);
+  });
+
+  it("steadily-decreasing series: normalized regression slope is negative", () => {
+    const closes = [100, 97.5, 95, 92.5, 90];
+    const normalized = normalizeToPercent(closes).filter((v): v is number => v !== null);
+    const regression = linearRegressionLine(normalized);
+    const first = regression[0] as number;
+    const last = regression[regression.length - 1] as number;
+    expect(last).toBeLessThan(first);
+  });
+
+  it("degenerate base (0): filter produces empty array, regression returns []", () => {
+    const closes = [0, 10, 20];
+    const normalized = normalizeToPercent(closes).filter((v): v is number => v !== null);
+    expect(normalized).toHaveLength(0);
+    const regression = linearRegressionLine(normalized);
+    expect(regression).toHaveLength(0);
+  });
+});
+
 describe("rangeChannel", () => {
   it("returns {high: null, low: null} for empty array", () => {
     expect(rangeChannel([])).toEqual({ high: null, low: null });
