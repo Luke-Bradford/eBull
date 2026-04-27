@@ -1221,6 +1221,7 @@ def list_10k_history(
             SELECT provider_filing_id, filing_date, filing_type
             FROM filing_events
             WHERE instrument_id = %s
+              AND provider = 'sec'
               AND filing_type IN ('10-K', '10-K/A')
             ORDER BY filing_date DESC, provider_filing_id DESC
             """,
