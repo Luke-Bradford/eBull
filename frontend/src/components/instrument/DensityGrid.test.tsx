@@ -119,4 +119,41 @@ describe("DensityGrid", () => {
     const overflowAuto = container.querySelectorAll(".overflow-auto");
     expect(overflowAuto.length).toBe(0);
   });
+
+  it("combined dividends/insider card uses exactly one overflow-auto scroll-bound (Phase D regression guard)", () => {
+    // When insider is active, InsiderActivityPanel renders up to 50 rows.
+    // The combined card retains overflow-auto + max-h-[360px] intentionally
+    // until Phase D replaces it with InsiderActivitySummary.
+    // This test pins the count to 1 so Phase D's removal of that bound
+    // is explicitly regression-guarded and not silently missed.
+    const summaryWithInsider = {
+      instrument_id: 1,
+      has_sec_cik: true,
+      identity: {
+        symbol: "GME",
+        display_name: "GameStop",
+        market_cap: "1000000",
+        sector: null,
+      },
+      capabilities: {
+        insider: {
+          providers: ["sec_form4"],
+          data_present: { sec_form4: true },
+        },
+      },
+      key_stats: null,
+    } as never;
+    const { container } = render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={summaryWithInsider}
+          keyStatsBlock={<div>KEY STATS BLOCK</div>}
+          thesisBlock={<div>THESIS BLOCK</div>}
+          newsBlock={<div>NEWS BLOCK</div>}
+        />
+      </MemoryRouter>,
+    );
+    const overflowAuto = container.querySelectorAll(".overflow-auto");
+    expect(overflowAuto.length).toBe(1);
+  });
 });
