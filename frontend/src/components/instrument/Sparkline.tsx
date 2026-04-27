@@ -4,6 +4,12 @@
  * series (revenue, op income, net income, total debt over 8 quarters).
  *
  * Phase 2 (#576): hover tooltip shows the value at the cursor index.
+ *
+ * Coloring: default `stroke="currentColor"` lets callers drive the
+ * polyline color via a Tailwind `text-*` class on `className` (e.g.
+ * `text-emerald-500`). Existing FundamentalsPane callers rely on this.
+ * For chart-theme alignment, new callers should pass
+ * `stroke={chartTheme.accent[N]}` from `@/lib/chartTheme` — see #586.
  */
 
 import { useState, useCallback, type JSX } from "react";

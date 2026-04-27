@@ -23,15 +23,17 @@ import {
 } from "lightweight-charts";
 
 import type { CandleBar } from "@/api/types";
+import { chartTheme } from "@/lib/chartTheme";
 
-const SMA_COLORS: Record<string, string> = {
-  sma20: "#3b82f6", // blue-500
-  sma50: "#a855f7", // purple-500
-  ema20: "#0ea5e9", // sky-500
-  ema50: "#ec4899", // pink-500
-};
+export type IndicatorId = "sma20" | "sma50" | "ema20" | "ema50";
+export const INDICATOR_IDS: IndicatorId[] = ["sma20", "sma50", "ema20", "ema50"];
 
-const SMA_LABELS: Record<string, string> = {
+// Keep palette keys exhaustively typed against IndicatorId so a missing or
+// misspelled key in chartTheme.indicator fails typecheck rather than
+// returning undefined at runtime.
+const SMA_COLORS: Record<IndicatorId, string> = chartTheme.indicator;
+
+const SMA_LABELS: Record<IndicatorId, string> = {
   sma20: "SMA(20)",
   sma50: "SMA(50)",
   ema20: "EMA(20)",
@@ -39,14 +41,7 @@ const SMA_LABELS: Record<string, string> = {
 };
 
 // Fixed palette for compare overlays — distinct from SMA colors.
-export const COMPARE_COLORS: readonly string[] = [
-  "#0ea5e9", // sky-500
-  "#a855f7", // purple-500
-  "#f59e0b", // amber-500
-];
-
-export type IndicatorId = "sma20" | "sma50" | "ema20" | "ema50";
-export const INDICATOR_IDS: IndicatorId[] = ["sma20", "sma50", "ema20", "ema50"];
+export const COMPARE_COLORS: readonly string[] = chartTheme.compare;
 
 export interface CompareSeries {
   readonly symbol: string;
@@ -234,34 +229,34 @@ export function ChartWorkspaceCanvas({
     const chart = createChart(container, {
       autoSize: true,
       layout: {
-        background: { color: "#ffffff" },
-        textColor: "#64748b",
+        background: { color: chartTheme.bg },
+        textColor: chartTheme.textSecondary,
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: "#f1f5f9" },
-        horzLines: { color: "#f1f5f9" },
+        vertLines: { color: chartTheme.gridLine },
+        horzLines: { color: chartTheme.gridLine },
       },
       rightPriceScale: {
-        borderColor: "#e2e8f0",
+        borderColor: chartTheme.borderColor,
         scaleMargins: { top: 0.08, bottom: 0.3 },
       },
       timeScale: {
-        borderColor: "#e2e8f0",
+        borderColor: chartTheme.borderColor,
         timeVisible: false,
         secondsVisible: false,
       },
       crosshair: {
-        vertLine: { width: 1, color: "#94a3b8", style: 3 },
-        horzLine: { width: 1, color: "#94a3b8", style: 3 },
+        vertLine: { width: 1, color: chartTheme.crosshair, style: 3 },
+        horzLine: { width: 1, color: chartTheme.crosshair, style: 3 },
       },
     });
 
     const candle = chart.addSeries(CandlestickSeries, {
-      upColor: "#10b981",
-      downColor: "#ef4444",
-      wickUpColor: "#10b981",
-      wickDownColor: "#ef4444",
+      upColor: chartTheme.up,
+      downColor: chartTheme.down,
+      wickUpColor: chartTheme.up,
+      wickDownColor: chartTheme.down,
       borderVisible: false,
     });
 
@@ -272,7 +267,7 @@ export function ChartWorkspaceCanvas({
     chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } });
 
     const primaryLine = chart.addSeries(LineSeries, {
-      color: "#1e293b",
+      color: chartTheme.primaryLine,
       lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: false,
@@ -302,7 +297,7 @@ export function ChartWorkspaceCanvas({
             // Read color from the symbol-keyed ref populated when the
             // LineSeries was created — keeps tooltip in sync with the
             // actual rendered series even if Map iteration order drifts.
-            color: compareColorRef.current.get(sym) ?? "#0ea5e9",
+            color: compareColorRef.current.get(sym) ?? chartTheme.compare[0],
             value: norm[idx] ?? null,
           }));
         const date = new Date(time * 1000).toISOString().slice(0, 10);
@@ -400,7 +395,7 @@ export function ChartWorkspaceCanvas({
         if (v === null || v === undefined || !bar) continue;
         lineData.push({ time: bar.time as Time, value: v });
       }
-      primaryLine.applyOptions({ visible: true, color: "#1e293b", lineWidth: 2 });
+      primaryLine.applyOptions({ visible: true, color: chartTheme.primaryLine, lineWidth: 2 });
       primaryLine.setData(lineData);
     } else {
       // Normal mode: show candles + volume; hide primary normalized line.
@@ -423,7 +418,7 @@ export function ChartWorkspaceCanvas({
           return {
             time: b.time as Time,
             value: b.volume,
-            color: b.close >= prev ? "rgba(16,185,129,0.4)" : "rgba(239,68,68,0.4)",
+            color: b.close >= prev ? chartTheme.volumeUpAlpha : chartTheme.volumeDownAlpha,
           };
         }),
       );
@@ -453,7 +448,8 @@ export function ChartWorkspaceCanvas({
 
     // Add/update series for each compare symbol.
     compares.forEach((cs, colorIdx) => {
-      const color = COMPARE_COLORS[colorIdx % COMPARE_COLORS.length] ?? "#0ea5e9";
+      const color =
+        COMPARE_COLORS[colorIdx % COMPARE_COLORS.length] ?? chartTheme.compare[0];
       compareColorRef.current.set(cs.symbol, color);
 
       const compareClean: NumericBar[] = cs.rows.flatMap((r) => {
@@ -573,7 +569,7 @@ export function ChartWorkspaceCanvas({
       const regValues = linearRegressionLine(closes);
       if (!regressionRef.current) {
         regressionRef.current = chart.addSeries(LineSeries, {
-          color: "#f97316", // orange-500
+          color: chartTheme.regression,
           lineWidth: 1,
           lineStyle: 2, // dashed
           priceLineVisible: false,
@@ -600,7 +596,7 @@ export function ChartWorkspaceCanvas({
     if (showChannel && high !== null && low !== null && clean.length >= 2) {
       if (!channelHighRef.current) {
         channelHighRef.current = chart.addSeries(LineSeries, {
-          color: "#10b981", // emerald-500
+          color: chartTheme.channelHigh,
           lineWidth: 1,
           lineStyle: 3, // dotted
           priceLineVisible: false,
@@ -609,7 +605,7 @@ export function ChartWorkspaceCanvas({
       }
       if (!channelLowRef.current) {
         channelLowRef.current = chart.addSeries(LineSeries, {
-          color: "#ef4444", // red-500
+          color: chartTheme.channelLow,
           lineWidth: 1,
           lineStyle: 3, // dotted
           priceLineVisible: false,
