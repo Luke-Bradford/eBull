@@ -3,7 +3,10 @@ import { activeProviders } from "@/lib/capabilityProviders";
 
 export type DensityProfile = "full-sec" | "partial-filings" | "minimal";
 
-const EMPTY_CELL = { providers: [] as string[], data_present: {} as Record<string, boolean> };
+export const EMPTY_CELL: { providers: string[]; data_present: Record<string, boolean> } = {
+  providers: [],
+  data_present: {},
+};
 
 export function selectProfile(summary: InstrumentSummary): DensityProfile {
   const cap = summary.capabilities;

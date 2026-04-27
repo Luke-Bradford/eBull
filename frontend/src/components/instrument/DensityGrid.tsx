@@ -29,9 +29,7 @@ import { PriceChart } from "@/components/instrument/PriceChart";
 import { RecentNewsPane } from "@/components/instrument/RecentNewsPane";
 import { SecProfilePanel } from "@/components/instrument/SecProfilePanel";
 import { ThesisPane } from "@/components/instrument/ThesisPane";
-import { selectProfile } from "@/components/instrument/densityProfile";
-
-const EMPTY_CELL = { providers: [] as string[], data_present: {} as Record<string, boolean> };
+import { EMPTY_CELL, selectProfile } from "@/components/instrument/densityProfile";
 
 export interface DensityGridProps {
   readonly summary: InstrumentSummary;
@@ -50,7 +48,6 @@ export function DensityGrid({
   const cap = summary.capabilities;
   const insiderActive = activeProviders(cap.insider ?? EMPTY_CELL).length > 0;
   const dividendProviders = activeProviders(cap.dividends ?? EMPTY_CELL);
-  const filingsActive = activeProviders(cap.filings ?? EMPTY_CELL).length > 0;
   const hasNarrative = summary.has_sec_cik;
 
   // PriceChart isn't yet a self-Pane'd component — wrap it locally.
@@ -74,13 +71,12 @@ export function DensityGrid({
           </div>
         )}
         <div className="col-span-12">
+          {/* full-sec profile guarantees sec_xbrl fundamentals + filings are active per selectProfile */}
           <FundamentalsPane summary={summary} />
         </div>
-        {filingsActive && (
-          <div className="col-span-12 lg:col-span-7">
-            <FilingsPane instrumentId={instrumentId} symbol={symbol} summary={summary} />
-          </div>
-        )}
+        <div className="col-span-12 lg:col-span-7">
+          <FilingsPane instrumentId={instrumentId} symbol={symbol} summary={summary} />
+        </div>
         {insiderActive && (
           <div className="col-span-12 lg:col-span-5">
             <InsiderActivitySummary symbol={symbol} />
@@ -122,11 +118,9 @@ export function DensityGrid({
             <SecProfilePanel symbol={symbol} />
           </div>
         )}
-        {filingsActive && (
-          <div className="col-span-12">
-            <FilingsPane instrumentId={instrumentId} symbol={symbol} summary={summary} />
-          </div>
-        )}
+        <div className="col-span-12">
+          <FilingsPane instrumentId={instrumentId} symbol={symbol} summary={summary} />
+        </div>
         {insiderActive && dividendProviders.length > 0 ? (
           <>
             <div className="col-span-12 lg:col-span-7">

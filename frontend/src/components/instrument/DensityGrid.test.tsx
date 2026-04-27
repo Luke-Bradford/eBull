@@ -84,6 +84,7 @@ describe("DensityGrid profiles", () => {
     expect(screen.getByText("Fundamentals")).toBeInTheDocument();
     expect(screen.getByText(/Recent filings/)).toBeInTheDocument();
     expect(screen.getByText(/Insider summary/)).toBeInTheDocument();
+    expect(screen.getByText("Recent news")).toBeInTheDocument();
   });
 
   it("full-sec profile without has_sec_cik: SEC profile slot absent (no ghost div)", () => {
