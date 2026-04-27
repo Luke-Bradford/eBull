@@ -96,7 +96,11 @@ export function FilingsPane({
       ) : state.data === null || state.data.items.length === 0 ? (
         <EmptyState
           title="No filings"
-          description="No 8-K / 10-K / 10-Q rows on file for this instrument."
+          description={
+            isSecEdgar
+              ? "No 8-K / 10-K / 10-Q rows on file for this instrument."
+              : "No filing rows on file for this instrument."
+          }
         />
       ) : (
         <ul className="space-y-1.5 text-xs">
