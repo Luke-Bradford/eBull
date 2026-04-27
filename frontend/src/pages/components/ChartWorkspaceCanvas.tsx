@@ -9,7 +9,7 @@
  * Deliberately separate from ChartCanvas (compact instrument-page chart) so
  * the compact component stays focused and this one can evolve independently.
  */
-import { useEffect, useRef, useState, type JSX } from "react";
+import { useEffect, useMemo, useRef, useState, type JSX } from "react";
 import {
   CandlestickSeries,
   HistogramSeries,
@@ -22,9 +22,11 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 
-import type { NormalisedBar } from "@/lib/chartData";
+import type { ChartRange } from "@/api/types";
+import { intervalSecondsFor, type NormalisedBar } from "@/lib/chartData";
 import { formatHoverLabel, humanizeVolume, tickFormatter } from "@/lib/chartFormatters";
 import { chartTheme } from "@/lib/chartTheme";
+import { useLiveLastBar } from "@/lib/useLiveLastBar";
 
 export type IndicatorId = "sma20" | "sma50" | "ema20" | "ema50";
 export const INDICATOR_IDS: IndicatorId[] = ["sma20", "sma50", "ema20", "ema50"];
@@ -173,6 +175,12 @@ function computeIndicator(id: IndicatorId, closes: number[]): Array<number | nul
 export interface ChartWorkspaceCanvasProps {
   readonly rows: ReadonlyArray<NormalisedBar>;
   readonly symbol: string;
+  /** Provider-native instrument id for live-tick subscription (#602).
+   *  When omitted the chart renders without live updates. */
+  readonly instrumentId?: number | null;
+  /** Required for live-tick aggregation — picks the bucket size that
+   *  matches the chart's interval. */
+  readonly range?: ChartRange;
   readonly indicators: ReadonlyArray<IndicatorId>;
   readonly compares?: ReadonlyArray<CompareSeries>;
   readonly showRegression?: boolean;
@@ -185,6 +193,8 @@ export interface ChartWorkspaceCanvasProps {
 export function ChartWorkspaceCanvas({
   rows,
   symbol,
+  instrumentId = null,
+  range,
   indicators,
   compares = [],
   showRegression = false,
@@ -375,15 +385,11 @@ export function ChartWorkspaceCanvas({
     };
   }, [symbol]);
 
-  // Feed candle + volume data on rows change; handle compare mode switching.
-  useEffect(() => {
-    const candle = candleRef.current;
-    const volume = volumeRef.current;
-    const primaryLine = primaryLineRef.current;
-    const chart = chartRef.current;
-    if (!candle || !volume || !chart || !primaryLine) return;
-
-    const clean: NumericBar[] = rows.flatMap((r) => {
+  // Numeric / null-filtered rows. Computed during render so values
+  // are available to the live-tick aggregator's historical anchor on
+  // the very first render. See PriceChart for the same fix.
+  const clean = useMemo<NumericBar[]>(() => {
+    return rows.flatMap((r) => {
       const open = parseNum(r.open);
       const high = parseNum(r.high);
       const low = parseNum(r.low);
@@ -402,7 +408,19 @@ export function ChartWorkspaceCanvas({
         },
       ];
     });
-    cleanRowsRef.current = clean;
+  }, [rows]);
+
+  // Mirror `clean` into the crosshair handler's ref. Registered once
+  // at mount; ref avoids stale-closure capture.
+  cleanRowsRef.current = clean;
+
+  // Feed candle + volume data on `clean` change; handle compare mode switching.
+  useEffect(() => {
+    const candle = candleRef.current;
+    const volume = volumeRef.current;
+    const primaryLine = primaryLineRef.current;
+    const chart = chartRef.current;
+    if (!candle || !volume || !chart || !primaryLine) return;
 
     if (compareMode) {
       // In compare mode: hide candles + volume, show normalized primary line.
@@ -448,7 +466,7 @@ export function ChartWorkspaceCanvas({
     }
 
     chart.timeScale().fitContent();
-  }, [rows, compareMode]);
+  }, [clean, compareMode]);
 
   // Compare series: fetch + render normalized lines per compare symbol.
   // Tears down series for symbols no longer in the list.
@@ -530,7 +548,7 @@ export function ChartWorkspaceCanvas({
       }
       series.setData(lineData);
     });
-  }, [compares, compareMode, rows]);
+  }, [compares, compareMode, clean]);
 
   // Add/remove indicator LineSeries based on `indicators` prop.
   // `rows` is in the dep array (alongside `indicators`) so this effect
@@ -575,7 +593,7 @@ export function ChartWorkspaceCanvas({
       }
       series.setData(data);
     }
-  }, [indicators, rows]);
+  }, [indicators, clean]);
 
   // Trend overlays: linear regression + range channel.
   // In compare mode the visible axis is % change, so we compute trends on
@@ -664,11 +682,55 @@ export function ChartWorkspaceCanvas({
         channelLowRef.current = null;
       }
     }
-  }, [showRegression, showChannel, rows, compares]);
+  }, [showRegression, showChannel, clean, compares]);
+
+  // Live last-bar updates (#602). Disabled in compare mode — when the
+  // candle/volume series are hidden in favour of normalized lines,
+  // the aggregator's update() calls would land on hidden series and
+  // diverge from the per-symbol normalised data we render. Compare
+  // ranges are also already restricted to daily-only at the page
+  // level (#601).
+  const lastRenderedBar = clean.length > 0 ? clean[clean.length - 1]! : null;
+  // Memoize on primitive OHLC so the prop into useLiveLastBar has a
+  // stable identity across renders (see PriceChart for the same fix
+  // and rationale).
+  const lastTime = lastRenderedBar !== null ? (lastRenderedBar.time as number) : null;
+  const lastOpen = lastRenderedBar !== null ? lastRenderedBar.open : null;
+  const lastHigh = lastRenderedBar !== null ? lastRenderedBar.high : null;
+  const lastLow = lastRenderedBar !== null ? lastRenderedBar.low : null;
+  const histLastBar = useMemo(
+    () =>
+      lastTime !== null && lastOpen !== null && lastHigh !== null && lastLow !== null
+        ? { time: lastTime, open: lastOpen, high: lastHigh, low: lastLow }
+        : null,
+    [lastTime, lastOpen, lastHigh, lastLow],
+  );
+  const bucketSeconds = range !== undefined ? intervalSecondsFor(range) : 60;
+  const liveTargetId = !compareMode && range !== undefined ? instrumentId : null;
+  const { connected, unavailable } = useLiveLastBar({
+    instrumentId: liveTargetId,
+    bucketSeconds,
+    historicalLastBar: histLastBar,
+    refs: {
+      candle: candleRef,
+      line: null, // workspace primaryLineRef is only used in compare mode
+      area: null,
+    },
+  });
+  const liveActive = connected && !unavailable && liveTargetId !== null;
 
   return (
     <div className="relative">
       {hover !== null ? <RichTooltip hover={hover} /> : null}
+      {liveActive ? (
+        <div
+          className="absolute right-2 top-2 z-10 flex items-center gap-1 text-[10px] uppercase tracking-wider text-emerald-600"
+          data-testid="chart-workspace-live-indicator"
+        >
+          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+          Live
+        </div>
+      ) : null}
       <div
         ref={containerRef}
         data-testid={`chart-workspace-${symbol}`}

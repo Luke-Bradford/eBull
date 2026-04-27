@@ -36,6 +36,7 @@ import type {
   NewsListResponse,
   ThesisDetail,
 } from "@/api/types";
+import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
 import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
 import { Section, SectionSkeleton } from "@/components/dashboard/Section";
@@ -611,6 +612,7 @@ function InstrumentPageBody({
   }
 
   return (
+    <LiveQuoteProvider instrumentIds={[instrumentId]}>
     <div className="space-y-4">
       <SummaryStrip
         summary={summary}
@@ -736,6 +738,7 @@ function InstrumentPageBody({
         />
       ) : null}
     </div>
+    </LiveQuoteProvider>
   );
 }
 

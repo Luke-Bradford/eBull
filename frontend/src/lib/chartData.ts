@@ -80,6 +80,42 @@ export function isIntraday(range: ChartRange): boolean {
 }
 
 /**
+ * Bar duration in seconds for each range. Used by the live-tick
+ * aggregator (#602) to decide whether an incoming tick updates the
+ * chart's last bar or rolls into a new bucket.
+ *
+ * Daily/weekly/monthly ranges all use 86400 (one day). The eToro
+ * tick stream is intraday-resolution regardless of the chart's
+ * range, so a 1Y chart gets one bucket per calendar day.
+ */
+export const INTERVAL_SECONDS: Record<string, number> = {
+  OneMinute: 60,
+  FiveMinutes: 300,
+  TenMinutes: 600,
+  FifteenMinutes: 900,
+  ThirtyMinutes: 1800,
+  OneHour: 3600,
+  FourHours: 14400,
+};
+
+export function intervalSecondsFor(range: ChartRange): number {
+  const plan = CHART_RANGE_PLAN[range];
+  if (plan.kind === "intraday") return INTERVAL_SECONDS[plan.interval] ?? 60;
+  return 86400;
+}
+
+/**
+ * Floor an epoch-second timestamp to the start of the bucket of the
+ * given interval. UTC-aligned because the daily endpoint stores
+ * `price_date` as UTC midnight and the intraday endpoint emits UTC
+ * timestamps. Mixing local-time floors here would silently misalign
+ * live-tick updates against the rendered last bar.
+ */
+export function floorToBucket(epochSeconds: number, intervalSeconds: number): number {
+  return Math.floor(epochSeconds / intervalSeconds) * intervalSeconds;
+}
+
+/**
  * Bar shape consumed by the chart components. Time is a UTC epoch
  * second so lightweight-charts can plot it directly without further
  * conversion. OHLCV values stay as nullable strings to match the

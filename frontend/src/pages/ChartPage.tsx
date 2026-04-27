@@ -21,6 +21,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { fetchInstrumentSummary } from "@/api/instruments";
 import type { ChartRange, InstrumentSummary } from "@/api/types";
+import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import {
   ChartWorkspaceCanvas,
   INDICATOR_IDS,
@@ -328,7 +329,15 @@ export function ChartPage(): JSX.Element {
         parseNum(r.close) !== null,
     ).length >= 2;
 
+  // Provider needs an array; pass [] when summary hasn't loaded yet so
+  // the SSE stream waits for a real id.
+  const liveIds: number[] =
+    summaryAsync.data?.instrument_id !== undefined
+      ? [summaryAsync.data.instrument_id]
+      : [];
+
   return (
+    <LiveQuoteProvider instrumentIds={liveIds}>
     <div className="space-y-3 p-4">
       {/* Header: back link + identity + price */}
       <div className="flex items-baseline gap-3">
@@ -537,6 +546,8 @@ export function ChartPage(): JSX.Element {
           <ChartWorkspaceCanvas
             rows={rows}
             symbol={symbol}
+            instrumentId={summaryAsync.data?.instrument_id ?? null}
+            range={range}
             indicators={enabledIndicators}
             compares={compareSeries}
             showRegression={enabledTrends.includes("regression")}
@@ -550,6 +561,7 @@ export function ChartPage(): JSX.Element {
         ) : null}
       </div>
     </div>
+    </LiveQuoteProvider>
   );
 }
 

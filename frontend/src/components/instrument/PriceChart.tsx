@@ -19,7 +19,7 @@
  * %Δ-from-prior; matches the pattern in `ChartWorkspaceCanvas.RichTooltip`
  * so an operator's mental model is consistent between overview and workspace.
  */
-import { useCallback, useEffect, useRef, useState, type JSX } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   AreaSeries,
@@ -39,6 +39,7 @@ import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import {
   fetchChartCandles,
+  intervalSecondsFor,
   isIntraday,
   type NormalisedBar,
   type NormalisedChartCandles,
@@ -46,6 +47,7 @@ import {
 import { formatHoverLabel, humanizeVolume, tickFormatter } from "@/lib/chartFormatters";
 import { chartTheme } from "@/lib/chartTheme";
 import { useAsync } from "@/lib/useAsync";
+import { useLiveLastBar } from "@/lib/useLiveLastBar";
 
 const RANGES: { id: ChartRange; label: string }[] = [
   { id: "1d", label: "1D" },
@@ -115,11 +117,16 @@ interface NumericBar {
 
 export interface PriceChartProps {
   symbol: string;
+  /** Provider-native instrument id used for the SSE live-tick subscription
+   *  (#602). When omitted, the chart renders without live updates — the
+   *  historical fetch is unaffected. */
+  instrumentId?: number | null;
   initialRange?: ChartRange;
 }
 
 export function PriceChart({
   symbol,
+  instrumentId = null,
   initialRange = "1m",
 }: PriceChartProps): JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -283,6 +290,8 @@ export function PriceChart({
         <ChartCanvas
           rows={rows}
           symbol={symbol}
+          instrumentId={instrumentId}
+          range={range}
           chartType={chartType}
           priceScale={priceScale}
           intraday={intraday}
@@ -295,6 +304,13 @@ export function PriceChart({
 export interface ChartCanvasProps {
   rows: ReadonlyArray<NormalisedBar>;
   symbol: string;
+  /** When set, opens a live SSE quote stream and keeps the last bar
+   *  updating in real time via lightweight-charts series.update(). */
+  instrumentId?: number | null;
+  /** Required for live-tick aggregation — picks the bucket size that
+   *  matches the chart's interval. When omitted the live-tick path
+   *  is disabled. */
+  range?: ChartRange;
   chartType?: ChartType;
   priceScale?: PriceScaleMode;
   /** When true, hover label includes HH:MM and the time scale shows time. */
@@ -305,6 +321,8 @@ export interface ChartCanvasProps {
 export function ChartCanvas({
   rows,
   symbol,
+  instrumentId = null,
+  range,
   chartType = "candle",
   priceScale = "linear",
   intraday = false,
@@ -496,20 +514,14 @@ export function ChartCanvas({
     } as unknown as Parameters<ReturnType<IChartApi["timeScale"]>["applyOptions"]>[0]);
   }, [intraday]);
 
-  // Feed data on every rows change. lightweight-charts replaces the
-  // series wholesale via setData — no incremental diffing needed.
-  useEffect(() => {
-    const candle = candleRef.current;
-    const line = lineRef.current;
-    const area = areaRef.current;
-    const volume = volumeRef.current;
-    const chart = chartRef.current;
-    if (!candle || !line || !area || !volume || !chart) return;
-
-    // Pre-convert to numeric bars so downstream `setData` calls work
-    // with guaranteed-non-null values (no dead `?? 0` fallbacks). Rows
-    // that fail any numeric parse are dropped here.
-    const clean: NumericBar[] = rows.flatMap((r) => {
+  // Numeric / null-filtered rows. Computed during render (not in an
+  // effect) so values are available to the live-tick aggregator's
+  // historical anchor on the very first render. Otherwise `histLastBar`
+  // would always be null until React next re-rendered, and live ticks
+  // would all bucket as "no anchor" → fresh bars, never extending the
+  // historical last candle.
+  const clean = useMemo<NumericBar[]>(() => {
+    return rows.flatMap((r) => {
       const open = parseNum(r.open);
       const high = parseNum(r.high);
       const low = parseNum(r.low);
@@ -528,7 +540,22 @@ export function ChartCanvas({
         },
       ];
     });
-    cleanRowsRef.current = clean;
+  }, [rows]);
+
+  // Mirror `clean` into the crosshair handler's ref. The handler is
+  // registered once at mount; reading from a ref avoids stale-closure
+  // capture.
+  cleanRowsRef.current = clean;
+
+  // Feed data on every clean change. lightweight-charts replaces the
+  // series wholesale via setData — no incremental diffing needed.
+  useEffect(() => {
+    const candle = candleRef.current;
+    const line = lineRef.current;
+    const area = areaRef.current;
+    const volume = volumeRef.current;
+    const chart = chartRef.current;
+    if (!candle || !line || !area || !volume || !chart) return;
 
     candle.setData(
       clean.map((b) => ({
@@ -556,11 +583,59 @@ export function ChartCanvas({
     );
 
     chart.timeScale().fitContent();
-  }, [rows]);
+  }, [clean]);
+
+  // Live-tick aggregator (#602). Subscribes to the page-level
+  // LiveQuoteProvider stream for `instrumentId` and updates the last
+  // bar's H/L/C — or appends a new bar when a tick crosses the bucket
+  // boundary. Disabled when `instrumentId` or `range` is missing
+  // (caller hasn't wired live updates for this chart).
+  //
+  // Anchor against the LAST RENDERED bar from `cleanRowsRef`, not the
+  // raw `rows` tail — the rendering effect drops rows with null OHLC,
+  // so anchoring against `rows[rows.length - 1]` could bucket ticks
+  // against an invisible bar (Codex pre-push #602).
+  const lastRenderedBar = clean.length > 0 ? clean[clean.length - 1]! : null;
+  // Memoize on the primitive OHLC fields so the object identity is
+  // stable while the data is — without this, `useLiveLastBar`'s tick
+  // effect would re-fire on every parent render and re-apply the
+  // last tick (Codex pre-push #602 round 2).
+  const lastTime = lastRenderedBar !== null ? (lastRenderedBar.time as number) : null;
+  const lastOpen = lastRenderedBar !== null ? lastRenderedBar.open : null;
+  const lastHigh = lastRenderedBar !== null ? lastRenderedBar.high : null;
+  const lastLow = lastRenderedBar !== null ? lastRenderedBar.low : null;
+  const histLastBar = useMemo(
+    () =>
+      lastTime !== null && lastOpen !== null && lastHigh !== null && lastLow !== null
+        ? { time: lastTime, open: lastOpen, high: lastHigh, low: lastLow }
+        : null,
+    [lastTime, lastOpen, lastHigh, lastLow],
+  );
+  const bucketSeconds = range !== undefined ? intervalSecondsFor(range) : 60;
+  const { connected, unavailable } = useLiveLastBar({
+    instrumentId: range !== undefined ? instrumentId : null,
+    bucketSeconds,
+    historicalLastBar: histLastBar,
+    refs: {
+      candle: candleRef,
+      line: lineRef,
+      area: areaRef,
+    },
+  });
+  const liveActive = connected && !unavailable && instrumentId !== null && range !== undefined;
 
   return (
     <div className="relative">
       {hover !== null ? <RichTooltip hover={hover} /> : null}
+      {liveActive ? (
+        <div
+          className="absolute right-2 top-2 z-10 flex items-center gap-1 text-[10px] uppercase tracking-wider text-emerald-600"
+          data-testid="price-chart-live-indicator"
+        >
+          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+          Live
+        </div>
+      ) : null}
       <div
         ref={containerRef}
         data-testid={`price-chart-${symbol}`}
