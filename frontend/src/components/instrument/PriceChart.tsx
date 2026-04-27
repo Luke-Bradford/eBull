@@ -19,7 +19,7 @@
  * %Δ-from-prior; matches the pattern in `ChartWorkspaceCanvas.RichTooltip`
  * so an operator's mental model is consistent between overview and workspace.
  */
-import { useCallback, useEffect, useRef, useState, type JSX } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   AreaSeries,
@@ -589,14 +589,21 @@ export function ChartCanvas({
   const lastRenderedBar = cleanRowsRef.current.length > 0
     ? cleanRowsRef.current[cleanRowsRef.current.length - 1]!
     : null;
-  const histLastBar = lastRenderedBar !== null
-    ? {
-        time: lastRenderedBar.time as number,
-        open: lastRenderedBar.open,
-        high: lastRenderedBar.high,
-        low: lastRenderedBar.low,
-      }
-    : null;
+  // Memoize on the primitive OHLC fields so the object identity is
+  // stable while the data is — without this, `useLiveLastBar`'s tick
+  // effect would re-fire on every parent render and re-apply the
+  // last tick (Codex pre-push #602 round 2).
+  const lastTime = lastRenderedBar !== null ? (lastRenderedBar.time as number) : null;
+  const lastOpen = lastRenderedBar !== null ? lastRenderedBar.open : null;
+  const lastHigh = lastRenderedBar !== null ? lastRenderedBar.high : null;
+  const lastLow = lastRenderedBar !== null ? lastRenderedBar.low : null;
+  const histLastBar = useMemo(
+    () =>
+      lastTime !== null && lastOpen !== null && lastHigh !== null && lastLow !== null
+        ? { time: lastTime, open: lastOpen, high: lastHigh, low: lastLow }
+        : null,
+    [lastTime, lastOpen, lastHigh, lastLow],
+  );
   const bucketSeconds = range !== undefined ? intervalSecondsFor(range) : 60;
   const { connected, unavailable } = useLiveLastBar({
     instrumentId: range !== undefined ? instrumentId : null,

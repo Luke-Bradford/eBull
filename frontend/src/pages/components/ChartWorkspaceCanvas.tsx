@@ -9,7 +9,7 @@
  * Deliberately separate from ChartCanvas (compact instrument-page chart) so
  * the compact component stays focused and this one can evolve independently.
  */
-import { useEffect, useRef, useState, type JSX } from "react";
+import { useEffect, useMemo, useRef, useState, type JSX } from "react";
 import {
   CandlestickSeries,
   HistogramSeries,
@@ -686,15 +686,20 @@ export function ChartWorkspaceCanvas({
     cleanRowsRef.current.length > 0
       ? cleanRowsRef.current[cleanRowsRef.current.length - 1]!
       : null;
-  const histLastBar =
-    lastRenderedBar !== null
-      ? {
-          time: lastRenderedBar.time as number,
-          open: lastRenderedBar.open,
-          high: lastRenderedBar.high,
-          low: lastRenderedBar.low,
-        }
-      : null;
+  // Memoize on primitive OHLC so the prop into useLiveLastBar has a
+  // stable identity across renders (see PriceChart for the same fix
+  // and rationale).
+  const lastTime = lastRenderedBar !== null ? (lastRenderedBar.time as number) : null;
+  const lastOpen = lastRenderedBar !== null ? lastRenderedBar.open : null;
+  const lastHigh = lastRenderedBar !== null ? lastRenderedBar.high : null;
+  const lastLow = lastRenderedBar !== null ? lastRenderedBar.low : null;
+  const histLastBar = useMemo(
+    () =>
+      lastTime !== null && lastOpen !== null && lastHigh !== null && lastLow !== null
+        ? { time: lastTime, open: lastOpen, high: lastHigh, low: lastLow }
+        : null,
+    [lastTime, lastOpen, lastHigh, lastLow],
+  );
   const bucketSeconds = range !== undefined ? intervalSecondsFor(range) : 60;
   const liveTargetId = !compareMode && range !== undefined ? instrumentId : null;
   const { connected, unavailable } = useLiveLastBar({
