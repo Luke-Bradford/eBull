@@ -1,23 +1,42 @@
 /**
- * FilingsPane — 5-row recent-filings list (8-K + 10-K) on the
- * instrument page density grid (#559). Each row links to the
- * corresponding drilldown route. Read-only — the canonical filings
- * tab still lives in the page tabs nav.
+ * FilingsPane — high-signal filings list (8-K + 10-K + 10-Q + foreign
+ * issuer equivalents) on the instrument page density grid (#559 / #567).
+ * Each row links to the corresponding drilldown route. A "View all
+ * filings →" footer routes to the canonical Filings tab when that tab
+ * is active for the instrument.
+ *
+ * The SIGNIFICANT_FILING_TYPES filter is applied only when the instrument
+ * has ``sec_edgar`` as a filings provider — SEC-style form types are
+ * meaningless on other providers (e.g. Companies House).
  */
 
 import { fetchFilings } from "@/api/filings";
-import type { FilingsListResponse } from "@/api/types";
-import {
-  Section,
-  SectionError,
-  SectionSkeleton,
-} from "@/components/dashboard/Section";
+import type { FilingsListResponse, InstrumentSummary } from "@/api/types";
+import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback } from "react";
 import { Link } from "react-router-dom";
 
-const ROW_LIMIT = 5;
+const ROW_LIMIT = 6;
+
+// US issuer types + foreign private issuer (FPI / ADR) equivalents.
+// Applied only when the instrument's filings capability includes
+// sec_edgar as a provider.
+const SIGNIFICANT_FILING_TYPES = [
+  "8-K",
+  "8-K/A",
+  "10-K",
+  "10-K/A",
+  "10-Q",
+  "10-Q/A",
+  "6-K",
+  "6-K/A",
+  "20-F",
+  "20-F/A",
+  "40-F",
+  "40-F/A",
+].join(",");
 
 const TYPES_WITH_DRILLDOWN = new Set(["8-K", "8-K/A", "10-K", "10-K/A"]);
 
@@ -25,28 +44,47 @@ function drilldownLink(symbol: string, filingType: string | null): string | null
   if (filingType === null || !TYPES_WITH_DRILLDOWN.has(filingType)) return null;
   const symbolEnc = encodeURIComponent(symbol);
   if (filingType.startsWith("10-K")) {
-    // 10-K drilldown defaults to the latest filing — no accession
-    // needed from the row. Operator picks an older year via the
-    // metadata rail's prior-10-Ks list once on the drilldown page.
     return `/instrument/${symbolEnc}/filings/10-k`;
   }
-  // 8-K family — list page shows all filings; row click on the list
-  // page itself handles per-accession selection.
   return `/instrument/${symbolEnc}/filings/8-k`;
+}
+
+/** True iff the instrument has an active filings capability
+ *  (any provider has data_present === true). Mirrors the check in
+ *  InstrumentPage.visibleTabs. */
+function hasActiveFilingsCapability(summary: InstrumentSummary): boolean {
+  const cell = summary.capabilities.filings;
+  if (cell === undefined) return false;
+  return cell.providers.some((p) => cell.data_present[p] === true);
 }
 
 export interface FilingsPaneProps {
   readonly instrumentId: number;
   readonly symbol: string;
+  readonly summary: InstrumentSummary;
 }
 
 export function FilingsPane({
   instrumentId,
   symbol,
+  summary,
 }: FilingsPaneProps): JSX.Element {
+  const filingsCell = summary.capabilities.filings;
+  const isSecEdgar =
+    filingsCell !== undefined && filingsCell.providers.includes("sec_edgar");
+  const typeFilter = isSecEdgar ? SIGNIFICANT_FILING_TYPES : undefined;
+  const filingsTabActive = hasActiveFilingsCapability(summary);
+
   const state = useAsync<FilingsListResponse>(
-    useCallback(() => fetchFilings(instrumentId, 0, ROW_LIMIT), [instrumentId]),
-    [instrumentId],
+    useCallback(
+      () =>
+        fetchFilings(instrumentId, 0, ROW_LIMIT, {
+          filing_type: typeFilter,
+        }),
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      [instrumentId, typeFilter],
+    ),
+    [instrumentId, typeFilter],
   );
 
   return (
@@ -58,7 +96,11 @@ export function FilingsPane({
       ) : state.data === null || state.data.items.length === 0 ? (
         <EmptyState
           title="No filings"
-          description="Filings appear once SEC EDGAR has been crawled for this instrument."
+          description={
+            isSecEdgar
+              ? "No 8-K / 10-K / 10-Q rows on file for this instrument."
+              : "No filing rows on file for this instrument."
+          }
         />
       ) : (
         <ul className="space-y-1.5 text-xs">
@@ -88,6 +130,16 @@ export function FilingsPane({
             );
           })}
         </ul>
+      )}
+      {filingsTabActive && (
+        <div className="mt-2 border-t border-slate-100 pt-1.5 text-right">
+          <Link
+            to={`/instrument/${encodeURIComponent(symbol)}?tab=filings`}
+            className="text-[11px] text-sky-700 hover:underline"
+          >
+            View all filings →
+          </Link>
+        </div>
       )}
     </Section>
   );

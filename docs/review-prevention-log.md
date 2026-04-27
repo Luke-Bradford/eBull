@@ -981,3 +981,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `DensityGrid` declared `thesis` and `thesisErrored` on its `DensityGridProps` interface; callers passed them; the function signature destructured neither and used neither. Silent dead path — TypeScript accepts it, callers think they're influencing render, no behaviour changes.
 - Prevention: Every prop in an exported component interface must appear in the destructuring parameter list of the function. At self-review: visually scan each `interface XProps {...}` in a diff and confirm each field is destructured + referenced in the body. The TS strict check `noUnusedParameters` doesn't catch this case because the destructured object as a whole is used.
 - Enforced in: this prevention log; PR #566 fix removes the dead props from the interface and call site.
+
+---
+
+### EmptyState copy depends on filter branch
+
+- First seen in: #571.
+- Symptom: `FilingsPane` rendered `"No 8-K / 10-K / 10-Q rows on file"` as its EmptyState description even for non-sec_edgar instruments (where no type filter was applied). The description was provider-specific but was not guarded on the same `isSecEdgar` condition as the filter.
+- Prevention: When a filter or branch condition shapes the data that a component fetches, every user-visible string that describes that data must be gated on the same condition. At self-review: grep for all string literals in a component that reference filter-specific domain terms (form types, provider names, data source names) and confirm each is inside the same conditional branch as the corresponding filter.
+- Enforced in: this prevention log; PR #571 fix gates the description on `isSecEdgar`.
