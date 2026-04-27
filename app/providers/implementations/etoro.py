@@ -8,6 +8,19 @@ field lands in SQL (``instruments``, ``price_daily``, ``quotes``,
 ``docs/review-prevention-log.md`` §"Raw payload persistence" for
 the scope-narrowed rule).
 
+**Intraday candle carve-out (#600).** ``get_intraday_candles`` is
+the one method on this class whose result is NOT mirrored to a SQL
+table. Intraday bars are ephemeral chart-UI data — they do not
+drive scoring, thesis, recommendations, orders, dividends, or tax,
+so the SQL-as-audit-trail invariant does not apply. The pass-through
+is gated by a TTL cache (``app/services/intraday_candles.py``) and
+the API endpoint is auth-gated to keep external quota traceable.
+Persisting intraday rows would expand the audit / sync surface
+without analytical value; the no-persistence design is locked at
+epic #585 and reviewed by Codex pre-implementation. This is the
+**only** sanctioned exception to the structured-fields-land-in-SQL
+rule for this provider — adding more requires reopening the design.
+
 Auth: three-header scheme (x-api-key, x-user-key, x-request-id).
 Base URL: https://public-api.etoro.com (configurable via settings.etoro_base_url).
 """
@@ -26,6 +39,8 @@ from app.providers.market_data import (
     ExchangeRecord,
     InstrumentRecord,
     InstrumentTypeRecord,
+    IntradayBar,
+    IntradayInterval,
     MarketDataProvider,
     OHLCVBar,
     Quote,
@@ -176,6 +191,31 @@ class EtoroMarketDataProvider(MarketDataProvider):
         response.raise_for_status()
         raw = response.json()
         return _normalise_candles(raw)
+
+    def get_intraday_candles(
+        self,
+        instrument_id: int,
+        interval: IntradayInterval,
+        count: int,
+    ) -> list[IntradayBar]:
+        """Fetch intraday OHLCV bars at the requested interval.
+
+        Same URL family as ``get_daily_candles`` but the interval slot
+        is variable. eToro caps ``count`` at 1000 bars per request;
+        callers in eBull stay well under that for chart use (≤600).
+
+        Raw response shape mirrors the daily endpoint exactly — only
+        the bar timestamp granularity differs. We use a sibling
+        normaliser (``_normalise_intraday_candles``) that preserves the
+        time component instead of truncating to a date.
+        """
+        response = self._http.get(
+            f"/api/v1/market-data/instruments/{instrument_id}/history/candles/asc/{interval}/{count}",
+            headers=self._request_headers(),
+        )
+        response.raise_for_status()
+        raw = response.json()
+        return _normalise_intraday_candles(raw)
 
     # ------------------------------------------------------------------
     # Quotes
@@ -371,6 +411,73 @@ def _normalise_candle(item: Mapping[str, object]) -> OHLCVBar | None:
         )
     except (ValueError, ArithmeticError) as exc:
         logger.warning("Skipping malformed candle: %s — %s", item, exc)
+        return None
+
+
+def _normalise_intraday_candles(raw: object) -> list[IntradayBar]:
+    """Normalise an eToro intraday-candles response into IntradayBar list.
+
+    Same outer envelope as the daily endpoint
+    (``{ candles: [{ instrumentId, candles: [...] }] }``); each inner
+    candle carries a ``fromDate`` ISO timestamp with time component
+    instead of date-only.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(f"Expected dict from eToro candles endpoint, got {type(raw)}")
+
+    outer: list[object] = raw.get("candles") or []
+
+    bars: list[IntradayBar] = []
+    for group in outer:
+        if not isinstance(group, dict):
+            continue
+        inner: list[object] = group.get("candles") or []
+        for item in inner:
+            if not isinstance(item, dict):
+                continue
+            bar = _normalise_intraday_candle(item)
+            if bar is not None:
+                bars.append(bar)
+    return bars
+
+
+def _normalise_intraday_candle(item: Mapping[str, object]) -> IntradayBar | None:
+    """Map a single eToro intraday candle dict to an IntradayBar.
+
+    Returns None and logs a warning on missing required fields rather
+    than raising — a single malformed bar should not poison a 390-bar
+    series. Decimal precision preserved via ``Decimal(str(...))``.
+    """
+    raw_date = item.get("fromDate")
+    raw_open = item.get("open")
+    raw_high = item.get("high")
+    raw_low = item.get("low")
+    raw_close = item.get("close")
+
+    if any(v is None or v == "" for v in (raw_date, raw_open, raw_high, raw_low, raw_close)):
+        logger.warning("Skipping intraday candle missing required fields: %s", item)
+        return None
+
+    try:
+        # eToro uses ISO timestamps with optional `Z` suffix; .fromisoformat
+        # handles `2026-04-27T14:30:00+00:00` natively and accepts the
+        # `Z` form on Python 3.11+. Coerce to UTC.
+        ts_text = str(raw_date).replace("Z", "+00:00")
+        ts = datetime.fromisoformat(ts_text)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        else:
+            ts = ts.astimezone(UTC)
+        return IntradayBar(
+            timestamp=ts,
+            open=Decimal(str(raw_open)),
+            high=Decimal(str(raw_high)),
+            low=Decimal(str(raw_low)),
+            close=Decimal(str(raw_close)),
+            volume=_int_or_none(item.get("volume")),
+        )
+    except (ValueError, ArithmeticError) as exc:
+        logger.warning("Skipping malformed intraday candle: %s — %s", item, exc)
         return None
 
 

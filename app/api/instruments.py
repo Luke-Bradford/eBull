@@ -6,7 +6,17 @@ Reads from:
   - coverage             (1:1 coverage tier per instrument)
   - external_identifiers (1:N provider-native identifiers per instrument)
 
-No writes. No schema changes.
+No writes (DB-side). No schema changes.
+
+**Carve-out — intraday candles (#600).** The
+``GET /instruments/{symbol}/intraday-candles`` endpoint is a
+provider-backed pass-through: it loads eToro broker credentials,
+calls the live eToro REST endpoint via ``EtoroMarketDataProvider``,
+and serves bars through an in-process TTL cache (no DB persistence).
+This is the one endpoint in this module that consumes external API
+quota and writes an audit row per request (via
+``load_credential_for_provider_use``). All other endpoints stay
+DB-only.
 """
 
 from __future__ import annotations
@@ -14,14 +24,29 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Literal
+from typing import Literal, get_args
 
+import httpx
 import psycopg
 import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from app.api.auth import require_session_or_service_token
+from app.config import settings
 from app.db import get_conn
+from app.providers.implementations.etoro import EtoroMarketDataProvider
+from app.providers.market_data import IntradayInterval
+from app.services.broker_credentials import (
+    CredentialNotFound,
+    load_credential_for_provider_use,
+)
+from app.services.intraday_candles import fetch_intraday_candles
+from app.services.operators import (
+    AmbiguousOperatorError,
+    NoOperatorError,
+    sole_operator_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +189,48 @@ class InstrumentCandles(BaseModel):
     range: Literal["1w", "1m", "3m", "6m", "1y", "5y", "max"]  # noqa: A003
     days: int | None  # None when range="max"
     rows: list[CandleBar]
+
+
+class IntradayBarPayload(BaseModel):
+    """One intraday OHLCV bar.
+
+    ``timestamp`` is a UTC ISO-8601 datetime — distinct from
+    ``CandleBar.date`` which is YYYY-MM-DD only. Lightweight-charts
+    consumers feed ``timestamp`` straight into the time scale via
+    ``new Date(...).getTime() / 1000``.
+    """
+
+    timestamp: datetime
+    open: Decimal | None
+    high: Decimal | None
+    low: Decimal | None
+    close: Decimal | None
+    volume: int | None
+
+
+class InstrumentIntradayCandles(BaseModel):
+    """Response shape for /instruments/{symbol}/intraday-candles.
+
+    ``persisted`` is always False so the caller knows these bars are
+    not in any DB table — they came directly from the provider via the
+    in-process cache. Useful for ops dashboards and a future
+    persistence-status flag if we ever cache to disk.
+    """
+
+    symbol: str
+    interval: IntradayInterval
+    count: int
+    persisted: Literal[False] = False
+    rows: list[IntradayBarPayload]
+
+
+# Accepted interval tokens — derived from the IntradayInterval Literal
+# so this list cannot drift from the provider contract.
+_VALID_INTERVALS: frozenset[str] = frozenset(get_args(IntradayInterval))
+
+# Hard cap mirrors eToro's documented 1000-candle ceiling. Leaving a
+# small headroom so we never touch the limit.
+_MAX_INTRADAY_COUNT = 1000
 
 
 class CapabilityCellPayload(BaseModel):
@@ -654,6 +721,151 @@ def get_instrument_candles(
         range=range_,
         days=days,
         rows=bars,
+    )
+
+
+@router.get(
+    "/{symbol}/intraday-candles",
+    response_model=InstrumentIntradayCandles,
+    dependencies=[Depends(require_session_or_service_token)],
+)
+def get_instrument_intraday_candles(
+    symbol: str,
+    interval: IntradayInterval = Query(default="OneMinute"),
+    count: int = Query(default=390, ge=1, le=_MAX_INTRADAY_COUNT),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InstrumentIntradayCandles:
+    """Provider-backed intraday OHLCV bars.
+
+    **Not** read from the local DB. Each call resolves the symbol to
+    an instrument id, loads eToro broker credentials, fetches bars at
+    the requested interval through the in-process TTL cache, and
+    returns them. Daily / longer-horizon ranges should continue to
+    use ``/candles?range=...`` which reads from ``price_daily``.
+
+    Error mapping:
+      * Unknown symbol → 404
+      * Missing eToro credentials → 503 (operator must run setup)
+      * Provider 429 (rate limit) → 503 with Retry-After
+      * Provider 5xx / network failure → 502
+
+    The frontend owns the range → (interval, count) translation
+    table. This endpoint is intentionally count-based to mirror the
+    eToro REST shape exactly.
+    """
+    if interval not in _VALID_INTERVALS:
+        # FastAPI already validates the Literal, but keep this as a
+        # belt-and-braces guard against drift between the type and
+        # the validator's accepted set.
+        raise HTTPException(status_code=400, detail=f"Unsupported interval {interval!r}")
+
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    # Symbol → instrument_id (primary-listing tiebreaker, matches
+    # the daily endpoint).
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    # Load eToro credentials. Each call writes an audit row tied to
+    # the operator and caller name, so chart-driven external spend is
+    # traceable. ``load_credential_for_provider_use`` does not commit
+    # itself; we commit the audit row before the external call so a
+    # network failure does not lose the audit trail.
+    try:
+        op_id = sole_operator_id(conn)
+    except (NoOperatorError, AmbiguousOperatorError) as exc:
+        logger.warning("intraday-candles: operator lookup failed: %s", exc)
+        raise HTTPException(status_code=503, detail="No operator configured") from exc
+
+    try:
+        api_key = load_credential_for_provider_use(
+            conn,
+            operator_id=op_id,
+            provider="etoro",
+            label="api_key",
+            environment=settings.etoro_env,
+            caller="intraday_candles_endpoint",
+        )
+        conn.commit()
+        user_key = load_credential_for_provider_use(
+            conn,
+            operator_id=op_id,
+            provider="etoro",
+            label="user_key",
+            environment=settings.etoro_env,
+            caller="intraday_candles_endpoint",
+        )
+        conn.commit()
+    except CredentialNotFound as exc:
+        logger.warning("intraday-candles: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="eToro credentials not configured",
+        ) from exc
+
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+
+    try:
+        with EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider:
+            bars = fetch_intraday_candles(
+                provider,
+                instrument_id=instrument_id,
+                interval=interval,
+                count=count,
+            )
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if status == 429:
+            retry_after = exc.response.headers.get("Retry-After", "30")
+            logger.warning(
+                "intraday-candles: eToro rate-limited for %s, retry-after=%s",
+                symbol_clean,
+                retry_after,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Rate limited upstream",
+                headers={"Retry-After": retry_after},
+            ) from exc
+        logger.warning("intraday-candles: eToro returned %d for %s", status, symbol_clean)
+        raise HTTPException(status_code=502, detail="Upstream provider error") from exc
+    except httpx.RequestError as exc:
+        logger.warning("intraday-candles: network error fetching %s: %s", symbol_clean, exc)
+        raise HTTPException(status_code=502, detail="Upstream provider unreachable") from exc
+
+    return InstrumentIntradayCandles(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        interval=interval,
+        # Echo the actual number of bars returned, not the operator's
+        # request — eToro can return fewer than `count` near market
+        # open, on thinly-traded instruments, or after a fresh listing.
+        # Callers reading `body.count` must see what they actually got.
+        count=len(bars),
+        rows=[
+            IntradayBarPayload(
+                timestamp=b.timestamp,
+                open=b.open,
+                high=b.high,
+                low=b.low,
+                close=b.close,
+                volume=b.volume,
+            )
+            for b in bars
+        ],
     )
 
 

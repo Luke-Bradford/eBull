@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,48 @@ class OHLCVBar:
     volume: int | None
 
 
+# Intraday candle interval tokens accepted by eToro's history endpoint.
+# Mirrors the URL slot in /history/candles/{direction}/{interval}/{count}.
+#
+# **Sub-day only.** Daily / weekly / monthly views read from `price_daily`
+# via the existing `/candles?range=...` endpoint so chart freshness is
+# served by the persisted, scored series — not a parallel live-fetch
+# path that would shadow it. If a long-horizon range needs a finer
+# series than `price_daily` provides, the right move is to deepen the
+# daily backfill (see #603), not to widen this Literal.
+#
+# Token set matches the documented eToro intraday options
+# (docs/etoro-api-reference.md §candles).
+IntradayInterval = Literal[
+    "OneMinute",
+    "FiveMinutes",
+    "TenMinutes",
+    "FifteenMinutes",
+    "ThirtyMinutes",
+    "OneHour",
+    "FourHours",
+]
+
+
+@dataclass(frozen=True)
+class IntradayBar:
+    """A single intraday OHLCV candle.
+
+    Distinct from `OHLCVBar` because intraday bars carry a full UTC
+    timestamp (bar-open instant) rather than a calendar date. Caller is
+    expected to know the interval so it can compute bar-close from
+    `timestamp + interval`. No DB persistence — these flow live from
+    provider through cache to the chart and never hit `price_daily`.
+    """
+
+    timestamp: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: int | None
+
+
 @dataclass(frozen=True)
 class Quote:
     """A current best-bid/ask quote."""
@@ -116,6 +159,30 @@ class MarketDataProvider(ABC):
         days than requested due to weekends and holidays. The eToro
         candle endpoint caps at 1000 candles per request; the current
         400-day lookback is well within that limit.
+        """
+
+    @abstractmethod
+    def get_intraday_candles(
+        self,
+        instrument_id: int,
+        interval: IntradayInterval,
+        count: int,
+    ) -> list[IntradayBar]:
+        """Return intraday OHLCV bars for an instrument.
+
+        The provider chooses how many bars to return up to ``count``.
+        Caller must supply both ``interval`` and ``count`` because the
+        underlying eToro endpoint is count-based, not date-range-based.
+
+        Bars carry full UTC timestamps (bar-open instant) and are
+        ordered oldest-first. The still-forming current bar may or may
+        not be included — implementations should pass through whatever
+        the provider returns; consumers that need only completed bars
+        should filter on ``timestamp + interval <= now``.
+
+        Returns an empty list if the instrument has no intraday data.
+        Raises on transport/auth failures so the API layer can surface
+        429s as 503s with a Retry-After hint.
         """
 
     @abstractmethod

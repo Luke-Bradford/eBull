@@ -546,6 +546,7 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `_fetch_company_facts` called `resp.raise_for_status()` before `_persist_raw()`, so non-404 HTTP errors (429, 503) raised before the raw payload was written to disk, losing diagnostic data.
 - Prevention: In provider HTTP methods, always call `_persist_raw()` before `resp.raise_for_status()`. The persist call captures the response body for auditability regardless of status code.
 - Enforced in: this prevention log
+- Carve-out (#600): ephemeral provider methods that explicitly do **not** feed any SQL audit trail and whose data does not drive scoring / thesis / recommendations / orders / dividends / tax do not require raw-payload persistence. Such methods must (a) be documented as a carve-out in the provider's class docstring naming the locked design ticket, (b) keep the data process-local (in-process cache OK, disk OK only as a debug aid), (c) be auth-gated at the API layer when they consume external quota. The first such carve-out is `EtoroMarketDataProvider.get_intraday_candles` (chart UI). Adding another carve-out requires reopening the design with an architecture-level review (Codex sign-off + epic update), not a unilateral provider-method addition.
 
 ---
 
