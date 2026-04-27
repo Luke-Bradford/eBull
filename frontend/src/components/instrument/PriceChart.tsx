@@ -514,20 +514,14 @@ export function ChartCanvas({
     } as unknown as Parameters<ReturnType<IChartApi["timeScale"]>["applyOptions"]>[0]);
   }, [intraday]);
 
-  // Feed data on every rows change. lightweight-charts replaces the
-  // series wholesale via setData — no incremental diffing needed.
-  useEffect(() => {
-    const candle = candleRef.current;
-    const line = lineRef.current;
-    const area = areaRef.current;
-    const volume = volumeRef.current;
-    const chart = chartRef.current;
-    if (!candle || !line || !area || !volume || !chart) return;
-
-    // Pre-convert to numeric bars so downstream `setData` calls work
-    // with guaranteed-non-null values (no dead `?? 0` fallbacks). Rows
-    // that fail any numeric parse are dropped here.
-    const clean: NumericBar[] = rows.flatMap((r) => {
+  // Numeric / null-filtered rows. Computed during render (not in an
+  // effect) so values are available to the live-tick aggregator's
+  // historical anchor on the very first render. Otherwise `histLastBar`
+  // would always be null until React next re-rendered, and live ticks
+  // would all bucket as "no anchor" → fresh bars, never extending the
+  // historical last candle.
+  const clean = useMemo<NumericBar[]>(() => {
+    return rows.flatMap((r) => {
       const open = parseNum(r.open);
       const high = parseNum(r.high);
       const low = parseNum(r.low);
@@ -546,7 +540,22 @@ export function ChartCanvas({
         },
       ];
     });
-    cleanRowsRef.current = clean;
+  }, [rows]);
+
+  // Mirror `clean` into the crosshair handler's ref. The handler is
+  // registered once at mount; reading from a ref avoids stale-closure
+  // capture.
+  cleanRowsRef.current = clean;
+
+  // Feed data on every clean change. lightweight-charts replaces the
+  // series wholesale via setData — no incremental diffing needed.
+  useEffect(() => {
+    const candle = candleRef.current;
+    const line = lineRef.current;
+    const area = areaRef.current;
+    const volume = volumeRef.current;
+    const chart = chartRef.current;
+    if (!candle || !line || !area || !volume || !chart) return;
 
     candle.setData(
       clean.map((b) => ({
@@ -574,7 +583,7 @@ export function ChartCanvas({
     );
 
     chart.timeScale().fitContent();
-  }, [rows]);
+  }, [clean]);
 
   // Live-tick aggregator (#602). Subscribes to the page-level
   // LiveQuoteProvider stream for `instrumentId` and updates the last
@@ -586,9 +595,7 @@ export function ChartCanvas({
   // raw `rows` tail — the rendering effect drops rows with null OHLC,
   // so anchoring against `rows[rows.length - 1]` could bucket ticks
   // against an invisible bar (Codex pre-push #602).
-  const lastRenderedBar = cleanRowsRef.current.length > 0
-    ? cleanRowsRef.current[cleanRowsRef.current.length - 1]!
-    : null;
+  const lastRenderedBar = clean.length > 0 ? clean[clean.length - 1]! : null;
   // Memoize on the primitive OHLC fields so the object identity is
   // stable while the data is — without this, `useLiveLastBar`'s tick
   // effect would re-fire on every parent render and re-apply the

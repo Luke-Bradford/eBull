@@ -385,15 +385,11 @@ export function ChartWorkspaceCanvas({
     };
   }, [symbol]);
 
-  // Feed candle + volume data on rows change; handle compare mode switching.
-  useEffect(() => {
-    const candle = candleRef.current;
-    const volume = volumeRef.current;
-    const primaryLine = primaryLineRef.current;
-    const chart = chartRef.current;
-    if (!candle || !volume || !chart || !primaryLine) return;
-
-    const clean: NumericBar[] = rows.flatMap((r) => {
+  // Numeric / null-filtered rows. Computed during render so values
+  // are available to the live-tick aggregator's historical anchor on
+  // the very first render. See PriceChart for the same fix.
+  const clean = useMemo<NumericBar[]>(() => {
+    return rows.flatMap((r) => {
       const open = parseNum(r.open);
       const high = parseNum(r.high);
       const low = parseNum(r.low);
@@ -412,7 +408,19 @@ export function ChartWorkspaceCanvas({
         },
       ];
     });
-    cleanRowsRef.current = clean;
+  }, [rows]);
+
+  // Mirror `clean` into the crosshair handler's ref. Registered once
+  // at mount; ref avoids stale-closure capture.
+  cleanRowsRef.current = clean;
+
+  // Feed candle + volume data on `clean` change; handle compare mode switching.
+  useEffect(() => {
+    const candle = candleRef.current;
+    const volume = volumeRef.current;
+    const primaryLine = primaryLineRef.current;
+    const chart = chartRef.current;
+    if (!candle || !volume || !chart || !primaryLine) return;
 
     if (compareMode) {
       // In compare mode: hide candles + volume, show normalized primary line.
@@ -458,7 +466,7 @@ export function ChartWorkspaceCanvas({
     }
 
     chart.timeScale().fitContent();
-  }, [rows, compareMode]);
+  }, [clean, compareMode]);
 
   // Compare series: fetch + render normalized lines per compare symbol.
   // Tears down series for symbols no longer in the list.
@@ -540,7 +548,7 @@ export function ChartWorkspaceCanvas({
       }
       series.setData(lineData);
     });
-  }, [compares, compareMode, rows]);
+  }, [compares, compareMode, clean]);
 
   // Add/remove indicator LineSeries based on `indicators` prop.
   // `rows` is in the dep array (alongside `indicators`) so this effect
@@ -585,7 +593,7 @@ export function ChartWorkspaceCanvas({
       }
       series.setData(data);
     }
-  }, [indicators, rows]);
+  }, [indicators, clean]);
 
   // Trend overlays: linear regression + range channel.
   // In compare mode the visible axis is % change, so we compute trends on
@@ -674,7 +682,7 @@ export function ChartWorkspaceCanvas({
         channelLowRef.current = null;
       }
     }
-  }, [showRegression, showChannel, rows, compares]);
+  }, [showRegression, showChannel, clean, compares]);
 
   // Live last-bar updates (#602). Disabled in compare mode — when the
   // candle/volume series are hidden in favour of normalized lines,
@@ -682,10 +690,7 @@ export function ChartWorkspaceCanvas({
   // diverge from the per-symbol normalised data we render. Compare
   // ranges are also already restricted to daily-only at the page
   // level (#601).
-  const lastRenderedBar =
-    cleanRowsRef.current.length > 0
-      ? cleanRowsRef.current[cleanRowsRef.current.length - 1]!
-      : null;
+  const lastRenderedBar = clean.length > 0 ? clean[clean.length - 1]! : null;
   // Memoize on primitive OHLC so the prop into useLiveLastBar has a
   // stable identity across renders (see PriceChart for the same fix
   // and rationale).
