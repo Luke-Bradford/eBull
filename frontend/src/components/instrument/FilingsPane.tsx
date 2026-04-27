@@ -2,11 +2,16 @@
  * FilingsPane — high-signal filings list (8-K + 10-K + 10-Q + foreign
  * issuer equivalents) on the instrument page density grid (#559 / #567).
  * Each row links to the corresponding drilldown route. A "View all
- * filings →" footer routes to the canonical Filings tab.
+ * filings →" footer routes to the canonical Filings tab when that tab
+ * is active for the instrument.
+ *
+ * The SIGNIFICANT_FILING_TYPES filter is applied only when the instrument
+ * has ``sec_edgar`` as a filings provider — SEC-style form types are
+ * meaningless on other providers (e.g. Companies House).
  */
 
 import { fetchFilings } from "@/api/filings";
-import type { FilingsListResponse } from "@/api/types";
+import type { FilingsListResponse, InstrumentSummary } from "@/api/types";
 import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
@@ -15,10 +20,9 @@ import { Link } from "react-router-dom";
 
 const ROW_LIMIT = 6;
 
-// US issuer types + foreign private issuer (FPI / ADR) types in one
-// list. The backend filters with `filing_type = ANY(...)`, so listing
-// FPI types alongside US types is harmless on US instruments and
-// correct for foreign issuers.
+// US issuer types + foreign private issuer (FPI / ADR) equivalents.
+// Applied only when the instrument's filings capability includes
+// sec_edgar as a provider.
 const SIGNIFICANT_FILING_TYPES = [
   "8-K",
   "8-K/A",
@@ -45,21 +49,42 @@ function drilldownLink(symbol: string, filingType: string | null): string | null
   return `/instrument/${symbolEnc}/filings/8-k`;
 }
 
+/** True iff the instrument has an active filings capability
+ *  (any provider has data_present === true). Mirrors the check in
+ *  InstrumentPage.visibleTabs. */
+function hasActiveFilingsCapability(summary: InstrumentSummary): boolean {
+  const cell = summary.capabilities.filings;
+  if (cell === undefined) return false;
+  return cell.providers.some((p) => cell.data_present[p] === true);
+}
+
 export interface FilingsPaneProps {
   readonly instrumentId: number;
   readonly symbol: string;
+  readonly summary: InstrumentSummary;
 }
 
-export function FilingsPane({ instrumentId, symbol }: FilingsPaneProps): JSX.Element {
+export function FilingsPane({
+  instrumentId,
+  symbol,
+  summary,
+}: FilingsPaneProps): JSX.Element {
+  const filingsCell = summary.capabilities.filings;
+  const isSecEdgar =
+    filingsCell !== undefined && filingsCell.providers.includes("sec_edgar");
+  const typeFilter = isSecEdgar ? SIGNIFICANT_FILING_TYPES : undefined;
+  const filingsTabActive = hasActiveFilingsCapability(summary);
+
   const state = useAsync<FilingsListResponse>(
     useCallback(
       () =>
         fetchFilings(instrumentId, 0, ROW_LIMIT, {
-          filing_type: SIGNIFICANT_FILING_TYPES,
+          filing_type: typeFilter,
         }),
-      [instrumentId],
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      [instrumentId, typeFilter],
     ),
-    [instrumentId],
+    [instrumentId, typeFilter],
   );
 
   return (
@@ -102,14 +127,16 @@ export function FilingsPane({ instrumentId, symbol }: FilingsPaneProps): JSX.Ele
           })}
         </ul>
       )}
-      <div className="mt-2 border-t border-slate-100 pt-1.5 text-right">
-        <Link
-          to={`/instrument/${encodeURIComponent(symbol)}?tab=filings`}
-          className="text-[11px] text-sky-700 hover:underline"
-        >
-          View all filings →
-        </Link>
-      </div>
+      {filingsTabActive && (
+        <div className="mt-2 border-t border-slate-100 pt-1.5 text-right">
+          <Link
+            to={`/instrument/${encodeURIComponent(symbol)}?tab=filings`}
+            className="text-[11px] text-sky-700 hover:underline"
+          >
+            View all filings →
+          </Link>
+        </div>
+      )}
     </Section>
   );
 }

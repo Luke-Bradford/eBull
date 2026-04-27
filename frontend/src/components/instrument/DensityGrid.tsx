@@ -74,7 +74,7 @@ export function DensityGrid({
           )}
         </div>
         <div className="overflow-auto rounded-md border border-slate-200 bg-white p-3 shadow-sm">
-          <FilingsPane instrumentId={summary.instrument_id} symbol={symbol} />
+          <FilingsPane instrumentId={summary.instrument_id} symbol={symbol} summary={summary} />
         </div>
 
         {/* Bottom row: segments spans 2 cols, news spans 1 col */}
