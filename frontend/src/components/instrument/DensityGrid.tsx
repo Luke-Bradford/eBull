@@ -49,22 +49,22 @@ export function DensityGrid({
   const insiderProviders = activeProviders(insider);
 
   return (
-    <div className="grid grid-cols-1 gap-3 lg:grid-cols-[2fr_1fr_1fr] lg:auto-rows-[220px]">
+    <div className="grid grid-cols-1 gap-2 lg:grid-cols-[2fr_1fr_1fr]">
         {/* Chart pane: wide column (2fr) × 2 rows top-left */}
-        <div className="overflow-hidden rounded-md border border-slate-200 bg-white p-3 shadow-sm lg:col-start-1 lg:col-end-2 lg:row-start-1 lg:row-end-3">
+        <div className="overflow-hidden rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm min-h-[440px] lg:col-start-1 lg:col-end-2 lg:row-start-1 lg:row-end-3">
           <PriceChart symbol={symbol} />
         </div>
 
         {/* Right column row 1 */}
-        <div className="overflow-auto rounded-md border border-slate-200 bg-white p-3 shadow-sm">
+        <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
           {keyStatsBlock}
         </div>
-        <div className="overflow-auto rounded-md border border-slate-200 bg-white p-3 shadow-sm">
+        <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
           {thesisBlock}
         </div>
 
         {/* Right column row 2 */}
-        <div className="overflow-auto rounded-md border border-slate-200 bg-white p-3 shadow-sm">
+        <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
           {hasSec ? (
             <SecProfilePanel symbol={symbol} />
           ) : (
@@ -73,12 +73,12 @@ export function DensityGrid({
             </Section>
           )}
         </div>
-        <div className="overflow-auto rounded-md border border-slate-200 bg-white p-3 shadow-sm">
+        <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
           <FilingsPane instrumentId={summary.instrument_id} symbol={symbol} summary={summary} />
         </div>
 
         {/* Bottom row: segments spans 2 cols, news spans 1 col */}
-        <div className="overflow-auto rounded-md border border-slate-200 bg-white p-3 shadow-sm lg:col-span-2">
+        <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm lg:col-span-2">
           {hasSec ? (
             <BusinessSectionsTeaser symbol={symbol} />
           ) : (
@@ -87,13 +87,13 @@ export function DensityGrid({
             </Section>
           )}
         </div>
-        <div className="overflow-auto rounded-md border border-slate-200 bg-white p-3 shadow-sm">
+        <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
           {newsBlock}
         </div>
 
         {/* Dividends + insider combined card — spans full width */}
         {(dividendProviders.length > 0 || insiderProviders.length > 0) && (
-          <div className="overflow-auto rounded-md border border-slate-200 bg-white p-3 shadow-sm lg:col-span-3">
+          <div className="overflow-auto max-h-[360px] rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm lg:col-span-3">
             <div className="grid gap-3 md:grid-cols-2">
               {dividendProviders.map((p) => (
                 <DividendsPanel key={`div-${p}`} symbol={symbol} provider={p} />
