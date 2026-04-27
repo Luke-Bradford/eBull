@@ -1,5 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 
 import type { InstrumentDividends } from "@/api/instruments";
 
@@ -9,9 +11,31 @@ vi.mock("@/api/instruments", () => ({
   fetchInstrumentDividends: vi.fn(),
 }));
 
+const navigateMock = vi.fn();
+vi.mock("react-router-dom", async (importActual) => {
+  const actual = (await importActual()) as object;
+  return { ...actual, useNavigate: () => navigateMock };
+});
+
 import { fetchInstrumentDividends } from "@/api/instruments";
 const mockFetch = vi.mocked(fetchInstrumentDividends);
 
+function makePeriod(
+  fy: number,
+  qt: string,
+  date: string,
+  dps: string,
+): InstrumentDividends["history"][number] {
+  return {
+    period_end_date: date,
+    period_type: qt,
+    fiscal_year: fy,
+    fiscal_quarter: null,
+    dps_declared: dps,
+    dividends_paid: null,
+    reported_currency: "USD",
+  };
+}
 
 function paid(): InstrumentDividends {
   return {
@@ -27,38 +51,27 @@ function paid(): InstrumentDividends {
       dividend_currency: "USD",
     },
     history: [
-      {
-        period_end_date: "2025-12-28",
-        period_type: "Q4",
-        fiscal_year: 2025,
-        fiscal_quarter: 4,
-        dps_declared: "0.2500",
-        dividends_paid: "4000000000.0000",
-        reported_currency: "USD",
-      },
-      {
-        period_end_date: "2025-09-28",
-        period_type: "Q3",
-        fiscal_year: 2025,
-        fiscal_quarter: 3,
-        dps_declared: "0.2500",
-        dividends_paid: "3900000000.0000",
-        reported_currency: "USD",
-      },
+      makePeriod(2025, "Q4", "2025-12-28", "0.2500"),
+      makePeriod(2025, "Q3", "2025-09-28", "0.2500"),
     ],
     upcoming: [],
   };
 }
 
-
+function wrap(ui: React.ReactElement) {
+  return render(<MemoryRouter>{ui}</MemoryRouter>);
+}
 
 afterEach(() => vi.clearAllMocks());
 
+beforeEach(() => {
+  navigateMock.mockReset();
+});
 
 describe("DividendsPanel", () => {
   it("renders summary + per-quarter history for a paying instrument", async () => {
     mockFetch.mockResolvedValue(paid());
-    render(<DividendsPanel symbol="AAPL" provider="sec_dividend_summary" />);
+    wrap(<DividendsPanel symbol="AAPL" provider="sec_dividend_summary" />);
 
     await waitFor(() => {
       expect(screen.getByText(/TTM yield/i)).toBeInTheDocument();
@@ -77,7 +90,7 @@ describe("DividendsPanel", () => {
       history: [],
       upcoming: [],
     } as never);
-    const { container } = render(
+    const { container } = wrap(
       <DividendsPanel symbol="X" provider="sec_dividend_summary" />,
     );
     await waitFor(() => expect(container.firstChild).toBeNull());
@@ -90,7 +103,7 @@ describe("DividendsPanel", () => {
       history: [],
       upcoming: [{ ex_date: "2026-05-01" } as never],
     } as never);
-    render(<DividendsPanel symbol="X" provider="sec_dividend_summary" />);
+    wrap(<DividendsPanel symbol="X" provider="sec_dividend_summary" />);
     // Pane renders — the h2 title "Dividends" is present (source badge may also
     // contain the word; use getAllByText to avoid the "multiple elements" error).
     await waitFor(() =>
@@ -100,7 +113,7 @@ describe("DividendsPanel", () => {
 
   it("renders error state + retry on fetch failure", async () => {
     mockFetch.mockRejectedValue(new Error("boom"));
-    render(<DividendsPanel symbol="AAPL" provider="sec_dividend_summary" />);
+    wrap(<DividendsPanel symbol="AAPL" provider="sec_dividend_summary" />);
 
     await waitFor(() => {
       expect(screen.getByText(/Failed to load/i)).toBeInTheDocument();
@@ -121,7 +134,7 @@ describe("DividendsPanel", () => {
       },
     ];
     mockFetch.mockResolvedValue(withUpcoming);
-    render(<DividendsPanel symbol="AAPL" provider="sec_dividend_summary" />);
+    wrap(<DividendsPanel symbol="AAPL" provider="sec_dividend_summary" />);
 
     await waitFor(() => {
       expect(screen.getByText(/Next dividend/i)).toBeInTheDocument();
@@ -130,5 +143,39 @@ describe("DividendsPanel", () => {
     expect(screen.getByText(/2026-02-10/)).toBeInTheDocument();
     expect(screen.getByText(/2026-02-11/)).toBeInTheDocument();
     expect(screen.getByText(/2026-02-20/)).toBeInTheDocument();
+  });
+
+  it("renders at most 4 HistoryBar rows regardless of history length", async () => {
+    const data = paid();
+    // Extend history to 7 quarters.
+    data.history = [
+      makePeriod(2025, "Q4", "2025-12-28", "0.25"),
+      makePeriod(2025, "Q3", "2025-09-28", "0.25"),
+      makePeriod(2025, "Q2", "2025-06-28", "0.24"),
+      makePeriod(2025, "Q1", "2025-03-28", "0.24"),
+      makePeriod(2024, "Q4", "2024-12-28", "0.23"),
+      makePeriod(2024, "Q3", "2024-09-28", "0.23"),
+      makePeriod(2024, "Q2", "2024-06-28", "0.22"),
+    ];
+    mockFetch.mockResolvedValue(data);
+    wrap(<DividendsPanel symbol="AAPL" provider="sec_dividend_summary" />);
+
+    await waitFor(() =>
+      expect(screen.getByText(/FY2025 Q4/)).toBeInTheDocument(),
+    );
+    // Exactly 4 progressbar elements (one per HistoryBar).
+    const bars = screen.getAllByRole("progressbar");
+    expect(bars).toHaveLength(4);
+    // FY2024 Q2 must NOT appear — it is beyond the 4-row limit.
+    expect(screen.queryByText(/FY2024 Q2/)).toBeNull();
+  });
+
+  it("Open button navigates to /instrument/<symbol>/dividends", async () => {
+    mockFetch.mockResolvedValue(paid());
+    wrap(<DividendsPanel symbol="GME" provider="sec_dividend_summary" />);
+
+    const btn = await screen.findByRole("button", { name: /open/i });
+    await userEvent.click(btn);
+    expect(navigateMock).toHaveBeenCalledWith("/instrument/GME/dividends");
   });
 });
