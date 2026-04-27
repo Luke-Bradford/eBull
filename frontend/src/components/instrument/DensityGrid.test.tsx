@@ -26,8 +26,8 @@ vi.mock("@/components/instrument/FilingsPane", () => ({
 vi.mock("@/components/instrument/DividendsPanel", () => ({
   DividendsPanel: () => <div>Dividends</div>,
 }));
-vi.mock("@/components/instrument/InsiderActivityPanel", () => ({
-  InsiderActivityPanel: () => <div>Insider</div>,
+vi.mock("@/components/instrument/InsiderActivitySummary", () => ({
+  InsiderActivitySummary: () => <div>Insider summary</div>,
 }));
 vi.mock("@/components/instrument/FundamentalsPane", () => ({
   FundamentalsPane: () => <div>Fundamentals stub</div>,
@@ -178,12 +178,10 @@ describe("DensityGrid", () => {
     expect(screen.queryByText("Fundamentals stub")).toBeNull();
   });
 
-  it("combined dividends/insider card uses exactly one overflow-auto scroll-bound (Phase D regression guard)", () => {
-    // When insider is active, InsiderActivityPanel renders up to 50 rows.
-    // The combined card retains overflow-auto + max-h-[360px] intentionally
-    // until Phase D replaces it with InsiderActivitySummary.
-    // This test pins the count to 1 so Phase D's removal of that bound
-    // is explicitly regression-guarded and not silently missed.
+  it("combined dividends/insider card has no overflow-auto after Phase D (InsiderActivitySummary is compact)", () => {
+    // Phase D replaced InsiderActivityPanel (up to 50 rows) with
+    // InsiderActivitySummary (compact 5-field block), so the combined
+    // card no longer needs the scroll-bound wrapper.
     const summaryWithInsider = {
       instrument_id: 1,
       has_sec_cik: true,
@@ -205,6 +203,41 @@ describe("DensityGrid", () => {
       <MemoryRouter>
         <DensityGrid
           summary={summaryWithInsider}
+          keyStatsBlock={<div>KEY STATS BLOCK</div>}
+          thesisBlock={<div>THESIS BLOCK</div>}
+          newsBlock={<div>NEWS BLOCK</div>}
+        />
+      </MemoryRouter>,
+    );
+    const overflowAuto = container.querySelectorAll(".overflow-auto");
+    expect(overflowAuto.length).toBe(0);
+  });
+
+  it("combined card retains overflow-auto scroll-bound when dividends are active (DividendsPanel can be tall)", () => {
+    // DividendsPanel can render 40+ history rows; the combined card wrapper
+    // must keep the scroll-bound when dividends are present so the grid
+    // doesn't push other panes far below the fold.
+    const summaryWithDividends = {
+      instrument_id: 1,
+      has_sec_cik: true,
+      identity: {
+        symbol: "GME",
+        display_name: "GameStop",
+        market_cap: "1000000",
+        sector: null,
+      },
+      capabilities: {
+        dividends: {
+          providers: ["sec_dividend_summary"],
+          data_present: { sec_dividend_summary: true },
+        },
+      },
+      key_stats: null,
+    } as never;
+    const { container } = render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={summaryWithDividends}
           keyStatsBlock={<div>KEY STATS BLOCK</div>}
           thesisBlock={<div>THESIS BLOCK</div>}
           newsBlock={<div>NEWS BLOCK</div>}
