@@ -54,6 +54,14 @@ describe("classifyUsSession (April 2026 EDT)", () => {
     // 02:00 EDT Tue = 06:00 UTC Tue.
     expect(classifyUsSession(utc(2026, 4, 21, 6, 0))).toBe("closed");
   });
+  it("classifies exactly midnight ET (00:00) as closed", () => {
+    // 00:00 EDT Tue Apr 21 = 04:00 UTC Tue Apr 21. Boundary case
+    // because some Intl runtimes emit hour="24" for midnight; the
+    // `% 24` normalisation in `_nyParts` must collapse that to 0
+    // so this lands in the closed window, not an unmatched branch.
+    // PR #610 review WARNING.
+    expect(classifyUsSession(utc(2026, 4, 21, 4, 0))).toBe("closed");
+  });
   it("classifies just-before-PM (03:59 ET)", () => {
     expect(classifyUsSession(utc(2026, 4, 21, 7, 59))).toBe("closed");
   });
