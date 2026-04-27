@@ -244,4 +244,21 @@ describe("DensityGrid profiles", () => {
     await user.click(openButton);
     expect(navigateMock).toHaveBeenCalledWith("/instrument/GME/chart");
   });
+
+  it("chart pane Open button preserves overview ?chart= range as ?range= on chart workspace", async () => {
+    navigateMock.mockClear();
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/instrument/GME?chart=5y"]}>
+        <DensityGrid
+          summary={makeSummary({})}
+          thesis={null}
+          thesisErrored={false}
+        />
+      </MemoryRouter>,
+    );
+    const openButton = screen.getByRole("button", { name: /open/i });
+    await user.click(openButton);
+    expect(navigateMock).toHaveBeenCalledWith("/instrument/GME/chart?range=5y");
+  });
 });
