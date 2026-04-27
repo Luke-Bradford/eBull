@@ -181,6 +181,22 @@ export function PriceChart({
     [symbol, range],
   );
 
+  // Background poll fallback (#602 follow-up). SSE drives the
+  // smooth-live feel when eToro is actually pushing ticks, but the
+  // demo WS goes silent for stretches and the chart needs to keep
+  // refreshing from REST to stay current. Interval scales with
+  // range — sub-day = 15s (matches the 30s intraday TTL cache, so
+  // alternating polls actually hit the provider), daily = 60s.
+  // The cache + singleflight on the backend (#600) keep this cheap;
+  // worst case is 4 GET/min/instrument across the page.
+  useEffect(() => {
+    const intervalMs = isIntraday(range) ? 15_000 : 60_000;
+    const id = setInterval(() => {
+      refetch();
+    }, intervalMs);
+    return () => clearInterval(id);
+  }, [range, refetch]);
+
   // Between a range click and useAsync's effect firing, React renders
   // one frame with loading=false and the prior range's data still in
   // state. Gate chart rendering on `data.range === range` so the old

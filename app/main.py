@@ -21,6 +21,7 @@ from app.api.auth_session import router as auth_session_router
 from app.api.auth_setup import router as auth_setup_router
 from app.api.broker_credentials import router as broker_credentials_router
 from app.api.budget import router as budget_router
+from app.api._debug_ws import router as debug_ws_router
 from app.api.business_summary_admin import router as business_summary_admin_router
 from app.api.capability_overrides_admin import router as capability_overrides_admin_router
 from app.api.config import KillSwitchRequest, KillSwitchResponse, post_kill_switch
@@ -338,6 +339,7 @@ app.include_router(config_router)
 app.include_router(copy_trading_router)
 app.include_router(coverage_router)
 app.include_router(business_summary_admin_router)
+app.include_router(debug_ws_router)
 app.include_router(capability_overrides_admin_router)
 app.include_router(filings_router)
 app.include_router(instruments_router)

@@ -259,6 +259,19 @@ export function ChartPage(): JSX.Element {
     [symbol, range],
   );
 
+  // Background poll fallback. SSE live-tick path covers smooth
+  // updates when eToro pushes; this guarantees the chart still
+  // freshens even when the WS goes silent. 15s for intraday,
+  // 60s for daily — backend cache + singleflight (#600) absorb
+  // the load.
+  useEffect(() => {
+    const intervalMs = intraday ? 15_000 : 60_000;
+    const id = setInterval(() => {
+      candlesAsync.refetch();
+    }, intervalMs);
+    return () => clearInterval(id);
+  }, [intraday, candlesAsync.refetch]);
+
   // Compare candle fetches: parallel, keyed on [range, ...compareSymbols].
   // We use a single useEffect + useState<Map> to manage compare fetches.
   const [compareData, setCompareData] = useState<Map<string, NormalisedBar[]>>(new Map());
