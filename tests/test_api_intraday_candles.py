@@ -164,7 +164,9 @@ def test_intraday_happy_path_returns_bars_with_iso_timestamps(client: TestClient
     body = resp.json()
     assert body["symbol"] == "AAPL"
     assert body["interval"] == "OneMinute"
-    assert body["count"] == 100
+    # `count` reflects bars actually returned, not the request — the
+    # provider returned 1 bar even though we asked for 100.
+    assert body["count"] == 1
     assert body["persisted"] is False
     assert len(body["rows"]) == 1
     # Timestamp is ISO-8601 with timezone — frontend parses via Date.

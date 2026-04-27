@@ -850,7 +850,11 @@ def get_instrument_intraday_candles(
     return InstrumentIntradayCandles(
         symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
         interval=interval,
-        count=count,
+        # Echo the actual number of bars returned, not the operator's
+        # request — eToro can return fewer than `count` near market
+        # open, on thinly-traded instruments, or after a fresh listing.
+        # Callers reading `body.count` must see what they actually got.
+        count=len(bars),
         rows=[
             IntradayBarPayload(
                 timestamp=b.timestamp,

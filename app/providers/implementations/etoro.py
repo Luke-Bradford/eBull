@@ -8,6 +8,19 @@ field lands in SQL (``instruments``, ``price_daily``, ``quotes``,
 ``docs/review-prevention-log.md`` §"Raw payload persistence" for
 the scope-narrowed rule).
 
+**Intraday candle carve-out (#600).** ``get_intraday_candles`` is
+the one method on this class whose result is NOT mirrored to a SQL
+table. Intraday bars are ephemeral chart-UI data — they do not
+drive scoring, thesis, recommendations, orders, dividends, or tax,
+so the SQL-as-audit-trail invariant does not apply. The pass-through
+is gated by a TTL cache (``app/services/intraday_candles.py``) and
+the API endpoint is auth-gated to keep external quota traceable.
+Persisting intraday rows would expand the audit / sync surface
+without analytical value; the no-persistence design is locked at
+epic #585 and reviewed by Codex pre-implementation. This is the
+**only** sanctioned exception to the structured-fields-land-in-SQL
+rule for this provider — adding more requires reopening the design.
+
 Auth: three-header scheme (x-api-key, x-user-key, x-request-id).
 Base URL: https://public-api.etoro.com (configurable via settings.etoro_base_url).
 """
