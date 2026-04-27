@@ -3,6 +3,7 @@ import { useState, type JSX } from "react";
 import type { ChartRange } from "@/api/types";
 import { EmptyState } from "@/components/states/EmptyState";
 import type { NormalisedBar } from "@/lib/chartData";
+import { formatHoverLabel } from "@/lib/chartFormatters";
 
 export interface RawOhlcvTableProps {
   readonly rows: ReadonlyArray<NormalisedBar>;
@@ -21,14 +22,8 @@ function formatNum(v: string | null | undefined): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
-function formatTime(epochSeconds: number, intraday: boolean): string {
-  const d = new Date(epochSeconds * 1000);
-  const date = d.toISOString().slice(0, 10);
-  if (!intraday) return date;
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mm = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${date} ${hh}:${mm}Z`;
-}
+// Time/timestamp rendering shares a single helper with the chart
+// hover tooltip — see @/lib/chartFormatters.
 
 function downloadCsv(
   rows: ReadonlyArray<NormalisedBar>,
@@ -40,7 +35,7 @@ function downloadCsv(
   const body = rows
     .map(
       (r) =>
-        `${formatTime(r.time, intraday)},${r.open ?? ""},${r.high ?? ""},${r.low ?? ""},${r.close ?? ""},${r.volume ?? ""}`,
+        `${formatHoverLabel(r.time, intraday)},${r.open ?? ""},${r.high ?? ""},${r.low ?? ""},${r.close ?? ""},${r.volume ?? ""}`,
     )
     .join("\n");
   const csv = header + body;
@@ -125,7 +120,7 @@ export function RawOhlcvTable({
           <tbody>
             {sorted.map((r) => (
               <tr key={r.time} className="border-b border-slate-100 last:border-0">
-                <td className="px-2 py-1 tabular-nums">{formatTime(r.time, intraday)}</td>
+                <td className="px-2 py-1 tabular-nums">{formatHoverLabel(r.time, intraday)}</td>
                 <td className="px-2 py-1 text-right tabular-nums">{formatNum(r.open)}</td>
                 <td className="px-2 py-1 text-right tabular-nums">{formatNum(r.high)}</td>
                 <td className="px-2 py-1 text-right tabular-nums">{formatNum(r.low)}</td>
