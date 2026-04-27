@@ -612,28 +612,39 @@ export function ChartCanvas({
     [lastTime, lastOpen, lastHigh, lastLow],
   );
   const bucketSeconds = range !== undefined ? intervalSecondsFor(range) : 60;
-  const { connected, unavailable } = useLiveLastBar({
-    instrumentId: range !== undefined ? instrumentId : null,
-    bucketSeconds,
-    historicalLastBar: histLastBar,
-    refs: {
-      candle: candleRef,
-      line: lineRef,
-      area: areaRef,
-    },
-  });
+  const { connected, unavailable, appliedTicks, lastAppliedAt, lastVerdict } =
+    useLiveLastBar({
+      instrumentId: range !== undefined ? instrumentId : null,
+      bucketSeconds,
+      historicalLastBar: histLastBar,
+      refs: {
+        candle: candleRef,
+        line: lineRef,
+        area: areaRef,
+      },
+    });
   const liveActive = connected && !unavailable && instrumentId !== null && range !== undefined;
+  const lastTickHHMM = lastAppliedAt !== null ? new Date(lastAppliedAt).toISOString().slice(11, 16) : null;
 
   return (
     <div className="relative">
       {hover !== null ? <RichTooltip hover={hover} /> : null}
       {liveActive ? (
         <div
-          className="absolute right-2 top-2 z-10 flex items-center gap-1 text-[10px] uppercase tracking-wider text-emerald-600"
+          className="absolute right-2 top-2 z-10 flex items-center gap-1.5 text-[10px] tabular-nums tracking-wide text-emerald-600"
           data-testid="price-chart-live-indicator"
+          title={`SSE connected · ${appliedTicks} ticks applied · last verdict: ${lastVerdict ?? "(none yet)"}`}
         >
           <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
-          Live
+          <span className="uppercase">Live</span>
+          <span className="text-slate-400">·</span>
+          <span className="text-slate-500">{appliedTicks} ticks</span>
+          {lastTickHHMM !== null ? (
+            <>
+              <span className="text-slate-400">·</span>
+              <span className="text-slate-500">{lastTickHHMM}Z</span>
+            </>
+          ) : null}
         </div>
       ) : null}
       <div

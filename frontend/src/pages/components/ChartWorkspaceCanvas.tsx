@@ -707,28 +707,39 @@ export function ChartWorkspaceCanvas({
   );
   const bucketSeconds = range !== undefined ? intervalSecondsFor(range) : 60;
   const liveTargetId = !compareMode && range !== undefined ? instrumentId : null;
-  const { connected, unavailable } = useLiveLastBar({
-    instrumentId: liveTargetId,
-    bucketSeconds,
-    historicalLastBar: histLastBar,
-    refs: {
-      candle: candleRef,
-      line: null, // workspace primaryLineRef is only used in compare mode
-      area: null,
-    },
-  });
+  const { connected, unavailable, appliedTicks, lastAppliedAt, lastVerdict } =
+    useLiveLastBar({
+      instrumentId: liveTargetId,
+      bucketSeconds,
+      historicalLastBar: histLastBar,
+      refs: {
+        candle: candleRef,
+        line: null, // workspace primaryLineRef is only used in compare mode
+        area: null,
+      },
+    });
   const liveActive = connected && !unavailable && liveTargetId !== null;
+  const lastTickHHMM = lastAppliedAt !== null ? new Date(lastAppliedAt).toISOString().slice(11, 16) : null;
 
   return (
     <div className="relative">
       {hover !== null ? <RichTooltip hover={hover} /> : null}
       {liveActive ? (
         <div
-          className="absolute right-2 top-2 z-10 flex items-center gap-1 text-[10px] uppercase tracking-wider text-emerald-600"
+          className="absolute right-2 top-2 z-10 flex items-center gap-1.5 text-[10px] tabular-nums tracking-wide text-emerald-600"
           data-testid="chart-workspace-live-indicator"
+          title={`SSE connected · ${appliedTicks} ticks applied · last verdict: ${lastVerdict ?? "(none yet)"}`}
         >
           <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
-          Live
+          <span className="uppercase">Live</span>
+          <span className="text-slate-400">·</span>
+          <span className="text-slate-500">{appliedTicks} ticks</span>
+          {lastTickHHMM !== null ? (
+            <>
+              <span className="text-slate-400">·</span>
+              <span className="text-slate-500">{lastTickHHMM}Z</span>
+            </>
+          ) : null}
         </div>
       ) : null}
       <div

@@ -33,7 +33,7 @@
  * eToro's quote stream doesn't expose; deferred to V2.
  */
 
-import { useEffect, useRef, type MutableRefObject } from "react";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import type { ISeriesApi, Time, UTCTimestamp } from "lightweight-charts";
 
 import { useLiveTick, useLiveQuoteConnection } from "@/components/quotes/LiveQuoteProvider";
@@ -173,6 +173,15 @@ export interface UseLiveLastBarResult {
   /** True if the SSE stream errored irrecoverably — the chart should
    *  not show a "LIVE" indicator. */
   unavailable: boolean;
+  /** Diagnostics: count of ticks the aggregator has actually applied
+   *  to the chart (post-skip, post-filter). Surfaces stuck-stream
+   *  bugs to the operator without needing devtools. */
+  appliedTicks: number;
+  /** Diagnostics: ISO timestamp of the most recent applied tick. */
+  lastAppliedAt: string | null;
+  /** Diagnostics: latest verdict from `aggregateTick` — "update",
+   *  "append", "skip", or null when no tick has arrived. */
+  lastVerdict: "update" | "append" | "skip" | null;
 }
 
 /**
@@ -197,6 +206,11 @@ export function useLiveLastBar({
   const tick = useLiveTick(instrumentId);
   const { connected, unavailable } = useLiveQuoteConnection();
   const liveBarRef = useRef<LiveBarState | null>(null);
+  const [appliedTicks, setAppliedTicks] = useState(0);
+  const [lastAppliedAt, setLastAppliedAt] = useState<string | null>(null);
+  const [lastVerdict, setLastVerdict] = useState<
+    "update" | "append" | "skip" | null
+  >(null);
 
   const histAnchorTime = historicalLastBar !== null ? historicalLastBar.time : null;
 
@@ -205,6 +219,9 @@ export function useLiveLastBar({
   // could update the wrong bar's H/L/C.
   useEffect(() => {
     liveBarRef.current = null;
+    setAppliedTicks(0);
+    setLastAppliedAt(null);
+    setLastVerdict(null);
   }, [instrumentId, bucketSeconds, histAnchorTime]);
 
   useEffect(() => {
@@ -222,9 +239,12 @@ export function useLiveLastBar({
       tickEpochSeconds: tickEpoch,
       tickPrice: price,
     });
+    setLastVerdict(result.verdict);
     if (result.verdict === "skip") return;
 
     liveBarRef.current = result.next;
+    setAppliedTicks((n) => n + 1);
+    setLastAppliedAt(tick.quoted_at);
 
     const time = result.next.time as UTCTimestamp;
     const candleSeries = refs.candle.current;
@@ -252,7 +272,7 @@ export function useLiveLastBar({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick, bucketSeconds, historicalLastBar, instrumentId]);
 
-  return { connected, unavailable };
+  return { connected, unavailable, appliedTicks, lastAppliedAt, lastVerdict };
 }
 
 // Renamed exports to keep tickPrice as a private helper.
