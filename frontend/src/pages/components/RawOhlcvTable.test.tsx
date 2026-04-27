@@ -61,13 +61,22 @@ describe("RawOhlcvTable", () => {
     expect(screen.getAllByText("—")).toHaveLength(5);
   });
 
-  it("intraday=true renders timestamp with HH:MM and uses Time header label", () => {
+  it("intraday=true renders timestamp in browser-local time + uses Time header label", () => {
+    // Pin to a UTC instant; assert the rendered cell matches whatever
+    // the browser's local-tz formatting produces for that instant.
+    // The hover label rule (#602): intraday hovers show local time
+    // not UTC, so a UK operator on BST sees the wall-clock time
+    // they'd see on TradingView.
     const t = Math.floor(Date.UTC(2026, 3, 27, 14, 30) / 1000);
     const intradayRows: NormalisedBar[] = [
       { time: t, open: "100", high: "100", low: "100", close: "100", volume: "1" },
     ];
     render(<RawOhlcvTable rows={intradayRows} symbol="GME" range="1d" intraday />);
-    expect(screen.getByText("2026-04-27 14:30Z")).toBeInTheDocument();
+    const d = new Date(t * 1000);
+    const expected =
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ` +
+      `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    expect(screen.getByText(expected)).toBeInTheDocument();
     expect(screen.getByText(/^Time/)).toBeInTheDocument();
   });
 });

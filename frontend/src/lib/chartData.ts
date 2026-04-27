@@ -159,10 +159,67 @@ function isoToEpochSeconds(iso: string): number | null {
 }
 
 /**
+ * Fill gaps within a contiguous market session with carry-forward
+ * synthetic bars so the chart renders continuously even when the
+ * upstream feed (eToro) skips minutes during illiquid AH/PM
+ * windows. Industry-standard pattern — TradingView/Robinhood do
+ * the same when the broker feed has sparse coverage.
+ *
+ * Heuristics:
+ *   * Only fills gaps shorter than `maxGapSeconds` (default = 2h
+ *     for intraday, 7d for daily). Longer gaps = market closed /
+ *     weekend / holiday, leave intact.
+ *   * Synthetic bars carry the prior close as O = H = L = C and
+ *     `volume = "0"`. The chart's volume series renders these as
+ *     zero-height bars so the operator sees the no-liquidity
+ *     marker visually.
+ *
+ * Pure function — bars in, bars out, no I/O.
+ */
+export function fillIntrasessionGaps(
+  bars: ReadonlyArray<NormalisedBar>,
+  bucketSeconds: number,
+  maxGapSeconds: number,
+): NormalisedBar[] {
+  if (bars.length < 2) return bars.slice();
+  const out: NormalisedBar[] = [bars[0]!];
+  for (let i = 1; i < bars.length; i++) {
+    const prev = bars[i - 1]!;
+    const curr = bars[i]!;
+    const gap = curr.time - prev.time;
+    // Inter-bar gap of one bucket is the normal contiguous case.
+    // Anything bigger is a missed-bar window we may want to fill.
+    if (gap > bucketSeconds && gap <= maxGapSeconds) {
+      const carry = prev.close;
+      for (let t = prev.time + bucketSeconds; t < curr.time; t += bucketSeconds) {
+        out.push({
+          time: t,
+          open: carry,
+          high: carry,
+          low: carry,
+          close: carry,
+          volume: "0",
+        });
+      }
+    }
+    out.push(curr);
+  }
+  return out;
+}
+
+/**
  * Resolve a chart range to bars, dispatched to the correct endpoint.
  * Returns `null` for any row whose timestamp can't be parsed; the
  * chart's existing valid-row gate filters those out.
  */
+// Note: gap-fill was previously applied here; reverted because
+// lightweight-charts is ordinal by default — bars at equal x-axis
+// spacing regardless of real-time gap. TradingView does the same.
+// Filling sparse AH bars with carry-forward synthetic candles
+// produced a long flat line in the rendered chart that didn't
+// match the gold-standard look. `fillIntrasessionGaps` is kept
+// exported in case a future caller wants opt-in.
+
 export async function fetchChartCandles(
   symbol: string,
   range: ChartRange,

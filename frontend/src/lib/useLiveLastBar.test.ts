@@ -8,9 +8,23 @@
  * boundary appends a new bar with O=H=L=C=tick, and a stale tick
  * before the historical anchor is dropped.
  */
-import { describe, expect, it } from "vitest";
+import { act, renderHook } from "@testing-library/react";
+import { createRef, type MutableRefObject } from "react";
+import type { ISeriesApi } from "lightweight-charts";
+import { describe, expect, it, vi } from "vitest";
 
-import { aggregateTick } from "@/lib/useLiveLastBar";
+import { aggregateTick, useLiveLastBar } from "@/lib/useLiveLastBar";
+import type { LiveTickPayload } from "@/lib/useLiveQuote";
+
+// Mock the LiveQuoteProvider hooks so the hook-under-test runs in
+// jsdom without the SSE EventSource. `useLiveTick` returns whatever
+// the test pushes via the mutable ref; `useLiveQuoteConnection`
+// reports a healthy stream.
+const mockTickRef: { current: LiveTickPayload | null } = { current: null };
+vi.mock("@/components/quotes/LiveQuoteProvider", () => ({
+  useLiveTick: () => mockTickRef.current,
+  useLiveQuoteConnection: () => ({ connected: true, unavailable: false }),
+}));
 
 const T_BAR_OPEN = Math.floor(Date.UTC(2026, 3, 27, 14, 30) / 1000); // 14:30
 const T_INSIDE = T_BAR_OPEN + 30; // 14:30:30
@@ -132,6 +146,98 @@ describe("aggregateTick — bucket boundary", () => {
       tickPrice: 100,
     });
     expect(result.verdict).toBe("append");
+  });
+});
+
+describe("useLiveLastBar — session-filter dedupe (PR #610 round 3)", () => {
+  // 04:00 ET = 08:00 UTC during EDT — first minute of pre-market.
+  const PM_TICK_AT = "2026-04-28T08:00:00Z";
+
+  function makePmTick(quotedAt: string = PM_TICK_AT): LiveTickPayload {
+    return {
+      instrument_id: 1699,
+      native_currency: "USD",
+      bid: "25.00",
+      ask: "25.05",
+      last: "25.00",
+      quoted_at: quotedAt,
+      display: null,
+    };
+  }
+
+  function makeRefs(): {
+    candle: MutableRefObject<ISeriesApi<"Candlestick"> | null>;
+    line: null;
+    area: null;
+    update: ReturnType<typeof vi.fn>;
+  } {
+    const update = vi.fn();
+    const candle = createRef<ISeriesApi<"Candlestick"> | null>() as MutableRefObject<
+      ISeriesApi<"Candlestick"> | null
+    >;
+    candle.current = { update } as unknown as ISeriesApi<"Candlestick">;
+    return { candle, line: null, area: null, update };
+  }
+
+  it("rejects PM tick when acceptPre=false AND does not retroactively apply when acceptPre flips to true", () => {
+    mockTickRef.current = makePmTick();
+    const refs = makeRefs();
+
+    const { result, rerender } = renderHook(
+      ({ acceptPre }: { acceptPre: boolean }) =>
+        useLiveLastBar({
+          instrumentId: 1699,
+          bucketSeconds: 60,
+          historicalLastBar: null,
+          refs,
+          acceptPre,
+          acceptAh: true,
+        }),
+      { initialProps: { acceptPre: false } },
+    );
+
+    // First render: filter is OFF, tick should be dropped + dedupe key
+    // recorded so a future flip can't replay it.
+    expect(result.current.appliedTicks).toBe(0);
+    expect(refs.update).not.toHaveBeenCalled();
+
+    // Flip filter ON, same tick still in-flight (no new tick arrived).
+    act(() => {
+      rerender({ acceptPre: true });
+    });
+
+    // Stale tick must NOT be retroactively applied — dedupe key was
+    // recorded on the rejected first pass.
+    expect(result.current.appliedTicks).toBe(0);
+    expect(refs.update).not.toHaveBeenCalled();
+  });
+
+  it("accepts a NEW PM tick after filter flips ON", () => {
+    mockTickRef.current = makePmTick();
+    const refs = makeRefs();
+
+    const { rerender, result } = renderHook(
+      ({ acceptPre }: { acceptPre: boolean }) =>
+        useLiveLastBar({
+          instrumentId: 1699,
+          bucketSeconds: 60,
+          historicalLastBar: null,
+          refs,
+          acceptPre,
+          acceptAh: true,
+        }),
+      { initialProps: { acceptPre: false } },
+    );
+    expect(result.current.appliedTicks).toBe(0);
+
+    // Now a fresh tick arrives at a later quoted_at AFTER filter flips.
+    act(() => {
+      mockTickRef.current = makePmTick("2026-04-28T08:01:00Z");
+      rerender({ acceptPre: true });
+    });
+
+    expect(result.current.appliedTicks).toBe(1);
+    expect(refs.update).toHaveBeenCalledTimes(1);
   });
 });
 

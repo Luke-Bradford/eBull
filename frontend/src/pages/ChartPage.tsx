@@ -212,6 +212,25 @@ export function ChartPage(): JSX.Element {
     [searchParams, setSearchParams, enabledTrends],
   );
 
+  // Session-visibility toggles. Default ON (omit param). Mirrors the
+  // PriceChart contract so URL params are consistent across the two
+  // surfaces.
+  const showPm = searchParams.get("pm") !== "0";
+  const showAh = searchParams.get("ah") !== "0";
+
+  const toggleSessionParam = useCallback(
+    (key: "pm" | "ah", currentlyOn: boolean) => {
+      const params = new URLSearchParams(searchParams);
+      if (currentlyOn) {
+        params.set(key, "0");
+      } else {
+        params.delete(key);
+      }
+      setSearchParams(params, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
   // View param — "chart" (default) or "raw"
   const view = searchParams.get("view") === "raw" ? "raw" : "chart";
 
@@ -258,6 +277,17 @@ export function ChartPage(): JSX.Element {
     () => fetchChartCandles(symbol, range),
     [symbol, range],
   );
+
+  // Coarser candle-window refetch as a backstop. SSE+REST live-rate
+  // polling on the backend (#602) keeps the in-progress bar fresh at
+  // 5s; this just picks up rare historical bar corrections.
+  useEffect(() => {
+    const intervalMs = intraday ? 60_000 : 300_000;
+    const id = setInterval(() => {
+      candlesAsync.refetch();
+    }, intervalMs);
+    return () => clearInterval(id);
+  }, [intraday, candlesAsync.refetch]);
 
   // Compare candle fetches: parallel, keyed on [range, ...compareSymbols].
   // We use a single useEffect + useState<Map> to manage compare fetches.
@@ -464,6 +494,36 @@ export function ChartPage(): JSX.Element {
             })}
           </div>
         )}
+
+        {/* Chart-only, intraday-only: session-visibility + previous-close
+            toggles. Mirrors PriceChart for cross-surface consistency. */}
+        {view === "chart" && intraday && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] uppercase tracking-wider text-slate-500">Session</span>
+            {(
+              [
+                { key: "pm", on: showPm, label: "PM", title: "Pre-market 04:00–09:30 ET" },
+                { key: "ah", on: showAh, label: "AH", title: "After-hours 16:00–20:00 ET" },
+              ] as const
+            ).map(({ key, on, label, title }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => toggleSessionParam(key, on)}
+                aria-pressed={on}
+                title={title}
+                className={`rounded border px-2 py-0.5 text-xs font-medium ${
+                  on
+                    ? "border-slate-400 bg-white text-slate-700"
+                    : "border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100"
+                }`}
+                data-testid={`session-toggle-${key}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Chart-only: compare row. Hidden on intraday ranges — fanning
@@ -553,6 +613,8 @@ export function ChartPage(): JSX.Element {
             showRegression={enabledTrends.includes("regression")}
             showChannel={enabledTrends.includes("channel")}
             intraday={intraday}
+            showPm={showPm}
+            showAh={showAh}
             containerClassName="h-[70vh] w-full"
           />
         ) : null}

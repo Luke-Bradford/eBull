@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
+from app.api._debug_ws import router as debug_ws_router
 from app.api.alerts import router as alerts_router
 from app.api.attribution import router as attribution_router
 from app.api.audit import router as audit_router
@@ -338,6 +339,15 @@ app.include_router(config_router)
 app.include_router(copy_trading_router)
 app.include_router(coverage_router)
 app.include_router(business_summary_admin_router)
+# Debug router is dev/test-only — exposes operator-credentialled
+# pass-throughs to eToro (`/_debug/etoro-candles-probe`,
+# `/_debug/etoro-instrument-raw`) plus internal subscriber state
+# (`/_debug/etoro-ws`). Allowlist (NOT denylist on `prod`) so future
+# environments like `staging`/`qa`/`uat` are denied by default and
+# never silently expose operator credentials. Add new envs here
+# explicitly when they need diagnostic access. PR #610 review.
+if settings.app_env in {"dev", "test", "local"}:
+    app.include_router(debug_ws_router)
 app.include_router(capability_overrides_admin_router)
 app.include_router(filings_router)
 app.include_router(instruments_router)

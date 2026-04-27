@@ -28,18 +28,84 @@ const _MONTH_ABBR = [
 ] as const;
 
 /**
- * Hover label.
- *   - Daily/weekly/monthly: `YYYY-MM-DD`
- *   - Intraday: `YYYY-MM-DD HH:MMZ` so the operator sees the full
- *     timestamp and the trailing `Z` makes it obvious the time is UTC.
+ * US equity session classification for an epoch-second timestamp.
+ * NYSE/NASDAQ standard hours in ET:
+ *   pre-market: 04:00–09:30
+ *   RTH:        09:30–16:00
+ *   after-hours: 16:00–20:00
+ *   closed:     20:00–04:00 (overnight + weekends)
+ *
+ * Computed from the UTC time + the instrument's exchange offset.
+ * Uses ET (UTC-5/UTC-4) by default — both EST and EDT collapse to
+ * the same wall-clock RTH start in ET so deriving from UTC requires
+ * we know whether DST is active for that instant. We use
+ * `Date#toLocaleString` with timezone "America/New_York" which
+ * handles the DST transition automatically; cheaper than
+ * hand-rolling DST rules.
+ *
+ * Saturday/Sunday always classify as `closed` regardless of clock.
+ */
+export type SessionKind = "pre" | "rth" | "ah" | "closed";
+
+const _NY_TZ = "America/New_York";
+
+function _nyParts(epochSeconds: number): { day: number; hh: number; mm: number } {
+  const d = new Date(epochSeconds * 1000);
+  // Intl.DateTimeFormat parts in NY tz.
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: _NY_TZ,
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(d);
+  const w = parts.find((p) => p.type === "weekday")?.value ?? "";
+  const hh = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const mm = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  // Map weekday string to 0=Sun..6=Sat (Intl emits Sun/Mon/Tue/Wed/Thu/Fri/Sat).
+  const dayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const day = dayMap[w] ?? 0;
+  return { day, hh: hh % 24, mm };
+}
+
+export function classifyUsSession(epochSeconds: number): SessionKind {
+  const { day, hh, mm } = _nyParts(epochSeconds);
+  if (day === 0 || day === 6) return "closed";
+  const minutes = hh * 60 + mm;
+  if (minutes >= 4 * 60 && minutes < 9 * 60 + 30) return "pre";
+  if (minutes >= 9 * 60 + 30 && minutes < 16 * 60) return "rth";
+  if (minutes >= 16 * 60 && minutes < 20 * 60) return "ah";
+  return "closed";
+}
+
+
+function _padDateLocal(d: Date): string {
+  // Browser-local YYYY-MM-DD. ISO `toISOString()` would force UTC.
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Hover label rendered in the **browser's local timezone** so a UK
+ * operator on BST sees `21:30` for a 20:30 UTC bar — matching the
+ * convention TradingView and Robinhood use when the user is in a
+ * different zone from the exchange. The chart's epoch-second time
+ * value is universal; only the rendered label localises.
+ *
+ *   - Daily/weekly/monthly: `YYYY-MM-DD` (local date)
+ *   - Intraday: `YYYY-MM-DD HH:MM` (local time, no zone suffix —
+ *     the chart's controls/range carry the calendar context).
  */
 export function formatHoverLabel(epochSeconds: number, intraday: boolean): string {
   const d = new Date(epochSeconds * 1000);
-  const date = d.toISOString().slice(0, 10);
+  const date = _padDateLocal(d);
   if (!intraday) return date;
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mm = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${date} ${hh}:${mm}Z`;
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${date} ${hh}:${mm}`;
 }
 
 /**
@@ -51,21 +117,25 @@ export function formatHoverLabel(epochSeconds: number, intraday: boolean): strin
  * year. Single formatter handles both daily and intraday modes
  * because the library only emits the higher-resolution discriminators
  * when the chart is actually intraday.
+ *
+ * **Local timezone**: getters use the browser's local zone (e.g. BST
+ * for a UK operator). The chart's underlying time values are still
+ * UTC epoch seconds; only the displayed labels localise.
  */
 export function tickFormatter(time: number, tickMarkType: number): string {
   const d = new Date(time * 1000);
   switch (tickMarkType) {
     case 0:
-      return String(d.getUTCFullYear());
+      return String(d.getFullYear());
     case 1:
-      return _MONTH_ABBR[d.getUTCMonth()] ?? "";
+      return _MONTH_ABBR[d.getMonth()] ?? "";
     case 2:
-      return `${_MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCDate()}`;
+      return `${_MONTH_ABBR[d.getMonth()]} ${d.getDate()}`;
     case 3:
     case 4:
     default: {
-      const hh = String(d.getUTCHours()).padStart(2, "0");
-      const mm = String(d.getUTCMinutes()).padStart(2, "0");
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
       return `${hh}:${mm}`;
     }
   }

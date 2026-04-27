@@ -36,15 +36,22 @@ import {
 
 import type { ChartRange } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { SessionBands } from "@/components/instrument/SessionBands";
 import { EmptyState } from "@/components/states/EmptyState";
 import {
   fetchChartCandles,
+  floorToBucket,
   intervalSecondsFor,
   isIntraday,
   type NormalisedBar,
   type NormalisedChartCandles,
 } from "@/lib/chartData";
-import { formatHoverLabel, humanizeVolume, tickFormatter } from "@/lib/chartFormatters";
+import {
+  classifyUsSession,
+  formatHoverLabel,
+  humanizeVolume,
+  tickFormatter,
+} from "@/lib/chartFormatters";
 import { chartTheme } from "@/lib/chartTheme";
 import { useAsync } from "@/lib/useAsync";
 import { useLiveLastBar } from "@/lib/useLiveLastBar";
@@ -139,6 +146,10 @@ export function PriceChart({
     ? (rawType as ChartType)
     : "candle";
   const priceScale: PriceScaleMode = searchParams.get("scale") === "log" ? "log" : "linear";
+  // Session-visibility toggles. Default ON (omit param to keep clean URLs);
+  // set `?pm=0` / `?ah=0` to hide pre-market / after-hours bars + bands.
+  const showPm = searchParams.get("pm") !== "0";
+  const showAh = searchParams.get("ah") !== "0";
 
   const setRange = useCallback(
     (next: ChartRange) => {
@@ -176,10 +187,35 @@ export function PriceChart({
     setSearchParams(params, { replace: true });
   }, [searchParams, setSearchParams, priceScale]);
 
+  const toggleParam = useCallback(
+    (key: "pm" | "ah", currentlyOn: boolean) => {
+      const params = new URLSearchParams(searchParams);
+      if (currentlyOn) {
+        params.set(key, "0");
+      } else {
+        params.delete(key);
+      }
+      setSearchParams(params, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
   const { data, error, loading, refetch } = useAsync<NormalisedChartCandles>(
     () => fetchChartCandles(symbol, range),
     [symbol, range],
   );
+
+  // Coarser-grained candle-window refetch as a backstop. The
+  // backend's REST live-rate poller (#602) keeps the in-progress bar
+  // ticking at 5s; this refetch picks up any historical bar
+  // corrections eToro emits (rare). 60s on intraday is plenty.
+  useEffect(() => {
+    const intervalMs = isIntraday(range) ? 60_000 : 300_000;
+    const id = setInterval(() => {
+      refetch();
+    }, intervalMs);
+    return () => clearInterval(id);
+  }, [range, refetch]);
 
   // Between a range click and useAsync's effect firing, React renders
   // one frame with loading=false and the prior range's data still in
@@ -268,6 +304,44 @@ export function PriceChart({
           >
             Log
           </button>
+          {/*
+            Session-visibility + previous-close toggles. Hidden on
+            daily-tier ranges (YTD/1Y/5Y/MAX) — those have one bar per
+            session so PM/AH boundaries don't apply, and the
+            previous-close reference is implicit in the daily series.
+          */}
+          {isIntraday(range) ? (
+            <>
+              <button
+                type="button"
+                onClick={() => toggleParam("pm", showPm)}
+                aria-pressed={showPm}
+                className={`rounded px-2 py-0.5 text-xs font-medium ${
+                  showPm
+                    ? "bg-slate-800 text-white"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                }`}
+                data-testid="chart-toggle-pm"
+                title="Show / hide pre-market (04:00–09:30 ET)"
+              >
+                PM
+              </button>
+              <button
+                type="button"
+                onClick={() => toggleParam("ah", showAh)}
+                aria-pressed={showAh}
+                className={`rounded px-2 py-0.5 text-xs font-medium ${
+                  showAh
+                    ? "bg-slate-800 text-white"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                }`}
+                data-testid="chart-toggle-ah"
+                title="Show / hide after-hours (16:00–20:00 ET)"
+              >
+                AH
+              </button>
+            </>
+          ) : null}
         </div>
       </div>
 
@@ -295,6 +369,8 @@ export function PriceChart({
           chartType={chartType}
           priceScale={priceScale}
           intraday={intraday}
+          showPm={showPm}
+          showAh={showAh}
         />
       ) : null}
     </div>
@@ -315,6 +391,10 @@ export interface ChartCanvasProps {
   priceScale?: PriceScaleMode;
   /** When true, hover label includes HH:MM and the time scale shows time. */
   intraday?: boolean;
+  /** Show pre-market (04:00–09:30 ET) bars + tint band. Default true. */
+  showPm?: boolean;
+  /** Show after-hours (16:00–20:00 ET) bars + tint band. Default true. */
+  showAh?: boolean;
   containerClassName?: string;
 }
 
@@ -326,6 +406,8 @@ export function ChartCanvas({
   chartType = "candle",
   priceScale = "linear",
   intraday = false,
+  showPm = true,
+  showAh = true,
   containerClassName,
 }: ChartCanvasProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -338,6 +420,13 @@ export function ChartCanvas({
   // closure capture when rows update.
   const cleanRowsRef = useRef<NumericBar[]>([]);
   const intradayRef = useRef<boolean>(intraday);
+  // Track which `range` we've already auto-fit. fitContent should
+  // only run on the first non-empty load for a given range — the
+  // 60s candle-window refetch (PriceChart's backstop polling) reuses
+  // the same range and would otherwise re-fit on every tick of the
+  // poll, shifting the visible right edge and re-anchoring axis
+  // ticks to whatever bar happens to be rightmost.
+  const fittedRangeRef = useRef<string | null>(null);
   const [hover, setHover] = useState<RichHoverState | null>(null);
 
   // Keep the ref in sync so the crosshair handler (registered once at
@@ -375,6 +464,14 @@ export function ChartCanvas({
         borderColor: chartTheme.borderColor,
         timeVisible: false,
         secondsVisible: false,
+        // rightOffset: 5 leaves a 5-bar buffer past the last bar so
+        // the rightmost time-axis tick lands on a clean grid position
+        // (e.g. 20:55) instead of the just-painted live bar
+        // (e.g. 20:57). TradingView uses the same trick — without
+        // it the live tick repeatedly shifts the visible-range edge,
+        // which forces lightweight-charts' tick generator to label
+        // whatever the rightmost bar happens to be.
+        rightOffset: 5,
         // Explicit formatter — without this the daily axis renders
         // weekday abbreviations ("Mon Tue Wed") instead of dates and
         // intraday axis hides the time component below ~minute zoom.
@@ -520,7 +617,10 @@ export function ChartCanvas({
   // would always be null until React next re-rendered, and live ticks
   // would all bucket as "no anchor" → fresh bars, never extending the
   // historical last candle.
-  const clean = useMemo<NumericBar[]>(() => {
+  //
+  // FULL set — used by the previous-close detector + SessionBands so
+  // they can see ALL sessions regardless of visibility toggles.
+  const cleanAll = useMemo<NumericBar[]>(() => {
     return rows.flatMap((r) => {
       const open = parseNum(r.open);
       const high = parseNum(r.high);
@@ -541,6 +641,20 @@ export function ChartCanvas({
       ];
     });
   }, [rows]);
+
+  // Visibility-filtered set — what gets fed into the price/volume
+  // series. PM/AH bars drop when the operator toggles them off, but
+  // RTH and `closed` bars are never hidden (closed bars are already
+  // collapsed by the ordinal axis).
+  const clean = useMemo<NumericBar[]>(() => {
+    if (!intraday || (showPm && showAh)) return cleanAll;
+    return cleanAll.filter((b) => {
+      const k = classifyUsSession(b.time);
+      if (k === "pre" && !showPm) return false;
+      if (k === "ah" && !showAh) return false;
+      return true;
+    });
+  }, [cleanAll, intraday, showPm, showAh]);
 
   // Mirror `clean` into the crosshair handler's ref. The handler is
   // registered once at mount; reading from a ref avoids stale-closure
@@ -582,8 +696,17 @@ export function ChartCanvas({
       }),
     );
 
-    chart.timeScale().fitContent();
-  }, [clean]);
+    // Re-fit only on the first non-empty load for a given range. The
+    // chart auto-extends visible width as new bars append; calling
+    // fitContent on every clean change would flush the operator's
+    // pan/zoom state every 60s and re-anchor the rightmost tick.
+    const fingerprint = range ?? "?";
+    if (clean.length > 0 && fittedRangeRef.current !== fingerprint) {
+      chart.timeScale().fitContent();
+      fittedRangeRef.current = fingerprint;
+    }
+  }, [clean, range]);
+
 
   // Live-tick aggregator (#602). Subscribes to the page-level
   // LiveQuoteProvider stream for `instrumentId` and updates the last
@@ -612,35 +735,86 @@ export function ChartCanvas({
     [lastTime, lastOpen, lastHigh, lastLow],
   );
   const bucketSeconds = range !== undefined ? intervalSecondsFor(range) : 60;
-  const { connected, unavailable } = useLiveLastBar({
-    instrumentId: range !== undefined ? instrumentId : null,
-    bucketSeconds,
-    historicalLastBar: histLastBar,
-    refs: {
-      candle: candleRef,
-      line: lineRef,
-      area: areaRef,
-    },
-  });
+  const { connected, unavailable, appliedTicks, lastAppliedAt, lastVerdict } =
+    useLiveLastBar({
+      instrumentId: range !== undefined ? instrumentId : null,
+      bucketSeconds,
+      historicalLastBar: histLastBar,
+      refs: {
+        candle: candleRef,
+        line: lineRef,
+        area: areaRef,
+      },
+      acceptPre: showPm,
+      acceptAh: showAh,
+    });
   const liveActive = connected && !unavailable && instrumentId !== null && range !== undefined;
+  const lastTickHHMM = lastAppliedAt !== null
+    ? (() => {
+        const d = new Date(lastAppliedAt);
+        return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      })()
+    : null;
+
+  // Bars passed to SessionBands — track the rendered (`clean`) set so
+  // toggling PM/AH off removes both the bars AND the corresponding
+  // tint, keeping the visual consistent. The ordinal axis collapses
+  // gaps either way, so band coordinates align with the rendered bars.
+  //
+  // Live-bar bucket: when the live-tick aggregator appends a fresh
+  // bucket past the historical tail (verdict `append`), the candle
+  // moves immediately via `series.update()` but `clean` doesn't
+  // refresh until the next REST refetch (60s on intraday). Append
+  // the live bucket here so the tint follows the candle without lag.
+  // Codex review #602.
+  const liveBucketTime = useMemo(() => {
+    if (lastAppliedAt === null) return null;
+    const tickEpoch = Math.floor(new Date(lastAppliedAt).getTime() / 1000);
+    if (!Number.isFinite(tickEpoch)) return null;
+    return floorToBucket(tickEpoch, bucketSeconds);
+  }, [lastAppliedAt, bucketSeconds]);
+  const bandBars = useMemo(() => {
+    const base = clean.map((b) => ({ time: b.time as number }));
+    if (
+      liveBucketTime !== null &&
+      (base.length === 0 || base[base.length - 1]!.time < liveBucketTime)
+    ) {
+      base.push({ time: liveBucketTime });
+    }
+    return base;
+  }, [clean, liveBucketTime]);
 
   return (
     <div className="relative">
-      {hover !== null ? <RichTooltip hover={hover} /> : null}
-      {liveActive ? (
-        <div
-          className="absolute right-2 top-2 z-10 flex items-center gap-1 text-[10px] uppercase tracking-wider text-emerald-600"
-          data-testid="price-chart-live-indicator"
-        >
-          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
-          Live
-        </div>
-      ) : null}
       <div
         ref={containerRef}
         data-testid={`price-chart-${symbol}`}
         className={containerClassName ?? "h-[340px] w-full"}
       />
+      <SessionBands
+        chartRef={chartRef}
+        bars={bandBars}
+        enabled={intraday && (showPm || showAh)}
+      />
+      {hover !== null ? <RichTooltip hover={hover} /> : null}
+      {liveActive ? (
+        <div
+          className="absolute right-2 top-2 z-10 flex items-center gap-1.5 text-[10px] tabular-nums tracking-wide text-emerald-600"
+          data-testid="price-chart-live-indicator"
+          title={`SSE connected · ${appliedTicks} ticks applied · last verdict: ${lastVerdict ?? "(none yet)"}`}
+        >
+          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+          <span className="uppercase">Live</span>
+          <span className="text-slate-400">·</span>
+          <span className="text-slate-500">{appliedTicks} ticks</span>
+          {lastTickHHMM !== null ? (
+            <>
+              <span className="text-slate-400">·</span>
+              <span className="text-slate-500">{lastTickHHMM}</span>
+            </>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

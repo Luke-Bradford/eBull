@@ -68,6 +68,12 @@ _RECONNECT_BACKOFF_S = 5.0
 # isn't hammered. 3 seconds is short enough that the operator sees
 # fresh state inside a "feel alive" window without churn.
 _RECONCILE_DEBOUNCE_S = 3.0
+# REST live-rate poll cadence. eToro's WS is bursty; this poll
+# guarantees a freshness floor so the chart's in-progress bar updates
+# at least every _RATE_POLL_INTERVAL_S regardless of WS push state.
+# 5s × 12 polls/min = 12 GET/min — well under the 60 GET/min budget.
+# Each poll batch-fetches every visible instrument in one rates call.
+_RATE_POLL_INTERVAL_S = 5.0
 
 
 # ---------------------------------------------------------------------
@@ -453,6 +459,16 @@ class EtoroWebSocketSubscriber:
         self._reconcile_idle = threading.Event()
         self._reconcile_idle.set()
 
+        # REST-polled live-rate fallback (#602 follow-up). eToro WS
+        # is bursty / silent for stretches in demo; per-second polling
+        # of /instruments/rates guarantees a freshness floor regardless
+        # of WS state. Every _RATE_POLL_INTERVAL_S the poll loop
+        # snapshots `_topic_refs.keys()` (visible instrument ids),
+        # batch-calls the rates endpoint, and publishes synthesised
+        # ticks to the bus exactly the way the WS path does. Skipped
+        # when no SSE stream has visible ids.
+        self._rest_poll_task: asyncio.Task[None] | None = None
+
         # Visibility-driven topic registry. Every page-view SSE stream
         # bumps a ref on its visible instrument ids; the topic is sent
         # to eToro iff its refcount > 0 (#498). No DB-backed selector
@@ -525,6 +541,7 @@ class EtoroWebSocketSubscriber:
         # ids on screen. Visibility drives the upstream subscription,
         # not held / watchlist state (#498).
         self._task = asyncio.create_task(self._run(), name="etoro-ws-subscriber")
+        self._rest_poll_task = asyncio.create_task(self._rest_poll_loop(), name="etoro-ws-rest-poll")
         logger.info("EtoroWebSocketSubscriber: started")
 
     async def stop(self) -> None:
@@ -535,6 +552,11 @@ class EtoroWebSocketSubscriber:
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         self._task = None
+        if self._rest_poll_task is not None:
+            self._rest_poll_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._rest_poll_task
+            self._rest_poll_task = None
         # Cancel the reconcile worker. The worker coroutine may be
         # awaiting ``asyncio.to_thread`` — the cancel raises
         # CancelledError out of the await, but the OS thread running
@@ -867,6 +889,93 @@ class EtoroWebSocketSubscriber:
                         update.instrument_id,
                         exc_info=True,
                     )
+
+    async def _rest_poll_loop(self) -> None:
+        """Periodic REST poll of /instruments/rates to guarantee a
+        freshness floor for the visible-id set.
+
+        eToro's WS is bursty: tens of seconds of silence are normal,
+        even on demo with held positions. Pure-WS charts go stale in
+        those windows. This loop runs alongside the WS, polling the
+        REST rates endpoint every _RATE_POLL_INTERVAL_S for whatever
+        ids have a refcount, and synthesises QuoteUpdate objects that
+        feed the same QuoteBus the WS path uses. SSE consumers see
+        identical tick payloads regardless of source.
+
+        Why a loop here, not per-SSE-stream: the rates endpoint
+        batches up to 100 ids in one call. One loop covering the
+        union of all visible ids is strictly cheaper than N parallel
+        per-stream polls. Same scaling argument as
+        LiveQuoteProvider's "one stream per page" rule.
+
+        Rate budget: 12 polls/min × 1 GET = 12 GET/min/key. 60 GET/min
+        is the eToro ceiling, leaving ample headroom for the WS-side
+        Subscribe / Unsubscribe traffic.
+        """
+        # Local import keeps the WS module's startup cycle independent
+        # of the REST provider's heavy httpx + retry deps; only fires
+        # when subscriber.start() is called.
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        provider = EtoroMarketDataProvider(
+            api_key=self._api_key,
+            user_key=self._user_key,
+            env=self._env,
+        )
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=_RATE_POLL_INTERVAL_S,
+                    )
+                    return
+                except TimeoutError:
+                    pass
+                async with self._topic_lock:
+                    ids = sorted(self._topic_refs.keys())
+                if not ids:
+                    continue
+                try:
+                    quotes = await asyncio.to_thread(provider.get_quotes, ids)
+                except Exception:
+                    logger.warning(
+                        "EtoroWebSocketSubscriber: REST rate poll failed for %d ids — will retry next interval",
+                        len(ids),
+                        exc_info=True,
+                    )
+                    continue
+                if self._bus is None:
+                    continue
+                for q in quotes:
+                    update = QuoteUpdate(
+                        instrument_id=q.instrument_id,
+                        bid=q.bid,
+                        ask=q.ask,
+                        last=q.last,
+                        quoted_at=q.timestamp,
+                    )
+                    self._bus.publish(update)
+                    # Also persist to quotes table so the operator's
+                    # next page-load sees the same fresh value the
+                    # chart is already displaying. Same offload pattern
+                    # as the WS path.
+                    try:
+                        await asyncio.to_thread(self._sync_upsert, update)
+                    except Exception:
+                        logger.warning(
+                            "EtoroWebSocketSubscriber: rate-poll upsert failed instrument_id=%d",
+                            update.instrument_id,
+                            exc_info=True,
+                        )
+        finally:
+            # Best-effort cleanup of the long-lived REST client. Most
+            # of the time the subscriber outlives a single eBull
+            # session so this only runs on lifespan shutdown.
+            try:
+                provider._client.close()  # noqa: SLF001 — provider context-manager only
+            except Exception:
+                pass
 
 
 def _looks_like_json_envelope(raw: str | bytes) -> bool:
