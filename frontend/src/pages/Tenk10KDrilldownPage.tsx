@@ -180,10 +180,12 @@ function secSearchUrlFor(accession: string | null): string | null {
 function Body({
   data,
   history,
+  historyError,
   symbol,
 }: {
   readonly data: BusinessSectionsResponse;
   readonly history: TenKHistoryResponse;
+  readonly historyError: unknown;
   readonly symbol: string;
 }) {
   if (data.sections.length === 0) {
@@ -231,12 +233,18 @@ function Body({
         ))}
       </div>
       <div className="hidden lg:block">
-        <TenKMetadataRail
-          symbol={symbol}
-          currentAccession={data.source_accession}
-          history={history.filings}
-          relatedItems={relatedItems}
-        />
+        {historyError !== null ? (
+          <p className="text-xs text-amber-700">
+            Filing history unavailable — couldn't load prior 10-Ks.
+          </p>
+        ) : (
+          <TenKMetadataRail
+            symbol={symbol}
+            currentAccession={data.source_accession}
+            history={history.filings}
+            relatedItems={relatedItems}
+          />
+        )}
       </div>
     </div>
   );
@@ -272,6 +280,7 @@ export function Tenk10KDrilldownPage() {
           <Body
             data={sectionsState.data}
             history={historyState.data ?? { symbol, filings: [] }}
+            historyError={historyState.error}
             symbol={symbol}
           />
         )}
