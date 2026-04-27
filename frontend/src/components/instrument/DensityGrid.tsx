@@ -4,19 +4,20 @@
  * (2fr) spanning 2 rows; right column (1fr + 1fr) stacks
  * key-stats / thesis / SEC profile / filings; bottom rows hold
  * business teaser / news; dividends + insider as a wide combined
- * card. Corporate events (8-K) follow below until Phase 4 ships
- * the dedicated /filings/8-k route.
+ * card.
  *
  * Responsive: at viewport widths below `lg` the grid degrades to
  * a single column. Pane order reflects priority: chart → key-stats
  * → thesis → filings → SEC-profile → segments → dividends-insider
- * → news → events. Each pane scrolls internally rather than pushing
- * the page taller.
+ * → news. Each pane scrolls internally rather than pushing the
+ * page taller.
+ *
+ * 8-K events are accessible via the FilingsPane row click →
+ * /instrument/:symbol/filings/8-k (Phase 4).
  */
 
 import { BusinessSectionsTeaser } from "@/components/instrument/BusinessSectionsTeaser";
 import { DividendsPanel } from "@/components/instrument/DividendsPanel";
-import { EightKEventsPanel } from "@/components/instrument/EightKEventsPanel";
 import { FilingsPane } from "@/components/instrument/FilingsPane";
 import { InsiderActivityPanel } from "@/components/instrument/InsiderActivityPanel";
 import { PriceChart } from "@/components/instrument/PriceChart";
@@ -44,14 +45,11 @@ export function DensityGrid({
   const hasSec = summary.has_sec_cik;
   const dividends = summary.capabilities.dividends ?? EMPTY_CELL;
   const insider = summary.capabilities.insider ?? EMPTY_CELL;
-  const corporateEvents = summary.capabilities.corporate_events ?? EMPTY_CELL;
   const dividendProviders = activeProviders(dividends);
   const insiderProviders = activeProviders(insider);
-  const eventProviders = activeProviders(corporateEvents);
 
   return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[2fr_1fr_1fr] lg:auto-rows-[220px]">
+    <div className="grid grid-cols-1 gap-3 lg:grid-cols-[2fr_1fr_1fr] lg:auto-rows-[220px]">
         {/* Chart pane: wide column (2fr) × 2 rows top-left */}
         <div className="overflow-hidden rounded-md border border-slate-200 bg-white p-3 shadow-sm lg:col-start-1 lg:col-end-2 lg:row-start-1 lg:row-end-3">
           <PriceChart symbol={symbol} />
@@ -110,20 +108,6 @@ export function DensityGrid({
             </div>
           </div>
         )}
-      </div>
-
-      {/* Corporate events (8-K) — transitional until Phase 4 ships /filings/8-k */}
-      {eventProviders.length > 0 && (
-        <div className="space-y-3">
-          {eventProviders.map((p) => (
-            <EightKEventsPanel
-              key={`events-${p}`}
-              symbol={symbol}
-              provider={p}
-            />
-          ))}
-        </div>
-      )}
     </div>
   );
 }
