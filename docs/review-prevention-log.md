@@ -954,3 +954,21 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: Any new service-layer caller of `SecFilingsProvider.fetch_document_text` that writes the returned body to `data/raw/*` without a matching normalised SQL table silently reintroduces the "body text on disk only" anti-pattern that the operator rejected at #448.
 - Prevention: `tests/test_fetch_document_text_callers.py` pins the allow-listed caller set. Adding a new caller requires the test to be updated alongside a documented normalisation path into SQL (e.g. a dedicated table with every structured field captured as rows / columns / JSONB). For ad-hoc body inspection (debugging, one-off investigation), use a script outside `app/` — never add a service-layer caller without the normalisation pipeline.
 - Enforced in: this prevention log; `tests/test_fetch_document_text_callers.py`; the docstring on `SecFilingsProvider.fetch_document_text` in `app/providers/implementations/sec_edgar.py` states the contract explicitly.
+
+---
+
+### Empty query-string params on third-party URLs
+
+- First seen in: #562.
+- Symptom: `secViewerUrlFor` built `cgi-bin/viewer?action=view&cik=&accession_number={naked}` with an empty `cik=` param. The SEC iXBRL viewer silently fails to load when CIK is missing, so every fallback link was broken without user visibility.
+- Prevention: When a URL builder accepts an optional ID (e.g. CIK) and the third-party system requires it, return `null` and skip the link rather than embedding `id=` empty. Document the dependency and the follow-up work to plumb the missing data. At self-review: grep URLs for naked `=&` or `=\)` patterns that indicate missing query params.
+- Enforced in: this prevention log; PR #562 fix uses EDGAR full-text search (works without CIK) as interim fallback, with a follow-up to plumb CIK into the response schema.
+
+---
+
+### Silent async error swallow in render branch
+
+- First seen in: #562.
+- Symptom: `Tenk10KDrilldownPage` had two parallel `useAsync` calls (`sectionsState`, `historyState`) but only one branch checked `.error`. When `historyState.error !== null`, the right rail silently rendered an empty filings list with no retry / notice — user can't tell whether the data is genuinely empty or the fetch failed.
+- Prevention: When adding a `useAsync` call alongside others, every `xState.error` must appear somewhere in the render branch — either as a `SectionError` (with retry), an inline notice, or a deliberate skip. At self-review: grep for `useAsync` in the file and confirm each returned `error` field is referenced in the JSX.
+- Enforced in: this prevention log; PR #562 fix shows an inline amber notice in the right rail when `historyState.error !== null`.

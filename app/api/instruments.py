@@ -1036,6 +1036,10 @@ class BusinessSectionsResponse(BaseModel):
 )
 def get_instrument_business_sections(
     symbol: str,
+    accession: str | None = Query(
+        None,
+        description="Specific 10-K accession; omit for the latest filing.",
+    ),
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> BusinessSectionsResponse:
     """Return the 10-K Item 1 subsection breakdown for an instrument (#449).
@@ -1046,6 +1050,10 @@ def get_instrument_business_sections(
     to other items / exhibits / notes. Headings that don't match a known
     canonical key surface as ``section_key='other'`` with the original
     heading preserved — no silent drops.
+
+    Pass ``?accession=<accession_number>`` to retrieve sections for a
+    specific historical filing. Returns 404 when no sections exist for
+    the requested accession (#559).
     """
     from app.services.business_summary import get_business_sections
 
@@ -1069,7 +1077,12 @@ def get_instrument_business_sections(
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
 
     instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
-    sections = get_business_sections(conn, instrument_id=instrument_id)
+    sections = get_business_sections(conn, instrument_id=instrument_id, accession=accession)
+    if accession is not None and not sections:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no 10-K sections for {symbol} accession {accession}",
+        )
     source_accession = sections[0].source_accession if sections else None
     return BusinessSectionsResponse(
         symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
@@ -1098,6 +1111,72 @@ def get_instrument_business_sections(
                 ],
             )
             for s in sections
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# 10-K filing history (#559)
+# ---------------------------------------------------------------------------
+
+
+class TenKHistoryFilingModel(BaseModel):
+    accession_number: str
+    filing_date: date
+    filing_type: str
+
+
+class TenKHistoryResponse(BaseModel):
+    symbol: str
+    filings: list[TenKHistoryFilingModel]
+
+
+@router.get(
+    "/{symbol}/filings/10-k/history",
+    response_model=TenKHistoryResponse,
+)
+def get_instrument_tenk_history(
+    symbol: str,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> TenKHistoryResponse:
+    """Return the list of 10-K and 10-K/A filings for an instrument in
+    reverse chronological order (#559).
+
+    Used by the prior-10-Ks rail on the drilldown page so the user can
+    navigate to any historical annual report.
+    """
+    from app.services.business_summary import list_10k_history
+
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    filings = list_10k_history(conn, instrument_id=instrument_id)
+    return TenKHistoryResponse(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        filings=[
+            TenKHistoryFilingModel(
+                accession_number=f.accession_number,
+                filing_date=f.filing_date,
+                filing_type=f.filing_type,
+            )
+            for f in filings
         ],
     )
 

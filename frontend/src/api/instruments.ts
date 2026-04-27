@@ -192,12 +192,19 @@ export interface BusinessCrossReference {
   context: string;
 }
 
+export interface BusinessTable {
+  order: number;
+  headers: string[];
+  rows: string[][];
+}
+
 export interface BusinessSection {
   section_order: number;
   section_key: string;
   section_label: string;
   body: string;
   cross_references: BusinessCrossReference[];
+  tables: BusinessTable[];
 }
 
 export interface BusinessSectionsResponse {
@@ -208,9 +215,30 @@ export interface BusinessSectionsResponse {
 
 export function fetchBusinessSections(
   symbol: string,
+  accession?: string,
 ): Promise<BusinessSectionsResponse> {
+  const qs = accession !== undefined
+    ? `?accession=${encodeURIComponent(accession)}`
+    : "";
   return apiFetch<BusinessSectionsResponse>(
-    `/instruments/${encodeURIComponent(symbol)}/business_sections`,
+    `/instruments/${encodeURIComponent(symbol)}/business_sections${qs}`,
+  );
+}
+
+export interface TenKHistoryFiling {
+  accession_number: string;
+  filing_date: string; // ISO yyyy-mm-dd
+  filing_type: string; // "10-K" | "10-K/A"
+}
+
+export interface TenKHistoryResponse {
+  symbol: string;
+  filings: TenKHistoryFiling[];
+}
+
+export function fetchTenKHistory(symbol: string): Promise<TenKHistoryResponse> {
+  return apiFetch<TenKHistoryResponse>(
+    `/instruments/${encodeURIComponent(symbol)}/filings/10-k/history`,
   );
 }
 
