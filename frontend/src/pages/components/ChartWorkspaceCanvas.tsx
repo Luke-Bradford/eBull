@@ -23,8 +23,14 @@ import {
 } from "lightweight-charts";
 
 import type { ChartRange } from "@/api/types";
-import { intervalSecondsFor, type NormalisedBar } from "@/lib/chartData";
-import { formatHoverLabel, humanizeVolume, tickFormatter } from "@/lib/chartFormatters";
+import { SessionBands } from "@/components/instrument/SessionBands";
+import { floorToBucket, intervalSecondsFor, type NormalisedBar } from "@/lib/chartData";
+import {
+  classifyUsSession,
+  formatHoverLabel,
+  humanizeVolume,
+  tickFormatter,
+} from "@/lib/chartFormatters";
 import { chartTheme } from "@/lib/chartTheme";
 import { useLiveLastBar } from "@/lib/useLiveLastBar";
 
@@ -187,6 +193,10 @@ export interface ChartWorkspaceCanvasProps {
   readonly showChannel?: boolean;
   /** Show time on the x-axis (intraday data). */
   readonly intraday?: boolean;
+  /** Show pre-market (04:00–09:30 ET) bars + tint band. Default true. */
+  readonly showPm?: boolean;
+  /** Show after-hours (16:00–20:00 ET) bars + tint band. Default true. */
+  readonly showAh?: boolean;
   readonly containerClassName?: string;
 }
 
@@ -200,6 +210,8 @@ export function ChartWorkspaceCanvas({
   showRegression = false,
   showChannel = false,
   intraday = false,
+  showPm = true,
+  showAh = true,
   containerClassName,
 }: ChartWorkspaceCanvasProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -226,6 +238,9 @@ export function ChartWorkspaceCanvas({
   // sees the current intraday flag without re-subscribing every time
   // the prop changes.
   const intradayRef = useRef<boolean>(intraday);
+  // Track which range/compareMode combination we've already auto-fit
+  // so polling refetches don't reset the operator's pan/zoom state.
+  const fittedFingerprintRef = useRef<string | null>(null);
   const [hover, setHover] = useState<RichHoverState | null>(null);
 
   const compareMode = compares.length > 0;
@@ -267,6 +282,10 @@ export function ChartWorkspaceCanvas({
         borderColor: chartTheme.borderColor,
         timeVisible: false,
         secondsVisible: false,
+        // 5-bar right buffer keeps the rightmost axis tick on a clean
+        // grid position instead of pinned to the live bar (see
+        // PriceChart for the same rationale).
+        rightOffset: 5,
       },
       crosshair: {
         vertLine: { width: 1, color: chartTheme.crosshair, style: 3 },
@@ -388,7 +407,10 @@ export function ChartWorkspaceCanvas({
   // Numeric / null-filtered rows. Computed during render so values
   // are available to the live-tick aggregator's historical anchor on
   // the very first render. See PriceChart for the same fix.
-  const clean = useMemo<NumericBar[]>(() => {
+  //
+  // FULL set — used by the previous-close detector so it can see RTH
+  // bars regardless of PM/AH visibility toggles.
+  const cleanAll = useMemo<NumericBar[]>(() => {
     return rows.flatMap((r) => {
       const open = parseNum(r.open);
       const high = parseNum(r.high);
@@ -409,6 +431,19 @@ export function ChartWorkspaceCanvas({
       ];
     });
   }, [rows]);
+
+  // Visibility-filtered set — what gets fed into the price/volume
+  // series + indicator/trend pipelines. PM/AH bars drop when the
+  // operator hides them; RTH and `closed` bars are never hidden.
+  const clean = useMemo<NumericBar[]>(() => {
+    if (!intraday || (showPm && showAh)) return cleanAll;
+    return cleanAll.filter((b) => {
+      const k = classifyUsSession(b.time);
+      if (k === "pre" && !showPm) return false;
+      if (k === "ah" && !showAh) return false;
+      return true;
+    });
+  }, [cleanAll, intraday, showPm, showAh]);
 
   // Mirror `clean` into the crosshair handler's ref. Registered once
   // at mount; ref avoids stale-closure capture.
@@ -465,8 +500,15 @@ export function ChartWorkspaceCanvas({
       );
     }
 
-    chart.timeScale().fitContent();
-  }, [clean, compareMode]);
+    // Only auto-fit on first non-empty load for a given
+    // range/compareMode combination — see PriceChart for rationale.
+    const fingerprint = `${range ?? "?"}/${compareMode ? "cmp" : "ohlcv"}`;
+    if (clean.length > 0 && fittedFingerprintRef.current !== fingerprint) {
+      chart.timeScale().fitContent();
+      fittedFingerprintRef.current = fingerprint;
+    }
+  }, [clean, compareMode, range]);
+
 
   // Compare series: fetch + render normalized lines per compare symbol.
   // Tears down series for symbols no longer in the list.
@@ -717,6 +759,8 @@ export function ChartWorkspaceCanvas({
         line: null, // workspace primaryLineRef is only used in compare mode
         area: null,
       },
+      acceptPre: showPm,
+      acceptAh: showAh,
     });
   const liveActive = connected && !unavailable && liveTargetId !== null;
   const lastTickHHMM = lastAppliedAt !== null
@@ -726,8 +770,40 @@ export function ChartWorkspaceCanvas({
       })()
     : null;
 
+  // SessionBands input — track filtered bars so toggling PM/AH
+  // off removes the corresponding tint together with the bars.
+  // Append the live-tick bucket so an appended bar's tint extends
+  // immediately without waiting for the next REST refetch
+  // (Codex review #602).
+  const liveBucketTime = useMemo(() => {
+    if (lastAppliedAt === null) return null;
+    const tickEpoch = Math.floor(new Date(lastAppliedAt).getTime() / 1000);
+    if (!Number.isFinite(tickEpoch)) return null;
+    return floorToBucket(tickEpoch, bucketSeconds);
+  }, [lastAppliedAt, bucketSeconds]);
+  const bandBars = useMemo(() => {
+    const base = clean.map((b) => ({ time: b.time as number }));
+    if (
+      liveBucketTime !== null &&
+      (base.length === 0 || base[base.length - 1]!.time < liveBucketTime)
+    ) {
+      base.push({ time: liveBucketTime });
+    }
+    return base;
+  }, [clean, liveBucketTime]);
+
   return (
     <div className="relative">
+      <div
+        ref={containerRef}
+        data-testid={`chart-workspace-${symbol}`}
+        className={containerClassName ?? "h-[70vh] w-full"}
+      />
+      <SessionBands
+        chartRef={chartRef}
+        bars={bandBars}
+        enabled={intraday && !compareMode && (showPm || showAh)}
+      />
       {hover !== null ? <RichTooltip hover={hover} /> : null}
       {liveActive ? (
         <div
@@ -747,11 +823,6 @@ export function ChartWorkspaceCanvas({
           ) : null}
         </div>
       ) : null}
-      <div
-        ref={containerRef}
-        data-testid={`chart-workspace-${symbol}`}
-        className={containerClassName ?? "h-[70vh] w-full"}
-      />
     </div>
   );
 }

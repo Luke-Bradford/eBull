@@ -27,6 +27,59 @@ const _MONTH_ABBR = [
   "Dec",
 ] as const;
 
+/**
+ * US equity session classification for an epoch-second timestamp.
+ * NYSE/NASDAQ standard hours in ET:
+ *   pre-market: 04:00–09:30
+ *   RTH:        09:30–16:00
+ *   after-hours: 16:00–20:00
+ *   closed:     20:00–04:00 (overnight + weekends)
+ *
+ * Computed from the UTC time + the instrument's exchange offset.
+ * Uses ET (UTC-5/UTC-4) by default — both EST and EDT collapse to
+ * the same wall-clock RTH start in ET so deriving from UTC requires
+ * we know whether DST is active for that instant. We use
+ * `Date#toLocaleString` with timezone "America/New_York" which
+ * handles the DST transition automatically; cheaper than
+ * hand-rolling DST rules.
+ *
+ * Saturday/Sunday always classify as `closed` regardless of clock.
+ */
+export type SessionKind = "pre" | "rth" | "ah" | "closed";
+
+const _NY_TZ = "America/New_York";
+
+function _nyParts(epochSeconds: number): { day: number; hh: number; mm: number } {
+  const d = new Date(epochSeconds * 1000);
+  // Intl.DateTimeFormat parts in NY tz.
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: _NY_TZ,
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(d);
+  const w = parts.find((p) => p.type === "weekday")?.value ?? "";
+  const hh = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const mm = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  // Map weekday string to 0=Sun..6=Sat (Intl emits Sun/Mon/Tue/Wed/Thu/Fri/Sat).
+  const dayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const day = dayMap[w] ?? 0;
+  return { day, hh: hh % 24, mm };
+}
+
+export function classifyUsSession(epochSeconds: number): SessionKind {
+  const { day, hh, mm } = _nyParts(epochSeconds);
+  if (day === 0 || day === 6) return "closed";
+  const minutes = hh * 60 + mm;
+  if (minutes >= 4 * 60 && minutes < 9 * 60 + 30) return "pre";
+  if (minutes >= 9 * 60 + 30 && minutes < 16 * 60) return "rth";
+  if (minutes >= 16 * 60 && minutes < 20 * 60) return "ah";
+  return "closed";
+}
+
+
 function _padDateLocal(d: Date): string {
   // Browser-local YYYY-MM-DD. ISO `toISOString()` would force UTC.
   const y = d.getFullYear();

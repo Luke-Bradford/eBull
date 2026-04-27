@@ -38,6 +38,7 @@ import type { ISeriesApi, Time, UTCTimestamp } from "lightweight-charts";
 
 import { useLiveTick, useLiveQuoteConnection } from "@/components/quotes/LiveQuoteProvider";
 import { floorToBucket } from "@/lib/chartData";
+import { classifyUsSession } from "@/lib/chartFormatters";
 import type { LiveTickPayload } from "@/lib/useLiveQuote";
 
 interface LiveBarState {
@@ -165,6 +166,14 @@ export interface UseLiveLastBarParams {
    *  live tick of the in-progress bar. */
   historicalLastBar: HistoricalLastBar | null;
   refs: LiveLastBarRefs;
+  /** Drop pre-market ticks before they reach the aggregator. Defaults
+   *  true (no filtering). When false, an arriving 04:00–09:30 ET tick
+   *  is silently dropped — pairs with the chart-level PM/AH visibility
+   *  toggles so a hidden session never gets a fresh bar appended. */
+  acceptPre?: boolean;
+  /** Drop after-hours ticks (16:00–20:00 ET). Same contract as
+   *  `acceptPre`. */
+  acceptAh?: boolean;
 }
 
 export interface UseLiveLastBarResult {
@@ -202,10 +211,19 @@ export function useLiveLastBar({
   bucketSeconds,
   historicalLastBar,
   refs,
+  acceptPre = true,
+  acceptAh = true,
 }: UseLiveLastBarParams): UseLiveLastBarResult {
   const tick = useLiveTick(instrumentId);
   const { connected, unavailable } = useLiveQuoteConnection();
   const liveBarRef = useRef<LiveBarState | null>(null);
+  // Dedupe key so toggling effect deps (`acceptPre`/`acceptAh`,
+  // `bucketSeconds`, `historicalLastBar`) doesn't re-apply the SAME
+  // tick we already processed. The effect is keyed on `tick` (and
+  // those props) — without this guard, the latest tick replays on
+  // every prop change, inflating `appliedTicks` and issuing redundant
+  // `series.update()` calls (Codex review #602).
+  const lastAppliedKeyRef = useRef<string | null>(null);
   const [appliedTicks, setAppliedTicks] = useState(0);
   const [lastAppliedAt, setLastAppliedAt] = useState<string | null>(null);
   const [lastVerdict, setLastVerdict] = useState<
@@ -219,6 +237,7 @@ export function useLiveLastBar({
   // could update the wrong bar's H/L/C.
   useEffect(() => {
     liveBarRef.current = null;
+    lastAppliedKeyRef.current = null;
     setAppliedTicks(0);
     setLastAppliedAt(null);
     setLastVerdict(null);
@@ -227,10 +246,21 @@ export function useLiveLastBar({
   useEffect(() => {
     if (tick === null) return;
     if (tick.instrument_id !== instrumentId) return;
+    // Dedupe by quoted_at — re-running the effect on prop change
+    // (e.g. toggling acceptPre/acceptAh) must not replay the last tick.
+    const dedupeKey = `${tick.instrument_id}:${tick.quoted_at}`;
+    if (lastAppliedKeyRef.current === dedupeKey) return;
     const price = tickPriceFor(tick);
     if (price === null) return;
     const tickEpoch = Math.floor(new Date(tick.quoted_at).getTime() / 1000);
     if (!Number.isFinite(tickEpoch)) return;
+
+    // Session-visibility gate (pairs with PriceChart's PM/AH toggles).
+    // Drop ticks whose session is hidden — without this a fresh bar
+    // would be appended into a session the operator chose to hide.
+    const tickSession = classifyUsSession(tickEpoch);
+    if (tickSession === "pre" && !acceptPre) return;
+    if (tickSession === "ah" && !acceptAh) return;
 
     const result = aggregateTick({
       prev: liveBarRef.current,
@@ -243,6 +273,7 @@ export function useLiveLastBar({
     if (result.verdict === "skip") return;
 
     liveBarRef.current = result.next;
+    lastAppliedKeyRef.current = dedupeKey;
     setAppliedTicks((n) => n + 1);
     setLastAppliedAt(tick.quoted_at);
 
@@ -267,10 +298,10 @@ export function useLiveLastBar({
     }
     // ESLint: refs.* are MutableRefObjects with stable identity, so
     // omitting them from deps is correct. The effect must re-fire only
-    // on tick / anchor / bucket / instrument changes — adding `refs`
-    // would re-fire on every parent render.
+    // on tick / anchor / bucket / instrument / session-visibility
+    // changes — adding `refs` would re-fire on every parent render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tick, bucketSeconds, historicalLastBar, instrumentId]);
+  }, [tick, bucketSeconds, historicalLastBar, instrumentId, acceptPre, acceptAh]);
 
   return { connected, unavailable, appliedTicks, lastAppliedAt, lastVerdict };
 }
