@@ -262,7 +262,7 @@ describe("DensityGrid profiles", () => {
     expect(navigateMock).toHaveBeenCalledWith("/instrument/GME/chart?range=5y");
   });
 
-  it("clicking the chart card itself drills to the chart workspace (#587)", async () => {
+  it("clicking the chart card body does NOT drill — only Open button drills (#601 follow-up)", async () => {
     navigateMock.mockClear();
     const user = userEvent.setup();
     render(
@@ -274,9 +274,11 @@ describe("DensityGrid profiles", () => {
         />
       </MemoryRouter>,
     );
-    // PriceChart is mocked above to a div with testid `price-chart-stub`.
-    // Clicking the stub bubbles up to the Pane's article-level onClick.
+    // Clicking the chart body must not fire the drill — operator
+    // reported the whole-card click was firing accidentally during
+    // chart hover/zoom interactions, so the card-click hook was
+    // removed in favour of the explicit "Open →" button only.
     await user.click(screen.getByTestId("price-chart-stub"));
-    expect(navigateMock).toHaveBeenCalledWith("/instrument/GME/chart?range=1y");
+    expect(navigateMock).not.toHaveBeenCalled();
   });
 });

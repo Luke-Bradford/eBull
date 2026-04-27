@@ -76,22 +76,37 @@ vi.mock("@/pages/components/ChartWorkspaceCanvas", () => ({
 
 vi.mock("@/api/instruments", () => ({
   fetchInstrumentSummary: vi.fn(),
-  fetchInstrumentCandles: vi.fn(),
 }));
 
-import { fetchInstrumentSummary, fetchInstrumentCandles } from "@/api/instruments";
-import type { InstrumentCandles, InstrumentSummary } from "@/api/types";
+vi.mock("@/lib/chartData", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/chartData")>("@/lib/chartData");
+  return {
+    ...actual,
+    fetchChartCandles: vi.fn(),
+  };
+});
+
+import { fetchInstrumentSummary } from "@/api/instruments";
+import type { InstrumentSummary, ChartRange } from "@/api/types";
+import { fetchChartCandles, type NormalisedBar, type NormalisedChartCandles } from "@/lib/chartData";
 import { ChartPage } from "./ChartPage";
 
 const mockSummary = vi.mocked(fetchInstrumentSummary);
-const mockCandles = vi.mocked(fetchInstrumentCandles);
+const mockCandles = vi.mocked(fetchChartCandles);
 
 function makeCandles(
-  range: InstrumentCandles["range"],
-  rows: InstrumentCandles["rows"] = [],
+  range: ChartRange,
+  rows: NormalisedBar[] = [],
   symbol = "AAPL",
-): InstrumentCandles {
-  return { symbol, range, days: 365, rows };
+): NormalisedChartCandles {
+  // YTD/1Y/5Y/MAX → daily, others → intraday per CHART_RANGE_PLAN.
+  const intradayRanges: ChartRange[] = ["1d", "5d", "1m", "3m", "6m"];
+  return {
+    symbol,
+    range,
+    kind: intradayRanges.includes(range) ? "intraday" : "daily",
+    rows,
+  };
 }
 
 function makeSummary(): InstrumentSummary {
@@ -109,10 +124,24 @@ function makeSummary(): InstrumentSummary {
   } as InstrumentSummary;
 }
 
-function twoValidRows(): InstrumentCandles["rows"] {
+function twoValidRows(): NormalisedBar[] {
   return [
-    { date: "2026-01-10", open: "180", high: "182", low: "179", close: "181", volume: "1000" },
-    { date: "2026-01-11", open: "181", high: "184", low: "180", close: "183", volume: "1200" },
+    {
+      time: Math.floor(Date.UTC(2026, 0, 10) / 1000),
+      open: "180",
+      high: "182",
+      low: "179",
+      close: "181",
+      volume: "1000",
+    },
+    {
+      time: Math.floor(Date.UTC(2026, 0, 11) / 1000),
+      open: "181",
+      high: "184",
+      low: "180",
+      close: "183",
+      volume: "1200",
+    },
   ];
 }
 
@@ -163,9 +192,9 @@ describe("ChartPage — header", () => {
 });
 
 describe("ChartPage — range picker", () => {
-  it("renders all seven range buttons", async () => {
+  it("renders all nine range buttons (post-#601 with 1D/5D/YTD)", async () => {
     renderPage();
-    for (const r of ["1w", "1m", "3m", "6m", "1y", "5y", "max"]) {
+    for (const r of ["1d", "5d", "1m", "3m", "6m", "ytd", "1y", "5y", "max"]) {
       expect(screen.getByTestId(`chart-range-${r}`)).toBeInTheDocument();
     }
   });
@@ -224,8 +253,22 @@ describe("ChartPage — chart body", () => {
   it("shows empty state when rows have no valid OHLC", async () => {
     mockCandles.mockResolvedValue(
       makeCandles("1y", [
-        { date: "2026-01-10", open: null, high: null, low: null, close: "181", volume: "1000" },
-        { date: "2026-01-11", open: null, high: null, low: null, close: "183", volume: "1200" },
+        {
+          time: Math.floor(Date.UTC(2026, 0, 10) / 1000),
+          open: null,
+          high: null,
+          low: null,
+          close: "181",
+          volume: "1000",
+        },
+        {
+          time: Math.floor(Date.UTC(2026, 0, 11) / 1000),
+          open: null,
+          high: null,
+          low: null,
+          close: "183",
+          volume: "1200",
+        },
       ]),
     );
     renderPage();

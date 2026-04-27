@@ -186,7 +186,7 @@ class InstrumentCandles(BaseModel):
     # class scope — pydantic v2's alias+populate_by_name wiring kept
     # tripping pyright, and the shadow is safe inside a BaseModel
     # (the builtin is still reachable as `builtins.range`).
-    range: Literal["1w", "1m", "3m", "6m", "1y", "5y", "max"]  # noqa: A003
+    range: Literal["1w", "1m", "3m", "6m", "ytd", "1y", "5y", "max"]  # noqa: A003
     days: int | None  # None when range="max"
     rows: list[CandleBar]
 
@@ -637,10 +637,27 @@ _CANDLE_RANGE_DAYS: dict[str, int | None] = {
 }
 
 
+def _resolve_range_days(range_: str, today: date) -> int | None:
+    """Map a range token to a calendar-day lookback, or None for max.
+
+    YTD is computed dynamically from ``today`` rather than living in
+    the static dict so the lookback shrinks every Jan 1. The static
+    dict still holds the fixed-window tokens.
+    """
+    if range_ == "ytd":
+        # Days from Jan 1 of `today`'s year to `today` (inclusive of
+        # today's bar). Clamp to ≥1 so January 1 returns at least
+        # yesterday's bar — without the clamp, Jan 1 returns 0 and the
+        # chart shows an empty state on what should be a sensible
+        # "single-day-into-the-year" view.
+        return max(1, (today - date(today.year, 1, 1)).days)
+    return _CANDLE_RANGE_DAYS[range_]
+
+
 @router.get("/{symbol}/candles", response_model=InstrumentCandles)
 def get_instrument_candles(
     symbol: str,
-    range_: Literal["1w", "1m", "3m", "6m", "1y", "5y", "max"] = Query(default="1m", alias="range"),
+    range_: Literal["1w", "1m", "3m", "6m", "ytd", "1y", "5y", "max"] = Query(default="1m", alias="range"),
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> InstrumentCandles:
     """Daily OHLCV bars for `symbol` over the requested lookback.
@@ -677,7 +694,7 @@ def get_instrument_candles(
     if inst_row is None:
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
 
-    days = _CANDLE_RANGE_DAYS[range_]
+    days = _resolve_range_days(range_, date.today())
     # Two fixed queries rather than f-string-composing a WHERE clause,
     # so there's no structural-injection footgun if the range-token
     # set grows later. `max` omits the date filter entirely.

@@ -1,25 +1,25 @@
 /**
  * PriceChart — overview candlestick / line / area + volume chart backed
- * by lightweight-charts (#204, polished in #587). Lives inside a
- * clickable Pane on the instrument page; clicking the card drills to
- * the full chart workspace at `/instrument/:symbol/chart`.
+ * by lightweight-charts. Lives inside a clickable Pane on the
+ * instrument page; clicking the card drills to the full chart workspace
+ * at `/instrument/:symbol/chart`.
  *
- * Layering:
- *   - candlestick / line / area series share the right price scale
- *     (only one is visible at a time, toggled via `?type=`)
- *   - volume series (Histogram) on its own overlay price scale pinned
- *     to the bottom 30% via `scaleMargins`
+ * Range mapping (#601): 9 buttons across two endpoints —
+ *   1D · 5D · 1M · 3M · 6M  → intraday endpoint at the right interval
+ *   YTD · 1Y · 5Y · MAX     → daily endpoint (price_daily)
+ * The dispatch table lives in `@/lib/chartData` so the same plan is
+ * shared with the chart workspace and any future drill page.
  *
  * URL params (replace, not push):
- *   - `?chart=<range>` → 1w | 1m | 3m | 6m | 1y | 5y | max (default 1m)
+ *   - `?chart=<range>` → 1d | 5d | 1m | 3m | 6m | ytd | 1y | 5y | max (default 1m)
  *   - `?type=line|area` → series type (default candle, no param)
  *   - `?scale=log` → logarithmic right price scale (default linear, no param)
  *
- * Hover tooltip shows date + OHLC + volume + %Δ-from-prior; matches the
- * pattern in `ChartWorkspaceCanvas.RichTooltip` so an operator's mental
- * model is consistent between the overview pane and the workspace.
+ * Hover tooltip shows date (or date+time for intraday) + OHLC + volume +
+ * %Δ-from-prior; matches the pattern in `ChartWorkspaceCanvas.RichTooltip`
+ * so an operator's mental model is consistent between overview and workspace.
  */
-import { useEffect, useRef, useState, useCallback, type JSX } from "react";
+import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   AreaSeries,
@@ -34,28 +34,38 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 
-import { fetchInstrumentCandles } from "@/api/instruments";
-import type { CandleBar, CandleRange, InstrumentCandles } from "@/api/types";
+import type { ChartRange } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
+import {
+  fetchChartCandles,
+  isIntraday,
+  type NormalisedBar,
+  type NormalisedChartCandles,
+} from "@/lib/chartData";
+import { formatHoverLabel, humanizeVolume, tickFormatter } from "@/lib/chartFormatters";
 import { chartTheme } from "@/lib/chartTheme";
 import { useAsync } from "@/lib/useAsync";
 
-const RANGES: { id: CandleRange; label: string }[] = [
-  { id: "1w", label: "1W" },
+const RANGES: { id: ChartRange; label: string }[] = [
+  { id: "1d", label: "1D" },
+  { id: "5d", label: "5D" },
   { id: "1m", label: "1M" },
   { id: "3m", label: "3M" },
   { id: "6m", label: "6M" },
+  { id: "ytd", label: "YTD" },
   { id: "1y", label: "1Y" },
   { id: "5y", label: "5Y" },
   { id: "max", label: "MAX" },
 ];
 
-const VALID_RANGES: readonly CandleRange[] = [
-  "1w",
+const VALID_RANGES: readonly ChartRange[] = [
+  "1d",
+  "5d",
   "1m",
   "3m",
   "6m",
+  "ytd",
   "1y",
   "5y",
   "max",
@@ -79,30 +89,8 @@ function parseNum(v: string | null | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/**
- * Convert a YYYY-MM-DD date string to a UTC-midnight Unix seconds
- * timestamp. We use epoch seconds rather than BusinessDay because
- * BusinessDay mode requires the library to know which dates are
- * trading days — weekends/holidays produce gaps that confuse its
- * internal scaling.
- *
- * Returns null for anything that doesn't parse cleanly so a bad row
- * is dropped rather than poisoning the time scale with NaN.
- */
-function dateToTime(date: string): UTCTimestamp | null {
-  const parts = date.split("-");
-  if (parts.length !== 3) return null;
-  const y = Number(parts[0]);
-  const m = Number(parts[1]);
-  const d = Number(parts[2]);
-  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
-  const ts = Date.UTC(y, m - 1, d);
-  if (!Number.isFinite(ts)) return null;
-  return (ts / 1000) as UTCTimestamp;
-}
-
 interface RichHoverState {
-  date: string;
+  label: string;
   open: number;
   high: number;
   low: number;
@@ -120,9 +108,14 @@ interface NumericBar {
   volume: number;
 }
 
+// formatHoverLabel / tickFormatter / humanizeVolume now live in
+// @/lib/chartFormatters so PriceChart and ChartWorkspaceCanvas share
+// one definition (#601 review feedback — duplicated copies would
+// silently drift).
+
 export interface PriceChartProps {
   symbol: string;
-  initialRange?: CandleRange;
+  initialRange?: ChartRange;
 }
 
 export function PriceChart({
@@ -131,8 +124,8 @@ export function PriceChart({
 }: PriceChartProps): JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
   const rawChart = searchParams.get("chart");
-  const range: CandleRange = VALID_RANGES.includes(rawChart as CandleRange)
-    ? (rawChart as CandleRange)
+  const range: ChartRange = VALID_RANGES.includes(rawChart as ChartRange)
+    ? (rawChart as ChartRange)
     : initialRange;
   const rawType = searchParams.get("type");
   const chartType: ChartType = VALID_TYPES.includes(rawType as ChartType)
@@ -141,7 +134,7 @@ export function PriceChart({
   const priceScale: PriceScaleMode = searchParams.get("scale") === "log" ? "log" : "linear";
 
   const setRange = useCallback(
-    (next: CandleRange) => {
+    (next: ChartRange) => {
       const params = new URLSearchParams(searchParams);
       if (next === initialRange) {
         params.delete("chart");
@@ -176,8 +169,8 @@ export function PriceChart({
     setSearchParams(params, { replace: true });
   }, [searchParams, setSearchParams, priceScale]);
 
-  const { data, error, loading, refetch } = useAsync<InstrumentCandles>(
-    () => fetchInstrumentCandles(symbol, range),
+  const { data, error, loading, refetch } = useAsync<NormalisedChartCandles>(
+    () => fetchChartCandles(symbol, range),
     [symbol, range],
   );
 
@@ -190,7 +183,7 @@ export function PriceChart({
 
   const rows = dataMatchesRange && data ? data.rows : null;
   // Candlestick rendering needs all four OHLC values non-null AND a
-  // parseable date; `close`-only isn't enough (lightweight-charts
+  // parseable time; `close`-only isn't enough (lightweight-charts
   // silently drops partial bars, leaving a blank canvas). Mirrors the
   // filter in `ChartCanvas`'s setData effect exactly so the gate
   // can't accept rows the effect will then drop.
@@ -201,9 +194,10 @@ export function PriceChart({
         parseNum(r.open) !== null &&
         parseNum(r.high) !== null &&
         parseNum(r.low) !== null &&
-        parseNum(r.close) !== null &&
-        dateToTime(r.date) !== null,
+        parseNum(r.close) !== null,
     ).length >= 2;
+
+  const intraday = isIntraday(range);
 
   return (
     <div className="space-y-2">
@@ -218,7 +212,7 @@ export function PriceChart({
         onClick={(e) => e.stopPropagation()}
         data-testid="chart-controls"
       >
-        <div className="flex gap-1">
+        <div className="flex flex-wrap gap-1">
           {RANGES.map((r) => (
             <button
               key={r.id}
@@ -277,7 +271,11 @@ export function PriceChart({
       {!effectivelyLoading && error === null && dataMatchesRange && !hasChartData ? (
         <EmptyState
           title="No price data"
-          description="No candles in the local price_daily store for this range. Widen the range or wait for the next market-data refresh."
+          description={
+            intraday
+              ? "No intraday bars from the provider for this range. Try a longer range or check that the broker connection is healthy."
+              : "No candles in the local price_daily store for this range. Widen the range or wait for the next market-data refresh."
+          }
         />
       ) : null}
 
@@ -287,6 +285,7 @@ export function PriceChart({
           symbol={symbol}
           chartType={chartType}
           priceScale={priceScale}
+          intraday={intraday}
         />
       ) : null}
     </div>
@@ -294,10 +293,12 @@ export function PriceChart({
 }
 
 export interface ChartCanvasProps {
-  rows: CandleBar[];
+  rows: ReadonlyArray<NormalisedBar>;
   symbol: string;
   chartType?: ChartType;
   priceScale?: PriceScaleMode;
+  /** When true, hover label includes HH:MM and the time scale shows time. */
+  intraday?: boolean;
   containerClassName?: string;
 }
 
@@ -306,6 +307,7 @@ export function ChartCanvas({
   symbol,
   chartType = "candle",
   priceScale = "linear",
+  intraday = false,
   containerClassName,
 }: ChartCanvasProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -317,7 +319,14 @@ export function ChartCanvas({
   // Stable ref into `clean` for the crosshair handler — avoids stale
   // closure capture when rows update.
   const cleanRowsRef = useRef<NumericBar[]>([]);
+  const intradayRef = useRef<boolean>(intraday);
   const [hover, setHover] = useState<RichHoverState | null>(null);
+
+  // Keep the ref in sync so the crosshair handler (registered once at
+  // mount) sees the current intraday flag without re-subscribing.
+  useEffect(() => {
+    intradayRef.current = intraday;
+  }, [intraday]);
 
   // One-shot chart construction. lightweight-charts owns the DOM
   // canvas and its own lifecycle; we give it an empty div and clean
@@ -348,6 +357,12 @@ export function ChartCanvas({
         borderColor: chartTheme.borderColor,
         timeVisible: false,
         secondsVisible: false,
+        // Explicit formatter — without this the daily axis renders
+        // weekday abbreviations ("Mon Tue Wed") instead of dates and
+        // intraday axis hides the time component below ~minute zoom.
+        // The DeepPartial<HorzScaleOptions> type strips function
+        // properties; pass the formatter via the post-mount
+        // `applyOptions` effect below instead.
       },
       crosshair: {
         vertLine: { width: 1, color: chartTheme.crosshair, style: 3 },
@@ -420,9 +435,8 @@ export function ChartCanvas({
         prev !== null && prev !== undefined && prev.close !== 0
           ? ((bar.close - prev.close) / prev.close) * 100
           : null;
-      const date = new Date(time * 1000).toISOString().slice(0, 10);
       setHover({
-        date,
+        label: formatHoverLabel(time, intradayRef.current),
         open: bar.open,
         high: bar.high,
         low: bar.low,
@@ -468,6 +482,20 @@ export function ChartCanvas({
     chart.priceScale("right").applyOptions({ mode: SCALE_MODE_NUM[priceScale] });
   }, [priceScale]);
 
+  // Show time on the X-axis only for intraday data; the tick formatter
+  // adapts via the tickMarkType param so it does not need re-installing.
+  // tickMarkFormatter is typed via DeepPartial which strips function
+  // properties, so cast through `unknown` to keep the contract.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.timeScale().applyOptions({
+      timeVisible: intraday,
+      secondsVisible: false,
+      tickMarkFormatter: tickFormatter,
+    } as unknown as Parameters<ReturnType<IChartApi["timeScale"]>["applyOptions"]>[0]);
+  }, [intraday]);
+
   // Feed data on every rows change. lightweight-charts replaces the
   // series wholesale via setData — no incremental diffing needed.
   useEffect(() => {
@@ -480,17 +508,25 @@ export function ChartCanvas({
 
     // Pre-convert to numeric bars so downstream `setData` calls work
     // with guaranteed-non-null values (no dead `?? 0` fallbacks). Rows
-    // that fail any numeric or date parse are dropped here.
+    // that fail any numeric parse are dropped here.
     const clean: NumericBar[] = rows.flatMap((r) => {
-      const time = dateToTime(r.date);
       const open = parseNum(r.open);
       const high = parseNum(r.high);
       const low = parseNum(r.low);
       const close = parseNum(r.close);
-      if (time === null || open === null || high === null || low === null || close === null) {
+      if (open === null || high === null || low === null || close === null) {
         return [];
       }
-      return [{ time, open, high, low, close, volume: parseNum(r.volume) ?? 0 }];
+      return [
+        {
+          time: r.time as UTCTimestamp,
+          open,
+          high,
+          low,
+          close,
+          volume: parseNum(r.volume) ?? 0,
+        },
+      ];
     });
     cleanRowsRef.current = clean;
 
@@ -534,35 +570,48 @@ export function ChartCanvas({
   );
 }
 
+/**
+ * TradingView-style status-line strip — single inline row at top-left.
+ * Replaces the prior multi-row floating box. Compact text, no shadow,
+ * transparent so the chart shows through cleanly. Color cues only on
+ * the close + delta to keep the eye on price action.
+ */
 function RichTooltip({ hover }: { hover: RichHoverState }): JSX.Element {
   const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const deltaClass =
+    hover.changePct === null
+      ? "text-slate-500"
+      : hover.changePct >= 0
+        ? "text-emerald-600"
+        : "text-red-600";
   return (
     <div
-      className="absolute right-2 top-2 z-10 min-w-[160px] rounded bg-white/95 px-3 py-2 text-xs shadow-md"
+      className="absolute left-2 top-2 z-10 flex flex-wrap items-baseline gap-x-2 text-[11px] tabular-nums leading-tight text-slate-700"
       data-testid="price-chart-tooltip"
     >
-      <div className="text-slate-500">{hover.date}</div>
-      <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 tabular-nums">
-        <dt className="text-slate-500">O</dt>
-        <dd>{fmt(hover.open)}</dd>
-        <dt className="text-slate-500">H</dt>
-        <dd>{fmt(hover.high)}</dd>
-        <dt className="text-slate-500">L</dt>
-        <dd>{fmt(hover.low)}</dd>
-        <dt className="text-slate-500">C</dt>
-        <dd className="font-medium text-slate-800">{fmt(hover.close)}</dd>
-        <dt className="text-slate-500">Vol</dt>
-        <dd>{fmt(hover.volume)}</dd>
-        {hover.changePct !== null ? (
-          <>
-            <dt className="text-slate-500">Δ%</dt>
-            <dd className={hover.changePct >= 0 ? "text-emerald-600" : "text-red-600"}>
-              {hover.changePct >= 0 ? "+" : ""}
-              {hover.changePct.toFixed(2)}%
-            </dd>
-          </>
-        ) : null}
-      </dl>
+      <span className="text-slate-500">{hover.label}</span>
+      <span className="text-slate-400">·</span>
+      <span>
+        <span className="text-slate-400">O</span> {fmt(hover.open)}
+      </span>
+      <span>
+        <span className="text-slate-400">H</span> {fmt(hover.high)}
+      </span>
+      <span>
+        <span className="text-slate-400">L</span> {fmt(hover.low)}
+      </span>
+      <span className="font-medium text-slate-800">
+        <span className="font-normal text-slate-400">C</span> {fmt(hover.close)}
+      </span>
+      <span>
+        <span className="text-slate-400">V</span> {humanizeVolume(hover.volume)}
+      </span>
+      {hover.changePct !== null ? (
+        <span className={deltaClass}>
+          {hover.changePct >= 0 ? "+" : ""}
+          {hover.changePct.toFixed(2)}%
+        </span>
+      ) : null}
     </div>
   );
 }

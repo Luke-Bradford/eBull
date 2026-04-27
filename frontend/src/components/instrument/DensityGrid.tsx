@@ -72,8 +72,12 @@ export function DensityGrid({
     navigate(url);
   };
 
+  // Card-click drill removed (#601 follow-up): the PaneHeader's
+  // "Open →" button is the only drill affordance now. Operator
+  // reported the whole-card click was firing accidentally on chart
+  // hover/zoom.
   const ChartPane = (
-    <Pane title="Price chart" onExpand={drillToWorkspace} onCardClick={drillToWorkspace}>
+    <Pane title="Price chart" onExpand={drillToWorkspace}>
       <PriceChart symbol={symbol} />
     </Pane>
   );

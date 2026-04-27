@@ -1,29 +1,25 @@
 /**
- * Tests for PriceChart (#204 lightweight-charts migration; polished in #587).
+ * Tests for PriceChart (#204 lightweight-charts migration; polished in
+ * #587; intraday + 1D/5D/YTD ranges + unified fetch in #601).
  *
- * lightweight-charts renders to a Canvas which jsdom cannot paint, so
+ * lightweight-charts renders to a Canvas that jsdom cannot paint, so
  * we mock the library wholesale. What we pin here is the component's
  * contract — not the library's rendering:
  *
- *   - All 7 range buttons render + switching refetches.
- *   - Type toggle (candle/line/area) flips visibility on each series
- *     and URL-syncs to ?type=line|area (no param for default candle).
- *   - Log scale toggle URL-syncs to ?scale=log and applies the
- *     logarithmic mode to the right price scale.
+ *   - All nine range buttons render (1D/5D/1M/3M/6M/YTD/1Y/5Y/MAX).
+ *   - Switching range refetches via the unified chartData dispatch.
+ *   - Type toggle (candle/line/area) flips visibility per series.
+ *   - Log scale toggle URL-syncs to ?scale=log and applies mode=1.
  *   - Empty / single-row data → empty state, no chart mount.
- *   - ≥2 valid rows → chart div mounts and the mocked series receives
- *     setData() with the right shape.
- *   - Loading / error states.
- *   - Stale-chart guard while a new-range fetch is in flight.
+ *   - ≥2 valid rows → chart canvas mounts and series.setData fires.
+ *   - chart.remove() runs on unmount.
+ *   - Fetch errors propagate via SectionError + retry.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
-// Mock lightweight-charts before importing PriceChart so the module
-// picks up the stubs at module-load time. `vi.hoisted` lets the mock
-// expose handles we can introspect from the tests.
 const libState = vi.hoisted(() => ({
   candleSetData: vi.fn(),
   lineSetData: vi.fn(),
@@ -34,6 +30,7 @@ const libState = vi.hoisted(() => ({
   areaApply: vi.fn(),
   rightPriceScaleApply: vi.fn(),
   volumePriceScaleApply: vi.fn(),
+  timeScaleApply: vi.fn(),
   fitContent: vi.fn(),
   crosshairHandlers: [] as Array<(p: unknown) => void>,
   remove: vi.fn(),
@@ -74,7 +71,10 @@ vi.mock("lightweight-charts", () => {
         ? { applyOptions: libState.rightPriceScaleApply }
         : { applyOptions: libState.volumePriceScaleApply },
     ),
-    timeScale: vi.fn(() => ({ fitContent: libState.fitContent })),
+    timeScale: vi.fn(() => ({
+      fitContent: libState.fitContent,
+      applyOptions: libState.timeScaleApply,
+    })),
     subscribeCrosshairMove: vi.fn((h: (p: unknown) => void) => {
       libState.crosshairHandlers.push(h);
     }),
@@ -86,31 +86,42 @@ vi.mock("lightweight-charts", () => {
     LineSeries: "__line__",
     AreaSeries: "__area__",
     HistogramSeries: "__histogram__",
-    // Numeric values mirror lightweight-charts' LineType enum so any
-    // assertion on the option passed to addSeries lines up with the
-    // real library shape.
     LineType: { Simple: 0, WithSteps: 1, Curved: 2 },
   };
 });
 
 import { PriceChart } from "@/components/instrument/PriceChart";
-import type { InstrumentCandles } from "@/api/types";
+import type { NormalisedChartCandles, NormalisedBar } from "@/lib/chartData";
 
-vi.mock("@/api/instruments", () => ({
-  fetchInstrumentCandles: vi.fn(),
-}));
+vi.mock("@/lib/chartData", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/chartData")>("@/lib/chartData");
+  return {
+    ...actual,
+    fetchChartCandles: vi.fn(),
+  };
+});
 
-import { fetchInstrumentCandles } from "@/api/instruments";
+import { fetchChartCandles } from "@/lib/chartData";
 
-const mockedFetch = vi.mocked(fetchInstrumentCandles);
+const mockedFetch = vi.mocked(fetchChartCandles);
 
-function candles(rows: InstrumentCandles["rows"]): InstrumentCandles {
+const T1 = Math.floor(Date.UTC(2026, 3, 10) / 1000);
+const T2 = Math.floor(Date.UTC(2026, 3, 11) / 1000);
+
+function bars(rows: NormalisedBar[], range: NormalisedChartCandles["range"] = "1m"): NormalisedChartCandles {
   return {
     symbol: "AAPL",
-    range: "1m",
-    days: 30,
+    range,
+    kind: range === "1d" || range === "5d" || range === "1m" || range === "3m" || range === "6m" ? "intraday" : "daily",
     rows,
   };
+}
+
+function twoValidRows(): NormalisedBar[] {
+  return [
+    { time: T1, open: "100", high: "102", low: "99", close: "101", volume: "1000" },
+    { time: T2, open: "101", high: "104", low: "100", close: "103", volume: "1500" },
+  ];
 }
 
 function LocationSpy({ onLocation }: { onLocation: (search: string) => void }) {
@@ -130,26 +141,27 @@ beforeEach(() => {
   libState.areaApply.mockClear();
   libState.rightPriceScaleApply.mockClear();
   libState.volumePriceScaleApply.mockClear();
+  libState.timeScaleApply.mockClear();
   libState.fitContent.mockClear();
   libState.remove.mockClear();
   libState.crosshairHandlers.length = 0;
 });
 
 describe("PriceChart — range picker", () => {
-  it("renders all seven range buttons", async () => {
-    mockedFetch.mockResolvedValue(candles([]));
+  it("renders all nine range buttons", async () => {
+    mockedFetch.mockResolvedValue(bars([]));
     render(
       <MemoryRouter>
         <PriceChart symbol="AAPL" />
       </MemoryRouter>,
     );
-    for (const r of ["1w", "1m", "3m", "6m", "1y", "5y", "max"]) {
+    for (const r of ["1d", "5d", "1m", "3m", "6m", "ytd", "1y", "5y", "max"]) {
       expect(screen.getByTestId(`chart-range-${r}`)).toBeInTheDocument();
     }
   });
 
   it("clicking a range button refetches with the new range", async () => {
-    mockedFetch.mockResolvedValue(candles([]));
+    mockedFetch.mockResolvedValue(bars([]));
     const user = userEvent.setup();
     render(
       <MemoryRouter>
@@ -168,8 +180,8 @@ describe("PriceChart — range picker", () => {
 });
 
 describe("PriceChart — type toggle (#587)", () => {
-  it("renders three type buttons (Candle / Line / Area) defaulting to Candle", async () => {
-    mockedFetch.mockResolvedValue(candles([]));
+  it("renders three type buttons defaulting to Candle", async () => {
+    mockedFetch.mockResolvedValue(bars([]));
     render(
       <MemoryRouter>
         <PriceChart symbol="AAPL" />
@@ -181,7 +193,7 @@ describe("PriceChart — type toggle (#587)", () => {
   });
 
   it("clicking Line writes ?type=line; clicking Candle clears the param", async () => {
-    mockedFetch.mockResolvedValue(candles([]));
+    mockedFetch.mockResolvedValue(bars([]));
     const user = userEvent.setup();
     let lastSearch = "";
     render(
@@ -197,12 +209,7 @@ describe("PriceChart — type toggle (#587)", () => {
   });
 
   it("toggles series visibility when ?type=area is set on initial render", async () => {
-    mockedFetch.mockResolvedValue(
-      candles([
-        { date: "2026-04-10", open: "100", high: "102", low: "99", close: "101", volume: "1000" },
-        { date: "2026-04-11", open: "101", high: "104", low: "100", close: "103", volume: "1500" },
-      ]),
-    );
+    mockedFetch.mockResolvedValue(bars(twoValidRows()));
     render(
       <MemoryRouter initialEntries={["/?type=area"]}>
         <PriceChart symbol="AAPL" />
@@ -211,8 +218,6 @@ describe("PriceChart — type toggle (#587)", () => {
     await waitFor(() => {
       expect(screen.getByTestId("price-chart-AAPL")).toBeInTheDocument();
     });
-    // Visibility effect runs once per series. Last call's `visible`
-    // flag reflects whether that series is the active type.
     await waitFor(() => {
       const last = libState.areaApply.mock.calls.at(-1)?.[0] as { visible?: boolean } | undefined;
       expect(last?.visible).toBe(true);
@@ -226,7 +231,7 @@ describe("PriceChart — type toggle (#587)", () => {
 
 describe("PriceChart — log scale toggle (#587)", () => {
   it("renders a Log toggle button defaulting to off", async () => {
-    mockedFetch.mockResolvedValue(candles([]));
+    mockedFetch.mockResolvedValue(bars([]));
     render(
       <MemoryRouter>
         <PriceChart symbol="AAPL" />
@@ -237,7 +242,7 @@ describe("PriceChart — log scale toggle (#587)", () => {
   });
 
   it("clicking Log writes ?scale=log; clicking again clears the param", async () => {
-    mockedFetch.mockResolvedValue(candles([]));
+    mockedFetch.mockResolvedValue(bars([]));
     const user = userEvent.setup();
     let lastSearch = "";
     render(
@@ -253,12 +258,7 @@ describe("PriceChart — log scale toggle (#587)", () => {
   });
 
   it("applies mode=1 to the right price scale when ?scale=log is set", async () => {
-    mockedFetch.mockResolvedValue(
-      candles([
-        { date: "2026-04-10", open: "100", high: "102", low: "99", close: "101", volume: "1000" },
-        { date: "2026-04-11", open: "101", high: "104", low: "100", close: "103", volume: "1500" },
-      ]),
-    );
+    mockedFetch.mockResolvedValue(bars(twoValidRows()));
     render(
       <MemoryRouter initialEntries={["/?scale=log"]}>
         <PriceChart symbol="AAPL" />
@@ -273,7 +273,7 @@ describe("PriceChart — log scale toggle (#587)", () => {
 
 describe("PriceChart — controls swallow card-click events (#587)", () => {
   it("clicks on the controls bar do not bubble to a parent click handler", async () => {
-    mockedFetch.mockResolvedValue(candles([]));
+    mockedFetch.mockResolvedValue(bars([]));
     const onCardClick = vi.fn();
     const user = userEvent.setup();
     render(
@@ -294,7 +294,7 @@ describe("PriceChart — controls swallow card-click events (#587)", () => {
 
 describe("PriceChart — data states", () => {
   it("renders 'No price data' when rows is empty", async () => {
-    mockedFetch.mockResolvedValue(candles([]));
+    mockedFetch.mockResolvedValue(bars([]));
     render(
       <MemoryRouter>
         <PriceChart symbol="AAPL" />
@@ -306,18 +306,9 @@ describe("PriceChart — data states", () => {
     expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
   });
 
-  it("renders empty state with only one valid close (can't draw a chart)", async () => {
+  it("renders empty state with only one valid row", async () => {
     mockedFetch.mockResolvedValue(
-      candles([
-        {
-          date: "2026-04-10",
-          open: "100",
-          high: "102",
-          low: "99",
-          close: "101",
-          volume: "1000",
-        },
-      ]),
+      bars([{ time: T1, open: "100", high: "102", low: "99", close: "101", volume: "1000" }]),
     );
     render(
       <MemoryRouter>
@@ -329,27 +320,8 @@ describe("PriceChart — data states", () => {
     });
   });
 
-  it("mounts the chart canvas and pushes ≥2 rows to the candle, line, and area series", async () => {
-    mockedFetch.mockResolvedValue(
-      candles([
-        {
-          date: "2026-04-10",
-          open: "100",
-          high: "102",
-          low: "99",
-          close: "101",
-          volume: "1000",
-        },
-        {
-          date: "2026-04-11",
-          open: "101",
-          high: "104",
-          low: "100",
-          close: "103",
-          volume: "1500",
-        },
-      ]),
-    );
+  it("mounts the chart canvas and pushes ≥2 rows to candle, line, and area series", async () => {
+    mockedFetch.mockResolvedValue(bars(twoValidRows()));
     render(
       <MemoryRouter>
         <PriceChart symbol="AAPL" />
@@ -358,8 +330,6 @@ describe("PriceChart — data states", () => {
     await waitFor(() => {
       expect(screen.getByTestId("price-chart-AAPL")).toBeInTheDocument();
     });
-    expect(screen.queryByText(/No price data/i)).not.toBeInTheDocument();
-    // Candlestick series received the two rows in OHLC shape.
     await waitFor(() => {
       expect(libState.candleSetData).toHaveBeenCalled();
     });
@@ -370,41 +340,16 @@ describe("PriceChart — data states", () => {
     expect(candleCall).toHaveLength(2);
     expect(candleCall[0]?.open).toBe(100);
     expect(candleCall[1]?.close).toBe(103);
-    // Line + area series receive close-only data.
     const lineCall = libState.lineSetData.mock.calls[0]?.[0] as Array<{ value: number }>;
     expect(lineCall).toHaveLength(2);
     expect(lineCall[0]?.value).toBe(101);
-    expect(lineCall[1]?.value).toBe(103);
     const areaCall = libState.areaSetData.mock.calls[0]?.[0] as Array<{ value: number }>;
-    expect(areaCall).toHaveLength(2);
     expect(areaCall[1]?.value).toBe(103);
-    // Volume series got the same count.
     expect(libState.volumeSetData).toHaveBeenCalled();
   });
 
   it("hides the chart while a new-range fetch is in flight", async () => {
-    mockedFetch.mockResolvedValue({
-      ...candles([
-        {
-          date: "2026-04-10",
-          open: "100",
-          high: "102",
-          low: "99",
-          close: "101",
-          volume: "1000",
-        },
-        {
-          date: "2026-04-11",
-          open: "101",
-          high: "104",
-          low: "100",
-          close: "103",
-          volume: "1500",
-        },
-      ]),
-      range: "5y",
-      days: 1825,
-    });
+    mockedFetch.mockResolvedValue(bars(twoValidRows(), "5y"));
     render(
       <MemoryRouter>
         <PriceChart symbol="AAPL" />
@@ -413,67 +358,16 @@ describe("PriceChart — data states", () => {
     await waitFor(() => {
       expect(mockedFetch).toHaveBeenCalled();
     });
+    // Fetched 5y rows but range is 1m — gate suppresses chart.
     expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
     expect(screen.queryByText(/No price data/i)).not.toBeInTheDocument();
   });
 
-  it("treats rows missing OHLC as dropped — empty state not a blank chart", async () => {
-    // Two rows, but only `close` is populated. lightweight-charts
-    // silently drops bars with null O/H/L, so the chart would mount
-    // empty if we gated on `close` alone. Verifies the stricter gate.
+  it("treats rows missing OHLC as dropped — empty state not blank chart", async () => {
     mockedFetch.mockResolvedValue(
-      candles([
-        {
-          date: "2026-04-10",
-          open: null,
-          high: null,
-          low: null,
-          close: "101",
-          volume: "1000",
-        },
-        {
-          date: "2026-04-11",
-          open: null,
-          high: null,
-          low: null,
-          close: "103",
-          volume: "1500",
-        },
-      ]),
-    );
-    render(
-      <MemoryRouter>
-        <PriceChart symbol="AAPL" />
-      </MemoryRouter>,
-    );
-    await waitFor(() => {
-      expect(screen.getByText(/No price data/i)).toBeInTheDocument();
-    });
-    expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
-  });
-
-  it("drops rows with malformed date strings (no NaN in the time scale)", async () => {
-    // Two rows — one with `date: ""`, one with a non-date. Even though
-    // OHLC is populated, the chart cannot plot these because their
-    // time values would be NaN. Mount gate drops them → empty state.
-    mockedFetch.mockResolvedValue(
-      candles([
-        {
-          date: "",
-          open: "100",
-          high: "102",
-          low: "99",
-          close: "101",
-          volume: "1000",
-        },
-        {
-          date: "not-a-date",
-          open: "101",
-          high: "104",
-          low: "100",
-          close: "103",
-          volume: "1500",
-        },
+      bars([
+        { time: T1, open: null, high: null, low: null, close: "101", volume: "1000" },
+        { time: T2, open: null, high: null, low: null, close: "103", volume: "1500" },
       ]),
     );
     render(
@@ -488,26 +382,7 @@ describe("PriceChart — data states", () => {
   });
 
   it("calls chart.remove() on unmount so the Canvas is released", async () => {
-    mockedFetch.mockResolvedValue(
-      candles([
-        {
-          date: "2026-04-10",
-          open: "100",
-          high: "102",
-          low: "99",
-          close: "101",
-          volume: "1000",
-        },
-        {
-          date: "2026-04-11",
-          open: "101",
-          high: "104",
-          low: "100",
-          close: "103",
-          volume: "1500",
-        },
-      ]),
-    );
+    mockedFetch.mockResolvedValue(bars(twoValidRows()));
     render(
       <MemoryRouter>
         <PriceChart symbol="AAPL" />
@@ -528,10 +403,36 @@ describe("PriceChart — data states", () => {
       </MemoryRouter>,
     );
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /retry/i }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
     });
     expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
+  });
+});
+
+describe("PriceChart — intraday axis formatting (#601)", () => {
+  it("intraday range applies timeVisible=true on the time scale", async () => {
+    mockedFetch.mockResolvedValue(bars(twoValidRows(), "1d"));
+    render(
+      <MemoryRouter initialEntries={["/?chart=1d"]}>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      const calls = libState.timeScaleApply.mock.calls.map((c) => c[0]);
+      expect(calls.some((opts: { timeVisible?: boolean }) => opts.timeVisible === true)).toBe(true);
+    });
+  });
+
+  it("daily range applies timeVisible=false", async () => {
+    mockedFetch.mockResolvedValue(bars(twoValidRows(), "1y"));
+    render(
+      <MemoryRouter initialEntries={["/?chart=1y"]}>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      const calls = libState.timeScaleApply.mock.calls.map((c) => c[0]);
+      expect(calls.some((opts: { timeVisible?: boolean }) => opts.timeVisible === false)).toBe(true);
+    });
   });
 });

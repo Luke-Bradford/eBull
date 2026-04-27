@@ -293,12 +293,16 @@ export interface InstrumentSummary {
   capabilities: Record<string, CapabilityCell>;
 }
 
-// #316 Slice A — daily OHLCV bars
+// #316 Slice A — daily OHLCV bars (existing daily endpoint contract).
+// Note: `1w` is legacy; the chart UI no longer uses it (#601 swapped it
+// for `5d` served by the intraday endpoint). Kept on the backend Literal
+// so any external consumer that still passes `?range=1w` keeps working.
 export type CandleRange =
   | "1w"
   | "1m"
   | "3m"
   | "6m"
+  | "ytd"
   | "1y"
   | "5y"
   | "max";
@@ -319,6 +323,54 @@ export interface InstrumentCandles {
   days: number | null;
   rows: CandleBar[];
 }
+
+// #600 — intraday OHLCV bars served live by the eToro provider.
+// Distinct from CandleBar: bars carry a UTC ISO timestamp instead of
+// a YYYY-MM-DD date. Not persisted in price_daily.
+export type IntradayInterval =
+  | "OneMinute"
+  | "FiveMinutes"
+  | "TenMinutes"
+  | "FifteenMinutes"
+  | "ThirtyMinutes"
+  | "OneHour"
+  | "FourHours";
+
+export interface IntradayBar {
+  /** UTC ISO-8601 timestamp at bar open. */
+  timestamp: string;
+  open: string | null;
+  high: string | null;
+  low: string | null;
+  close: string | null;
+  volume: number | null;
+}
+
+export interface InstrumentIntradayCandles {
+  symbol: string;
+  interval: IntradayInterval;
+  /** Number of bars actually returned (not the requested count). */
+  count: number;
+  /** Always false in v1 — intraday data is not stored in any DB table. */
+  persisted: false;
+  rows: IntradayBar[];
+}
+
+// #601 — chart UI range token (the union the chart buttons render).
+// Translates to either a daily range (existing endpoint) or an
+// intraday (interval, count) pair via CHART_RANGE_PLAN. The API
+// boundary keeps two separate shapes; the chart consumes a unified
+// normalised stream.
+export type ChartRange =
+  | "1d"
+  | "5d"
+  | "1m"
+  | "3m"
+  | "6m"
+  | "ytd"
+  | "1y"
+  | "5y"
+  | "max";
 
 // Phase 2.3 — financials
 export interface InstrumentFinancialRow {
