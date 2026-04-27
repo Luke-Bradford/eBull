@@ -228,7 +228,8 @@ class TestListFilings:
         count_sql: str = cursors[1].execute.call_args[0][0]
         assert "filing_type" in count_sql.lower()
         count_params = cursors[1].execute.call_args[0][1]
-        assert count_params["filing_type"] == "10-K"
+        # Single value is now wrapped in a list for ANY(...) compatibility
+        assert count_params["filing_types"] == ["10-K"]
 
     def test_no_filing_type_filter_omits_clause(self) -> None:
         _, cursors = _with_conn(
@@ -305,3 +306,42 @@ class TestListFilings:
         client.get("/filings/1")
 
         assert len(cursors) == 3
+
+
+def test_list_filings_csv_filing_type_filter():
+    """CSV filing_type matches any listed type; excludes others."""
+    rows = [
+        _make_filing_row(filing_event_id=1, filing_type="10-K"),
+        _make_filing_row(filing_event_id=2, filing_type="8-K"),
+    ]
+    count_cur = MagicMock()
+    count_cur.fetchone.return_value = {"cnt": 2}
+    list_cur = MagicMock()
+    list_cur.fetchall.return_value = rows
+
+    inst_cur = MagicMock()
+    inst_cur.fetchone.return_value = {"instrument_id": 1, "symbol": "GME"}
+
+    cursors: Iterator[MagicMock] = iter([inst_cur, count_cur, list_cur])
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.side_effect = lambda: next(cursors)
+
+    def _override() -> Iterator[MagicMock]:
+        yield conn
+
+    app.dependency_overrides[get_conn] = _override
+    try:
+        client_local = TestClient(app)
+        r = client_local.get("/filings/1?filing_type=10-K,8-K")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["total"] == 2
+        types = [item["filing_type"] for item in body["items"]]
+        assert set(types) == {"10-K", "8-K"}
+        # Confirm the SQL builder used = ANY(...) with a list, not a single value
+        # by inspecting the bound params on the count query call.
+        executed_params = count_cur.execute.call_args[0][1]
+        assert "filing_types" in executed_params
+        assert sorted(executed_params["filing_types"]) == ["10-K", "8-K"]
+    finally:
+        app.dependency_overrides.pop(get_conn, None)

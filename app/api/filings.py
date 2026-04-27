@@ -114,8 +114,10 @@ def list_filings(
     filter_params: dict[str, object] = {"instrument_id": instrument_id}
 
     if filing_type is not None:
-        where_clauses.append("filing_type = %(filing_type)s")
-        filter_params["filing_type"] = filing_type
+        types = [t.strip() for t in filing_type.split(",") if t.strip()]
+        if types:
+            where_clauses.append("filing_type = ANY(%(filing_types)s)")
+            filter_params["filing_types"] = types
 
     where_sql = " AND ".join(where_clauses)
 
