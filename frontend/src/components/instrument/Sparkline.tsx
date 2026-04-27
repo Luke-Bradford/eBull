@@ -26,12 +26,17 @@ export function Sparkline({
   }
   const min = Math.min(...values);
   const max = Math.max(...values);
-  const range = max - min || 1;
+  const range = max - min;
   const xStep = width / (values.length - 1);
   const points = values
     .map((v, i) => {
       const x = i * xStep;
-      const y = height - ((v - min) / range) * height;
+      // When all values are equal (range === 0) center the flat line
+      // at height/2 rather than clipping it to the bottom boundary.
+      const y =
+        range === 0
+          ? height / 2
+          : height - ((v - min) / range) * height;
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     })
     .join(" ");

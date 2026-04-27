@@ -138,37 +138,41 @@ export function FundamentalsPane({ summary }: FundamentalsPaneProps): JSX.Elemen
           description="Need at least 2 quarters with both income + balance data."
         />
       ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <FundamentalCell
-            label="Revenue"
-            values={series.map((r) => r.revenue)}
-            stroke="text-sky-500"
-          />
-          <FundamentalCell
-            label="Op income"
-            values={series.map((r) => r.operatingIncome)}
-            stroke="text-emerald-500"
-          />
-          <FundamentalCell
-            label="Net income"
-            values={series.map((r) => r.netIncome)}
-            stroke="text-emerald-500"
-          />
-          <FundamentalCell
-            label="Total debt"
-            values={series.map((r) => r.totalDebt)}
-            stroke="text-amber-500"
-          />
-        </div>
+        <>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <FundamentalCell
+              label="Revenue"
+              values={series.map((r) => r.revenue)}
+              stroke="text-sky-500"
+            />
+            <FundamentalCell
+              label="Op income"
+              values={series.map((r) => r.operatingIncome)}
+              stroke="text-emerald-500"
+            />
+            <FundamentalCell
+              label="Net income"
+              values={series.map((r) => r.netIncome)}
+              stroke="text-emerald-500"
+            />
+            <FundamentalCell
+              label="Total debt"
+              values={series.map((r) => r.totalDebt)}
+              stroke="text-amber-500"
+            />
+          </div>
+          {/* Footer link only shown when data is present — not during
+              skeleton / error / empty states (see review-prevention-log). */}
+          <div className="mt-2 border-t border-slate-100 pt-1.5 text-right">
+            <Link
+              to={`/instrument/${encodeURIComponent(symbol)}?tab=financials`}
+              className="text-[11px] text-sky-700 hover:underline"
+            >
+              View statements →
+            </Link>
+          </div>
+        </>
       )}
-      <div className="mt-2 border-t border-slate-100 pt-1.5 text-right">
-        <Link
-          to={`/instrument/${encodeURIComponent(symbol)}?tab=financials`}
-          className="text-[11px] text-sky-700 hover:underline"
-        >
-          View statements →
-        </Link>
-      </div>
     </Section>
   );
 }
