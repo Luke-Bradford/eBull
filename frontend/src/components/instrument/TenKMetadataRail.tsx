@@ -71,10 +71,8 @@ export function TenKMetadataRail({
           </h3>
           <ul className="space-y-0.5">
             {relatedItems.map((item) => (
-              <li key={item}>
-                <a href={`#ref-${item}`} className="text-sky-700 hover:underline">
-                  {item} ↗
-                </a>
+              <li key={item} className="text-slate-700">
+                {item}
               </li>
             ))}
           </ul>

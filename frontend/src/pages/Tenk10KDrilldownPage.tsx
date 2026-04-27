@@ -203,7 +203,7 @@ function Body({
   const secViewer = secViewerUrlFor(data.source_accession);
 
   return (
-    <div className="grid gap-6 grid-cols-[180px_minmax(0,1fr)_200px]">
+    <div className="grid gap-6 lg:grid-cols-[180px_minmax(0,1fr)_200px]">
       <aside className="hidden lg:block">
         <TOCRail sections={data.sections} />
       </aside>
