@@ -20,7 +20,7 @@ import { BusinessSectionsTeaser } from "@/components/instrument/BusinessSections
 import { DividendsPanel } from "@/components/instrument/DividendsPanel";
 import { FilingsPane } from "@/components/instrument/FilingsPane";
 import { FundamentalsPane } from "@/components/instrument/FundamentalsPane";
-import { InsiderActivityPanel } from "@/components/instrument/InsiderActivityPanel";
+import { InsiderActivitySummary } from "@/components/instrument/InsiderActivitySummary";
 import { PriceChart } from "@/components/instrument/PriceChart";
 import { SecProfilePanel } from "@/components/instrument/SecProfilePanel";
 import { Section } from "@/components/dashboard/Section";
@@ -105,18 +105,14 @@ export function DensityGrid({
 
         {/* Dividends + insider combined card — spans full width */}
         {(dividendProviders.length > 0 || insiderProviders.length > 0) && (
-          <div className="overflow-auto max-h-[360px] rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm lg:col-span-3">
+          <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm lg:col-span-3">
             <div className="grid gap-3 md:grid-cols-2">
               {dividendProviders.map((p) => (
                 <DividendsPanel key={`div-${p}`} symbol={symbol} provider={p} />
               ))}
-              {insiderProviders.map((p) => (
-                <InsiderActivityPanel
-                  key={`ins-${p}`}
-                  symbol={symbol}
-                  provider={p}
-                />
-              ))}
+              {insiderProviders.length > 0 && (
+                <InsiderActivitySummary symbol={symbol} />
+              )}
             </div>
           </div>
         )}

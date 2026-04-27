@@ -26,8 +26,8 @@ vi.mock("@/components/instrument/FilingsPane", () => ({
 vi.mock("@/components/instrument/DividendsPanel", () => ({
   DividendsPanel: () => <div>Dividends</div>,
 }));
-vi.mock("@/components/instrument/InsiderActivityPanel", () => ({
-  InsiderActivityPanel: () => <div>Insider</div>,
+vi.mock("@/components/instrument/InsiderActivitySummary", () => ({
+  InsiderActivitySummary: () => <div>Insider summary</div>,
 }));
 vi.mock("@/components/instrument/FundamentalsPane", () => ({
   FundamentalsPane: () => <div>Fundamentals stub</div>,
@@ -178,12 +178,10 @@ describe("DensityGrid", () => {
     expect(screen.queryByText("Fundamentals stub")).toBeNull();
   });
 
-  it("combined dividends/insider card uses exactly one overflow-auto scroll-bound (Phase D regression guard)", () => {
-    // When insider is active, InsiderActivityPanel renders up to 50 rows.
-    // The combined card retains overflow-auto + max-h-[360px] intentionally
-    // until Phase D replaces it with InsiderActivitySummary.
-    // This test pins the count to 1 so Phase D's removal of that bound
-    // is explicitly regression-guarded and not silently missed.
+  it("combined dividends/insider card has no overflow-auto after Phase D (InsiderActivitySummary is compact)", () => {
+    // Phase D replaced InsiderActivityPanel (up to 50 rows) with
+    // InsiderActivitySummary (compact 5-field block), so the combined
+    // card no longer needs the scroll-bound wrapper.
     const summaryWithInsider = {
       instrument_id: 1,
       has_sec_cik: true,
@@ -212,6 +210,6 @@ describe("DensityGrid", () => {
       </MemoryRouter>,
     );
     const overflowAuto = container.querySelectorAll(".overflow-auto");
-    expect(overflowAuto.length).toBe(1);
+    expect(overflowAuto.length).toBe(0);
   });
 });
