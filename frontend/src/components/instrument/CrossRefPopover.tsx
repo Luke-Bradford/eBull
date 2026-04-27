@@ -15,8 +15,8 @@ export interface CrossRefPopoverProps {
   readonly cref: BusinessCrossReference;
   /** All sections in the current 10-K — used to resolve "Item 1A" etc. */
   readonly sections: ReadonlyArray<BusinessSection>;
-  /** SEC iXBRL viewer URL for fall-back when target isn't ingested. */
-  readonly secViewerUrl: string | null;
+  /** SEC EDGAR search URL for fall-back when target isn't ingested. */
+  readonly secSearchUrl: string | null;
 }
 
 function findTargetSection(
@@ -44,7 +44,7 @@ function shortenBody(body: string): string {
 export function CrossRefPopover({
   cref,
   sections,
-  secViewerUrl,
+  secSearchUrl,
 }: CrossRefPopoverProps): JSX.Element {
   const [open, setOpen] = useState(false);
   const target = findTargetSection(cref, sections);
@@ -85,14 +85,14 @@ export function CrossRefPopover({
               <span className="mt-1 block leading-relaxed text-slate-600">
                 Not yet ingested in eBull. View the source on SEC.
               </span>
-              {secViewerUrl !== null && (
+              {secSearchUrl !== null && (
                 <a
-                  href={secViewerUrl}
+                  href={secSearchUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="mt-2 block text-sky-700 hover:underline"
                 >
-                  Open on SEC iXBRL viewer ↗
+                  Search for filing on SEC EDGAR ↗
                 </a>
               )}
             </>

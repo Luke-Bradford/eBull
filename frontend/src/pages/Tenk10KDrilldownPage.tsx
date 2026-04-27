@@ -65,7 +65,7 @@ function renderProseWithCrossRefs(
   prose: string,
   crefs: ReadonlyArray<BusinessCrossReference>,
   sections: ReadonlyArray<BusinessSection>,
-  secViewerUrl: string | null,
+  secSearchUrl: string | null,
 ): JSX.Element {
   // Build a single regex matching every cref.target, longest-first to
   // avoid "Item 1" eating "Item 1A".
@@ -90,7 +90,7 @@ function renderProseWithCrossRefs(
           key={`cref-${key++}`}
           cref={cref}
           sections={sections}
-          secViewerUrl={secViewerUrl}
+          secSearchUrl={secSearchUrl}
         />,
       );
     } else {
@@ -105,11 +105,11 @@ function renderProseWithCrossRefs(
 function SectionBody({
   section,
   allSections,
-  secViewerUrl,
+  secSearchUrl,
 }: {
   readonly section: BusinessSection;
   readonly allSections: ReadonlyArray<BusinessSection>;
-  readonly secViewerUrl: string | null;
+  readonly secSearchUrl: string | null;
 }) {
   const parts = splitBodyByTables(section.body);
   return (
@@ -127,7 +127,7 @@ function SectionBody({
                   p.prose,
                   section.cross_references,
                   allSections,
-                  secViewerUrl,
+                  secSearchUrl,
                 )}
               </div>
             );
@@ -167,12 +167,14 @@ function TOCRail({ sections }: { readonly sections: ReadonlyArray<BusinessSectio
   );
 }
 
-function secViewerUrlFor(accession: string | null): string | null {
+function secSearchUrlFor(accession: string | null): string | null {
   if (accession === null) return null;
-  // SEC's iXBRL viewer pattern; accession numbers in their URL form
-  // omit the dashes.
-  const naked = accession.replace(/-/g, "");
-  return `https://www.sec.gov/cgi-bin/viewer?action=view&cik=&accession_number=${naked}`;
+  // EDGAR full-text search for the specific accession. Works without
+  // CIK (the prior cgi-bin viewer URL needed CIK and silently broke
+  // when none was available — codex/bot finding on PR #562).
+  // Follow-up #TBD: plumb CIK into BusinessSectionsResponse and link
+  // directly to the iXBRL viewer.
+  return `https://efts.sec.gov/LATEST/search-index?q=%22${encodeURIComponent(accession)}%22&forms=10-K,10-K%2FA`;
 }
 
 function Body({
@@ -200,7 +202,7 @@ function Body({
         .map((c) => c.target),
     ),
   ];
-  const secViewer = secViewerUrlFor(data.source_accession);
+  const secSearchUrl = secSearchUrlFor(data.source_accession);
 
   return (
     <div className="grid gap-6 lg:grid-cols-[180px_minmax(0,1fr)_200px]">
@@ -224,7 +226,7 @@ function Body({
             key={sectionAnchorId(s)}
             section={s}
             allSections={data.sections}
-            secViewerUrl={secViewer}
+            secSearchUrl={secSearchUrl}
           />
         ))}
       </div>
