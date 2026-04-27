@@ -20,6 +20,8 @@ from app.providers.implementations.etoro import (
     _normalise_candles,
     _normalise_instrument,
     _normalise_instruments,
+    _normalise_intraday_candle,
+    _normalise_intraday_candles,
     _normalise_rate,
     _normalise_rates,
 )
@@ -246,6 +248,92 @@ class TestNormaliseCandles:
             ]
         }
         bars = _normalise_candles(raw)
+        assert len(bars) == 1
+
+
+# ---------------------------------------------------------------------------
+# Intraday candle normalisation (#600)
+# ---------------------------------------------------------------------------
+
+
+_FIXTURE_INTRADAY_CANDLE = {
+    "fromDate": "2026-04-27T14:30:00Z",
+    "open": "180.00",
+    "high": "180.50",
+    "low": "179.80",
+    "close": "180.20",
+    "volume": "12345",
+}
+
+
+class TestNormaliseIntradayCandle:
+    def test_valid_intraday_candle_keeps_time(self) -> None:
+        bar = _normalise_intraday_candle(_FIXTURE_INTRADAY_CANDLE)
+        assert bar is not None
+        assert bar.timestamp == datetime(2026, 4, 27, 14, 30, tzinfo=UTC)
+        assert bar.open == Decimal("180.00")
+        assert bar.close == Decimal("180.20")
+        assert bar.volume == 12345
+
+    def test_iso_timestamp_with_offset_normalised_to_utc(self) -> None:
+        item = {**_FIXTURE_INTRADAY_CANDLE, "fromDate": "2026-04-27T16:30:00+02:00"}
+        bar = _normalise_intraday_candle(item)
+        assert bar is not None
+        # +02:00 at 16:30 == 14:30 UTC
+        assert bar.timestamp == datetime(2026, 4, 27, 14, 30, tzinfo=UTC)
+
+    def test_missing_close_returns_none(self) -> None:
+        item = {k: v for k, v in _FIXTURE_INTRADAY_CANDLE.items() if k != "close"}
+        assert _normalise_intraday_candle(item) is None
+
+    def test_empty_string_timestamp_returns_none(self) -> None:
+        item = {**_FIXTURE_INTRADAY_CANDLE, "fromDate": ""}
+        assert _normalise_intraday_candle(item) is None
+
+    def test_malformed_timestamp_returns_none(self) -> None:
+        item = {**_FIXTURE_INTRADAY_CANDLE, "fromDate": "not-a-datetime"}
+        assert _normalise_intraday_candle(item) is None
+
+
+class TestNormaliseIntradayCandles:
+    def test_nested_response_shape(self) -> None:
+        raw = {
+            "candles": [
+                {
+                    "instrumentId": 1001,
+                    "candles": [
+                        _FIXTURE_INTRADAY_CANDLE,
+                        {**_FIXTURE_INTRADAY_CANDLE, "fromDate": "2026-04-27T14:31:00Z"},
+                    ],
+                }
+            ]
+        }
+        bars = _normalise_intraday_candles(raw)
+        assert len(bars) == 2
+        assert bars[0].timestamp.minute == 30
+        assert bars[1].timestamp.minute == 31
+
+    def test_empty_list(self) -> None:
+        assert _normalise_intraday_candles({"candles": []}) == []
+
+    def test_non_dict_raises(self) -> None:
+        with pytest.raises(ValueError, match="Expected dict"):
+            _normalise_intraday_candles(["not", "a", "dict"])
+
+    def test_bad_items_skipped(self) -> None:
+        raw = {
+            "candles": [
+                {
+                    "instrumentId": 1001,
+                    "candles": [
+                        _FIXTURE_INTRADAY_CANDLE,
+                        {"fromDate": "2026-04-27T14:31:00Z"},  # missing OHLC
+                        "not a dict",
+                    ],
+                }
+            ]
+        }
+        bars = _normalise_intraday_candles(raw)
         assert len(bars) == 1
 
 
