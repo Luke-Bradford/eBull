@@ -212,4 +212,39 @@ describe("DensityGrid", () => {
     const overflowAuto = container.querySelectorAll(".overflow-auto");
     expect(overflowAuto.length).toBe(0);
   });
+
+  it("combined card retains overflow-auto scroll-bound when dividends are active (DividendsPanel can be tall)", () => {
+    // DividendsPanel can render 40+ history rows; the combined card wrapper
+    // must keep the scroll-bound when dividends are present so the grid
+    // doesn't push other panes far below the fold.
+    const summaryWithDividends = {
+      instrument_id: 1,
+      has_sec_cik: true,
+      identity: {
+        symbol: "GME",
+        display_name: "GameStop",
+        market_cap: "1000000",
+        sector: null,
+      },
+      capabilities: {
+        dividends: {
+          providers: ["sec_dividend_summary"],
+          data_present: { sec_dividend_summary: true },
+        },
+      },
+      key_stats: null,
+    } as never;
+    const { container } = render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={summaryWithDividends}
+          keyStatsBlock={<div>KEY STATS BLOCK</div>}
+          thesisBlock={<div>THESIS BLOCK</div>}
+          newsBlock={<div>NEWS BLOCK</div>}
+        />
+      </MemoryRouter>,
+    );
+    const overflowAuto = container.querySelectorAll(".overflow-auto");
+    expect(overflowAuto.length).toBe(1);
+  });
 });

@@ -103,9 +103,15 @@ export function DensityGrid({
           {newsBlock}
         </div>
 
-        {/* Dividends + insider combined card — spans full width */}
+        {/* Dividends + insider combined card — spans full width.
+            overflow-auto + max-h guard applies only when dividends are
+            active because DividendsPanel can render 40+ history bars.
+            InsiderActivitySummary is compact (5-field block) and does
+            not need height-capping. */}
         {(dividendProviders.length > 0 || insiderProviders.length > 0) && (
-          <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm lg:col-span-3">
+          <div
+            className={`rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm lg:col-span-3${dividendProviders.length > 0 ? " overflow-auto max-h-[360px]" : ""}`}
+          >
             <div className="grid gap-3 md:grid-cols-2">
               {dividendProviders.map((p) => (
                 <DividendsPanel key={`div-${p}`} symbol={symbol} provider={p} />
