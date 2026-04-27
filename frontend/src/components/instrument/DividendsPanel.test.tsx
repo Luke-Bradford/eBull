@@ -170,12 +170,14 @@ describe("DividendsPanel", () => {
     expect(screen.queryByText(/FY2024 Q2/)).toBeNull();
   });
 
-  it("Open button navigates to /instrument/<symbol>/dividends", async () => {
+  it("Open button navigates to /instrument/<symbol>/dividends preserving the provider", async () => {
     mockFetch.mockResolvedValue(paid());
     wrap(<DividendsPanel symbol="GME" provider="sec_dividend_summary" />);
 
     const btn = await screen.findByRole("button", { name: /open/i });
     await userEvent.click(btn);
-    expect(navigateMock).toHaveBeenCalledWith("/instrument/GME/dividends");
+    expect(navigateMock).toHaveBeenCalledWith(
+      "/instrument/GME/dividends?provider=sec_dividend_summary",
+    );
   });
 });

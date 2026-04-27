@@ -77,7 +77,9 @@ export function DividendsPanel({ symbol, provider }: DividendsPanelProps) {
       title="Dividends"
       source={{ providers: [provider] }}
       onExpand={() =>
-        navigate(`/instrument/${encodeURIComponent(symbol)}/dividends`)
+        navigate(
+          `/instrument/${encodeURIComponent(symbol)}/dividends?provider=${encodeURIComponent(provider)}`,
+        )
       }
     >
       {state.loading ? (
