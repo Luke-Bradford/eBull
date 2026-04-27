@@ -8,7 +8,7 @@
  * Deliberately separate from ChartCanvas (compact instrument-page chart) so
  * the compact component stays focused and this one can evolve independently.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type JSX } from "react";
 import {
   CandlestickSeries,
   HistogramSeries,
@@ -286,6 +286,11 @@ export function ChartWorkspaceCanvas({
   }, [rows]);
 
   // Add/remove indicator LineSeries based on `indicators` prop.
+  // `rows` is in the dep array (alongside `indicators`) so this effect
+  // re-runs after the prior data effect refreshes `cleanRowsRef`. Without
+  // it, toggling indicators on a re-fetched range would compute SMAs over
+  // the previous range's `cleanRowsRef`. Do not "simplify" by removing
+  // `rows` from the deps.
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
