@@ -9,10 +9,10 @@ describe("FilingsPane", () => {
     vi.spyOn(filingsApi, "fetchFilings").mockResolvedValue({
       instrument_id: 1,
       symbol: "GME",
-      total: 8,
+      total: 5,
       offset: 0,
       limit: 5,
-      items: Array.from({ length: 8 }, (_, i) => ({
+      items: Array.from({ length: 5 }, (_, i) => ({
         filing_event_id: i + 1,
         instrument_id: 1,
         filing_date: `2026-03-${(i + 1).toString().padStart(2, "0")}`,
