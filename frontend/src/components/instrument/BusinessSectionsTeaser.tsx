@@ -15,15 +15,12 @@ import type {
   BusinessSection,
   BusinessSectionsResponse,
 } from "@/api/instruments";
-import {
-  Section,
-  SectionError,
-  SectionSkeleton,
-} from "@/components/dashboard/Section";
+import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { Pane } from "@/components/instrument/Pane";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback } from "react";
-import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 
 export interface BusinessSectionsTeaserProps {
   readonly symbol: string;
@@ -52,13 +49,19 @@ function pickTeaser(sections: ReadonlyArray<BusinessSection>): string {
 }
 
 export function BusinessSectionsTeaser({ symbol }: BusinessSectionsTeaserProps) {
+  const navigate = useNavigate();
   const state = useAsync<BusinessSectionsResponse>(
     useCallback(() => fetchBusinessSections(symbol), [symbol]),
     [symbol],
   );
 
   return (
-    <Section title="Company narrative (SEC 10-K Item 1)">
+    <Pane
+      title="Company narrative"
+      scope="10-K Item 1"
+      source={{ providers: ["sec_10k_item1"] }}
+      onExpand={() => navigate(`/instrument/${encodeURIComponent(symbol)}/filings/10-k`)}
+    >
       {state.loading ? (
         <SectionSkeleton rows={2} />
       ) : state.error !== null ? (
@@ -73,22 +76,14 @@ export function BusinessSectionsTeaser({ symbol }: BusinessSectionsTeaserProps) 
           <p className="leading-relaxed text-slate-700">
             {pickTeaser(state.data.sections)}
           </p>
-          <div>
-            <Link
-              to={`/instrument/${encodeURIComponent(symbol)}/filings/10-k`}
-              className="text-xs font-medium text-sky-700 hover:underline"
-            >
-              View full 10-K narrative →
-            </Link>
-            {state.data.source_accession !== null && (
-              <span className="ml-2 text-[11px] text-slate-500">
-                accession{" "}
-                <span className="font-mono">{state.data.source_accession}</span>
-              </span>
-            )}
-          </div>
+          {state.data.source_accession !== null && (
+            <span className="text-[11px] text-slate-500">
+              accession{" "}
+              <span className="font-mono">{state.data.source_accession}</span>
+            </span>
+          )}
         </div>
       )}
-    </Section>
+    </Pane>
   );
 }
