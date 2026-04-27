@@ -183,4 +183,70 @@ describe("FundamentalsPane", () => {
     // Latest total debt = 150 + 30 = 180
     expect(await screen.findByText(/180/)).toBeInTheDocument();
   });
+
+  it("returns null when capability active but joined series is empty (e.g. SEC ingest before any quarters)", async () => {
+    vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
+      ((_symbol: string, query: { statement: string }) =>
+        Promise.resolve({
+          symbol: "GME",
+          statement: query.statement,
+          period: "quarterly",
+          currency: "USD",
+          source: "sec_xbrl",
+          rows: [],
+        })) as never,
+    );
+    const { container } = render(
+      <MemoryRouter>
+        <FundamentalsPane summary={makeSummary(true)} />
+      </MemoryRouter>,
+    );
+    // Wait for both async fetches to settle, then assert no card.
+    await new Promise((r) => setTimeout(r, 30));
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("returns null when capability active but only 1 quarter has both income + balance data", async () => {
+    vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
+      ((_symbol: string, query: { statement: string }) => {
+        if (query.statement === "income") {
+          return Promise.resolve({
+            symbol: "GME",
+            statement: "income",
+            period: "quarterly",
+            currency: "USD",
+            source: "sec_xbrl",
+            rows: [
+              {
+                period_end: "2026-03-30",
+                period_type: "Q1",
+                values: { revenue: "100", operating_income: "10", net_income: "5" },
+              },
+            ],
+          });
+        }
+        return Promise.resolve({
+          symbol: "GME",
+          statement: "balance",
+          period: "quarterly",
+          currency: "USD",
+          source: "sec_xbrl",
+          rows: [
+            {
+              period_end: "2026-03-30",
+              period_type: "Q1",
+              values: { long_term_debt: "100", short_term_debt: "20" },
+            },
+          ],
+        });
+      }) as never,
+    );
+    const { container } = render(
+      <MemoryRouter>
+        <FundamentalsPane summary={makeSummary(true)} />
+      </MemoryRouter>,
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    expect(container.firstChild).toBeNull();
+  });
 });

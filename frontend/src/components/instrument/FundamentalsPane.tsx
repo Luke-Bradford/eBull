@@ -14,7 +14,6 @@ import { fetchInstrumentFinancials } from "@/api/instruments";
 import type { InstrumentFinancialRow, InstrumentSummary } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { Pane } from "@/components/instrument/Pane";
-import { EmptyState } from "@/components/states/EmptyState";
 import { Sparkline } from "@/components/instrument/Sparkline";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback, useMemo } from "react";
@@ -128,6 +127,18 @@ export function FundamentalsPane({ summary }: FundamentalsPaneProps): JSX.Elemen
 
   if (!active) return null;
 
+  // Capability active but the joined series is too short to plot — return
+  // null to follow the polish round-2 four-state empty rule (no full
+  // empty-state cards on the instrument page). Loading + error states
+  // still render the Pane so the operator sees the chrome.
+  const insufficient =
+    !income.loading &&
+    !balance.loading &&
+    income.error === null &&
+    balance.error === null &&
+    series.length < 2;
+  if (insufficient) return null;
+
   return (
     <Pane
       title="Fundamentals"
@@ -139,11 +150,6 @@ export function FundamentalsPane({ summary }: FundamentalsPaneProps): JSX.Elemen
         <SectionSkeleton rows={3} />
       ) : income.error !== null || balance.error !== null ? (
         <SectionError onRetry={() => { income.refetch(); balance.refetch(); }} />
-      ) : series.length < 2 ? (
-        <EmptyState
-          title="Not enough fundamentals history"
-          description="Need at least 2 quarters with both income + balance data."
-        />
       ) : (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <FundamentalCell
