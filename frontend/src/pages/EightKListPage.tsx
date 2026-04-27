@@ -20,7 +20,7 @@ import {
 } from "@/components/instrument/EightKFilterStrip";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 const SEVERITY_TONE: Record<string, string> = {
@@ -28,6 +28,8 @@ const SEVERITY_TONE: Record<string, string> = {
   medium: "bg-amber-100 text-amber-700",
   low: "bg-slate-100 text-slate-600",
 };
+
+const HARD_LIMIT = 250;
 
 function readFilters(p: URLSearchParams): EightKFilters {
   const severity = p.get("severity");
@@ -97,7 +99,7 @@ export function EightKListPage(): JSX.Element {
   const selectedAccession = searchParams.get("accession");
 
   const state = useAsync<EightKFilingsResponse>(
-    useCallback(() => fetchEightKFilings(symbol, 100), [symbol]),
+    useCallback(() => fetchEightKFilings(symbol, HARD_LIMIT), [symbol]),
     [symbol],
   );
 
@@ -122,6 +124,32 @@ export function EightKListPage(): JSX.Element {
     else out.set("accession", acc);
     setSearchParams(out, { replace: true });
   }
+
+  // Auto-select first filtered row on page open; clear stale accession when
+  // filter excludes selected filing (fixes empty detail pane on initial load
+  // and broken deep-link contract when filters exclude selection).
+  useEffect(() => {
+    // Clear stale accession when filters exclude the selected filing.
+    if (
+      selectedAccession !== null &&
+      state.data !== null &&
+      !filtered.some((f) => f.accession_number === selectedAccession)
+    ) {
+      const out = new URLSearchParams(searchParams);
+      out.delete("accession");
+      setSearchParams(out, { replace: true });
+      return;
+    }
+    // Auto-select first filtered row when no accession is selected.
+    if (selectedAccession === null && filtered.length > 0) {
+      const out = new URLSearchParams(searchParams);
+      const first = filtered[0];
+      if (first) {
+        out.set("accession", first.accession_number);
+        setSearchParams(out, { replace: true });
+      }
+    }
+  }, [selectedAccession, filtered, searchParams, setSearchParams, state.data]);
 
   return (
     <div className="mx-auto max-w-screen-2xl space-y-3 p-4">
@@ -208,6 +236,12 @@ export function EightKListPage(): JSX.Element {
                   )}
                 </tbody>
               </table>
+              {state.data !== null && state.data.filings.length === HARD_LIMIT && (
+                <p className="mt-2 text-xs text-amber-700">
+                  Showing the most recent {HARD_LIMIT} filings. Older 8-Ks not
+                  shown — file a follow-up to add pagination if you need them.
+                </p>
+              )}
             </div>
             <EightKDetailPanel filing={selected} />
           </div>

@@ -48,7 +48,7 @@ const filings = [
 ] as never;
 
 describe("EightKListPage", () => {
-  it("filters by severity and selects an accession via row click", async () => {
+  it("auto-selects first row on page open and respects filter changes", async () => {
     vi.spyOn(api, "fetchEightKFilings").mockResolvedValue({
       symbol: "GME",
       filings,
@@ -69,6 +69,11 @@ describe("EightKListPage", () => {
     expect(await screen.findByText("5.02")).toBeTruthy();
     expect(screen.getByText("8.01")).toBeTruthy();
 
+    // First row (acc-1) is auto-selected on page open
+    await waitFor(() => {
+      expect(screen.getByText("acc-1")).toBeTruthy();
+    });
+
     // Filter to high severity — low-severity row disappears
     const severitySelect = screen.getByRole("combobox");
     fireEvent.change(severitySelect, { target: { value: "high" } });
@@ -76,7 +81,10 @@ describe("EightKListPage", () => {
       expect(screen.queryByText("8.01")).toBeNull();
     });
 
-    // Click the high-severity row (by its date cell) → detail panel shows accession
+    // acc-1 still selected after filter (it matches high severity)
+    expect(screen.getByText("acc-1")).toBeTruthy();
+
+    // Click a row to change selection
     fireEvent.click(screen.getByText("2026-03-15"));
     await waitFor(() => {
       expect(screen.getByText("acc-1")).toBeTruthy();
