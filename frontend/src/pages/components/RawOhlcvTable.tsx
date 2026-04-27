@@ -64,7 +64,15 @@ export function RawOhlcvTable({ rows, symbol, range }: RawOhlcvTableProps): JSX.
         </span>
         <button
           type="button"
-          onClick={() => downloadCsv(sorted, symbol, range)}
+          onClick={() => {
+            // Always export in chronological order regardless of the
+            // UI sort toggle — downstream tools (Excel, pandas, etc.)
+            // expect time-series ascending.
+            const chronological = [...rows].sort((a, b) =>
+              a.date.localeCompare(b.date),
+            );
+            downloadCsv(chronological, symbol, range);
+          }}
           className="rounded bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700"
           data-testid="csv-download"
         >
