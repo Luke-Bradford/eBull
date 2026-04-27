@@ -68,9 +68,11 @@ export function DensityGrid({
         <div className="col-span-12 lg:col-span-4">
           <KeyStatsPane summary={summary} />
         </div>
-        <div className="col-span-12 lg:col-span-4">
-          {hasNarrative && <SecProfilePanel symbol={symbol} />}
-        </div>
+        {hasNarrative && (
+          <div className="col-span-12 lg:col-span-4">
+            <SecProfilePanel symbol={symbol} />
+          </div>
+        )}
         <div className="col-span-12">
           <FundamentalsPane summary={summary} />
         </div>

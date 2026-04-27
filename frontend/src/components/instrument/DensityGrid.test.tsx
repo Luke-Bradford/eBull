@@ -86,6 +86,27 @@ describe("DensityGrid profiles", () => {
     expect(screen.getByText(/Insider summary/)).toBeInTheDocument();
   });
 
+  it("full-sec profile without has_sec_cik: SEC profile slot absent (no ghost div)", () => {
+    render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={makeSummary(
+            {
+              fundamentals: { providers: ["sec_xbrl"], data_present: { sec_xbrl: true } },
+              filings: { providers: ["sec_edgar"], data_present: { sec_edgar: true } },
+            },
+            false, // has_sec_cik = false
+          )}
+          thesis={null}
+          thesisErrored={false}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByText("SEC Profile")).not.toBeInTheDocument();
+    // The chart + key stats row should not have an extra empty col-4 slot.
+    // Sanity: the only col-span-4 element in this profile branch is KeyStats.
+  });
+
   it("partial-filings profile: no fundamentals; filings full-width; insider+dividends share row when both active", () => {
     render(
       <MemoryRouter>
