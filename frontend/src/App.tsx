@@ -10,6 +10,7 @@ import { InstrumentDetailRedirect } from "@/pages/InstrumentDetailRedirect";
 import { InstrumentPage } from "@/pages/InstrumentPage";
 import { Tenk10KDrilldownPage } from "@/pages/Tenk10KDrilldownPage";
 import { EightKListPage } from "@/pages/EightKListPage";
+import { DividendsPage } from "@/pages/DividendsPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { RecommendationsPage } from "@/pages/RecommendationsPage";
 import { AdminPage } from "@/pages/AdminPage";
@@ -69,6 +70,10 @@ export function App() {
           <Route
             path="instrument/:symbol/filings/8-k"
             element={<EightKListPage />}
+          />
+          <Route
+            path="instrument/:symbol/dividends"
+            element={<DividendsPage />}
           />
           <Route path="copy-trading/:mirrorId" element={<CopyTradingPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />
