@@ -1,8 +1,8 @@
 /**
- * Tests for ChartPage (#576 Phase 1).
+ * Tests for ChartPage (#576 Phase 1 + Phase 2).
  *
  * lightweight-charts cannot render in jsdom (Canvas API absent), so we stub
- * ChartCanvas to a simple div. What we pin here is the page's contract:
+ * ChartWorkspaceCanvas to a simple div. What we pin here is the page's contract:
  *
  *   - Symbol + back-link render
  *   - Default range is 1Y
@@ -10,17 +10,31 @@
  *   - Empty state when data has no valid rows
  *   - Error state propagates a retry button
  *   - Fetch calls with the active range
+ *   - Four indicator toggle buttons render
+ *   - Clicking a toggle updates the URL ?ind= param
+ *   - Pre-set ?ind= in URL activates the matching toggles
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
-// Stub ChartCanvas so lightweight-charts is never touched in jsdom.
-vi.mock("@/components/instrument/PriceChart", () => ({
-  ChartCanvas: ({ symbol }: { symbol: string }) => (
-    <div data-testid="chart-canvas-stub" data-symbol={symbol} />
+// Stub ChartWorkspaceCanvas so lightweight-charts is never touched in jsdom.
+vi.mock("@/pages/components/ChartWorkspaceCanvas", () => ({
+  ChartWorkspaceCanvas: ({
+    symbol,
+    indicators,
+  }: {
+    symbol: string;
+    indicators: string[];
+  }) => (
+    <div
+      data-testid="chart-canvas-stub"
+      data-symbol={symbol}
+      data-indicators={indicators.join(",")}
+    />
   ),
+  INDICATOR_IDS: ["sma20", "sma50", "ema20", "ema50"],
 }));
 
 vi.mock("@/api/instruments", () => ({
@@ -194,5 +208,72 @@ describe("ChartPage — chart body", () => {
       expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
     });
     expect(screen.queryByTestId("chart-canvas-stub")).not.toBeInTheDocument();
+  });
+});
+
+describe("ChartPage — indicator toggles", () => {
+  it("renders exactly four indicator toggle buttons", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+    for (const id of ["sma20", "sma50", "ema20", "ema50"]) {
+      expect(screen.getByTestId(`indicator-${id}`)).toBeInTheDocument();
+    }
+  });
+
+  it("clicking a toggle updates the ?ind= URL param", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("indicator-sma20"));
+    // After clicking, the stub should receive the indicator
+    await waitFor(() => {
+      const stub = screen.getByTestId("chart-canvas-stub");
+      expect(stub.getAttribute("data-indicators")).toBe("sma20");
+    });
+  });
+
+  it("clicking the same toggle twice removes it from ?ind=", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("indicator-sma20"));
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub").getAttribute("data-indicators")).toBe("sma20");
+    });
+    await user.click(screen.getByTestId("indicator-sma20"));
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-canvas-stub").getAttribute("data-indicators")).toBe("");
+    });
+  });
+
+  it("pre-set ?ind=sma20,sma50 activates those two indicators", async () => {
+    mockCandles.mockImplementation((_, range) =>
+      Promise.resolve(makeCandles(range, twoValidRows())),
+    );
+    renderPage("/instrument/AAPL/chart?ind=sma20,sma50");
+    await waitFor(() => {
+      const stub = screen.getByTestId("chart-canvas-stub");
+      const active = stub.getAttribute("data-indicators") ?? "";
+      expect(active.split(",")).toContain("sma20");
+      expect(active.split(",")).toContain("sma50");
+    });
+  });
+
+  it("ignores unrecognised indicator ids in ?ind=", async () => {
+    mockCandles.mockImplementation((_, range) =>
+      Promise.resolve(makeCandles(range, twoValidRows())),
+    );
+    renderPage("/instrument/AAPL/chart?ind=sma20,rsi14,garbage");
+    await waitFor(() => {
+      const stub = screen.getByTestId("chart-canvas-stub");
+      // Only sma20 is valid
+      expect(stub.getAttribute("data-indicators")).toBe("sma20");
+    });
   });
 });
