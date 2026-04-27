@@ -12,12 +12,13 @@
 
 import { fetchInstrumentFinancials } from "@/api/instruments";
 import type { InstrumentFinancialRow, InstrumentSummary } from "@/api/types";
-import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { Pane } from "@/components/instrument/Pane";
 import { EmptyState } from "@/components/states/EmptyState";
 import { Sparkline } from "@/components/instrument/Sparkline";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback, useMemo } from "react";
-import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 
 const SLICE = 8;
 
@@ -88,6 +89,7 @@ export interface FundamentalsPaneProps {
 
 export function FundamentalsPane({ summary }: FundamentalsPaneProps): JSX.Element | null {
   const symbol = summary.identity.symbol;
+  const navigate = useNavigate();
   const fundCell = summary.capabilities["fundamentals"];
   const active =
     fundCell !== undefined &&
@@ -127,7 +129,12 @@ export function FundamentalsPane({ summary }: FundamentalsPaneProps): JSX.Elemen
   if (!active) return null;
 
   return (
-    <Section title="Fundamentals">
+    <Pane
+      title="Fundamentals"
+      scope="last 8 quarters"
+      source={{ providers: ["sec_xbrl"] }}
+      onExpand={() => navigate(`/instrument/${encodeURIComponent(symbol)}?tab=financials`)}
+    >
       {income.loading || balance.loading ? (
         <SectionSkeleton rows={3} />
       ) : income.error !== null || balance.error !== null ? (
@@ -138,42 +145,30 @@ export function FundamentalsPane({ summary }: FundamentalsPaneProps): JSX.Elemen
           description="Need at least 2 quarters with both income + balance data."
         />
       ) : (
-        <>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <FundamentalCell
-              label="Revenue"
-              values={series.map((r) => r.revenue)}
-              stroke="text-sky-500"
-            />
-            <FundamentalCell
-              label="Op income"
-              values={series.map((r) => r.operatingIncome)}
-              stroke="text-emerald-500"
-            />
-            <FundamentalCell
-              label="Net income"
-              values={series.map((r) => r.netIncome)}
-              stroke="text-emerald-500"
-            />
-            <FundamentalCell
-              label="Total debt"
-              values={series.map((r) => r.totalDebt)}
-              stroke="text-amber-500"
-            />
-          </div>
-          {/* Footer link only shown when data is present — not during
-              skeleton / error / empty states (see review-prevention-log). */}
-          <div className="mt-2 border-t border-slate-100 pt-1.5 text-right">
-            <Link
-              to={`/instrument/${encodeURIComponent(symbol)}?tab=financials`}
-              className="text-[11px] text-sky-700 hover:underline"
-            >
-              View statements →
-            </Link>
-          </div>
-        </>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <FundamentalCell
+            label="Revenue"
+            values={series.map((r) => r.revenue)}
+            stroke="text-sky-500"
+          />
+          <FundamentalCell
+            label="Op income"
+            values={series.map((r) => r.operatingIncome)}
+            stroke="text-emerald-500"
+          />
+          <FundamentalCell
+            label="Net income"
+            values={series.map((r) => r.netIncome)}
+            stroke="text-emerald-500"
+          />
+          <FundamentalCell
+            label="Total debt"
+            values={series.map((r) => r.totalDebt)}
+            stroke="text-amber-500"
+          />
+        </div>
       )}
-    </Section>
+    </Pane>
   );
 }
 

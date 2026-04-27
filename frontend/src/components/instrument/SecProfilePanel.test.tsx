@@ -83,4 +83,12 @@ describe("SecProfilePanel", () => {
       expect(screen.getByText(/Failed to load/i)).toBeInTheDocument();
     });
   });
+
+  it("renders Pane chrome with sec_edgar source", async () => {
+    mockFetch.mockResolvedValue(seededProfile());
+    render(<SecProfilePanel symbol="AAPL" />);
+
+    await screen.findByText(/Designs consumer electronics/);
+    expect(screen.getByText(/SEC EDGAR/)).toBeInTheDocument();
+  });
 });

@@ -20,12 +20,10 @@ import type {
   UpcomingDividend,
 } from "@/api/instruments";
 import {
-  Section,
   SectionError,
   SectionSkeleton,
 } from "@/components/dashboard/Section";
-import { EmptyState } from "@/components/states/EmptyState";
-import { providerLabel } from "@/lib/capabilityProviders";
+import { Pane } from "@/components/instrument/Pane";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback } from "react";
 
@@ -84,35 +82,40 @@ export function DividendsPanel({ symbol, provider }: DividendsPanelProps) {
     ),
     [symbol, provider],
   );
-  const title = `Dividends · ${providerLabel(provider)}`;
+
+  // Empty case: data loaded, no history AND no upcoming → no card at all.
+  // This implements the four-state empty-pane policy: capability active but
+  // no current and no forward signal → render null.
+  if (
+    !state.loading &&
+    state.error === null &&
+    state.data !== null &&
+    state.data.history.length === 0 &&
+    state.data.upcoming.length === 0
+  ) {
+    return null;
+  }
 
   return (
-    <Section title={title}>
+    <Pane title="Dividends" source={{ providers: [provider] }}>
       {state.loading ? (
         <SectionSkeleton rows={3} />
       ) : state.error !== null || state.data === null ? (
         <SectionError onRetry={state.refetch} />
       ) : (
         <>
-          {/* Upcoming banner renders OUTSIDE the has_dividend gate so a
-              company announcing its first-ever dividend via 8-K (with
-              zero XBRL history yet) still shows the calendar instead
-              of the "never paid" empty state. */}
+          {/* Upcoming banner renders above history so a company announcing
+              its first-ever dividend via 8-K (with zero XBRL history yet)
+              still shows the calendar. */}
           {state.data.upcoming[0] !== undefined && (
             <NextDividendBanner upcoming={state.data.upcoming[0]} />
           )}
-          {!state.data.summary.has_dividend ||
-          state.data.history.length === 0 ? (
-            <EmptyState
-              title="No dividend history on file"
-              description="This instrument has not reported a positive dividend in this provider's data."
-            />
-          ) : (
+          {state.data.history.length > 0 ? (
             <DividendsBody data={state.data} />
-          )}
+          ) : null}
         </>
       )}
-    </Section>
+    </Pane>
   );
 }
 

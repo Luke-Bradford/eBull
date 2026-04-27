@@ -51,24 +51,6 @@ function paid(): InstrumentDividends {
 }
 
 
-function notPaid(): InstrumentDividends {
-  return {
-    symbol: "GOOG",
-    summary: {
-      has_dividend: false,
-      ttm_dps: null,
-      ttm_dividends_paid: null,
-      ttm_yield_pct: null,
-      latest_dps: null,
-      latest_dividend_at: null,
-      dividend_streak_q: 0,
-      dividend_currency: null,
-    },
-    history: [],
-    upcoming: [],
-  };
-}
-
 
 afterEach(() => vi.clearAllMocks());
 
@@ -88,14 +70,32 @@ describe("DividendsPanel", () => {
     expect(screen.getByText("40")).toBeInTheDocument();
   });
 
-  it("renders empty state when never-paid", async () => {
-    mockFetch.mockResolvedValue(notPaid());
-    render(<DividendsPanel symbol="GOOG" provider="sec_dividend_summary" />);
+  it("returns null when history is empty AND upcoming is empty", async () => {
+    mockFetch.mockResolvedValueOnce({
+      symbol: "X",
+      summary: { has_dividend: false } as never,
+      history: [],
+      upcoming: [],
+    } as never);
+    const { container } = render(
+      <DividendsPanel symbol="X" provider="sec_dividend_summary" />,
+    );
+    await waitFor(() => expect(container.firstChild).toBeNull());
+  });
 
-    await waitFor(() => {
-      expect(screen.getByText(/No dividend history on file/i)).toBeInTheDocument();
-    });
-    expect(screen.queryByText(/TTM yield/i)).not.toBeInTheDocument();
+  it("renders Pane when history is empty but upcoming has 1 item", async () => {
+    mockFetch.mockResolvedValueOnce({
+      symbol: "X",
+      summary: { has_dividend: true } as never,
+      history: [],
+      upcoming: [{ ex_date: "2026-05-01" } as never],
+    } as never);
+    render(<DividendsPanel symbol="X" provider="sec_dividend_summary" />);
+    // Pane renders — the h2 title "Dividends" is present (source badge may also
+    // contain the word; use getAllByText to avoid the "multiple elements" error).
+    await waitFor(() =>
+      expect(screen.getAllByText(/Dividends/i).length).toBeGreaterThan(0),
+    );
   });
 
   it("renders error state + retry on fetch failure", async () => {

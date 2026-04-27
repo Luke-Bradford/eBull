@@ -137,8 +137,7 @@ function formatDecimal(
 // Header + Overview tab removed in Slice 1 — replaced by
 // `components/instrument/SummaryStrip.tsx` (sticky strip) and
 // `components/instrument/ResearchTab.tsx` (Research tab content).
-// `formatDecimal` is still used by the Financials tab below;
-// `formatMarketCap` moved to ResearchTab.
+// `formatDecimal` is still used by the Financials tab below.
 
 // ---------------------------------------------------------------------------
 // Financials tab

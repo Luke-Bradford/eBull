@@ -37,6 +37,18 @@ describe("InsiderActivitySummary", () => {
     expect(screen.getByText("2026-04-13")).toBeInTheDocument();
   });
 
+  it("renders Pane chrome with scope and source", async () => {
+    vi.spyOn(api, "fetchInsiderSummary").mockResolvedValue(payload);
+    render(
+      <MemoryRouter>
+        <InsiderActivitySummary symbol="GME" />
+      </MemoryRouter>,
+    );
+    // After data loads, chrome shows scope and source
+    expect(await screen.findByText("last 90 days")).toBeInTheDocument();
+    expect(screen.getByText(/SEC Form 4/)).toBeInTheDocument();
+  });
+
   it("renders negative NET with leading minus when disposed > acquired", async () => {
     vi.spyOn(api, "fetchInsiderSummary").mockResolvedValue({
       ...payload,

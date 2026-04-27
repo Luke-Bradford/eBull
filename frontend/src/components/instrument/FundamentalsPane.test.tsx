@@ -1,9 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { FundamentalsPane } from "@/components/instrument/FundamentalsPane";
 import * as api from "@/api/instruments";
 import type { InstrumentSummary } from "@/api/types";
+
+const navigateMock = vi.fn();
+vi.mock("react-router-dom", async () => {
+  const actual = await vi.importActual<typeof import("react-router-dom")>(
+    "react-router-dom",
+  );
+  return { ...actual, useNavigate: () => navigateMock };
+});
 
 function makeSummary(secXbrlActive: boolean): InstrumentSummary {
   return {
@@ -85,6 +94,40 @@ describe("FundamentalsPane", () => {
     expect(screen.getByText("Op income")).toBeInTheDocument();
     expect(screen.getByText("Net income")).toBeInTheDocument();
     expect(screen.getByText("Total debt")).toBeInTheDocument();
+  });
+
+  it("renders Open button when fundamentals tab is active and navigates to ?tab=financials", async () => {
+    vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
+      ((_symbol: string, query: { statement: string }) => {
+        if (query.statement === "income") {
+          return Promise.resolve({
+            symbol: "GME",
+            statement: "income",
+            period: "quarterly",
+            currency: "USD",
+            source: "sec_xbrl",
+            rows: incomeRows,
+          });
+        }
+        return Promise.resolve({
+          symbol: "GME",
+          statement: "balance",
+          period: "quarterly",
+          currency: "USD",
+          source: "sec_xbrl",
+          rows: balanceRows,
+        });
+      }) as never,
+    );
+    navigateMock.mockReset();
+    render(
+      <MemoryRouter>
+        <FundamentalsPane summary={makeSummary(true)} />
+      </MemoryRouter>,
+    );
+    const btn = await screen.findByRole("button", { name: /open/i });
+    await userEvent.click(btn);
+    expect(navigateMock).toHaveBeenCalledWith("/instrument/GME?tab=financials");
   });
 
   it("computes total debt as long_term_debt + short_term_debt per period", async () => {

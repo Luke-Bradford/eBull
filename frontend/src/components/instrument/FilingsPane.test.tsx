@@ -1,9 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { FilingsPane } from "@/components/instrument/FilingsPane";
 import * as filingsApi from "@/api/filings";
 import type { InstrumentSummary } from "@/api/types";
+
+const navigateMock = vi.fn();
+vi.mock("react-router-dom", async () => {
+  const actual = await vi.importActual<typeof import("react-router-dom")>(
+    "react-router-dom",
+  );
+  return { ...actual, useNavigate: () => navigateMock };
+});
 
 function makeSummary(opts: {
   filingsProvider?: string;
@@ -112,7 +121,7 @@ describe("FilingsPane", () => {
     expect(rows.length).toBe(6);
   });
 
-  it("footer link routes to /instrument/GME?tab=filings when filings capability is active", async () => {
+  it("renders Open button when filings tab is active and navigates to ?tab=filings", async () => {
     vi.spyOn(filingsApi, "fetchFilings").mockResolvedValue({
       instrument_id: 1,
       symbol: "GME",
@@ -121,19 +130,18 @@ describe("FilingsPane", () => {
       limit: 6,
       items: [],
     });
+    navigateMock.mockReset();
     render(
       <MemoryRouter>
         <FilingsPane instrumentId={1} symbol="GME" summary={makeSummary()} />
       </MemoryRouter>,
     );
-    const link = await screen.findByText(/View all filings/);
-    expect(link.closest("a")).toHaveAttribute(
-      "href",
-      "/instrument/GME?tab=filings",
-    );
+    const btn = await screen.findByRole("button", { name: /open/i });
+    await userEvent.click(btn);
+    expect(navigateMock).toHaveBeenCalledWith("/instrument/GME?tab=filings");
   });
 
-  it("hides footer link when filings capability is inactive", async () => {
+  it("hides Open button when filings capability is inactive", async () => {
     vi.spyOn(filingsApi, "fetchFilings").mockResolvedValue({
       instrument_id: 1,
       symbol: "GME",
@@ -153,6 +161,6 @@ describe("FilingsPane", () => {
     );
     // EmptyState renders; wait for async resolution
     await screen.findByText(/No filings/);
-    expect(screen.queryByText(/View all filings/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /open/i })).toBeNull();
   });
 });
