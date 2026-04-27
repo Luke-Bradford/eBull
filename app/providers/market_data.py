@@ -154,11 +154,12 @@ class MarketDataProvider(ABC):
 
         Ordering: oldest-first.
 
-        lookback_days is a hint, not a guarantee. The provider returns up
-        to that many trading days of data, which may be fewer calendar
-        days than requested due to weekends and holidays. The eToro
-        candle endpoint caps at 1000 candles per request; the current
-        400-day lookback is well within that limit.
+        lookback_days is a hint, not a guarantee. The provider returns
+        up to that many bars; the eToro endpoint caps at 1000 per
+        request and offers no from_date pagination, so values above
+        1000 silently truncate. Post-#603 the default is 1000 — about
+        4 calendar years of trading-day price points, which is the
+        maximum a single fetch can deliver.
         """
 
     @abstractmethod
