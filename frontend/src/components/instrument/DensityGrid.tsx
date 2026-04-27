@@ -64,14 +64,6 @@ export function DensityGrid({
           {thesisBlock}
         </div>
 
-        {/* Fundamentals pane: full-width row, gated on sec_xbrl capability */}
-        {summary.capabilities["fundamentals"]?.providers.includes("sec_xbrl") &&
-         summary.capabilities["fundamentals"].data_present["sec_xbrl"] === true ? (
-          <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm lg:col-span-3">
-            <FundamentalsPane summary={summary} />
-          </div>
-        ) : null}
-
         {/* Right column row 2 */}
         <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
           {hasSec ? (
@@ -85,6 +77,17 @@ export function DensityGrid({
         <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
           <FilingsPane instrumentId={summary.instrument_id} symbol={symbol} summary={summary} />
         </div>
+
+        {/* Fundamentals pane: full-width row after sec profile + filings,
+            gated on sec_xbrl capability. Placed after the row-2 right-column
+            panes so the chart/keyStats/thesis/secProfile/filings layout is
+            preserved regardless of whether fundamentals are active. */}
+        {summary.capabilities["fundamentals"]?.providers.includes("sec_xbrl") &&
+         summary.capabilities["fundamentals"].data_present["sec_xbrl"] === true ? (
+          <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm lg:col-span-3">
+            <FundamentalsPane summary={summary} />
+          </div>
+        ) : null}
 
         {/* Bottom row: segments spans 2 cols, news spans 1 col */}
         <div className="rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm lg:col-span-2">
