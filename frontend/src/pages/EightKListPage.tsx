@@ -18,16 +18,11 @@ import {
   EightKFilterStrip,
   type EightKFilters,
 } from "@/components/instrument/EightKFilterStrip";
+import { SEVERITY_TONE } from "@/components/instrument/eightKSeverity";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback, useEffect, useMemo } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-
-const SEVERITY_TONE: Record<string, string> = {
-  high: "bg-red-100 text-red-700",
-  medium: "bg-amber-100 text-amber-700",
-  low: "bg-slate-100 text-slate-600",
-};
 
 const HARD_LIMIT = 250;
 

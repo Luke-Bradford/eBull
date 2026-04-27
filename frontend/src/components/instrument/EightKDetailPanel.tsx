@@ -5,16 +5,11 @@
  */
 
 import type { EightKFiling } from "@/api/instruments";
+import { SEVERITY_TONE } from "@/components/instrument/eightKSeverity";
 
 export interface EightKDetailPanelProps {
   readonly filing: EightKFiling | null;
 }
-
-const SEVERITY_TONE: Record<string, string> = {
-  high: "bg-red-100 text-red-700",
-  medium: "bg-amber-100 text-amber-700",
-  low: "bg-slate-100 text-slate-600",
-};
 
 export function EightKDetailPanel({
   filing,

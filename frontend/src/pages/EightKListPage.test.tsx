@@ -74,18 +74,19 @@ describe("EightKListPage", () => {
       expect(screen.getByText("acc-1")).toBeTruthy();
     });
 
-    // Filter to high severity — low-severity row disappears
+    // Click the OTHER row (acc-2, low severity) — selection moves
+    fireEvent.click(screen.getByText("2025-12-04"));
+    await waitFor(() => {
+      expect(screen.getByText("acc-2")).toBeTruthy();
+    });
+
+    // Filter to high severity — acc-2 (low) disappears AND URL
+    // clears the now-stale accession; auto-select picks acc-1.
     const severitySelect = screen.getByRole("combobox");
     fireEvent.change(severitySelect, { target: { value: "high" } });
     await waitFor(() => {
       expect(screen.queryByText("8.01")).toBeNull();
     });
-
-    // acc-1 still selected after filter (it matches high severity)
-    expect(screen.getByText("acc-1")).toBeTruthy();
-
-    // Click a row to change selection
-    fireEvent.click(screen.getByText("2026-03-15"));
     await waitFor(() => {
       expect(screen.getByText("acc-1")).toBeTruthy();
     });
