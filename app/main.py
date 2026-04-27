@@ -342,10 +342,11 @@ app.include_router(business_summary_admin_router)
 # Debug router is dev/test-only — exposes operator-credentialled
 # pass-throughs to eToro (`/_debug/etoro-candles-probe`,
 # `/_debug/etoro-instrument-raw`) plus internal subscriber state
-# (`/_debug/etoro-ws`). Gating on `app_env` keeps these routes
-# off in production where they would be reachable unauthenticated
-# (PR #610 review BLOCKING).
-if settings.app_env != "prod":
+# (`/_debug/etoro-ws`). Allowlist (NOT denylist on `prod`) so future
+# environments like `staging`/`qa`/`uat` are denied by default and
+# never silently expose operator credentials. Add new envs here
+# explicitly when they need diagnostic access. PR #610 review.
+if settings.app_env in {"dev", "test", "local"}:
     app.include_router(debug_ws_router)
 app.include_router(capability_overrides_admin_router)
 app.include_router(filings_router)
