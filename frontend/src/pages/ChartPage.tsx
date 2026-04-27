@@ -432,7 +432,6 @@ export function ChartPage(): JSX.Element {
             value={compareInput}
             onChange={(e) => setCompareInput(e.target.value)}
             onKeyDown={handleCompareKeyDown}
-            onBlur={handleCompareSubmit}
             placeholder="Add ticker to compare..."
             className="rounded border border-slate-200 bg-white px-2 py-0.5 text-xs text-slate-700 placeholder-slate-400 focus:border-slate-400 focus:outline-none"
             data-testid="compare-input"

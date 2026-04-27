@@ -218,6 +218,10 @@ export function ChartWorkspaceCanvas({
   const indicatorValuesRef = useRef<Map<IndicatorId, Array<number | null>>>(new Map());
   // Compare mode normalized values keyed by symbol; primary is keyed by symbol prop.
   const compareNormRef = useRef<Map<string, Array<number | null>>>(new Map());
+  // Symbol → color, derived from compares prop order. Single source of
+  // truth so the tooltip and the LineSeries always agree on color even
+  // after add/remove cycles change Map insertion order.
+  const compareColorRef = useRef<Map<string, string>>(new Map());
   const [hover, setHover] = useState<RichHoverState | null>(null);
 
   const compareMode = compares.length > 0;
@@ -293,9 +297,12 @@ export function ChartWorkspaceCanvas({
         const primaryPct = primaryNorm ? (primaryNorm[idx] ?? null) : null;
         const comparePcts = Array.from(compareNormRef.current.entries())
           .filter(([k]) => k !== "__primary__")
-          .map(([sym, norm], colorIdx) => ({
+          .map(([sym, norm]) => ({
             symbol: sym,
-            color: COMPARE_COLORS[colorIdx % COMPARE_COLORS.length] ?? "#0ea5e9",
+            // Read color from the symbol-keyed ref populated when the
+            // LineSeries was created — keeps tooltip in sync with the
+            // actual rendered series even if Map iteration order drifts.
+            color: compareColorRef.current.get(sym) ?? "#0ea5e9",
             value: norm[idx] ?? null,
           }));
         const date = new Date(time * 1000).toISOString().slice(0, 10);
@@ -438,6 +445,7 @@ export function ChartWorkspaceCanvas({
         chart.removeSeries(series);
         compareLineRefs.current.delete(sym);
         compareNormRef.current.delete(sym);
+        compareColorRef.current.delete(sym);
       }
     }
 
@@ -446,6 +454,7 @@ export function ChartWorkspaceCanvas({
     // Add/update series for each compare symbol.
     compares.forEach((cs, colorIdx) => {
       const color = COMPARE_COLORS[colorIdx % COMPARE_COLORS.length] ?? "#0ea5e9";
+      compareColorRef.current.set(cs.symbol, color);
 
       const compareClean: NumericBar[] = cs.rows.flatMap((r) => {
         const time = dateToTime(r.date);
