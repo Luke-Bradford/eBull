@@ -40,7 +40,6 @@ import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
 import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
 import { Section, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
-import { PriceChart } from "@/components/instrument/PriceChart";
 import { ResearchTab } from "@/components/instrument/ResearchTab";
 import { RightRail } from "@/components/instrument/RightRail";
 import { SummaryStrip } from "@/components/instrument/SummaryStrip";
@@ -645,11 +644,11 @@ function InstrumentPageBody({
           Thesis generation failed: {thesisErr}
         </div>
       ) : null}
-      {/* 8/12 + 4/12 split: tab content left, right rail right. Right
-          rail is persistent across tab changes per the spec — filings
-          / peer / news are always in the operator's peripheral view. */}
-      <div className="grid gap-4 lg:grid-cols-12">
-        <div className="space-y-4 lg:col-span-8">
+      {/* Layout: Research tab is the full-width density grid (#559).
+          All other tabs keep the legacy 8/12 + 4/12 split with the
+          persistent RightRail (filings / peer / news preview). */}
+      {activeTab === "research" ? (
+        <div className="space-y-4">
           <nav className="flex gap-1 border-b border-slate-200">
             {tabs.map((tab) => (
               <button
@@ -666,40 +665,51 @@ function InstrumentPageBody({
               </button>
             ))}
           </nav>
-
-          {activeTab === "research" && (
-            <div className="space-y-4">
-              {/* Chart sits at the top of Research — the operator
-                  lands on the tab and sees price context before
-                  drilling into thesis + stats. Slice B of #316. */}
-              <div className="rounded-md border border-slate-200 bg-white p-3 shadow-sm">
-                <PriceChart symbol={symbol} />
-              </div>
-              <ResearchTab
-                summary={summary}
-                thesis={thesisAsync.data}
-                thesisErrored={thesisErrSticky}
-              />
-            </div>
-          )}
-          {activeTab === "financials" && <FinancialsTab symbol={symbol} />}
-          {activeTab === "positions" && (
-            <PositionsTab symbol={symbol} instrumentId={summary.instrument_id} />
-          )}
-          {activeTab === "news" && <NewsTab instrumentId={summary.instrument_id} />}
-          {activeTab === "filings" && (
-            <FilingsTab instrumentId={summary.instrument_id} />
-          )}
-        </div>
-        <div className="lg:col-span-4">
-          <RightRail
-            instrumentId={summary.instrument_id}
-            sector={summary.identity.sector}
-            currentSymbol={summary.identity.symbol}
-            filingsActive={hasActiveCapability(summary, "filings")}
+          <ResearchTab
+            summary={summary}
+            thesis={thesisAsync.data}
+            thesisErrored={thesisErrSticky}
           />
         </div>
-      </div>
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-12">
+          <div className="space-y-4 lg:col-span-8">
+            <nav className="flex gap-1 border-b border-slate-200">
+              {tabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  className={`px-3 py-2 text-sm ${
+                    activeTab === tab.id
+                      ? "border-b-2 border-blue-600 font-medium text-blue-700"
+                      : "text-slate-500 hover:text-slate-700"
+                  }`}
+                  onClick={() => setActiveTab(tab.id)}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </nav>
+
+            {activeTab === "financials" && <FinancialsTab symbol={symbol} />}
+            {activeTab === "positions" && (
+              <PositionsTab symbol={symbol} instrumentId={summary.instrument_id} />
+            )}
+            {activeTab === "news" && <NewsTab instrumentId={summary.instrument_id} />}
+            {activeTab === "filings" && (
+              <FilingsTab instrumentId={summary.instrument_id} />
+            )}
+          </div>
+          <div className="lg:col-span-4">
+            <RightRail
+              instrumentId={summary.instrument_id}
+              sector={summary.identity.sector}
+              currentSymbol={summary.identity.symbol}
+              filingsActive={hasActiveCapability(summary, "filings")}
+            />
+          </div>
+        </div>
+      )}
 
       {addOpen ? (
         <OrderEntryModal
