@@ -159,10 +159,66 @@ function isoToEpochSeconds(iso: string): number | null {
 }
 
 /**
+ * Fill gaps within a contiguous market session with carry-forward
+ * synthetic bars so the chart renders continuously even when the
+ * upstream feed (eToro) skips minutes during illiquid AH/PM
+ * windows. Industry-standard pattern — TradingView/Robinhood do
+ * the same when the broker feed has sparse coverage.
+ *
+ * Heuristics:
+ *   * Only fills gaps shorter than `maxGapSeconds` (default = 2h
+ *     for intraday, 7d for daily). Longer gaps = market closed /
+ *     weekend / holiday, leave intact.
+ *   * Synthetic bars carry the prior close as O = H = L = C and
+ *     `volume = "0"`. The chart's volume series renders these as
+ *     zero-height bars so the operator sees the no-liquidity
+ *     marker visually.
+ *
+ * Pure function — bars in, bars out, no I/O.
+ */
+export function fillIntrasessionGaps(
+  bars: ReadonlyArray<NormalisedBar>,
+  bucketSeconds: number,
+  maxGapSeconds: number,
+): NormalisedBar[] {
+  if (bars.length < 2) return bars.slice();
+  const out: NormalisedBar[] = [bars[0]!];
+  for (let i = 1; i < bars.length; i++) {
+    const prev = bars[i - 1]!;
+    const curr = bars[i]!;
+    const gap = curr.time - prev.time;
+    // Inter-bar gap of one bucket is the normal contiguous case.
+    // Anything bigger is a missed-bar window we may want to fill.
+    if (gap > bucketSeconds && gap <= maxGapSeconds) {
+      const carry = prev.close;
+      for (let t = prev.time + bucketSeconds; t < curr.time; t += bucketSeconds) {
+        out.push({
+          time: t,
+          open: carry,
+          high: carry,
+          low: carry,
+          close: carry,
+          volume: "0",
+        });
+      }
+    }
+    out.push(curr);
+  }
+  return out;
+}
+
+/**
  * Resolve a chart range to bars, dispatched to the correct endpoint.
  * Returns `null` for any row whose timestamp can't be parsed; the
  * chart's existing valid-row gate filters those out.
  */
+// Max gap to backfill, by endpoint. Anything bigger is treated as
+// "market closed" and left as a visual gap.
+//   * Intraday: 2 hours covers post-RTH AH lulls + lunch lulls
+//   * Daily: 7 days covers weekends + long weekends
+const _INTRADAY_MAX_GAP_S = 2 * 60 * 60;
+const _DAILY_MAX_GAP_S = 7 * 24 * 60 * 60;
+
 export async function fetchChartCandles(
   symbol: string,
   range: ChartRange,
@@ -170,33 +226,8 @@ export async function fetchChartCandles(
   const plan = CHART_RANGE_PLAN[range];
   if (plan.kind === "intraday") {
     const res = await fetchInstrumentIntradayCandles(symbol, plan.interval, plan.count);
-    return {
-      symbol: res.symbol,
-      range,
-      kind: "intraday",
-      rows: res.rows.flatMap((b) => {
-        const time = isoToEpochSeconds(b.timestamp);
-        if (time === null) return [];
-        return [
-          {
-            time,
-            open: b.open,
-            high: b.high,
-            low: b.low,
-            close: b.close,
-            volume: b.volume === null ? null : String(b.volume),
-          },
-        ];
-      }),
-    };
-  }
-  const res = await fetchInstrumentCandles(symbol, plan.range);
-  return {
-    symbol: res.symbol,
-    range,
-    kind: "daily",
-    rows: res.rows.flatMap((b) => {
-      const time = dateToEpochSeconds(b.date);
+    const raw = res.rows.flatMap((b) => {
+      const time = isoToEpochSeconds(b.timestamp);
       if (time === null) return [];
       return [
         {
@@ -205,9 +236,37 @@ export async function fetchChartCandles(
           high: b.high,
           low: b.low,
           close: b.close,
-          volume: b.volume,
+          volume: b.volume === null ? null : String(b.volume),
         },
       ];
-    }),
+    });
+    const bucketSeconds = INTERVAL_SECONDS[plan.interval] ?? 60;
+    return {
+      symbol: res.symbol,
+      range,
+      kind: "intraday",
+      rows: fillIntrasessionGaps(raw, bucketSeconds, _INTRADAY_MAX_GAP_S),
+    };
+  }
+  const res = await fetchInstrumentCandles(symbol, plan.range);
+  const raw = res.rows.flatMap((b) => {
+    const time = dateToEpochSeconds(b.date);
+    if (time === null) return [];
+    return [
+      {
+        time,
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
+        volume: b.volume,
+      },
+    ];
+  });
+  return {
+    symbol: res.symbol,
+    range,
+    kind: "daily",
+    rows: fillIntrasessionGaps(raw, 86400, _DAILY_MAX_GAP_S),
   };
 }
