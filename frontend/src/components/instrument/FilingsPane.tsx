@@ -1,8 +1,8 @@
 /**
  * FilingsPane — high-signal filings list (8-K + 10-K + 10-Q + foreign
  * issuer equivalents) on the instrument page density grid (#559 / #567).
- * Each row links to the corresponding drilldown route. A "View all
- * filings →" footer routes to the canonical Filings tab when that tab
+ * Each row links to the corresponding drilldown route. An "Open →" button
+ * in the pane header routes to the canonical Filings tab when that tab
  * is active for the instrument.
  *
  * The SIGNIFICANT_FILING_TYPES filter is applied only when the instrument
@@ -12,11 +12,12 @@
 
 import { fetchFilings } from "@/api/filings";
 import type { FilingsListResponse, InstrumentSummary } from "@/api/types";
-import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { Pane } from "@/components/instrument/Pane";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 const ROW_LIMIT = 6;
 
@@ -69,11 +70,14 @@ export function FilingsPane({
   symbol,
   summary,
 }: FilingsPaneProps): JSX.Element {
+  const navigate = useNavigate();
   const filingsCell = summary.capabilities.filings;
   const isSecEdgar =
     filingsCell !== undefined && filingsCell.providers.includes("sec_edgar");
   const typeFilter = isSecEdgar ? SIGNIFICANT_FILING_TYPES : undefined;
   const filingsTabActive = hasActiveFilingsCapability(summary);
+
+  const sourceProviders = filingsCell?.providers ?? [];
 
   const state = useAsync<FilingsListResponse>(
     useCallback(
@@ -88,7 +92,16 @@ export function FilingsPane({
   );
 
   return (
-    <Section title="Recent filings">
+    <Pane
+      title="Recent filings"
+      scope="high-signal types"
+      source={{ providers: sourceProviders }}
+      onExpand={
+        filingsTabActive
+          ? () => navigate(`/instrument/${encodeURIComponent(symbol)}?tab=filings`)
+          : undefined
+      }
+    >
       {state.loading ? (
         <SectionSkeleton rows={5} />
       ) : state.error !== null ? (
@@ -131,16 +144,6 @@ export function FilingsPane({
           })}
         </ul>
       )}
-      {filingsTabActive && (
-        <div className="mt-2 border-t border-slate-100 pt-1.5 text-right">
-          <Link
-            to={`/instrument/${encodeURIComponent(symbol)}?tab=filings`}
-            className="text-[11px] text-sky-700 hover:underline"
-          >
-            View all filings →
-          </Link>
-        </div>
-      )}
-    </Section>
+    </Pane>
   );
 }
