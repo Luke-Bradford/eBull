@@ -917,7 +917,14 @@ export function ChartCanvas({
       <div
         ref={containerRef}
         data-testid={`price-chart-${symbol}`}
-        className={containerClassName ?? "h-full min-h-[340px] w-full flex-1"}
+        // Default is the safe block-layout sizing (works under any
+        // parent). Callers that mount the chart inside a flex/grid
+        // cell and want fillHeight semantics MUST pass
+        // `containerClassName="h-full min-h-[340px] w-full flex-1"`
+        // explicitly (PriceChart's wrapper does so above). Switching
+        // the default to a flex-dependent string would silently
+        // collapse the canvas to 340px under any block-layout caller.
+        className={containerClassName ?? "h-[340px] w-full"}
       />
       <SessionBands
         chartRef={chartRef}

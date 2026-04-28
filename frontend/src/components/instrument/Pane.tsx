@@ -45,15 +45,23 @@ export function Pane({
   children,
 }: PaneProps): JSX.Element {
   const clickable = onCardClick !== undefined;
-  const fillCls = fillHeight ? "flex h-full flex-col" : "";
   const childCls = fillHeight ? "mt-2 flex min-h-0 flex-1 flex-col" : "mt-2";
+  // Build the article className from atomic segments so optional
+  // segments do not leave double spaces when omitted (e.g.
+  // `shadow-sm  ` when fillHeight is off + non-clickable + no
+  // `className` override). Cheap to read, matches the conditional
+  // class pattern used elsewhere in this file's siblings.
+  const articleCls = [
+    "rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm",
+    fillHeight ? "flex h-full flex-col" : null,
+    clickable ? "cursor-pointer transition hover:border-slate-300 hover:shadow-md" : null,
+    className ?? null,
+  ]
+    .filter((x): x is string => x !== null)
+    .join(" ");
   return (
     <article
-      className={`rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm ${fillCls} ${
-        clickable
-          ? "cursor-pointer transition hover:border-slate-300 hover:shadow-md"
-          : ""
-      } ${className ?? ""}`}
+      className={articleCls}
       onClick={clickable ? onCardClick : undefined}
       data-clickable={clickable ? "true" : undefined}
     >
