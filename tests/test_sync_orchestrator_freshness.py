@@ -300,12 +300,10 @@ class TestFundamentalsIsFresh:
         # snapshot query would otherwise silently assert on the
         # wrong call (#639 WARNING).
         snapshot_query_calls = [
-            c for c in conn.execute.call_args_list
-            if c.args and "external_identifiers" in c.args[0]
+            c for c in conn.execute.call_args_list if c.args and "external_identifiers" in c.args[0]
         ]
         assert len(snapshot_query_calls) == 1, (
-            f"expected exactly one snapshot-cohort execute, "
-            f"got {len(snapshot_query_calls)}"
+            f"expected exactly one snapshot-cohort execute, got {len(snapshot_query_calls)}"
         )
         snapshot_query = snapshot_query_calls[0].args[0]
         assert "ei.provider = 'sec'" in snapshot_query

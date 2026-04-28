@@ -224,13 +224,8 @@ def test_cik_lookup_query_filters_to_primary_cik(monkeypatch) -> None:
     # Content filter rather than positional index: a future refactor
     # that inserts another conn.execute() earlier in the flow would
     # otherwise silently assert on the wrong query (#639 WARNING).
-    cik_query_calls = [
-        c for c in fake_conn.execute.call_args_list
-        if c.args and "external_identifiers" in c.args[0]
-    ]
-    assert len(cik_query_calls) == 1, (
-        f"expected exactly one cik-lookup execute, got {len(cik_query_calls)}"
-    )
+    cik_query_calls = [c for c in fake_conn.execute.call_args_list if c.args and "external_identifiers" in c.args[0]]
+    assert len(cik_query_calls) == 1, f"expected exactly one cik-lookup execute, got {len(cik_query_calls)}"
     cik_query = cik_query_calls[0].args[0]
     assert "ei.provider = 'sec'" in cik_query
     assert "ei.identifier_type = 'cik'" in cik_query
