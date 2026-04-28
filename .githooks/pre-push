@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#
+# Pre-push gate. Runs lint + format-check + typecheck before any push
+# leaves the machine, so a CI ruff/pyright failure that triggers a
+# fix-and-repush cycle (which re-spends Anthropic API credits on the
+# review bot) cannot happen by default.
+#
+# Pytest is intentionally excluded — at ~110s it dominates the gate
+# wall-clock and CI runs it anyway. Lint + format + pyright each run
+# in <5s and have caught every recent CI failure on this repo.
+#
+# Wire once per clone:
+#   git config core.hooksPath .githooks
+#
+# Bypass for emergencies:
+#   git push --no-verify
+# (use sparingly — the entire point of this hook is to stop the
+# fix-and-repush cycle that wastes review-bot credits).
+
+set -euo pipefail
+
+echo "==> Pre-push gate: ruff check"
+uv run ruff check .
+
+echo "==> Pre-push gate: ruff format --check"
+uv run ruff format --check .
+
+echo "==> Pre-push gate: pyright"
+uv run pyright
+
+echo "==> Pre-push gate: green. Pushing."

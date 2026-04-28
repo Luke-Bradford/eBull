@@ -167,6 +167,18 @@ uv run pytest
 
 All four must pass.
 
+A repo pre-push hook at `.githooks/pre-push` enforces the first
+three automatically. Wire once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The hook skips pytest (~110s) — CI runs it. Bypass with `--no-verify`
+only for genuine emergencies; the hook exists to stop the
+push-fail-fix-repush cycle that re-spends Anthropic credits on the
+review bot.
+
 `uv run pytest` includes `tests/smoke/test_app_boots.py`, which drives
 the FastAPI lifespan through `TestClient` against the real dev DB.
 This is the gate that catches lifespan-only failures (bad SQL in

@@ -35,6 +35,21 @@ jobs:
       - name: Pyright typecheck
         run: uv run pyright
 
+      - name: Pre-push hook is executable
+        # Hook is committed at .githooks/pre-push and wired via
+        # ``git config core.hooksPath .githooks``. On Windows, a
+        # local ``chmod +x`` does not update git's stored mode —
+        # the file ships as 100644 and the hook silently never
+        # runs, defeating the whole purpose of committing it.
+        # PR #642 review BLOCKING.
+        run: |
+          mode=$(git ls-files -s .githooks/pre-push | awk '{print $1}')
+          if [ "$mode" != "100755" ]; then
+            echo "::error::.githooks/pre-push is mode $mode, expected 100755"
+            echo "Fix: git update-index --chmod=+x .githooks/pre-push"
+            exit 1
+          fi
+
   pytest:
     # #247: run backend test suite. Postgres service is required; the
     # smoke test (tests/smoke/test_app_boots.py) drives the FastAPI

@@ -1045,3 +1045,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: SQL-shape regression tests asserted on `mock.call_args_list[1].args[0]` (the second mock-conn execute call). A future refactor that inserts an extra `conn.execute()` earlier in the flow silently shifts the index, so the test asserts on the wrong call and the actual SQL filter regression goes undetected. The test stays green for the wrong reason.
 - Prevention: Identify the target call by content filter, not position. Use `[c for c in mock.call_args_list if c.args and "<distinguishing token>" in c.args[0]]` and assert exactly one match before reading the SQL. The distinguishing token should be a noun the query is meant to use (e.g. `external_identifiers`, the table the predicate is enforcing) — not a generic SQL keyword. At self-review: grep `call_args_list\[\d\]\.args\[0\]` and convert each to a content-filter form.
 - Enforced in: this prevention log; PR #639 fix replaces both positional indexes with content filters in `test_daily_research_refresh_dedupe.py` and `test_sync_orchestrator_freshness.py`.
+
+---
+
+### Committed git hooks must be 100755 in the index
+
+- First seen in: #642 (#111 pre-push gate hook).
+- Symptom: `.githooks/pre-push` was created on Windows and `chmod +x` made it executable on the local FS, but git's stored mode for the file was still `100644` because `core.fileMode` is false on Windows by default. After `git config core.hooksPath .githooks`, git did not execute the hook (non-executable) and the entire pre-push gate silently never ran on subsequent pushes — the very fix-and-repush cycle the hook was supposed to prevent could continue undetected.
+- Prevention: When committing a git hook, fix the mode in git's index explicitly with `git update-index --chmod=+x <path>` (works regardless of OS). At self-review: `git ls-files -s <path>` must show `100755`. The repo CI lint job has a guard that fails when `.githooks/pre-push` is anything other than `100755`, so a re-added non-executable hook is caught automatically.
+- Enforced in: this prevention log; PR #642 fix sets the mode in the index AND adds the CI guard at `.github/workflows/ci.yml`.

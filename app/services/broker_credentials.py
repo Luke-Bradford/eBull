@@ -27,13 +27,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 import psycopg
 import psycopg.errors
 import psycopg.rows
 from psycopg import sql
+from psycopg_pool import ConnectionPool
 
 from app.security.secrets_crypto import (
     KEY_VERSION_CURRENT,
@@ -334,6 +335,81 @@ def _write_access_log(
     )
 
 
+_AUDIT_POOL_TIMEOUT_S = 5.0
+"""How long ``_write_durable_audit`` waits for a side-connection
+slot before giving up and logging the audit drop. Default
+``ConnectionPool.connection()`` timeout is 30s, which would block
+a credential-load handler that long under pool saturation. 5s
+fails fast — ADR 0001 prefers an alarmed missing audit over a
+30s-blocked credential load."""
+
+
+def _write_durable_audit(
+    pool: ConnectionPool[psycopg.Connection[Any]],
+    *,
+    credential_id: UUID | None,
+    operator_id: UUID,
+    caller: str,
+    success: bool,
+    failure_reason: str | None,
+) -> None:
+    """Write the audit row on a side connection, committed independently
+    of the caller's transaction (#111).
+
+    The caller's transaction may roll back for unrelated reasons (a
+    later step in a trade flow fails, an exception bubbles past the
+    DB layer). If the audit row were on that same transaction, it
+    would be lost — and ADR 0001 requires audit-on-every-decryption
+    independent of caller outcome. A side-connection write is the
+    cheapest way to achieve that durability invariant.
+
+    A side-connection write that itself fails is logged but does not
+    propagate: a broken audit pipeline must not block the caller's
+    primary work (the credential load may still be valid; surfacing
+    the load failure is more useful than the audit failure). The
+    operator-facing alarm comes from the structured log line, which
+    is captured by the standard observability layer.
+
+    Pool sizing: production callers should pass the DEDICATED
+    audit pool from ``app.state.audit_pool`` (created in the
+    lifespan, sized min=1/max=2). Passing the request pool that
+    backs ``get_conn`` would risk losing audit rows under request-
+    pool saturation, since each handler already holds one slot for
+    the read and would need a second for the audit. The dedicated
+    pool isolates audit acquisition from request-pool pressure.
+
+    ``_AUDIT_POOL_TIMEOUT_S`` is a short fail-fast cap (5s vs the
+    30s default) so even on the dedicated pool, a stuck audit
+    write does not block the caller indefinitely — ADR 0001
+    prefers an alarmed missing audit over a 30s-blocked credential
+    load.
+    """
+    try:
+        with pool.connection(timeout=_AUDIT_POOL_TIMEOUT_S) as audit_conn:
+            with audit_conn.cursor() as cur:
+                _write_access_log(
+                    cur,
+                    credential_id=credential_id,
+                    operator_id=operator_id,
+                    caller=caller,
+                    success=success,
+                    failure_reason=failure_reason,
+                )
+            audit_conn.commit()
+    except Exception:
+        # ADR 0001 prefers an alarmed missing audit over a blocked
+        # credential load. The structured log is the operator
+        # signal; the load proceeds.
+        logger.exception(
+            "broker_credentials._write_durable_audit: side-connection audit failed "
+            "operator_id=%s caller=%s success=%s reason=%s",
+            operator_id,
+            caller,
+            success,
+            failure_reason,
+        )
+
+
 def load_credential_for_provider_use(
     conn: psycopg.Connection[object],
     *,
@@ -342,6 +418,7 @@ def load_credential_for_provider_use(
     label: str,
     environment: str,
     caller: str,
+    audit_pool: ConnectionPool[psycopg.Connection[Any]] | None = None,
 ) -> str:
     """Decrypt and return the plaintext secret for internal provider use.
 
@@ -360,27 +437,19 @@ def load_credential_for_provider_use(
       flush whatever the caller had accumulated (see review-prevention
       -log entry on mid-transaction commits in service functions).
 
-      *Audit durability*: the audit row is written on the caller's
-      transaction. If the caller commits, the audit row is durable. If
-      the caller rolls back, the audit row is lost along with the
-      caller's other changes. **This applies to all three audit
-      paths**: success (`UPDATE last_used_at` + success log),
-      `not_found` failure (failure log only), and `decrypt_failed`
-      failure (failure log only). Even on the failure paths, the
-      function does not commit -- the caller must commit if it wants
-      the failure record to outlive its own transaction. Issue #111
-      tracks the side-connection durable-audit followup.
+      *Audit durability* (#111): when ``audit_pool`` is supplied,
+      the audit row is written on a SIDE connection from that pool
+      and committed independently of the caller's transaction.
+      ADR 0001 requires audit-on-every-decryption to be durable
+      regardless of caller outcome. Trade-path callers MUST pass
+      ``audit_pool`` to satisfy this invariant.
 
-      Callers on a trade path MUST commit the audit row before
-      performing the external broker call -- the documented pattern
-      is::
-
-          secret = load_credential_for_provider_use(conn, ...)
-          conn.commit()                  # audit row durable
-          place_order(secret, ...)       # external side effect
-
-      A future "always-durable audit on a side connection" mode is
-      tracked separately and is out of scope for this ticket.
+      When ``audit_pool`` is None, the audit row is written on the
+      caller's transaction (legacy back-compat). The caller is
+      responsible for ``conn.commit()`` if they want the row to
+      outlive their transaction. New callers should always pass
+      ``audit_pool``; the None path exists only so existing tests
+      that mock the connection can keep working.
 
     Raises:
       CredentialValidationError -- unsupported provider / label /
@@ -413,14 +482,24 @@ def load_credential_for_provider_use(
         )
         row = cur.fetchone()
         if row is None:
-            _write_access_log(
-                cur,
-                credential_id=None,
-                operator_id=operator_id,
-                caller=caller_clean,
-                success=False,
-                failure_reason="not_found",
-            )
+            if audit_pool is not None:
+                _write_durable_audit(
+                    audit_pool,
+                    credential_id=None,
+                    operator_id=operator_id,
+                    caller=caller_clean,
+                    success=False,
+                    failure_reason="not_found",
+                )
+            else:
+                _write_access_log(
+                    cur,
+                    credential_id=None,
+                    operator_id=operator_id,
+                    caller=caller_clean,
+                    success=False,
+                    failure_reason="not_found",
+                )
             raise CredentialNotFound(f"no active credential for ({provider_norm!r}, {label_norm!r}, {env_norm!r})")
 
         try:
@@ -432,26 +511,46 @@ def load_credential_for_provider_use(
                 key_version=row["key_version"],  # type: ignore[arg-type]
             )
         except CredentialDecryptError:
-            _write_access_log(
-                cur,
-                credential_id=row["id"],  # type: ignore[arg-type]
-                operator_id=operator_id,
-                caller=caller_clean,
-                success=False,
-                failure_reason="decrypt_failed",
-            )
+            if audit_pool is not None:
+                _write_durable_audit(
+                    audit_pool,
+                    credential_id=row["id"],  # type: ignore[arg-type]
+                    operator_id=operator_id,
+                    caller=caller_clean,
+                    success=False,
+                    failure_reason="decrypt_failed",
+                )
+            else:
+                _write_access_log(
+                    cur,
+                    credential_id=row["id"],  # type: ignore[arg-type]
+                    operator_id=operator_id,
+                    caller=caller_clean,
+                    success=False,
+                    failure_reason="decrypt_failed",
+                )
             raise
 
         cur.execute(
             "UPDATE broker_credentials SET last_used_at = now() WHERE id = %s",
             (row["id"],),
         )
-        _write_access_log(
-            cur,
-            credential_id=row["id"],  # type: ignore[arg-type]
-            operator_id=operator_id,
-            caller=caller_clean,
-            success=True,
-            failure_reason=None,
-        )
+        if audit_pool is not None:
+            _write_durable_audit(
+                audit_pool,
+                credential_id=row["id"],  # type: ignore[arg-type]
+                operator_id=operator_id,
+                caller=caller_clean,
+                success=True,
+                failure_reason=None,
+            )
+        else:
+            _write_access_log(
+                cur,
+                credential_id=row["id"],  # type: ignore[arg-type]
+                operator_id=operator_id,
+                caller=caller_clean,
+                success=True,
+                failure_reason=None,
+            )
     return plaintext
