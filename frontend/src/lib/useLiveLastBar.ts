@@ -174,6 +174,31 @@ export interface UseLiveLastBarParams {
   /** Drop after-hours ticks (16:00–20:00 ET). Same contract as
    *  `acceptPre`. */
   acceptAh?: boolean;
+  /**
+   * Fired after the aggregator applies a tick to the visible series
+   * (post-`series.update`). Lets the caller mirror the live state into
+   * any state derived from the historical fetch — e.g. PriceChart's
+   * setData fingerprint, which would otherwise treat the next REST
+   * refetch (when it catches up to the live bar) as a fresh dataset
+   * and trigger a wholesale repaint flash. The argument is the bar
+   * the aggregator just rendered: `kind: "update"` mutated the
+   * historical last bar in place, `kind: "append"` added a fresh
+   * bucket beyond it. Open/high/low/close come straight from
+   * aggregateTick's output. Volume is null because the tick stream
+   * does not carry per-bar volume — the caller must keep its own
+   * (e.g. carry the historical volume forward on update, leave
+   * volume null on append until REST backfills).
+   */
+  onApplied?: (applied: AppliedTick) => void;
+}
+
+export interface AppliedTick {
+  kind: "update" | "append";
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
 }
 
 export interface UseLiveLastBarResult {
@@ -213,7 +238,13 @@ export function useLiveLastBar({
   refs,
   acceptPre = true,
   acceptAh = true,
+  onApplied,
 }: UseLiveLastBarParams): UseLiveLastBarResult {
+  // Stash in a ref so the apply effect doesn't re-fire when the
+  // caller passes an inline callback. Pattern matches the `refs`
+  // contract above — caller can pass a fresh function each render.
+  const onAppliedRef = useRef(onApplied);
+  onAppliedRef.current = onApplied;
   const tick = useLiveTick(instrumentId);
   const { connected, unavailable } = useLiveQuoteConnection();
   const liveBarRef = useRef<LiveBarState | null>(null);
@@ -308,6 +339,20 @@ export function useLiveLastBar({
     const areaSeries = refs.area !== null ? refs.area.current : null;
     if (areaSeries !== null) {
       areaSeries.update({ time: time as Time, value: result.next.close });
+    }
+    // Notify the caller post-apply so it can mirror the live state
+    // into derived caches (e.g. PriceChart's setData fingerprint).
+    // Read through the ref so an inline callback identity change in
+    // the parent does not refire this effect.
+    if (onAppliedRef.current !== undefined) {
+      onAppliedRef.current({
+        kind: result.verdict,
+        time: result.next.time,
+        open: result.next.open,
+        high: result.next.high,
+        low: result.next.low,
+        close: result.next.close,
+      });
     }
     // ESLint: refs.* are MutableRefObjects with stable identity, so
     // omitting them from deps is correct. The effect must re-fire only

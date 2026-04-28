@@ -74,6 +74,16 @@ vi.mock("lightweight-charts", () => {
     timeScale: vi.fn(() => ({
       fitContent: libState.fitContent,
       applyOptions: libState.timeScaleApply,
+      // SessionBands subscribes to range changes when intraday + bands
+      // enabled. Tests don't drive bands rendering, but the listener
+      // attach happens on mount — provide no-op subscribe/unsubscribe
+      // so the chart can mount without throwing.
+      subscribeVisibleLogicalRangeChange: vi.fn(),
+      unsubscribeVisibleLogicalRangeChange: vi.fn(),
+      logicalToCoordinate: vi.fn(() => 0),
+      timeToCoordinate: vi.fn(() => 0),
+      getVisibleLogicalRange: vi.fn(() => null),
+      getVisibleRange: vi.fn(() => null),
     })),
     subscribeCrosshairMove: vi.fn((h: (p: unknown) => void) => {
       libState.crosshairHandlers.push(h);
@@ -406,6 +416,280 @@ describe("PriceChart — data states", () => {
       expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
     });
     expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
+  });
+});
+
+describe("PriceChart — no-flicker refetch (#650)", () => {
+  it("skips wholesale series.setData when the 60s backstop refetch returns identical bars", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mockedFetch.mockResolvedValue(bars(twoValidRows()));
+      render(
+        <MemoryRouter>
+          <PriceChart symbol="AAPL" />
+        </MemoryRouter>,
+      );
+      await waitFor(() => {
+        expect(libState.candleSetData).toHaveBeenCalledTimes(1);
+      });
+
+      // Two backstop ticks with identical data — fingerprint guard
+      // must skip the wholesale setData (the visible-flash path).
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(libState.candleSetData).toHaveBeenCalledTimes(1);
+      expect(libState.lineSetData).toHaveBeenCalledTimes(1);
+      expect(libState.areaSetData).toHaveBeenCalledTimes(1);
+      expect(libState.volumeSetData).toHaveBeenCalledTimes(1);
+
+      // Now the backstop returns a revised last bar — fingerprint
+      // changes, wholesale setData fires once to pick up the revision.
+      const [first, last] = twoValidRows();
+      mockedFetch.mockResolvedValue(bars([first!, { ...last!, close: "999" }]));
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      await waitFor(() => {
+        expect(libState.candleSetData).toHaveBeenCalledTimes(2);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Each row below is a single OHLCV field on the LAST bar that the
+  // fingerprint must not false-negative on. If any of these slip past
+  // the guard the chart will freeze on stale data after a backstop
+  // refetch — the original short fingerprint missed open/high/low and
+  // any interior-bar revision.
+  const lastBarMutations: Array<[label: string, mutate: (b: NormalisedBar) => NormalisedBar]> = [
+    ["open changed", (b) => ({ ...b, open: "888" })],
+    ["high changed", (b) => ({ ...b, high: "888" })],
+    ["low changed", (b) => ({ ...b, low: "0.5" })],
+    ["volume changed", (b) => ({ ...b, volume: "9999" })],
+  ];
+
+  it.each(lastBarMutations)(
+    "wholesale setData fires when the last bar's %s",
+    async (_label, mutate) => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const initial = twoValidRows();
+        mockedFetch.mockResolvedValue(bars(initial));
+        render(
+          <MemoryRouter>
+            <PriceChart symbol="AAPL" />
+          </MemoryRouter>,
+        );
+        await waitFor(() => {
+          expect(libState.candleSetData).toHaveBeenCalledTimes(1);
+        });
+
+        const mutated = [initial[0]!, mutate(initial[1]!)];
+        mockedFetch.mockResolvedValue(bars(mutated));
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        await waitFor(() => {
+          expect(libState.candleSetData).toHaveBeenCalledTimes(2);
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("wholesale setData fires when an interior bar's close changes (volume coloring depends on prior close)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      // Three bars so we have a true interior bar between first/last.
+      const T0 = Math.floor(Date.UTC(2026, 3, 9) / 1000);
+      const initial: NormalisedBar[] = [
+        { time: T0, open: "98", high: "100", low: "97", close: "99", volume: "800" },
+        { time: T1, open: "100", high: "102", low: "99", close: "101", volume: "1000" },
+        { time: T2, open: "101", high: "104", low: "100", close: "103", volume: "1500" },
+      ];
+      mockedFetch.mockResolvedValue(bars(initial));
+      render(
+        <MemoryRouter>
+          <PriceChart symbol="AAPL" />
+        </MemoryRouter>,
+      );
+      await waitFor(() => {
+        expect(libState.candleSetData).toHaveBeenCalledTimes(1);
+      });
+
+      // Mutate ONLY the middle bar's close — first/last unchanged.
+      // The volume bar's color depends on close >= prev close, so a
+      // missed interior change leaves stale red/green coloring.
+      const mutated = [initial[0]!, { ...initial[1]!, close: "97" }, initial[2]!];
+      mockedFetch.mockResolvedValue(bars(mutated));
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      await waitFor(() => {
+        expect(libState.candleSetData).toHaveBeenCalledTimes(2);
+        expect(libState.volumeSetData).toHaveBeenCalledTimes(2);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("barFingerprint + mergeLiveBarIntoClean (#650 helpers)", () => {
+  // These pure helpers underpin the no-flicker guarantee: the same
+  // fingerprint formula must be used for the REST setData path AND
+  // the SSE onApplied path, otherwise REST converging on the live
+  // bar would be misclassified as new data and trigger a wholesale
+  // setData flash. Tests below pin both formulas + the merge rules.
+
+  it("barFingerprint distinguishes range, length, and any field on any bar", async () => {
+    const { barFingerprint } = await import("./PriceChart");
+    const T0 = Math.floor(Date.UTC(2026, 3, 9) / 1000);
+    const Tn = Math.floor(Date.UTC(2026, 3, 10) / 1000);
+    const bar = (over: Partial<{ time: number; o: number; h: number; l: number; c: number; v: number }> = {}) => ({
+      time: (over.time ?? T0) as number,
+      open: over.o ?? 100,
+      high: over.h ?? 102,
+      low: over.l ?? 99,
+      close: over.c ?? 101,
+      volume: over.v ?? 1000,
+    });
+    const base = [bar(), bar({ time: Tn, c: 103 })];
+    const baseFp = barFingerprint("1m", base as never);
+
+    expect(baseFp).toBe(barFingerprint("1m", [...base] as never));
+    expect(baseFp).not.toBe(barFingerprint("1y", base as never));
+    expect(baseFp).not.toBe(barFingerprint("1m", [...base, bar({ time: Tn + 60 })] as never));
+    expect(baseFp).not.toBe(barFingerprint("1m", [bar({ o: 99 }), base[1]!] as never));
+    expect(baseFp).not.toBe(barFingerprint("1m", [base[0]!, bar({ time: Tn, c: 999 })] as never));
+    expect(baseFp).not.toBe(barFingerprint("1m", [base[0]!, bar({ time: Tn, v: 9999 })] as never));
+  });
+
+  it("mergeLiveBarIntoClean.update mutates the last bar when times match, preserves volume", async () => {
+    const { mergeLiveBarIntoClean } = await import("./PriceChart");
+    const T0 = Math.floor(Date.UTC(2026, 3, 9) / 1000);
+    const initial = [
+      { time: T0 as never, open: 100, high: 102, low: 99, close: 101, volume: 5000 },
+    ];
+    const merged = mergeLiveBarIntoClean(initial, {
+      kind: "update",
+      time: T0,
+      open: 100,
+      high: 105,
+      low: 98,
+      close: 104,
+    });
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toEqual({ time: T0, open: 100, high: 105, low: 98, close: 104, volume: 5000 });
+  });
+
+  it("mergeLiveBarIntoClean.update with time > last upserts as a new bar (handles append → update sequencing)", async () => {
+    // The aggregator emits `update` for ticks that land in its own
+    // previously-appended live bucket. From REST's perspective that
+    // bar does not exist yet, so the merge must still keep the
+    // overlay alive — otherwise the second tick into a fresh bucket
+    // would silently roll the fingerprint back, re-opening the
+    // wholesale-flash on the next 60s REST refetch.
+    const { mergeLiveBarIntoClean } = await import("./PriceChart");
+    const T0 = Math.floor(Date.UTC(2026, 3, 9) / 1000);
+    const initial = [
+      { time: T0 as never, open: 100, high: 102, low: 99, close: 101, volume: 5000 },
+    ];
+    const merged = mergeLiveBarIntoClean(initial, {
+      kind: "update",
+      time: T0 + 60,
+      open: 102,
+      high: 106,
+      low: 101,
+      close: 105,
+    });
+    expect(merged).toHaveLength(2);
+    expect(merged[1]).toEqual({ time: T0 + 60, open: 102, high: 106, low: 101, close: 105, volume: 0 });
+  });
+
+  it("mergeLiveBarIntoClean leaves clean untouched when live.time is older than last (stale tick)", async () => {
+    const { mergeLiveBarIntoClean } = await import("./PriceChart");
+    const T0 = Math.floor(Date.UTC(2026, 3, 9) / 1000);
+    const initial = [
+      { time: T0 as never, open: 100, high: 102, low: 99, close: 101, volume: 5000 },
+    ];
+    const merged = mergeLiveBarIntoClean(initial, {
+      kind: "update",
+      time: T0 - 60,
+      open: 99,
+      high: 100,
+      low: 98,
+      close: 99.5,
+    });
+    expect(merged).toEqual(initial);
+  });
+
+  it("mergeLiveBarIntoClean append → update on same bucket converges to single overlay bar", async () => {
+    const { mergeLiveBarIntoClean, barFingerprint } = await import("./PriceChart");
+    const T0 = Math.floor(Date.UTC(2026, 3, 9) / 1000);
+    const T1Bucket = T0 + 60;
+    const rest = [
+      { time: T0 as never, open: 100, high: 102, low: 99, close: 101, volume: 5000 },
+    ];
+
+    // First tick: append.
+    const afterAppend = mergeLiveBarIntoClean(rest, {
+      kind: "append",
+      time: T1Bucket,
+      open: 102,
+      high: 102,
+      low: 102,
+      close: 102,
+    });
+    expect(afterAppend).toHaveLength(2);
+    const fpAfterAppend = barFingerprint("1m", afterAppend as never);
+
+    // Second tick same bucket arrives as `update` per aggregator —
+    // but REST clean has not refetched, so merge against `rest`,
+    // NOT `afterAppend`. The fix means this still produces the
+    // upserted bar with the latest OHLC, fingerprint stays sensible.
+    const afterUpdate = mergeLiveBarIntoClean(rest, {
+      kind: "update",
+      time: T1Bucket,
+      open: 102,
+      high: 105,
+      low: 102,
+      close: 104,
+    });
+    expect(afterUpdate).toHaveLength(2);
+    expect(afterUpdate[1]).toMatchObject({ time: T1Bucket, open: 102, high: 105, low: 102, close: 104, volume: 0 });
+
+    // Most importantly: the post-update fingerprint differs from the
+    // post-append one (so the cached fp tracks the latest overlay).
+    const fpAfterUpdate = barFingerprint("1m", afterUpdate as never);
+    expect(fpAfterUpdate).not.toBe(fpAfterAppend);
+
+    // And: when REST eventually catches up to the same overlay
+    // state, fingerprint matches and the wholesale setData is
+    // skipped — that's the whole point of the convergence fix.
+    const restCaughtUp = [
+      ...rest,
+      { time: T1Bucket as never, open: 102, high: 105, low: 102, close: 104, volume: 0 },
+    ];
+    expect(barFingerprint("1m", restCaughtUp as never)).toBe(fpAfterUpdate);
+  });
+
+  it("mergeLiveBarIntoClean.append adds a fresh bar with volume=0", async () => {
+    const { mergeLiveBarIntoClean } = await import("./PriceChart");
+    const T0 = Math.floor(Date.UTC(2026, 3, 9) / 1000);
+    const initial = [
+      { time: T0 as never, open: 100, high: 102, low: 99, close: 101, volume: 5000 },
+    ];
+    const merged = mergeLiveBarIntoClean(initial, {
+      kind: "append",
+      time: T0 + 60,
+      open: 101,
+      high: 103,
+      low: 100,
+      close: 102,
+    });
+    expect(merged).toHaveLength(2);
+    expect(merged[1]).toEqual({ time: T0 + 60, open: 101, high: 103, low: 100, close: 102, volume: 0 });
   });
 });
 
