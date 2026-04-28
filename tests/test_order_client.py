@@ -206,6 +206,17 @@ def _cost_record_write_cursor() -> MagicMock:
     return _make_cursor([])
 
 
+def _update_cursor(rowcount: int = 1) -> MagicMock:
+    """Cursor consumed by an UPDATE that asserts ``cur.rowcount == 1``.
+
+    Used by the #243 ``_update_order_with_broker_result`` post-broker
+    UPDATE on the pre-call intent row.
+    """
+    cur = _make_cursor([])
+    cur.__enter__.return_value.rowcount = rowcount
+    return cur
+
+
 # ---------------------------------------------------------------------------
 # TestSyntheticFill
 # ---------------------------------------------------------------------------
@@ -745,8 +756,11 @@ class TestExecuteOrderLiveMode:
         cursors = [
             _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
             _cash_cursor(balance=10_000.0),
-            # broker called (no cursor)
+            # #243 pre-broker durable intent INSERT
             _order_returning_cursor(order_id=10),
+            # broker called (no cursor)
+            # #243 post-broker UPDATE asserts rowcount == 1
+            _update_cursor(rowcount=1),
             _cost_config_cursor(),
             _cost_model_cursor(),  # no cost_model → falls back to quote
             _quote_cursor(last=100.0, bid=99.5, ask=100.5, spread_pct=0.30),  # cost fallback
@@ -763,6 +777,8 @@ class TestExecuteOrderLiveMode:
         assert result.outcome == "filled"
         assert result.broker_order_ref == "ORD-123"
         broker.place_order.assert_called_once()
+        # #243: durable intent commit happens before broker call.
+        assert conn.commit.called
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_live_buy_records_cost_from_quote_fallback(self, _mock_now: MagicMock) -> None:
@@ -780,7 +796,8 @@ class TestExecuteOrderLiveMode:
         cursors = [
             _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
             _cash_cursor(balance=10_000.0),
-            _order_returning_cursor(order_id=10),
+            _order_returning_cursor(order_id=10),  # #243 pre-broker intent
+            _update_cursor(rowcount=1),  # #243 post-broker UPDATE
             _cost_config_cursor(),
             _cost_model_cursor(),  # no cost_model → falls back to quote
             _quote_cursor(last=100.0, bid=99.5, ask=100.5, spread_pct=0.30),
@@ -817,7 +834,8 @@ class TestExecuteOrderLiveMode:
         cursors = [
             _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
             _cash_cursor(balance=10_000.0),
-            _order_returning_cursor(order_id=10),
+            _order_returning_cursor(order_id=10),  # #243 pre-broker intent
+            _update_cursor(rowcount=1),  # #243 post-broker UPDATE
             _cost_config_cursor(),
             _cost_model_cursor(),  # no cost_model → falls back to quote
             _quote_cursor(last=100.0, bid=99.5, ask=100.5, spread_pct=0.30),
@@ -847,9 +865,12 @@ class TestExecuteOrderLiveMode:
             _position_cursor(current_units=5.0),
             # _load_position_id_for_exit resolves instrument_id → position_id
             _make_cursor([{"position_id": 98765}]),
-            # broker called (no cursor)
-            # No cost recording for EXIT
+            # #243 pre-broker durable intent INSERT
             _order_returning_cursor(order_id=11),
+            # broker called (no cursor)
+            # #243 post-broker UPDATE asserts rowcount == 1
+            _update_cursor(rowcount=1),
+            # No cost recording for EXIT
             _fill_returning_cursor(fill_id=7),
             # Post-fill: read current_units for attribution check
             _make_cursor([{"current_units": 0}]),
@@ -886,6 +907,100 @@ class TestExecuteOrderLiveMode:
         )
         assert result.outcome == "failed"
         broker.close_position.assert_not_called()
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_live_buy_persists_intent_before_broker_call(self, _mock_now: MagicMock) -> None:
+        """#243 — durable order intent must be INSERTed and COMMITed
+        BEFORE the broker call. A fake broker that raises after the
+        commit must leave the intent row visible to a reconciler.
+
+        Mock-level proof: track the order of cursor consumption, the
+        commit call, and the broker call. Asserts:
+          1. the intent INSERT cursor is consumed
+          2. conn.commit() runs
+          3. broker.place_order is invoked
+          4. all in that exact order
+
+        With this ordering, a real DB would have a committed
+        ``status='submitted'`` row on disk before any external side
+        effect — the reconciler can find it after a crash.
+        """
+        sequence: list[str] = []
+
+        broker = MagicMock()
+
+        def _broker_side_effect(*_args: object, **_kwargs: object) -> BrokerOrderResult:
+            sequence.append("broker.place_order")
+            raise RuntimeError("simulated broker crash")
+
+        broker.place_order.side_effect = _broker_side_effect
+
+        intent_cursor = _order_returning_cursor(order_id=99)
+
+        def _intent_execute(*_args: object, **_kwargs: object) -> None:
+            # Tag the cursor execute fired inside _persist_submitted_intent.
+            # No real DB; fetchone is already wired by _make_cursor.
+            sequence.append("intent_insert")
+
+        intent_cursor.__enter__.return_value.execute.side_effect = _intent_execute
+
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            intent_cursor,
+        ]
+        conn = _make_conn(cursors)
+
+        def _commit_tag() -> None:
+            sequence.append("commit")
+
+        conn.commit.side_effect = _commit_tag
+
+        with pytest.raises(RuntimeError, match="simulated broker crash"):
+            execute_order(
+                conn,
+                recommendation_id=42,
+                decision_id=10,
+                broker=broker,
+            )
+
+        # Order matters: intent → commit → broker call.
+        assert sequence == ["intent_insert", "commit", "broker.place_order"], (
+            f"durable-intent ordering violated: {sequence}"
+        )
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_live_buy_zero_row_update_raises(self, _mock_now: MagicMock) -> None:
+        """#637 review BLOCKING — _update_order_with_broker_result MUST
+        refuse to advance to fill/cost/position writes when the UPDATE
+        matches zero rows. Without this guard, ``order_id`` would
+        silently flow forward as a foreign key into fills, corrupting
+        referential integrity. Simulate by returning rowcount=0 from
+        the UPDATE cursor."""
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-PHANTOM",
+            status="filled",
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            fees=Decimal("0"),
+            raw_payload={},
+        )
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=99),  # pre-broker intent INSERT
+            _update_cursor(rowcount=0),  # phantom UPDATE matches nothing
+        ]
+        conn = _make_conn(cursors)
+
+        with pytest.raises(RuntimeError, match="expected to update exactly 1 orders row"):
+            execute_order(
+                conn,
+                recommendation_id=42,
+                decision_id=10,
+                broker=broker,
+            )
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_live_mode_no_broker_raises(self, _mock_now: MagicMock) -> None:
@@ -935,7 +1050,8 @@ class TestExecuteOrderFailures:
         cursors = [
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
-            _order_returning_cursor(order_id=12),
+            _order_returning_cursor(order_id=12),  # #243 pre-broker intent
+            _update_cursor(rowcount=1),  # #243 post-broker UPDATE
             _cost_config_cursor(),
             _cost_model_cursor(),  # no cost_model → falls back to quote
             _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
@@ -954,7 +1070,10 @@ class TestExecuteOrderFailures:
         assert "failed" in result.explanation
 
         # conn.execute: safety-layer checks (fx_rates + portfolio_sync = 2),
-        # rec status update + audit = 4 (no fill/position/cash)
+        # rec status update + audit = 2. Total 4 (no fill/position/cash
+        # on a failed broker call). The #243 post-broker UPDATE goes
+        # through a cursor, not conn.execute, so it does not bump this
+        # counter.
         assert conn.execute.call_count == 4
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
@@ -972,7 +1091,8 @@ class TestExecuteOrderFailures:
         cursors = [
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
-            _order_returning_cursor(order_id=13),
+            _order_returning_cursor(order_id=13),  # #243 pre-broker intent
+            _update_cursor(rowcount=1),  # #243 post-broker UPDATE
             _cost_config_cursor(),
             _cost_model_cursor(),  # no cost_model → falls back to quote
             _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
@@ -1023,7 +1143,8 @@ class TestExecuteOrderFailures:
         cursors = [
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
-            _order_returning_cursor(order_id=14),
+            _order_returning_cursor(order_id=14),  # #243 pre-broker intent
+            _update_cursor(rowcount=1),  # #243 post-broker UPDATE
             _cost_config_cursor(),
             _cost_model_cursor(),  # no cost_model → falls back to quote
             _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
@@ -1055,7 +1176,8 @@ class TestExecuteOrderFailures:
         cursors = [
             _rec_cursor(action="BUY"),
             _cash_cursor(balance=10_000.0),
-            _order_returning_cursor(order_id=15),
+            _order_returning_cursor(order_id=15),  # #243 pre-broker intent
+            _update_cursor(rowcount=1),  # #243 post-broker UPDATE
             _cost_config_cursor(),
             _cost_model_cursor(),  # no cost_model → falls back to quote
             _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback

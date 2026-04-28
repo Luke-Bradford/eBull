@@ -311,6 +311,100 @@ def _synthetic_fill(
 # ---------------------------------------------------------------------------
 
 
+_SUBMITTED_INTENT_PAYLOAD: dict[str, Any] = {"intent": "submitted_pre_broker_call"}
+
+
+def _persist_submitted_intent(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    recommendation_id: int,
+    decision_id: int,
+    action: str,
+    requested_amount: Decimal | None,
+    requested_units: Decimal | None,
+    now: datetime,
+) -> int:
+    """Insert a durable order-intent row BEFORE the broker call (#243).
+
+    The row carries ``status='submitted'`` and a sentinel
+    ``raw_payload_json`` so a reconciler can find rows whose broker
+    call never returned. The caller MUST ``conn.commit()`` after
+    this returns and BEFORE issuing the external broker call —
+    otherwise the intent stays inside the implicit transaction and
+    a process crash erases it along with everything else.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            INSERT INTO orders
+                (instrument_id, recommendation_id, decision_id,
+                 action, order_type, requested_amount, requested_units,
+                 status, broker_order_ref, raw_payload_json, created_at)
+            VALUES
+                (%(iid)s, %(rid)s, %(did)s,
+                 %(action)s, %(otype)s, %(amt)s, %(units)s,
+                 'submitted', NULL, %(payload)s, %(now)s)
+            RETURNING order_id
+            """,
+            {
+                "iid": instrument_id,
+                "rid": recommendation_id,
+                "did": decision_id,
+                "action": action,
+                "otype": _DEFAULT_ORDER_TYPE,
+                "amt": requested_amount,
+                "units": requested_units,
+                "payload": Jsonb(_SUBMITTED_INTENT_PAYLOAD),
+                "now": now,
+            },
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise RuntimeError("orders INSERT (submitted intent) returned no row")
+    return int(row["order_id"])
+
+
+def _update_order_with_broker_result(
+    conn: psycopg.Connection[Any],
+    *,
+    order_id: int,
+    status: str,
+    broker_order_ref: str | None,
+    raw_payload: dict[str, Any],
+) -> None:
+    """Update the pre-call ``submitted`` row with the broker response (#243).
+
+    Raises ``RuntimeError`` if the UPDATE matched zero rows — without
+    this check, ``order_id`` would silently flow forward as a foreign
+    key into fills / cost records / positions and corrupt referential
+    integrity. PR #637 review BLOCKING.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE orders
+            SET status = %(status)s,
+                broker_order_ref = %(ref)s,
+                raw_payload_json = %(payload)s
+            WHERE order_id = %(oid)s
+            """,
+            {
+                "oid": order_id,
+                "status": status,
+                "ref": broker_order_ref,
+                "payload": Jsonb(raw_payload),
+            },
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError(
+                f"_update_order_with_broker_result: expected to update exactly "
+                f"1 orders row for order_id={order_id}, matched {cur.rowcount}. "
+                f"Either the pre-call intent INSERT was lost or order_id is "
+                f"stale — refusing to advance to fill/cost/position writes."
+            )
+
+
 def _persist_order(
     conn: psycopg.Connection[Any],
     instrument_id: int,
@@ -713,13 +807,25 @@ def execute_order(
     Steps:
       1. Load the approved recommendation (raises if not found or not approved).
       2. Determine order parameters from the recommendation.
-      3. If live mode: call the broker provider.
-         If demo mode: generate a synthetic fill.
-      4. Persist the order row with raw broker response.
+      3. **Live mode only (#243)**: INSERT a durable ``status='submitted'``
+         intent row and ``conn.commit()`` so a process crash mid-broker-call
+         leaves a row a reconciler can chase. Then call the broker.
+         **Demo mode**: generate a synthetic fill (no external side effect).
+      4. Live: UPDATE the pre-call intent row with the broker response.
+         Demo / live-EXIT-no-position: INSERT a fresh order row.
       5. If filled: persist fill, update position, record cash ledger entry.
-      All DB writes in steps 4-5 are inside a single transaction.
+      DB writes in steps 4-5 are inside a single transaction.
 
     No external I/O is performed inside any DB transaction.
+
+    **Connection ownership contract (#243)**: live-mode paths issue a
+    ``conn.commit()`` between the intent INSERT and the broker call.
+    Callers MUST therefore pass a connection that does NOT carry
+    unrelated uncommitted writes — the commit would publish them
+    too. The current scheduler caller (app/workers/scheduler.py)
+    uses a fresh per-order pool connection, which satisfies this.
+    Do not call ``execute_order`` inside a caller-owned outer
+    transaction.
 
     Raises ValueError if:
       - recommendation_id does not exist
@@ -776,6 +882,7 @@ def execute_order(
     is_live = runtime.enable_live_trading
 
     quote_data: dict[str, Any] | None = None
+    submitted_order_id: int | None = None
 
     if is_live:
         if broker is None:
@@ -797,8 +904,35 @@ def execute_order(
                     raw_payload={"error": f"No broker_positions row for instrument {instrument_id}"},
                 )
             else:
+                # #243: persist the order intent BEFORE the broker
+                # side effect, then commit so a crash mid-call leaves
+                # a durable ``status='submitted'`` row that a
+                # reconciler can chase against the broker.
+                submitted_order_id = _persist_submitted_intent(
+                    conn,
+                    instrument_id=instrument_id,
+                    recommendation_id=recommendation_id,
+                    decision_id=decision_id,
+                    action=action,
+                    requested_amount=requested_amount,
+                    requested_units=requested_units,
+                    now=now,
+                )
+                conn.commit()
                 broker_result = broker.close_position(exit_pos_id)
         else:
+            # #243: durable order intent before the broker call.
+            submitted_order_id = _persist_submitted_intent(
+                conn,
+                instrument_id=instrument_id,
+                recommendation_id=recommendation_id,
+                decision_id=decision_id,
+                action=action,
+                requested_amount=requested_amount,
+                requested_units=requested_units,
+                now=now,
+            )
+            conn.commit()
             broker_result = broker.place_order(
                 instrument_id=instrument_id,
                 action=action,
@@ -833,19 +967,34 @@ def execute_order(
     fill_id: int | None = None
 
     with conn.transaction():
-        order_id = _persist_order(
-            conn,
-            instrument_id=instrument_id,
-            recommendation_id=recommendation_id,
-            decision_id=decision_id,
-            action=action,
-            requested_amount=requested_amount,
-            requested_units=requested_units,
-            status=order_status,
-            broker_order_ref=broker_result.broker_order_ref,
-            raw_payload=broker_result.raw_payload,
-            now=now,
-        )
+        if submitted_order_id is not None:
+            # #243 live path: pre-call intent already exists. UPDATE
+            # the same row with the broker response so reconciliation
+            # keys on a single durable identity.
+            order_id = submitted_order_id
+            _update_order_with_broker_result(
+                conn,
+                order_id=order_id,
+                status=order_status,
+                broker_order_ref=broker_result.broker_order_ref,
+                raw_payload=broker_result.raw_payload,
+            )
+        else:
+            # Demo path (no external side effect to lose) or live
+            # EXIT with no broker_positions row (broker not called).
+            order_id = _persist_order(
+                conn,
+                instrument_id=instrument_id,
+                recommendation_id=recommendation_id,
+                decision_id=decision_id,
+                action=action,
+                requested_amount=requested_amount,
+                requested_units=requested_units,
+                status=order_status,
+                broker_order_ref=broker_result.broker_order_ref,
+                raw_payload=broker_result.raw_payload,
+                now=now,
+            )
 
         # Record estimated cost for BUY/ADD only (entry cost is meaningless
         # for EXIT orders).  Best-effort: any failure here must not block the

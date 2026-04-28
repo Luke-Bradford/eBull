@@ -1027,3 +1027,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: GET handlers that issue 2+ sequential reads on the same `get_conn` connection see a fresh READ COMMITTED snapshot per statement. A concurrent writer between Q1 and Q2 produces brief drift — counts and lists disagree, totals and details lag by one. Cosmetic in steady state, hides real bugs in tests, becomes a correctness issue under multi-operator concurrency.
 - Prevention: Any read handler that issues 2+ statements whose results must agree (counts, list of items, sub-aggregates of the same set) MUST wrap the reads in `with snapshot_read(conn): ...` from `app.db.snapshot`. The helper opens a REPEATABLE READ transaction so all statements run against one consistent snapshot. At self-review: grep for `cur.execute(` count >= 2 inside any GET handler and confirm `snapshot_read` wraps them, or that the handler's docstring justifies READ COMMITTED.
 - Enforced in: this prevention log; PR for #395 introduces `app/db/snapshot.py::snapshot_read` and applies it to `GET /alerts/guard-rejections`. Apply to other multi-query GETs as the pattern is encountered.
+
+---
+
+### UPDATE-by-PK helpers must assert rowcount
+
+- First seen in: #637 (durable order intent for #243).
+- Symptom: `_update_order_with_broker_result` issued `conn.execute(UPDATE ... WHERE order_id = %s)` with no rowcount check. If the UPDATE matched zero rows (stale order_id, lost intent INSERT, schema drift) the function returned silently and `order_id` flowed forward as a foreign key into fills / cost records / positions, corrupting referential integrity invisibly.
+- Prevention: Any helper that UPDATEs by primary key and threads the same id forward into FK-referencing writes MUST assert `cur.rowcount == 1` (or the equivalent `statusmessage == "UPDATE 1"`) and raise on mismatch. Use the cursor form `with conn.cursor() as cur: cur.execute(...); if cur.rowcount != 1: raise ...` rather than the connection-level `conn.execute(...)` shortcut, since the latter discards `rowcount`. At self-review: grep `conn.execute(\\s*"UPDATE ` in any service that takes an id from a prior INSERT and threads it into later writes; convert to the cursor + assertion form.
+- Enforced in: this prevention log; PR #637 fix raises `RuntimeError` when the post-broker UPDATE on the #243 intent row matches anything other than 1 row.
