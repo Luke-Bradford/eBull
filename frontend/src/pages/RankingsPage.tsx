@@ -36,6 +36,15 @@ export function RankingsPage() {
     stance: null,
   });
   const [scoreThreshold, setScoreThreshold] = useState<number | null>(null);
+  // #194 — debounced symbol/name search; client-side filter over the
+  // current response (server-side `search` is not supported on the
+  // rankings endpoint and the page caps at RANKINGS_PAGE_LIMIT rows).
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setSearch(searchInput.trim().toLowerCase()), 300);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
 
   // Sector dropdown options must be derived from data the page has seen,
   // not from the *current* response. Once a sector filter is applied the
@@ -74,15 +83,26 @@ export function RankingsPage() {
     query.coverage_tier !== null ||
     query.sector !== null ||
     query.stance !== null ||
-    scoreThreshold !== null;
+    scoreThreshold !== null ||
+    // Use the un-debounced searchInput so Clear All shows immediately
+    // on first keystroke rather than 300 ms later (#634 NITPICK).
+    searchInput !== "";
 
   const filteredItems = useMemo(() => {
     if (rankings.data === null) return [];
-    if (scoreThreshold === null) return rankings.data.items;
-    return rankings.data.items.filter(
-      (i) => i.total_score !== null && i.total_score >= scoreThreshold,
-    );
-  }, [rankings.data, scoreThreshold]);
+    let items: ReadonlyArray<RankingItem> = rankings.data.items;
+    if (scoreThreshold !== null) {
+      items = items.filter((i) => i.total_score !== null && i.total_score >= scoreThreshold);
+    }
+    if (search !== "") {
+      items = items.filter(
+        (i) =>
+          i.symbol.toLowerCase().includes(search) ||
+          i.company_name.toLowerCase().includes(search),
+      );
+    }
+    return items;
+  }, [rankings.data, scoreThreshold, search]);
 
   // Surface the single edge case where the universe outgrew our single-page
   // assumption (>200 Tier 1+2 instruments). Loud in dev, harmless in prod.
@@ -97,6 +117,8 @@ export function RankingsPage() {
   const onClearAll = () => {
     setQuery({ coverage_tier: null, sector: null, stance: null });
     setScoreThreshold(null);
+    setSearchInput("");
+    setSearch("");
   };
 
   const view: RankingsView = computeView({
@@ -110,8 +132,8 @@ export function RankingsPage() {
   });
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="flex h-full flex-col gap-6">
+      <div className="flex flex-shrink-0 items-center justify-between">
         <h1 className="text-xl font-semibold text-slate-800">Rankings</h1>
         <span className="text-xs text-slate-500">
           {rankings.data?.scored_at
@@ -120,17 +142,48 @@ export function RankingsPage() {
         </span>
       </div>
 
-      <RankingsFilters
-        query={query}
-        onQueryChange={setQuery}
-        scoreThreshold={scoreThreshold}
-        onScoreThresholdChange={setScoreThreshold}
-        knownSectors={knownSectors}
-        onClearAll={onClearAll}
-        filtersDirty={filtersDirty}
-      />
+      <div className="flex-shrink-0 space-y-3">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="rankings-search">
+            Search
+          </label>
+          <input
+            id="rankings-search"
+            type="text"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Symbol or company name…"
+            className="w-full rounded border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+          />
+          {/* Search is client-side over the page-bounded response.
+              When the universe outgrows RANKINGS_PAGE_LIMIT a match
+              outside the first page would silently fail to surface;
+              warn the operator so they don't read a false-negative
+              empty state as authoritative. Server-side search is the
+              proper fix and is tracked under the same paginated-
+              rankings follow-up referenced at line 92. */}
+          {search !== "" &&
+            rankings.data !== null &&
+            rankings.data.total > rankings.data.items.length && (
+              <p className="mt-1 text-xs text-amber-700">
+                Search covers the first {rankings.data.items.length} of {rankings.data.total} ranked
+                rows; matches outside the page are not shown.
+              </p>
+            )}
+        </div>
 
-      <Section title="Candidates">
+        <RankingsFilters
+          query={query}
+          onQueryChange={setQuery}
+          scoreThreshold={scoreThreshold}
+          onScoreThresholdChange={setScoreThreshold}
+          knownSectors={knownSectors}
+          onClearAll={onClearAll}
+          filtersDirty={filtersDirty}
+        />
+      </div>
+
+      <Section title="Candidates" scrollable>
         <RankingsTable view={view} />
       </Section>
     </div>

@@ -7,23 +7,35 @@ import type { ReactNode } from "react";
  * failing /system/status must not blank /portfolio. Sections render an
  * inline ErrorBanner with a Retry button rather than throwing, so the
  * top-level ErrorBoundary is reserved for unexpected exceptions.
+ *
+ * ``scrollable=true`` (#194) switches the Section into a contained-
+ * scroll layout: the section claims remaining flex space and its
+ * body scrolls vertically, instead of growing the page-level scroll.
+ * Use when the parent is a flex column with ``h-full`` and the
+ * section sits below header/filter chrome that should stay visible.
  */
 export function Section({
   title,
   action,
   children,
+  scrollable = false,
 }: {
   title: string;
   action?: ReactNode;
   children: ReactNode;
+  scrollable?: boolean;
 }) {
+  const sectionClass = scrollable
+    ? "flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm"
+    : "rounded-md border border-slate-200 bg-white shadow-sm";
+  const bodyClass = scrollable ? "min-h-0 flex-1 overflow-auto p-4" : "p-4";
   return (
-    <section className="rounded-md border border-slate-200 bg-white shadow-sm">
-      <header className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+    <section className={sectionClass}>
+      <header className="flex flex-shrink-0 items-center justify-between border-b border-slate-100 px-4 py-3">
         <h2 className="text-sm font-semibold text-slate-700">{title}</h2>
         {action ? <div className="text-xs">{action}</div> : null}
       </header>
-      <div className="p-4">{children}</div>
+      <div className={bodyClass}>{children}</div>
     </section>
   );
 }
