@@ -81,10 +81,13 @@ def _sanitise_tag(tag: str) -> str:
     Behaviour:
 
       * Any character outside ``[A-Za-z0-9._-]`` becomes ``_``.
-      * Leading dots are stripped so ``..`` cannot become ``__``
-        and slip past containment (paranoia — the regex already
-        replaces ``.`` only when paired with the second ``.``;
-        an explicit guard is cheaper than reasoning about it).
+      * Leading dots are stripped after the regex pass. The regex
+        keeps ``.`` because legitimate tags often embed a version
+        suffix (``fmp_profile_v1.2``), so ``..`` survives the regex
+        unchanged. ``lstrip('.')`` then peels off any leading dots
+        so a tag of the form ``../etc/passwd`` cannot leave a
+        ``..`` segment that the resolved-path containment check has
+        to argue about.
       * The result is capped at ``_MAX_TAG_LEN`` characters so the
         full path stays well below typical filesystem limits.
       * If the input collapses to an empty string the tag becomes
