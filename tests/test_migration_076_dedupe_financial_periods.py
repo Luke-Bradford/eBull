@@ -40,12 +40,28 @@ def _run_migration(conn: psycopg.Connection[tuple]) -> None:
     The migration file is idempotent, so re-running on top of the
     already-applied state is a no-op for already-deduped rows but
     will collapse rows seeded by the test after the auto-apply.
-    Uses ClientCursor because the file uses BEGIN/COMMIT (multiple
-    statements) and the simple-query protocol is required.
+
+    Implementation note (PR #613 review): psycopg3 ``execute()``
+    accepts multi-statement strings only under specific conditions
+    (autocommit mode + simple-query protocol via
+    ``ClientCursor``). We commit any pending test transaction, flip
+    to autocommit, run the file as one ClientCursor execute, then
+    restore autocommit. This is the same code path
+    ``app/db/migrations.run_migrations`` uses in production for
+    each migration file.
     """
     sql_text = _MIGRATION_PATH.read_text(encoding="utf-8")
-    with psycopg.ClientCursor(conn) as cur:
-        cur.execute(sql_text)  # type: ignore[call-overload]
+    # Commit any pending writes from the per-test seed so the
+    # autocommit flip is legal (psycopg3 forbids autocommit toggling
+    # mid-transaction).
+    conn.commit()
+    prior_autocommit = conn.autocommit
+    conn.autocommit = True
+    try:
+        with psycopg.ClientCursor(conn) as cur:
+            cur.execute(sql_text)  # type: ignore[call-overload]
+    finally:
+        conn.autocommit = prior_autocommit
 
 
 def _seed_instrument(conn: psycopg.Connection[tuple], instrument_id: int, symbol: str) -> None:
