@@ -18,6 +18,7 @@ to keep the test/migration pair from drifting.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -31,29 +32,19 @@ from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixtu
 pytestmark = pytest.mark.integration
 
 
-_MIGRATION_PATH = Path(__file__).resolve().parents[1] / "sql" / "076_dedupe_financial_periods.sql"
+_SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
+_MIGRATION_PATH = _SQL_DIR / "076_dedupe_financial_periods.sql"
+_MIGRATION_077_PATH = _SQL_DIR / "077_financial_periods_fiscal_label_unique.sql"
 
 
-def _run_migration(conn: psycopg.Connection[tuple]) -> None:
-    """Re-execute migration 076 against the test DB.
+def _exec_sql_file(conn: psycopg.Connection[tuple], path: Path) -> None:
+    """Run a multi-statement SQL file against ``conn`` in autocommit mode.
 
-    The migration file is idempotent, so re-running on top of the
-    already-applied state is a no-op for already-deduped rows but
-    will collapse rows seeded by the test after the auto-apply.
-
-    Implementation note (PR #613 review): psycopg3 ``execute()``
-    accepts multi-statement strings only under specific conditions
-    (autocommit mode + simple-query protocol via
-    ``ClientCursor``). We commit any pending test transaction, flip
-    to autocommit, run the file as one ClientCursor execute, then
-    restore autocommit. This is the same code path
-    ``app/db/migrations.run_migrations`` uses in production for
-    each migration file.
+    psycopg3 ``execute()`` accepts multi-statement strings only via
+    ``ClientCursor`` + autocommit, mirroring the production
+    ``app/db/migrations.run_migrations`` path.
     """
-    sql_text = _MIGRATION_PATH.read_text(encoding="utf-8")
-    # Commit any pending writes from the per-test seed so the
-    # autocommit flip is legal (psycopg3 forbids autocommit toggling
-    # mid-transaction).
+    sql_text = path.read_text(encoding="utf-8")
     conn.commit()
     prior_autocommit = conn.autocommit
     conn.autocommit = True
@@ -62,6 +53,62 @@ def _run_migration(conn: psycopg.Connection[tuple]) -> None:
             cur.execute(sql_text)  # type: ignore[call-overload]
     finally:
         conn.autocommit = prior_autocommit
+
+
+@pytest.fixture
+def fiscal_label_index_dropped(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> Iterator[psycopg.Connection[tuple]]:
+    """Drop migration-077 partial unique index for the duration of a test.
+
+    The index (``uniq_financial_periods_fiscal_label``, added in #624)
+    enforces the post-cleanup invariant that one fiscal label maps to
+    one row per source. Tests in this file deliberately seed the
+    pollution shape that motivated migration 076 in the first place,
+    which requires two rows with the same fiscal label simultaneously
+    — illegal under 077.
+
+    The index is restored via ``try/finally`` regardless of test
+    outcome so a crash mid-test cannot leave the shared ``ebull_test``
+    DB without the index for subsequent runs. The
+    ``apply_migrations_to_test_db`` bootstrap only re-applies files
+    not listed in ``schema_migrations``, so 077 would otherwise stay
+    dropped across CI runs.
+
+    Teardown order matters: 076 (dedupe) runs before 077 (recreate).
+    A crash between seeding and the test's own ``_run_migration``
+    call would otherwise leave duplicate rows on disk, and the
+    077 ``CREATE UNIQUE INDEX`` recreation would raise
+    ``UniqueViolation``, leaving the index absent. Running 076 first
+    collapses any leftover duplicates, after which 077 succeeds.
+    """
+    conn = ebull_test_conn
+    conn.execute("DROP INDEX IF EXISTS uniq_financial_periods_fiscal_label")
+    conn.commit()
+    try:
+        yield conn
+    finally:
+        # Best-effort rollback so the autocommit flip below cannot
+        # trip on an aborted in-test transaction.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        # Dedupe first, then recreate. Both files are idempotent —
+        # 076 returns rowcount 0 on already-clean data, 077 is
+        # ``IF NOT EXISTS``.
+        _exec_sql_file(conn, _MIGRATION_PATH)
+        _exec_sql_file(conn, _MIGRATION_077_PATH)
+
+
+def _run_migration(conn: psycopg.Connection[tuple]) -> None:
+    """Re-execute migration 076 against the test DB.
+
+    Idempotent: the dedupe DELETEs return rowcount 0 when run against
+    already-clean data, so re-running on top of the already-applied
+    state is a no-op.
+    """
+    _exec_sql_file(conn, _MIGRATION_PATH)
 
 
 def _seed_instrument(conn: psycopg.Connection[tuple], instrument_id: int, symbol: str) -> None:
@@ -156,9 +203,9 @@ class TestDedupePass1SameAccession:
 
     def test_canonical_table_keeps_smallest_period_end(
         self,
-        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        fiscal_label_index_dropped: psycopg.Connection[tuple],
     ) -> None:
-        conn = ebull_test_conn
+        conn = fiscal_label_index_dropped
         _seed_instrument(conn, instrument_id=1, symbol="GME")
         _seed_period(
             conn,
@@ -199,12 +246,12 @@ class TestDedupePass1SameAccession:
 
     def test_fy_row_with_null_quarter_is_collapsed(
         self,
-        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        fiscal_label_index_dropped: psycopg.Connection[tuple],
     ) -> None:
         """FY rows have fiscal_quarter = NULL. The IS NOT DISTINCT FROM
         join must still match two FY rows with the same source_ref.
         """
-        conn = ebull_test_conn
+        conn = fiscal_label_index_dropped
         _seed_instrument(conn, instrument_id=2, symbol="AAPL")
         _seed_period(
             conn,
@@ -245,7 +292,7 @@ class TestDedupePass2CrossAccession:
 
     def test_bbby_pattern_keeps_real_fiscal_end(
         self,
-        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        fiscal_label_index_dropped: psycopg.Connection[tuple],
     ) -> None:
         """Smoking-gun regression for the BBBY (Beyond Inc) pattern:
 
@@ -261,7 +308,7 @@ class TestDedupePass2CrossAccession:
         always shifts period_end FORWARD, never backward, so smaller
         period_end is the reliable signal.
         """
-        conn = ebull_test_conn
+        conn = fiscal_label_index_dropped
         _seed_instrument(conn, instrument_id=3, symbol="BBBY")
         _seed_period(
             conn,
@@ -303,14 +350,14 @@ class TestDedupePass2CrossAccession:
 
     def test_compound_source_ref_collapses_to_single(
         self,
-        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        fiscal_label_index_dropped: psycopg.Connection[tuple],
     ) -> None:
         """A single-accession row paired with a compound-accession row
         sharing a fiscal label — same as the BBBY case but with a
         different fiscal year, to confirm the rule generalises.
         Smaller period_end wins.
         """
-        conn = ebull_test_conn
+        conn = fiscal_label_index_dropped
         _seed_instrument(conn, instrument_id=9, symbol="BYON")
         _seed_period(
             conn,
@@ -490,12 +537,12 @@ class TestDedupeIsolation:
 class TestDedupeIdempotent:
     def test_second_run_is_noop(
         self,
-        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        fiscal_label_index_dropped: psycopg.Connection[tuple],
     ) -> None:
         """Running the migration a second time on already-deduped data
         does not delete any further rows.
         """
-        conn = ebull_test_conn
+        conn = fiscal_label_index_dropped
         _seed_instrument(conn, instrument_id=6, symbol="NVDA")
         _seed_period(
             conn,

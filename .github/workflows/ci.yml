@@ -94,11 +94,7 @@ jobs:
         run: uv sync --group dev
 
       - name: Run backend pytest
-        # Deselect the test that fails on main (#626 — pre-existing
-        # uniq_financial_periods_fiscal_label collision in the
-        # migration 076 dedupe fixture). Remove the deselect once #626
-        # lands.
-        run: uv run pytest --deselect tests/test_migration_076_dedupe_financial_periods.py
+        run: uv run pytest
 
   supply-chain:
     # #598: catch yanked / phantom / advisory-laden lockfile entries
