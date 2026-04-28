@@ -44,6 +44,7 @@ def test_post_layer_enabled_portfolio_sync_disable_warning(clean_client: TestCli
         clean_client.post("/sync/layers/portfolio_sync/enabled", json={"enabled": True})
 
 
+@pytest.mark.integration
 def test_post_layer_enabled_unknown_layer_404(clean_client: TestClient) -> None:
     resp = clean_client.post("/sync/layers/not_a_real_layer/enabled", json={"enabled": False})
     assert resp.status_code == 404

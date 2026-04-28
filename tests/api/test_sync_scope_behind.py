@@ -1,6 +1,12 @@
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
+
+# All tests use the ``clean_client`` fixture (real DB-backed). Per the
+# #421 PREVENTION rule, mark the whole module integration so unit-only
+# CI passes deselect cleanly.
+pytestmark = pytest.mark.integration
 
 
 def _make_empty_plan():

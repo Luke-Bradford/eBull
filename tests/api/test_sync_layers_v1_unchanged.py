@@ -4,7 +4,15 @@ If a later refactor deliberately retires v1, delete this test in the
 same PR that removes the endpoint.
 """
 
+import pytest
 from fastapi.testclient import TestClient
+
+# Every test below uses the ``clean_client`` fixture, which spins up a
+# real DB-backed FastAPI client. Per the #421 PREVENTION rule, those
+# must be marked ``@pytest.mark.integration`` so unit-only CI passes
+# can deselect them. Module-level pytestmark covers all current and
+# future tests in this file uniformly.
+pytestmark = pytest.mark.integration
 
 EXPECTED_LAYER_KEYS = {
     "name",
