@@ -161,7 +161,13 @@ class ClaudeSentimentScorer(SentimentScorer):
 
         # All retries exhausted — re-raise the last seen transient
         # error so the caller can decide between skip and fail.
-        assert last_exc is not None
+        # Explicit raise (not ``assert``) so production runs under
+        # ``python -O`` (which strips assertions) cannot silently
+        # fall through and return ``None`` — review feedback #618.
+        if last_exc is None:
+            raise RuntimeError(
+                "ClaudeSentimentScorer retry loop exited with no exception captured"
+            )
         raise last_exc
 
     def score(self, headline: str, snippet: str | None) -> SentimentResult:
