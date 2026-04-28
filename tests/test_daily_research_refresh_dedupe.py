@@ -7,6 +7,7 @@ the reason. Companies House path unaffected either way.
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock
 
 from app.workers import scheduler
@@ -216,8 +217,12 @@ def test_cik_lookup_query_filters_to_primary_cik(monkeypatch) -> None:
 
     # Inspect every conn.execute() call for the cik lookup. The
     # second execute on the connection is the cik_rows query.
-    connect_call = scheduler.psycopg.connect.call_args_list[0]
-    fake_conn = scheduler.psycopg.connect.return_value.__enter__.return_value
+    # ``scheduler.psycopg.connect`` is monkeypatched with a MagicMock
+    # at the top of this test (via _base_mocks), but pyright sees
+    # the real function signature; cast through Any.
+    connect_mock: Any = scheduler.psycopg.connect
+    connect_call = connect_mock.call_args_list[0]
+    fake_conn = connect_mock.return_value.__enter__.return_value
     cik_query = fake_conn.execute.call_args_list[1].args[0]
     assert "external_identifiers" in cik_query
     assert "ei.provider = 'sec'" in cik_query
