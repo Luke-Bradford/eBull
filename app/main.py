@@ -417,37 +417,31 @@ def health(request: Request) -> JSONResponse:
 
 @app.get("/health/db")
 def health_db(conn: psycopg.Connection[object] = Depends(get_conn)) -> dict:
-    """Returns migration history and list of public tables in the database."""
-    try:
-        migrations = migration_status(conn)
-    except Exception as exc:
-        return {"db_reachable": False, "db_error": str(exc), "tables": [], "migrations": []}
+    """Public liveness probe for the DB layer.
 
-    try:
-        tables = [
-            row[0]  # type: ignore[index]  # TupleRow from default row factory
-            for row in conn.execute(
-                """
-                SELECT tablename
-                FROM pg_tables
-                WHERE schemaname = 'public'
-                ORDER BY tablename
-                """
-            )
-        ]
-        db_ok = True
-        db_error = None
-    except Exception as exc:
-        tables = []
-        db_ok = False
-        db_error = str(exc)
+    Returns ONLY ``{"db_reachable": bool}`` to unauthenticated callers
+    (#240). Earlier revisions echoed the full ``public`` schema's table
+    list, the migration history, and raw ``str(exc)`` error text — all
+    useful fingerprints for an attacker once the app is reachable
+    off-loopback. Schema state and migration history have moved
+    behind operator auth in the existing observability endpoints
+    (``/sync/layers``, ``/sync/layers/v2``); the public probe is now a
+    binary up/down signal only.
 
-    return {
-        "db_reachable": db_ok,
-        "db_error": db_error,
-        "tables": tables,
-        "migrations": migrations,
-    }
+    Any exception during the probe is logged at warning level
+    (framework + ``logger.warning`` so the operator can still
+    investigate) but is NEVER echoed in the response body.
+    """
+    try:
+        # ``migration_status`` itself runs a SELECT against
+        # schema_migrations — sufficient to verify the pool is up
+        # and the bootstrap table exists, which is all a liveness
+        # probe needs to assert.
+        migration_status(conn)
+        return {"db_reachable": True}
+    except Exception:
+        logger.warning("/health/db: probe failed", exc_info=True)
+        return {"db_reachable": False}
 
 
 # ---------------------------------------------------------------------------
