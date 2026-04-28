@@ -15,7 +15,8 @@ drop the audit row.
 
 from __future__ import annotations
 
-from uuid import uuid4
+from collections.abc import Iterator
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -42,12 +43,13 @@ _TEST_KEY = b"\x01" * 32
 
 
 @pytest.fixture(autouse=True)
-def _install_test_crypto_key() -> None:
+def _install_test_crypto_key() -> Iterator[None]:
     set_active_key(_TEST_KEY)
+    yield
 
 
 @pytest.fixture
-def audit_pool() -> ConnectionPool[psycopg.Connection[object]]:
+def audit_pool() -> Iterator[ConnectionPool[psycopg.Connection[object]]]:
     """Pool against the test DB. Closed at the end of the test."""
     pool: ConnectionPool[psycopg.Connection[object]] = ConnectionPool(
         _test_database_url(),
