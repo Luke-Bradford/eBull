@@ -236,6 +236,35 @@ def _synthetic_fill(
     else:
         price = Decimal("0")
 
+    # Fail-closed for demo EXIT with no quote (#241).
+    #
+    # For BUY/ADD with amount-based sizing the units calculation below
+    # produces 0 when price=0, the outer guard ``fu > 0`` skips
+    # persistence, and the recommendation ends in a failed state. That
+    # is correct.
+    #
+    # For EXIT, ``requested_units`` is loaded from the existing
+    # position, so units is NON-ZERO even when price=0. The outer
+    # guard would let _persist_fill record a sale at zero, the cash
+    # ledger would credit 0, _update_position_exit would deduct the
+    # position to zero, and the report would log a realised loss
+    # equal to the position's open cost basis. Bail explicitly here
+    # — leave the position open and the next quote refresh can retry.
+    if price == 0 and action == "EXIT":
+        return BrokerOrderResult(
+            broker_order_ref=f"DEMO-{instrument_id}-{action}",
+            status="failed",
+            filled_price=None,
+            filled_units=None,
+            fees=Decimal("0"),
+            raw_payload={
+                "demo": True,
+                "instrument_id": instrument_id,
+                "action": action,
+                "error": "no quote available for EXIT — cannot price fill",
+            },
+        )
+
     if requested_units is not None:
         units = requested_units
     elif requested_amount is not None and price > 0:

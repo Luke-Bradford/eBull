@@ -273,6 +273,53 @@ class TestSyntheticFill:
         )
         assert result.filled_units == Decimal("0")
 
+    def test_exit_with_no_quote_fails_closed(self) -> None:
+        """Regression for #241.
+
+        Demo EXIT with no quote (no last, no bid) used to return
+        ``status='filled'`` with ``filled_price=0`` and
+        ``filled_units = position_units``. The outer guard ``fu > 0``
+        in execute_order is satisfied (units came from the open
+        position) so a fill at price=0 was persisted, the cash ledger
+        credited 0, and a realised loss equal to the position's open
+        basis was booked.
+
+        Now: status='failed', filled_units=None, filled_price=None.
+        execute_order's persistence guard skips the fill and the
+        recommendation ends in a failed state.
+        """
+        result = _synthetic_fill(
+            instrument_id=123,
+            action="EXIT",
+            quote_price=None,
+            requested_amount=None,
+            requested_units=Decimal("10"),  # position size
+            bid=None,
+            ask=None,
+        )
+        assert result.status == "failed"
+        assert result.filled_price is None
+        assert result.filled_units is None
+        assert result.fees == Decimal("0")
+        assert "no quote" in result.raw_payload["error"].lower()
+
+    def test_buy_with_no_quote_still_zero_units(self) -> None:
+        """The fail-closed branch is EXIT-only. BUY/ADD with
+        amount-based sizing already correctly produced units=0 when
+        price=0; that path must remain unchanged.
+        """
+        result = _synthetic_fill(
+            instrument_id=123,
+            action="BUY",
+            quote_price=None,
+            requested_amount=Decimal("1000"),
+            requested_units=None,
+            bid=None,
+            ask=None,
+        )
+        assert result.status == "filled"
+        assert result.filled_units == Decimal("0")
+
 
 # ---------------------------------------------------------------------------
 # TestSyntheticFillSpreadCost
@@ -447,6 +494,37 @@ class TestExecuteOrderDemoMode:
 
         # conn.execute: position update, cash_ledger, rec status, audit = 4
         assert conn.execute.call_count == 4
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_exit_no_quote_fails_closed(self, _mock_now: MagicMock) -> None:
+        """Regression for #241. Demo EXIT with no quote must NOT
+        persist a fill at price=0 / book a synthetic loss / drain
+        the position. Synthetic_fill returns status=failed; the outer
+        guard skips _persist_fill, _update_position_exit and the cash
+        ledger entirely.
+        """
+        cursors = [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            _position_cursor(current_units=5.0),
+            _make_cursor([]),  # no quote
+            # Inside transaction: order persisted (status=failed), no fill, no
+            # position update, no cash ledger, no attribution.
+            _order_returning_cursor(order_id=11),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+        )
+        assert result.outcome == "failed"
+        assert result.fill_id is None
+        assert result.order_id == 11
+
+        # conn.execute: rec status update + audit = 2 (NO position deduct,
+        # NO cash ledger, NO broker_positions). The fill guard rejected
+        # everything because broker_result.status = 'failed'.
+        assert conn.execute.call_count == 2
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_demo_buy_no_quote_produces_failed_no_fill(self, _mock_now: MagicMock) -> None:
