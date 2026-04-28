@@ -25,6 +25,13 @@ export interface PaneProps extends PaneHeaderProps {
    * keyboard-reachable without needing a card-level handler.
    */
   readonly onCardClick?: () => void;
+  /**
+   * Stretch the pane (and its single child) to fill the parent grid
+   * cell vertically. Use when the cell uses `lg:row-span-N` to span
+   * multiple rows — without this, the child sits at its intrinsic
+   * height and leaves whitespace below when the right rail is taller.
+   */
+  readonly fillHeight?: boolean;
 }
 
 export function Pane({
@@ -34,12 +41,15 @@ export function Pane({
   onExpand,
   className,
   onCardClick,
+  fillHeight = false,
   children,
 }: PaneProps): JSX.Element {
   const clickable = onCardClick !== undefined;
+  const fillCls = fillHeight ? "flex h-full flex-col" : "";
+  const childCls = fillHeight ? "mt-2 flex min-h-0 flex-1 flex-col" : "mt-2";
   return (
     <article
-      className={`rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm ${
+      className={`rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm ${fillCls} ${
         clickable
           ? "cursor-pointer transition hover:border-slate-300 hover:shadow-md"
           : ""
@@ -53,7 +63,7 @@ export function Pane({
         source={source}
         onExpand={onExpand}
       />
-      <div className="mt-2">{children}</div>
+      <div className={childCls}>{children}</div>
     </article>
   );
 }
