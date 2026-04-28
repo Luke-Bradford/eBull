@@ -295,9 +295,19 @@ class TestFundamentalsIsFresh:
             [(now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()), (0,)]
         )
         fundamentals_is_fresh(conn)
-        # Second execute call is the missing-snapshot count query.
-        snapshot_query = conn.execute.call_args_list[1].args[0]
-        assert "external_identifiers" in snapshot_query
+        # Content filter rather than positional index — a future
+        # refactor inserting another conn.execute() before the
+        # snapshot query would otherwise silently assert on the
+        # wrong call (#639 WARNING).
+        snapshot_query_calls = [
+            c for c in conn.execute.call_args_list
+            if c.args and "external_identifiers" in c.args[0]
+        ]
+        assert len(snapshot_query_calls) == 1, (
+            f"expected exactly one snapshot-cohort execute, "
+            f"got {len(snapshot_query_calls)}"
+        )
+        snapshot_query = snapshot_query_calls[0].args[0]
         assert "ei.provider = 'sec'" in snapshot_query
         assert "ei.identifier_type = 'cik'" in snapshot_query
         assert "ei.is_primary = TRUE" in snapshot_query

@@ -1036,3 +1036,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `_update_order_with_broker_result` issued `conn.execute(UPDATE ... WHERE order_id = %s)` with no rowcount check. If the UPDATE matched zero rows (stale order_id, lost intent INSERT, schema drift) the function returned silently and `order_id` flowed forward as a foreign key into fills / cost records / positions, corrupting referential integrity invisibly.
 - Prevention: Any helper that UPDATEs by primary key and threads the same id forward into FK-referencing writes MUST assert `cur.rowcount == 1` (or the equivalent `statusmessage == "UPDATE 1"`) and raise on mismatch. Use the cursor form `with conn.cursor() as cur: cur.execute(...); if cur.rowcount != 1: raise ...` rather than the connection-level `conn.execute(...)` shortcut, since the latter discards `rowcount`. At self-review: grep `conn.execute(\\s*"UPDATE ` in any service that takes an id from a prior INSERT and threads it into later writes; convert to the cursor + assertion form.
 - Enforced in: this prevention log; PR #637 fix raises `RuntimeError` when the post-broker UPDATE on the #243 intent row matches anything other than 1 row.
+
+---
+
+### Positional `call_args_list` index in SQL-shape regression tests
+
+- First seen in: #639 (#540 SEC-CIK cohort pins).
+- Symptom: SQL-shape regression tests asserted on `mock.call_args_list[1].args[0]` (the second mock-conn execute call). A future refactor that inserts an extra `conn.execute()` earlier in the flow silently shifts the index, so the test asserts on the wrong call and the actual SQL filter regression goes undetected. The test stays green for the wrong reason.
+- Prevention: Identify the target call by content filter, not position. Use `[c for c in mock.call_args_list if c.args and "<distinguishing token>" in c.args[0]]` and assert exactly one match before reading the SQL. The distinguishing token should be a noun the query is meant to use (e.g. `external_identifiers`, the table the predicate is enforcing) — not a generic SQL keyword. At self-review: grep `call_args_list\[\d\]\.args\[0\]` and convert each to a content-filter form.
+- Enforced in: this prevention log; PR #639 fix replaces both positional indexes with content filters in `test_daily_research_refresh_dedupe.py` and `test_sync_orchestrator_freshness.py`.
