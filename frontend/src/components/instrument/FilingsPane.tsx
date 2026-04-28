@@ -132,8 +132,8 @@ export function FilingsPane({
           {state.data.items.slice(0, ROW_LIMIT).map((f) => {
             const link = drilldownLink(
               symbol,
-              f.filing_type ?? null,
-              f.accession_number ?? null,
+              f.filing_type,
+              f.accession_number,
             );
             const label = (
               <span className="flex items-baseline gap-2">
