@@ -435,13 +435,20 @@ def _persist_broker_position(
 ) -> None:
     """Insert a broker_positions row for an eBull-originated BUY/ADD fill.
 
-    Uses ``order_id`` as the synthetic ``position_id`` — the same convention
-    as ``app/api/orders._persist_order_and_fill``.  The row is immediately
-    visible to ``_load_position_id_for_exit`` so a subsequent EXIT
-    recommendation does not have to wait for the next broker sync cycle.
+    Uses ``-order_id`` as the synthetic ``position_id`` (#227). The
+    sign partitions the synthetic-id namespace from real
+    broker-assigned position_ids — eToro's positionID is unsigned in
+    practice, so a negative synthetic id can never collide with one
+    pulled in by a future portfolio sync. Pairs with the matching
+    convention in ``app/api/orders._persist_order_and_fill``.
 
-    ON CONFLICT: if a broker sync backfills the same ``position_id`` before
-    this runs (unlikely but safe), update units/amount/updated_at.
+    The row is immediately visible to ``_load_position_id_for_exit``
+    (which filters by ``units > 0`` only — sign-agnostic) so a
+    subsequent EXIT recommendation does not have to wait for the next
+    broker sync cycle.
+
+    ON CONFLICT: if the same synthetic id ever recurs (e.g. a re-run
+    of the same order), update units/amount/updated_at.
     """
     gross = filled_price * filled_units
     conn.execute(
@@ -470,7 +477,7 @@ def _persist_broker_position(
             updated_at = EXCLUDED.updated_at
         """,
         {
-            "pid": order_id,
+            "pid": -order_id,
             "iid": instrument_id,
             "units": filled_units,
             "amount": gross,
