@@ -223,38 +223,149 @@ class TestDedupePass1SameAccession:
 
 
 class TestDedupePass2CrossAccession:
-    """Pass 2: collapse same (fy, fq, period_type), keep latest filed_date."""
+    """Pass 2: across source_refs, smaller period_end wins; on tied
+    period_end keep the latest filed_date.
+    """
 
-    def test_keeps_latest_filed_amendment(
+    def test_bbby_pattern_keeps_real_fiscal_end(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
-        """Cross-accession restatement leftover. The instrument page must
-        not show two columns for the same fiscal label; the latest
-        filing's values supersede the original.
+        """Smoking-gun regression for the BBBY (Beyond Inc) pattern:
+
+          real:     period_end=2023-12-31, source_ref='acc-13',
+                    filed=2024-02-23, revenue=1.232B
+          polluted: period_end=2024-10-29, source_ref='acc-13,acc-78'
+                    (compound — extraction merged a 10-Q's facts in
+                    via a re-run), filed=2024-10-31, revenue=1.232B
+
+        The polluted row has the LATER filed_date (a 10-Q amendment is
+        processed after the original 10-K), so a naive
+        keep-latest-filed_date rule would pick the BAD row. Pollution
+        always shifts period_end FORWARD, never backward, so smaller
+        period_end is the reliable signal.
         """
         conn = ebull_test_conn
-        _seed_instrument(conn, instrument_id=3, symbol="MSFT")
+        _seed_instrument(conn, instrument_id=3, symbol="BBBY")
         _seed_period(
             conn,
             instrument_id=3,
-            period_end=date(2024, 6, 30),
+            period_end=date(2023, 12, 31),  # real Q4 2023 end
             period_type="Q4",
-            fiscal_year=2024,
+            fiscal_year=2023,
             fiscal_quarter=4,
-            source_ref="acc-original",
-            filed_date=date(2024, 7, 30),
-            revenue=Decimal("1000"),
+            source_ref="0001130713-24-000013",
+            filed_date=date(2024, 2, 23),
+            revenue=Decimal("1232008000"),
         )
         _seed_period(
             conn,
             instrument_id=3,
-            period_end=date(2024, 7, 15),
+            period_end=date(2024, 10, 29),  # filing-date pollution
             period_type="Q4",
-            fiscal_year=2024,
+            fiscal_year=2023,
             fiscal_quarter=4,
+            source_ref="0001130713-24-000013,000113071",  # compound
+            filed_date=date(2024, 10, 31),  # LATER than real
+            revenue=Decimal("1232008000"),
+        )
+        conn.commit()
+
+        _run_migration(conn)
+        conn.commit()
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT period_end_date, source_ref FROM financial_periods "
+                "WHERE instrument_id = 3 AND fiscal_quarter = 4"
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        # Real fiscal end survives — pollution is dropped despite later filed_date.
+        assert rows[0]["period_end_date"] == date(2023, 12, 31)
+        assert rows[0]["source_ref"] == "0001130713-24-000013"
+
+    def test_compound_source_ref_collapses_to_single(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """A single-accession row paired with a compound-accession row
+        sharing a fiscal label — same as the BBBY case but with a
+        different fiscal year, to confirm the rule generalises.
+        Smaller period_end wins.
+        """
+        conn = ebull_test_conn
+        _seed_instrument(conn, instrument_id=9, symbol="BYON")
+        _seed_period(
+            conn,
+            instrument_id=9,
+            period_end=date(2022, 12, 31),  # real Q4 2022
+            period_type="Q4",
+            fiscal_year=2022,
+            fiscal_quarter=4,
+            source_ref="acc-14",
+            filed_date=date(2023, 2, 24),
+        )
+        _seed_period(
+            conn,
+            instrument_id=9,
+            period_end=date(2023, 6, 30),  # polluted compound
+            period_type="Q4",
+            fiscal_year=2022,
+            fiscal_quarter=4,
+            source_ref="acc-14,acc-71",
+            filed_date=date(2023, 7, 3),
+        )
+        conn.commit()
+
+        _run_migration(conn)
+        conn.commit()
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT period_end_date, source_ref FROM financial_periods "
+                "WHERE instrument_id = 9 AND fiscal_quarter = 4"
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0]["period_end_date"] == date(2022, 12, 31)
+        assert rows[0]["source_ref"] == "acc-14"
+
+    def test_tied_period_end_amendment_keeps_latest_filed(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Genuine restatement: two filings of the SAME fiscal label
+        with the SAME period_end_date (real amendments do not move the
+        fiscal calendar). Tie-break keeps the most recent filed_date.
+
+        Tested against the raw table because the canonical PK
+        (instrument_id, period_end_date, period_type) cannot hold two
+        rows with identical period_end. Migration logic is identical
+        between canonical and raw.
+        """
+        conn = ebull_test_conn
+        _seed_instrument(conn, instrument_id=8, symbol="ORCL")
+        _seed_period_raw(
+            conn,
+            instrument_id=8,
+            period_end=date(2024, 11, 30),
+            period_type="Q2",
+            fiscal_year=2025,
+            fiscal_quarter=2,
+            source_ref="acc-original",
+            filed_date=date(2024, 12, 11),
+            revenue=Decimal("1000"),
+        )
+        _seed_period_raw(
+            conn,
+            instrument_id=8,
+            period_end=date(2024, 11, 30),
+            period_type="Q2",
+            fiscal_year=2025,
+            fiscal_quarter=2,
             source_ref="acc-amendment",
-            filed_date=date(2024, 9, 12),  # later
+            filed_date=date(2025, 1, 15),  # later
             revenue=Decimal("1100"),
         )
         conn.commit()
@@ -264,94 +375,12 @@ class TestDedupePass2CrossAccession:
 
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                "SELECT period_end_date, source_ref, revenue FROM financial_periods "
-                "WHERE instrument_id = 3 AND fiscal_quarter = 4"
+                "SELECT source_ref, revenue FROM financial_periods_raw WHERE instrument_id = 8 AND fiscal_quarter = 2"
             )
             rows = cur.fetchall()
         assert len(rows) == 1
         assert rows[0]["source_ref"] == "acc-amendment"
         assert rows[0]["revenue"] == Decimal("1100")
-
-    def test_tied_filed_date_falls_back_to_period_end(
-        self,
-        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
-    ) -> None:
-        """When two cross-accession rows were filed on the same day,
-        the larger period_end_date wins (most-recently-reported period
-        end).
-        """
-        conn = ebull_test_conn
-        _seed_instrument(conn, instrument_id=8, symbol="ORCL")
-        _seed_period(
-            conn,
-            instrument_id=8,
-            period_end=date(2024, 11, 30),
-            period_type="Q2",
-            fiscal_year=2025,
-            fiscal_quarter=2,
-            source_ref="acc-a",
-            filed_date=date(2024, 12, 11),
-        )
-        _seed_period(
-            conn,
-            instrument_id=8,
-            period_end=date(2024, 12, 1),
-            period_type="Q2",
-            fiscal_year=2025,
-            fiscal_quarter=2,
-            source_ref="acc-b",
-            filed_date=date(2024, 12, 11),  # same filed_date
-        )
-        conn.commit()
-
-        _run_migration(conn)
-        conn.commit()
-
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute("SELECT period_end_date FROM financial_periods WHERE instrument_id = 8 AND fiscal_quarter = 2")
-            rows = cur.fetchall()
-        assert len(rows) == 1
-        assert rows[0]["period_end_date"] == date(2024, 12, 1)
-
-    def test_null_filed_date_loses_to_known(
-        self,
-        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
-    ) -> None:
-        """A row with a known filed_date supersedes a row whose
-        filed_date is NULL — known-provenance always beats stub.
-        """
-        conn = ebull_test_conn
-        _seed_instrument(conn, instrument_id=9, symbol="ADBE")
-        _seed_period(
-            conn,
-            instrument_id=9,
-            period_end=date(2024, 8, 30),
-            period_type="Q3",
-            fiscal_year=2024,
-            fiscal_quarter=3,
-            source_ref="acc-stub",
-            filed_date=None,
-        )
-        _seed_period(
-            conn,
-            instrument_id=9,
-            period_end=date(2024, 8, 31),
-            period_type="Q3",
-            fiscal_year=2024,
-            fiscal_quarter=3,
-            source_ref="acc-real",
-            filed_date=date(2024, 9, 13),
-        )
-        conn.commit()
-
-        _run_migration(conn)
-        conn.commit()
-
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute("SELECT source_ref FROM financial_periods WHERE instrument_id = 9")
-            rows = cur.fetchall()
-        assert len(rows) == 1
-        assert rows[0]["source_ref"] == "acc-real"
 
 
 class TestDedupeIsolation:
