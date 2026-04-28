@@ -18,6 +18,7 @@ to keep the test/migration pair from drifting.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
@@ -94,10 +95,22 @@ def fiscal_label_index_dropped(
             conn.rollback()
         except Exception:
             pass
-        # Dedupe first, then recreate. Both files are idempotent —
-        # 076 returns rowcount 0 on already-clean data, 077 is
-        # ``IF NOT EXISTS``.
-        _exec_sql_file(conn, _MIGRATION_PATH)
+        # Each step in its own try/except so a failure in 076 cannot
+        # skip the 077 recreate (PR #631 review — "teardown-step
+        # isolation"). If 076 fails (e.g. a future revision introduces
+        # a SQL error), the recreate may still succeed when no
+        # duplicates were seeded; if it fails we re-raise so the test
+        # framework reports the leak, rather than silently dropping
+        # the index for every subsequent test.
+        try:
+            _exec_sql_file(conn, _MIGRATION_PATH)
+        except Exception as dedupe_exc:
+            warnings.warn(
+                f"fiscal_label_index_dropped teardown: migration 076 "
+                f"re-run failed -- {type(dedupe_exc).__name__}: {dedupe_exc}. "
+                f"Attempting 077 recreate anyway.",
+                stacklevel=2,
+            )
         _exec_sql_file(conn, _MIGRATION_077_PATH)
 
 

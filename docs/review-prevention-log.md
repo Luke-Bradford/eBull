@@ -1009,3 +1009,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: `FundamentalsPane` rendered a "View statements →" `<Link>` as a sibling of the loading/error/empty conditional block inside `<Section>`, so the link was visible during skeleton and error states before data was confirmed present.
 - Prevention: Navigation links (and any affordance that implies data is loaded) inside `useAsync`-driven panes must live inside the resolved-data branch, not as unconditional siblings of the loading/error/empty ternary. At self-review: grep for `<Link` in any component that also has `useAsync`, and confirm each link is inside the `state.data !== null` branch or the resolved conditional arm.
 - Enforced in: this prevention log; PR #573 fix moves the "View statements" footer into the data-resolved `<>...</>` fragment.
+
+---
+
+### Teardown-step isolation in shared-DB schema fixtures
+
+- First seen in: #631.
+- Symptom: A pytest fixture restoring shared `ebull_test` schema in `finally` ran two SQL files sequentially without per-step `try`. If step N (re-running migration 076 to dedupe leftover seeds) ever raised, step N+1 (re-creating the migration 077 partial unique index) would be skipped — leaving the index dropped for every subsequent test in the run, because `apply_migrations_to_test_db` only applies files not yet recorded in `schema_migrations`.
+- Prevention: Each step in a multi-step `finally` block that mutates shared DB schema (drop/recreate index, re-apply migration, restore singleton) must be wrapped in its own `try/except`. A failure in step N must not abandon steps N+1..end. Swallow + warn for non-fatal recovery steps; re-raise the final restore so the test framework reports the leak instead of silently corrupting later test runs.
+- Enforced in: this prevention log; PR #631 fix wraps the migration 076 dedupe call in its own `try/except` so the migration 077 recreate runs unconditionally.
