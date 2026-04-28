@@ -1035,23 +1035,85 @@ def _canonical_merge_instrument(
 ) -> int:
     """Merge financial_periods_raw into financial_periods for one instrument.
 
-    For each (period_end_date, period_type), picks the row from the
-    highest-priority source.  Returns count of rows upserted.
+    Keys on the **fiscal label** ``(fiscal_year, fiscal_quarter,
+    period_type)`` rather than ``(period_end_date, period_type)``
+    (#624). Period_end_date is data, not identity — a late-arriving
+    amendment with a different period_end_date than the row already
+    on file used to insert as a NEW canonical row, leaving the
+    original behind as a duplicate. Now:
+
+      * Phase A: ``best_source`` CTE picks the winning raw row per
+        ``(fiscal_year, fiscal_quarter, period_type)`` — source
+        priority first (sec_edgar > companies_house > others), then
+        ``filed_date DESC`` (latest filing wins regardless of
+        arrival order), with ``period_end_date ASC`` as a final
+        tiebreak so the smallest (real fiscal end) wins on tied
+        filed_date.
+
+      * Phase B: ``deletions`` CTE removes canonical rows whose
+        fiscal label collides with a winner but whose
+        ``period_end_date`` differs — those are stale leftovers
+        from a prior arrival.
+
+      * Phase C: INSERT the winners. ON CONFLICT on the PK
+        ``(instrument_id, period_end_date, period_type)`` updates
+        the row in place when period_end_date matches (a true
+        same-date restatement); the partial unique index from
+        migration 077 backstops the non-stale path so a same-label
+        insert with a *different* period_end_date than any
+        surviving row simply lands as a fresh row after the
+        Phase B delete cleared the way.
     """
-    cur = conn.execute(
+    # Phase B: delete canonical rows that share a fiscal label with a
+    # raw winner but carry a stale ``period_end_date`` (left over from
+    # a prior arrival of the same fiscal period). Running the DELETE
+    # as a separate statement before the INSERT is mandatory: a
+    # combined data-modifying CTE doesn't expose its DELETE rows to
+    # the sibling INSERT's snapshot, so the partial unique index from
+    # migration 077 would still see the stale row and raise
+    # UniqueViolation.
+    conn.execute(
         """
-        WITH best_source AS (
-            SELECT DISTINCT ON (period_end_date, period_type)
-                *
+        DELETE FROM financial_periods fp
+        USING (
+            SELECT DISTINCT ON (fiscal_year, fiscal_quarter, period_type)
+                source, fiscal_year, fiscal_quarter, period_type, period_end_date
             FROM financial_periods_raw
             WHERE instrument_id = %(iid)s
-            ORDER BY period_end_date, period_type,
+            ORDER BY fiscal_year, fiscal_quarter, period_type,
                      CASE source
                          WHEN 'sec_edgar' THEN 1
                          WHEN 'companies_house' THEN 2
                          ELSE 99
                      END,
-                     filed_date DESC NULLS LAST
+                     filed_date DESC NULLS LAST,
+                     period_end_date ASC
+        ) bs
+        WHERE fp.instrument_id = %(iid)s
+          AND fp.source = bs.source
+          AND fp.fiscal_year = bs.fiscal_year
+          AND fp.fiscal_quarter IS NOT DISTINCT FROM bs.fiscal_quarter
+          AND fp.period_type = bs.period_type
+          AND fp.period_end_date IS DISTINCT FROM bs.period_end_date
+        """,
+        {"iid": instrument_id},
+    )
+
+    cur = conn.execute(
+        """
+        WITH best_source AS (
+            SELECT DISTINCT ON (fiscal_year, fiscal_quarter, period_type)
+                *
+            FROM financial_periods_raw
+            WHERE instrument_id = %(iid)s
+            ORDER BY fiscal_year, fiscal_quarter, period_type,
+                     CASE source
+                         WHEN 'sec_edgar' THEN 1
+                         WHEN 'companies_house' THEN 2
+                         ELSE 99
+                     END,
+                     filed_date DESC NULLS LAST,
+                     period_end_date ASC
         )
         INSERT INTO financial_periods (
             instrument_id, period_end_date, period_type,
