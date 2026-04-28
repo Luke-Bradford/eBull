@@ -330,6 +330,105 @@ class TestBusinessSectionsIngest:
         prod_refs = {(r.reference_type, r.target) for r in products.cross_references}
         assert ("item", "Item 7") in prod_refs
 
+    def test_null_tables_json_re_selects_for_reparse(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """#560 — pre-migration-075 rows have tables_json = NULL on
+        sections; the candidate query must re-select them so the next
+        ingest re-parses and populates tables_json from the new
+        parser. Once populated the EXISTS clause goes false and the
+        gate behaves as steady-state.
+        """
+        iid = _seed_instrument(ebull_test_conn, symbol="APEX", iid=303)
+        _seed_10k(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="APEX-10K-560",
+            url="https://www.sec.gov/Archives/apex560.htm",
+        )
+        fetcher_first = _StubFetcher({"https://www.sec.gov/Archives/apex560.htm": self._RICH_10K})
+        first = ingest_business_summaries(ebull_test_conn, cast("object", fetcher_first))  # type: ignore[arg-type]
+        assert first.rows_inserted == 1
+
+        # Simulate pre-#075 state: NULL tables_json on every child row.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE instrument_business_summary_sections SET tables_json = NULL WHERE instrument_id = %s",
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        # Without the #560 EXISTS clause this would skip (source_accession
+        # matches, no retry pending). The clause should re-select the row.
+        fetcher_second = _StubFetcher({"https://www.sec.gov/Archives/apex560.htm": self._RICH_10K})
+        second = ingest_business_summaries(ebull_test_conn, cast("object", fetcher_second))  # type: ignore[arg-type]
+        assert second.filings_scanned == 1
+        # rows_updated proves the upsert branch actually executed — a
+        # silent no-op reparse would still pass scan + fetch assertions
+        # alone (#633 NITPICK).
+        assert second.rows_updated == 1
+        assert fetcher_second.calls == ["https://www.sec.gov/Archives/apex560.htm"]
+
+        # tables_json now repopulated (non-NULL on every section row).
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM instrument_business_summary_sections "
+                "WHERE instrument_id = %s AND tables_json IS NULL",
+                (iid,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert int(row[0]) == 0
+
+        # Steady-state: a third run with all tables_json populated must
+        # NOT re-select. EXISTS clause goes false; gate empties.
+        fetcher_third = _StubFetcher({"https://www.sec.gov/Archives/apex560.htm": self._RICH_10K})
+        third = ingest_business_summaries(ebull_test_conn, cast("object", fetcher_third))  # type: ignore[arg-type]
+        assert third.filings_scanned == 0
+        assert fetcher_third.calls == []
+
+    def test_null_tables_json_quarantined_row_skipped(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """#560 — a backfill candidate that is currently quarantined
+        (``next_retry_at`` in the future) must NOT be re-selected by
+        the new EXISTS clause. Without the AND-guard a repeatedly-
+        failing reparse would bypass the #533 exponential backoff and
+        fetch on every ingest pass.
+        """
+        iid = _seed_instrument(ebull_test_conn, symbol="QRTN", iid=304)
+        _seed_10k(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="QRTN-10K-560",
+            url="https://www.sec.gov/Archives/qrtn560.htm",
+        )
+        fetcher_first = _StubFetcher({"https://www.sec.gov/Archives/qrtn560.htm": self._RICH_10K})
+        ingest_business_summaries(ebull_test_conn, cast("object", fetcher_first))  # type: ignore[arg-type]
+
+        # Simulate pre-#075 NULL tables_json AND quarantined parent.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE instrument_business_summary_sections SET tables_json = NULL WHERE instrument_id = %s",
+                (iid,),
+            )
+            cur.execute(
+                "UPDATE instrument_business_summary "
+                "SET next_retry_at = NOW() + INTERVAL '7 days' "
+                "WHERE instrument_id = %s",
+                (iid,),
+            )
+        ebull_test_conn.commit()
+
+        fetcher_second = _StubFetcher({"https://www.sec.gov/Archives/qrtn560.htm": self._RICH_10K})
+        second = ingest_business_summaries(ebull_test_conn, cast("object", fetcher_second))  # type: ignore[arg-type]
+        # The quarantine clock keeps the row out of the candidate set
+        # despite the NULL tables_json — backoff contract preserved.
+        assert second.filings_scanned == 0
+        assert fetcher_second.calls == []
+
     def test_insert_failure_rolls_back_delete_atomically(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """#449 BLOCKING regression — a failure inside the sections
         upsert must not leave an empty sections table committed. If
