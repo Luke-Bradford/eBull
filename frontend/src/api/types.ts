@@ -969,6 +969,13 @@ export interface ActionNeededItem {
   self_heal: boolean;
   consecutive_failures: number;
   affected_downstream: string[];
+  /**
+   * First line of the most recent captured exception
+   * (sync_layer_progress.error_message). Populated by #645 forensics.
+   * Null when the layer has never recorded a forensic message — older
+   * pre-#645 rows stay null until the next failure is recorded.
+   */
+  error_excerpt?: string | null;
 }
 
 export interface SecretMissingItem {

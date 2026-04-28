@@ -211,6 +211,15 @@ function ActionNeededRow({ item, onOpen }: { item: ActionNeededItem; onOpen: () 
           <div className="font-medium text-red-800">
             {item.display_name} — {item.operator_message}
           </div>
+          {item.error_excerpt !== null && item.error_excerpt !== undefined ? (
+            <div
+              className="mt-0.5 truncate font-mono text-xs text-red-700"
+              title={item.error_excerpt}
+              data-testid="problems-error-excerpt"
+            >
+              {item.error_excerpt}
+            </div>
+          ) : null}
           {fix !== null ? (
             <div className="text-xs text-slate-700">
               {fixAsLink ? (

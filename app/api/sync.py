@@ -33,7 +33,10 @@ from app.services.sync_orchestrator import (
     submit_sync,
 )
 from app.services.sync_orchestrator.cascade import collapse_cascades
-from app.services.sync_orchestrator.layer_failure_history import all_layer_histories
+from app.services.sync_orchestrator.layer_failure_history import (
+    all_layer_error_excerpts,
+    all_layer_histories,
+)
 from app.services.sync_orchestrator.layer_state import compute_layer_states_from_db
 from app.services.sync_orchestrator.layer_types import (
     REMEDIES,
@@ -94,6 +97,12 @@ class ActionNeededItem(BaseModel):
     self_heal: bool
     consecutive_failures: int
     affected_downstream: list[str]
+    # First line of the latest captured exception (sync_layer_progress
+    # .error_message). None when the layer has never recorded a
+    # forensic message — older rows pre-#645 will be NULL until the
+    # next failure is recorded. The Admin banner shows this alongside
+    # the category so "Unclassified error" is no longer opaque.
+    error_excerpt: str | None = None
 
 
 class SecretMissingItem(BaseModel):
@@ -367,6 +376,7 @@ def get_sync_layers_v2(
     states = compute_layer_states_from_db(conn)
     names = list(states.keys())
     streaks, categories = all_layer_histories(conn, names)
+    error_excerpts = all_layer_error_excerpts(conn, names)
     last_updates = _layer_last_updated_map(conn, names)
 
     if any(s in {LayerState.ACTION_NEEDED, LayerState.SECRET_MISSING} for s in states.values()):
@@ -413,6 +423,7 @@ def get_sync_layers_v2(
                     self_heal=remedy.self_heal,
                     consecutive_failures=streaks.get(name, 0),
                     affected_downstream=groups_by_root.get(name, []),
+                    error_excerpt=error_excerpts.get(name),
                 )
             )
         elif state is LayerState.SECRET_MISSING:

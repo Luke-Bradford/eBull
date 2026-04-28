@@ -96,6 +96,47 @@ describe("ProblemsPanel", () => {
     expect(screen.getByText(/3 consecutive failures/)).toBeInTheDocument();
   });
 
+  it("renders error_excerpt under the message when the API returns one (#645 forensics)", () => {
+    const v2 = emptyV2();
+    v2.system_state = "needs_attention";
+    v2.action_needed = [
+      {
+        root_layer: "fundamentals",
+        display_name: "Fundamentals",
+        category: "internal_error",
+        operator_message: "Unclassified error — retrying with backoff",
+        operator_fix: null,
+        self_heal: true,
+        consecutive_failures: 7,
+        affected_downstream: [],
+        error_excerpt: "KeyError: 'cik'",
+      },
+    ];
+    renderPanel({ v2 });
+    expect(screen.getByTestId("problems-error-excerpt")).toHaveTextContent("KeyError: 'cik'");
+  });
+
+  it("omits the error_excerpt block when the API does not return one (legacy pre-#645 row)", () => {
+    const v2 = emptyV2();
+    v2.system_state = "needs_attention";
+    v2.action_needed = [
+      {
+        root_layer: "fundamentals",
+        display_name: "Fundamentals",
+        category: "internal_error",
+        operator_message: "Unclassified error — retrying with backoff",
+        operator_fix: null,
+        self_heal: true,
+        consecutive_failures: 1,
+        affected_downstream: [],
+        // error_excerpt omitted entirely (undefined) — same as a
+        // legacy row with no message column populated.
+      },
+    ];
+    renderPanel({ v2 });
+    expect(screen.queryByTestId("problems-error-excerpt")).not.toBeInTheDocument();
+  });
+
   it("renders secret_missing row with a Link to /settings#providers", () => {
     const v2 = emptyV2();
     v2.system_state = "needs_attention";
