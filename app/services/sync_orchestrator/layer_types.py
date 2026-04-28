@@ -192,8 +192,14 @@ class Cadence:
             return self.interval.total_seconds()
         # Calendar mode: pick a cadence_seconds such that
         # cadence_seconds * grace_multiplier == boundary_age.
+        # ``max(..., 1.0)`` floors the value to one second so callers
+        # that log or divide by ``cadence_seconds`` never see a zero
+        # at the exact instant of the calendar tick (where
+        # ``now == window_start`` and ``boundary_age`` is otherwise
+        # 0). Rule 9's behavior is unchanged: any prior run still
+        # has ``age_seconds > 0`` and gets DEGRADED.
         boundary_age = (now.astimezone(UTC) - self.window_start(now)).total_seconds()
-        return boundary_age / grace_multiplier
+        return max(boundary_age, 1.0) / grace_multiplier
 
     def grace_window(self, grace_multiplier: float) -> timedelta:
         if grace_multiplier <= 0:

@@ -211,3 +211,17 @@ def test_cadence_seconds_for_state_machine_calendar_collapses_grace() -> None:
     grace = 1.25
     cadence_seconds = cadence.cadence_seconds_for_state_machine(now, grace_multiplier=grace)
     assert cadence_seconds * grace == pytest.approx(boundary_age)
+
+
+def test_cadence_seconds_for_state_machine_at_exact_boundary_is_floored() -> None:
+    """At ``now == window_start`` (exact day-1 UTC tick) the literal
+    boundary_age is 0. Floor to 1 second so callers that log or divide
+    by ``cadence_seconds`` never see zero. Rule 9's correctness is
+    unchanged because any prior run still has ``age_seconds > 0``."""
+    now = datetime(2026, 4, 1, 0, 0, 0, tzinfo=UTC)
+    cadence = Cadence(calendar_months=1)
+    cadence_seconds = cadence.cadence_seconds_for_state_machine(now, grace_multiplier=1.25)
+    # 1.0 / 1.25 == 0.8; the floor is on boundary_age, not on the final
+    # quotient — what matters is that cadence_seconds is strictly
+    # positive so downstream math is never divide-by-zero.
+    assert cadence_seconds > 0

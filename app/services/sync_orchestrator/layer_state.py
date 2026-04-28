@@ -137,6 +137,13 @@ def compute_layer_states_from_db(
             status = "complete"
         else:
             age_seconds = latest_ages.get(name, float("inf"))
+        # Belt-and-braces: any future caller (logging, ratio math)
+        # that touches ``cadence_seconds`` should never see zero.
+        # ``Cadence.cadence_seconds_for_state_machine`` already
+        # floors to 1 second; this assert turns a regression into a
+        # loud failure during the planning sweep.
+        cadence_seconds = layer.cadence.cadence_seconds_for_state_machine(now, layer.grace_multiplier)
+        assert cadence_seconds > 0, f"cadence_seconds must be positive (got {cadence_seconds} for {name})"
         return LayerContext(
             is_enabled=enabled.get(name, True),
             is_running=name in running_set,
@@ -153,7 +160,7 @@ def compute_layer_states_from_db(
             # (``age_seconds > cadence_seconds * grace_multiplier``)
             # fires at the calendar tick, not after a 31-day rolling
             # window.
-            cadence_seconds=layer.cadence.cadence_seconds_for_state_machine(now, layer.grace_multiplier),
+            cadence_seconds=cadence_seconds,
             grace_multiplier=layer.grace_multiplier,
             max_attempts=layer.retry_policy.max_attempts,
         )
