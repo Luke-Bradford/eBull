@@ -25,7 +25,7 @@ from app.services.fundamentals_observability import (
     get_cik_timing_summary,
     get_seed_progress,
 )
-from app.services.layer_enabled import set_layer_enabled
+from app.services.layer_enabled import SAFETY_CRITICAL_LAYERS, set_layer_enabled
 from app.services.sync_orchestrator import (
     ExecutionPlan,
     SyncAlreadyRunning,
@@ -145,6 +145,12 @@ class SyncLayersV2Response(BaseModel):
 
 class LayerEnabledRequest(BaseModel):
     enabled: bool
+    # #346: safety-critical layers (``fx_rates`` / ``portfolio_sync``)
+    # require a non-empty ``reason`` when ``enabled=False``; the
+    # endpoint enforces this. Other layers may include reason +
+    # changed_by for audit completeness without strict enforcement.
+    reason: str | None = None
+    changed_by: str | None = None
 
 
 class LayerEnabledResponse(BaseModel):
@@ -502,7 +508,29 @@ def post_layer_enabled(
     """
     if layer_name not in LAYERS:
         raise HTTPException(status_code=404, detail=f"unknown layer: {layer_name}")
-    set_layer_enabled(conn, layer_name, enabled=body.enabled)
+    # #346: safety-critical disables MUST carry a reason. Direct API
+    # / service-token callers (no UI confirm dialog in the loop) would
+    # otherwise be able to flip ``fx_rates`` or ``portfolio_sync`` off
+    # without operator attribution, which is inconsistent with the
+    # kill-switch / live-trading toggles.
+    # Trim once so both the safety gate and the audit row see the same
+    # value — passing the unstripped form to set_layer_enabled would
+    # store leading/trailing whitespace despite the gate having
+    # rejected it.
+    reason_trimmed = body.reason.strip() if body.reason is not None else None
+    if not body.enabled and layer_name in SAFETY_CRITICAL_LAYERS:
+        if not reason_trimmed:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"layer '{layer_name}' is safety-critical; supply a non-empty 'reason' to disable it."),
+            )
+    set_layer_enabled(
+        conn,
+        layer_name,
+        enabled=body.enabled,
+        reason=reason_trimmed,
+        changed_by=body.changed_by,
+    )
     conn.commit()
     return LayerEnabledResponse(
         layer=layer_name,
@@ -553,7 +581,13 @@ def post_ingest_enabled(
             status_code=404,
             detail=f"unknown ingest key: {key}; allowed: {sorted(INGEST_TOGGLES)}",
         )
-    set_layer_enabled(conn, key, enabled=body.enabled)
+    set_layer_enabled(
+        conn,
+        key,
+        enabled=body.enabled,
+        reason=body.reason,
+        changed_by=body.changed_by,
+    )
     conn.commit()
     return IngestToggleResponse(
         key=key,

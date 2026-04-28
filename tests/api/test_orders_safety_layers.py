@@ -16,7 +16,10 @@ from fastapi.testclient import TestClient
 
 @pytest.mark.integration
 def test_manual_buy_blocked_when_fx_rates_disabled(clean_client: TestClient) -> None:
-    clean_client.post("/sync/layers/fx_rates/enabled", json={"enabled": False})
+    clean_client.post(
+        "/sync/layers/fx_rates/enabled",
+        json={"enabled": False, "reason": "test", "changed_by": "pytest"},
+    )
     try:
         resp = clean_client.post(
             "/portfolio/orders",
@@ -32,7 +35,10 @@ def test_manual_buy_blocked_when_fx_rates_disabled(clean_client: TestClient) -> 
 
 @pytest.mark.integration
 def test_manual_buy_blocked_when_portfolio_sync_disabled(clean_client: TestClient) -> None:
-    clean_client.post("/sync/layers/portfolio_sync/enabled", json={"enabled": False})
+    clean_client.post(
+        "/sync/layers/portfolio_sync/enabled",
+        json={"enabled": False, "reason": "test", "changed_by": "pytest"},
+    )
     try:
         resp = clean_client.post(
             "/portfolio/orders",
