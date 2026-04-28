@@ -278,14 +278,26 @@ def create(
                     # inside store_credential could raise on a
                     # value the outer pass accepted (review
                     # feedback PR #118 round 12).
-                    meta = store_credential(
-                        conn,
-                        operator_id=session.operator_id,
-                        provider=provider_norm,
-                        label=label_norm,
-                        environment=env_norm,
-                        plaintext=secret_norm,
-                    )
+                    #
+                    # #112: caller owns transaction lifecycle.
+                    # ``conn.commit()`` flushes the implicit
+                    # transaction opened by ``_active_credential_
+                    # exists`` above so ``conn.transaction()``
+                    # opens a real top-level txn (not a savepoint
+                    # that defers commit until get_conn teardown,
+                    # which would publish the recovery phrase
+                    # before the credential row is durable —
+                    # Codex medium-severity finding).
+                    conn.commit()
+                    with conn.transaction():
+                        meta = store_credential(
+                            conn,
+                            operator_id=session.operator_id,
+                            provider=provider_norm,
+                            label=label_norm,
+                            environment=env_norm,
+                            plaintext=secret_norm,
+                        )
                 except KeyboardInterrupt, SystemExit:
                     # Signal-driven shutdown: do NOT touch the
                     # file. At signal time it is unknowable
@@ -406,15 +418,28 @@ def _do_store(
     plaintext: str,
     phrase: list[str] | None,
 ) -> CreateCredentialResponse:
+    # #112: caller owns transaction lifecycle. The duplicate
+    # pre-check (``_active_credential_exists``) runs an earlier
+    # SELECT on this autocommit-off pool connection, which opens an
+    # implicit transaction. Without the explicit ``conn.commit()``
+    # below, the ``with conn.transaction()`` block would nest as a
+    # SAVEPOINT and the INSERT would commit only on get_conn
+    # teardown — i.e. AFTER the 201 response had been sent
+    # (Codex high-severity finding on PR #112). Flush the implicit
+    # transaction first; the wrapping block then opens a real
+    # top-level txn so the INSERT is durable before the handler
+    # returns.
+    conn.commit()
     try:
-        meta = store_credential(
-            conn,
-            operator_id=operator_id,
-            provider=provider,
-            label=label,
-            environment=environment,
-            plaintext=plaintext,
-        )
+        with conn.transaction():
+            meta = store_credential(
+                conn,
+                operator_id=operator_id,
+                provider=provider,
+                label=label,
+                environment=environment,
+                plaintext=plaintext,
+            )
     except CredentialValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -490,12 +515,20 @@ def delete(
 ) -> None:
     """Soft-delete a credential. Returns 404 if it does not exist or is
     already revoked; 204 on success."""
+    # #112: caller owns transaction lifecycle. ``conn.commit()``
+    # flushes any implicit transaction opened earlier on this
+    # connection (FastAPI dependencies that issued reads, etc.) so
+    # ``conn.transaction()`` opens a real top-level txn — not a
+    # savepoint that would defer the soft-delete commit to
+    # get_conn teardown (Codex finding pattern, see _do_store).
+    conn.commit()
     try:
-        revoke_credential(
-            conn,
-            credential_id=credential_id,
-            operator_id=session.operator_id,
-        )
+        with conn.transaction():
+            revoke_credential(
+                conn,
+                credential_id=credential_id,
+                operator_id=session.operator_id,
+            )
     except CredentialNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

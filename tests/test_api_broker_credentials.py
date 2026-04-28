@@ -218,6 +218,36 @@ class TestCreate:
             )
         assert resp.status_code == 400
 
+    def test_commit_called_before_transaction_to_flush_implicit_pending_tx(self) -> None:
+        """#112 regression — the duplicate pre-check (`_active_credential_exists`)
+        opens an implicit transaction on the autocommit-off pool conn.
+        Without an explicit ``conn.commit()`` before ``conn.transaction()``,
+        the wrapping block nests as a SAVEPOINT and the INSERT commits
+        only on get_conn teardown — i.e. AFTER the 201 response.
+        Assert ``conn.commit`` was called during the successful create."""
+        gen = app.dependency_overrides[get_conn]
+        # The dependency yields a MagicMock; grab it.
+        mock_conn = next(iter(gen()))
+        with patch(
+            "app.api.broker_credentials.store_credential",
+            return_value=_meta(),
+        ):
+            resp = client.post(
+                "/broker-credentials",
+                json={
+                    "provider": "etoro",
+                    "label": "primary",
+                    "secret": "secret-value-1234",
+                },
+            )
+        assert resp.status_code == 201
+        assert mock_conn.commit.called, (
+            "POST /broker-credentials must call conn.commit() to flush the "
+            "implicit transaction opened by _active_credential_exists before "
+            "entering conn.transaction(); otherwise the INSERT defers commit "
+            "to get_conn teardown, after the response is sent."
+        )
+
     def test_duplicate_returns_409(self) -> None:
         with patch(
             "app.api.broker_credentials.store_credential",

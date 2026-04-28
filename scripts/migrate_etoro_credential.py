@@ -123,17 +123,22 @@ def main() -> int:
 
             migrated = 0
 
-            # Migrate ETORO_READ_API_KEY → label "api_key", environment "demo"
+            # Migrate ETORO_READ_API_KEY → label "api_key", environment "demo".
+            # #112: each store_credential call now requires a caller-owned
+            # transaction. Wrap each independently so a UniqueViolation on
+            # one (CredentialAlreadyExists → handled below) doesn't roll
+            # back the other.
             if _READ_KEY:
                 try:
-                    store_credential(
-                        conn,
-                        operator_id=op_id,
-                        provider="etoro",
-                        label="api_key",
-                        environment="demo",
-                        plaintext=_READ_KEY,
-                    )
+                    with conn.transaction():
+                        store_credential(
+                            conn,
+                            operator_id=op_id,
+                            provider="etoro",
+                            label="api_key",
+                            environment="demo",
+                            plaintext=_READ_KEY,
+                        )
                     print("Migrated ETORO_READ_API_KEY → broker_credentials (etoro/api_key/demo)")
                     migrated += 1
                 except CredentialAlreadyExists:
@@ -142,14 +147,15 @@ def main() -> int:
             # Migrate ETORO_WRITE_API_KEY → label "user_key", environment "demo"
             if _WRITE_KEY:
                 try:
-                    store_credential(
-                        conn,
-                        operator_id=op_id,
-                        provider="etoro",
-                        label="user_key",
-                        environment="demo",
-                        plaintext=_WRITE_KEY,
-                    )
+                    with conn.transaction():
+                        store_credential(
+                            conn,
+                            operator_id=op_id,
+                            provider="etoro",
+                            label="user_key",
+                            environment="demo",
+                            plaintext=_WRITE_KEY,
+                        )
                     print("Migrated ETORO_WRITE_API_KEY → broker_credentials (etoro/user_key/demo)")
                     migrated += 1
                 except CredentialAlreadyExists:
