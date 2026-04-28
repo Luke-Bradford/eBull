@@ -114,7 +114,11 @@ class TestFormatAge:
 
 class TestSimpleAuditOnlyPredicates:
     """Layers with no content check — portfolio_sync, fx_rates,
-    cost_models, weekly_reports, monthly_reports, universe."""
+    cost_models, weekly_reports, universe.
+
+    ``monthly_reports`` is calendar-anchored (#335) and uses a wider
+    row shape, so it has its own test class below.
+    """
 
     @pytest.mark.parametrize(
         "predicate,job_name,window",
@@ -124,7 +128,6 @@ class TestSimpleAuditOnlyPredicates:
             (fx_rates_is_fresh, "fx_rates_refresh", timedelta(hours=24)),
             (cost_models_is_fresh, "seed_cost_models", timedelta(hours=24)),
             (weekly_reports_is_fresh, "weekly_report", timedelta(days=7)),
-            (monthly_reports_is_fresh, "monthly_report", timedelta(days=31)),
         ],
     )
     def test_fresh_when_recent_success(self, predicate, job_name, window) -> None:
@@ -132,6 +135,80 @@ class TestSimpleAuditOnlyPredicates:
         conn = _mock_conn_with_row((now - window / 2, "success", None, (window / 2).total_seconds()))
         fresh, _ = predicate(conn)
         assert fresh is True
+
+
+class TestMonthlyReportsCalendarAnchored:
+    """#335 — ``monthly_reports_is_fresh`` is calendar-anchored, not a
+    flat 31-day window. The freshness boundary is the first instant of
+    the current calendar month in UTC; anything older than that is
+    stale, regardless of literal age in days. The month boundary is
+    computed in Python (not SQL) to dodge timezone-coercion hazards
+    when the DB session ``TimeZone`` is not UTC."""
+
+    def test_fresh_when_latest_run_is_inside_current_calendar_month(self) -> None:
+        now = datetime.now(UTC)
+        # Pin started_at to the most recent first-of-month so the
+        # assertion is stable regardless of which day the test runs.
+        started_at = datetime(now.year, now.month, 1, 6, 0, tzinfo=UTC)
+        age_seconds = (now - started_at).total_seconds()
+        conn = _mock_conn_with_row((started_at, "success", None, age_seconds))
+        fresh, detail = monthly_reports_is_fresh(conn)
+        assert fresh is True, detail
+        assert "this calendar month" in detail
+
+    def test_stale_when_latest_run_is_strictly_before_current_month_start(self) -> None:
+        """Regression for the flat-31d behavior: a run from the prior
+        calendar month must always be considered stale, even when the
+        literal age is below 31 days."""
+        now = datetime.now(UTC)
+        # 1 second before the start of the current calendar month UTC.
+        month_start = datetime(now.year, now.month, 1, tzinfo=UTC)
+        started_at = month_start - timedelta(seconds=1)
+        age_seconds = (now - started_at).total_seconds()
+        conn = _mock_conn_with_row((started_at, "success", None, age_seconds))
+        fresh, detail = monthly_reports_is_fresh(conn)
+        assert fresh is False
+        assert "before the start of the current calendar month" in detail
+
+    def test_stale_when_latest_status_is_failure(self) -> None:
+        now = datetime.now(UTC)
+        started_at = now - timedelta(hours=6)
+        age_seconds = (now - started_at).total_seconds()
+        conn = _mock_conn_with_row((started_at, "failure", "boom", age_seconds))
+        fresh, detail = monthly_reports_is_fresh(conn)
+        assert fresh is False
+        assert "status=failure" in detail
+
+    def test_stale_when_no_run_recorded(self) -> None:
+        conn = _mock_conn_with_row(None)
+        fresh, detail = monthly_reports_is_fresh(conn)
+        assert fresh is False
+        assert "no job_runs row" in detail
+
+    def test_anchor_uses_finished_at_when_run_straddles_month_boundary(self) -> None:
+        """A run that straddles the month boundary must count as a run
+        in the *finishing* month — the SELECT anchors on
+        ``COALESCE(finished_at, started_at)`` so the legacy predicate
+        and the state machine (which also uses COALESCE in
+        ``_latest_age_seconds_map``) agree on the month a run belongs
+        to. Prevents /sync/layers reporting STALE while
+        /sync/layers/v2 reports HEALTHY at a month edge.
+
+        Anchored to the real current month so the test stays valid
+        regardless of the wall-clock date the suite runs at.
+        """
+        now = datetime.now(UTC)
+        month_start = datetime(now.year, now.month, 1, tzinfo=UTC)
+        # Anchor (finished_at) just AFTER current month start — what
+        # the production code computes when a run that started in the
+        # prior month finished one minute into this month. The
+        # predicate must treat this as in-month.
+        finished_anchor = month_start + timedelta(minutes=1)
+        age_seconds = (now - finished_anchor).total_seconds()
+        conn = _mock_conn_with_row((finished_anchor, "success", None, age_seconds))
+        fresh, detail = monthly_reports_is_fresh(conn)
+        assert fresh is True, detail
+        assert "this calendar month" in detail
 
 
 class TestFxRatesIsFreshWindow:

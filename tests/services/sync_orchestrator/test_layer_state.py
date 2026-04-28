@@ -139,6 +139,63 @@ def test_age_inside_grace_is_healthy() -> None:
     assert compute_layer_state(_ctx(age_seconds=70, cadence_seconds=60, grace_multiplier=1.25)) is LayerState.HEALTHY
 
 
+def test_calendar_month_cadence_degrades_at_day_one_tick() -> None:
+    """#335 — when the DB-facing builder feeds rule 9 with the calendar
+    cadence_seconds (computed by ``Cadence.cadence_seconds_for_state_machine``),
+    a monthly_reports run from the previous calendar month flips the
+    state to DEGRADED at the day-1 UTC tick instead of after a 31-day
+    rolling window.
+
+    Construct the context with the same cadence_seconds the production
+    builder would derive at ``now = Feb 1, 2026 00:00 UTC + 1 second``
+    for a run that started on Jan 31, 2026 23:59 UTC. The literal age
+    is ~1 minute (well under any 31-day window), but rule 9 still
+    fires because the calendar boundary collapses the window to the
+    last-month / this-month edge.
+    """
+    from datetime import UTC, datetime
+
+    from app.services.sync_orchestrator.layer_types import Cadence
+
+    cadence = Cadence(calendar_months=1)
+    grace = 1.25
+    now = datetime(2026, 2, 1, 0, 0, 1, tzinfo=UTC)
+    cadence_seconds = cadence.cadence_seconds_for_state_machine(now, grace)
+    # Run started Jan 31 23:59 UTC, never finished — anchor is started_at.
+    started_at = datetime(2026, 1, 31, 23, 59, tzinfo=UTC)
+    age_seconds = (now - started_at).total_seconds()
+    assert (
+        compute_layer_state(_ctx(age_seconds=age_seconds, cadence_seconds=cadence_seconds, grace_multiplier=grace))
+        is LayerState.DEGRADED
+    )
+
+
+def test_calendar_month_cadence_remains_healthy_inside_current_month() -> None:
+    """Mirror of the day-1-tick test, the other side of the boundary:
+    a run started early in the current calendar month must keep the
+    layer HEALTHY for the rest of that month, no matter the literal
+    age in days."""
+    from datetime import UTC, datetime
+
+    from app.services.sync_orchestrator.layer_types import Cadence
+
+    cadence = Cadence(calendar_months=1)
+    grace = 1.25
+    # Late in March 2026; ``now`` is Mar 28.
+    now = datetime(2026, 3, 28, 18, 0, tzinfo=UTC)
+    cadence_seconds = cadence.cadence_seconds_for_state_machine(now, grace)
+    # Run started Mar 1 (27 days ago) — a flat ``timedelta(days=31)``
+    # check would still call this fresh, but the test pins that the
+    # calendar-aware shape doesn't accidentally over-tighten the
+    # boundary either.
+    started_at = datetime(2026, 3, 1, 6, 0, tzinfo=UTC)
+    age_seconds = (now - started_at).total_seconds()
+    assert (
+        compute_layer_state(_ctx(age_seconds=age_seconds, cadence_seconds=cadence_seconds, grace_multiplier=grace))
+        is LayerState.HEALTHY
+    )
+
+
 def test_local_failure_beats_cascade() -> None:
     # Spec §3.2 rule 4 precedes rule 7 — downstream with own failure
     # surfaces as ACTION_NEEDED, not CASCADE_WAITING, so the operator

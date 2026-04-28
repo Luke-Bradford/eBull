@@ -9,7 +9,7 @@ orchestrator import graph.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -95,16 +95,116 @@ REMEDIES: dict[FailureCategory, Remedy] = {
 
 @dataclass(frozen=True)
 class Cadence:
-    interval: timedelta
+    """Layer refresh cadence.
+
+    Two mutually-exclusive modes:
+
+    * ``interval`` — fixed-width timedelta (the original shape).
+      Suitable for hourly, daily, weekly cadences that don't drift
+      against the calendar.
+
+    * ``calendar_months`` — calendar-anchored monthly cadence (#335).
+      A layer is considered current as long as a counting refresh
+      landed within the most-recent ``calendar_months`` calendar
+      months in UTC. Anchored to day 1 of the month so a monthly
+      cadence does not drift across calendar boundaries
+      (Feb-vs-Mar arithmetic with ``timedelta(days=31)`` always
+      undershoots short months and overshoots long ones).
+
+    Exactly one of the two MUST be set; the validator enforces it
+    so a future caller can't accidentally pass both and pick up an
+    ambiguous behavior.
+    """
+
+    interval: timedelta | None = None
+    calendar_months: int | None = None
 
     def __post_init__(self) -> None:
-        if self.interval <= timedelta(0):
+        if (self.interval is None) == (self.calendar_months is None):
+            raise ValueError("Cadence requires exactly one of interval or calendar_months")
+        if self.interval is not None and self.interval <= timedelta(0):
             raise ValueError("interval must be positive")
+        if self.calendar_months is not None and self.calendar_months <= 0:
+            raise ValueError("calendar_months must be positive")
+
+    @property
+    def effective_interval(self) -> timedelta:
+        """Best-effort timedelta for display + display-only callers.
+
+        For ``interval`` mode this is the literal interval. For
+        ``calendar_months`` mode this is the longest-month upper
+        bound (31 days per month) — a coarse approximation only
+        suitable for human-readable labels. The orchestrator's
+        state-machine age check uses
+        :meth:`cadence_seconds_for_state_machine` instead, which is
+        calendar-aware and does NOT collapse a 30-day February
+        boundary into the 31-day approximation.
+        """
+        if self.interval is not None:
+            return self.interval
+        assert self.calendar_months is not None
+        return timedelta(days=31 * self.calendar_months)
+
+    def window_start(self, now: datetime) -> datetime:
+        """Earliest ``started_at`` that still counts a layer as fresh.
+
+        For ``interval`` mode this is ``now - interval``; the rolling
+        window slides with ``now``. For ``calendar_months`` mode this
+        is the first instant of the month ``calendar_months - 1``
+        months before the month containing ``now``, in UTC. A monthly
+        cadence (calendar_months=1) returns the first instant of the
+        current calendar month UTC.
+
+        The DB-facing state builder uses this to compute the
+        cadence-aware "age boundary" so the orchestrator's
+        ``DEGRADED`` rule fires on the day-1 calendar tick instead
+        of after a 31-day rolling window.
+        """
+        if now.tzinfo is None:
+            raise ValueError("Cadence.window_start requires a timezone-aware datetime")
+        now_utc = now.astimezone(UTC)
+        if self.interval is not None:
+            return now_utc - self.interval
+        assert self.calendar_months is not None
+        # Walk back ``calendar_months - 1`` months from the current
+        # month start. Handles year wrap (Jan with calendar_months=2
+        # → previous Dec) without depending on dateutil.
+        month_index = now_utc.year * 12 + (now_utc.month - 1) - (self.calendar_months - 1)
+        anchor_year, anchor_month_zero_indexed = divmod(month_index, 12)
+        return datetime(anchor_year, anchor_month_zero_indexed + 1, 1, tzinfo=UTC)
+
+    def cadence_seconds_for_state_machine(self, now: datetime, grace_multiplier: float) -> float:
+        """Effective cadence-window length in seconds for the
+        ``compute_layer_state`` rule 9 (``age_seconds > cadence_seconds * grace_multiplier``).
+
+        For ``interval`` mode this is just ``interval.total_seconds()`` —
+        identical to the pre-#335 behavior. For ``calendar_months``
+        mode this returns the seconds between ``now`` and
+        :meth:`window_start`, divided by ``grace_multiplier`` so the
+        existing rule 9 multiplication recovers the calendar
+        boundary. The net result: monthly_reports flips to
+        ``DEGRADED`` exactly at the day-1 UTC boundary, no grace
+        applied (calendar boundaries are sharp by design).
+        """
+        if grace_multiplier <= 0:
+            raise ValueError(f"grace_multiplier must be positive (got {grace_multiplier})")
+        if self.interval is not None:
+            return self.interval.total_seconds()
+        # Calendar mode: pick a cadence_seconds such that
+        # cadence_seconds * grace_multiplier == boundary_age.
+        # ``max(..., 1.0)`` floors the value to one second so callers
+        # that log or divide by ``cadence_seconds`` never see a zero
+        # at the exact instant of the calendar tick (where
+        # ``now == window_start`` and ``boundary_age`` is otherwise
+        # 0). Rule 9's behavior is unchanged: any prior run still
+        # has ``age_seconds > 0`` and gets DEGRADED.
+        boundary_age = (now.astimezone(UTC) - self.window_start(now)).total_seconds()
+        return max(boundary_age, 1.0) / grace_multiplier
 
     def grace_window(self, grace_multiplier: float) -> timedelta:
         if grace_multiplier <= 0:
             raise ValueError(f"grace_multiplier must be positive (got {grace_multiplier})")
-        return self.interval * grace_multiplier
+        return self.effective_interval * grace_multiplier
 
 
 @dataclass(frozen=True)
@@ -162,6 +262,10 @@ class LayerRefreshFailed(Exception):
 
 def cadence_display_string(cadence: Cadence) -> str:
     """Short human label used by dashboards where a one-liner is enough."""
+    if cadence.calendar_months is not None:
+        m = cadence.calendar_months
+        return "monthly" if m == 1 else f"{m}mo"
+    assert cadence.interval is not None
     total = int(cadence.interval.total_seconds())
     if total % 86400 == 0:
         d = total // 86400

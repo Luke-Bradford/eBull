@@ -175,7 +175,12 @@ LAYERS: dict[str, DataLayer] = {
         name="monthly_reports",
         display_name="Monthly Performance Report",
         tier=3,
-        cadence=Cadence(interval=timedelta(days=31)),
+        # Calendar-anchored monthly cadence (#335). A flat
+        # ``timedelta(days=31)`` drifts against calendar months
+        # (Feb undershoots, 30-day months overshoot); the calendar
+        # form anchors freshness to "produced this calendar month
+        # in UTC" via ``monthly_reports_is_fresh``.
+        cadence=Cadence(calendar_months=1),
         is_fresh=monthly_reports_is_fresh,
         refresh=refresh_monthly_reports,
         dependencies=(),
