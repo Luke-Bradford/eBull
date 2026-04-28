@@ -29,7 +29,7 @@ from typing import Literal, get_args
 import httpx
 import psycopg
 import psycopg.rows
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.api.auth import require_session_or_service_token
@@ -761,6 +761,7 @@ def get_instrument_candles(
     dependencies=[Depends(require_session_or_service_token)],
 )
 def get_instrument_intraday_candles(
+    request: Request,
     symbol: str,
     interval: IntradayInterval = Query(default="OneMinute"),
     count: int = Query(default=390, ge=1, le=_MAX_INTRADAY_COUNT),
@@ -811,17 +812,19 @@ def get_instrument_intraday_candles(
     if inst_row is None:
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
 
-    # Load eToro credentials. Each call writes an audit row tied to
-    # the operator and caller name, so chart-driven external spend is
-    # traceable. ``load_credential_for_provider_use`` does not commit
-    # itself; we commit the audit row before the external call so a
-    # network failure does not lose the audit trail.
+    # Load eToro credentials. #111: pass the pool so the audit row
+    # is written on a side connection — durable independent of this
+    # handler's transaction state, so network failures on the
+    # external eToro call cannot drop the audit trail.
     try:
         op_id = sole_operator_id(conn)
     except (NoOperatorError, AmbiguousOperatorError) as exc:
         logger.warning("intraday-candles: operator lookup failed: %s", exc)
         raise HTTPException(status_code=503, detail="No operator configured") from exc
 
+    # #111: dedicated audit pool from lifespan; falls back to None
+    # for tests that don't set up app.state (legacy caller-conn audit).
+    audit_pool = getattr(request.app.state, "audit_pool", None)
     try:
         api_key = load_credential_for_provider_use(
             conn,
@@ -830,8 +833,8 @@ def get_instrument_intraday_candles(
             label="api_key",
             environment=settings.etoro_env,
             caller="intraday_candles_endpoint",
+            audit_pool=audit_pool,
         )
-        conn.commit()
         user_key = load_credential_for_provider_use(
             conn,
             operator_id=op_id,
@@ -839,8 +842,8 @@ def get_instrument_intraday_candles(
             label="user_key",
             environment=settings.etoro_env,
             caller="intraday_candles_endpoint",
+            audit_pool=audit_pool,
         )
-        conn.commit()
     except CredentialNotFound as exc:
         logger.warning("intraday-candles: %s", exc)
         raise HTTPException(

@@ -723,6 +723,7 @@ def validate(
 
 @router.post("/validate-stored", response_model=ValidateCredentialResponse)
 def validate_stored(
+    request: Request,
     session: SessionRow = Depends(require_session),
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> ValidateCredentialResponse:
@@ -731,12 +732,19 @@ def validate_stored(
     Loads both ``api_key`` and ``user_key`` from the DB for the session's
     operator, decrypts them, and runs the same two-level eToro probe as
     ``/validate``. Nothing is persisted beyond the access-log entries
-    written by ``load_credential_for_provider_use``.
+    written by ``load_credential_for_provider_use`` on a side
+    connection (#111).
 
     Returns 404 if either credential is missing. Returns 503 if
     decryption fails (key material issue).
     """
     environment = "demo"  # hardcoded for v1, matches frontend ENVIRONMENT constant
+    # #111: prefer the dedicated audit pool when the lifespan has
+    # populated it. Falling back to the request pool would risk
+    # losing audit rows under saturation; falling back to None
+    # keeps existing unit tests (which don't set up app.state)
+    # working via the legacy caller-conn audit path.
+    audit_pool = getattr(request.app.state, "audit_pool", None)
 
     try:
         api_key = load_credential_for_provider_use(
@@ -746,6 +754,7 @@ def validate_stored(
             label="api_key",
             environment=environment,
             caller="validate-stored",
+            audit_pool=audit_pool,
         )
         user_key = load_credential_for_provider_use(
             conn,
@@ -754,6 +763,7 @@ def validate_stored(
             label="user_key",
             environment=environment,
             caller="validate-stored",
+            audit_pool=audit_pool,
         )
     except CredentialNotFound as exc:
         raise HTTPException(

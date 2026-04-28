@@ -100,6 +100,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Connection pool opened (min=1, max=10).")
     app.state.db_pool = pool
 
+    # #111: dedicated small pool for durable credential-access audit
+    # writes. Using the request pool risks losing audit rows under
+    # saturation (the request handler holds one slot for the read,
+    # acquires another for the audit, and a saturated request pool
+    # would drop the audit). Sized at min=1, max=2 — audit writes
+    # are short-lived single-row INSERTs that don't need
+    # parallelism. ADR 0001 requires audit-on-every-decryption to
+    # be durable independent of caller outcome.
+    audit_pool = ConnectionPool(settings.database_url, min_size=1, max_size=2)
+    audit_pool.wait()
+    logger.info("Audit pool opened (min=1, max=2).")
+    app.state.audit_pool = audit_pool
+
     # First-run bootstrap token (issue #106 / ADR 0002).
     with pool.connection() as conn:
         ensure_startup_token(operators_empty=operators_empty(conn))
@@ -198,7 +211,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # only when broker credentials are loadable — otherwise the
     # operator hasn't completed setup yet and there's nothing to
     # subscribe to. WS failures must NOT block the rest of the app.
-    ws_subscriber = await _maybe_start_etoro_ws(pool, quote_bus)
+    ws_subscriber = await _maybe_start_etoro_ws(pool, audit_pool, quote_bus)
     app.state.etoro_ws = ws_subscriber
 
     yield
@@ -224,6 +237,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     shutdown_runtime(job_runtime)
     app.state.job_runtime = None
 
+    audit_pool.close()
+    logger.info("Audit pool closed.")
     pool.close()
     logger.info("Connection pool closed.")
 
@@ -270,7 +285,11 @@ def _bootstrap_fx_rates(pool: ConnectionPool[Any]) -> None:
         )
 
 
-async def _maybe_start_etoro_ws(pool: ConnectionPool[Any], bus: QuoteBus) -> EtoroWebSocketSubscriber | None:
+async def _maybe_start_etoro_ws(
+    pool: ConnectionPool[Any],
+    audit_pool: ConnectionPool[Any],
+    bus: QuoteBus,
+) -> EtoroWebSocketSubscriber | None:
     """Boot the WS subscriber when credentials are available.
 
     Pulled out of ``lifespan`` so the credential-load + subscriber
@@ -281,6 +300,10 @@ async def _maybe_start_etoro_ws(pool: ConnectionPool[Any], bus: QuoteBus) -> Eto
     try:
         with pool.connection() as conn:
             op_id = sole_operator_id(conn)
+            # #111: pass the dedicated audit pool so the audit row
+            # is written on a side connection from a separate pool
+            # — durable independent of this conn's transaction state
+            # AND independent of request-pool saturation.
             api_key = load_credential_for_provider_use(
                 conn,
                 operator_id=op_id,
@@ -288,8 +311,8 @@ async def _maybe_start_etoro_ws(pool: ConnectionPool[Any], bus: QuoteBus) -> Eto
                 label="api_key",
                 environment=settings.etoro_env,
                 caller="etoro_ws_subscriber",
+                audit_pool=audit_pool,
             )
-            conn.commit()
             user_key = load_credential_for_provider_use(
                 conn,
                 operator_id=op_id,
@@ -297,8 +320,8 @@ async def _maybe_start_etoro_ws(pool: ConnectionPool[Any], bus: QuoteBus) -> Eto
                 label="user_key",
                 environment=settings.etoro_env,
                 caller="etoro_ws_subscriber",
+                audit_pool=audit_pool,
             )
-            conn.commit()
     except (NoOperatorError, AmbiguousOperatorError, CredentialNotFound) as exc:
         logger.info(
             "EtoroWebSocketSubscriber not started (%s): %s",
