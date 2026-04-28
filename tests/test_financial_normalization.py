@@ -160,6 +160,70 @@ class TestDerivePeriodsFromFacts:
         assert len(periods) == 1
         assert periods[0].period_type == "Q1"
 
+    def test_dei_fact_does_not_pollute_period_end(self) -> None:
+        """Regression for #558.
+
+        DEI facts (e.g. dei:EntityCommonStockSharesOutstanding) carry an
+        "as-of" context endDate equal to the filing date — typically
+        ~6 weeks AFTER the real fiscal period end. Previously
+        ``_derive_periods_from_facts`` did
+        ``period_end = max(f.period_end for f in period_facts)``, which
+        let a DEI fact lift period_end to the filing date and produced
+        a duplicate row in financial_periods on subsequent runs. The
+        fix restricts boundary derivation to facts whose concept maps
+        to a canonical column.
+        """
+        gaap_fact = _fact(
+            concept="Revenues",
+            val=Decimal("100"),
+            period_end="2026-01-31",  # real Q4 end
+            period_start="2025-11-01",
+            fiscal_period="Q4",
+            fiscal_year=2025,
+            frame="CY2025Q4",
+            accession_number="0001326380-26-000013",
+            filed_date="2026-03-19",
+        )
+        dei_fact = _fact(
+            concept="EntityCommonStockSharesOutstanding",  # not in _TAG_TO_COLUMN
+            val=Decimal("268000000"),
+            period_end="2026-03-18",  # filing-date pollution
+            period_start=None,
+            fiscal_period="Q4",
+            fiscal_year=2025,
+            frame=None,  # would be filtered as YTD-duration, but it's instant (no start)
+            accession_number="0001326380-26-000013",
+            filed_date="2026-03-19",
+        )
+        periods = _derive_periods_from_facts([gaap_fact, dei_fact], reported_currency="USD")
+        assert len(periods) == 1
+        p = periods[0]
+        # Real fiscal end, NOT 2026-03-18.
+        assert p.period_end_date == date(2026, 1, 31)
+        # Real period start preserved.
+        assert p.period_start_date == date(2025, 11, 1)
+        # Mapped column populated.
+        assert p.revenue == Decimal("100")
+
+    def test_group_with_only_unmapped_facts_is_skipped(self) -> None:
+        """If a (fy, fp) group contains no facts mapped to a canonical
+        column, it must NOT produce a row anchored on filing-date
+        metadata. Skipping prevents spurious rows like
+        ``period_end_date = filing date`` from appearing in
+        financial_periods (#558).
+        """
+        only_dei = _fact(
+            concept="EntityCommonStockSharesOutstanding",
+            val=Decimal("1"),
+            period_end="2026-03-18",
+            period_start=None,
+            fiscal_period="Q4",
+            fiscal_year=2025,
+            frame=None,
+        )
+        periods = _derive_periods_from_facts([only_dei], reported_currency="USD")
+        assert periods == []
+
     def test_tag_priority_picks_first_match(self) -> None:
         """When multiple tags map to the same concept (e.g. revenue),
         the highest-priority tag's value is used."""
