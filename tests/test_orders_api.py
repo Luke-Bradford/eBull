@@ -251,6 +251,17 @@ class TestPlaceOrder:
         assert len(broker_positions_inserts) >= 1, "Expected at least one INSERT into broker_positions"
         assert "INSERT INTO broker_positions" in broker_positions_inserts[0]
 
+        # #227: synthetic position_id is the negation of order_id so
+        # the synthetic-id namespace is partitioned from real
+        # broker-assigned position_ids. order_id was 99 above.
+        bp_call = next(
+            c
+            for c in conn.execute.call_args_list
+            if "broker_positions" in str(c.args[0]) and "INSERT" in str(c.args[0])
+        )
+        assert bp_call.args[1]["pid"] == -99
+        assert bp_call.args[1]["pid"] < 0
+
 
 # ---------------------------------------------------------------------------
 # TestClosePosition

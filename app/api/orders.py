@@ -259,7 +259,16 @@ def _persist_order_and_fill(
                 )
 
                 # 4. Insert into broker_positions
-                synthetic_position_id = order_id
+                #
+                # Use a NEGATIVE id derived from order_id so the
+                # synthetic-id namespace is partitioned from real
+                # broker-assigned position_ids (#227). eToro's
+                # broker_positions.position_id is unsigned in
+                # practice, so any negative is guaranteed to never
+                # collide with a real id pulled in by a future
+                # portfolio sync. Pairs with the matching convention
+                # in app/services/order_client._persist_broker_position.
+                synthetic_position_id = -order_id
                 conn.execute(
                     """
                     INSERT INTO broker_positions

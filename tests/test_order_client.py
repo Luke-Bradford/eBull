@@ -528,7 +528,11 @@ class TestExecuteOrderDemoMode:
 
         # Verify params passed through execute_order (not just SQL shape)
         params = bp_calls[0].args[1]
-        assert params["pid"] == 7  # position_id = order_id
+        # #227: synthetic position_id is the negation of order_id so the
+        # synthetic-id namespace can never collide with a real broker
+        # position_id pulled in by portfolio sync.
+        assert params["pid"] == -7
+        assert params["pid"] < 0  # negative-namespace contract
         assert params["iid"] == 1  # instrument_id from rec
         assert params["sl"] == Decimal("90")
         assert params["tp"] == Decimal("120")
@@ -1058,7 +1062,10 @@ class TestPersistBrokerPosition:
         assert "raw_payload = EXCLUDED.raw_payload" in normalised
 
         params = conn.execute.call_args_list[0].args[1]
-        assert params["pid"] == 7
+        # #227: synthetic position_id = -order_id (negative-namespace
+        # convention to avoid colliding with real broker position_ids).
+        assert params["pid"] == -7
+        assert params["pid"] < 0
         assert params["iid"] == 42
         assert params["units"] == Decimal("5")
         # amount = price * units = 500
