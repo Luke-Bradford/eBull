@@ -19,8 +19,19 @@ from uuid import uuid4
 import pytest
 
 from app.security import secrets_crypto
+from app.security.master_key import BootResult, MasterKeyError
+from app.security.secrets_crypto import CredentialCryptoConfigError
 from app.services.broker_credentials import CredentialAlreadyExists, CredentialNotFound
 from app.services.operators import NoOperatorError
+
+
+def _normal_boot(key: bytes | None = None) -> BootResult:
+    return BootResult(
+        state="normal",
+        broker_encryption_key=key if key is not None else b"\x00" * 32,
+        needs_setup=False,
+        recovery_required=False,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +49,8 @@ def _key() -> Iterator[None]:
 class TestMigrateEtoroCredential:
     """Tests for scripts/migrate_etoro_credential.main()."""
 
+    @patch("scripts.migrate_etoro_credential.set_active_key")
+    @patch("scripts.migrate_etoro_credential.master_key")
     @patch("scripts.migrate_etoro_credential.psycopg")
     @patch("scripts.migrate_etoro_credential.store_credential")
     @patch("scripts.migrate_etoro_credential.sole_operator_id")
@@ -50,18 +63,24 @@ class TestMigrateEtoroCredential:
         mock_sole_op: MagicMock,
         mock_store: MagicMock,
         mock_psycopg: MagicMock,
+        mock_master_key: MagicMock,
+        mock_set_active: MagicMock,
     ) -> None:
         from scripts.migrate_etoro_credential import main
 
         op_id = uuid4()
         mock_sole_op.return_value = op_id
-        mock_settings.secrets_key = "some-key"
         mock_settings.database_url = "postgresql://test"
+        derived_key = b"\xab" * 32
+        mock_master_key.bootstrap.return_value = _normal_boot(derived_key)
         mock_conn = MagicMock()
         mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_psycopg.connect.return_value.__exit__ = MagicMock(return_value=False)
 
         assert main() == 0
+        # bootstrap must run before any encrypt call
+        mock_master_key.bootstrap.assert_called_once_with(mock_conn)
+        mock_set_active.assert_called_once_with(derived_key)
         mock_store.assert_called_once_with(
             mock_conn,
             operator_id=op_id,
@@ -78,6 +97,8 @@ class TestMigrateEtoroCredential:
 
         assert main() == 0
 
+    @patch("scripts.migrate_etoro_credential.set_active_key")
+    @patch("scripts.migrate_etoro_credential.master_key")
     @patch("scripts.migrate_etoro_credential.psycopg")
     @patch("scripts.migrate_etoro_credential.sole_operator_id")
     @patch("scripts.migrate_etoro_credential.settings")
@@ -88,11 +109,13 @@ class TestMigrateEtoroCredential:
         mock_settings: MagicMock,
         mock_sole_op: MagicMock,
         mock_psycopg: MagicMock,
+        mock_master_key: MagicMock,
+        mock_set_active: MagicMock,
     ) -> None:
         from scripts.migrate_etoro_credential import main
 
-        mock_settings.secrets_key = "some-key"
         mock_settings.database_url = "postgresql://test"
+        mock_master_key.bootstrap.return_value = _normal_boot()
         mock_sole_op.side_effect = NoOperatorError("no operator")
         mock_conn = MagicMock()
         mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -100,6 +123,8 @@ class TestMigrateEtoroCredential:
 
         assert main() == 1
 
+    @patch("scripts.migrate_etoro_credential.set_active_key")
+    @patch("scripts.migrate_etoro_credential.master_key")
     @patch("scripts.migrate_etoro_credential.psycopg")
     @patch("scripts.migrate_etoro_credential.store_credential")
     @patch("scripts.migrate_etoro_credential.sole_operator_id")
@@ -112,12 +137,14 @@ class TestMigrateEtoroCredential:
         mock_sole_op: MagicMock,
         mock_store: MagicMock,
         mock_psycopg: MagicMock,
+        mock_master_key: MagicMock,
+        mock_set_active: MagicMock,
     ) -> None:
         from scripts.migrate_etoro_credential import main
 
         mock_sole_op.return_value = uuid4()
         mock_store.side_effect = CredentialAlreadyExists("exists")
-        mock_settings.secrets_key = "some-key"
+        mock_master_key.bootstrap.return_value = _normal_boot()
         mock_settings.database_url = "postgresql://test"
         mock_conn = MagicMock()
         mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -125,18 +152,154 @@ class TestMigrateEtoroCredential:
 
         assert main() == 0
 
+    @patch("scripts.migrate_etoro_credential.set_active_key")
+    @patch("scripts.migrate_etoro_credential.master_key")
+    @patch("scripts.migrate_etoro_credential.psycopg")
+    @patch("scripts.migrate_etoro_credential.settings")
     @patch("scripts.migrate_etoro_credential._READ_KEY", "test-key-12345")
     @patch("scripts.migrate_etoro_credential._WRITE_KEY", "")
-    @patch("scripts.migrate_etoro_credential.settings")
-    def test_no_secrets_key_exits_nonzero(
+    def test_clean_install_state_exits_nonzero(
         self,
         mock_settings: MagicMock,
+        mock_psycopg: MagicMock,
+        mock_master_key: MagicMock,
+        mock_set_active: MagicMock,
     ) -> None:
         from scripts.migrate_etoro_credential import main
 
-        mock_settings.secrets_key = None
+        mock_settings.database_url = "postgresql://test"
+        mock_master_key.bootstrap.return_value = BootResult(
+            state="clean_install",
+            broker_encryption_key=None,
+            needs_setup=True,
+            recovery_required=False,
+        )
+        mock_conn = MagicMock()
+        mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_psycopg.connect.return_value.__exit__ = MagicMock(return_value=False)
 
         assert main() == 1
+        # active key MUST NOT be installed when bootstrap returned None
+        mock_set_active.assert_not_called()
+
+    @patch("scripts.migrate_etoro_credential.set_active_key")
+    @patch("scripts.migrate_etoro_credential.master_key")
+    @patch("scripts.migrate_etoro_credential.psycopg")
+    @patch("scripts.migrate_etoro_credential.settings")
+    @patch("scripts.migrate_etoro_credential._READ_KEY", "test-key-12345")
+    @patch("scripts.migrate_etoro_credential._WRITE_KEY", "")
+    def test_recovery_required_state_exits_nonzero(
+        self,
+        mock_settings: MagicMock,
+        mock_psycopg: MagicMock,
+        mock_master_key: MagicMock,
+        mock_set_active: MagicMock,
+    ) -> None:
+        from scripts.migrate_etoro_credential import main
+
+        mock_settings.database_url = "postgresql://test"
+        mock_master_key.bootstrap.return_value = BootResult(
+            state="recovery_required",
+            broker_encryption_key=None,
+            needs_setup=False,
+            recovery_required=True,
+        )
+        mock_conn = MagicMock()
+        mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_psycopg.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        assert main() == 1
+        mock_set_active.assert_not_called()
+
+    @patch("scripts.migrate_etoro_credential.master_key")
+    @patch("scripts.migrate_etoro_credential.psycopg")
+    @patch("scripts.migrate_etoro_credential.settings")
+    @patch("scripts.migrate_etoro_credential._READ_KEY", "test-key-12345")
+    @patch("scripts.migrate_etoro_credential._WRITE_KEY", "")
+    def test_master_key_error_exits_nonzero(
+        self,
+        mock_settings: MagicMock,
+        mock_psycopg: MagicMock,
+        mock_master_key: MagicMock,
+    ) -> None:
+        from scripts.migrate_etoro_credential import main
+
+        mock_settings.database_url = "postgresql://test"
+        mock_master_key.bootstrap.side_effect = MasterKeyError("EBULL_SECRETS_KEY does not match existing ciphertext")
+        mock_conn = MagicMock()
+        mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_psycopg.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        assert main() == 1
+
+    @patch("scripts.migrate_etoro_credential.master_key")
+    @patch("scripts.migrate_etoro_credential.psycopg")
+    @patch("scripts.migrate_etoro_credential.settings")
+    @patch("scripts.migrate_etoro_credential._READ_KEY", "test-key-12345")
+    @patch("scripts.migrate_etoro_credential._WRITE_KEY", "")
+    def test_malformed_env_key_exits_nonzero(
+        self,
+        mock_settings: MagicMock,
+        mock_psycopg: MagicMock,
+        mock_master_key: MagicMock,
+    ) -> None:
+        """``decode_env_key`` raises CredentialCryptoConfigError on a malformed
+        EBULL_SECRETS_KEY. master_key.bootstrap propagates it; the script must
+        catch and exit cleanly rather than dump a traceback.
+        """
+        from scripts.migrate_etoro_credential import main
+
+        mock_settings.database_url = "postgresql://test"
+        mock_master_key.bootstrap.side_effect = CredentialCryptoConfigError(
+            "EBULL_SECRETS_KEY must decode to exactly 32 bytes"
+        )
+        mock_conn = MagicMock()
+        mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_psycopg.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        assert main() == 1
+
+    @patch("scripts.migrate_etoro_credential.set_active_key")
+    @patch("scripts.migrate_etoro_credential.master_key")
+    @patch("scripts.migrate_etoro_credential.psycopg")
+    @patch("scripts.migrate_etoro_credential.store_credential")
+    @patch("scripts.migrate_etoro_credential.sole_operator_id")
+    @patch("scripts.migrate_etoro_credential.settings")
+    @patch("scripts.migrate_etoro_credential._READ_KEY", "test-read-key-1234")
+    @patch("scripts.migrate_etoro_credential._WRITE_KEY", "")
+    def test_clean_install_with_env_override_proceeds(
+        self,
+        mock_settings: MagicMock,
+        mock_sole_op: MagicMock,
+        mock_store: MagicMock,
+        mock_psycopg: MagicMock,
+        mock_master_key: MagicMock,
+        mock_set_active: MagicMock,
+    ) -> None:
+        """When EBULL_SECRETS_KEY is set on a clean_install database,
+        bootstrap returns state=clean_install with the env_key installed.
+        The script must proceed (key is loaded), not bail on the state
+        label. This is the env-override migration path.
+        """
+        from scripts.migrate_etoro_credential import main
+
+        op_id = uuid4()
+        mock_sole_op.return_value = op_id
+        mock_settings.database_url = "postgresql://test"
+        env_key = b"\xcd" * 32
+        mock_master_key.bootstrap.return_value = BootResult(
+            state="clean_install",
+            broker_encryption_key=env_key,
+            needs_setup=True,
+            recovery_required=False,
+        )
+        mock_conn = MagicMock()
+        mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_psycopg.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        assert main() == 0
+        mock_set_active.assert_called_once_with(env_key)
+        mock_store.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
