@@ -42,3 +42,11 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Run frontend tests (#247)
+        # Full ``pnpm test`` includes the SetupPage integration tests
+        # — heavier but representative of the user-visible path. The
+        # local pre-push gate uses ``test:unit``; CI runs the wider
+        # ``test`` so an integration-only regression cannot ship
+        # behind a green pre-push.
+        run: pnpm test
