@@ -167,13 +167,27 @@ function TOCRail({ sections }: { readonly sections: ReadonlyArray<BusinessSectio
   );
 }
 
-function secSearchUrlFor(accession: string | null): string | null {
+function secSearchUrlFor(
+  accession: string | null,
+  cik: string | null,
+): string | null {
   if (accession === null) return null;
-  // EDGAR full-text search for the specific accession. Works without
-  // CIK (the prior cgi-bin viewer URL needed CIK and silently broke
-  // when none was available — codex/bot finding on PR #562).
-  // Follow-up #TBD: plumb CIK into BusinessSectionsResponse and link
-  // directly to the iXBRL viewer.
+  // #563: prefer the iXBRL viewer when both CIK + accession are
+  // available — it lands on the specific filing's iXBRL document
+  // rather than an EDGAR full-text result list. Strip the leading
+  // zero padding from CIK so the viewer URL matches EDGAR's expected
+  // format (the API column stores the zero-padded form).
+  if (cik !== null) {
+    const cikTrimmed = cik.replace(/^0+/, "") || "0";
+    return (
+      `https://www.sec.gov/cgi-bin/viewer?action=view` +
+      `&cik=${encodeURIComponent(cikTrimmed)}` +
+      `&accession_number=${encodeURIComponent(accession)}` +
+      `&type=10-K`
+    );
+  }
+  // Fallback: EDGAR full-text search by accession. Used when the
+  // instrument has no primary SEC CIK link (non-US tickers etc.).
   return `https://efts.sec.gov/LATEST/search-index?q=%22${encodeURIComponent(accession)}%22&forms=10-K,10-K%2FA`;
 }
 
@@ -204,7 +218,7 @@ function Body({
         .map((c) => c.target),
     ),
   ];
-  const secSearchUrl = secSearchUrlFor(data.source_accession);
+  const secSearchUrl = secSearchUrlFor(data.source_accession, data.cik);
 
   return (
     <div className="grid gap-6 lg:grid-cols-[180px_minmax(0,1fr)_200px]">
