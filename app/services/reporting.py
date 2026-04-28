@@ -457,33 +457,66 @@ def _thesis_accuracy(
 
     For each closed position, determines whether the exit price hit the bull,
     base, or bear target from the thesis that was active when the position
-    was opened (nearest thesis by created_at before hold_start).
+    was opened.
+
+    Selection precedence for the entry timestamp (#244):
+
+      1. If ``return_attribution.entry_fill_id`` is set, use
+         ``fills.filled_at`` for that fill (timestamp-precise).
+      2. Otherwise fall back to
+         ``trade_recommendations.created_at`` via
+         ``return_attribution.recommendation_id`` — the recommendation
+         is created and approved before the order fills, so its
+         timestamp is a strict upper bound on entry.
+      3. If neither anchor is available, the row's thesis joins as
+         NULL — the report renders ``target_hit = null`` rather than
+         picking a hindsight thesis.
+
+    Crucially, the previous query used
+    ``created_at < (ra.hold_start::timestamptz + interval '1 day')``
+    where ``hold_start`` is a DATE. That admitted any thesis written on
+    the same calendar day, including ones generated AFTER the entry
+    fill — turning the report into a hindsight evaluation. The new
+    bound is ``created_at <= entry_anchor`` against a real timestamp.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT ra.instrument_id,
+            WITH attribution AS (
+                SELECT ra.instrument_id,
+                       ra.gross_return_pct,
+                       ra.exit_fill_id,
+                       COALESCE(f_entry.filled_at, tr.created_at) AS entry_anchor
+                FROM return_attribution ra
+                LEFT JOIN fills f_entry
+                       ON f_entry.fill_id = ra.entry_fill_id
+                LEFT JOIN trade_recommendations tr
+                       ON tr.recommendation_id = ra.recommendation_id
+                WHERE ra.hold_end >= %(start)s
+                  AND ra.hold_end <= %(end)s
+            )
+            SELECT a.instrument_id,
                    i.symbol,
-                   ra.gross_return_pct,
+                   a.gross_return_pct,
+                   a.entry_anchor,
                    t.base_value,
                    t.bull_value,
                    t.bear_value,
                    t.stance,
                    t.confidence_score,
                    f_exit.price AS exit_price
-            FROM return_attribution ra
+            FROM attribution a
             JOIN instruments i USING (instrument_id)
             LEFT JOIN LATERAL (
                 SELECT base_value, bull_value, bear_value, stance, confidence_score
                 FROM theses
-                WHERE instrument_id = ra.instrument_id
-                  AND created_at < (ra.hold_start::timestamptz + interval '1 day')
+                WHERE instrument_id = a.instrument_id
+                  AND a.entry_anchor IS NOT NULL
+                  AND created_at <= a.entry_anchor
                 ORDER BY created_at DESC
                 LIMIT 1
             ) t ON true
-            LEFT JOIN fills f_exit ON f_exit.fill_id = ra.exit_fill_id
-            WHERE ra.hold_end >= %(start)s
-              AND ra.hold_end <= %(end)s
+            LEFT JOIN fills f_exit ON f_exit.fill_id = a.exit_fill_id
             """,
             {"start": period_start, "end": period_end},
         )
