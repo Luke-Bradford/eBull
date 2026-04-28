@@ -66,4 +66,44 @@ describe("Tenk10KDrilldownPage", () => {
     // Sentinel string must not leak to the visible text
     expect(screen.queryByText(/TABLE_0/)).toBeNull();
   });
+
+  it("renders sections while history is still loading (#564)", async () => {
+    vi.spyOn(api, "fetchBusinessSections").mockResolvedValue({
+      symbol: "GME",
+      source_accession: "0001326380-26-000001",
+      cik: "0001326380",
+      sections: [
+        {
+          section_order: 0,
+          section_key: "general",
+          section_label: "General",
+          body: "We sell games.",
+          cross_references: [],
+          tables: [],
+        },
+      ],
+    });
+    // History never resolves — sections must still render.
+    vi.spyOn(api, "fetchTenKHistory").mockReturnValue(
+      new Promise<api.TenKHistoryResponse>(() => {
+        /* never resolves */
+      }),
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/instrument/GME/filings/10-k"]}>
+        <Routes>
+          <Route
+            path="/instrument/:symbol/filings/10-k"
+            element={<Tenk10KDrilldownPage />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    // Body content for the section is visible despite history being pending.
+    expect(await screen.findByText("We sell games.")).toBeInTheDocument();
+    // Prior 10-K rail content (which only appears when history resolves) is absent.
+    expect(screen.queryByText(/Prior 10-Ks/i)).toBeNull();
+  });
 });

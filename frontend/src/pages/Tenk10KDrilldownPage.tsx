@@ -194,11 +194,13 @@ function secSearchUrlFor(
 function Body({
   data,
   history,
+  historyLoading,
   historyError,
   symbol,
 }: {
   readonly data: BusinessSectionsResponse;
   readonly history: TenKHistoryResponse;
+  readonly historyLoading: boolean;
   readonly historyError: unknown;
   readonly symbol: string;
 }) {
@@ -247,7 +249,9 @@ function Body({
         ))}
       </div>
       <div className="hidden lg:block">
-        {historyError !== null ? (
+        {historyLoading ? (
+          <SectionSkeleton rows={4} />
+        ) : historyError !== null ? (
           <p className="text-xs text-amber-700">
             Filing history unavailable — couldn't load prior 10-Ks.
           </p>
@@ -281,7 +285,7 @@ export function Tenk10KDrilldownPage() {
   return (
     <div className="mx-auto max-w-screen-2xl p-4">
       <Section title={`${symbol} — 10-K narrative`}>
-        {sectionsState.loading || historyState.loading ? (
+        {sectionsState.loading ? (
           <SectionSkeleton rows={6} />
         ) : sectionsState.error !== null ? (
           <SectionError onRetry={sectionsState.refetch} />
@@ -294,6 +298,7 @@ export function Tenk10KDrilldownPage() {
           <Body
             data={sectionsState.data}
             history={historyState.data ?? { symbol, filings: [] }}
+            historyLoading={historyState.loading}
             historyError={historyState.error}
             symbol={symbol}
           />
