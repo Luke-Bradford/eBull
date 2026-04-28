@@ -748,6 +748,13 @@ export interface FilingItem {
   filing_date: string;
   filing_type: string | null;
   provider: string;
+  /**
+   * Provider's primary filing identifier (#565). For SEC filings this
+   * is the accession number; FilingsPane appends `?accession=...` to
+   * the 10-K drilldown so non-latest rows route to their specific
+   * filing instead of always landing on the latest.
+   */
+  accession_number: string | null;
   source_url: string | null;
   primary_document_url: string | null;
   extracted_summary: string | null;

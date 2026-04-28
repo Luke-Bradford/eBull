@@ -41,10 +41,22 @@ const SIGNIFICANT_FILING_TYPES = [
 
 const TYPES_WITH_DRILLDOWN = new Set(["8-K", "8-K/A", "10-K", "10-K/A"]);
 
-function drilldownLink(symbol: string, filingType: string | null): string | null {
+function drilldownLink(
+  symbol: string,
+  filingType: string | null,
+  accessionNumber: string | null,
+): string | null {
   if (filingType === null || !TYPES_WITH_DRILLDOWN.has(filingType)) return null;
   const symbolEnc = encodeURIComponent(symbol);
   if (filingType.startsWith("10-K")) {
+    // #565: append ?accession=... so a click on a non-latest 10-K
+    // (or a 10-K/A amendment) lands on that specific filing's
+    // drilldown rather than always on the latest 10-K. Falls back
+    // to the bare URL when accession is missing — Tenk10KDrilldownPage
+    // handles that as "show the latest filing".
+    if (accessionNumber !== null) {
+      return `/instrument/${symbolEnc}/filings/10-k?accession=${encodeURIComponent(accessionNumber)}`;
+    }
     return `/instrument/${symbolEnc}/filings/10-k`;
   }
   return `/instrument/${symbolEnc}/filings/8-k`;
@@ -118,7 +130,11 @@ export function FilingsPane({
       ) : (
         <ul className="space-y-1.5 text-xs">
           {state.data.items.slice(0, ROW_LIMIT).map((f) => {
-            const link = drilldownLink(symbol, f.filing_type ?? null);
+            const link = drilldownLink(
+              symbol,
+              f.filing_type ?? null,
+              f.accession_number ?? null,
+            );
             const label = (
               <span className="flex items-baseline gap-2">
                 <span className="text-slate-500">{f.filing_date}</span>
