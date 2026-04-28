@@ -698,7 +698,6 @@ def _make_fake_conn(
     news_rows: list[dict[str, object]],
     avg_red_flag: float | None,
     valuation_row: dict[str, object] | None = None,
-    estimates_row: dict[str, object] | None = None,
 ) -> MagicMock:
     """
     Return a MagicMock psycopg connection that supports the cursor(row_factory=...)
@@ -708,7 +707,7 @@ def _make_fake_conn(
     cur.fetchall() is called on the *same* cursor object. We model this by having
     execute() mutate cur.fetchone / cur.fetchall as a side effect, dispatching
     results in order: fundamentals, price, quote, thesis, news, red_flag,
-    valuation, analyst_estimates.
+    valuation. (analyst_estimates retired with FMP under #539.)
     """
     rf_row: dict[str, object] = {"avg_red_flag": avg_red_flag}
 
@@ -721,7 +720,6 @@ def _make_fake_conn(
         ("fetchall", news_rows),
         ("fetchone", rf_row),
         ("fetchone", valuation_row),
-        ("fetchone", estimates_row),
     ]
     response_iter = iter(responses)
 

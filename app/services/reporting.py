@@ -171,42 +171,6 @@ def _positions_opened_closed(
     return opened, closed
 
 
-def _upcoming_earnings(
-    conn: psycopg.Connection[Any],
-    lookahead_days: int = 14,
-) -> list[dict[str, Any]]:
-    """Upcoming earnings events for currently held positions."""
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT ee.instrument_id,
-                   i.symbol,
-                   i.company_name,
-                   ee.reporting_date,
-                   ee.eps_estimate
-            FROM earnings_events ee
-            JOIN instruments i USING (instrument_id)
-            JOIN positions p USING (instrument_id)
-            WHERE p.current_units > 0
-              AND ee.reporting_date >= CURRENT_DATE
-              AND ee.reporting_date < CURRENT_DATE + make_interval(days => %(days)s)
-            ORDER BY ee.reporting_date
-            """,
-            {"days": lookahead_days},
-        )
-        rows = cur.fetchall()
-    return [
-        {
-            "instrument_id": r["instrument_id"],
-            "symbol": r["symbol"],
-            "company_name": r["company_name"],
-            "reporting_date": r["reporting_date"].isoformat() if r["reporting_date"] is not None else None,
-            "eps_estimate": _dec(r["eps_estimate"]),
-        }
-        for r in rows
-    ]
-
-
 def _score_changes(
     conn: psycopg.Connection[Any],
     period_start: date,
@@ -792,7 +756,7 @@ def generate_weekly_report(
     """Generate a weekly performance report snapshot.
 
     Reads from positions, fills, orders, instruments, trade_recommendations,
-    earnings_events, scores, and the budget service.
+    scores, and the budget service.
 
     The caller owns the transaction; this function never calls conn.commit().
 
@@ -801,7 +765,10 @@ def generate_weekly_report(
     pnl = _pnl_snapshot(conn)
     top_performers, bottom_performers = _top_bottom_performers(conn)
     positions_opened, positions_closed = _positions_opened_closed(conn, period_start, period_end)
-    upcoming_earnings = _upcoming_earnings(conn)
+    # #539: upcoming-earnings calendar sourced from FMP retired. Field
+    # remains in the snapshot shape as an empty list so existing
+    # readers (frontend, downstream report consumers) don't NPE.
+    upcoming_earnings: list[dict[str, Any]] = []
     score_changes = _score_changes(conn, period_start, period_end)
     budget = _budget_snapshot(conn)
     positions_now = _positions_snapshot(conn)
