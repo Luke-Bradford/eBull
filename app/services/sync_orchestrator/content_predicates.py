@@ -49,7 +49,10 @@ def candles_content_ok(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
 
 
 def fundamentals_content_ok(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
-    """Every tradable instrument must have a fundamentals_snapshot row in the current quarter."""
+    """Every SEC-CIK-mapped tradable instrument must have a fundamentals_snapshot
+    row in the current quarter. #540: scoped to SEC-CIK only — non-US
+    instruments have no fundamentals source today.
+    """
     today = date.today()
     quarter = (today.month - 1) // 3
     quarter_start = date(today.year, quarter * 3 + 1, 1)
@@ -57,6 +60,11 @@ def fundamentals_content_ok(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
         """
         SELECT COUNT(*) AS missing
         FROM instruments i
+        JOIN external_identifiers ei
+            ON ei.instrument_id = i.instrument_id
+           AND ei.provider = 'sec'
+           AND ei.identifier_type = 'cik'
+           AND ei.is_primary = TRUE
         WHERE i.is_tradable = TRUE
           AND NOT EXISTS (
               SELECT 1 FROM fundamentals_snapshot fs
@@ -70,7 +78,7 @@ def fundamentals_content_ok(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     if missing > 0:
         return (
             False,
-            f"{missing} tradable instruments lack fundamentals snapshot "
+            f"{missing} SEC-CIK tradable instruments lack fundamentals snapshot "
             f"for quarter starting {quarter_start.isoformat()}",
         )
     return True, "all tradable instruments have snapshot"

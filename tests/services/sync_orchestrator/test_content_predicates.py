@@ -47,3 +47,18 @@ def test_fundamentals_content_missing_reports_count() -> None:
     ok, detail = fundamentals_content_ok(conn)
     assert ok is False
     assert "5" in detail
+
+
+def test_fundamentals_content_query_filters_to_sec_cik_cohort() -> None:
+    # #540: pin the SEC-CIK JOIN so a future refactor cannot silently
+    # widen the cohort back to "every tradable instrument", which
+    # would re-introduce the cosmetic alarm storm on non-US / crypto
+    # / commodity instruments that have no public fundamentals source.
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.return_value = (0,)
+    fundamentals_content_ok(conn)
+    sql = conn.execute.call_args.args[0]
+    assert "external_identifiers" in sql
+    assert "ei.provider = 'sec'" in sql
+    assert "ei.identifier_type = 'cik'" in sql
+    assert "ei.is_primary = TRUE" in sql

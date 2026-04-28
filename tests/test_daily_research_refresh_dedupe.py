@@ -190,3 +190,38 @@ def test_sec_fundamentals_flag_true_skips_refresh_fundamentals(monkeypatch) -> N
     # No SEC XBRL path means refresh_fundamentals is never called.
     # FMP was retired in #532 — no fallback path remains.
     refresh_fund_mock.assert_not_called()
+
+
+def test_cik_lookup_query_filters_to_primary_cik(monkeypatch) -> None:
+    """#540 producer-side cohort guard: the symbol→CIK lookup MUST
+    filter on ``ei.is_primary = TRUE`` so the SEC fundamentals
+    refresh runs against the same cohort the freshness reader
+    expects (``app/services/sync_orchestrator/freshness.py::
+    fundamentals_is_fresh``). Regressing this filter would let a
+    demoted historical CIK feed the refresh against the wrong
+    issuer while the freshness reader silently reports the
+    instrument as missing — issuer-mix corruption.
+    """
+    stub_settings = MagicMock()
+    stub_settings.database_url = "postgresql://test"
+    stub_settings.sec_user_agent = "test"
+    stub_settings.companies_house_api_key = None
+    stub_settings.enable_filings_fetch_dedupe = False
+    stub_settings.enable_sec_fundamentals_dedupe = False
+    monkeypatch.setattr(scheduler, "settings", stub_settings)
+
+    _base_mocks(monkeypatch)
+
+    scheduler.daily_research_refresh()
+
+    # Inspect every conn.execute() call for the cik lookup. The
+    # second execute on the connection is the cik_rows query.
+    connect_call = scheduler.psycopg.connect.call_args_list[0]
+    fake_conn = scheduler.psycopg.connect.return_value.__enter__.return_value
+    cik_query = fake_conn.execute.call_args_list[1].args[0]
+    assert "external_identifiers" in cik_query
+    assert "ei.provider = 'sec'" in cik_query
+    assert "ei.identifier_type = 'cik'" in cik_query
+    assert "ei.is_primary = TRUE" in cik_query
+    # Sanity: the connect call argument is the configured DB URL.
+    assert connect_call.args[0] == "postgresql://test"

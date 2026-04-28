@@ -274,7 +274,9 @@ class TestFundamentalsIsFresh:
         )
         fresh, detail = fundamentals_is_fresh(conn)
         assert fresh is False
-        assert "5 tradable instruments lack fundamentals snapshot" in detail
+        # #540: scoped to SEC-CIK only — non-US / crypto / commodity
+        # instruments cannot have a fundamentals_snapshot row today.
+        assert "5 SEC-CIK tradable instruments lack fundamentals snapshot" in detail
 
     def test_fresh_when_all_have_quarter_snapshot(self) -> None:
         now = datetime.now(UTC)
@@ -283,6 +285,22 @@ class TestFundamentalsIsFresh:
         )
         fresh, _ = fundamentals_is_fresh(conn)
         assert fresh is True
+
+    def test_query_filters_to_sec_cik_cohort(self) -> None:
+        # #540: pin the SEC-CIK JOIN so a future refactor cannot
+        # silently widen the cohort back to "every tradable
+        # instrument" and re-introduce noise on non-SEC instruments.
+        now = datetime.now(UTC)
+        conn = _mock_conn_with_rows(
+            [(now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()), (0,)]
+        )
+        fundamentals_is_fresh(conn)
+        # Second execute call is the missing-snapshot count query.
+        snapshot_query = conn.execute.call_args_list[1].args[0]
+        assert "external_identifiers" in snapshot_query
+        assert "ei.provider = 'sec'" in snapshot_query
+        assert "ei.identifier_type = 'cik'" in snapshot_query
+        assert "ei.is_primary = TRUE" in snapshot_query
 
 
 class TestScoringIsFresh:
