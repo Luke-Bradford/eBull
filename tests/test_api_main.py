@@ -65,12 +65,19 @@ client = TestClient(app)
 
 
 class TestHealthDb:
-    """GET /health/db — migration status via pooled connection."""
+    """GET /health/db — public liveness probe.
+
+    Per #240, the response body MUST contain only ``db_reachable``.
+    Table names, migration history, and raw exception text were
+    removed because the endpoint is unauthenticated and an attacker
+    can use any of those to fingerprint schema / migration / infra
+    failure modes.
+    """
 
     def teardown_method(self) -> None:
         _cleanup()
 
-    def test_returns_db_health_via_pooled_conn(self) -> None:
+    def test_db_reachable_true_only(self) -> None:
         conn = _mock_conn()
         _setup(conn)
 
@@ -78,20 +85,47 @@ class TestHealthDb:
             {"file": "001_init.sql", "status": "applied", "applied_at": "2026-01-01T00:00:00"}
         ]
 
-        # conn.execute returns rows for the pg_tables query
-        conn.execute.return_value = [("instruments",), ("coverage",)]
-
         with patch("app.main.migration_status", return_value=migrations) as mock_status:
             resp = client.get("/health/db")
 
         assert resp.status_code == 200
         body = resp.json()
-        assert body["db_reachable"] is True
-        assert body["tables"] == ["instruments", "coverage"]
-        assert len(body["migrations"]) == 1
+        assert body == {"db_reachable": True}
 
         # migration_status was called with the pooled connection
+        # (probe still verifies the bootstrap table exists).
         mock_status.assert_called_once_with(conn)
+
+    def test_db_unreachable_does_not_leak_exception_text(self) -> None:
+        """When ``migration_status`` raises, the response is the
+        binary ``db_reachable: false`` only — the original exception
+        message must NEVER appear in the response body (#240).
+        """
+        conn = _mock_conn()
+        _setup(conn)
+
+        marker = "internal-leak-marker-XYZ-pg_connect-failed"
+        with patch("app.main.migration_status", side_effect=RuntimeError(marker)):
+            resp = client.get("/health/db")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body == {"db_reachable": False}
+        assert marker not in resp.text
+
+    def test_response_does_not_include_legacy_fields(self) -> None:
+        """Belt-and-braces: even on the success path, ``tables`` and
+        ``migrations`` keys must be absent so a future regression
+        that accidentally re-adds them trips this test.
+        """
+        conn = _mock_conn()
+        _setup(conn)
+        with patch("app.main.migration_status", return_value=[]):
+            resp = client.get("/health/db")
+        body = resp.json()
+        assert "tables" not in body
+        assert "migrations" not in body
+        assert "db_error" not in body
 
 
 class TestKillSwitch:
