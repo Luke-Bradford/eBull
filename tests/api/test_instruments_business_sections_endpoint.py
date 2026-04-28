@@ -27,11 +27,21 @@ def _build_app(conn: MagicMock) -> FastAPI:
     return app
 
 
-def _cursor_returning_instrument() -> MagicMock:
+def _cursor_returning_instrument(cik: str | None = "0001326380") -> MagicMock:
+    """Mock cursor that yields the instrument row on the first
+    ``fetchone`` and the CIK lookup row on the second (#563).
+    Override ``cik=None`` to simulate a non-US instrument so the
+    response's ``cik`` field comes back as ``None``.
+    """
     cur = MagicMock()
     cur.__enter__ = MagicMock(return_value=cur)
     cur.__exit__ = MagicMock(return_value=False)
-    cur.fetchone.return_value = {"instrument_id": 1, "symbol": "GME"}
+    cik_row = {"identifier_value": cik} if cik is not None else None
+    # Sequence: 1st call resolves instrument_id; 2nd call resolves CIK.
+    cur.fetchone.side_effect = [
+        {"instrument_id": 1, "symbol": "GME"},
+        cik_row,
+    ]
     return cur
 
 
@@ -189,3 +199,38 @@ def test_business_sections_unknown_accession_404() -> None:
         r = client.get("/instruments/GME/business_sections?accession=does-not-exist")
 
     assert r.status_code == 404
+
+
+def test_business_sections_response_includes_cik() -> None:
+    """#563: ``cik`` field is plumbed through from external_identifiers."""
+    conn = MagicMock()
+    conn.cursor.return_value = _cursor_returning_instrument(cik="0001326380")
+    app = _build_app(conn)
+    with patch(
+        "app.services.business_summary.get_business_sections",
+        return_value=_FAKE_SECTIONS,
+    ):
+        client = TestClient(app)
+        r = client.get("/instruments/GME/business_sections")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["cik"] == "0001326380"
+
+
+def test_business_sections_cik_null_for_non_us_instrument() -> None:
+    """Instruments without a primary SEC CIK link return ``cik: null``
+    rather than a 500 — the iXBRL viewer fallback in the frontend
+    handles the missing-CIK case by falling back to EDGAR search.
+    """
+    conn = MagicMock()
+    conn.cursor.return_value = _cursor_returning_instrument(cik=None)
+    app = _build_app(conn)
+    with patch(
+        "app.services.business_summary.get_business_sections",
+        return_value=_FAKE_SECTIONS,
+    ):
+        client = TestClient(app)
+        r = client.get("/instruments/GME/business_sections")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["cik"] is None

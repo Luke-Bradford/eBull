@@ -9,6 +9,7 @@ describe("Tenk10KDrilldownPage", () => {
     vi.spyOn(api, "fetchBusinessSections").mockResolvedValue({
       symbol: "GME",
       source_accession: "0001326380-26-000001",
+      cik: "0001326380",
       sections: [
         {
           section_order: 0,

@@ -212,6 +212,14 @@ export interface BusinessSection {
 export interface BusinessSectionsResponse {
   symbol: string;
   source_accession: string | null;
+  /**
+   * SEC entity CIK for the instrument. Plumbed through (#563) so the
+   * frontend can build direct iXBRL viewer URLs
+   * (`cgi-bin/viewer?cik=...&accession_number=...`) instead of falling
+   * back to an EDGAR full-text search by accession. NULL for
+   * instruments without a primary SEC CIK link.
+   */
+  cik: string | null;
   sections: BusinessSection[];
 }
 

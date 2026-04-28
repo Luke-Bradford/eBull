@@ -1252,10 +1252,17 @@ class BusinessSectionsResponse(BaseModel):
     ``source_accession`` identifies the 10-K the sections were extracted
     from, so the UI can link back to the SEC filing. Empty list when
     no sections are on file (first-time instruments or no 10-K filed).
+
+    ``cik`` is the SEC entity CIK for the instrument, plumbed through
+    so the frontend can build direct iXBRL viewer URLs
+    (``cgi-bin/viewer?cik=...&accession_number=...``) without an
+    EDGAR search redirect (#563). NULL for instruments without a
+    primary SEC CIK link (non-US tickers, crypto, etc.).
     """
 
     symbol: str
     source_accession: str | None
+    cik: str | None
     sections: list[BusinessSectionModel]
 
 
@@ -1313,9 +1320,25 @@ def get_instrument_business_sections(
             detail=f"no 10-K sections for {symbol} accession {accession}",
         )
     source_accession = sections[0].source_accession if sections else None
+
+    # #563: plumb CIK so the frontend can build direct iXBRL viewer
+    # URLs. Single SELECT against the existing primary SEC link;
+    # returns None for instruments without one (non-US tickers).
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT identifier_value FROM external_identifiers "
+            "WHERE instrument_id = %(iid)s AND provider = 'sec' "
+            "AND identifier_type = 'cik' AND is_primary = TRUE "
+            "LIMIT 1",
+            {"iid": instrument_id},
+        )
+        cik_row = cur.fetchone()
+    cik = str(cik_row["identifier_value"]) if cik_row is not None else None  # type: ignore[index]
+
     return BusinessSectionsResponse(
         symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
         source_accession=source_accession,
+        cik=cik,
         sections=[
             BusinessSectionModel(
                 section_order=s.section_order,
