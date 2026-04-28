@@ -327,7 +327,11 @@ class TestSyntheticFill:
 
 
 class TestSyntheticFillSpreadCost:
-    def test_buy_fills_at_ask_with_spread_fee(self) -> None:
+    def test_buy_fills_at_ask_with_zero_fees(self) -> None:
+        """BUY at ask already embeds half-spread vs mid in execution price.
+        Fees must be 0 — see #255 — so the cash ledger does not subtract
+        the spread twice (once via gross at ask, once via fees).
+        """
         result = _synthetic_fill(
             instrument_id=123,
             action="BUY",
@@ -342,12 +346,14 @@ class TestSyntheticFillSpreadCost:
         # units = 1000 / 100.20
         expected_units = (Decimal("1000") / Decimal("100.20")).quantize(Decimal("0.000001"))
         assert result.filled_units == expected_units
-        # Spread cost = (ask - bid) / 2 * units
-        spread_per_unit = (Decimal("100.20") - Decimal("99.80")) / 2
-        expected_fees = (spread_per_unit * expected_units).quantize(Decimal("0.000001"))
-        assert result.fees == expected_fees
+        # Spread already embedded in fill price; fees=0 to avoid double count.
+        assert result.fees == Decimal("0")
 
-    def test_exit_fills_at_bid_with_spread_fee(self) -> None:
+    def test_exit_fills_at_bid_with_zero_fees(self) -> None:
+        """EXIT at bid already embeds half-spread vs mid. Fees must be 0
+        so cash credit on close is `bid * units` flat, not `bid * units
+        - half_spread * units`.
+        """
         result = _synthetic_fill(
             instrument_id=123,
             action="EXIT",
@@ -358,9 +364,55 @@ class TestSyntheticFillSpreadCost:
             ask=Decimal("100.20"),
         )
         assert result.filled_price == Decimal("99.80")
-        spread_per_unit = (Decimal("100.20") - Decimal("99.80")) / 2
-        expected_fees = (spread_per_unit * Decimal("10")).quantize(Decimal("0.000001"))
-        assert result.fees == expected_fees
+        assert result.fees == Decimal("0")
+
+    def test_demo_buy_cash_ledger_writes_gross_only_no_double_count(self) -> None:
+        """Regression for #255 at the ledger boundary.
+
+        Before the fix the cash ledger row for demo BUY was
+        ``-(gross + half_spread*units)`` — spread subtracted twice
+        (once via ask>mid in gross, once via fees). After the fix the
+        ledger row must be exactly ``-gross``.
+        """
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _quote_cursor(last=100.0, bid=99.80, ask=100.20, spread_pct=0.40),
+            _order_returning_cursor(order_id=7),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
+            _fill_returning_cursor(fill_id=3),
+        ]
+        conn = _make_conn(cursors)
+
+        with patch("app.services.order_client._utcnow", return_value=_NOW):
+            execute_order(conn, recommendation_id=42, decision_id=10)
+
+        # gross = filled_price (ask=100.20) * units (suggested_size=5% of 10_000 / 100.20)
+        # Match cash_ledger inserts via positional OR keyword query
+        # (#612 review). A positional-only filter would silently
+        # pass with zero matches if the production call is ever
+        # refactored to ``conn.execute(query=...)``, defeating the
+        # regression guard.
+        def _query_str(c: Any) -> str:
+            if c.args:
+                return str(c.args[0])
+            return str(c.kwargs.get("query", ""))
+
+        ledger_calls = [c for c in conn.execute.call_args_list if "cash_ledger" in _query_str(c)]
+        # Belt-and-braces: assert match count is non-zero before
+        # taking [0], so a future test-mock refactor that drops
+        # all positional args trips this assertion loudly.
+        assert len(ledger_calls) >= 1, list(conn.execute.call_args_list)
+        assert len(ledger_calls) == 1, ledger_calls
+        params = ledger_calls[0].args[1] if ledger_calls[0].args else ledger_calls[0].kwargs.get("params")
+        # amount must equal -gross exactly (fees=0). Any negative drift
+        # vs that == double-count regression.
+        units = (Decimal("500") / Decimal("100.20")).quantize(Decimal("0.000001"))
+        expected_gross = Decimal("100.20") * units
+        assert params["amount"] == -expected_gross
+        assert params["type"] == "order_buy"
 
     def test_no_bid_ask_falls_back_to_zero_fees(self) -> None:
         result = _synthetic_fill(
