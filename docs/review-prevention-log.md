@@ -1018,3 +1018,12 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: A pytest fixture restoring shared `ebull_test` schema in `finally` ran two SQL files sequentially without per-step `try`. If step N (re-running migration 076 to dedupe leftover seeds) ever raised, step N+1 (re-creating the migration 077 partial unique index) would be skipped — leaving the index dropped for every subsequent test in the run, because `apply_migrations_to_test_db` only applies files not yet recorded in `schema_migrations`.
 - Prevention: Each step in a multi-step `finally` block that mutates shared DB schema (drop/recreate index, re-apply migration, restore singleton) must be wrapped in its own `try/except`. A failure in step N must not abandon steps N+1..end. Swallow + warn for non-fatal recovery steps; re-raise the final restore so the test framework reports the leak instead of silently corrupting later test runs.
 - Enforced in: this prevention log; PR #631 fix wraps the migration 076 dedupe call in its own `try/except` so the migration 077 recreate runs unconditionally.
+
+---
+
+### Multi-query read handlers must use a single snapshot
+
+- First seen in: #395.
+- Symptom: GET handlers that issue 2+ sequential reads on the same `get_conn` connection see a fresh READ COMMITTED snapshot per statement. A concurrent writer between Q1 and Q2 produces brief drift — counts and lists disagree, totals and details lag by one. Cosmetic in steady state, hides real bugs in tests, becomes a correctness issue under multi-operator concurrency.
+- Prevention: Any read handler that issues 2+ statements whose results must agree (counts, list of items, sub-aggregates of the same set) MUST wrap the reads in `with snapshot_read(conn): ...` from `app.db.snapshot`. The helper opens a REPEATABLE READ transaction so all statements run against one consistent snapshot. At self-review: grep for `cur.execute(` count >= 2 inside any GET handler and confirm `snapshot_read` wraps them, or that the handler's docstring justifies READ COMMITTED.
+- Enforced in: this prevention log; PR for #395 introduces `app/db/snapshot.py::snapshot_read` and applies it to `GET /alerts/guard-rejections`. Apply to other multi-query GETs as the pattern is encountered.
