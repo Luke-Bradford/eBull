@@ -14,11 +14,19 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Literal
 
 logger = logging.getLogger(__name__)
+
+# Retry budget for transient Anthropic errors (#29). Three attempts
+# total: an initial call + two retries with exponential backoff
+# (1s, 2s). Anything beyond raises the SDK's exception so the caller
+# can decide whether to skip the article or fail the run.
+_RETRY_MAX_ATTEMPTS = 3
+_RETRY_INITIAL_BACKOFF_S = 1.0
 
 SentimentLabel = Literal["positive", "negative", "neutral"]
 
@@ -92,17 +100,80 @@ class ClaudeSentimentScorer(SentimentScorer):
 
         self._client = anthropic.Anthropic(api_key=api_key)
 
+    def _call_with_retry(self, user_content: str):
+        """Send the messages.create call with retry on transient errors.
+
+        Retries (#29) are limited to:
+          * ``anthropic.RateLimitError`` — HTTP 429.
+          * ``anthropic.APIStatusError`` with ``status_code >= 500`` —
+            transient server-side faults (529 included).
+
+        Non-retryable: 4xx other than 429 (auth, bad request) and any
+        non-Anthropic exception. Those propagate immediately so the
+        caller's outer ``except Exception`` does not silently swallow
+        a programmer error.
+
+        Backoff is 1s, then 2s — short enough to keep the news loop
+        moving on a brief 429 spike, long enough to clear most
+        token-bucket windows.
+        """
+        import anthropic
+
+        backoff = _RETRY_INITIAL_BACKOFF_S
+        last_exc: Exception | None = None
+        for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
+            try:
+                return self._client.messages.create(
+                    model=self.MODEL,
+                    max_tokens=self.MAX_TOKENS,
+                    system=_SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": user_content}],
+                )
+            except anthropic.RateLimitError as exc:
+                last_exc = exc
+                if attempt == _RETRY_MAX_ATTEMPTS:
+                    break
+                logger.warning(
+                    "Sentiment scorer: 429 rate limit (attempt %d/%d); sleeping %.1fs",
+                    attempt,
+                    _RETRY_MAX_ATTEMPTS,
+                    backoff,
+                )
+            except anthropic.APIStatusError as exc:
+                # Only retry server-side errors. 4xx other than 429
+                # mean the request is malformed or unauthorised —
+                # retrying does not help.
+                if exc.status_code < 500:
+                    raise
+                last_exc = exc
+                if attempt == _RETRY_MAX_ATTEMPTS:
+                    break
+                logger.warning(
+                    "Sentiment scorer: %d %s (attempt %d/%d); sleeping %.1fs",
+                    exc.status_code,
+                    type(exc).__name__,
+                    attempt,
+                    _RETRY_MAX_ATTEMPTS,
+                    backoff,
+                )
+            time.sleep(backoff)
+            backoff *= 2
+
+        # All retries exhausted — re-raise the last seen transient
+        # error so the caller can decide between skip and fail.
+        # Explicit raise (not ``assert``) so production runs under
+        # ``python -O`` (which strips assertions) cannot silently
+        # fall through and return ``None`` — review feedback #618.
+        if last_exc is None:
+            raise RuntimeError("ClaudeSentimentScorer retry loop exited with no exception captured")
+        raise last_exc
+
     def score(self, headline: str, snippet: str | None) -> SentimentResult:
         user_content = f"Headline: {headline}"
         if snippet:
             user_content += f"\nSnippet: {snippet}"
 
-        message = self._client.messages.create(
-            model=self.MODEL,
-            max_tokens=self.MAX_TOKENS,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
-        )
+        message = self._call_with_retry(user_content)
 
         block = message.content[0]
         if not hasattr(block, "text"):
