@@ -109,7 +109,7 @@ def fiscal_label_index_dropped(
                 f"fiscal_label_index_dropped teardown: migration 076 "
                 f"re-run failed -- {type(dedupe_exc).__name__}: {dedupe_exc}. "
                 f"Attempting 077 recreate anyway.",
-                stacklevel=2,
+                stacklevel=1,
             )
         _exec_sql_file(conn, _MIGRATION_077_PATH)
 
