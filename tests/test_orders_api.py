@@ -402,8 +402,9 @@ class TestClosePosition:
         Outer SELECT shows ``units = 10`` so the endpoint accepts the
         full close. Inside the transaction, the FOR UPDATE re-read
         returns ``units = 2`` (another close consumed 8). The endpoint
-        must raise 409 and the transaction must roll back; no
-        cash_ledger or decision_audit insert may be attempted.
+        must raise 409, the transaction must exit via the exception
+        path (so the orders/fills cursor inserts roll back), and no
+        cash_ledger or decision_audit ``conn.execute`` write may run.
         """
         pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
         order_row = [{"order_id": 90}]
@@ -415,6 +416,16 @@ class TestClosePosition:
         resp = client.post("/portfolio/positions/500/close")
         assert resp.status_code == 409
         assert "another close" in resp.json()["detail"]
+
+        # The orders/fills INSERTs use ``conn.cursor()`` (not
+        # ``conn.execute``); the meaningful rollback evidence is the
+        # transaction context manager exiting with an exception. Assert
+        # ``conn.transaction().__exit__`` was called with a non-None
+        # ``exc_type`` — that is what triggers psycopg's tx ROLLBACK.
+        tx_exits = conn.transaction.return_value.__exit__.call_args_list
+        assert any(call.args[0] is not None for call in tx_exits), (
+            f"Expected tx __exit__ to receive an exception (rollback path); actual call_args={tx_exits!r}"
+        )
 
         sql_calls = [str(call.args[0]) for call in conn.execute.call_args_list]
         assert not any("cash_ledger" in s for s in sql_calls), "Race-loser must not record a cash_ledger entry."
