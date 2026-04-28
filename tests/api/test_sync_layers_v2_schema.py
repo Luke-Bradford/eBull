@@ -1,4 +1,10 @@
+import pytest
 from fastapi.testclient import TestClient
+
+# All tests use the ``clean_client`` fixture (real DB-backed). Per the
+# #421 PREVENTION rule, mark the whole module integration so unit-only
+# CI passes deselect cleanly.
+pytestmark = pytest.mark.integration
 
 
 def test_v2_endpoint_returns_expected_top_level_keys(clean_client: TestClient) -> None:
