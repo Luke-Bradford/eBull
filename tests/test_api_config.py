@@ -89,17 +89,24 @@ class TestGetConfig:
         assert "app_env" in body
         assert "etoro_env" in body
 
-    def test_runtime_config_corrupt_returns_503(self) -> None:
+    def test_runtime_config_corrupt_returns_503_with_fixed_detail(self) -> None:
+        """#87: 5xx detail is a fixed string — internal exception text
+        must NOT be echoed to unauthenticated callers. The marker
+        substring from the raised exception must not appear in the
+        response body.
+        """
         _override_conn(_mock_conn())
 
+        marker = "internal-leak-marker-XYZ-singleton-missing"
         with patch(
             "app.api.config.get_runtime_config",
-            side_effect=RuntimeConfigCorrupt("singleton missing"),
+            side_effect=RuntimeConfigCorrupt(marker),
         ):
             resp = client.get("/config")
 
         assert resp.status_code == 503
-        assert "missing" in resp.json()["detail"]
+        assert marker not in resp.text
+        assert resp.json()["detail"] == "runtime config unavailable"
 
 
 # ---------------------------------------------------------------------------
@@ -225,11 +232,13 @@ class TestPatchConfig:
             )
         assert resp.status_code == 200
 
-    def test_corrupt_runtime_config_returns_503(self) -> None:
+    def test_corrupt_runtime_config_returns_503_with_fixed_detail(self) -> None:
+        """#87 — see TestGetConfig docstring."""
         _override_conn(_mock_conn())
+        marker = "patch-internal-leak-marker-ZZZ"
         with patch(
             "app.api.config.update_runtime_config",
-            side_effect=RuntimeConfigCorrupt("missing"),
+            side_effect=RuntimeConfigCorrupt(marker),
         ):
             resp = client.patch(
                 "/config",
@@ -240,6 +249,8 @@ class TestPatchConfig:
                 },
             )
         assert resp.status_code == 503
+        assert marker not in resp.text
+        assert resp.json()["detail"] == "runtime config unavailable"
 
 
 # ---------------------------------------------------------------------------
@@ -300,14 +311,18 @@ class TestPostKillSwitch:
         )
         assert resp.status_code == 422
 
-    def test_missing_kill_switch_row_returns_503(self) -> None:
+    def test_missing_kill_switch_row_returns_503_with_fixed_detail(self) -> None:
+        """#87 — see TestGetConfig docstring."""
         _override_conn(_mock_conn())
+        marker = "killswitch-internal-leak-marker-QQQ-row-missing"
         with patch(
             "app.api.config.activate_kill_switch",
-            side_effect=RuntimeError("kill_switch row missing"),
+            side_effect=RuntimeError(marker),
         ):
             resp = client.post(
                 "/config/kill-switch",
                 json={"active": True, "reason": "halt", "activated_by": "op"},
             )
         assert resp.status_code == 503
+        assert marker not in resp.text
+        assert resp.json()["detail"] == "kill switch unavailable"

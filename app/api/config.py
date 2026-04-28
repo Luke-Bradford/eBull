@@ -169,7 +169,10 @@ def get_config(
     except RuntimeConfigCorrupt as exc:
         # Fail closed: never substitute defaults.
         # Prevention-log: "Health endpoint returns HTTP 200 on infra failure".
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # #87: do NOT echo str(exc) — internal exception text leaks
+        # schema / migration / state hints to unauthenticated callers.
+        # Framework still logs the traceback via `from exc`.
+        raise HTTPException(status_code=503, detail="runtime config unavailable") from exc
 
     return ConfigResponse(
         app_env=settings.app_env,
@@ -206,7 +209,8 @@ def patch_config(
             display_currency=body.display_currency,
         )
     except RuntimeConfigCorrupt as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # #87: fixed string instead of str(exc) — see GET handler note.
+        raise HTTPException(status_code=503, detail="runtime config unavailable") from exc
     except RuntimeConfigNoOp as exc:
         # No-op patch — reject so audit table never diverges from singleton.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -253,7 +257,8 @@ def post_kill_switch(
     except RuntimeError as exc:
         # Singleton row missing -> configuration corrupt.  503 not 500: this
         # is an environmental fault, not a programmer error.
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # #87: fixed string — same reasoning as the runtime-config handlers.
+        raise HTTPException(status_code=503, detail="kill switch unavailable") from exc
 
     # Build the response from the values the service committed inside its own
     # transaction — never re-read after commit, since a concurrent toggle
