@@ -239,6 +239,70 @@ class TestCanonicalMergeArrivalOrder:
         assert rows[0]["source_ref"] == "acc-restatement"
         assert rows[0]["revenue"] == Decimal("550")
 
+    def test_source_switch_clears_lower_priority_ghost_row(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Bot review (#625) caught the source-switch ghost case:
+
+        Run 1: companies_house has a raw row, sec_edgar does not. CH
+        wins the merge → canonical has one CH row.
+
+        Run 2: sec_edgar raw row arrives. SEC outranks CH (priority
+        1 vs 2). The merge winner switches sources. Phase B must
+        delete the now-stale CH canonical row; otherwise both rows
+        survive and the instrument page renders the same fiscal
+        label twice.
+
+        Without the fix, ``fp.source = bs.source`` filtered the
+        DELETE to the winning source only, leaving the lower-priority
+        ghost behind.
+        """
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=204, symbol="MIX")
+
+        # Run 1: CH-only raw → CH canonical row.
+        _seed_raw(
+            conn,
+            instrument_id=204,
+            period_end=date(2024, 12, 31),
+            period_type="FY",
+            fiscal_year=2024,
+            fiscal_quarter=None,
+            source_ref="ch-001",
+            filed_date=date(2025, 3, 1),
+            revenue=Decimal("900"),
+            source="companies_house",
+        )
+        conn.commit()
+        _canonical_merge_instrument(conn, 204)
+        conn.commit()
+        rows = _canonical_rows(conn, 204)
+        assert len(rows) == 1
+        assert rows[0]["source_ref"] == "ch-001"
+
+        # Run 2: SEC raw arrives, outranks CH on the same fiscal label.
+        _seed_raw(
+            conn,
+            instrument_id=204,
+            period_end=date(2024, 12, 31),
+            period_type="FY",
+            fiscal_year=2024,
+            fiscal_quarter=None,
+            source_ref="sec-001",
+            filed_date=date(2025, 4, 1),
+            revenue=Decimal("950"),
+            source="sec_edgar",
+        )
+        conn.commit()
+        _canonical_merge_instrument(conn, 204)
+        conn.commit()
+
+        rows = _canonical_rows(conn, 204)
+        assert len(rows) == 1, [dict(r) for r in rows]
+        assert rows[0]["source_ref"] == "sec-001"
+        assert rows[0]["revenue"] == Decimal("950")
+
     def test_partial_unique_index_blocks_direct_dupe(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

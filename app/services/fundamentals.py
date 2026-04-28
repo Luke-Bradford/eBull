@@ -1065,13 +1065,27 @@ def _canonical_merge_instrument(
         Phase B delete cleared the way.
     """
     # Phase B: delete canonical rows that share a fiscal label with a
-    # raw winner but carry a stale ``period_end_date`` (left over from
-    # a prior arrival of the same fiscal period). Running the DELETE
-    # as a separate statement before the INSERT is mandatory: a
-    # combined data-modifying CTE doesn't expose its DELETE rows to
-    # the sibling INSERT's snapshot, so the partial unique index from
-    # migration 077 would still see the stale row and raise
-    # UniqueViolation.
+    # raw winner but are NOT the winner itself.
+    #
+    # Two cases collapsed into the same predicate:
+    #   * stale ``period_end_date`` for the winning source (e.g.
+    #     amendment with a different period_end than the row already
+    #     on file).
+    #   * stale ghost row from a lower-priority source (e.g.
+    #     companies_house won on a prior run when sec_edgar had no
+    #     raw row; sec_edgar arrives later and outranks it). Without
+    #     this delete the ghost row would survive alongside the
+    #     sec_edgar winner, both showing up as separate rows on the
+    #     instrument page.
+    #
+    # The winner is identified by its ``(source, period_end_date)``
+    # tuple. Anything else matching the fiscal label is dropped.
+    #
+    # Running the DELETE as a separate statement before the INSERT is
+    # mandatory: a combined data-modifying CTE doesn't expose its
+    # DELETE rows to the sibling INSERT's snapshot, so the partial
+    # unique index from migration 077 would still see the stale row
+    # and raise UniqueViolation.
     conn.execute(
         """
         DELETE FROM financial_periods fp
@@ -1090,11 +1104,10 @@ def _canonical_merge_instrument(
                      period_end_date ASC
         ) bs
         WHERE fp.instrument_id = %(iid)s
-          AND fp.source = bs.source
           AND fp.fiscal_year = bs.fiscal_year
           AND fp.fiscal_quarter IS NOT DISTINCT FROM bs.fiscal_quarter
           AND fp.period_type = bs.period_type
-          AND fp.period_end_date IS DISTINCT FROM bs.period_end_date
+          AND NOT (fp.source = bs.source AND fp.period_end_date = bs.period_end_date)
         """,
         {"iid": instrument_id},
     )
