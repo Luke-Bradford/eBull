@@ -332,7 +332,7 @@ def test_api_orders_buy_into_closed_position_flips_source(
     assert units == Decimal("7")
 
 
-def test_api_orders_buy_into_open_ebull_position_preserves_source(
+def test_api_orders_buy_into_open_broker_position_preserves_source(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:
     """Preserve-arm DB regression (Codex finding: the prior version
