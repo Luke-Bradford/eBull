@@ -758,13 +758,29 @@ def _derive_periods_from_facts(
     for (fy, fp), period_facts in grouped.items():
         period_type, fiscal_quarter = _FP_MAP[fp]
 
-        # Determine period dates from facts
-        period_end = max(f.period_end for f in period_facts)
-        starts = [f.period_start for f in period_facts if f.period_start is not None]
+        # Determine period dates from financial-line-item facts only.
+        # DEI facts (e.g. dei:EntityCommonStockSharesOutstanding) carry
+        # an "as-of" context endDate equal to the filing date, ~6 weeks
+        # after the real fiscal period end. Including them in the
+        # max(period_end) lifted period_end to the filing date and
+        # produced duplicate rows in financial_periods on subsequent
+        # runs (issue #558). Restrict boundary derivation to facts
+        # whose concept maps to a canonical column — those are the
+        # fiscal-period-bearing line items.
+        mapped_facts = [f for f in period_facts if f.concept in _TAG_TO_COLUMN]
+        if not mapped_facts:
+            # Group has only DEI / unmapped concepts. Without a mapped
+            # fact we cannot anchor a real fiscal period; skip rather
+            # than fabricate one from filing-date metadata.
+            continue
+        period_end = max(f.period_end for f in mapped_facts)
+        starts = [f.period_start for f in mapped_facts if f.period_start is not None]
         period_start = min(starts) if starts else None
         months = _months_between(period_start, period_end)
 
-        # Collect accession numbers for source_ref
+        # Collect accession numbers for source_ref (from all facts in
+        # the group — filing provenance is independent of which
+        # concepts the row populates).
         accession_numbers = sorted({f.accession_number for f in period_facts})
         source_ref = accession_numbers[0] if len(accession_numbers) == 1 else ",".join(accession_numbers)
 

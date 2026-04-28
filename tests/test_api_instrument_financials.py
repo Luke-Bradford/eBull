@@ -116,6 +116,44 @@ def test_local_sec_data_returned(client: TestClient) -> None:
     assert body["rows"][0]["period_type"] == "FY"
 
 
+def test_periods_query_orders_by_period_end_date_desc_first(client: TestClient) -> None:
+    """#558/#613 review: ordering pins the chronological-DESC contract.
+
+    ``period_end_date DESC`` is the primary key so the rendered
+    columns walk backwards through real fiscal time. ``filed_date
+    DESC NULLS LAST`` is the tie-breaker — it must NOT precede
+    ``period_end_date`` (that would interleave restatement rows
+    chronologically incorrect on the operator's Financials tab),
+    and it must NOT include ``fiscal_quarter DESC NULLS FIRST``
+    (which would push FY rows ahead of Q4 rows for the same
+    fiscal year on the annual / mixed-period view).
+    """
+
+    cur_mock = MagicMock()
+    cur_mock.__enter__.return_value = cur_mock
+    cur_mock.fetchone.return_value = {"instrument_id": 1, "symbol": "AAPL"}
+    cur_mock.fetchall.return_value = []
+
+    def _conn() -> Iterator[MagicMock]:
+        conn_mock = MagicMock()
+        conn_mock.cursor.return_value = cur_mock
+        yield conn_mock
+
+    from app.db import get_conn
+
+    app.dependency_overrides[get_conn] = _conn
+    try:
+        resp = client.get("/instruments/AAPL/financials?statement=income&period=quarterly")
+        assert resp.status_code == 200
+        executed_sql = "".join(str(call.args[0]) for call in cur_mock.execute.call_args_list if call.args)
+        assert "ORDER BY period_end_date DESC" in executed_sql, executed_sql
+        assert "filed_date DESC NULLS LAST" in executed_sql
+        # NULLS FIRST on fiscal_quarter would re-order FY ahead of Q4 for the same year.
+        assert "NULLS FIRST" not in executed_sql
+    finally:
+        _clear_db_override()
+
+
 def test_no_local_data_returns_unavailable_empty(client: TestClient) -> None:
     """When SEC has no rows for the instrument, return empty payload
     with ``source = "unavailable"`` — no yfinance fallback."""

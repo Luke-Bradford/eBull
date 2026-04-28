@@ -525,13 +525,27 @@ def _fetch_local_financials(
     # is bound as a parameter, not formatted, so a future value added to
     # the CHECK constraint won't silently match.
     select_cols = ", ".join(columns)
+    # Ordering: ``period_end_date DESC`` is the primary signal so the
+    # rendered columns walk backwards through real fiscal time. The
+    # endpoint is called separately for ``period_types ∈ {Q1..Q4}``
+    # (quarterly view) vs ``{FY}`` (annual view) — see the call sites
+    # below — so a within-row mix of FY and Q4 does not happen at the
+    # API level. Tie-breakers are added defensively so a leftover
+    # duplicate row that slips past the migration 076 dedupe (e.g. a
+    # provider-side restatement that arrives after the one-shot purge)
+    # still renders deterministically: latest ``filed_date`` wins,
+    # then ``filing_event_id`` only as a final pin against a tied
+    # filed_date.
     sql = f"""
         SELECT period_end_date, period_type, reported_currency, {select_cols}
         FROM financial_periods
         WHERE instrument_id = %(iid)s
           AND superseded_at IS NULL
           AND period_type = ANY(%(types)s::text[])
-        ORDER BY period_end_date DESC
+        ORDER BY period_end_date DESC,
+                 filed_date DESC NULLS LAST,
+                 fiscal_year DESC NULLS LAST,
+                 fiscal_quarter DESC NULLS LAST
         LIMIT 20
     """  # noqa: S608 — columns are a hardcoded whitelist; period_types is bound
 
