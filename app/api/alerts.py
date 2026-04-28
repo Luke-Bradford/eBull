@@ -47,6 +47,7 @@ from pydantic import BaseModel, Field
 
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
+from app.db.snapshot import snapshot_read
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 
 router = APIRouter(
@@ -137,7 +138,12 @@ def get_guard_rejections(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> GuardRejectionsResponse:
     operator_id = _resolve_operator(conn)
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+    # #395: three sequential reads must agree on a single snapshot,
+    # otherwise a concurrent guard FAIL between Q2 and Q3 lets the
+    # list contain N+1 rows while unseen_count reports N (pill lags
+    # by one). REPEATABLE READ over the whole handler closes the
+    # window. Read-only block — no writes inside.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur, snapshot_read(conn):
         # 1. Read operator's cursor.
         cur.execute(
             "SELECT alerts_last_seen_decision_id FROM operators WHERE operator_id = %(op)s",
