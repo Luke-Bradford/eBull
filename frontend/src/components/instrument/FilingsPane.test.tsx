@@ -105,6 +105,7 @@ describe("FilingsPane", () => {
         filing_date: `2026-03-${(i + 1).toString().padStart(2, "0")}`,
         filing_type: i % 2 === 0 ? "10-K" : "8-K",
         provider: "sec_edgar",
+        accession_number: `0000000000-26-00000${i}`,
         red_flag_score: null,
         extracted_summary: `summary ${i}`,
         primary_document_url: null,
@@ -139,6 +140,63 @@ describe("FilingsPane", () => {
     const btn = await screen.findByRole("button", { name: /open/i });
     await userEvent.click(btn);
     expect(navigateMock).toHaveBeenCalledWith("/instrument/GME?tab=filings");
+  });
+
+  it("appends accession to 10-K drilldown link (#565)", async () => {
+    vi.spyOn(filingsApi, "fetchFilings").mockResolvedValue({
+      instrument_id: 1,
+      symbol: "GME",
+      total: 2,
+      offset: 0,
+      limit: 6,
+      items: [
+        {
+          filing_event_id: 1,
+          instrument_id: 1,
+          filing_date: "2026-03-20",
+          filing_type: "10-K",
+          provider: "sec_edgar",
+          accession_number: "0001326380-26-000013",
+          red_flag_score: null,
+          extracted_summary: "FY 2025 10-K",
+          primary_document_url: null,
+          source_url: null,
+          created_at: "2026-03-20T00:00:00Z",
+        },
+        {
+          filing_event_id: 2,
+          instrument_id: 1,
+          filing_date: "2024-04-01",
+          filing_type: "10-K/A",
+          provider: "sec_edgar",
+          accession_number: "0001326380-24-000019",
+          red_flag_score: null,
+          extracted_summary: "FY 2023 10-K/A",
+          primary_document_url: null,
+          source_url: null,
+          created_at: "2024-04-01T00:00:00Z",
+        },
+      ],
+    });
+    render(
+      <MemoryRouter>
+        <FilingsPane instrumentId={1} symbol="GME" summary={makeSummary()} />
+      </MemoryRouter>,
+    );
+    // Wait for data + find the row links by their summary text.
+    const link10k = (await screen.findByText("FY 2025 10-K")).closest("a");
+    expect(link10k).not.toBeNull();
+    expect(link10k!.getAttribute("href")).toBe(
+      "/instrument/GME/filings/10-k?accession=0001326380-26-000013",
+    );
+
+    // 10-K/A also gets accession-targeted drilldown — historical row
+    // no longer routes to "the latest" by default.
+    const link10ka = (await screen.findByText("FY 2023 10-K/A")).closest("a");
+    expect(link10ka).not.toBeNull();
+    expect(link10ka!.getAttribute("href")).toBe(
+      "/instrument/GME/filings/10-k?accession=0001326380-24-000019",
+    );
   });
 
   it("hides Open button when filings capability is inactive", async () => {

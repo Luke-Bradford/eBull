@@ -68,6 +68,7 @@ function filingsWith(instrumentId: number): FilingsListResponse {
         filing_date: "2026-04-18",
         filing_type: "10-Q",
         provider: "sec",
+        accession_number: "0001-test",
         source_url: null,
         primary_document_url: "https://sec.gov/10q",
         extracted_summary: null,

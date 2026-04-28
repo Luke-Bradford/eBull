@@ -6,9 +6,10 @@ Reads from:
 
 No writes. No schema changes.
 
-Filing identity is provider-scoped (settled decision).  The API exposes
-``provider`` and ``filing_type`` for display but does not expose
-``provider_filing_id`` or ``raw_payload_json``.
+Filing identity is provider-scoped (settled decision). The API exposes
+``provider``, ``filing_type``, and ``accession_number`` (the
+provider's primary identifier — see #565). It does NOT expose
+``raw_payload_json``.
 """
 
 from __future__ import annotations
@@ -34,13 +35,24 @@ MAX_PAGE_LIMIT = 200
 
 
 class FilingItem(BaseModel):
-    """Single filing event for an instrument."""
+    """Single filing event for an instrument.
+
+    ``accession_number`` is the provider's primary filing identifier
+    (#565). FilingsPane drilldown links route to
+    ``/instrument/{symbol}/filings/10-k`` — without an accession the
+    drilldown always lands on the latest filing, so clicking a
+    historical 10-K or a 10-K/A row landed on the wrong document.
+    Populated from ``filing_events.provider_filing_id``; nullable
+    only as a defensive guard for rows missing the column (none in
+    the current schema, but the column is nullable).
+    """
 
     filing_event_id: int
     instrument_id: int
     filing_date: date
     filing_type: str | None
     provider: str
+    accession_number: str | None
     source_url: str | None
     primary_document_url: str | None
     extracted_summary: str | None
@@ -69,6 +81,7 @@ def _parse_filing_item(row: dict[str, object]) -> FilingItem:
         filing_date=row["filing_date"],  # type: ignore[arg-type]
         filing_type=row["filing_type"],  # type: ignore[arg-type]
         provider=row["provider"],  # type: ignore[arg-type]
+        accession_number=row.get("provider_filing_id"),  # type: ignore[arg-type]
         source_url=row["source_url"],  # type: ignore[arg-type]
         primary_document_url=row["primary_document_url"],  # type: ignore[arg-type]
         extracted_summary=row["extracted_summary"],  # type: ignore[arg-type]
@@ -137,7 +150,7 @@ def list_filings(
         "offset": offset,
     }
     items_sql = f"""SELECT filing_event_id, instrument_id, filing_date,
-                       filing_type, provider,
+                       filing_type, provider, provider_filing_id,
                        source_url, primary_document_url,
                        extracted_summary, red_flag_score,
                        created_at
