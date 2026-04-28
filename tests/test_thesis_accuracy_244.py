@@ -196,8 +196,11 @@ class TestThesisAccuracyEntryAnchor:
         )
         conn.commit()
 
-        rows = _thesis_accuracy(conn, period_start=date(2026, 5, 1), period_end=date(2026, 5, 31))
-
+        all_rows = _thesis_accuracy(conn, period_start=date(2026, 5, 1), period_end=date(2026, 5, 31))
+        # Filter to this test's instrument so the assertion is robust
+        # if the function-scoped fixture lets earlier tests' rows
+        # survive into this period window (#614 review).
+        rows = [r for r in all_rows if r["instrument_id"] == 100]
         assert len(rows) == 1
         # Must be the BEFORE-entry thesis (v1), not the hindsight v2.
         assert Decimal(rows[0]["base_value"]) == Decimal("110")
@@ -271,8 +274,9 @@ class TestThesisAccuracyEntryAnchor:
         )
         conn.commit()
 
-        rows = _thesis_accuracy(conn, period_start=date(2026, 5, 1), period_end=date(2026, 5, 31))
-
+        all_rows = _thesis_accuracy(conn, period_start=date(2026, 5, 1), period_end=date(2026, 5, 31))
+        # Filter to this test's instrument (#614 review).
+        rows = [r for r in all_rows if r["instrument_id"] == 101]
         assert len(rows) == 1
         assert Decimal(rows[0]["base_value"]) == Decimal("100")
         assert Decimal(rows[0]["bull_value"]) == Decimal("110")
@@ -320,8 +324,9 @@ class TestThesisAccuracyEntryAnchor:
         )
         conn.commit()
 
-        rows = _thesis_accuracy(conn, period_start=date(2026, 5, 1), period_end=date(2026, 5, 31))
-
+        all_rows = _thesis_accuracy(conn, period_start=date(2026, 5, 1), period_end=date(2026, 5, 31))
+        # Filter to this test's instrument (#614 review).
+        rows = [r for r in all_rows if r["instrument_id"] == 102]
         assert len(rows) == 1
         assert rows[0]["base_value"] is None
         assert rows[0]["bull_value"] is None
