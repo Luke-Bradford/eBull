@@ -156,13 +156,33 @@ def fundamentals_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     audit_fresh, audit_detail = _fresh_by_audit(conn, "daily_research_refresh", timedelta(hours=24))
     if not audit_fresh:
         return False, audit_detail
-    # Content check: every tradable instrument must have a
-    # fundamentals_snapshot row with as_of_date in the current quarter.
+    # Content check: every SEC-CIK-mapped tradable instrument must
+    # have a fundamentals_snapshot row with as_of_date in the
+    # current quarter. #540: scoped to SEC-CIK only — non-US /
+    # crypto / commodity instruments have no public-source
+    # fundamentals path today and would otherwise alarm
+    # indefinitely (cosmetic noise on the operator dashboard).
+    #
+    # Cohort alignment with the producer: this reader scopes to
+    # ``is_primary = TRUE`` CIKs, and the SEC fundamentals producer
+    # in ``app/workers/scheduler.py::daily_research_refresh`` was
+    # tightened in this PR (#540) to filter on the same predicate.
+    # Either side regressing back to "every sec/cik row" would
+    # re-introduce silent issuer-mix corruption on instruments with
+    # demoted historical CIKs — the SQL-shape regression tests in
+    # ``tests/test_sync_orchestrator_freshness.py`` and
+    # ``tests/services/sync_orchestrator/test_content_predicates.py``
+    # pin both sides.
     quarter_start = _current_quarter_start(date.today())
     row = conn.execute(
         """
         SELECT COUNT(*) AS missing
         FROM instruments i
+        JOIN external_identifiers ei
+            ON ei.instrument_id = i.instrument_id
+           AND ei.provider = 'sec'
+           AND ei.identifier_type = 'cik'
+           AND ei.is_primary = TRUE
         WHERE i.is_tradable = TRUE
           AND NOT EXISTS (
               SELECT 1 FROM fundamentals_snapshot fs
@@ -176,7 +196,7 @@ def fundamentals_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     if missing > 0:
         return (
             False,
-            f"{missing} tradable instruments lack fundamentals snapshot "
+            f"{missing} SEC-CIK tradable instruments lack fundamentals snapshot "
             f"for quarter starting {quarter_start.isoformat()}",
         )
     return True, audit_detail

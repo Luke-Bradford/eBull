@@ -1228,7 +1228,13 @@ def daily_research_refresh() -> None:
                 """
             ).fetchall()
 
-            # Build symbol→CIK mapping for SEC fundamentals
+            # Build symbol→CIK mapping for SEC fundamentals.
+            # #540: scope to primary CIKs only so the producer cohort
+            # matches the reader's freshness check (which now also
+            # filters on is_primary=TRUE). Without this, a demoted
+            # historical CIK row could feed the refresh against the
+            # wrong issuer while the reader counted the instrument as
+            # missing — silent issuer-mix corruption.
             cik_rows = conn.execute(
                 """
                 SELECT i.symbol, ei.identifier_value
@@ -1236,6 +1242,7 @@ def daily_research_refresh() -> None:
                 JOIN instruments i ON i.instrument_id = ei.instrument_id
                 WHERE ei.provider = 'sec'
                   AND ei.identifier_type = 'cik'
+                  AND ei.is_primary = TRUE
                   AND i.is_tradable = TRUE
                 """
             ).fetchall()
