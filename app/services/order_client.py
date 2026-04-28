@@ -373,22 +373,36 @@ def _update_order_with_broker_result(
     broker_order_ref: str | None,
     raw_payload: dict[str, Any],
 ) -> None:
-    """Update the pre-call ``submitted`` row with the broker response (#243)."""
-    conn.execute(
-        """
-        UPDATE orders
-        SET status = %(status)s,
-            broker_order_ref = %(ref)s,
-            raw_payload_json = %(payload)s
-        WHERE order_id = %(oid)s
-        """,
-        {
-            "oid": order_id,
-            "status": status,
-            "ref": broker_order_ref,
-            "payload": Jsonb(raw_payload),
-        },
-    )
+    """Update the pre-call ``submitted`` row with the broker response (#243).
+
+    Raises ``RuntimeError`` if the UPDATE matched zero rows — without
+    this check, ``order_id`` would silently flow forward as a foreign
+    key into fills / cost records / positions and corrupt referential
+    integrity. PR #637 review BLOCKING.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE orders
+            SET status = %(status)s,
+                broker_order_ref = %(ref)s,
+                raw_payload_json = %(payload)s
+            WHERE order_id = %(oid)s
+            """,
+            {
+                "oid": order_id,
+                "status": status,
+                "ref": broker_order_ref,
+                "payload": Jsonb(raw_payload),
+            },
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError(
+                f"_update_order_with_broker_result: expected to update exactly "
+                f"1 orders row for order_id={order_id}, matched {cur.rowcount}. "
+                f"Either the pre-call intent INSERT was lost or order_id is "
+                f"stale — refusing to advance to fill/cost/position writes."
+            )
 
 
 def _persist_order(
