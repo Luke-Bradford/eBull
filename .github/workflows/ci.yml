@@ -19,7 +19,9 @@ jobs:
           python-version: "3.14"
 
       - name: Install uv
-        run: pip install uv
+        # Pinned so CI / local dev / supply-chain audit see the
+        # same resolver behavior across runs.
+        run: pip install "uv==0.5.21"
 
       - name: Install dependencies
         run: uv sync --group dev
@@ -43,7 +45,13 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # Match production Postgres major version. Newer plan docs
+        # (docs/superpowers/plans/2026-04-13-live-pricing-currency-
+        # conversion.md, 2026-04-14-fundamentals-enrichment.md,
+        # 2026-04-16-data-orchestrator-p1.md) target PG17; running
+        # PG16 on CI would let a PG17-only feature pass green here
+        # and fail at deploy time.
+        image: postgres:17
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -78,7 +86,9 @@ jobs:
           python-version: "3.14"
 
       - name: Install uv
-        run: pip install uv
+        # Pinned so CI / local dev / supply-chain audit see the
+        # same resolver behavior across runs.
+        run: pip install "uv==0.5.21"
 
       - name: Install dependencies
         run: uv sync --group dev
@@ -137,7 +147,10 @@ jobs:
           python-version: "3.14"
 
       - name: Install uv + pip-audit
-        run: pip install uv pip-audit
+        # uv pinned for resolver determinism (matches the lint/pytest
+        # jobs above); pip-audit floats so we always hit the latest
+        # advisory database — pinning that would defeat the gate.
+        run: pip install "uv==0.5.21" pip-audit
 
       - name: Export Python lockfile to requirements.txt
         # GitHub's default ``bash -e`` does not reliably run process
