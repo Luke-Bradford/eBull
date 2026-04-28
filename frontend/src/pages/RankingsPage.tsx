@@ -84,7 +84,9 @@ export function RankingsPage() {
     query.sector !== null ||
     query.stance !== null ||
     scoreThreshold !== null ||
-    search !== "";
+    // Use the un-debounced searchInput so Clear All shows immediately
+    // on first keystroke rather than 300 ms later (#634 NITPICK).
+    searchInput !== "";
 
   const filteredItems = useMemo(() => {
     if (rankings.data === null) return [];
