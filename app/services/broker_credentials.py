@@ -188,6 +188,15 @@ def store_credential(
 ) -> CredentialMetadata:
     """Encrypt and insert a new credential row.
 
+    Transaction model (#112): caller owns the lifecycle. This
+    function does NOT call ``conn.commit()`` or ``conn.rollback()``
+    and does NOT open its own ``conn.transaction()`` block — runs
+    the INSERT on whatever transaction the caller has set up. A
+    ``CredentialAlreadyExists`` raised on UniqueViolation aborts
+    the caller's transaction (psycopg3 marks it failed); the
+    caller must rollback. Use ``with conn.transaction():`` at the
+    call site to get clean rollback-on-exception semantics.
+
     Raises:
       CredentialValidationError -- provider / label / environment / secret invalid.
       CredentialAlreadyExists   -- an active row with the same (operator,
@@ -236,9 +245,7 @@ def store_credential(
                 # This branch is defensive so pyright does not see an
                 # Optional leak downstream.
                 raise RuntimeError("INSERT ... RETURNING produced no row")
-        conn.commit()
     except psycopg.errors.UniqueViolation as exc:
-        conn.rollback()
         raise CredentialAlreadyExists(
             f"credential already exists for ({provider_norm!r}, {label_norm!r}, {env_norm!r})"
         ) from exc
@@ -282,49 +289,30 @@ def revoke_credential(
     """Soft-delete a credential. Idempotent-ish: revoking an already-revoked
     row returns ``CredentialNotFound`` so the caller gets a clear 404 and
     cannot accidentally treat "already revoked" as "just revoked".
+
+    Transaction model (#112): caller owns the lifecycle. This
+    function does NOT call ``conn.commit()`` or ``conn.rollback()``
+    and does NOT open its own ``conn.transaction()`` block — runs
+    the UPDATE on whatever transaction the caller has set up. The
+    no-row branch raises ``CredentialNotFound``; the caller must
+    rollback the (otherwise empty) transaction. Use
+    ``with conn.transaction():`` at the call site to get clean
+    rollback-on-exception semantics.
     """
-    # Transaction discipline: every exit path from this function leaves
-    # the connection in either a committed or rolled-back state, never
-    # in an open implicit transaction. psycopg3 opens an implicit txn
-    # on any statement (even an UPDATE that touches no rows), so the
-    # rollback path matters for the not-found case as well as the
-    # genuine-error case. The structure below ensures rollback happens
-    # in a `finally` block when committed=False, so a rollback that
-    # itself raises does not silently mask the original exception.
-    committed = False
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE broker_credentials
-                   SET revoked_at = now()
-                 WHERE id = %s
-                   AND operator_id = %s
-                   AND revoked_at IS NULL
-                """,
-                (credential_id, operator_id),
-            )
-            rowcount = cur.rowcount
-        if rowcount == 0:
-            raise CredentialNotFound(f"credential {credential_id} not found")
-        conn.commit()
-        committed = True
-    finally:
-        if not committed:
-            # Either CredentialNotFound on the no-row branch or any
-            # unexpected DB error. In both cases the connection has an
-            # open (and possibly aborted) transaction we must clear
-            # before returning it to the pool.
-            try:
-                conn.rollback()
-            except Exception:
-                # A rollback that itself raises (e.g. broken
-                # connection) is logged via the standard exception
-                # chaining and does not mask the original error,
-                # because we are in a `finally` -- the original
-                # exception will continue to propagate after we exit
-                # this block.
-                logger.exception("broker_credentials.revoke_credential: rollback failed")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE broker_credentials
+               SET revoked_at = now()
+             WHERE id = %s
+               AND operator_id = %s
+               AND revoked_at IS NULL
+            """,
+            (credential_id, operator_id),
+        )
+        rowcount = cur.rowcount
+    if rowcount == 0:
+        raise CredentialNotFound(f"credential {credential_id} not found")
 
 
 def _write_access_log(
