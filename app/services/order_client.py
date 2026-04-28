@@ -223,7 +223,11 @@ def _synthetic_fill(
 
     Uses bid/ask for realistic pricing when available:
     - BUY fills at ask, EXIT fills at bid (worst-case execution)
-    - Fees = half-spread × units (entry cost of crossing the spread)
+    - Fees = 0. The half-spread cost of crossing the spread is already
+      embedded in the bid/ask execution price; charging fees on top
+      would double-count the spread in the cash ledger
+      (`gross_amount + fees` debit on BUY, `gross_amount - fees` credit
+      on EXIT). See issue #255.
     Falls back to last price with zero fees when bid/ask unavailable.
     """
     # Determine fill price: BUY at ask, EXIT at bid, fallback to last
@@ -243,12 +247,9 @@ def _synthetic_fill(
     else:
         units = Decimal("0")
 
-    # Compute spread-based fees
-    if bid is not None and ask is not None and units > 0:
-        half_spread = (ask - bid) / 2
-        fees = (half_spread * units).quantize(Decimal("0.000001"))
-    else:
-        fees = Decimal("0")
+    # Synthetic fills price at bid/ask when available, which already
+    # contains the half-spread vs mid. No additional fee — see #255.
+    fees = Decimal("0")
 
     payload: dict[str, Any] = {
         "demo": True,
