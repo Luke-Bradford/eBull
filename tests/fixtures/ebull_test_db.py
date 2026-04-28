@@ -55,6 +55,10 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # it in the planner truncation set so a failed test cannot leak
     # a disabled state across the next function-scoped run and
     # silently make subsequent "not paused" assertions trip.
+    # layer_enabled_audit is the #346 append-only history table — also
+    # truncated so audit-row leakage between cases doesn't make a
+    # later assertion observe a phantom prior toggle.
+    "layer_enabled_audit",
     "layer_enabled",
     "external_identifiers",
     "external_data_watermarks",
