@@ -315,7 +315,19 @@ def _persist_order_and_fill(
             elif action == "EXIT":
                 # Update positions for EXIT — prorate cost_basis so partial
                 # closes don't leave the full basis on fewer units.
-                conn.execute(
+                # Rowcount-checked: the aggregate row is the source of
+                # realized P&L; a silent zero-row UPDATE here would record
+                # cash + audit side effects without moving realized_pnl
+                # (prevention log entry: "Single-row UPDATE silent no-op").
+                #
+                # Lock-order discipline (#245): touch ``positions`` BEFORE
+                # ``broker_positions``. ``portfolio_sync`` acquires row
+                # locks in that same order (UPDATE positions at
+                # ``app/services/portfolio_sync.py`` L585, broker_positions
+                # writes at L688). Reversing the order here would form a
+                # deadlock cycle against any concurrent broker sync
+                # touching the same instrument.
+                positions_cur = conn.execute(
                     """
                     UPDATE positions SET
                         cost_basis     = CASE
@@ -337,11 +349,55 @@ def _persist_order_and_fill(
                         "now": now,
                     },
                 )
+                if positions_cur.rowcount != 1:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"positions row for instrument {instrument_id} either missing or "
+                            f"has fewer than {fu} units; aggregate close cannot proceed."
+                        ),
+                    )
 
-                # Deduct units (and prorate amount) from the broker_positions
-                # row so it can't be double-closed.
+                # Lock the broker_positions row and re-read its units
+                # before deducting. Without the lock + re-read, two close
+                # requests reading ``units > 0`` outside the transaction
+                # would both build a synthetic fill, both pass the
+                # ``units >= fu`` UPDATE guard for the winner, and the
+                # loser's UPDATE would silently match zero rows while
+                # the orders/fills/cash_ledger/audit inserts in the same
+                # transaction still committed (#245).
                 if close_position_id is not None:
-                    conn.execute(
+                    with conn.cursor() as lock_cur:
+                        lock_cur.execute(
+                            "SELECT units FROM broker_positions WHERE position_id = %(pid)s FOR UPDATE",
+                            {"pid": close_position_id},
+                        )
+                        locked_row = lock_cur.fetchone()
+                    if locked_row is None:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                f"broker_position {close_position_id} no longer exists; "
+                                "it was closed by another request after this close was initiated."
+                            ),
+                        )
+                    locked_units = Decimal(str(locked_row[0]))
+                    if locked_units < fu:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                f"broker_position {close_position_id} has only {locked_units} units, "
+                                f"requested deduction is {fu}; another close consumed units after this "
+                                "request was initiated."
+                            ),
+                        )
+
+                    # Deduct units (and prorate amount). The FOR UPDATE
+                    # above already guarantees the WHERE clause matches;
+                    # the rowcount check is belt-and-braces against the
+                    # row being deleted by an ON DELETE CASCADE pathway
+                    # in future.
+                    bp_cur = conn.execute(
                         """
                         UPDATE broker_positions SET
                             amount     = CASE
@@ -360,6 +416,14 @@ def _persist_order_and_fill(
                             "now": now,
                         },
                     )
+                    if bp_cur.rowcount != 1:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                f"broker_position {close_position_id} deduction matched zero "
+                                "rows despite locked re-read; concurrent modification detected."
+                            ),
+                        )
 
             # 5. Cash ledger entry
             if action in ("BUY", "ADD"):
