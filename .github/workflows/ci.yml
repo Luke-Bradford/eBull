@@ -19,7 +19,9 @@ jobs:
           python-version: "3.14"
 
       - name: Install uv
-        run: pip install uv
+        # Pinned so CI / local dev / supply-chain audit see the
+        # same resolver behavior across runs.
+        run: pip install "uv==0.5.21"
 
       - name: Install dependencies
         run: uv sync --group dev
@@ -32,3 +34,137 @@ jobs:
 
       - name: Pyright typecheck
         run: uv run pyright
+
+  pytest:
+    # #247: run backend test suite. Postgres service is required; the
+    # smoke test (tests/smoke/test_app_boots.py) drives the FastAPI
+    # lifespan against a live DB and is the canonical gate against
+    # broken migrations / lifespan-only failures. Without a real
+    # Postgres, the integration tests skip and merge gates regress.
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Match production Postgres major version. Newer plan docs
+        # (docs/superpowers/plans/2026-04-13-live-pricing-currency-
+        # conversion.md, 2026-04-14-fundamentals-enrichment.md,
+        # 2026-04-16-data-orchestrator-p1.md) target PG17; running
+        # PG16 on CI would let a PG17-only feature pass green here
+        # and fail at deploy time.
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ebull
+        ports:
+          - 5432:5432
+        # Service must be ready before the suite starts; without
+        # health-check args the runner moves on while the server is
+        # still booting and the first connection attempt errors.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      EBULL_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ebull
+      # Deterministic 32-byte base64 key used only for CI. Real
+      # deployments derive this per-environment via ADR 0001 — never
+      # share this value with prod.
+      EBULL_SECRETS_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      # Tests that hit the bearer-auth path require this to be set
+      # and ≥32 chars; pick a fixed-but-non-prod token.
+      EBULL_SERVICE_TOKEN: ci-service-token-0123456789abcdef
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        # Pinned so CI / local dev / supply-chain audit see the
+        # same resolver behavior across runs.
+        run: pip install "uv==0.5.21"
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Run backend pytest
+        # Deselect the test that fails on main (#626 — pre-existing
+        # uniq_financial_periods_fiscal_label collision in the
+        # migration 076 dedupe fixture). Remove the deselect once #626
+        # lands.
+        run: uv run pytest --deselect tests/test_migration_076_dedupe_financial_periods.py
+
+  supply-chain:
+    # #598: catch yanked / phantom / advisory-laden lockfile entries
+    # before merge. Runs alongside the frontend / backend lint jobs;
+    # advisories block the merge so a CVE in a transitive dep cannot
+    # ship silently.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend deps (lockfile fetchability gate)
+        # ``--frozen-lockfile`` resolves every entry in
+        # ``frontend/pnpm-lock.yaml`` against the registry. A yanked /
+        # unpublished / phantom version that ``pnpm audit`` would not
+        # surface fails this step instead. Without this, a backend-
+        # only PR could merge green despite a non-fetchable frontend
+        # lockfile entry (the "phantom version" case #598 was filed
+        # to catch).
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: pnpm audit (frontend, all deps)
+        # Audit dev + prod deps. The frontend toolchain (vite,
+        # vitest, typescript) executes during builds and tests, so
+        # advisories there are still in the supply chain we ship
+        # through CI. ``high`` floor matches what we'd accept as a
+        # merge gate; ``moderate`` produced too many false alarms in
+        # tooling chains we don't deploy.
+        run: pnpm --dir frontend audit --audit-level high
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv + pip-audit
+        # uv pinned for resolver determinism (matches the lint/pytest
+        # jobs above); pip-audit floats so we always hit the latest
+        # advisory database — pinning that would defeat the gate.
+        run: pip install "uv==0.5.21" pip-audit
+
+      - name: Export Python lockfile to requirements.txt
+        # GitHub's default ``bash -e`` does not reliably run process
+        # substitution across runners. Materialise the requirements
+        # to disk so pip-audit can read it as a real file. Include
+        # dev deps so the CI / pre-push toolchain (pytest, ruff,
+        # pyright) is also covered — those packages execute on
+        # operator machines and CI runners, so their advisories are
+        # supply-chain risks too.
+        run: uv export --no-hashes --no-emit-project > /tmp/requirements.txt
+
+      - name: Audit Python dependencies
+        # ``pip-audit`` resolves the lockfile against the PyPA
+        # advisory database. Strict-mode failure surfaces both
+        # advisory-laden and yanked versions; tolerated exceptions
+        # belong in this step's allowlist (none today).
+        run: pip-audit --strict --requirement /tmp/requirements.txt
