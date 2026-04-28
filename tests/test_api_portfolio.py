@@ -702,3 +702,191 @@ class TestPortfolioMirrors:
         assert m["funded"] == 10000.0
         # unrealized = total_return - realised = (10500 - 10000) - 500 = 0
         assert m["unrealized_pnl"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestInstrumentPositionsOpenConversionRate (#229)
+# ---------------------------------------------------------------------------
+
+
+def _make_instrument_row(
+    instrument_id: int = 1,
+    symbol: str = "AAPL",
+    company_name: str = "Apple Inc",
+    currency: str = "USD",
+    quote_last: float | None = 200.0,
+    daily_close: float | None = None,
+) -> dict[str, Any]:
+    """Build a row matching the instrument_sql shape in get_instrument_positions."""
+    return {
+        "instrument_id": instrument_id,
+        "symbol": symbol,
+        "company_name": company_name,
+        "currency": currency,
+        "quote_last": quote_last,
+        "daily_close": daily_close,
+    }
+
+
+def _make_broker_position_row(
+    position_id: int = 9001,
+    is_buy: bool = True,
+    units: float = 10.0,
+    amount: float = 1800.0,
+    open_rate: float = 180.0,
+    open_conversion_rate: float = 1.0,
+    open_date_time: datetime | None = None,
+    stop_loss_rate: float | None = None,
+    take_profit_rate: float | None = None,
+    is_tsl_enabled: bool = False,
+    leverage: int = 1,
+    total_fees: float = 0.0,
+) -> dict[str, Any]:
+    """Build a row matching the trades_sql shape in get_instrument_positions."""
+    return {
+        "position_id": position_id,
+        "is_buy": is_buy,
+        "units": units,
+        "amount": amount,
+        "open_rate": open_rate,
+        "open_conversion_rate": open_conversion_rate,
+        "open_date_time": open_date_time or _NOW,
+        "stop_loss_rate": stop_loss_rate,
+        "take_profit_rate": take_profit_rate,
+        "is_tsl_enabled": is_tsl_enabled,
+        "leverage": leverage,
+        "total_fees": total_fees,
+    }
+
+
+class TestInstrumentPositionsOpenConversionRate:
+    """GET /portfolio/instruments/{id} — #229 P&L formula honours
+    open_conversion_rate so native-currency price deltas reconcile
+    back to the USD-denominated ``amount`` column."""
+
+    def teardown_method(self) -> None:
+        _cleanup()
+
+    def test_usd_position_open_conv_one_is_noop(self) -> None:
+        """USD position with open_conversion_rate=1 must produce the
+        same market_value the pre-#229 formula did — regression guard."""
+        instrument = _make_instrument_row(instrument_id=1, symbol="AAPL", currency="USD", quote_last=200.0)
+        pos = _make_broker_position_row(units=10.0, amount=1800.0, open_rate=180.0, open_conversion_rate=1.0)
+        # Endpoint runs two queries in order: instrument, broker_positions.
+        # The mock helper is row-list per execute; instrument query uses
+        # fetchone so wrap as a single-row list.
+        conn = _mock_conn([[instrument], [pos]])
+
+        def _override() -> Iterator[MagicMock]:
+            yield conn
+
+        app.dependency_overrides[get_conn] = _override
+
+        resp = client.get("/portfolio/instruments/1")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        # mv = 1800 + 10 * (200 - 180) * 1.0 = 2000
+        assert body["trades"][0]["market_value"] == 2000.0
+        assert body["trades"][0]["unrealized_pnl"] == 200.0
+
+    def test_non_usd_long_applies_open_conversion_rate(self) -> None:
+        """Native-currency price delta is multiplied by open_conv to
+        convert to USD before adding to the USD-denominated amount.
+
+        Example: GBP-denominated instrument opened at 1.25 GBP/USD,
+        position size 10 units, open_rate 100 GBP, current 110 GBP.
+        Native delta = 10 * (110 - 100) = 100 GBP.
+        USD delta   = 100 * 1.25       = 125 USD.
+        amount in USD already = 1250 (10 units * 100 GBP * 1.25).
+        mv = 1250 + 125 = 1375 USD.
+        Pre-#229 (no conv multiplier) would have given 1250 + 100 = 1350.
+        """
+        instrument = _make_instrument_row(
+            instrument_id=2,
+            symbol="LSE.X",
+            currency="GBP",
+            quote_last=110.0,
+        )
+        pos = _make_broker_position_row(
+            units=10.0,
+            amount=1250.0,
+            open_rate=100.0,
+            open_conversion_rate=1.25,
+        )
+        conn = _mock_conn([[instrument], [pos]])
+
+        def _override() -> Iterator[MagicMock]:
+            yield conn
+
+        app.dependency_overrides[get_conn] = _override
+
+        resp = client.get("/portfolio/instruments/2")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert body["trades"][0]["market_value"] == 1375.0
+        assert body["trades"][0]["unrealized_pnl"] == 125.0
+
+    def test_non_usd_short_applies_open_conversion_rate(self) -> None:
+        """Short P&L: profit when price drops below open_rate. Native
+        delta is signed against the long; conversion still applies."""
+        instrument = _make_instrument_row(
+            instrument_id=3,
+            symbol="LSE.S",
+            currency="GBP",
+            quote_last=90.0,
+        )
+        pos = _make_broker_position_row(
+            position_id=9002,
+            is_buy=False,
+            units=10.0,
+            amount=1250.0,
+            open_rate=100.0,
+            open_conversion_rate=1.25,
+        )
+        conn = _mock_conn([[instrument], [pos]])
+
+        def _override() -> Iterator[MagicMock]:
+            yield conn
+
+        app.dependency_overrides[get_conn] = _override
+
+        resp = client.get("/portfolio/instruments/3")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        # mv = 1250 + 10 * (100 - 90) * 1.25 = 1375
+        assert body["trades"][0]["market_value"] == 1375.0
+        assert body["trades"][0]["unrealized_pnl"] == 125.0
+
+    def test_no_quote_keeps_market_value_at_amount(self) -> None:
+        """When current_price is unavailable the formula short-circuits
+        to mv=amount with pnl=0 — open_conversion_rate is irrelevant on
+        that branch and must not cause a KeyError or NaN."""
+        instrument = _make_instrument_row(
+            instrument_id=4,
+            symbol="GBP.NQ",
+            currency="GBP",
+            quote_last=None,
+            daily_close=None,
+        )
+        pos = _make_broker_position_row(
+            units=10.0,
+            amount=1250.0,
+            open_rate=100.0,
+            open_conversion_rate=1.25,
+        )
+        conn = _mock_conn([[instrument], [pos]])
+
+        def _override() -> Iterator[MagicMock]:
+            yield conn
+
+        app.dependency_overrides[get_conn] = _override
+
+        resp = client.get("/portfolio/instruments/4")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert body["trades"][0]["market_value"] == 1250.0
+        assert body["trades"][0]["unrealized_pnl"] == 0.0

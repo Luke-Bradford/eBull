@@ -594,7 +594,7 @@ def get_instrument_positions(
     """
     trades_sql = """
         SELECT bp.position_id, bp.is_buy, bp.units, bp.amount,
-               bp.open_rate, bp.open_date_time,
+               bp.open_rate, bp.open_conversion_rate, bp.open_date_time,
                bp.stop_loss_rate, bp.take_profit_rate,
                bp.is_tsl_enabled, bp.leverage, bp.total_fees
         FROM broker_positions bp
@@ -627,16 +627,24 @@ def get_instrument_positions(
         units = float(tr["units"])
         amount = float(tr["amount"])
         open_rate = float(tr["open_rate"])
+        # eToro stores ``amount`` in USD but ``open_rate`` and the
+        # current quote in the instrument's native currency.
+        # ``open_conversion_rate`` (native→USD at open) reconciles the
+        # native price delta back into USD before adding to ``amount``
+        # so non-USD positions value correctly. Same pattern as the
+        # copy-trading aggregate at app/services/portfolio.py:225-230.
+        # USD positions store conversion_rate=1 → no-op.
+        open_conv = float(tr["open_conversion_rate"])
         is_buy = tr["is_buy"]
 
         if current_price is not None:
             if is_buy:
                 # Long: invested capital + leveraged price delta.
-                mv = amount + units * (current_price - open_rate)
+                mv = amount + units * (current_price - open_rate) * open_conv
                 pnl = mv - amount
             else:
                 # Short: profit when price drops below open_rate.
-                mv = amount + units * (open_rate - current_price)
+                mv = amount + units * (open_rate - current_price) * open_conv
                 pnl = mv - amount
         else:
             mv = amount
