@@ -343,9 +343,23 @@ class TestSyntheticFillSpreadCost:
             execute_order(conn, recommendation_id=42, decision_id=10)
 
         # gross = filled_price (ask=100.20) * units (suggested_size=5% of 10_000 / 100.20)
-        ledger_calls = [c for c in conn.execute.call_args_list if "cash_ledger" in (c.args[0] if c.args else "")]
+        # Match cash_ledger inserts via positional OR keyword query
+        # (#612 review). A positional-only filter would silently
+        # pass with zero matches if the production call is ever
+        # refactored to ``conn.execute(query=...)``, defeating the
+        # regression guard.
+        def _query_str(c: Any) -> str:
+            if c.args:
+                return str(c.args[0])
+            return str(c.kwargs.get("query", ""))
+
+        ledger_calls = [c for c in conn.execute.call_args_list if "cash_ledger" in _query_str(c)]
+        # Belt-and-braces: assert match count is non-zero before
+        # taking [0], so a future test-mock refactor that drops
+        # all positional args trips this assertion loudly.
+        assert len(ledger_calls) >= 1, list(conn.execute.call_args_list)
         assert len(ledger_calls) == 1, ledger_calls
-        params = ledger_calls[0].args[1]
+        params = ledger_calls[0].args[1] if ledger_calls[0].args else ledger_calls[0].kwargs.get("params")
         # amount must equal -gross exactly (fees=0). Any negative drift
         # vs that == double-count regression.
         units = (Decimal("500") / Decimal("100.20")).quantize(Decimal("0.000001"))
