@@ -364,6 +364,10 @@ class TestBusinessSectionsIngest:
         fetcher_second = _StubFetcher({"https://www.sec.gov/Archives/apex560.htm": self._RICH_10K})
         second = ingest_business_summaries(ebull_test_conn, cast("object", fetcher_second))  # type: ignore[arg-type]
         assert second.filings_scanned == 1
+        # rows_updated proves the upsert branch actually executed — a
+        # silent no-op reparse would still pass scan + fetch assertions
+        # alone (#633 NITPICK).
+        assert second.rows_updated == 1
         assert fetcher_second.calls == ["https://www.sec.gov/Archives/apex560.htm"]
 
         # tables_json now repopulated (non-NULL on every section row).
