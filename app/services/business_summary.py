@@ -1402,7 +1402,8 @@ def ingest_business_summaries(
     """Scan 10-K filings, fetch primary doc, extract Item 1, upsert.
 
     Candidate selector (shape addresses Codex #428 findings, extended
-    in #533 with backoff/quarantine):
+    in #533 with backoff/quarantine, in #560 with tables_json
+    backfill):
 
     1. ``fe.filing_type IN ('10-K', '10-K/A')`` — amendments retain
        their ``/A`` suffix through the SEC pipeline (see
@@ -1413,7 +1414,12 @@ def ingest_business_summaries(
     3. No ``instrument_business_summary`` row, OR the stored
        ``source_accession`` differs from this filing's accession
        (later 10-K supersedes), OR the existing row's ``next_retry_at``
-       has elapsed.
+       has elapsed, OR any child section row has ``tables_json IS
+       NULL`` AND the row is not currently quarantined (rows ingested
+       before migration 075 — re-parse populates the column from the
+       new parser; clause self-empties once backfilled). The
+       quarantine AND-guard preserves the #533 backoff contract for
+       repeatedly-failing backfill candidates.
     4. Newest filing wins per instrument (``DISTINCT ON`` resolves to
        the latest filing_date, tie-break on filing_event_id); the
        outer query then sorts GLOBALLY newest-first so a backlog
@@ -1455,6 +1461,22 @@ def ingest_business_summaries(
             WHERE bs.instrument_id IS NULL
                OR bs.source_accession <> lpi.provider_filing_id
                OR (bs.next_retry_at IS NOT NULL AND bs.next_retry_at <= NOW())
+               OR (
+                   -- #560 backfill: re-select parent rows whose child
+                   -- sections still have tables_json IS NULL (pre-075
+                   -- ingest). AND-guarded by the quarantine clock so
+                   -- a repeatedly-failing reparse doesn't bypass
+                   -- exponential backoff (#533) and re-fetch on every
+                   -- ingest pass.
+                   (bs.next_retry_at IS NULL OR bs.next_retry_at <= NOW())
+                   AND EXISTS (
+                       SELECT 1
+                       FROM instrument_business_summary_sections s
+                       WHERE s.instrument_id = bs.instrument_id
+                         AND s.source_accession = bs.source_accession
+                         AND s.tables_json IS NULL
+                   )
+               )
             ORDER BY lpi.filing_date DESC, lpi.filing_event_id DESC
             LIMIT %s
             """,
