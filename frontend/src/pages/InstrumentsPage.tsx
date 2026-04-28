@@ -206,8 +206,8 @@ export function InstrumentsPage() {
   );
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="flex h-full flex-col gap-6">
+      <div className="flex flex-shrink-0 items-center justify-between">
         <h1 className="text-xl font-semibold text-slate-800">Instruments</h1>
         {result.data && (
           <span className="text-xs text-slate-500">
@@ -217,7 +217,7 @@ export function InstrumentsPage() {
       </div>
 
       {/* Search + filters bar */}
-      <div className="flex flex-wrap items-end gap-3">
+      <div className="flex flex-shrink-0 flex-wrap items-end gap-3">
         <div className="flex-1">
           <label className="mb-1 block text-xs font-medium text-slate-600">
             Search
@@ -288,7 +288,7 @@ export function InstrumentsPage() {
         </div>
       </div>
 
-      <Section title="Results">
+      <Section title="Results" scrollable>
         {result.loading ? (
           <SectionSkeleton rows={10} />
         ) : result.error !== null ? (
