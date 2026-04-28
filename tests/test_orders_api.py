@@ -15,7 +15,7 @@ Structure:
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -47,11 +47,13 @@ _QUOTE_ROW = [{"last": 150.0}]
 _NO_ROWS: list[dict[str, Any]] = []
 
 
-def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
+def _mock_conn(cursor_results: Sequence[Sequence[Any]]) -> MagicMock:
     """Build a mock psycopg.Connection.
 
     ``cursor_results`` is a list of result sets, one per ``cur.execute()`` call.
     Each cursor().execute() pops the next result set from the iterator.
+    Rows may be either dict-like (for ``row_factory=dict_row``) or tuples
+    (for the default tuple-row cursor used by the EXIT FOR UPDATE re-read).
     """
     cur = MagicMock()
     result_iter = iter(cursor_results)
@@ -68,6 +70,15 @@ def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
     conn = MagicMock()
     conn.cursor.return_value = cur
 
+    # ``conn.execute(...)`` returns a cursor whose ``rowcount`` callers
+    # use to detect silent zero-row UPDATEs (#245). Default to 1 so the
+    # happy-path EXIT branch passes the rowcount checks; per-test
+    # overrides (``conn.execute.return_value.rowcount = 0``) drive the
+    # zero-row regressions.
+    exec_cursor = MagicMock()
+    exec_cursor.rowcount = 1
+    conn.execute.return_value = exec_cursor
+
     tx = MagicMock()
     tx.__enter__ = MagicMock(return_value=tx)
     tx.__exit__ = MagicMock(return_value=False)
@@ -76,7 +87,7 @@ def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
     return conn
 
 
-def _with_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
+def _with_conn(cursor_results: Sequence[Sequence[Any]]) -> MagicMock:
     conn = _mock_conn(cursor_results)
 
     def _override() -> Iterator[MagicMock]:
@@ -298,13 +309,15 @@ class TestClosePosition:
         close_quote = [{"last": 160.0}]
         order_row = [{"order_id": 77}]
         fill_row = [{"fill_id": 15}]
+        locked_row = [(10.0,)]
         # Cursor calls:
         #   1. kill switch check
         #   2. broker_positions lookup
         #   3. quote price lookup
         #   4. INSERT orders RETURNING order_id
         #   5. INSERT fills RETURNING fill_id
-        _with_conn([_KILL_SWITCH_OFF, pos_row, close_quote, order_row, fill_row])
+        #   6. SELECT broker_positions FOR UPDATE (#245 race-safe re-read)
+        _with_conn([_KILL_SWITCH_OFF, pos_row, close_quote, order_row, fill_row, locked_row])
 
         resp = client.post("/portfolio/positions/500/close")
         assert resp.status_code == 200
@@ -319,8 +332,9 @@ class TestClosePosition:
         pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
         order_row = [{"order_id": 80}]
         fill_row = [{"fill_id": 18}]
-        # Cursor calls: kill switch, broker_positions, quote (empty), order, fill
-        _with_conn([_KILL_SWITCH_OFF, pos_row, _NO_ROWS, order_row, fill_row])
+        locked_row = [(10.0,)]
+        # Cursor calls: kill switch, broker_positions, quote (empty), order, fill, FOR UPDATE
+        _with_conn([_KILL_SWITCH_OFF, pos_row, _NO_ROWS, order_row, fill_row, locked_row])
 
         resp = client.post("/portfolio/positions/500/close")
         assert resp.status_code == 200
@@ -365,7 +379,8 @@ class TestClosePosition:
         pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
         order_row = [{"order_id": 78}]
         fill_row = [{"fill_id": 16}]
-        conn = _with_conn([_KILL_SWITCH_OFF, pos_row, _QUOTE_ROW, order_row, fill_row])
+        locked_row = [(10.0,)]
+        conn = _with_conn([_KILL_SWITCH_OFF, pos_row, _QUOTE_ROW, order_row, fill_row, locked_row])
 
         resp = client.post("/portfolio/positions/500/close")
         assert resp.status_code == 200
@@ -380,3 +395,109 @@ class TestClosePosition:
         resp = client.post("/portfolio/positions/500/close")
         assert resp.status_code == 403
         assert "kill switch" in resp.json()["detail"].lower()
+
+    def test_close_409_when_locked_units_below_request(self) -> None:
+        """#245 regression — stale outer read, fewer locked units inside tx.
+
+        Outer SELECT shows ``units = 10`` so the endpoint accepts the
+        full close. Inside the transaction, the FOR UPDATE re-read
+        returns ``units = 2`` (another close consumed 8). The endpoint
+        must raise 409, the transaction must exit via the exception
+        path (so the orders/fills cursor inserts roll back), and no
+        cash_ledger or decision_audit ``conn.execute`` write may run.
+        """
+        pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
+        order_row = [{"order_id": 90}]
+        fill_row = [{"fill_id": 25}]
+        # FOR UPDATE re-read: locked units shrunk below requested deduction.
+        locked_row = [(2.0,)]
+        conn = _with_conn([_KILL_SWITCH_OFF, pos_row, _QUOTE_ROW, order_row, fill_row, locked_row])
+
+        resp = client.post("/portfolio/positions/500/close")
+        assert resp.status_code == 409
+        assert "another close" in resp.json()["detail"]
+
+        # The orders/fills INSERTs use ``conn.cursor()`` (not
+        # ``conn.execute``); the meaningful rollback evidence is the
+        # transaction context manager exiting with an exception. Assert
+        # ``conn.transaction().__exit__`` was called with a non-None
+        # ``exc_type`` — that is what triggers psycopg's tx ROLLBACK.
+        tx_exits = conn.transaction.return_value.__exit__.call_args_list
+        assert any(call.args[0] is not None for call in tx_exits), (
+            f"Expected tx __exit__ to receive an exception (rollback path); actual call_args={tx_exits!r}"
+        )
+
+        sql_calls = [str(call.args[0]) for call in conn.execute.call_args_list]
+        assert not any("cash_ledger" in s for s in sql_calls), "Race-loser must not record a cash_ledger entry."
+        assert not any("decision_audit" in s for s in sql_calls), "Race-loser must not record a decision_audit entry."
+
+    def test_close_409_when_locked_row_disappeared(self) -> None:
+        """#245 regression — broker_position deleted between outer read and tx.
+
+        The endpoint's outer SELECT found the row, but by the time the
+        FOR UPDATE re-read fires the row is gone (e.g. another close
+        zeroed it and a downstream prune removed zero-unit rows). The
+        endpoint must raise 409 rather than silently committing the
+        order/fill side effects.
+        """
+        pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
+        order_row = [{"order_id": 91}]
+        fill_row = [{"fill_id": 26}]
+        locked_missing: list[Any] = []
+        conn = _with_conn([_KILL_SWITCH_OFF, pos_row, _QUOTE_ROW, order_row, fill_row, locked_missing])
+
+        resp = client.post("/portfolio/positions/500/close")
+        assert resp.status_code == 409
+        assert "no longer exists" in resp.json()["detail"]
+
+        sql_calls = [str(call.args[0]) for call in conn.execute.call_args_list]
+        assert not any("cash_ledger" in s for s in sql_calls)
+
+    def test_close_409_when_broker_positions_rowcount_zero(self) -> None:
+        """#245 belt-and-braces — locked re-read shows valid units but the
+        ``broker_positions`` UPDATE still matches zero rows (e.g. an
+        ``ON DELETE CASCADE`` removed the row between the SELECT FOR
+        UPDATE and the UPDATE). Without the rowcount check the endpoint
+        would commit cash + audit side effects against a deleted broker
+        position.
+        """
+        pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
+        order_row = [{"order_id": 93}]
+        fill_row = [{"fill_id": 28}]
+        locked_row = [(10.0,)]
+        conn = _with_conn([_KILL_SWITCH_OFF, pos_row, _QUOTE_ROW, order_row, fill_row, locked_row])
+
+        # Per-call side_effect: positions UPDATE returns rowcount=1, the
+        # subsequent broker_positions UPDATE returns rowcount=0; later
+        # writes (cash_ledger, decision_audit) never run because the 409
+        # raises first.
+        rowcounts = iter([1, 0])
+
+        def _exec_side_effect(*_args: Any, **_kwargs: Any) -> MagicMock:
+            cur = MagicMock()
+            cur.rowcount = next(rowcounts, 1)
+            return cur
+
+        conn.execute.side_effect = _exec_side_effect
+
+        resp = client.post("/portfolio/positions/500/close")
+        assert resp.status_code == 409
+        assert "deduction matched zero" in resp.json()["detail"]
+
+    def test_close_409_when_positions_aggregate_rowcount_zero(self) -> None:
+        """#245 regression — broker_positions locked + valid, but aggregate
+        ``positions`` row missing or already drained. The aggregate UPDATE
+        matches zero rows; without the rowcount check the endpoint would
+        have committed orders/fills/cash without moving realized_pnl.
+        """
+        pos_row = [{"instrument_id": 5, "units": 10.0, "amount": 1500.0, "open_rate": 150.0}]
+        order_row = [{"order_id": 92}]
+        fill_row = [{"fill_id": 27}]
+        locked_row = [(10.0,)]
+        conn = _with_conn([_KILL_SWITCH_OFF, pos_row, _QUOTE_ROW, order_row, fill_row, locked_row])
+        # Force the aggregate-positions UPDATE to match zero rows.
+        conn.execute.return_value.rowcount = 0
+
+        resp = client.post("/portfolio/positions/500/close")
+        assert resp.status_code == 409
+        assert "positions row" in resp.json()["detail"]
