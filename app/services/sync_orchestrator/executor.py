@@ -20,7 +20,10 @@ autocommit, with conn.transaction() becomes a SAVEPOINT).
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
+import traceback
 from collections.abc import Mapping
 from typing import Any, Protocol
 
@@ -263,8 +266,14 @@ def _run_layers_loop(
                 layer_plan.emits,
                 returned_names,
             )
+            # Sort BOTH sequences so the message text is deterministic
+            # across worker restarts. `set` repr ordering is
+            # hash-seed-dependent (PYTHONHASHSEED varies per process),
+            # which would otherwise make the #645 error_fingerprint
+            # for the same contract violation hash to a different value
+            # on every restart and defeat the repeat-grouping intent.
             contract_exc = RuntimeError(
-                f"refresh contract violation: expected {set(layer_plan.emits)}, got {returned_names}"
+                f"refresh contract violation: expected {sorted(layer_plan.emits)}, got {sorted(returned_names)}"
             )
             for emit in layer_plan.emits:
                 _record_layer_failed(sync_run_id, emit, error=contract_exc)
@@ -418,22 +427,72 @@ def _record_layer_result(
             )
 
 
+_FORENSICS_MESSAGE_LIMIT = 1000
+_FORENSICS_TRACEBACK_LIMIT = 8000
+
+# Strip absolute paths + line numbers from a traceback so the
+# fingerprint groups repeats of the same exception class + frame
+# regardless of refactor noise. e.g. `File "D:\\Repos\\eBull\\app\\
+# services\\foo.py", line 142, in bar` collapses to `File foo.py, in
+# bar`. Conservative — keeps file basename + function name (the bits
+# that actually identify the failure site).
+_FRAME_LINE_PATTERN = re.compile(r'File "(?:.*[\\/])?([^"\\/]+)", line \d+, in (\S+)')
+
+
+def _build_forensics(error: BaseException) -> tuple[str, str, str]:
+    """Return (error_message, error_traceback, error_fingerprint).
+
+    Caller passes the exception. Uses
+    ``traceback.format_exception(error)`` (NOT ``format_exc()``) so the
+    function works for exceptions constructed but not raised — e.g.
+    the contract-guard path in ``_run_layers_loop`` builds a
+    ``RuntimeError`` to record without raising it. ``format_exc()``
+    only reads the active exception via ``sys.exc_info()``; outside
+    an active ``except`` block it returns the literal stub
+    ``'NoneType: None\\n'`` which would poison both the traceback
+    column and the fingerprint hash.
+
+    Strings are length-capped so a pathological adapter (e.g. an LLM
+    client raising a multi-MB error) cannot blow up the row.
+    Fingerprint groups repeats of the same exception class + call
+    stack so the operator can tell "this is the same failure as the
+    prior run" without diffing tracebacks by hand.
+    """
+    message = repr(error)[:_FORENSICS_MESSAGE_LIMIT]
+    tb_text = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    tb = tb_text[:_FORENSICS_TRACEBACK_LIMIT]
+    normalised = _FRAME_LINE_PATTERN.sub(r"File \1, in \2", tb)
+    fingerprint = hashlib.sha1(normalised.encode("utf-8")).hexdigest()
+    return message, tb, fingerprint
+
+
 def _record_layer_failed(
     sync_run_id: int,
     layer_name: str,
     error: BaseException,
 ) -> None:
+    error_message, error_traceback, error_fingerprint = _build_forensics(error)
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         with conn.transaction():
             conn.execute(
                 """
                 UPDATE sync_layer_progress
-                SET status = 'failed',
-                    finished_at = now(),
-                    error_category = %s
+                SET status            = 'failed',
+                    finished_at       = now(),
+                    error_category    = %s,
+                    error_message     = %s,
+                    error_traceback   = %s,
+                    error_fingerprint = %s
                 WHERE sync_run_id = %s AND layer_name = %s
                 """,
-                (classify_exception(error).value, sync_run_id, layer_name),
+                (
+                    classify_exception(error).value,
+                    error_message,
+                    error_traceback,
+                    error_fingerprint,
+                    sync_run_id,
+                    layer_name,
+                ),
             )
 
 
@@ -457,16 +516,48 @@ def _record_layer_skipped(
 
 
 def _fail_unfinished_layers(sync_run_id: int) -> dict[str, LayerOutcome]:
-    """Mark any 'pending' or 'running' sync_layer_progress rows for the
-    given sync as 'failed' with error_category='orchestrator_crash'.
-    Returns {layer_name: FAILED} for rows actually updated."""
+    """Finalize any unfinished sync_layer_progress rows after a crash.
+
+    Two cases — distinguished by `started_at` to keep the consecutive-
+    failure streak in the admin banner truthful (#645):
+
+    - `pending` rows (started_at IS NULL) — the adapter never ran. The
+      worker died between row insert and adapter dispatch. Marked
+      `'cancelled'` (NOT `'failed'`) so the streak counter does not
+      treat reaper noise from dev `--reload` cycles as real adapter
+      failures. The legacy behavior here was the dominant source of
+      the 140/328 inflated streak counts the operator reported.
+    - `running` rows (started_at IS NOT NULL) — the adapter started
+      and the worker died mid-flight. Marked `'failed'` with
+      `'orchestrator_crash'` because real work was in progress.
+
+    Returns {layer_name: outcome} for rows actually updated.
+    """
+    cancelled: dict[str, LayerOutcome] = {}
+    failed: dict[str, LayerOutcome] = {}
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         with conn.transaction():
-            rows = conn.execute(
+            cancelled_rows = conn.execute(
                 """
                 UPDATE sync_layer_progress
-                SET status = 'failed',
+                SET status      = 'cancelled',
                     finished_at = now(),
+                    skip_reason = 'worker died before adapter dispatched'
+                WHERE sync_run_id = %s
+                  AND status      = 'pending'
+                  AND started_at IS NULL
+                RETURNING layer_name
+                """,
+                (sync_run_id,),
+            ).fetchall()
+            for r in cancelled_rows:
+                cancelled[r[0]] = LayerOutcome.DEP_SKIPPED
+
+            failed_rows = conn.execute(
+                """
+                UPDATE sync_layer_progress
+                SET status         = 'failed',
+                    finished_at    = now(),
                     error_category = 'orchestrator_crash'
                 WHERE sync_run_id = %s
                   AND status IN ('pending', 'running')
@@ -474,7 +565,9 @@ def _fail_unfinished_layers(sync_run_id: int) -> dict[str, LayerOutcome]:
                 """,
                 (sync_run_id,),
             ).fetchall()
-    return {r[0]: LayerOutcome.FAILED for r in rows}
+            for r in failed_rows:
+                failed[r[0]] = LayerOutcome.FAILED
+    return {**cancelled, **failed}
 
 
 def _finalize_sync_run(
@@ -489,20 +582,34 @@ def _finalize_sync_run(
             counts_row = conn.execute(
                 """
                 SELECT
-                    COUNT(*) FILTER (WHERE status IN ('complete', 'partial')) AS done,
-                    COUNT(*) FILTER (WHERE status = 'failed')                 AS failed,
-                    COUNT(*) FILTER (WHERE status = 'skipped')                AS skipped
+                    COUNT(*) FILTER (WHERE status IN ('complete', 'partial'))   AS done,
+                    COUNT(*) FILTER (WHERE status = 'failed')                   AS failed,
+                    -- `cancelled` is rolled into the skipped bucket for
+                    -- parent-status accounting (#645). Layer-row distinction
+                    -- (skipped = blocked by dep, cancelled = worker died
+                    -- before adapter dispatched) is preserved on
+                    -- sync_layer_progress; sync_runs.layers_skipped just
+                    -- tracks "didn't complete and didn't fail".
+                    COUNT(*) FILTER (WHERE status IN ('skipped', 'cancelled'))  AS skipped,
+                    COUNT(*)                                                    AS total
                 FROM sync_layer_progress
                 WHERE sync_run_id = %s
                 """,
                 (sync_run_id,),
             ).fetchone()
             assert counts_row is not None, "COUNT(*) aggregate returned no row"
-            done, failed, skipped = counts_row
+            done, failed, skipped, total = counts_row
 
-            if failed == 0:
+            # `failed=0 && done=total` → complete (every layer ran and won).
+            # Anything that didn't run AND didn't fail still leaves the
+            # parent in an "incomplete success" state — `partial` rather
+            # than `complete` so the operator can spot crash-early
+            # finalizations from the /sync/runs feed (a sync that died
+            # before any adapter dispatched would otherwise report
+            # `complete` with zero layers done).
+            if failed == 0 and done == total:
                 status = "complete"
-            elif done == 0:
+            elif done == 0 and failed > 0:
                 status = "failed"
             else:
                 status = "partial"

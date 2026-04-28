@@ -22,6 +22,7 @@ import psycopg
 import pytest
 
 from app.services.sync_orchestrator.layer_failure_history import (
+    all_layer_error_excerpts,
     all_layer_histories,
     consecutive_failures,
     last_error_category,
@@ -325,3 +326,142 @@ class TestBatchedAllLayerHistories:
         assert included in categories
         assert excluded not in streaks
         assert excluded not in categories
+
+
+class TestCancelledStatusBreaksStreak:
+    """`cancelled` is the new status #645 added so the reaper can
+    distinguish never-started rows from real failures. The streak
+    counter must treat it like any other non-failed status — a
+    cancelled row at the head zeros the streak."""
+
+    def test_cancelled_at_head_zeroes_streak(self, conn: psycopg.Connection[object]) -> None:
+        layer = f"test-layer-{uuid4()}"
+        _seed_progress_rows(
+            conn,
+            layer,
+            [
+                ("failed", 60, "db_constraint"),
+                ("failed", 30, "db_constraint"),
+                ("cancelled", 5, None),  # reaper fired; never started
+            ],
+        )
+        # Without the new status in the streak-break set this would
+        # have been 0 anyway (the loop already breaks on any non-
+        # failed). Assert the contract explicitly.
+        assert consecutive_failures(conn, layer) == 0
+
+    def test_cancelled_in_middle_breaks_older_failures(self, conn: psycopg.Connection[object]) -> None:
+        layer = f"test-layer-{uuid4()}"
+        _seed_progress_rows(
+            conn,
+            layer,
+            [
+                ("failed", 100, "db_constraint"),
+                ("cancelled", 60, None),  # breaks streak
+                ("failed", 30, "db_constraint"),
+                ("failed", 10, "db_constraint"),  # head
+            ],
+        )
+        assert consecutive_failures(conn, layer) == 2
+
+
+class TestAllLayerErrorExcerpts:
+    """`#645 forensics. Returns most-recent non-null error_message
+    per layer, first line only, length-capped."""
+
+    def test_returns_first_line_of_recent_error(self, conn: psycopg.Connection[object]) -> None:
+        layer = f"test-layer-exc-{uuid4()}"
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO sync_runs
+                    (scope, trigger, started_at, finished_at, status, layers_planned)
+                VALUES ('full', 'manual', now() - interval '5 min', now(), 'failed', 1)
+                RETURNING sync_run_id
+                """,
+            )
+            row = cur.fetchone()
+            assert row is not None
+            sid = int(row[0])  # type: ignore[index]
+            cur.execute(
+                """
+                INSERT INTO sync_layer_progress
+                    (sync_run_id, layer_name, status, started_at, finished_at,
+                     error_category, error_message, error_traceback, error_fingerprint)
+                VALUES (%s, %s, 'failed', now() - interval '5 min', now(),
+                        'internal_error',
+                        %s, 'full traceback here', 'fp123')
+                """,
+                (sid, layer, "KeyError: 'cik'\nTraceback follows..."),
+            )
+        conn.commit()
+        result = all_layer_error_excerpts(conn, [layer])
+        # First line only, no traceback prefix.
+        assert result[layer] == "KeyError: 'cik'"
+
+    def test_returns_none_when_no_error_message(self, conn: psycopg.Connection[object]) -> None:
+        layer = f"test-layer-exc-none-{uuid4()}"
+        # A row with error_category but no error_message (legacy pre-#645).
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO sync_runs
+                    (scope, trigger, started_at, finished_at, status, layers_planned)
+                VALUES ('full', 'manual', now() - interval '5 min', now(), 'failed', 1)
+                RETURNING sync_run_id
+                """,
+            )
+            row = cur.fetchone()
+            assert row is not None
+            sid = int(row[0])  # type: ignore[index]
+            cur.execute(
+                """
+                INSERT INTO sync_layer_progress
+                    (sync_run_id, layer_name, status, started_at, finished_at,
+                     error_category)
+                VALUES (%s, %s, 'failed', now() - interval '5 min', now(), 'internal_error')
+                """,
+                (sid, layer),
+            )
+        conn.commit()
+        result = all_layer_error_excerpts(conn, [layer])
+        assert result[layer] is None
+
+    def test_caps_length_at_240_chars(self, conn: psycopg.Connection[object]) -> None:
+        layer = f"test-layer-exc-cap-{uuid4()}"
+        long_msg = "RuntimeError: " + ("x" * 500)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO sync_runs
+                    (scope, trigger, started_at, finished_at, status, layers_planned)
+                VALUES ('full', 'manual', now() - interval '5 min', now(), 'failed', 1)
+                RETURNING sync_run_id
+                """,
+            )
+            row = cur.fetchone()
+            assert row is not None
+            sid = int(row[0])  # type: ignore[index]
+            cur.execute(
+                """
+                INSERT INTO sync_layer_progress
+                    (sync_run_id, layer_name, status, started_at, finished_at,
+                     error_category, error_message)
+                VALUES (%s, %s, 'failed', now() - interval '5 min', now(),
+                        'internal_error', %s)
+                """,
+                (sid, layer, long_msg),
+            )
+        conn.commit()
+        result = all_layer_error_excerpts(conn, [layer])
+        excerpt = result[layer]
+        assert excerpt is not None
+        assert len(excerpt) == 240
+
+    def test_empty_layer_list_returns_empty_dict(self, conn: psycopg.Connection[object]) -> None:
+        assert all_layer_error_excerpts(conn, []) == {}
+
+    def test_unknown_layer_maps_to_none(self, conn: psycopg.Connection[object]) -> None:
+        layer = f"test-layer-exc-unknown-{uuid4()}"
+        result = all_layer_error_excerpts(conn, [layer])
+        assert result == {layer: None}

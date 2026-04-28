@@ -232,3 +232,50 @@ def all_layer_histories(
             categories[str(row["layer_name"])] = str(row["error_category"])
 
     return streaks, categories
+
+
+def all_layer_error_excerpts(
+    conn: psycopg.Connection[Any],
+    layer_names: list[str] | tuple[str, ...],
+) -> dict[str, str | None]:
+    """Most recent non-null `error_message` per layer (#645 forensics).
+
+    Returns the first line of the message so the admin banner can
+    show "Unclassified error -- KeyError: 'fundamentals.cik'"
+    instead of the bare category. Multiline tracebacks are
+    deliberately collapsed to the first line; the full traceback
+    lives in `sync_layer_progress.error_traceback` for deep triage.
+
+    Layers without a recorded message map to None. Pre-#645 rows
+    that never captured a message stay None until the next failure.
+    """
+    if not layer_names:
+        return {}
+    names = list(layer_names)
+    excerpts: dict[str, str | None] = {n: None for n in names}
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    layer_name,
+                    error_message,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY layer_name
+                        ORDER BY COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC
+                    ) AS rn
+                FROM sync_layer_progress
+                WHERE error_message IS NOT NULL AND layer_name = ANY(%s)
+            )
+            SELECT layer_name, error_message
+            FROM ranked
+            WHERE rn = 1;
+            """,
+            (names,),
+        )
+        for row in cur.fetchall():
+            raw = str(row["error_message"])
+            # First non-empty line, capped — banner copy is one line.
+            first_line = next((ln for ln in raw.splitlines() if ln.strip()), raw)
+            excerpts[str(row["layer_name"])] = first_line[:240]
+    return excerpts

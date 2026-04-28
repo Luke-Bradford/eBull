@@ -48,30 +48,57 @@ def reap_orphaned_syncs(
             # of a timedelta=0 age check.
             reaped_rows = conn.execute(
                 """
-                WITH reaped AS (
-                    UPDATE sync_runs
-                    SET status = 'failed',
-                        finished_at = now(),
-                        error_category = 'orchestrator_crash'
-                    WHERE status = 'running'
-                      AND (%(reap_all)s OR started_at < now() - %(timeout)s::interval)
-                    RETURNING sync_run_id
-                ),
-                _progress_cleanup AS (
-                    UPDATE sync_layer_progress slp
-                    SET status = 'failed',
-                        finished_at = now(),
-                        error_category = 'orchestrator_crash'
-                    FROM reaped r
-                    WHERE slp.sync_run_id = r.sync_run_id
-                      AND slp.status IN ('pending', 'running')
-                    RETURNING 1
-                )
-                SELECT sync_run_id FROM reaped
+                UPDATE sync_runs
+                SET status = 'failed',
+                    finished_at = now(),
+                    error_category = 'orchestrator_crash'
+                WHERE status = 'running'
+                  AND (%(reap_all)s OR started_at < now() - %(timeout)s::interval)
+                RETURNING sync_run_id
                 """,
                 {"timeout": timeout, "reap_all": reap_all},
             ).fetchall()
             reaped_ids = [r[0] for r in reaped_rows]
+
+            # #645 split — two SEPARATE statements (NOT a single WITH
+            # with both updates). PostgreSQL CTE semantics let
+            # concurrent data-modifying CTEs see the same row snapshot,
+            # so a single WITH containing both the cancel and the fail
+            # UPDATE would race: the fail CTE could clobber rows the
+            # cancel CTE just transitioned. Sequencing them inside the
+            # transaction guarantees the fail UPDATE only sees rows
+            # the cancel UPDATE left behind.
+            if reaped_ids:
+                # Step A: never-started pending rows become 'cancelled'
+                # so the consecutive-failure streak in the admin banner
+                # is not inflated by reaper noise (uvicorn --reload
+                # cycles during dev iteration were the dominant source).
+                conn.execute(
+                    """
+                    UPDATE sync_layer_progress
+                    SET status      = 'cancelled',
+                        finished_at = now(),
+                        skip_reason = 'worker died before adapter dispatched'
+                    WHERE sync_run_id = ANY(%s)
+                      AND status      = 'pending'
+                      AND started_at IS NULL
+                    """,
+                    (reaped_ids,),
+                )
+                # Step B: any remaining pending/running rows had
+                # `started_at` populated, meaning the adapter actually
+                # began work — those are real mid-flight failures.
+                conn.execute(
+                    """
+                    UPDATE sync_layer_progress
+                    SET status         = 'failed',
+                        finished_at    = now(),
+                        error_category = 'orchestrator_crash'
+                    WHERE sync_run_id = ANY(%s)
+                      AND status IN ('pending', 'running')
+                    """,
+                    (reaped_ids,),
+                )
 
             # Step 2: recompute aggregate counts. Inside the SAME
             # transaction so status='failed' and counts either both
@@ -90,7 +117,11 @@ def reap_orphaned_syncs(
                         SELECT sync_run_id,
                                COUNT(*) FILTER (WHERE status IN ('complete','partial')) AS done,
                                COUNT(*) FILTER (WHERE status = 'failed')                AS failed,
-                               COUNT(*) FILTER (WHERE status = 'skipped')               AS skipped
+                               -- `cancelled` (#645 reaper split) rolled
+                               -- into the skipped bucket so layers_done +
+                               -- layers_failed + layers_skipped continues
+                               -- to equal the row count for the run.
+                               COUNT(*) FILTER (WHERE status IN ('skipped','cancelled')) AS skipped
                         FROM sync_layer_progress
                         WHERE sync_run_id = ANY(%s)
                         GROUP BY sync_run_id
