@@ -312,11 +312,25 @@ class TestSweepSource:
         assert "sec_submissions_old.json" not in remaining
 
     def test_deletes_files_older_than_policy(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``fmp`` policy has max_age_days=30 → files older than 30
-        days are deleted; newer preserved. (Previously used
-        ``etoro`` at max_age_days=7; etoro flipped to 0 under #471
-        once SQL coverage replaced raw persistence.)"""
+        """``companies_house`` policy retains forever (max_age_days=None);
+        ``fmp`` / ``sec`` / ``sec_fundamentals`` / ``etoro`` policies all
+        compact-out at max_age_days=0 (after #470 / #471 / #539). Use
+        the original ``etoro`` shape to drive the test against a policy
+        that was historically age-bounded — replace with a synthetic
+        rule by stubbing _RETENTION_POLICY locally.
+
+        This branch verifies the sweep deletes files older than a
+        positive max_age_days when the policy is set that way.
+        """
         monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
+        # Stub a local 30-day policy under a known tag so the sweep
+        # has a non-zero max_age_days to act on (production policies
+        # are now all 0 or None).
+        monkeypatch.setitem(
+            raw_persistence._RETENTION_POLICY,
+            "fmp",
+            raw_persistence.RetentionPolicy(max_age_days=30, max_duplicate_files_per_hash=1),
+        )
         fmp_dir = tmp_path / "fmp"
         _seed(fmp_dir, "old_20260101T120000Z.json", {"x": 1}, age=timedelta(days=45))
         _seed(fmp_dir, "fresh_20260102T120000Z.json", {"y": 2}, age=timedelta(days=10))
@@ -331,6 +345,14 @@ class TestSweepSource:
     def test_min_age_safeguard_preserves_under_24h(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Even if policy says delete, files <24h old are preserved."""
         monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
+        # Same stub as above — production fmp policy is now 0, so
+        # override with a 30-day policy to exercise the >24h guard
+        # correctly.
+        monkeypatch.setitem(
+            raw_persistence._RETENTION_POLICY,
+            "fmp",
+            raw_persistence.RetentionPolicy(max_age_days=30, max_duplicate_files_per_hash=1),
+        )
         fmp_dir = tmp_path / "fmp"
         # fmp policy: 30 days. File is 31 days old AND 2 hours old — the 2h one is protected.
         _seed(fmp_dir, "recent_20260101T120000Z.json", {"x": 1}, age=timedelta(hours=2))

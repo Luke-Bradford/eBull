@@ -78,8 +78,10 @@ class FundamentalsProvider(ABC):
     """
     Interface for normalised company fundamentals: income, balance sheet, cash flow.
 
-    v1 implementation: FmpFundamentalsProvider
-    If official filing data disagrees with provider data, prefer the filing.
+    No active implementation in v1 — fundamentals are sourced directly
+    from SEC XBRL via ``app/services/fundamentals.py`` and stored in
+    ``financial_periods`` / ``financial_facts_raw``. The interface is
+    retained for a possible non-US (Companies House / EDINET) provider.
     """
 
     @abstractmethod

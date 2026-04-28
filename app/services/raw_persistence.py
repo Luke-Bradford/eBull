@@ -146,7 +146,6 @@ class RetentionPolicy:
 #   etoro_market + etoro_diagnostics with different policies.
 # - etoro_broker: 90 days rolling — broker-state audit for
 #   reconciling position / cash discrepancies.
-# - fmp: fallback only; 30 days is enough for re-derivation.
 _RETENTION_POLICY: dict[str, RetentionPolicy] = {
     # sec_fundamentals / sec: no new writes (providers stopped
     # calling persist_raw_if_new under #470). Retention at 0 so the
@@ -159,7 +158,9 @@ _RETENTION_POLICY: dict[str, RetentionPolicy] = {
     # reclaims residual files past the 24-hour safeguard.
     "etoro": RetentionPolicy(max_age_days=0, max_duplicate_files_per_hash=1),
     "etoro_broker": RetentionPolicy(max_age_days=0, max_duplicate_files_per_hash=1),
-    "fmp": RetentionPolicy(max_age_days=30, max_duplicate_files_per_hash=1),
+    # fmp source dropped (#539). Retention at 0 so the next sweep
+    # reclaims any residual disk dump.
+    "fmp": RetentionPolicy(max_age_days=0, max_duplicate_files_per_hash=1),
     "companies_house": RetentionPolicy(max_age_days=None, max_duplicate_files_per_hash=1),
 }
 

@@ -11,18 +11,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.providers.filings import FilingSearchResult, FilingsProvider
-from app.providers.fundamentals import FundamentalsSnapshot
 from app.providers.implementations.companies_house import (
     _normalise_filing_event as ch_normalise_event,
 )
 from app.providers.implementations.companies_house import (
     _normalise_filings as ch_normalise_filings,
-)
-from app.providers.implementations.fmp import (
-    _build_snapshot,
-    _decimal_or_none,
-    _int_or_none,
-    _margin_or_none,
 )
 from app.providers.implementations.sec_edgar import (
     _normalise_filings as sec_normalise_filings,
@@ -43,26 +36,6 @@ from app.services.fundamentals import _current_quarter_start, _fundamentals_are_
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-FIXTURE_FMP_BS = {
-    "date": "2024-03-31",
-    "cashAndCashEquivalents": "29965000000",
-    "totalDebt": "108040000000",
-    "netDebt": "78075000000",
-    "commonStock": "15441000000",
-    "bookValuePerShare": "4.24",
-}
-
-FIXTURE_FMP_INCOME_TTM = {
-    "revenue": "383285000000",
-    "grossProfitRatio": "0.4531",
-    "operatingIncomeRatio": "0.2985",
-    "epsdiluted": "6.43",
-}
-
-FIXTURE_FMP_CF_TTM = {
-    "freeCashFlow": "99584000000",
-}
 
 FIXTURE_SEC_TICKERS = {
     "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
@@ -106,104 +79,6 @@ FIXTURE_CH_ITEMS = [
         "type": "AA",
     },
 ]
-
-
-# ---------------------------------------------------------------------------
-# FMP normaliser tests
-# ---------------------------------------------------------------------------
-
-
-class TestBuildSnapshot:
-    def test_full_data_produces_snapshot(self) -> None:
-        snap = _build_snapshot("AAPL", FIXTURE_FMP_BS, FIXTURE_FMP_INCOME_TTM, FIXTURE_FMP_CF_TTM)
-        assert snap is not None
-        assert snap.symbol == "AAPL"
-        assert snap.as_of_date == date(2024, 3, 31)
-
-    def test_as_of_date_from_balance_sheet(self) -> None:
-        snap = _build_snapshot("AAPL", FIXTURE_FMP_BS, FIXTURE_FMP_INCOME_TTM, FIXTURE_FMP_CF_TTM)
-        assert snap is not None
-        assert snap.as_of_date == date(2024, 3, 31)
-
-    def test_revenue_from_income(self) -> None:
-        snap = _build_snapshot("AAPL", FIXTURE_FMP_BS, FIXTURE_FMP_INCOME_TTM, FIXTURE_FMP_CF_TTM)
-        assert snap is not None
-        assert snap.revenue_ttm == Decimal("383285000000")
-
-    def test_margins_from_income(self) -> None:
-        snap = _build_snapshot("AAPL", FIXTURE_FMP_BS, FIXTURE_FMP_INCOME_TTM, FIXTURE_FMP_CF_TTM)
-        assert snap is not None
-        assert snap.gross_margin == Decimal("0.4531")
-        assert snap.operating_margin == Decimal("0.2985")
-
-    def test_fcf_from_cashflow(self) -> None:
-        snap = _build_snapshot("AAPL", FIXTURE_FMP_BS, FIXTURE_FMP_INCOME_TTM, FIXTURE_FMP_CF_TTM)
-        assert snap is not None
-        assert snap.fcf == Decimal("99584000000")
-
-    def test_balance_sheet_fields(self) -> None:
-        snap = _build_snapshot("AAPL", FIXTURE_FMP_BS, FIXTURE_FMP_INCOME_TTM, FIXTURE_FMP_CF_TTM)
-        assert snap is not None
-        assert snap.cash == Decimal("29965000000")
-        assert snap.debt == Decimal("108040000000")
-        assert snap.net_debt == Decimal("78075000000")
-        assert snap.book_value == Decimal("4.24")
-
-    def test_shares_outstanding_as_int(self) -> None:
-        snap = _build_snapshot("AAPL", FIXTURE_FMP_BS, FIXTURE_FMP_INCOME_TTM, FIXTURE_FMP_CF_TTM)
-        assert snap is not None
-        assert snap.shares_outstanding == 15441000000
-
-    def test_missing_income_leaves_ttm_fields_none(self) -> None:
-        snap = _build_snapshot("AAPL", FIXTURE_FMP_BS, None, FIXTURE_FMP_CF_TTM)
-        assert snap is not None
-        assert snap.revenue_ttm is None
-        assert snap.gross_margin is None
-        assert snap.operating_margin is None
-        assert snap.eps is None
-
-    def test_missing_cashflow_leaves_fcf_none(self) -> None:
-        snap = _build_snapshot("AAPL", FIXTURE_FMP_BS, FIXTURE_FMP_INCOME_TTM, None)
-        assert snap is not None
-        assert snap.fcf is None
-
-    def test_missing_date_returns_none(self) -> None:
-        bs = {k: v for k, v in FIXTURE_FMP_BS.items() if k != "date"}
-        assert _build_snapshot("AAPL", bs, None, None) is None
-
-    def test_bad_date_returns_none(self) -> None:
-        bs = {**FIXTURE_FMP_BS, "date": "not-a-date"}
-        assert _build_snapshot("AAPL", bs, None, None) is None
-
-    def test_returns_fundamentals_snapshot(self) -> None:
-        snap = _build_snapshot("AAPL", FIXTURE_FMP_BS, FIXTURE_FMP_INCOME_TTM, FIXTURE_FMP_CF_TTM)
-        assert isinstance(snap, FundamentalsSnapshot)
-
-
-class TestFmpHelpers:
-    def test_decimal_or_none_numeric_string(self) -> None:
-        assert _decimal_or_none("12345.67") == Decimal("12345.67")
-
-    def test_decimal_or_none_integer(self) -> None:
-        assert _decimal_or_none(42) == Decimal("42")
-
-    def test_decimal_or_none_none(self) -> None:
-        assert _decimal_or_none(None) is None
-
-    def test_decimal_or_none_invalid(self) -> None:
-        assert _decimal_or_none("not-a-number") is None
-
-    def test_int_or_none_large_value(self) -> None:
-        assert _int_or_none("15441000000") == 15441000000
-
-    def test_int_or_none_zero_returns_none(self) -> None:
-        assert _int_or_none("0") is None
-
-    def test_int_or_none_none(self) -> None:
-        assert _int_or_none(None) is None
-
-    def test_margin_or_none_ratio(self) -> None:
-        assert _margin_or_none("0.4531") == Decimal("0.4531")
 
 
 # ---------------------------------------------------------------------------

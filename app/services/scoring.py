@@ -790,9 +790,8 @@ def _load_instrument_data(
         # Degrade gracefully if the view or table does not exist yet
         # (pre-migration environment, partial test setup).
         # Wrapped in a savepoint so UndefinedTable only rolls back
-        # the enrichment queries, not the entire transaction.
+        # the enrichment query, not the entire transaction.
         valuation_row: dict[str, Any] | None = None
-        estimates_row: dict[str, Any] | None = None
         try:
             with conn.transaction():
                 cur.execute(
@@ -805,19 +804,6 @@ def _load_instrument_data(
                     {"id": instrument_id},
                 )
                 valuation_row = cur.fetchone()
-
-                cur.execute(
-                    """
-                    SELECT price_target_mean, price_target_high, price_target_low,
-                           analyst_count, buy_count, hold_count, sell_count
-                    FROM analyst_estimates
-                    WHERE instrument_id = %(id)s
-                    ORDER BY as_of_date DESC
-                    LIMIT 1
-                    """,
-                    {"id": instrument_id},
-                )
-                estimates_row = cur.fetchone()
         except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
             pass  # savepoint already rolled back; prior queries intact
 
@@ -831,7 +817,6 @@ def _load_instrument_data(
         # rf_row is therefore never None; avg_red_flag may be None if no filings matched.
         "avg_red_flag_score": _to_float(rf_row["avg_red_flag"]) if rf_row is not None else None,
         "valuation_row": valuation_row,
-        "estimates_row": estimates_row,
     }
 
 
@@ -948,7 +933,6 @@ def compute_score(
         explanation_parts.append("quality: " + "; ".join(q_notes))
 
     val_row = data.get("valuation_row")
-    est_row = data.get("estimates_row")
 
     v_score, v_notes = _value_score(
         base_value=_to_float(thesis_row["base_value"]) if thesis_row else None,
@@ -956,7 +940,10 @@ def compute_score(
         current_price=current_price,
         pe_ratio=_to_float(val_row["pe_ratio"]) if val_row else None,
         fcf_yield=_to_float(val_row["fcf_yield"]) if val_row else None,
-        price_target_mean=_to_float(est_row["price_target_mean"]) if est_row else None,
+        # #539: analyst price targets sourced from FMP retired; the
+        # value-score branch falls back to thesis base/bear and
+        # multiples when this is None.
+        price_target_mean=None,
     )
     if v_notes:
         explanation_parts.append("value: " + "; ".join(v_notes))
