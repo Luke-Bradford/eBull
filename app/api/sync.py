@@ -513,9 +513,13 @@ def post_layer_enabled(
     # otherwise be able to flip ``fx_rates`` or ``portfolio_sync`` off
     # without operator attribution, which is inconsistent with the
     # kill-switch / live-trading toggles.
+    # Trim once so both the safety gate and the audit row see the same
+    # value — passing the unstripped form to set_layer_enabled would
+    # store leading/trailing whitespace despite the gate having
+    # rejected it.
+    reason_trimmed = body.reason.strip() if body.reason is not None else None
     if not body.enabled and layer_name in SAFETY_CRITICAL_LAYERS:
-        reason = (body.reason or "").strip()
-        if not reason:
+        if not reason_trimmed:
             raise HTTPException(
                 status_code=400,
                 detail=(f"layer '{layer_name}' is safety-critical; supply a non-empty 'reason' to disable it."),
@@ -524,7 +528,7 @@ def post_layer_enabled(
         conn,
         layer_name,
         enabled=body.enabled,
-        reason=body.reason,
+        reason=reason_trimmed,
         changed_by=body.changed_by,
     )
     conn.commit()
