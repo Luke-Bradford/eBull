@@ -52,6 +52,44 @@ describe("Pane", () => {
     expect(onCardClick).not.toHaveBeenCalled();
   });
 
+  it("fillHeight=true applies h-full + flex-col so the pane stretches to the parent grid cell (#647)", () => {
+    render(
+      <Pane title="Price chart" fillHeight>
+        <p>body</p>
+      </Pane>,
+    );
+    const article = document.querySelector("article");
+    expect(article?.className).toContain("h-full");
+    expect(article?.className).toContain("flex");
+    expect(article?.className).toContain("flex-col");
+    const body = screen.getByText("body").parentElement;
+    expect(body?.className).toContain("flex-1");
+    expect(body?.className).toContain("min-h-0");
+  });
+
+  it("fillHeight defaults to false — existing panes unchanged", () => {
+    render(
+      <Pane title="Recent filings">
+        <p>body</p>
+      </Pane>,
+    );
+    const article = document.querySelector("article");
+    expect(article?.className).not.toContain("h-full");
+    const body = screen.getByText("body").parentElement;
+    expect(body?.className).not.toContain("flex-1");
+  });
+
+  it("article className builder produces no double spaces or trailing space when optional segments are omitted", () => {
+    render(
+      <Pane title="Recent filings">
+        <p>body</p>
+      </Pane>,
+    );
+    const article = document.querySelector("article");
+    expect(article?.className).not.toMatch(/ {2,}/);
+    expect(article?.className).not.toMatch(/ $/);
+  });
+
   it("clickable card does NOT take role=button (avoids nesting interactive descendants)", () => {
     const onCardClick = vi.fn();
     render(

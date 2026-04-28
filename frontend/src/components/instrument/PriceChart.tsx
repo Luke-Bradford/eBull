@@ -243,7 +243,13 @@ export function PriceChart({
   const intraday = isIntraday(range);
 
   return (
-    <div className="space-y-2">
+    // Flex column with `flex-1 min-h-0` so when mounted inside a Pane
+    // with `fillHeight` (DensityGrid chart cell uses lg:row-span-2),
+    // the chart canvas below expands to fill the grid cell instead
+    // of sitting at its 340px intrinsic height. In a non-fillHeight
+    // (block-layout) parent, the modifiers are inert and intrinsic
+    // sizing is preserved.
+    <div className="flex flex-1 flex-col gap-2 min-h-0">
       {/*
         Controls swallow click events so they do NOT trigger the
         Pane's card-click drill (which navigates to the full chart
@@ -371,6 +377,12 @@ export function PriceChart({
           intraday={intraday}
           showPm={showPm}
           showAh={showAh}
+          // Override the default `h-[340px] w-full` so the chart
+          // fills the Pane fillHeight layout instead of sitting at
+          // the intrinsic 340px. min-h-[340px] preserves the
+          // sensible floor when the cell happens to be small (e.g.
+          // narrow viewport).
+          containerClassName="h-full w-full min-h-[340px]"
         />
       ) : null}
     </div>
@@ -785,7 +797,14 @@ export function ChartCanvas({
   }, [clean, liveBucketTime]);
 
   return (
-    <div className="relative">
+    // `relative` for the absolutely-positioned hover tooltip + LIVE
+    // indicator children. `flex-1` makes the canvas wrapper absorb
+    // the remaining height in a flex parent (PriceChart's wrapper
+    // when fillHeight is on); inert when the parent is block layout
+    // (every other caller). NOTHING ELSE — the previous attempt at
+    // this fix added `flex flex-col min-h-0` here too and broke the
+    // chart's visible time range, see PR #652 revert.
+    <div className="relative flex-1">
       <div
         ref={containerRef}
         data-testid={`price-chart-${symbol}`}
