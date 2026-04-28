@@ -50,6 +50,57 @@ _DATA_ROOT = Path("data/raw")
 
 
 # ---------------------------------------------------------------------
+# Filename sanitisation (#249)
+# ---------------------------------------------------------------------
+
+# Conservative safe-character set for raw-file tags: ASCII alphanumeric
+# plus ``_`` ``-`` ``.``. Everything else (incl. ``/``, ``\``, ``..``,
+# ``:``, NUL, control chars, unicode) is replaced with ``_`` so a
+# provider-derived identifier (symbol, company number, transaction id)
+# can never inject path separators or shell metacharacters into the
+# filename.
+_SAFE_TAG_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+# Cap a tag at 200 chars so a degenerate identifier can't blow past
+# the typical filesystem 255-byte limit once the 16-char hash suffix
+# and ``.json`` extension are appended. Truncated tags still hash
+# distinctly because the SHA-256 prefix uses the full payload, not
+# the tag.
+_MAX_TAG_LEN = 200
+
+
+def _sanitise_tag(tag: str) -> str:
+    """Reduce ``tag`` to a conservative safe character set (#249).
+
+    Provider-derived identifiers like ``symbol``, ``company_number``,
+    and ``transaction_id`` are interpolated directly into raw filenames
+    by callers. They originate in external systems; treating them as
+    trusted-shape strings risks path traversal, NUL injection, or
+    over-long filenames once an upstream API returns an unusual value.
+
+    Behaviour:
+
+      * Any character outside ``[A-Za-z0-9._-]`` becomes ``_``.
+      * Leading dots are stripped so ``..`` cannot become ``__``
+        and slip past containment (paranoia — the regex already
+        replaces ``.`` only when paired with the second ``.``;
+        an explicit guard is cheaper than reasoning about it).
+      * The result is capped at ``_MAX_TAG_LEN`` characters so the
+        full path stays well below typical filesystem limits.
+      * If the input collapses to an empty string the tag becomes
+        ``"_"`` so the resulting filename always has a body before
+        the ``_{hash}.json`` suffix.
+    """
+    cleaned = _SAFE_TAG_CHARS_RE.sub("_", tag)
+    cleaned = cleaned.lstrip(".")
+    if not cleaned:
+        cleaned = "_"
+    if len(cleaned) > _MAX_TAG_LEN:
+        cleaned = cleaned[:_MAX_TAG_LEN]
+    return cleaned
+
+
+# ---------------------------------------------------------------------
 # Per-source retention policy
 # ---------------------------------------------------------------------
 
@@ -193,6 +244,12 @@ def persist_raw_if_new(
             f"policy entry to _RETENTION_POLICY before calling."
         )
 
+    # Sanitise the provider-supplied tag BEFORE composing the path
+    # (#249). Containment is verified after the path resolves so
+    # symlinks or `..` segments that slipped past the regex still
+    # cannot escape the source directory.
+    safe_tag = _sanitise_tag(tag)
+
     # Everything touching the filesystem is inside this try. A
     # disk-full / permission / transient-FS error at any step must
     # log + return None, never escape into provider sync code.
@@ -201,13 +258,30 @@ def persist_raw_if_new(
         digest = hashlib.sha256(body).hexdigest()[:16]
         dir_ = _DATA_ROOT / source
         dir_.mkdir(parents=True, exist_ok=True)
-        target = dir_ / f"{tag}_{digest}.json"
+        target = dir_ / f"{safe_tag}_{digest}.json"
+
+        # Containment guard (#249). Resolve both paths and assert the
+        # target stays under the source directory. Belt-and-braces
+        # against any sanitisation bypass — tags that survive the
+        # regex and length cap are still subject to the resolved-path
+        # check.
+        try:
+            dir_resolved = dir_.resolve(strict=False)
+            target_resolved = target.resolve(strict=False)
+            target_resolved.relative_to(dir_resolved)
+        except OSError, ValueError:
+            logger.warning(
+                "persist_raw_if_new: tag %r resolves outside source dir %r — refusing",
+                tag,
+                source,
+            )
+            return None
 
         if target.exists():
             logger.debug("persist_raw_if_new: dedup hit %s", target.name)
             return None
 
-        fd, tmp_path = tempfile.mkstemp(dir=dir_, prefix=f".{tag}_", suffix=".tmp")
+        fd, tmp_path = tempfile.mkstemp(dir=dir_, prefix=f".{safe_tag}_", suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(body)

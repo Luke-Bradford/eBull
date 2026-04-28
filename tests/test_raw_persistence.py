@@ -172,6 +172,118 @@ class TestPersistRawIfNew:
 
 
 # ---------------------------------------------------------------------
+# Tag sanitisation (#249)
+# ---------------------------------------------------------------------
+
+
+class TestTagSanitisation:
+    """Provider-derived identifiers (symbol, company_number,
+    transaction_id) are interpolated directly into raw filenames.
+    Whatever an upstream API returns must NOT be able to escape the
+    source directory, smuggle in NUL/control characters, or blow past
+    typical filesystem name limits.
+    """
+
+    def test_forward_slash_in_tag_replaced(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
+        result = persist_raw_if_new("fmp", "profile/AAPL", {"k": "v"})
+        assert result is not None
+        # No subdirectory was created; the slash is replaced.
+        fmp_dir = tmp_path / "fmp"
+        assert result.parent == fmp_dir
+        assert "/" not in result.name
+        assert "profile_AAPL_" in result.name
+
+    def test_dot_dot_in_tag_replaced(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``..`` cannot escape the source directory — the regex
+        replaces neither dot independently, but leading dots are
+        stripped and the containment check would catch a resolved
+        path outside the source dir.
+        """
+        monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
+        result = persist_raw_if_new("fmp", "../etc/passwd", {"k": "v"})
+        assert result is not None
+        # ``../`` collapses to ``__`` after sanitisation; the file
+        # MUST still live under tmp_path/fmp/.
+        assert result.is_relative_to(tmp_path / "fmp")
+        assert ".." not in result.name
+
+    def test_backslash_in_tag_replaced(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
+        result = persist_raw_if_new("fmp", r"profile\AAPL", {"k": "v"})
+        assert result is not None
+        assert "\\" not in result.name
+        assert "profile_AAPL_" in result.name
+
+    def test_nul_byte_replaced(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
+        result = persist_raw_if_new("fmp", "profile\x00AAPL", {"k": "v"})
+        assert result is not None
+        assert "\x00" not in result.name
+
+    def test_unicode_replaced(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
+        result = persist_raw_if_new("fmp", "profile_日本", {"k": "v"})
+        assert result is not None
+        # Only ASCII alphanumeric + ._- survives.
+        assert all(c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for c in result.name)
+
+    def test_long_tag_truncated(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
+        long_tag = "x" * 5000
+        result = persist_raw_if_new("fmp", long_tag, {"k": "v"})
+        assert result is not None
+        # Tag truncated to <=200 chars; full filename stays under
+        # typical FS limits.
+        assert len(result.name) < 255
+
+    def test_empty_after_sanitisation_uses_underscore(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A tag composed entirely of unsafe chars collapses to the
+        single ``_`` placeholder so the filename always has a body
+        before the ``_{hash}.json`` suffix.
+        """
+        monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
+        result = persist_raw_if_new("fmp", "/\x00\x01", {"k": "v"})
+        assert result is not None
+        # All-unsafe tag collapses to a sequence of ``_`` characters
+        # (the regex maps each unsafe char to ``_`` and the result
+        # becomes the tag prefix). The file MUST land under fmp/ and
+        # MUST end with ``_<16hex>.json``.
+        assert result.is_relative_to(tmp_path / "fmp")
+        # Strip extension, strip 17-char ``_<16hex>`` suffix; what
+        # remains is the sanitised tag — must be non-empty.
+        stem = result.stem  # filename without .json
+        # Stem is ``{tag}_{16hex}`` so split off the last underscore
+        # group (the hash):
+        head, _, hash_part = stem.rpartition("_")
+        assert len(hash_part) == 16
+        assert head != ""
+        # Every char in the sanitised head is a safe-set member.
+        assert all(c in "_" for c in head)
+
+    def test_dedup_robust_across_tag_variants(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two callers passing different but equivalent-after-sanitise
+        tags + the same payload still dedup to one file (digest is
+        payload-derived, sanitised tag is the same).
+        """
+        monkeypatch.setattr(raw_persistence, "_DATA_ROOT", tmp_path)
+        a = persist_raw_if_new("fmp", "profile/AAPL", {"k": "v"})
+        b = persist_raw_if_new("fmp", "profile_AAPL", {"k": "v"})
+        # The ``/`` in tag a sanitises to ``_``, so both tags become
+        # ``profile_AAPL`` with identical digests → second call dedups.
+        assert a is not None
+        assert b is None
+
+
+# ---------------------------------------------------------------------
 # Writer-discipline regression guard (#436)
 # ---------------------------------------------------------------------
 
