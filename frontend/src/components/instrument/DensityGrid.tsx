@@ -77,7 +77,7 @@ export function DensityGrid({
   // reported the whole-card click was firing accidentally on chart
   // hover/zoom.
   const ChartPane = (
-    <Pane title="Price chart" onExpand={drillToWorkspace}>
+    <Pane title="Price chart" onExpand={drillToWorkspace} fillHeight>
       <PriceChart symbol={symbol} instrumentId={instrumentId} />
     </Pane>
   );
