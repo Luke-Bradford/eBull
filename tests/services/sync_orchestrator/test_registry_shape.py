@@ -20,7 +20,8 @@ EXPECTED_CADENCES: dict[str, timedelta] = {
     "fx_rates": timedelta(minutes=5),
     "cost_models": timedelta(hours=24),
     "weekly_reports": timedelta(days=7),
-    "monthly_reports": timedelta(days=31),
+    # monthly_reports uses a calendar-anchored cadence (#335); it is
+    # asserted separately rather than mapped to a fixed timedelta.
 }
 
 
@@ -34,6 +35,15 @@ def test_cadence_intervals_match_expected() -> None:
         assert LAYERS[name].cadence.interval == expected, (
             f"{name} cadence interval {LAYERS[name].cadence.interval} != {expected}"
         )
+
+
+def test_monthly_reports_uses_calendar_cadence() -> None:
+    """#335 — monthly_reports must be calendar-anchored, not a flat 31d."""
+    cadence = LAYERS["monthly_reports"].cadence
+    assert cadence.calendar_months == 1, (
+        f"monthly_reports cadence must be calendar-anchored (calendar_months=1); got {cadence}"
+    )
+    assert cadence.interval is None
 
 
 def test_minute_cadence_layers_have_tighter_retry_policy() -> None:

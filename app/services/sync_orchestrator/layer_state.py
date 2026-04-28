@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -122,6 +123,11 @@ def compute_layer_states_from_db(
     latest_status = _latest_status_map(conn, names)
     latest_ages = _latest_age_seconds_map(conn, names)
     content_results = _content_ok_map(conn)
+    # Snapshot a single ``now`` per state-machine evaluation so all
+    # calendar-month boundary computations share the same reference
+    # instant. Drift between layers within a single evaluation would
+    # be incoherent (different layers seeing different "this month").
+    now = datetime.now(UTC)
 
     def build(name: str, upstream: dict[str, LayerState]) -> LayerContext:
         layer = LAYERS[name]
@@ -141,7 +147,13 @@ def compute_layer_states_from_db(
             secret_present=all(bool(os.environ.get(ref.env_var)) for ref in layer.secret_refs),
             content_ok=content_results.get(name, True),
             age_seconds=age_seconds,
-            cadence_seconds=layer.cadence.interval.total_seconds(),
+            # ``cadence_seconds_for_state_machine`` is calendar-aware
+            # (#335): for ``calendar_months`` cadences it returns the
+            # boundary distance such that rule 9
+            # (``age_seconds > cadence_seconds * grace_multiplier``)
+            # fires at the calendar tick, not after a 31-day rolling
+            # window.
+            cadence_seconds=layer.cadence.cadence_seconds_for_state_machine(now, layer.grace_multiplier),
             grace_multiplier=layer.grace_multiplier,
             max_attempts=layer.retry_policy.max_attempts,
         )

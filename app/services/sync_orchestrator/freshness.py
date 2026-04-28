@@ -18,11 +18,12 @@ BEFORE ordering would hide a newer failure behind an older success.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import psycopg
 
+from app.services.sync_orchestrator.layer_types import Cadence
 from app.services.sync_orchestrator.types import PREREQ_SKIP_MARKER
 
 # ---------------------------------------------------------------------------
@@ -249,4 +250,63 @@ def weekly_reports_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
 
 
 def monthly_reports_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
-    return _fresh_by_audit(conn, "monthly_report", timedelta(days=31))
+    """Calendar-month anchored freshness for the monthly report layer (#335).
+
+    Fresh iff the latest counting ``job_runs`` row for ``monthly_report``
+    has its ``COALESCE(finished_at, started_at)`` anchor on or after
+    the first day of the current calendar month in UTC.
+
+    Two design choices to flag:
+
+    * The month boundary is computed in Python (not via SQL
+      ``date_trunc('month', now() at time zone 'UTC')``). The SQL
+      form returns ``timestamp without time zone``, which Postgres
+      silently coerces against a ``timestamptz`` ``started_at`` using
+      the session's ``TimeZone`` setting — that would mis-classify
+      runs at the boundary in any non-UTC DB session. Comparing two
+      ``timestamptz`` values in Python sidesteps the coercion.
+
+    * The freshness anchor is ``COALESCE(finished_at, started_at)``,
+      matching ``layer_state.py::_latest_age_seconds_map``. Without
+      that alignment, a run that started Jan 31 23:59 UTC and
+      finished Feb 1 00:01 UTC would be reported STALE by this
+      predicate and HEALTHY by the v2 state machine — the month-edge
+      divergence Codex flagged on #335.
+    """
+    now = datetime.now(UTC)
+    month_start_utc = Cadence(calendar_months=1).window_start(now)
+    # ``anchor`` mirrors the state machine's ``_latest_age_seconds_map``
+    # in ``layer_state.py`` — ``COALESCE(finished_at, started_at)``. A
+    # monthly run that started Jan 31 23:59 UTC and finished Feb 1
+    # 00:01 UTC counts as a Feb run for both views: predicate and v2
+    # state-machine. Without aligning the anchor, /sync/layers (legacy)
+    # and /sync/layers/v2 (state-machine) could disagree at the
+    # month-boundary edge.
+    row = conn.execute(
+        """
+        SELECT COALESCE(finished_at, started_at) AS anchor,
+               status,
+               error_msg,
+               EXTRACT(EPOCH FROM now() - COALESCE(finished_at, started_at)) AS age_seconds
+        FROM job_runs
+        WHERE job_name = %s
+        ORDER BY started_at DESC
+        LIMIT 1
+        """,
+        ("monthly_report",),
+    ).fetchone()
+    if row is None:
+        return False, "no job_runs row for monthly_report"
+    anchor, status, error_msg, age_seconds = row
+    is_counting = status == "success" or (
+        status == "skipped" and error_msg is not None and error_msg.startswith(PREREQ_SKIP_MARKER)
+    )
+    if not is_counting:
+        return False, f"latest monthly_report has status={status}, not a counting row"
+    age = timedelta(seconds=float(age_seconds))
+    if anchor < month_start_utc:
+        return (
+            False,
+            f"last monthly_report {_format_age(age)} ago — before the start of the current calendar month UTC",
+        )
+    return True, f"last monthly_report {_format_age(age)} ago (this calendar month)"
