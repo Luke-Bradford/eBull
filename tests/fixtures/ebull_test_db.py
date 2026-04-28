@@ -67,6 +67,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "position_alerts",  # #396 position-alert episodes
     "watchlist",  # #042 — FK → instruments
     "broker_positions",  # #024 — FK → instruments
+    "positions",  # #186 — FK → instruments; truncated so the upsert
+    # reset-on-reopen integration tests don't see stale state from
+    # earlier in the test run.
     "quotes",  # #002 — FK → instruments (live-tick target #471)
     "instruments",
     "job_runs",
