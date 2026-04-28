@@ -54,7 +54,7 @@ import {
 } from "@/lib/chartFormatters";
 import { chartTheme } from "@/lib/chartTheme";
 import { useAsync } from "@/lib/useAsync";
-import { useLiveLastBar, type AppliedTick } from "@/lib/useLiveLastBar";
+import { useLiveLastBar } from "@/lib/useLiveLastBar";
 
 const RANGES: { id: ChartRange; label: string }[] = [
   { id: "1d", label: "1D" },
@@ -115,85 +115,6 @@ interface NumericBar {
   low: number;
   close: number;
   volume: number;
-}
-
-/**
- * Build the wholesale-setData fingerprint string. Lifted out of the
- * effect so the SSE onApplied path can rebuild it from the same
- * formula — keeping the formula in one place stops the live and
- * REST sides from drifting and re-introducing flicker.
- *
- * Exported for unit testing — not part of the public component API.
- */
-export function barFingerprint(range: ChartRange | undefined, bars: readonly NumericBar[]): string {
-  return `${range ?? "?"}|${bars.length}|` + bars
-    .map((b) => `${b.time},${b.open},${b.high},${b.low},${b.close},${b.volume}`)
-    .join(";");
-}
-
-/**
- * Project a live-tick application into the bar-set that REST will
- * eventually return when it catches up. The merge is keyed on
- * timestamp, not on the aggregator's `kind` verdict — that verdict
- * is computed against history-plus-live state inside useLiveLastBar
- * but `clean` here is REST-only and may lag the visible chart by
- * one or more append/update cycles (a fresh bucket can take many
- * ticks before REST catches up at the 60s backstop). Merge rules:
- *
- *   * `live.time === last.time` → mutate that bar's OHLC, preserve
- *     its volume (tick stream has no per-bar volume).
- *   * `live.time > last.time` → upsert as a new bar (volume = 0).
- *     This branch is what handles the `append → update → ...`
- *     sequence: the first tick into a fresh bucket appends; every
- *     subsequent tick in that bucket arrives with `kind: "update"`
- *     against the aggregator's live bar, but `clean` still ends at
- *     the historical tail, so we must keep upserting until REST
- *     catches up.
- *   * `live.time < last.time` → stale tick (REST has already moved
- *     past); leave clean untouched.
- *
- * Exported for unit testing — not part of the public component API.
- */
-export function mergeLiveBarIntoClean(clean: readonly NumericBar[], live: AppliedTick): NumericBar[] {
-  if (clean.length === 0) {
-    return [
-      {
-        time: live.time as UTCTimestamp,
-        open: live.open,
-        high: live.high,
-        low: live.low,
-        close: live.close,
-        volume: 0,
-      },
-    ];
-  }
-  const lastIdx = clean.length - 1;
-  const last = clean[lastIdx]!;
-  if (live.time === last.time) {
-    const merged = clean.slice();
-    merged[lastIdx] = {
-      ...last,
-      open: live.open,
-      high: live.high,
-      low: live.low,
-      close: live.close,
-    };
-    return merged;
-  }
-  if (live.time > last.time) {
-    return [
-      ...clean,
-      {
-        time: live.time as UTCTimestamp,
-        open: live.open,
-        high: live.high,
-        low: live.low,
-        close: live.close,
-        volume: 0,
-      },
-    ];
-  }
-  return clean.slice();
 }
 
 // formatHoverLabel / tickFormatter / humanizeVolume now live in
@@ -322,13 +243,7 @@ export function PriceChart({
   const intraday = isIntraday(range);
 
   return (
-    // flex column with `flex-1 min-h-0` so when the parent Pane is
-    // mounted with `fillHeight` (DensityGrid chart cell uses
-    // lg:row-span-2), the chart canvas below expands to fill the
-    // grid cell instead of sitting at its 340px intrinsic height.
-    // Outside fillHeight contexts the modifiers are inert — block-
-    // layout parents ignore flex sizing on the child.
-    <div className="flex flex-1 flex-col gap-2 min-h-0">
+    <div className="space-y-2">
       {/*
         Controls swallow click events so they do NOT trigger the
         Pane's card-click drill (which navigates to the full chart
@@ -456,10 +371,6 @@ export function PriceChart({
           intraday={intraday}
           showPm={showPm}
           showAh={showAh}
-          // Make the canvas expand within the flex column above. In
-          // block-layout (non-fillHeight) parents these modifiers
-          // collapse to no-op and the canvas keeps its min-height.
-          containerClassName="h-full min-h-[340px] w-full flex-1"
         />
       ) : null}
     </div>
@@ -516,11 +427,6 @@ export function ChartCanvas({
   // poll, shifting the visible right edge and re-anchoring axis
   // ticks to whatever bar happens to be rightmost.
   const fittedRangeRef = useRef<string | null>(null);
-  // Bar-set fingerprint to skip wholesale series.setData when the
-  // 60s backstop refetch returns identical bars (the common case).
-  // Live ticks bypass this — they go through useLiveLastBar's
-  // series.update path which is silent and incremental by design.
-  const lastSetDataFingerprintRef = useRef<string | null>(null);
   const [hover, setHover] = useState<RichHoverState | null>(null);
 
   // Keep the ref in sync so the crosshair handler (registered once at
@@ -755,12 +661,8 @@ export function ChartCanvas({
   // capture.
   cleanRowsRef.current = clean;
 
-  // Feed data on every clean change. lightweight-charts `setData` is a
-  // wholesale replace that visibly flashes — fine on a true data
-  // change, ugly when the 60s backstop refetch returns identical bars
-  // (the common case, since live ticks come via `series.update` in
-  // useLiveLastBar). Skip the wholesale path when the bar set is
-  // unchanged. Live ticks remain unaffected — they bypass `clean`.
+  // Feed data on every clean change. lightweight-charts replaces the
+  // series wholesale via setData — no incremental diffing needed.
   useEffect(() => {
     const candle = candleRef.current;
     const line = lineRef.current;
@@ -768,21 +670,6 @@ export function ChartCanvas({
     const volume = volumeRef.current;
     const chart = chartRef.current;
     if (!candle || !line || !area || !volume || !chart) return;
-
-    // Bar-set fingerprint covering every field that influences the
-    // rendered output: range + length + every OHLCV per bar. We
-    // cannot key on first/last alone — interior revisions, OHL
-    // changes on the live bar, and earlier-close changes (which flip
-    // volume bar coloring via the `b.close >= prev.close` rule
-    // below) would all false-negative and freeze the chart on stale
-    // data. The string compare is sub-millisecond on the typical
-    // ~300-bar intraday set; cost is negligible vs the
-    // lightweight-charts repaint we are avoiding. The SSE onApplied
-    // path uses the same `barFingerprint` formula so live and REST
-    // can converge without re-introducing the wholesale flash.
-    const fp = barFingerprint(range, clean);
-    if (lastSetDataFingerprintRef.current === fp) return;
-    lastSetDataFingerprintRef.current = fp;
 
     candle.setData(
       clean.map((b) => ({
@@ -860,16 +747,6 @@ export function ChartCanvas({
       },
       acceptPre: showPm,
       acceptAh: showAh,
-      // Mirror live-tick state into the wholesale-setData fingerprint
-      // so the next REST backstop refetch — which catches up to the
-      // already-painted live bar — is recognised as identical and
-      // does not trigger a wholesale repaint flash. Without this, a
-      // chart sitting in an active SSE session would still flicker
-      // every 60s as REST converges on the live state.
-      onApplied: (live) => {
-        const merged = mergeLiveBarIntoClean(cleanRowsRef.current, live);
-        lastSetDataFingerprintRef.current = barFingerprint(range, merged);
-      },
     });
   const liveActive = connected && !unavailable && instrumentId !== null && range !== undefined;
   const lastTickHHMM = lastAppliedAt !== null
@@ -908,22 +785,10 @@ export function ChartCanvas({
   }, [clean, liveBucketTime]);
 
   return (
-    // `relative` for hover tooltip + live indicator absolute children.
-    // `flex flex-1 min-h-0 flex-col` so when the parent PriceChart
-    // wrapper is in flex column layout (the fillHeight path), this
-    // wrapper expands to fill the remaining height and the chart
-    // container's `h-full` inside it has a definite ancestor.
-    <div className="relative flex min-h-0 flex-1 flex-col">
+    <div className="relative">
       <div
         ref={containerRef}
         data-testid={`price-chart-${symbol}`}
-        // Default is the safe block-layout sizing (works under any
-        // parent). Callers that mount the chart inside a flex/grid
-        // cell and want fillHeight semantics MUST pass
-        // `containerClassName="h-full min-h-[340px] w-full flex-1"`
-        // explicitly (PriceChart's wrapper does so above). Switching
-        // the default to a flex-dependent string would silently
-        // collapse the canvas to 340px under any block-layout caller.
         className={containerClassName ?? "h-[340px] w-full"}
       />
       <SessionBands
