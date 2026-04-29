@@ -327,3 +327,228 @@ class TestExtendedUsGaapConcepts:
         facts = _extract_facts_from_gaap(gaap)
         assert len(facts) == 1
         assert facts[0].concept == "TreasuryStockSharesAcquired"
+
+
+class TestPartnershipDistributionConcepts:
+    """#674: pass-through entities (MLPs, LPs, LLCs taxed as partnerships)
+    file dividend / distribution facts under partnership-specific
+    XBRL tags. Without these in the allowlist, IEP / ET / EPD / MPLX
+    etc. landed at zero declared DPS in dividend_history despite
+    continuing to file quarterly distributions on SEC.
+
+    Live cross-check: SEC ships
+    ``DistributionMadeToLimitedPartnerDistributionsDeclaredPerUnit``
+    on Icahn Enterprises (CIK 0000813762) quarterly under
+    ``USD/shares`` units — the same priority slot the corp-style
+    ``CommonStockDividendsPerShareDeclared`` already used."""
+
+    def test_lp_distributions_declared_per_unit_extracted(self) -> None:
+        gaap = {
+            "DistributionMadeToLimitedPartnerDistributionsDeclaredPerUnit": {
+                "units": {
+                    "USD/shares": [
+                        _make_xbrl_entry(end="2025-09-30", val=0.50, fp="Q3", fy=2025),
+                    ]
+                }
+            }
+        }
+        facts = _extract_facts_from_gaap(gaap)
+        assert len(facts) == 1
+        assert facts[0].concept == "DistributionMadeToLimitedPartnerDistributionsDeclaredPerUnit"
+        assert facts[0].val == Decimal("0.5")
+        assert facts[0].unit == "USD/shares"
+
+    def test_lp_legacy_distributions_per_unit_outstanding_extracted(self) -> None:
+        # Older MLPs (some still filing) use this legacy concept name.
+        gaap = {
+            "DistributionsPerLimitedPartnershipUnitOutstanding": {
+                "units": {
+                    "USD/shares": [
+                        _make_xbrl_entry(end="2024-12-31", val=1.25, fp="Q4", fy=2024),
+                    ]
+                }
+            }
+        }
+        facts = _extract_facts_from_gaap(gaap)
+        assert len(facts) == 1
+        assert facts[0].concept == "DistributionsPerLimitedPartnershipUnitOutstanding"
+
+    def test_lp_cash_distributions_paid_per_unit_extracted(self) -> None:
+        gaap = {
+            "DistributionMadeToLimitedPartnerCashDistributionsPaidPerUnit": {
+                "units": {
+                    "USD/shares": [
+                        _make_xbrl_entry(end="2025-06-30", val=0.50, fp="Q2", fy=2025),
+                    ]
+                }
+            }
+        }
+        facts = _extract_facts_from_gaap(gaap)
+        assert len(facts) == 1
+        assert facts[0].concept == "DistributionMadeToLimitedPartnerCashDistributionsPaidPerUnit"
+
+    def test_llc_member_distributions_paid_per_unit_extracted(self) -> None:
+        # LLC variant for entities that file LLC member distribution
+        # rather than LP unit distribution (e.g. some MLPs structured
+        # as LLCs taxed as partnerships).
+        gaap = {
+            "DistributionMadeToLimitedLiabilityCompanyLLCMemberDistributionsPaidPerUnit": {
+                "units": {
+                    "USD/shares": [
+                        _make_xbrl_entry(end="2024-09-30", val=0.75, fp="Q3", fy=2024),
+                    ]
+                }
+            }
+        }
+        facts = _extract_facts_from_gaap(gaap)
+        assert len(facts) == 1
+        assert facts[0].concept == "DistributionMadeToLimitedLiabilityCompanyLLCMemberDistributionsPaidPerUnit"
+
+    def test_lp_aggregate_cash_distributions_paid_extracted(self) -> None:
+        gaap = {
+            "DistributionMadeToLimitedPartnerCashDistributionsPaid": {
+                "units": {
+                    "USD": [
+                        _make_xbrl_entry(end="2025-12-31", val=200_000_000.0, fp="FY", fy=2025),
+                    ]
+                }
+            }
+        }
+        facts = _extract_facts_from_gaap(gaap)
+        assert len(facts) == 1
+        assert facts[0].concept == "DistributionMadeToLimitedPartnerCashDistributionsPaid"
+        assert facts[0].unit == "USD"
+
+    def test_member_or_lp_aggregate_cash_distributions_paid_extracted(self) -> None:
+        gaap = {
+            "DistributionMadeToMemberOrLimitedPartnerCashDistributionsPaid": {
+                "units": {
+                    "USD": [
+                        _make_xbrl_entry(end="2025-12-31", val=150_000_000.0, fp="FY", fy=2025),
+                    ]
+                }
+            }
+        }
+        facts = _extract_facts_from_gaap(gaap)
+        assert len(facts) == 1
+
+    def test_member_or_lp_declared_per_unit_extracted(self) -> None:
+        # LP+member-aggregate variant of the per-unit declared concept.
+        gaap = {
+            "DistributionMadeToMemberOrLimitedPartnerDistributionsDeclaredPerUnit": {
+                "units": {
+                    "USD/shares": [
+                        _make_xbrl_entry(end="2025-09-30", val=0.30, fp="Q3", fy=2025),
+                    ]
+                }
+            }
+        }
+        facts = _extract_facts_from_gaap(gaap)
+        assert len(facts) == 1
+        assert facts[0].concept == "DistributionMadeToMemberOrLimitedPartnerDistributionsDeclaredPerUnit"
+
+    def test_llc_member_declared_per_unit_extracted(self) -> None:
+        # Pure-LLC variant (e.g. some MLPs structured as LLCs taxed
+        # as partnerships emit this rather than the LP-side concept).
+        gaap = {
+            "DistributionMadeToLimitedLiabilityCompanyLLCMemberDistributionsDeclaredPerUnit": {
+                "units": {
+                    "USD/shares": [
+                        _make_xbrl_entry(end="2024-12-31", val=2.10, fp="FY", fy=2024),
+                    ]
+                }
+            }
+        }
+        facts = _extract_facts_from_gaap(gaap)
+        assert len(facts) == 1
+        assert facts[0].concept == "DistributionMadeToLimitedLiabilityCompanyLLCMemberDistributionsDeclaredPerUnit"
+
+    def test_llc_member_aggregate_cash_distributions_paid_extracted(self) -> None:
+        # Pure-LLC paid-aggregate counterpart to the LP variant.
+        gaap = {
+            "DistributionMadeToLimitedLiabilityCompanyLLCMemberCashDistributionsPaid": {
+                "units": {
+                    "USD": [
+                        _make_xbrl_entry(end="2025-12-31", val=180_000_000.0, fp="FY", fy=2025),
+                    ]
+                }
+            }
+        }
+        facts = _extract_facts_from_gaap(gaap)
+        assert len(facts) == 1
+        assert facts[0].concept == "DistributionMadeToLimitedLiabilityCompanyLLCMemberCashDistributionsPaid"
+
+
+class TestPartnershipDistributionAliasing:
+    """The TRACKED_CONCEPTS allowlist is also the alias map that
+    drives the canonical projection in financial_periods. Verify each
+    new partnership tag routes to the correct canonical column with
+    the expected priority — corp-style stays priority 0 (so legacy
+    converters that file BOTH tags don't double-count or flip)."""
+
+    def test_lp_declared_aliases_to_dps_declared_at_priority_after_corp(self) -> None:
+        from app.services.fundamentals import _TAG_TO_COLUMN
+
+        col, prio = _TAG_TO_COLUMN["DistributionMadeToLimitedPartnerDistributionsDeclaredPerUnit"]
+        assert col == "dps_declared"
+        # Corp-style is priority 0; LP-style must be a higher index so
+        # the corp-style tag wins when both exist for the same period.
+        assert prio > 0
+        corp_col, corp_prio = _TAG_TO_COLUMN["CommonStockDividendsPerShareDeclared"]
+        assert corp_col == "dps_declared"
+        assert corp_prio == 0
+        assert prio > corp_prio
+
+    def test_lp_legacy_per_unit_aliases_to_dps_declared(self) -> None:
+        from app.services.fundamentals import _TAG_TO_COLUMN
+
+        col, _ = _TAG_TO_COLUMN["DistributionsPerLimitedPartnershipUnitOutstanding"]
+        assert col == "dps_declared"
+
+    def test_lp_cash_paid_per_unit_aliases_to_dps_cash_paid(self) -> None:
+        from app.services.fundamentals import _TAG_TO_COLUMN
+
+        col, _ = _TAG_TO_COLUMN["DistributionMadeToLimitedPartnerCashDistributionsPaidPerUnit"]
+        assert col == "dps_cash_paid"
+
+    def test_llc_member_cash_paid_per_unit_aliases_to_dps_cash_paid(self) -> None:
+        from app.services.fundamentals import _TAG_TO_COLUMN
+
+        col, _ = _TAG_TO_COLUMN["DistributionMadeToLimitedLiabilityCompanyLLCMemberDistributionsPaidPerUnit"]
+        assert col == "dps_cash_paid"
+
+    def test_lp_aggregate_cash_paid_aliases_to_dividends_paid(self) -> None:
+        from app.services.fundamentals import _TAG_TO_COLUMN
+
+        col, _ = _TAG_TO_COLUMN["DistributionMadeToLimitedPartnerCashDistributionsPaid"]
+        assert col == "dividends_paid"
+
+    def test_member_or_lp_aggregate_cash_paid_aliases_to_dividends_paid(self) -> None:
+        from app.services.fundamentals import _TAG_TO_COLUMN
+
+        col, _ = _TAG_TO_COLUMN["DistributionMadeToMemberOrLimitedPartnerCashDistributionsPaid"]
+        assert col == "dividends_paid"
+
+    def test_llc_member_aggregate_cash_paid_aliases_to_dividends_paid(self) -> None:
+        from app.services.fundamentals import _TAG_TO_COLUMN
+
+        col, _ = _TAG_TO_COLUMN["DistributionMadeToLimitedLiabilityCompanyLLCMemberCashDistributionsPaid"]
+        assert col == "dividends_paid"
+
+    def test_member_or_lp_declared_per_unit_aliases_to_dps_declared(self) -> None:
+        from app.services.fundamentals import _TAG_TO_COLUMN
+
+        col, _ = _TAG_TO_COLUMN["DistributionMadeToMemberOrLimitedPartnerDistributionsDeclaredPerUnit"]
+        assert col == "dps_declared"
+
+    def test_llc_member_declared_per_unit_aliases_to_dps_declared(self) -> None:
+        from app.services.fundamentals import _TAG_TO_COLUMN
+
+        col, _ = _TAG_TO_COLUMN["DistributionMadeToLimitedLiabilityCompanyLLCMemberDistributionsDeclaredPerUnit"]
+        assert col == "dps_declared"
+
+    def test_member_or_lp_paid_per_unit_aliases_to_dps_cash_paid(self) -> None:
+        from app.services.fundamentals import _TAG_TO_COLUMN
+
+        col, _ = _TAG_TO_COLUMN["DistributionMadeToMemberOrLimitedPartnerCashDistributionsPaidPerUnit"]
+        assert col == "dps_cash_paid"
