@@ -162,14 +162,21 @@ def _parse_date(raw: str | None) -> date | None:
         return date(year, month, day)
     except KeyError, ValueError:
         # `_MONTHS[name]` may KeyError on an unrecognised month
-        # token; `int(...)` may ValueError on a token that is not a
-        # parseable integer. Either path means the regex matched
-        # something that does not actually represent a date — return
+        # token; `int(...)` and `date(...)` may ValueError on tokens
+        # that do not represent a real date. Either path means the
+        # regex matched something that doesn't actually parse — return
         # None and let the caller fall back to a different label.
-        # Pre-#644 this was Python 2 syntax (`except KeyError, ValueError:`)
-        # which is a SyntaxError in Python 3; the file imported
-        # successfully only because the path was unreachable on the
-        # adapter's failing flow at the time.
+        #
+        # Pre-#644 this was `except KeyError, ValueError:` (no parens).
+        # On Python <=3.13 the no-parens form parses as
+        # `except KeyError as ValueError:` — only KeyError is caught,
+        # the bound name shadows the `ValueError` builtin inside the
+        # handler, and any real ValueError raised by `int()` or
+        # `date()` propagates up through `_extract` and aborts the
+        # entire announcement parse for one bad token. PEP 758 makes
+        # the bare-tuple form legal syntax on 3.14+, but the
+        # semantics still need parens to mean "catch a tuple of
+        # classes" rather than the as-bind reading.
         return None
 
 

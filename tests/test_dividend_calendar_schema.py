@@ -27,10 +27,15 @@ from tests.fixtures.ebull_test_db import (
 
 
 class TestParseDateSyntax:
-    """Pure import + invocation. The Python-2 except syntax used to
-    raise SyntaxError the first time the path was exercised on a
-    Python 3 interpreter. Calling the parser with input that takes
-    the failure branch proves the fix."""
+    """The pre-#644 `except KeyError, ValueError:` (no parens)
+    parsed differently on Python <=3.13 vs 3.14: on the older
+    versions it reads as `except KeyError as ValueError:` (only
+    catches KeyError, binds the bound name `ValueError`); on 3.14
+    PEP 758 makes the bare-tuple form mean what the parens form
+    does. Either way the parens form is portable and unambiguous.
+    Tests below exercise the ValueError branch explicitly so a
+    regression to the no-parens form would fail the test on
+    Python <=3.13 (real ValueError would propagate)."""
 
     def test_parser_returns_date_on_canonical_long_form(self) -> None:
         from datetime import date
