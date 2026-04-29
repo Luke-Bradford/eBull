@@ -48,9 +48,11 @@ export function DividendsPanel({ symbol, provider }: DividendsPanelProps) {
     [symbol, provider],
   );
 
-  // Empty case: data loaded, no history AND no upcoming → no card at all.
-  // This implements the four-state empty-pane policy: capability active but
-  // no current and no forward signal → render null.
+  // Empty case: data loaded, no history AND no upcoming → render an
+  // in-pane empty state instead of null. Returning null left the
+  // bento grid's pre-allocated column blank (operator-visible dead
+  // space — #684 round 3 Codex finding). The empty-state card carries
+  // honest "no dividend history" copy + the same Pane chrome.
   if (
     !state.loading &&
     state.error === null &&
@@ -58,7 +60,24 @@ export function DividendsPanel({ symbol, provider }: DividendsPanelProps) {
     state.data.history.length === 0 &&
     state.data.upcoming.length === 0
   ) {
-    return null;
+    // Match the populated card's chrome — provider provenance + the
+    // Open→ drill stay so the operator can still navigate to the
+    // L2 dividends page for context, even with no data here.
+    return (
+      <Pane
+        title="Dividends"
+        source={{ providers: [provider] }}
+        onExpand={() =>
+          navigate(
+            `/instrument/${encodeURIComponent(symbol)}/dividends?provider=${encodeURIComponent(provider)}`,
+          )
+        }
+      >
+        <p className="text-xs text-slate-500">
+          No dividend history or upcoming dividends on file.
+        </p>
+      </Pane>
+    );
   }
 
   const last4 =

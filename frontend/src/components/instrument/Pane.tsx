@@ -47,10 +47,16 @@ export function Pane({
   const clickable = onCardClick !== undefined;
   // Build the article className from atomic segments so optional
   // segments do not leave double spaces when omitted.
+  // Bento-aesthetic chrome (#684 round 3): rounded-xl (12px) per
+  // ui-ux-pro-max guidance — distinctive without being cartoonish.
+  // ``transition-shadow`` on every pane gives a subtle hover lift
+  // even on non-clickable cards, signalling "this is a tile in a
+  // bento grid" without the layout-shifting hover-scale that #687
+  // explicitly avoided.
   const articleCls = [
-    "rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm",
+    "rounded-xl border border-slate-200 bg-white px-3 py-2.5 shadow-sm transition-shadow hover:shadow-md",
     fillHeight ? "flex h-full flex-col" : null,
-    clickable ? "cursor-pointer transition hover:border-slate-300 hover:shadow-md" : null,
+    clickable ? "cursor-pointer hover:border-slate-300" : null,
     className ?? null,
   ]
     .filter((x): x is string => x !== null)

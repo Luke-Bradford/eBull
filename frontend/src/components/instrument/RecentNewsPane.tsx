@@ -38,8 +38,18 @@ export function RecentNewsPane({
       </Pane>
     );
   }
+  // Render an in-pane empty state instead of returning null so the
+  // bento grid's allocator doesn't reserve a phantom column for the
+  // pane and leave operator-visible dead space (#684 round 3 — Codex
+  // finding 2). The "no news yet" copy is more honest than a hole.
   if (state.data === null || state.data.items.length === 0) {
-    return null;
+    return (
+      <Pane title="Recent news">
+        <p className="text-xs text-slate-500">
+          No news on file for this instrument.
+        </p>
+      </Pane>
+    );
   }
 
   const items = state.data.items.slice(0, ROW_LIMIT);

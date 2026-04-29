@@ -46,16 +46,23 @@ describe("RecentNewsPane", () => {
     expect(items.length).toBeLessThanOrEqual(5);
   });
 
-  it("returns null when feed is empty (no card)", async () => {
+  it("renders an in-pane empty state when feed is empty (#684 round 3)", async () => {
+    // Was: returned null. Changed to render the Pane chrome with an
+    // empty-state line so the bento grid's allocator doesn't reserve
+    // a phantom column for a pane that disappears at runtime.
     vi.spyOn(newsApi, "fetchNews").mockResolvedValueOnce({
       items: [],
       total: 0,
     } as never);
-    const { container } = render(
+    render(
       <MemoryRouter>
         <RecentNewsPane instrumentId={1} symbol="X" />
       </MemoryRouter>,
     );
-    await waitFor(() => expect(container.firstChild).toBeNull());
+    await waitFor(() => {
+      expect(
+        screen.getByText(/No news on file for this instrument/i),
+      ).toBeInTheDocument();
+    });
   });
 });

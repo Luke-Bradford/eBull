@@ -90,17 +90,24 @@ describe("DividendsPanel", () => {
     expect(screen.getByText("40")).toBeInTheDocument();
   });
 
-  it("returns null when history is empty AND upcoming is empty", async () => {
+  it("renders an in-pane empty state when history is empty AND upcoming is empty (#684 round 3)", async () => {
+    // Was: returned null. Changed to render the Pane chrome with an
+    // empty-state line so the bento grid's allocator doesn't reserve
+    // a phantom column for a pane that disappears at runtime.
     mockFetch.mockResolvedValueOnce({
       symbol: "X",
       summary: { has_dividend: false } as never,
       history: [],
       upcoming: [],
     } as never);
-    const { container } = wrap(
-      <DividendsPanel symbol="X" provider="sec_dividend_summary" />,
-    );
-    await waitFor(() => expect(container.firstChild).toBeNull());
+    wrap(<DividendsPanel symbol="X" provider="sec_dividend_summary" />);
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          /No dividend history or upcoming dividends on file/i,
+        ),
+      ).toBeInTheDocument();
+    });
   });
 
   it("renders Pane when history is empty but upcoming has 1 item", async () => {
