@@ -106,13 +106,20 @@ export function DensityGrid({
             <InsiderActivitySummary symbol={symbol} />
           </div>
         )}
+        {/* BusinessSections narrative stays full-width (long-form
+            content reads fine wide). Dividends panel caps at 6 cols
+            so its narrow stat-block doesn't stretch — was previously
+            paired with narrative but DividendsPanel and
+            BusinessSectionsTeaser each null-out independently when
+            their own data is empty, which would have left a 5-column
+            ghost slot in mixed-coverage states (#684 review). */}
         {hasNarrative && (
           <div className="col-span-12">
             <BusinessSectionsTeaser symbol={symbol} />
           </div>
         )}
         {dividendProviders.length > 0 && (
-          <div className="col-span-12">
+          <div className="col-span-12 lg:col-span-6">
             {dividendProviders.map((p) => (
               <DividendsPanel key={`div-${p}`} symbol={symbol} provider={p} />
             ))}
@@ -168,7 +175,10 @@ export function DensityGrid({
             <InsiderActivitySummary symbol={symbol} />
           </div>
         ) : dividendProviders.length > 0 ? (
-          <div className="col-span-12">
+          // Standalone dividends pane caps at 6 cols so a narrow
+          // stat-block doesn't stretch across the viewport (#684
+          // operator review).
+          <div className="col-span-12 lg:col-span-6">
             {dividendProviders.map((p) => (
               <DividendsPanel key={`div-${p}`} symbol={symbol} provider={p} />
             ))}
@@ -204,7 +214,8 @@ export function DensityGrid({
         </div>
       )}
       {dividendProviders.length > 0 && (
-        <div className="col-span-12">
+        // Minimal-profile dividends caps at 6 cols too (#684).
+        <div className="col-span-12 lg:col-span-6">
           {dividendProviders.map((p) => (
             <DividendsPanel key={`div-${p}`} symbol={symbol} provider={p} />
           ))}

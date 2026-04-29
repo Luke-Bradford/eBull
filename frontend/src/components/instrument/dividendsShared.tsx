@@ -121,7 +121,7 @@ export function NextDividendBanner({ upcoming }: { upcoming: UpcomingDividend })
 
 export function DividendsSummaryBlock({ summary }: { summary: DividendSummary }) {
   return (
-    <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+    <dl className="grid max-w-md grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
       <dt className="text-slate-500">
         <Term term="TTM" /> yield
       </dt>
