@@ -65,16 +65,15 @@ class TestParseDateContract:
 
         assert _parse_date("not a date at all") is None
 
-    def test_parser_returns_none_on_unrecognised_month_token(self) -> None:
-        # Take the KeyError branch via _MONTHS[name] lookup of an
-        # unknown month. The regex pattern requires one of the
-        # _MONTH_NAME_ALT tokens, so we synthesise the failure
-        # via a string the regex won't catch — the no-match branch
-        # is the realistic shape of "regex matched garbage in v1".
+    def test_parser_short_circuits_on_falsy_input(self) -> None:
+        # Covers the `if not raw: return None` early-exit guard at
+        # the top of `_parse_date`. The KeyError arm of the
+        # except-clause is dead code in practice — `_DATE_RE`'s
+        # `m1` group is built from `_MONTHS.keys()`, so a regex
+        # match guarantees the lookup succeeds. Kept as defensive
+        # belt-and-suspenders in the source; not test-worthy here.
         from app.services.dividend_calendar import _parse_date
 
-        # An empty string short-circuits via the `if not raw` guard
-        # — covers the falsy-input branch.
         assert _parse_date("") is None
         assert _parse_date(None) is None
 
