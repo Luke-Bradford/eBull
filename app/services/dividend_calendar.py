@@ -161,6 +161,14 @@ def _parse_date(raw: str | None) -> date | None:
             year = int(m.group("y2"))
         return date(year, month, day)
     except KeyError, ValueError:
+        # `_MONTHS[name]` may KeyError on an unrecognised month
+        # token; `int(...)` and `date(...)` may ValueError on tokens
+        # that don't represent a real date. Either path means the
+        # regex matched something that doesn't actually parse — return
+        # None and let the caller fall back to a different label.
+        # PEP 758 (Python 3.14+) makes this bare-tuple form mean
+        # `except (KeyError, ValueError):`; ruff format normalises
+        # away the parens since the project pins requires-python>=3.14.
         return None
 
 
