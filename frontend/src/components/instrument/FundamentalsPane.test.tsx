@@ -96,7 +96,7 @@ describe("FundamentalsPane", () => {
     expect(screen.getByText("Total debt")).toBeInTheDocument();
   });
 
-  it("renders Open button when fundamentals tab is active and navigates to ?tab=financials", async () => {
+  it("renders Open button and navigates to the fundamentals drill route", async () => {
     vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
       ((_symbol: string, query: { statement: string }) => {
         if (query.statement === "income") {
@@ -127,7 +127,7 @@ describe("FundamentalsPane", () => {
     );
     const btn = await screen.findByRole("button", { name: /open/i });
     await userEvent.click(btn);
-    expect(navigateMock).toHaveBeenCalledWith("/instrument/GME?tab=financials");
+    expect(navigateMock).toHaveBeenCalledWith("/instrument/GME/fundamentals");
   });
 
   it("computes total debt as long_term_debt + short_term_debt per period", async () => {
