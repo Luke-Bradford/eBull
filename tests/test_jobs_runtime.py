@@ -925,3 +925,88 @@ class TestShutdownBoundedWait:
         rt.shutdown(timeout_s=0.5)
         elapsed = time.monotonic() - start
         assert elapsed < 5.0, f"shutdown took {elapsed:.2f}s"
+
+
+class TestShutdownDoesNotBlockOnInflightJobs:
+    """#657 — shutdown must NOT wait for in-flight jobs. APScheduler is
+    stopped with wait=False; the manual executor with wait=False +
+    cancel_futures=True. Recovery is the boot reaper's job."""
+
+    def test_scheduler_shutdown_uses_wait_false(self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The previous impl used wait=True and routinely hit the 30s
+        cap on edits-during-fundamentals-sync, causing the uvicorn
+        --reload supervisor to give up and exit dirty. wait=False
+        means in-flight jobs get hard-killed by process exit and the
+        boot reaper transitions their orphaned sync_runs / layer rows
+        on the next startup."""
+        rt = _make_runtime({"j1": lambda: None})
+        rt.start()
+
+        captured: dict[str, object] = {}
+
+        def fake_scheduler_shutdown(*args: object, **kwargs: object) -> None:
+            captured["scheduler_kwargs"] = kwargs
+            captured["scheduler_args"] = args
+
+        monkeypatch.setattr(rt._scheduler, "shutdown", fake_scheduler_shutdown)
+        monkeypatch.setattr(rt._manual_executor, "shutdown", lambda *a, **kw: None)
+
+        rt.shutdown()
+
+        assert captured["scheduler_kwargs"] == {"wait": False}
+
+    def test_executor_shutdown_uses_wait_false_and_cancel_futures(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """cancel_futures=True drops manual triggers that are still
+        queued so they don't keep the executor alive past shutdown.
+        In-flight ones get hard-killed by process exit."""
+        rt = _make_runtime({"j1": lambda: None})
+        rt.start()
+
+        captured: dict[str, object] = {}
+
+        def fake_executor_shutdown(*args: object, **kwargs: object) -> None:
+            captured["executor_kwargs"] = kwargs
+
+        monkeypatch.setattr(rt._scheduler, "shutdown", lambda *a, **kw: None)
+        monkeypatch.setattr(rt._manual_executor, "shutdown", fake_executor_shutdown)
+
+        rt.shutdown()
+
+        assert captured["executor_kwargs"] == {"wait": False, "cancel_futures": True}
+
+    def test_inflight_job_does_not_delay_shutdown(self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Real-process simulation: a manual trigger submits a job that
+        sleeps long; shutdown must return promptly because we no longer
+        wait for it. The previous wait=True path would have blocked
+        until the sleep completed."""
+        import time
+
+        slept_for = 60.0  # job would sleep 60s if waited on
+        rt = _make_runtime({"slow": lambda: time.sleep(slept_for)})
+        rt.start()
+        rt._manual_executor.submit(lambda: time.sleep(slept_for))
+
+        start = time.monotonic()
+        rt.shutdown()
+        elapsed = time.monotonic() - start
+        assert elapsed < 2.0, (
+            f"shutdown took {elapsed:.2f}s — should be sub-second with wait=False; "
+            f"a value near {slept_for}s would mean wait=True regressed"
+        )
+
+    def test_default_timeout_is_short(self, patched_runtime: None) -> None:
+        """Default timeout is the belt-and-suspenders cap for the case
+        where the underlying shutdown(wait=False) call ITSELF wedges
+        (very rare). 5s is short enough that the uvicorn supervisor
+        does not give up on the relaunch but long enough to absorb
+        any cleanup the libraries do."""
+        import inspect
+
+        sig = inspect.signature(JobRuntime.shutdown)
+        default = sig.parameters["timeout_s"].default
+        assert default <= 10.0, (
+            f"shutdown default timeout is {default}s — should be <=10s so "
+            f"the uvicorn --reload supervisor does not abandon the relaunch"
+        )
