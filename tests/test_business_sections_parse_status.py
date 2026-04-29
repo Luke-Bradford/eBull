@@ -94,13 +94,17 @@ class TestGetParseStatus:
 
     def test_no_item_1_when_failure_reason_is_marker(self, conn: psycopg.Connection[object]) -> None:
         instrument_id = _seed_instrument(conn)
+        # last_parsed_at populated explicitly so the assertion below
+        # doesn't depend on the schema-level NOT NULL DEFAULT NOW().
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO instrument_business_summary
                     (instrument_id, body, source_accession,
-                     attempt_count, last_failure_reason, next_retry_at)
-                VALUES (%s, '', 'acc-1', 1, 'no_item_1_marker', now() + interval '1 day')
+                     attempt_count, last_failure_reason, next_retry_at,
+                     last_parsed_at)
+                VALUES (%s, '', 'acc-1', 1, 'no_item_1_marker',
+                        now() + interval '1 day', now())
                 """,
                 (instrument_id,),
             )
@@ -123,8 +127,10 @@ class TestGetParseStatus:
                 """
                 INSERT INTO instrument_business_summary
                     (instrument_id, body, source_accession,
-                     attempt_count, last_failure_reason, next_retry_at)
-                VALUES (%s, '', 'acc-2', 1, 'body_too_short', now() + interval '1 day')
+                     attempt_count, last_failure_reason, next_retry_at,
+                     last_parsed_at)
+                VALUES (%s, '', 'acc-2', 1, 'body_too_short',
+                        now() + interval '1 day', now())
                 """,
                 (instrument_id,),
             )
@@ -145,8 +151,10 @@ class TestGetParseStatus:
                 """
                 INSERT INTO instrument_business_summary
                     (instrument_id, body, source_accession,
-                     attempt_count, last_failure_reason, next_retry_at)
-                VALUES (%s, '', 'acc-3', 2, 'parse_exception', now() + interval '7 days')
+                     attempt_count, last_failure_reason, next_retry_at,
+                     last_parsed_at)
+                VALUES (%s, '', 'acc-3', 2, 'parse_exception',
+                        now() + interval '7 days', now())
                 """,
                 (instrument_id,),
             )
@@ -169,8 +177,8 @@ class TestGetParseStatus:
             cur.execute(
                 """
                 INSERT INTO instrument_business_summary
-                    (instrument_id, body, source_accession)
-                VALUES (%s, 'real Item 1 body text', 'acc-4')
+                    (instrument_id, body, source_accession, last_parsed_at)
+                VALUES (%s, 'real Item 1 body text', 'acc-4', now())
                 """,
                 (instrument_id,),
             )
@@ -178,6 +186,34 @@ class TestGetParseStatus:
             ps = get_parse_status(conn, instrument_id=instrument_id)
             assert ps is not None
             assert ps.state == "sections_pending"
+            assert ps.last_attempted_at is not None
+        finally:
+            _delete_summary(conn, instrument_id)
+
+    def test_parse_failed_when_failure_reason_is_null(self, conn: psycopg.Connection[object]) -> None:
+        # Edge case the bot flagged: a row with body='' but
+        # last_failure_reason IS NULL (race window where the ingester
+        # wrote the tombstone but failed before stamping the reason,
+        # or a manual operator-inserted row). Falls through to
+        # parse_failed with failure_reason=None — UI omits the
+        # parenthetical so it reads "Parser failed." rather than
+        # "Parser failed (None)" or similar awkward fallback.
+        instrument_id = _seed_instrument(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO instrument_business_summary
+                    (instrument_id, body, source_accession,
+                     attempt_count, last_parsed_at)
+                VALUES (%s, '', 'acc-null-reason', 1, now())
+                """,
+                (instrument_id,),
+            )
+        try:
+            ps = get_parse_status(conn, instrument_id=instrument_id)
+            assert ps is not None
+            assert ps.state == "parse_failed"
+            assert ps.failure_reason is None
             assert ps.last_attempted_at is not None
         finally:
             _delete_summary(conn, instrument_id)
