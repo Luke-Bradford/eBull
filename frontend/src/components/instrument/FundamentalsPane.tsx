@@ -455,7 +455,19 @@ function FundamentalCell({
               />
               <Tooltip
                 cursor={{ stroke: chartTheme.crosshair, strokeWidth: 1, strokeDasharray: "3 3" }}
-                formatter={(value: number) => [formatBigNumber(value), label]}
+                formatter={(value) => {
+                  // Recharts ValueType is string | number | (string|number)[].
+                  // For null-valued points we expect Recharts to skip the
+                  // tooltip row, but coerce defensively so the formatter
+                  // signature is honest about every value Recharts can pass.
+                  const n =
+                    typeof value === "number"
+                      ? value
+                      : typeof value === "string" && value !== ""
+                        ? Number(value)
+                        : null;
+                  return [formatBigNumber(Number.isFinite(n) ? n : null), label];
+                }}
                 labelFormatter={formatPeriodTick}
                 contentStyle={{
                   fontSize: "11px",
