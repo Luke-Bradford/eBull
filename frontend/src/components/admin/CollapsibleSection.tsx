@@ -52,7 +52,7 @@ export function CollapsibleSection({
         type="button"
         onClick={toggle}
         aria-expanded={isOpen}
-        className="flex w-full items-baseline justify-between gap-2 text-left transition-colors hover:text-amber-600"
+        className="group flex w-full items-baseline justify-between gap-2 text-left"
       >
         <div className="flex items-baseline gap-2">
           <span
@@ -61,14 +61,14 @@ export function CollapsibleSection({
           >
             ▸
           </span>
-          <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-700">
+          <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-700 transition-colors group-hover:text-amber-600">
             {title}
           </h2>
           {summary ? (
             <span className="text-xs text-slate-500">— {summary}</span>
           ) : null}
         </div>
-        <span className="text-[11px] text-slate-500">
+        <span className="text-[11px] text-slate-500 transition-colors group-hover:text-amber-600">
           {isOpen ? "Hide" : "Show"}
         </span>
       </button>
