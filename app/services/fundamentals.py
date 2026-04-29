@@ -73,7 +73,8 @@ def refresh_fundamentals(
     counted.
     """
     upserted = 0
-    skipped = 0
+    skipped_no_data = 0
+    skipped_provider_error = 0
     fresh_skipped = 0
     today = date.today()
 
@@ -84,14 +85,17 @@ def refresh_fundamentals(
         try:
             snap = provider.get_latest_snapshot(symbol)
             if snap is None:
-                logger.info("Fundamentals: no data from provider for %s, skipping", symbol)
-                skipped += 1
+                # Per-symbol "no data" is a known property of the
+                # universe (non-US issuers, deisted, IPO-recent), not
+                # a transient miss worth one log line per symbol per
+                # refresh tick. Aggregate at the end (#669).
+                skipped_no_data += 1
                 continue
             _upsert_snapshot(conn, instrument_id, snap)
             upserted += 1
         except Exception:
             logger.warning("Fundamentals: failed to refresh %s, skipping", symbol, exc_info=True)
-            skipped += 1
+            skipped_provider_error += 1
 
     if fresh_skipped:
         logger.info(
@@ -99,11 +103,17 @@ def refresh_fundamentals(
             fresh_skipped,
             len(symbols),
         )
+    if skipped_no_data:
+        logger.info(
+            "Fundamentals: %d/%d instruments returned no data from provider",
+            skipped_no_data,
+            len(symbols),
+        )
 
     return FundamentalsRefreshSummary(
         symbols_attempted=len(symbols),
         snapshots_upserted=upserted,
-        symbols_skipped=skipped,
+        symbols_skipped=skipped_no_data + skipped_provider_error,
     )
 
 
@@ -122,14 +132,14 @@ def refresh_fundamentals_history(
     and for catching up after provider outages.
     """
     upserted = 0
-    skipped = 0
+    skipped_no_data = 0
+    skipped_provider_error = 0
 
     for symbol, instrument_id in symbols:
         try:
             snaps = provider.get_snapshot_history(symbol, from_date, to_date, limit=limit)
             if not snaps:
-                logger.info("Fundamentals history: no data for %s in range, skipping", symbol)
-                skipped += 1
+                skipped_no_data += 1
                 continue
             with conn.transaction():
                 for snap in snaps:
@@ -137,13 +147,24 @@ def refresh_fundamentals_history(
             # Count only after the transaction commits successfully
             upserted += len(snaps)
         except Exception:
-            logger.warning("Fundamentals history: failed to refresh %s, skipping", symbol, exc_info=True)
-            skipped += 1
+            logger.warning(
+                "Fundamentals history: failed to refresh %s, skipping",
+                symbol,
+                exc_info=True,
+            )
+            skipped_provider_error += 1
+
+    if skipped_no_data:
+        logger.info(
+            "Fundamentals history: %d/%d instruments returned no data in range",
+            skipped_no_data,
+            len(symbols),
+        )
 
     return FundamentalsRefreshSummary(
         symbols_attempted=len(symbols),
         snapshots_upserted=upserted,
-        symbols_skipped=skipped,
+        symbols_skipped=skipped_no_data + skipped_provider_error,
     )
 
 
