@@ -1,26 +1,52 @@
 /**
  * /instrument/:symbol/dividends — full dividend drill-through page (#578).
  *
- * Sections:
- *   1. Summary  — DividendsSummaryBlock
- *   2. Upcoming — NextDividendBanner (when present)
- *   3. Per-quarter history — full HistoryBar list, grouped by FY DESC
- *   4. Per-FY totals — summed dps_declared per fiscal_year
+ * #590 upgrade: four recharts panes layered above the existing raw
+ * tables — DPS line, cumulative DPS area, payout-ratio line (annual
+ * cashflow input), and yield-on-cost bar (only when the operator
+ * holds the instrument). The original Summary / Upcoming / per-quarter
+ * history bars / per-FY totals stay below the charts so the analyst
+ * view and the raw audit-trail view live side by side.
+ *
+ * Fetches:
+ *   - GET /instruments/{symbol}/dividends                       (always)
+ *   - GET /instruments/{symbol}/summary                         (always — gets instrument_id for the position lookup)
+ *   - GET /instruments/{symbol}/financials?statement=cashflow&period=annual (for payout ratio; degrades the pane only)
+ *   - GET /portfolio/instruments/{instrument_id}                (after summary lands; degrades to "not held" on 404 / zero units)
  *
  * URL: /instrument/:symbol/dividends
- * Optional ?provider= query param forwarded to the API; defaults to the
- * provider embedded in the data (any row's reported_currency shares the
- * same provider — we don't need to inspect capabilities here because this
- * page is only reachable from DividendsPanel which already resolved the
- * provider).
+ * Optional ?provider= forwarded to the dividends endpoint.
  */
 
-import { fetchInstrumentDividends } from "@/api/instruments";
-import type { DividendPeriod, InstrumentDividends } from "@/api/instruments";
+import { useCallback, useMemo } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
+
+import {
+  fetchInstrumentDividends,
+  fetchInstrumentFinancials,
+  fetchInstrumentSummary,
+} from "@/api/instruments";
+import type {
+  DividendPeriod,
+  InstrumentDividends,
+} from "@/api/instruments";
+import type {
+  InstrumentFinancials,
+  InstrumentPositionDetail,
+  InstrumentSummary,
+} from "@/api/types";
+import { ApiError } from "@/api/client";
+import { fetchInstrumentPositions } from "@/api/portfolio";
 import {
   SectionError,
   SectionSkeleton,
 } from "@/components/dashboard/Section";
+import {
+  CumulativeDpsChart,
+  DpsLineChart,
+  PayoutRatioChart,
+  YieldOnCostChart,
+} from "@/components/dividends/dividendsCharts";
 import { Pane } from "@/components/instrument/Pane";
 import {
   DividendsSummaryBlock,
@@ -30,8 +56,6 @@ import {
 } from "@/components/instrument/dividendsShared";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
-import { useCallback } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
 
 // ---------------------------------------------------------------------------
 // Per-FY totals helper
@@ -81,6 +105,23 @@ function sortedHistory(history: ReadonlyArray<DividendPeriod>): DividendPeriod[]
 }
 
 // ---------------------------------------------------------------------------
+// Position fetch (degrades to null on 404 — instrument exists but
+// is not in the operator's portfolio. Other failures rethrow so the
+// error surfaces in the SectionError path.)
+// ---------------------------------------------------------------------------
+
+async function fetchPositionOrNull(
+  instrumentId: number,
+): Promise<InstrumentPositionDetail | null> {
+  try {
+    return await fetchInstrumentPositions(instrumentId);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Page component
 // ---------------------------------------------------------------------------
 
@@ -89,7 +130,7 @@ export function DividendsPage(): JSX.Element {
   const [searchParams] = useSearchParams();
   const provider = searchParams.get("provider") ?? undefined;
 
-  const state = useAsync<InstrumentDividends>(
+  const dividends = useAsync<InstrumentDividends>(
     useCallback(
       () => fetchInstrumentDividends(symbol, provider),
       [symbol, provider],
@@ -97,15 +138,58 @@ export function DividendsPage(): JSX.Element {
     [symbol, provider],
   );
 
+  const summary = useAsync<InstrumentSummary>(
+    useCallback(() => fetchInstrumentSummary(symbol), [symbol]),
+    [symbol],
+  );
+
+  // Annual cashflow rows feed the payout-ratio pane. Quarterly is too
+  // noisy (capex spikes throw the ratio); spec asks for annual.
+  const cashflow = useAsync<InstrumentFinancials>(
+    useCallback(
+      () =>
+        fetchInstrumentFinancials(symbol, {
+          statement: "cashflow",
+          period: "annual",
+        }),
+      [symbol],
+    ),
+    [symbol],
+  );
+
+  // Position fetch keys on the instrument_id once summary resolves.
+  // useAsync re-runs when deps change, so we're safe to feed it the
+  // resolved id without an effect dance.
+  const instrumentId = summary.data?.instrument_id ?? null;
+  const position = useAsync<InstrumentPositionDetail | null>(
+    useCallback(
+      () =>
+        instrumentId === null
+          ? Promise.resolve(null)
+          : fetchPositionOrNull(instrumentId),
+      [instrumentId],
+    ),
+    [instrumentId],
+  );
+
+  const avgEntry = useMemo<number | null>(() => {
+    const pos = position.data;
+    if (pos === null) return null;
+    if (pos.total_units <= 0) return null;
+    // `avg_entry` is the per-share weighted entry price. Yield-on-
+    // cost divides by it, so a null / zero / negative value is
+    // mathematically meaningless; treat the position as effectively
+    // unheld for YoC purposes and let the page hide the pane.
+    if (pos.avg_entry === null || pos.avg_entry <= 0) return null;
+    return pos.avg_entry;
+  }, [position.data]);
+
   const backHref = `/instrument/${encodeURIComponent(symbol)}`;
 
   return (
     <div className="mx-auto max-w-screen-xl space-y-4 p-4">
       <header className="border-b border-slate-200 pb-3">
-        <Link
-          to={backHref}
-          className="text-xs text-sky-700 hover:underline"
-        >
+        <Link to={backHref} className="text-xs text-sky-700 hover:underline">
           ← Back to {symbol}
         </Link>
         <h1 className="mt-1 text-lg font-semibold text-slate-900">
@@ -113,19 +197,17 @@ export function DividendsPage(): JSX.Element {
         </h1>
       </header>
 
-      {state.loading ? (
+      {dividends.loading ? (
         <SectionSkeleton rows={6} />
-      ) : state.error !== null || state.data === null ? (
-        <SectionError onRetry={state.refetch} />
-      ) : state.data.history.length === 0 && state.data.upcoming.length === 0 ? (
+      ) : dividends.error !== null || dividends.data === null ? (
+        <SectionError onRetry={dividends.refetch} />
+      ) : dividends.data.history.length === 0 &&
+        dividends.data.upcoming.length === 0 ? (
         <EmptyState
           title="No dividend data"
           description="No dividend history or upcoming dividends on file for this instrument."
         >
-          <Link
-            to={backHref}
-            className="text-sm text-sky-700 hover:underline"
-          >
+          <Link to={backHref} className="text-sm text-sky-700 hover:underline">
             ← Back to {symbol}
           </Link>
         </EmptyState>
@@ -133,27 +215,77 @@ export function DividendsPage(): JSX.Element {
         <div className="space-y-4">
           {/* 1. Summary */}
           <Pane title="Summary">
-            <DividendsSummaryBlock summary={state.data.summary} />
+            <DividendsSummaryBlock summary={dividends.data.summary} />
           </Pane>
 
           {/* 2. Upcoming dividend (optional) */}
-          {state.data.upcoming[0] !== undefined && (
+          {dividends.data.upcoming[0] !== undefined && (
             <Pane title="Upcoming dividend">
-              <NextDividendBanner upcoming={state.data.upcoming[0]} />
+              <NextDividendBanner upcoming={dividends.data.upcoming[0]} />
             </Pane>
           )}
 
-          {/* 3. Per-quarter history */}
-          {state.data.history.length > 0 && (
+          {/* 3. DPS line */}
+          {dividends.data.history.length > 0 && (
+            <Pane
+              title="DPS over time"
+              scope="declared per period"
+              source={{ providers: ["sec_xbrl"] }}
+            >
+              <DpsLineChart history={dividends.data.history} />
+            </Pane>
+          )}
+
+          {/* 4. Cumulative DPS */}
+          {dividends.data.history.length > 0 && (
+            <Pane
+              title="Cumulative DPS"
+              scope="running total since first reported"
+              source={{ providers: ["sec_xbrl"] }}
+            >
+              <CumulativeDpsChart history={dividends.data.history} />
+            </Pane>
+          )}
+
+          {/* 5. Payout ratio (annual). Degrades inside the pane when
+               the cashflow endpoint fails or has no data — the rest
+               of the page keeps rendering. */}
+          <Pane
+            title="Payout ratio"
+            scope="annual · dividends paid / FCF"
+            source={{ providers: ["sec_xbrl"] }}
+          >
+            <PayoutRatioPaneBody state={cashflow} />
+          </Pane>
+
+          {/* 6. Yield-on-cost — only when held. The chart itself
+               renders the not-held empty hint, but we hide the pane
+               entirely so unheld instruments don't carry an awkward
+               gray block. */}
+          {avgEntry !== null && dividends.data.history.length > 0 && (
+            <Pane
+              title="Yield-on-cost"
+              scope={`vs avg entry ${avgEntry.toFixed(2)}`}
+              source={{ providers: ["sec_xbrl", "etoro"] }}
+            >
+              <YieldOnCostChart
+                history={dividends.data.history}
+                avgEntry={avgEntry}
+              />
+            </Pane>
+          )}
+
+          {/* 7. Per-quarter history (raw audit) */}
+          {dividends.data.history.length > 0 && (
             <Pane title="Per-quarter history">
-              <PerQuarterHistory history={state.data.history} />
+              <PerQuarterHistory history={dividends.data.history} />
             </Pane>
           )}
 
-          {/* 4. Per-FY totals */}
-          {state.data.history.length > 0 && (
+          {/* 8. Per-FY totals (raw audit) */}
+          {dividends.data.history.length > 0 && (
             <Pane title="Per-FY totals">
-              <FyTotalsTable history={state.data.history} />
+              <FyTotalsTable history={dividends.data.history} />
             </Pane>
           )}
         </div>
@@ -163,7 +295,37 @@ export function DividendsPage(): JSX.Element {
 }
 
 // ---------------------------------------------------------------------------
-// Per-quarter history
+// Per-pane payout-ratio body — separated so its loading / error /
+// no-data branches don't bloat the page render. The cashflow endpoint
+// can legitimately fail or be empty without taking down the rest of
+// the page.
+// ---------------------------------------------------------------------------
+
+function PayoutRatioPaneBody({
+  state,
+}: {
+  readonly state: ReturnType<typeof useAsync<InstrumentFinancials>>;
+}): JSX.Element {
+  if (state.loading) return <SectionSkeleton rows={3} />;
+  if (state.error !== null) {
+    return (
+      <p className="text-xs text-slate-500">
+        Cash-flow data unavailable.
+        <button
+          type="button"
+          onClick={state.refetch}
+          className="ml-2 text-sky-700 hover:underline"
+        >
+          Retry
+        </button>
+      </p>
+    );
+  }
+  return <PayoutRatioChart cashflowRows={state.data?.rows ?? []} />;
+}
+
+// ---------------------------------------------------------------------------
+// Per-quarter history (existing component, unchanged)
 // ---------------------------------------------------------------------------
 
 function PerQuarterHistory({
@@ -191,7 +353,7 @@ function PerQuarterHistory({
 }
 
 // ---------------------------------------------------------------------------
-// Per-FY totals table
+// Per-FY totals table (existing component, unchanged)
 // ---------------------------------------------------------------------------
 
 function FyTotalsTable({
