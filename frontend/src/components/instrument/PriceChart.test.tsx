@@ -74,6 +74,17 @@ vi.mock("lightweight-charts", () => {
     timeScale: vi.fn(() => ({
       fitContent: libState.fitContent,
       applyOptions: libState.timeScaleApply,
+      // SessionBands subscribes to visible-range changes when
+      // mounted (intraday + bands enabled). The test renderer
+      // doesn't drive bands, but the subscribe call fires on
+      // mount; provide no-op stubs so it doesn't throw an
+      // "is not a function" during teardown.
+      subscribeVisibleLogicalRangeChange: vi.fn(),
+      unsubscribeVisibleLogicalRangeChange: vi.fn(),
+      logicalToCoordinate: vi.fn(() => 0),
+      timeToCoordinate: vi.fn(() => 0),
+      getVisibleLogicalRange: vi.fn(() => null),
+      getVisibleRange: vi.fn(() => null),
     })),
     subscribeCrosshairMove: vi.fn((h: (p: unknown) => void) => {
       libState.crosshairHandlers.push(h);
@@ -406,6 +417,110 @@ describe("PriceChart — data states", () => {
       expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
     });
     expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
+  });
+});
+
+describe("PriceChart — no-flicker on background refetch (#650)", () => {
+  it("does NOT render the skeleton during a same-range backstop refetch (chart stays mounted, no layout shift)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mockedFetch.mockResolvedValue(bars(twoValidRows()));
+      render(
+        <MemoryRouter>
+          <PriceChart symbol="AAPL" />
+        </MemoryRouter>,
+      );
+
+      // Initial load completes — chart visible, no skeleton.
+      await waitFor(() => {
+        expect(screen.getByTestId("price-chart-AAPL")).toBeInTheDocument();
+      });
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+
+      // The 60s backstop refetch fires. Pre-#650 this would have
+      // toggled `loading=true` for a frame, the skeleton would
+      // mount + push the chart down + unmount + push it back —
+      // visually a "browser refresh" flicker.
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      // Chart still mounted; skeleton must not appear during a
+      // background refetch with valid same-range data already
+      // on screen.
+      expect(screen.getByTestId("price-chart-AAPL")).toBeInTheDocument();
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("DOES render the skeleton on initial load (no chart yet to keep on screen)", async () => {
+    // Hold the fetch open so we can observe the loading state
+    // before data arrives.
+    let resolveFetch!: (v: NormalisedChartCandles) => void;
+    mockedFetch.mockReturnValue(
+      new Promise<NormalisedChartCandles>((r) => {
+        resolveFetch = r;
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
+
+    // Initial load: skeleton present, chart not yet mounted.
+    expect(await screen.findByRole("status")).toBeInTheDocument();
+    expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
+
+    // Resolve, chart mounts, skeleton vanishes.
+    resolveFetch(bars(twoValidRows()));
+    await waitFor(() => {
+      expect(screen.getByTestId("price-chart-AAPL")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("DOES render the skeleton when the operator clicks a different range (chart hides until new range data arrives)", async () => {
+    mockedFetch.mockResolvedValue(bars(twoValidRows(), "1m"));
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="AAPL" />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("price-chart-AAPL")).toBeInTheDocument();
+    });
+
+    // Hold the next fetch open to observe the in-flight state.
+    let resolve5y!: (v: NormalisedChartCandles) => void;
+    mockedFetch.mockReturnValueOnce(
+      new Promise<NormalisedChartCandles>((r) => {
+        resolve5y = r;
+      }),
+    );
+    await user.click(screen.getByTestId("chart-range-5y"));
+
+    // Range mismatch (data still has range="1m", url now says "5y"):
+    // skeleton appears, chart hides until 5y data lands.
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("price-chart-AAPL")).not.toBeInTheDocument();
+
+    resolve5y(bars(twoValidRows(), "5y"));
+    await waitFor(() => {
+      expect(screen.getByTestId("price-chart-AAPL")).toBeInTheDocument();
+    });
+    // Once the new range data lands, the skeleton must vanish — the
+    // skeleton-shown half of this contract is asserted above; the
+    // skeleton-hidden half belongs here so a regression that left
+    // the skeleton stuck on top of the chart would fail the test.
+    await waitFor(() => {
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    });
   });
 });
 
