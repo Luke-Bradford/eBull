@@ -26,15 +26,29 @@ def client():
     app.dependency_overrides[get_conn] and don't always restore — the
     overrides stick on the module-global FastAPI app. We explicitly
     clear and set only the auth bypass so our read-only endpoints hit
-    the real DB with a recognized auth context."""
+    the real DB with a recognized auth context.
+
+    SNAPSHOT-RESTORE pattern (#655): the prior version called
+    `app.dependency_overrides.clear()` on both setup AND teardown,
+    which wiped the no-op auth override that conftest.py installs at
+    module import time. Subsequent tests in other files (notably the
+    smoke test) hit real auth and 401'd. We snapshot the dict before
+    mutating and restore on teardown so the test isolation is
+    self-contained and other test modules see exactly the override
+    set they would have seen if this fixture had not run.
+    """
     from app.api.auth import require_session_or_service_token
     from app.main import app
 
+    snapshot = dict(app.dependency_overrides)
     app.dependency_overrides.clear()
     app.dependency_overrides[require_session_or_service_token] = lambda: None
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
+    try:
+        with TestClient(app) as c:
+            yield c
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(snapshot)
 
 
 @pytest.fixture

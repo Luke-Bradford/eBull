@@ -22,6 +22,8 @@ import os
 # EBULL_SKIP_CATCH_UP=0 pytest to reproduce catch-up bugs.
 os.environ.setdefault("EBULL_SKIP_CATCH_UP", "1")
 
+import pytest  # noqa: E402
+
 from app.api.auth import require_session_or_service_token  # noqa: E402
 from app.main import app  # noqa: E402
 from tests.fixtures.ebull_test_db import ebull_test_conn as ebull_test_conn  # noqa: F401, E402
@@ -31,4 +33,17 @@ def _noop_auth() -> None:  # pragma: no cover - trivial override
     return None
 
 
+# Module-import-time install so non-fixtured tests see the bypass.
 app.dependency_overrides[require_session_or_service_token] = _noop_auth
+
+
+# Defense-in-depth (#655): re-assert the auth bypass at the start of
+# every test. A test fixture elsewhere can call
+# ``app.dependency_overrides.clear()`` and forget to restore — that
+# wipes this module-global install and any subsequent test (notably
+# the smoke test) hits real auth and 401s. Re-installing here makes
+# the bypass robust against any other test that mutates the global
+# override dict, regardless of test ordering.
+@pytest.fixture(autouse=True)
+def _reassert_auth_bypass() -> None:
+    app.dependency_overrides[require_session_or_service_token] = _noop_auth
