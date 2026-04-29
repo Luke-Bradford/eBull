@@ -112,7 +112,7 @@ export function DashboardPage() {
         // they share the `/portfolio` fetch so duplicating the retry
         // affordance would just confuse the operator (Codex #387
         // review).
-        <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="border-t border-slate-200 pt-3">
           <SectionError onRetry={portfolio.refetch} />
         </div>
       ) : (

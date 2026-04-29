@@ -1,18 +1,24 @@
 import type { ReactNode } from "react";
 
 /**
- * Section card container used by every dashboard panel.
+ * Section — canonical card primitive used by every dashboard panel and
+ * many list/detail pages.
  *
  * Each section owns its own loading / error / empty / data state — a
  * failing /system/status must not blank /portfolio. Sections render an
  * inline ErrorBanner with a Retry button rather than throwing, so the
  * top-level ErrorBoundary is reserved for unexpected exceptions.
  *
- * ``scrollable=true`` (#194) switches the Section into a contained-
- * scroll layout: the section claims remaining flex space and its
- * body scrolls vertically, instead of growing the page-level scroll.
- * Use when the parent is a flex column with ``h-full`` and the
- * section sits below header/filter chrome that should stay visible.
+ * Design-system v1 chrome (issue #691): hairline top-rule + small-caps
+ * uppercase title. Replaces the prior rounded card + border + shadow
+ * pattern so the page reads as a continuous editorial spread instead
+ * of a Trello-board of tiles. Matches the Pane component on the
+ * instrument page.
+ *
+ * `scrollable=true` (#194) switches the Section into a contained-scroll
+ * layout: the section claims remaining flex space and its body scrolls
+ * vertically. Use when the parent is a flex column with `h-full` and
+ * the section sits below header/filter chrome that should stay visible.
  */
 export function Section({
   title,
@@ -25,15 +31,21 @@ export function Section({
   children: ReactNode;
   scrollable?: boolean;
 }) {
+  // Hairline chrome — no background, no border, no shadow. The top-rule
+  // + small-caps title pair carries the section break visually.
   const sectionClass = scrollable
-    ? "flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm"
-    : "rounded-md border border-slate-200 bg-white shadow-sm";
-  const bodyClass = scrollable ? "min-h-0 flex-1 overflow-auto p-4" : "p-4";
+    ? "flex min-h-0 flex-1 flex-col overflow-hidden border-t border-slate-200 pt-3"
+    : "border-t border-slate-200 pt-3";
+  const bodyClass = scrollable ? "min-h-0 flex-1 overflow-auto pt-3" : "pt-3";
   return (
     <section className={sectionClass}>
-      <header className="flex flex-shrink-0 items-center justify-between border-b border-slate-100 px-4 py-3">
-        <h2 className="text-sm font-semibold text-slate-700">{title}</h2>
-        {action ? <div className="text-xs">{action}</div> : null}
+      <header className="flex flex-shrink-0 items-baseline justify-between gap-2">
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-700">
+          {title}
+        </h2>
+        {action ? (
+          <div className="text-[11px] text-slate-600">{action}</div>
+        ) : null}
       </header>
       <div className={bodyClass}>{children}</div>
     </section>
@@ -44,7 +56,7 @@ export function SectionError({ onRetry }: { onRetry: () => void }) {
   return (
     <div
       role="alert"
-      className="flex items-center justify-between rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+      className="flex items-center justify-between rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
     >
       <span>Failed to load. Check the browser console for details.</span>
       <button

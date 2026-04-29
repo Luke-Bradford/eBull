@@ -4,7 +4,8 @@ import { formatMoney, formatPct, pnlPct } from "@/lib/format";
 import { SectionSkeleton } from "@/components/dashboard/Section";
 
 /**
- * Three top-level cards: Total AUM, Cash, Unrealized P&L.
+ * Four top-level cards: Total AUM, Cash, Unrealized P&L, Available for
+ * deployment.
  *
  * AUM honours the settled decision: backend uses mark-to-market first and
  * falls back to cost basis when no quote exists (see app/api/portfolio.py).
@@ -15,6 +16,10 @@ import { SectionSkeleton } from "@/components/dashboard/Section";
  * expose a top-line `unrealized_pnl` field. Percentage uses sum-of-PnL over
  * sum-of-cost-basis (capital-weighted), not an average of per-position
  * percentages.
+ *
+ * Design-system v1 chrome (#691): borderless, divided by hairlines on
+ * sm+ screens. Replaces the prior bordered+shadowed card pattern so
+ * the page reads as one editorial spread.
  */
 export function SummaryCards({
   data,
@@ -28,9 +33,9 @@ export function SummaryCards({
   const currency = useDisplayCurrency();
   if (data === null) {
     return (
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2 lg:grid-cols-4">
         {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+          <div key={i} className="border-t border-slate-200 px-1 pt-3 pb-1">
             <SectionSkeleton rows={2} />
           </div>
         ))}
@@ -53,7 +58,7 @@ export function SummaryCards({
   const pnlFraction = pnlPct(totalPnl, totalCost);
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2 lg:grid-cols-4">
       <Card label="Total AUM" value={formatMoney(data.total_aum, currency)} />
       <Card
         label="Cash balance"
@@ -86,7 +91,7 @@ function DeploymentCard({
       return <Card label="Available for deployment" value="—" hint="Budget unavailable" />;
     }
     return (
-      <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="border-t border-slate-200 px-1 pt-3 pb-1">
         <SectionSkeleton rows={2} />
       </div>
     );
@@ -132,13 +137,17 @@ function Card({
     tone === "positive"
       ? "text-emerald-600"
       : tone === "negative"
-        ? "text-red-600"
+        ? "text-rose-600"
         : "text-slate-900";
   return (
-    <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
-      <div className={`mt-1 text-2xl font-semibold ${toneClass}`}>{value}</div>
-      {hint ? <div className="mt-1 text-xs text-slate-500">{hint}</div> : null}
+    <div className="border-t border-slate-200 px-1 pt-3 pb-1">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">
+        {label}
+      </div>
+      <div className={`mt-1 text-2xl font-semibold tabular-nums ${toneClass}`}>
+        {value}
+      </div>
+      {hint ? <div className="mt-1 text-xs tabular-nums text-slate-500">{hint}</div> : null}
     </div>
   );
 }
