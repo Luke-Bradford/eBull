@@ -452,33 +452,59 @@ class JobRuntime:
             fut = self._manual_executor.submit(wrapped)
             fut.add_done_callback(self._log_future_exception)
 
-    def shutdown(self, *, timeout_s: float = 30.0) -> None:
-        """Stop the scheduler with a bounded wait for in-flight jobs.
+    def shutdown(self, *, timeout_s: float = 5.0) -> None:
+        """Stop the scheduler quickly; rely on the boot reaper for recovery.
 
         Called from the FastAPI lifespan teardown *before* the
-        connection pool is closed so any job currently writing to
-        ``job_runs`` can finish cleanly.
+        connection pool is closed.
 
-        Two-phase teardown:
+        Recovery model (#657):
 
-        1. Graceful: try ``shutdown(wait=True)`` for up to
-           ``timeout_s`` seconds. If in-flight jobs return cleanly,
-           every ``job_runs`` write lands.
+        eBull treats shutdown as best-effort and crash recovery as
+        authoritative — the same pattern Postgres uses for its own
+        WAL replay, Kubernetes for ReplicaSet failover, Sidekiq for
+        ReliableFetch, etc. Two consequences:
 
-        2. Bounded escalation: if the graceful wait exceeds the
-           timeout, log loud and fall back to ``shutdown(wait=False)``
-           so the lifespan teardown can proceed. In-flight jobs
-           continue running in the background; their late writes to
-           ``job_runs`` will fail against the (about to close)
-           connection pool.
+        1. We do NOT block waiting for in-flight jobs. APScheduler is
+           stopped with ``wait=False`` so it stops accepting new jobs
+           and returns immediately; in-flight scheduled jobs get
+           hard-killed by process exit and Postgres rolls back their
+           open transactions when the connection drops. The manual
+           ThreadPoolExecutor likewise stops with
+           ``shutdown(wait=False, cancel_futures=True)`` so queued
+           manual triggers do not delay teardown.
 
-        Pre-fix history: the original implementation (PR #131) used
-        unbounded ``wait=True``. A hung job (e.g. SEC HTTP call
-        wedged behind a watcher-driven uvicorn reload) blocked the
-        lifespan teardown indefinitely; the old worker held port
-        8000 and the new worker couldn't bind, requiring a manual
-        process kill. Bounded wait converts a hard hang into
-        best-effort teardown + a visible operator-facing warning.
+        2. The orchestrator boot reaper
+           (``app.services.sync_orchestrator.reaper.reap_orphaned_syncs``,
+           called with ``reap_all=True`` from the lifespan startup) is
+           the authoritative cleanup. It transitions any
+           ``status='running'`` ``sync_runs`` row + its leftover
+           ``pending``/``running`` layer rows to terminal status with
+           ``error_category='orchestrator_crash'`` (or ``'cancelled'``
+           per #645 for never-started rows). This recovery runs on
+           every boot, regardless of how the prior process exited
+           (clean reload, SIGKILL, OOM, host reboot).
+
+        Pre-fix history (#131 → #657): the original implementation
+        used ``wait=True`` to drain jobs. A hung job blocked teardown
+        for the full timeout, and a uvicorn ``--reload`` cycle that
+        runs into an in-flight long-running job (SEC ingest,
+        fundamentals refresh) would routinely abandon the daemon
+        thread after 30s — slow enough that uvicorn's reload
+        supervisor often gave up and left the dev server dead with
+        no follow-up "Started server process" log. The fix lets
+        shutdown return in milliseconds and shifts trust onto the
+        boot reaper that already exists.
+
+        Idempotency requirement: any long-running job MUST be safe
+        under mid-flight kill. This already holds for orchestrator-
+        managed layers (UPSERT semantics + the reaper). Future jobs
+        added via APScheduler must not assume they'll always finish.
+
+        ``timeout_s`` (default 5.0) is the belt-and-suspenders cap.
+        With ``wait=False`` the underlying call should return in
+        milliseconds; the timeout exists in case APScheduler /
+        ThreadPoolExecutor itself hangs in cleanup.
         """
         if not self._started:
             return
@@ -486,34 +512,34 @@ class JobRuntime:
 
         def _graceful_scheduler() -> None:
             try:
-                self._scheduler.shutdown(wait=True)
+                # wait=False per #657 — do not block on in-flight jobs.
+                # The boot reaper handles their orphaned state on the
+                # next process startup.
+                self._scheduler.shutdown(wait=False)
             except Exception:
                 logger.exception("JobRuntime scheduler shutdown raised")
 
         def _graceful_executor() -> None:
             try:
-                self._manual_executor.shutdown(wait=True)
+                # cancel_futures=True drops queued manual triggers
+                # that haven't started yet; in-flight ones get
+                # hard-killed by process exit.
+                self._manual_executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 logger.exception("JobRuntime manual executor shutdown raised")
 
-        # Run each shutdown on a DAEMON thread. If the join times out,
-        # we ABANDON the daemon thread rather than make a concurrent
-        # ``shutdown(wait=False)`` call: APScheduler / ThreadPoolExecutor
-        # don't document concurrent ``shutdown`` re-entry as safe and
-        # the second call could corrupt internal state or race with
-        # the still-blocked first call (Codex review on this PR).
-        # Daemon=True ensures the abandoned thread does not block
-        # interpreter exit; the underlying scheduler / executor goes
-        # to undefined state but that's acceptable for lifespan
-        # teardown — the process is on its way out either way and a
-        # uvicorn reload spawns a fresh runtime.
+        # Daemon-thread isolation kept from the prior impl so the
+        # join timeout cannot trap the lifespan teardown if either
+        # underlying ``shutdown`` itself wedges (rare; should not
+        # happen with wait=False but cheap insurance).
         sched_thread = threading.Thread(target=_graceful_scheduler, daemon=True)
         sched_thread.start()
         sched_thread.join(timeout=timeout_s)
         if sched_thread.is_alive():
             logger.warning(
-                "JobRuntime scheduler shutdown exceeded %.0fs — abandoning the daemon thread "
-                "and proceeding with teardown; in-flight scheduled jobs will not be drained",
+                "JobRuntime scheduler shutdown(wait=False) wedged for %.0fs — "
+                "abandoning daemon and proceeding; boot reaper will reconcile "
+                "any orphaned sync_runs on next startup",
                 timeout_s,
             )
 
@@ -522,8 +548,8 @@ class JobRuntime:
         exec_thread.join(timeout=timeout_s)
         if exec_thread.is_alive():
             logger.warning(
-                "JobRuntime manual executor shutdown exceeded %.0fs — abandoning the daemon "
-                "thread and proceeding; in-flight manual triggers will not be drained",
+                "JobRuntime manual executor shutdown(wait=False) wedged for %.0fs — "
+                "abandoning daemon and proceeding; queued manual triggers are dropped",
                 timeout_s,
             )
 
