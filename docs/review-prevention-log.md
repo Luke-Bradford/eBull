@@ -1058,6 +1058,13 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 ### `CREATE TABLE IF NOT EXISTS` does not add columns to pre-existing tables
 
 - First seen in: #644 (dividend_events.last_parsed_at).
-- Symptom: migration 054 declared `last_parsed_at` inside the `CREATE TABLE IF NOT EXISTS dividend_events (...)` block. On any database where `dividend_events` already existed when 054 ran (a partial earlier apply, a manual create, etc.), `IF NOT EXISTS` short-circuited the entire CREATE — and the new column was silently never added. `schema_migrations` recorded 054 as applied. Daily `sec_dividend_calendar_ingest` then failed every run with `column de.last_parsed_at does not exist` because the ingester query referenced a column the migration had not actually added.
+- Symptom: migration 054 declared `last_parsed_at` inside the `CREATE TABLE IF NOT EXISTS dividend_events (...)` block. On any database where `dividend_events` already existed when 054 ran (a partial earlier apply, a manual create, etc.), `IF NOT EXISTS` short-circuited the entire CREATE — the new column was silently never added. `schema_migrations` recorded 054 as applied. Daily `sec_dividend_calendar_ingest` then failed every run with `column de.last_parsed_at does not exist` because the ingester query referenced a column the migration had not actually added.
 - Prevention: any column added in a "new table" migration must be paired with an idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` for the case where the table already exists. Either inline in the same migration after the CREATE, or as a follow-up backfill migration (the pattern in `sql/082_dividend_events_last_parsed_at_backfill.sql`). Self-review for any new-table migration: ask "what if this table already exists from an earlier shape?" — if the answer is "the column never lands", add the ALTER.
-- Enforced in: this prevention log; PR #644 ships the backfill migration. Future fix tracked in #644's deferred verifier sub-task: a post-migration column verifier that fails boot on drift.
+- Enforced in: this prevention log; PR #644 ships the backfill migration.
+
+### Don't claim `except A, B:` is Python 2 syntax on a 3.14+ project
+
+- First seen in: #644 review (PR #659).
+- Symptom: a comment claimed `except KeyError, ValueError:` was Python-2 syntax that would `SyntaxError` on Python 3. PEP 758 (Python 3.14) makes the bare-tuple form legal again as a tuple-of-types catch — equivalent to `except (KeyError, ValueError):`. The project pins `requires-python>=3.14` and ruff format normalises away the parens. The misleading comment risked future contributors trying to "fix" non-broken code.
+- Prevention: when the project pins a Python minimum, treat exception-clause forms as a syntax-by-version question. On <=3.13 projects, `except A, B:` parses as `except A as B:` (binds the second name) and IS a real bug; on 3.14+ projects it's the canonical form per PEP 758. Don't write comments claiming "Python 2 syntax" without checking the project's `requires-python` first.
+- Enforced in: this prevention log.
