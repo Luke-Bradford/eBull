@@ -19,7 +19,7 @@ export function AuditFilters({
 }: AuditFiltersProps) {
   return (
     <div
-      className="flex flex-wrap items-end gap-3 rounded-md border border-slate-200 bg-white p-3 shadow-sm"
+      className="flex flex-wrap items-end gap-3 border-t border-slate-200 px-1 pt-3 pb-2"
       role="group"
       aria-label="Audit filters"
     >
