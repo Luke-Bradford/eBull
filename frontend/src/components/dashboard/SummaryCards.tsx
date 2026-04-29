@@ -33,9 +33,9 @@ export function SummaryCards({
   const currency = useDisplayCurrency();
   if (data === null) {
     return (
-      <div className="grid grid-cols-1 divide-y divide-slate-200 sm:grid-cols-2 sm:divide-x sm:divide-y-0 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2 lg:grid-cols-4">
         {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="px-4 py-3 first:pl-0 sm:first:pl-4 sm:[&:nth-child(3)]:pl-4 lg:[&:nth-child(3)]:pl-4">
+          <div key={i} className="border-t border-slate-200 px-1 pt-3 pb-1">
             <SectionSkeleton rows={2} />
           </div>
         ))}
@@ -58,7 +58,7 @@ export function SummaryCards({
   const pnlFraction = pnlPct(totalPnl, totalCost);
 
   return (
-    <div className="grid grid-cols-1 divide-y divide-slate-200 sm:grid-cols-2 sm:divide-x sm:divide-y-0 lg:grid-cols-4">
+    <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2 lg:grid-cols-4">
       <Card label="Total AUM" value={formatMoney(data.total_aum, currency)} />
       <Card
         label="Cash balance"
@@ -91,7 +91,7 @@ function DeploymentCard({
       return <Card label="Available for deployment" value="—" hint="Budget unavailable" />;
     }
     return (
-      <div className="px-4 py-3">
+      <div className="border-t border-slate-200 px-1 pt-3 pb-1">
         <SectionSkeleton rows={2} />
       </div>
     );
@@ -140,7 +140,7 @@ function Card({
         ? "text-rose-600"
         : "text-slate-900";
   return (
-    <div className="px-4 py-3">
+    <div className="border-t border-slate-200 px-1 pt-3 pb-1">
       <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">
         {label}
       </div>
