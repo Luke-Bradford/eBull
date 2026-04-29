@@ -154,10 +154,21 @@ export function DpsLineChart({ history }: HistoryProps): JSX.Element {
 
 export function CumulativeDpsChart({ history }: HistoryProps): JSX.Element {
   const series = buildCumulativeDps(history);
-  if (series.length === 0 || series[series.length - 1]!.cumulative_dps === 0) {
+  // Empty hint fires when:
+  //   - the helper returned no rows at all, or
+  //   - every row's cumulative_dps is null (every source dps was
+  //     missing — the round-2 fix to emit nulls for gaps means the
+  //     all-null case now passes the rendered-axes guard otherwise).
+  // Without the second branch, an issuer whose `dps_declared` column
+  // is empty everywhere renders an AreaChart with no visible series
+  // instead of the inline "no data" hint (PR #673 review).
+  const lastWithValue = [...series]
+    .reverse()
+    .find((p) => p.cumulative_dps !== null);
+  if (lastWithValue === undefined || lastWithValue.cumulative_dps === 0) {
     return <NoData message="No declared DPS history to accumulate." />;
   }
-  const currency = series[series.length - 1]!.currency ?? "USD";
+  const currency = lastWithValue.currency ?? "USD";
   return (
     <div style={{ height: CHART_HEIGHT }} className="w-full">
       <ResponsiveContainer width="100%" height="100%">
