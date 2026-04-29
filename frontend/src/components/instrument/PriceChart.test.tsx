@@ -524,6 +524,101 @@ describe("PriceChart — no-flicker on background refetch (#650)", () => {
   });
 });
 
+describe("PriceChart — duplicate-timestamp dedupe (GENC at 6m)", () => {
+  it("dedupes duplicate timestamps so lightweight-charts asc-ordering assert never trips", async () => {
+    // Reproduces the GENC FourHours observation: eToro intraday
+    // returned two bars with the same `time` at index 22, the
+    // setData call hit the library's "data must be asc ordered by
+    // time" assertion, the chart threw, and the page-level
+    // ErrorBoundary blanked the whole instrument view. The dedupe
+    // in `cleanAll` keeps the assertion from ever firing.
+    const T0 = Math.floor(Date.UTC(2025, 11, 5) / 1000);
+    const T1 = T0 + 14400; // +4h (FourHours bucket)
+    const T2 = T1 + 14400;
+    mockedFetch.mockResolvedValue(
+      bars([
+        { time: T0, open: "10", high: "11", low: "9", close: "10.5", volume: "100" },
+        // Duplicate timestamp — the bug repro.
+        { time: T1, open: "10.5", high: "12", low: "10", close: "11", volume: "200" },
+        { time: T1, open: "11", high: "12.5", low: "10.5", close: "11.5", volume: "150" },
+        { time: T2, open: "11.5", high: "12", low: "11", close: "11.8", volume: "180" },
+      ]),
+    );
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="GENC" />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(libState.candleSetData).toHaveBeenCalled();
+    });
+    const call = libState.candleSetData.mock.calls.at(-1)?.[0] as Array<{ time: number }>;
+    // Three unique times — the duplicate T1 collapsed.
+    expect(call).toHaveLength(3);
+    // Strictly ascending — the contract that pre-#666 was violated.
+    for (let i = 1; i < call.length; i++) {
+      expect(call[i]!.time).toBeGreaterThan(call[i - 1]!.time);
+    }
+  });
+
+  it("last-write-wins on duplicates (matches live-tick aggregator semantics)", async () => {
+    // When eToro returns two bars for the same bucket, the SECOND
+    // is treated as authoritative — same rule the live aggregator
+    // uses when a tick mutates the in-progress bar. Test pins this
+    // so a future "first-wins" change can't slip in unnoticed.
+    const T0 = Math.floor(Date.UTC(2025, 11, 5) / 1000);
+    const T1 = T0 + 14400;
+    mockedFetch.mockResolvedValue(
+      bars([
+        { time: T0, open: "10", high: "11", low: "9", close: "10.5", volume: "100" },
+        { time: T1, open: "100", high: "200", low: "50", close: "150", volume: "1" },
+        { time: T1, open: "11", high: "12", low: "10.5", close: "11.5", volume: "999" },
+      ]),
+    );
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="GENC" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(libState.candleSetData).toHaveBeenCalled();
+    });
+    const call = libState.candleSetData.mock.calls.at(-1)?.[0] as Array<{
+      time: number;
+      close: number;
+    }>;
+    expect(call[1]?.close).toBe(11.5); // second (later) entry won
+  });
+
+  it("sorts out-of-order timestamps before deduping", async () => {
+    // Hardening: even if the upstream returned bars out of time
+    // order, the chart must end up strictly ascending. The earlier
+    // shape never happened in production but guarding the contract
+    // keeps a future provider-quirk from re-introducing the bug.
+    const T0 = Math.floor(Date.UTC(2025, 11, 5) / 1000);
+    const T1 = T0 + 14400;
+    const T2 = T1 + 14400;
+    mockedFetch.mockResolvedValue(
+      bars([
+        { time: T2, open: "11.5", high: "12", low: "11", close: "11.8", volume: "180" },
+        { time: T0, open: "10", high: "11", low: "9", close: "10.5", volume: "100" },
+        { time: T1, open: "10.5", high: "12", low: "10", close: "11", volume: "200" },
+      ]),
+    );
+    render(
+      <MemoryRouter>
+        <PriceChart symbol="GENC" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(libState.candleSetData).toHaveBeenCalled();
+    });
+    const call = libState.candleSetData.mock.calls.at(-1)?.[0] as Array<{ time: number }>;
+    expect(call.map((b) => b.time)).toEqual([T0, T1, T2]);
+  });
+});
+
 describe("PriceChart — intraday axis formatting (#601)", () => {
   it("intraday range applies timeVisible=true on the time scale", async () => {
     mockedFetch.mockResolvedValue(bars(twoValidRows(), "1d"));

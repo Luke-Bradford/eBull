@@ -642,7 +642,7 @@ export function ChartCanvas({
   // FULL set — used by the previous-close detector + SessionBands so
   // they can see ALL sessions regardless of visibility toggles.
   const cleanAll = useMemo<NumericBar[]>(() => {
-    return rows.flatMap((r) => {
+    const parsed = rows.flatMap((r) => {
       const open = parseNum(r.open);
       const high = parseNum(r.high);
       const low = parseNum(r.low);
@@ -661,6 +661,31 @@ export function ChartCanvas({
         },
       ];
     });
+    // Dedupe + ascending-sort by time. lightweight-charts asserts
+    // strictly-ascending input on `series.setData` and crashes the
+    // entire chart with "data must be asc ordered by time" when fed
+    // duplicate timestamps. eToro's intraday endpoint occasionally
+    // returns duplicate bars for thinly-traded instruments at the
+    // FourHours interval (observed on GENC at the 6m range — a
+    // duplicate at index 22). Defending here keeps the assertion
+    // from ever reaching the library.
+    //
+    // Strategy: stable sort by time, then walk and drop any bar
+    // whose time matches the previous kept bar's time. Last-write-
+    // wins on duplicates (matches the live-tick aggregator's
+    // semantics, where the most recent bar for a bucket is the
+    // authoritative one).
+    if (parsed.length < 2) return parsed;
+    const sorted = [...parsed].sort((a, b) => (a.time as number) - (b.time as number));
+    const out: NumericBar[] = [];
+    for (const b of sorted) {
+      if (out.length > 0 && out[out.length - 1]!.time === b.time) {
+        out[out.length - 1] = b; // overwrite — last-write-wins on dup
+      } else {
+        out.push(b);
+      }
+    }
+    return out;
   }, [rows]);
 
   // Visibility-filtered set — what gets fed into the price/volume
