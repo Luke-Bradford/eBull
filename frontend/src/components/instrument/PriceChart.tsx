@@ -223,6 +223,14 @@ export function PriceChart({
   // chart doesn't flash under the new range label.
   const dataMatchesRange = data?.range === range;
   const effectivelyLoading = loading || !dataMatchesRange;
+  // #650 — only show the skeleton when there is NO chart on screen
+  // (initial load, range switch, or recovered error). During the 60s
+  // backstop refetch the chart stays mounted; rendering a skeleton
+  // alongside it would push the chart down and shift it back when
+  // the skeleton disappears, which is the "looks like a browser
+  // refresh" visual the operator reported. Live ticks still update
+  // the chart silently via `useLiveLastBar.series.update()`.
+  const showSkeleton = effectivelyLoading && error === null && !dataMatchesRange;
 
   const rows = dataMatchesRange && data ? data.rows : null;
   // Candlestick rendering needs all four OHLC values non-null AND a
@@ -351,9 +359,7 @@ export function PriceChart({
         </div>
       </div>
 
-      {effectivelyLoading && error === null ? (
-        <SectionSkeleton rows={6} />
-      ) : null}
+      {showSkeleton ? <SectionSkeleton rows={6} /> : null}
       {error !== null ? <SectionError onRetry={refetch} /> : null}
       {!effectivelyLoading && error === null && dataMatchesRange && !hasChartData ? (
         <EmptyState
