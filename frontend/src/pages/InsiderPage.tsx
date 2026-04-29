@@ -39,6 +39,7 @@ import { InsiderNetByMonth } from "@/components/insider/InsiderNetByMonth";
 import { InsiderPriceMarkers } from "@/components/insider/InsiderPriceMarkers";
 import { InsiderTransactionsTable } from "@/components/insider/InsiderTransactionsTable";
 import { Pane } from "@/components/instrument/Pane";
+import { Term } from "@/components/Term";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 
@@ -68,9 +69,12 @@ export function InsiderPage(): JSX.Element {
           Insider activity — {symbol}
         </h1>
         <p className="mt-1 text-xs text-slate-500">
-          SEC Form 4 transactions. Acquired = green, disposed = red.
-          Non-derivative trades only in the chart sections; the table
-          shows every row including derivatives.
+          SEC <Term term="Form 4" /> transactions — directors / officers
+          / 10%+ holders disclosing share trades within 2 business days.
+          Acquired = green, disposed = red. The chart panes use only
+          non-derivative trades (open-market buys + sells, RSU vests,
+          tax-withholding sells); the table shows every row including
+          derivative grants and option exercises.
         </p>
       </header>
 

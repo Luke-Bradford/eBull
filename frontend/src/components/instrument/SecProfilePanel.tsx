@@ -22,6 +22,7 @@ import {
   SectionSkeleton,
 } from "@/components/dashboard/Section";
 import { Pane } from "@/components/instrument/Pane";
+import { Term } from "@/components/Term";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback } from "react";
@@ -74,7 +75,9 @@ function Body({
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
         {profile.sic_description !== null && (
           <>
-            <dt className="text-slate-500">Industry (SIC)</dt>
+            <dt className="text-slate-500">
+              Industry (<Term term="SIC" />)
+            </dt>
             <dd>
               {profile.sic_description}
               {profile.sic !== null && (
@@ -97,7 +100,9 @@ function Body({
         )}
         {profile.category !== null && (
           <>
-            <dt className="text-slate-500">Filer category</dt>
+            <dt className="text-slate-500">
+              <Term term="Filer category" />
+            </dt>
             <dd>{profile.category}</dd>
           </>
         )}
@@ -124,7 +129,9 @@ function Body({
             </dd>
           </>
         )}
-        <dt className="text-slate-500">CIK</dt>
+        <dt className="text-slate-500">
+          <Term term="CIK" />
+        </dt>
         <dd className="font-mono text-xs text-slate-600">{profile.cik}</dd>
       </dl>
 

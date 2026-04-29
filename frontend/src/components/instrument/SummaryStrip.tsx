@@ -17,6 +17,7 @@ import type {
   InstrumentPositionDetail,
   ThesisDetail,
 } from "@/api/types";
+import { Term } from "@/components/Term";
 import { liveTickDisplayPrice, useLiveQuote } from "@/lib/useLiveQuote";
 
 const THESIS_STALE_DAYS = 30;
@@ -148,9 +149,12 @@ export function SummaryStrip({
           {identity.display_name ?? "—"}
         </span>
         {summary.coverage_tier !== null ? (
-          <span className="rounded bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">
+          <Term
+            term={`Tier ${summary.coverage_tier}`}
+            className="rounded bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700 no-underline"
+          >
             Tier {summary.coverage_tier}
-          </span>
+          </Term>
         ) : null}
         {price || livePrice ? (
           <>

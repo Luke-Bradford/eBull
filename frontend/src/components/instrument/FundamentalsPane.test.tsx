@@ -204,6 +204,103 @@ describe("FundamentalsPane", () => {
     await waitFor(() => expect(container.firstChild).toBeNull());
   });
 
+  it("renders the pane for partnership/MLP issuers that don't file operating_income (#684)", async () => {
+    // IEP / ET / EPD-style: revenue + net_income populated but
+    // operating_income null on every row because the issuer files
+    // ``IncomeLossFromContinuingOperations`` instead of
+    // ``OperatingIncomeLoss``. Pre-fix, the joinPeriods strict gate
+    // dropped every row → series.length < 2 → pane hidden. Post-fix,
+    // the pane renders revenue + net income sparklines and the
+    // op-income cell shows "—".
+    vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
+      ((_symbol: string, query: { statement: string }) => {
+        if (query.statement === "income") {
+          return Promise.resolve({
+            symbol: "IEP",
+            statement: "income",
+            period: "quarterly",
+            currency: "USD",
+            source: "sec_xbrl",
+            rows: Array.from({ length: 4 }, (_, i) => ({
+              period_end: `2025-0${i + 1}-30`,
+              period_type: `Q${i + 1}`,
+              values: {
+                revenue: String(2000 + i * 100),
+                // operating_income deliberately absent
+                net_income: String(-100 + i * 50),
+              },
+            })),
+          });
+        }
+        return Promise.resolve({
+          symbol: "IEP",
+          statement: "balance",
+          period: "quarterly",
+          currency: "USD",
+          source: "sec_xbrl",
+          rows: [],
+        });
+      }) as never,
+    );
+    render(
+      <MemoryRouter>
+        <FundamentalsPane summary={makeSummary(true)} />
+      </MemoryRouter>,
+    );
+    // Pane chrome renders + the four cell labels are present.
+    expect(await screen.findByText("Revenue")).toBeInTheDocument();
+    expect(screen.getByText("Op income")).toBeInTheDocument();
+    expect(screen.getByText("Net income")).toBeInTheDocument();
+    // Latest revenue = 2300 renders via formatLatest as "2.30K".
+    expect(await screen.findByText("2.30K")).toBeInTheDocument();
+  });
+
+  it("surfaces a coverage caption when one cell has fewer periods than its siblings (#684 review)", async () => {
+    // Constructed case: 4 periods of revenue + net_income, only 2
+    // periods of operating_income (e.g. issuer changed reporting
+    // mid-history). Op income cell should annotate "2/4 periods"
+    // so the operator notices the time-axis asymmetry — bot review
+    // WARNING: silently-divergent sparkline shapes mislead.
+    vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
+      ((_symbol: string, query: { statement: string }) => {
+        if (query.statement === "income") {
+          return Promise.resolve({
+            symbol: "GME",
+            statement: "income",
+            period: "quarterly",
+            currency: "USD",
+            source: "sec_xbrl",
+            rows: Array.from({ length: 4 }, (_, i) => ({
+              period_end: `2025-0${i + 1}-30`,
+              period_type: `Q${i + 1}`,
+              values: {
+                revenue: String(2000 + i * 100),
+                net_income: String(100 + i * 10),
+                ...(i >= 2
+                  ? { operating_income: String(50 + i * 5) }
+                  : {}),
+              },
+            })),
+          });
+        }
+        return Promise.resolve({
+          symbol: "GME",
+          statement: "balance",
+          period: "quarterly",
+          currency: "USD",
+          source: "sec_xbrl",
+          rows: [],
+        });
+      }) as never,
+    );
+    render(
+      <MemoryRouter>
+        <FundamentalsPane summary={makeSummary(true)} />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/2\/4 periods/)).toBeInTheDocument();
+  });
+
   it("returns null when capability active but only 1 quarter has both income + balance data", async () => {
     vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
       ((_symbol: string, query: { statement: string }) => {

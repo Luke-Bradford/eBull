@@ -23,10 +23,16 @@ const SLICE = 8;
 
 interface SeriesRow {
   readonly period_end: string;
-  readonly revenue: number;
-  readonly operatingIncome: number;
-  readonly netIncome: number;
-  readonly totalDebt: number;
+  // Each metric is independently nullable. Per-cell render filters its
+  // own column rather than the whole row dropping when one column is
+  // missing — partnership/MLP issuers like IEP file
+  // `IncomeLossFromContinuingOperations` instead of the standard
+  // `OperatingIncomeLoss`, leaving operating_income null on every row,
+  // which previously hid the entire pane (#684 operator report).
+  readonly revenue: number | null;
+  readonly operatingIncome: number | null;
+  readonly netIncome: number | null;
+  readonly totalDebt: number | null;
 }
 
 function num(v: string | null | undefined): number | null {
@@ -46,21 +52,27 @@ function joinPeriods(
   for (const i of income) {
     const key = `${i.period_end}|${i.period_type}`;
     const b = bMap.get(key);
-    if (b === undefined) continue;
     const revenue = num(i.values["revenue"] ?? null);
     const operatingIncome = num(i.values["operating_income"] ?? null);
     const netIncome = num(i.values["net_income"] ?? null);
-    const lt = num(b.values["long_term_debt"] ?? null) ?? 0;
-    const st = num(b.values["short_term_debt"] ?? null) ?? 0;
-    if (revenue === null || operatingIncome === null || netIncome === null) {
+    const lt = b !== undefined ? num(b.values["long_term_debt"] ?? null) : null;
+    const st = b !== undefined ? num(b.values["short_term_debt"] ?? null) : null;
+    // Drop a row only when every income-side flagship metric is null
+    // — otherwise the pane has nothing to plot. Total debt is a
+    // best-effort sum (if either component is non-null we surface
+    // what we have; balance-side gaps don't kill the income-side
+    // sparklines).
+    if (revenue === null && operatingIncome === null && netIncome === null) {
       continue;
     }
+    const totalDebt =
+      lt === null && st === null ? null : (lt ?? 0) + (st ?? 0);
     joined.push({
       period_end: i.period_end,
       revenue,
       operatingIncome,
       netIncome,
-      totalDebt: lt + st,
+      totalDebt,
     });
   }
   // Sort newest first then take the latest SLICE; reverse so the
@@ -69,6 +81,21 @@ function joinPeriods(
   const latest = joined.slice(0, SLICE);
   latest.reverse();
   return latest;
+}
+
+/** Filter the per-period series down to non-null values for one
+ *  metric. Empty array means "this issuer doesn't report this metric"
+ *  — the cell renders an em dash + a small "no data" hint. */
+function nonNullValues(
+  series: ReadonlyArray<SeriesRow>,
+  pick: (row: SeriesRow) => number | null,
+): number[] {
+  const out: number[] = [];
+  for (const row of series) {
+    const v = pick(row);
+    if (v !== null) out.push(v);
+  }
+  return out;
 }
 
 function formatLatest(values: ReadonlyArray<number>): string {
@@ -151,42 +178,78 @@ export function FundamentalsPane({ summary }: FundamentalsPaneProps): JSX.Elemen
       ) : income.error !== null || balance.error !== null ? (
         <SectionError onRetry={() => { income.refetch(); balance.refetch(); }} />
       ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <FundamentalCell
-            label="Revenue"
-            values={series.map((r) => r.revenue)}
-            stroke="text-sky-500"
-          />
-          <FundamentalCell
-            label="Op income"
-            values={series.map((r) => r.operatingIncome)}
-            stroke="text-emerald-500"
-          />
-          <FundamentalCell
-            label="Net income"
-            values={series.map((r) => r.netIncome)}
-            stroke="text-emerald-500"
-          />
-          <FundamentalCell
-            label="Total debt"
-            values={series.map((r) => r.totalDebt)}
-            stroke="text-amber-500"
-          />
-        </div>
+        <FundamentalsGrid series={series} />
       )}
     </Pane>
+  );
+}
+
+function FundamentalsGrid({
+  series,
+}: {
+  readonly series: ReadonlyArray<SeriesRow>;
+}): JSX.Element {
+  const revenueValues = nonNullValues(series, (r) => r.revenue);
+  const opIncomeValues = nonNullValues(series, (r) => r.operatingIncome);
+  const netIncomeValues = nonNullValues(series, (r) => r.netIncome);
+  const totalDebtValues = nonNullValues(series, (r) => r.totalDebt);
+  // Sparklines are side-by-side and share an x-axis only visually —
+  // when one cell has fewer periods than the siblings (e.g. an MLP
+  // with operating_income null on every quarter), shapes can't be
+  // compared directly. Surface a "n/N periods" caption on cells
+  // whose coverage diverges from the maximum so the operator notices
+  // the asymmetry. PR #684 review.
+  const maxLen = Math.max(
+    revenueValues.length,
+    opIncomeValues.length,
+    netIncomeValues.length,
+    totalDebtValues.length,
+  );
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <FundamentalCell
+        label="Revenue"
+        values={revenueValues}
+        maxLen={maxLen}
+        stroke="text-sky-500"
+      />
+      <FundamentalCell
+        label="Op income"
+        values={opIncomeValues}
+        maxLen={maxLen}
+        stroke="text-emerald-500"
+      />
+      <FundamentalCell
+        label="Net income"
+        values={netIncomeValues}
+        maxLen={maxLen}
+        stroke="text-emerald-500"
+      />
+      <FundamentalCell
+        label="Total debt"
+        values={totalDebtValues}
+        maxLen={maxLen}
+        stroke="text-amber-500"
+      />
+    </div>
   );
 }
 
 function FundamentalCell({
   label,
   values,
+  maxLen,
   stroke,
 }: {
   readonly label: string;
   readonly values: ReadonlyArray<number>;
+  /** Largest period count across sibling cells. When this cell's
+   *  ``values.length`` is smaller, the shapes between sparklines
+   *  can't be compared directly — surface a coverage caption. */
+  readonly maxLen: number;
   readonly stroke: string;
 }) {
+  const showCoverage = values.length > 0 && values.length < maxLen;
   return (
     <div className="flex flex-col items-start">
       <span className="text-[10px] uppercase tracking-wider text-slate-500">
@@ -196,6 +259,14 @@ function FundamentalCell({
       <span className="text-xs font-medium tabular-nums text-slate-800">
         {formatLatest(values)}
       </span>
+      {showCoverage ? (
+        <span
+          className="text-[9px] uppercase tracking-wider text-amber-600"
+          title={`This cell covers ${values.length} of the ${maxLen} periods rendered by sibling cells.`}
+        >
+          {values.length}/{maxLen} periods
+        </span>
+      ) : null}
     </div>
   );
 }
