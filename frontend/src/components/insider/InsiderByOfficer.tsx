@@ -80,11 +80,12 @@ export function buildOfficerBuckets(
   }
 
   const buckets: OfficerBucket[] = [];
+  // Every entry in `map` was created from at least one classified
+  // non-derivative row (count >= 1) — derivatives and unknown
+  // directions are filtered upstream — so the bucket itself proves
+  // real activity. Net == 0 on its own is fine and keeps offsetting
+  // buy + sell traders visible.
   for (const [key, { name, role, net, count }] of map.entries()) {
-    // Keep officers whose net is zero only when they had real activity
-    // (offsetting buys + sells in the window). Zero-row aggregates from
-    // pure derivative-only filers were already filtered above.
-    if (net === 0 && count === 0) continue;
     const roleLabel = role !== null ? roleSummary(role) : null;
     buckets.push({
       key,
