@@ -35,6 +35,48 @@ class FilingsRefreshSummary:
     instruments_skipped: int  # identifier missing or provider error
 
 
+def _bulk_resolve_identifiers(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_ids: list[str],
+    provider_name: str,
+    identifier_type: str,
+) -> dict[str, str]:
+    """Single SELECT to map every instrument_id with a primary identifier
+    of (provider_name, identifier_type) to its identifier_value.
+
+    Was: per-row ``_resolve_identifier`` in the refresh loop, which
+    issued one SELECT per instrument and emitted an INFO log line
+    for every miss. With a 12k-row universe and ~7k instruments
+    lacking SEC CIKs that produced ~7k DB roundtrips and ~7k log
+    lines per refresh tick — enough log spam to make the dev
+    terminal unusable (operator report 2026-04-29). The bulk
+    resolver replaces both with one query and one summary line at
+    the end of ``refresh_filings``.
+    """
+    if not instrument_ids:
+        return {}
+    # Cast to int where possible so the ANY(%s) parameter binds
+    # against the int4 instrument_id column. Strings stored in the
+    # caller-supplied list pass through ANY-style comparison via
+    # implicit cast on Postgres' side.
+    rows = conn.execute(
+        """
+        SELECT instrument_id::text, identifier_value
+        FROM external_identifiers
+        WHERE provider = %(provider)s
+          AND identifier_type = %(identifier_type)s
+          AND is_primary = TRUE
+          AND instrument_id::text = ANY(%(ids)s)
+        """,
+        {
+            "provider": provider_name,
+            "identifier_type": identifier_type,
+            "ids": [str(i) for i in instrument_ids],
+        },
+    ).fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
 def refresh_filings(
     provider: FilingsProvider,
     provider_name: str,
@@ -45,29 +87,34 @@ def refresh_filings(
     end_date: date | None = None,
     filing_types: list[str] | None = None,
 ) -> FilingsRefreshSummary:
-    """
-    For each instrument_id, resolve the provider-native identifier from
-    external_identifiers, fetch filing metadata, and upsert to filing_events.
+    """For each instrument_id with a primary ``(provider_name,
+    identifier_type)`` identifier, fetch filing metadata and upsert
+    into ``filing_events``.
 
-    provider_name: e.g. 'sec', 'companies_house' — used for identifier lookup
-        and for the provider column in filing_events.
+    Identifier resolution is bulk-fetched in one SELECT before the
+    loop runs (#669). Instruments lacking the identifier are dropped
+    silently from the iteration — they're a known property of the
+    universe (crypto, FX, non-US equities have no SEC CIK), not a
+    transient miss worth logging per-row. A single summary INFO at
+    the end records the aggregate skip count so the observability
+    signal ("how many of the cohort were eligible") survives.
+
+    provider_name: e.g. 'sec', 'companies_house'.
     identifier_type: e.g. 'cik', 'company_number'.
     """
+    if not instrument_ids:
+        return FilingsRefreshSummary(
+            instruments_attempted=0,
+            filings_upserted=0,
+            instruments_skipped=0,
+        )
+
+    resolved = _bulk_resolve_identifiers(conn, instrument_ids, provider_name, identifier_type)
+    skipped_no_identifier = len(instrument_ids) - len(resolved)
     upserted = 0
-    skipped = 0
+    skipped_provider_error = 0
 
-    for instrument_id in instrument_ids:
-        identifier_value = _resolve_identifier(conn, instrument_id, provider_name, identifier_type)
-        if identifier_value is None:
-            logger.info(
-                "Filings: no %s/%s for instrument_id=%s, skipping",
-                provider_name,
-                identifier_type,
-                instrument_id,
-            )
-            skipped += 1
-            continue
-
+    for instrument_id, identifier_value in resolved.items():
         try:
             results = provider.list_filings_by_identifier(
                 identifier_type=identifier_type,
@@ -88,12 +135,22 @@ def refresh_filings(
                 provider_name,
                 exc_info=True,
             )
-            skipped += 1
+            skipped_provider_error += 1
+
+    if skipped_no_identifier > 0:
+        logger.info(
+            "Filings: %d/%d instruments skipped (missing %s/%s identifier — expected for non-%s issuers)",
+            skipped_no_identifier,
+            len(instrument_ids),
+            provider_name,
+            identifier_type,
+            provider_name.upper(),
+        )
 
     return FilingsRefreshSummary(
         instruments_attempted=len(instrument_ids),
         filings_upserted=upserted,
-        instruments_skipped=skipped,
+        instruments_skipped=skipped_no_identifier + skipped_provider_error,
     )
 
 
