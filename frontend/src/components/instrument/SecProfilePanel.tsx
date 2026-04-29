@@ -72,7 +72,7 @@ function Body({
         <p className="leading-relaxed text-slate-700">{profile.description}</p>
       )}
 
-      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+      <dl className="grid max-w-xl grid-cols-[auto_1fr] gap-x-4 gap-y-1">
         {profile.sic_description !== null && (
           <>
             <dt className="text-slate-500">

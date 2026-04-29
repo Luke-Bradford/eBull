@@ -102,7 +102,10 @@ export function KeyStatsPane({ summary }: KeyStatsPaneProps): JSX.Element {
           description="No provider returned key stats for this ticker."
         />
       ) : (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+        // Cap dl width so on a wide grid cell the key/value columns
+        // don't stretch with whitespace between them — narrow
+        // stat-block content reads tighter at ~28rem (#684).
+        <dl className="grid max-w-md grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
           {rows.map((r) => (
             <KeyStatRow key={r.label} row={r} />
           ))}

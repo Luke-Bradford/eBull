@@ -86,7 +86,10 @@ export function InsiderActivitySummary({
                 ? "text-red-700"
                 : "text-slate-700";
           return (
-            <div className="grid grid-cols-5 gap-2 text-xs">
+            // Cap width so the 5 stat boxes don't stretch with empty
+            // gaps when the pane sits in a wide grid cell — operator
+            // 2026-04-29 review (#684).
+            <div className="grid max-w-2xl grid-cols-5 gap-2 text-xs">
               <Field label="NET 90d">
                 <span className={`font-medium tabular-nums ${netClass}`}>
                   {fmtSigned(net)} {arrow}
