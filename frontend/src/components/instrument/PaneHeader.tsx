@@ -45,7 +45,7 @@ export function PaneHeader({
           {title}
         </h2>
         {scope ? (
-          <span className="text-[10px] text-slate-500 dark:text-slate-500">
+          <span className="text-[10px] text-slate-500 dark:text-slate-400">
             {scope}
           </span>
         ) : null}
