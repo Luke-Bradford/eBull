@@ -120,7 +120,7 @@ describe("NotificationBell (#646)", () => {
     expect(bell.dataset.unseenCount).toBe("150");
   });
 
-  it("clicking the bell navigates to /dashboard", async () => {
+  it("clicking the bell navigates to / (dashboard root)", async () => {
     vi.spyOn(alertsApi, "fetchGuardRejections").mockResolvedValue({
       unseen_count: 1,
       rejections: [],
@@ -142,7 +142,7 @@ describe("NotificationBell (#646)", () => {
 
     const bell = await screen.findByTestId("notification-bell");
     await userEvent.click(bell);
-    expect(navigateMock).toHaveBeenCalledWith("/dashboard");
+    expect(navigateMock).toHaveBeenCalledWith("/");
   });
 
   it("polls again after the interval — refresh picks up new unseen state", async () => {
