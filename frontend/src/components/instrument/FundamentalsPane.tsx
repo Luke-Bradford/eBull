@@ -178,42 +178,78 @@ export function FundamentalsPane({ summary }: FundamentalsPaneProps): JSX.Elemen
       ) : income.error !== null || balance.error !== null ? (
         <SectionError onRetry={() => { income.refetch(); balance.refetch(); }} />
       ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <FundamentalCell
-            label="Revenue"
-            values={nonNullValues(series, (r) => r.revenue)}
-            stroke="text-sky-500"
-          />
-          <FundamentalCell
-            label="Op income"
-            values={nonNullValues(series, (r) => r.operatingIncome)}
-            stroke="text-emerald-500"
-          />
-          <FundamentalCell
-            label="Net income"
-            values={nonNullValues(series, (r) => r.netIncome)}
-            stroke="text-emerald-500"
-          />
-          <FundamentalCell
-            label="Total debt"
-            values={nonNullValues(series, (r) => r.totalDebt)}
-            stroke="text-amber-500"
-          />
-        </div>
+        <FundamentalsGrid series={series} />
       )}
     </Pane>
+  );
+}
+
+function FundamentalsGrid({
+  series,
+}: {
+  readonly series: ReadonlyArray<SeriesRow>;
+}): JSX.Element {
+  const revenueValues = nonNullValues(series, (r) => r.revenue);
+  const opIncomeValues = nonNullValues(series, (r) => r.operatingIncome);
+  const netIncomeValues = nonNullValues(series, (r) => r.netIncome);
+  const totalDebtValues = nonNullValues(series, (r) => r.totalDebt);
+  // Sparklines are side-by-side and share an x-axis only visually —
+  // when one cell has fewer periods than the siblings (e.g. an MLP
+  // with operating_income null on every quarter), shapes can't be
+  // compared directly. Surface a "n/N periods" caption on cells
+  // whose coverage diverges from the maximum so the operator notices
+  // the asymmetry. PR #684 review.
+  const maxLen = Math.max(
+    revenueValues.length,
+    opIncomeValues.length,
+    netIncomeValues.length,
+    totalDebtValues.length,
+  );
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <FundamentalCell
+        label="Revenue"
+        values={revenueValues}
+        maxLen={maxLen}
+        stroke="text-sky-500"
+      />
+      <FundamentalCell
+        label="Op income"
+        values={opIncomeValues}
+        maxLen={maxLen}
+        stroke="text-emerald-500"
+      />
+      <FundamentalCell
+        label="Net income"
+        values={netIncomeValues}
+        maxLen={maxLen}
+        stroke="text-emerald-500"
+      />
+      <FundamentalCell
+        label="Total debt"
+        values={totalDebtValues}
+        maxLen={maxLen}
+        stroke="text-amber-500"
+      />
+    </div>
   );
 }
 
 function FundamentalCell({
   label,
   values,
+  maxLen,
   stroke,
 }: {
   readonly label: string;
   readonly values: ReadonlyArray<number>;
+  /** Largest period count across sibling cells. When this cell's
+   *  ``values.length`` is smaller, the shapes between sparklines
+   *  can't be compared directly — surface a coverage caption. */
+  readonly maxLen: number;
   readonly stroke: string;
 }) {
+  const showCoverage = values.length > 0 && values.length < maxLen;
   return (
     <div className="flex flex-col items-start">
       <span className="text-[10px] uppercase tracking-wider text-slate-500">
@@ -223,6 +259,14 @@ function FundamentalCell({
       <span className="text-xs font-medium tabular-nums text-slate-800">
         {formatLatest(values)}
       </span>
+      {showCoverage ? (
+        <span
+          className="text-[9px] uppercase tracking-wider text-amber-600"
+          title={`This cell covers ${values.length} of the ${maxLen} periods rendered by sibling cells.`}
+        >
+          {values.length}/{maxLen} periods
+        </span>
+      ) : null}
     </div>
   );
 }

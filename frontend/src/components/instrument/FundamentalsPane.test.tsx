@@ -255,6 +255,52 @@ describe("FundamentalsPane", () => {
     expect(await screen.findByText("2.30K")).toBeInTheDocument();
   });
 
+  it("surfaces a coverage caption when one cell has fewer periods than its siblings (#684 review)", async () => {
+    // Constructed case: 4 periods of revenue + net_income, only 2
+    // periods of operating_income (e.g. issuer changed reporting
+    // mid-history). Op income cell should annotate "2/4 periods"
+    // so the operator notices the time-axis asymmetry — bot review
+    // WARNING: silently-divergent sparkline shapes mislead.
+    vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
+      ((_symbol: string, query: { statement: string }) => {
+        if (query.statement === "income") {
+          return Promise.resolve({
+            symbol: "GME",
+            statement: "income",
+            period: "quarterly",
+            currency: "USD",
+            source: "sec_xbrl",
+            rows: Array.from({ length: 4 }, (_, i) => ({
+              period_end: `2025-0${i + 1}-30`,
+              period_type: `Q${i + 1}`,
+              values: {
+                revenue: String(2000 + i * 100),
+                net_income: String(100 + i * 10),
+                ...(i >= 2
+                  ? { operating_income: String(50 + i * 5) }
+                  : {}),
+              },
+            })),
+          });
+        }
+        return Promise.resolve({
+          symbol: "GME",
+          statement: "balance",
+          period: "quarterly",
+          currency: "USD",
+          source: "sec_xbrl",
+          rows: [],
+        });
+      }) as never,
+    );
+    render(
+      <MemoryRouter>
+        <FundamentalsPane summary={makeSummary(true)} />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/2\/4 periods/)).toBeInTheDocument();
+  });
+
   it("returns null when capability active but only 1 quarter has both income + balance data", async () => {
     vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
       ((_symbol: string, query: { statement: string }) => {
