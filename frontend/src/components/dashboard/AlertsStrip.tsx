@@ -396,13 +396,13 @@ export function AlertsStrip(): JSX.Element | null {
   return (
     <section
       aria-labelledby="alerts-strip-heading"
-      className="rounded-md border border-slate-200 bg-white shadow-sm"
+      className="border-t border-slate-200 pt-3"
     >
-      <header className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-        <div className="flex items-center gap-2">
+      <header className="flex items-baseline justify-between gap-2">
+        <div className="flex items-baseline gap-2">
           <h2
             id="alerts-strip-heading"
-            className="text-sm font-semibold text-slate-700"
+            className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-700"
           >
             Alerts
           </h2>

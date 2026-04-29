@@ -117,10 +117,12 @@ export function PortfolioValueChart(): JSX.Element | null {
   if (!effectivelyLoading && !hasMovement && fxSkipped === 0) return null;
 
   return (
-    <div className="rounded-md border border-slate-200 bg-white p-3 shadow-sm">
-      <div className="flex items-center justify-between">
+    <div className="border-t border-slate-200 pt-3">
+      <div className="flex items-baseline justify-between">
         <div className="flex items-baseline gap-2">
-          <h2 className="text-sm font-medium text-slate-700">Portfolio value</h2>
+          <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-700">
+            Portfolio value
+          </h2>
           {/* Two mutually-exclusive FX signals:
               - caption  → fine state (live FX applied cleanly)
               - badge    → partial state (some pairs dropped)

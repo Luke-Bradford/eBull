@@ -103,8 +103,8 @@ export function BootstrapProgress({
   const steps = buildSteps(stage);
 
   return (
-    <div className="rounded-md border border-blue-200 bg-blue-50 p-4">
-      <h2 className="text-sm font-semibold text-blue-800">
+    <div className="border-l-2 border-blue-400 bg-blue-50/60 pl-4 pr-3 py-3">
+      <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-blue-800">
         Getting started
       </h2>
       <p className="mt-1 text-xs text-blue-700">

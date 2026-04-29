@@ -39,21 +39,17 @@ function Pill({
       : sign === "neg"
         ? "text-red-700"
         : "text-slate-600";
-  const toneBorder =
-    sign === "pos"
-      ? "border-emerald-200"
-      : sign === "neg"
-        ? "border-red-200"
-        : "border-slate-200";
+  // Design-system v1: hairline-top chrome shared with Section/Pane.
+  // Tone is carried by text colour only — no border accent.
   return (
     <div
-      className={`flex-1 rounded-md border ${toneBorder} bg-white p-3 shadow-sm`}
+      className="flex-1 border-t border-slate-200 px-3 pt-3 pb-1"
       data-testid={`rolling-pnl-${period.period}`}
     >
-      <div className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">
         {LABELS[period.period] ?? period.period}
       </div>
-      <div className={`mt-0.5 text-lg font-semibold tabular-nums ${toneText}`}>
+      <div className={`mt-1 text-lg font-semibold tabular-nums ${toneText}`}>
         {`${sign === "pos" ? "+" : ""}${formatMoney(period.pnl, currency)}`}
       </div>
       <div className={`text-xs tabular-nums ${toneText}`}>
@@ -69,12 +65,9 @@ export function RollingPnlStrip(): JSX.Element | null {
 
   if (loading) {
     return (
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-3">
         {[0, 1, 2].map((i) => (
-          <div
-            key={i}
-            className="rounded-md border border-slate-200 bg-white p-3 shadow-sm"
-          >
+          <div key={i} className="border-t border-slate-200 px-3 pt-3 pb-1">
             <SectionSkeleton rows={1} />
           </div>
         ))}
@@ -90,7 +83,7 @@ export function RollingPnlStrip(): JSX.Element | null {
   }
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+    <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-3">
       {data.periods.map((period) => (
         <Pill
           key={period.period}
