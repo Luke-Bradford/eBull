@@ -144,7 +144,7 @@ export function FundamentalsPane({ summary }: FundamentalsPaneProps): JSX.Elemen
       title="Fundamentals"
       scope="last 8 quarters"
       source={{ providers: ["sec_xbrl"] }}
-      onExpand={() => navigate(`/instrument/${encodeURIComponent(symbol)}?tab=financials`)}
+      onExpand={() => navigate(`/instrument/${encodeURIComponent(symbol)}/fundamentals`)}
     >
       {income.loading || balance.loading ? (
         <SectionSkeleton rows={3} />
