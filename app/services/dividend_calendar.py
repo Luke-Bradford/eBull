@@ -161,6 +161,15 @@ def _parse_date(raw: str | None) -> date | None:
             year = int(m.group("y2"))
         return date(year, month, day)
     except KeyError, ValueError:
+        # `_MONTHS[name]` may KeyError on an unrecognised month
+        # token; `int(...)` may ValueError on a token that is not a
+        # parseable integer. Either path means the regex matched
+        # something that does not actually represent a date — return
+        # None and let the caller fall back to a different label.
+        # Pre-#644 this was Python 2 syntax (`except KeyError, ValueError:`)
+        # which is a SyntaxError in Python 3; the file imported
+        # successfully only because the path was unreachable on the
+        # adapter's failing flow at the time.
         return None
 
 
