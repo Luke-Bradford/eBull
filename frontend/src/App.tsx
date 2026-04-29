@@ -12,6 +12,7 @@ import { Tenk10KDrilldownPage } from "@/pages/Tenk10KDrilldownPage";
 import { EightKListPage } from "@/pages/EightKListPage";
 import { ChartPage } from "@/pages/ChartPage";
 import { DividendsPage } from "@/pages/DividendsPage";
+import { InsiderPage } from "@/pages/InsiderPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { RecommendationsPage } from "@/pages/RecommendationsPage";
 import { AdminPage } from "@/pages/AdminPage";
@@ -75,6 +76,10 @@ export function App() {
           <Route
             path="instrument/:symbol/dividends"
             element={<DividendsPage />}
+          />
+          <Route
+            path="instrument/:symbol/insider"
+            element={<InsiderPage />}
           />
           <Route
             path="instrument/:symbol/chart"
