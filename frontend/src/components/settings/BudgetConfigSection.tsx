@@ -118,14 +118,14 @@ export function BudgetConfigSection() {
     eventAmount === "" || !Number.isFinite(parsedEventAmount) || parsedEventAmount <= 0;
 
   return (
-    <section className="rounded-md border border-slate-200 bg-white shadow-sm">
-      <header className="border-b border-slate-100 px-4 py-3">
-        <h2 className="text-sm font-semibold text-slate-700">
+    <section className="border-t border-slate-200 pt-3">
+      <header>
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-700">
           Budget Configuration
         </h2>
       </header>
 
-      <div className="space-y-6 p-4">
+      <div className="mt-3 space-y-6">
         {/* ---- Sub-section 1: Config Controls ---- */}
         <div>
           <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">

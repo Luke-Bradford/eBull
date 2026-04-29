@@ -579,7 +579,7 @@ export function ChartPage(): JSX.Element {
       )}
 
       {/* Body: chart or raw table */}
-      <div className="rounded-md border border-slate-200 bg-white shadow-sm">
+      <div className="border-t border-slate-200 pt-3">
         {effectivelyLoading && candlesAsync.error === null ? (
           <div className="p-4">
             <SectionSkeleton rows={10} />
