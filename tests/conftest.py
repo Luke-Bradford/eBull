@@ -22,6 +22,13 @@ import os
 # EBULL_SKIP_CATCH_UP=0 pytest to reproduce catch-up bugs.
 os.environ.setdefault("EBULL_SKIP_CATCH_UP", "1")
 
+# Skip the #649A boot freshness sweep in every TestClient(app) enter
+# cycle. Without this, every test that enters the FastAPI lifespan
+# would dispatch a `scope='behind'` sync that holds the partial-
+# unique-index gate; subsequent POST /sync scope='behind' tests in
+# unrelated test modules would 409 against it.
+os.environ.setdefault("EBULL_SKIP_BOOT_SWEEP", "1")
+
 import pytest  # noqa: E402
 
 from app.api.auth import require_session_or_service_token  # noqa: E402

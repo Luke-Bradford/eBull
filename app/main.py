@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -198,6 +199,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.exception("failed to register orchestrator executor")
 
+        # #649A — boot-time freshness sweep. Fires once on startup as
+        # a non-blocking asyncio task; uses scope='behind' which the
+        # planner short-circuits when nothing is past its freshness
+        # target, so this is cheap on a fresh dev DB. Without this
+        # the daily 03:00 UTC orchestrator_full_sync was the only
+        # scheduled refresh path and any restart that missed that
+        # window left the data stale until the operator manually
+        # clicked "Sync now". Recovery model is now: every boot
+        # opportunistically catches up everything that drifted past
+        # its freshness target.
+        #
+        # Gated by EBULL_SKIP_BOOT_SWEEP (mirrors EBULL_SKIP_CATCH_UP)
+        # so the test suite can disable it — every TestClient(app)
+        # enter would otherwise dispatch a behind sync that holds the
+        # partial-unique-index gate and 409s subsequent POST /sync
+        # scope='behind' tests in unrelated test modules.
+        skip_boot_sweep = os.environ.get("EBULL_SKIP_BOOT_SWEEP") == "1"
+        if settings.orchestrator_enabled and not skip_boot_sweep:
+            try:
+                asyncio.create_task(_boot_freshness_sweep())
+            except Exception:
+                logger.exception("failed to schedule boot freshness sweep")
+
     # In-process quote-tick fan-out bus (#274 Slice 3). Created here
     # so it lives for the full app lifetime; the WS subscriber
     # publishes to it, the SSE endpoint reads from it. Always
@@ -283,6 +307,48 @@ def _bootstrap_fx_rates(pool: ConnectionPool[Any]) -> None:
             "fx bootstrap: fx_rates_refresh raised; daily cron will retry",
             exc_info=True,
         )
+
+
+async def _boot_freshness_sweep() -> None:
+    """Boot-time `scope='behind'` sweep (#649A).
+
+    Fires once per app startup as a non-blocking asyncio task.
+    Uses the existing `scope='behind'` planner which only refreshes
+    layers past their freshness target — cheap when the data is
+    current, useful when the daily 03:00 UTC slot was missed (dev
+    laptop asleep, prod restart, host reboot).
+
+    All exceptions swallowed: this is a best-effort recovery on top
+    of the regular schedule, not a critical path. The orchestrator's
+    own audit (sync_runs / sync_layer_progress) records what fired
+    and what failed; we just dispatch.
+    """
+    try:
+        from app.services.sync_orchestrator import (
+            SyncAlreadyRunning,
+            SyncScope,
+            submit_sync,
+        )
+
+        # Submit on a worker thread — submit_sync's planner does some
+        # synchronous DB work and `asyncio.create_task` runs us on
+        # the event loop. Off-load via to_thread so we don't block
+        # other startup tasks.
+        def _dispatch() -> None:
+            try:
+                submit_sync(SyncScope.behind(), trigger="boot_sweep")
+                logger.info("boot freshness sweep dispatched (scope=behind)")
+            except SyncAlreadyRunning:
+                # The 5-minute high_frequency tick may have beaten us
+                # to the gate, or a manual sync is already running.
+                # Fine — that sync covers the catch-up either way.
+                logger.info("boot freshness sweep skipped: sync already running")
+            except Exception:
+                logger.exception("boot freshness sweep dispatch failed")
+
+        await asyncio.to_thread(_dispatch)
+    except Exception:
+        logger.exception("boot freshness sweep helper failed")
 
 
 async def _maybe_start_etoro_ws(

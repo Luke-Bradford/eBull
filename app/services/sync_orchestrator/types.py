@@ -120,7 +120,7 @@ class ExecutionPlan:
 # ---------------------------------------------------------------------------
 
 
-SyncTrigger = Literal["manual", "scheduled", "catch_up"]
+SyncTrigger = Literal["manual", "scheduled", "catch_up", "boot_sweep"]
 
 
 @dataclass(frozen=True)
