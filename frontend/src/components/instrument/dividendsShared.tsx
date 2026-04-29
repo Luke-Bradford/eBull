@@ -11,6 +11,7 @@
  */
 
 import type { DividendPeriod, DividendSummary, UpcomingDividend } from "@/api/instruments";
+import { Term } from "@/components/Term";
 
 // ---------------------------------------------------------------------------
 // Formatters
@@ -121,13 +122,19 @@ export function NextDividendBanner({ upcoming }: { upcoming: UpcomingDividend })
 export function DividendsSummaryBlock({ summary }: { summary: DividendSummary }) {
   return (
     <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-      <dt className="text-slate-500">TTM yield</dt>
+      <dt className="text-slate-500">
+        <Term term="TTM" /> yield
+      </dt>
       <dd className="font-semibold text-emerald-700">
         {formatYieldPct(summary.ttm_yield_pct)}
       </dd>
-      <dt className="text-slate-500">TTM DPS</dt>
+      <dt className="text-slate-500">
+        <Term term="TTM" /> <Term term="DPS" />
+      </dt>
       <dd>{formatDps(summary.ttm_dps, summary.dividend_currency)}</dd>
-      <dt className="text-slate-500">Latest DPS</dt>
+      <dt className="text-slate-500">
+        Latest <Term term="DPS" />
+      </dt>
       <dd>
         {formatDps(summary.latest_dps, summary.dividend_currency)}
         {summary.latest_dividend_at !== null && (

@@ -13,7 +13,9 @@ import { fetchInsiderSummary } from "@/api/instruments";
 import type { InsiderSummary } from "@/api/instruments";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { Pane } from "@/components/instrument/Pane";
+import { Term } from "@/components/Term";
 import { EmptyState } from "@/components/states/EmptyState";
+import { lookupTerm } from "@/lib/glossary";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback } from "react";
 import { useNavigate } from "react-router-dom";
@@ -119,10 +121,17 @@ function Field({
   readonly label: string;
   readonly children: React.ReactNode;
 }) {
+  // Wrap the abbreviation in a <Term> tooltip when the label is in
+  // the glossary (#684). Operator complaint: NET 90d / TXNS etc.
+  // are dense without a hover-explanation. The Field caption keeps
+  // the same uppercase / tracking-wider styling either way; the
+  // glossary version adds a subtle dotted underline to flag
+  // hover-availability.
+  const hasGlossary = lookupTerm(label) !== null;
   return (
     <div className="flex flex-col">
       <span className="text-[10px] uppercase tracking-wider text-slate-500">
-        {label}
+        {hasGlossary ? <Term term={label} /> : label}
       </span>
       <span>{children}</span>
     </div>

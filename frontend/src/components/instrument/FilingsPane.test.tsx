@@ -199,6 +199,59 @@ describe("FilingsPane", () => {
     );
   });
 
+  it("renders the friendly form-type name when extracted_summary is null (no `8-K  8-K` dupe — #684)", async () => {
+    // Operator screenshot 2026-04-29 on /instrument/IEP showed each
+    // row rendering the form type twice (once as the chip, once as
+    // the third-column fallback when extracted_summary was null).
+    // The fix: fall back to the glossary's friendly short name
+    // (e.g. "Material event" / "Annual report") so the row carries
+    // distinct information.
+    vi.spyOn(filingsApi, "fetchFilings").mockResolvedValue({
+      instrument_id: 1,
+      symbol: "IEP",
+      total: 2,
+      offset: 0,
+      limit: 6,
+      items: [
+        {
+          filing_event_id: 1,
+          instrument_id: 1,
+          filing_date: "2026-03-05",
+          filing_type: "8-K",
+          provider: "sec_edgar",
+          accession_number: "0000000000-26-000001",
+          red_flag_score: null,
+          extracted_summary: null, // <- the bug condition
+          primary_document_url: null,
+          source_url: null,
+          created_at: "2026-03-05T00:00:00Z",
+        },
+        {
+          filing_event_id: 2,
+          instrument_id: 1,
+          filing_date: "2026-02-26",
+          filing_type: "10-K",
+          provider: "sec_edgar",
+          accession_number: "0000000000-26-000002",
+          red_flag_score: null,
+          extracted_summary: null,
+          primary_document_url: null,
+          source_url: null,
+          created_at: "2026-02-26T00:00:00Z",
+        },
+      ],
+    });
+    render(
+      <MemoryRouter>
+        <FilingsPane instrumentId={1} symbol="IEP" summary={makeSummary()} />
+      </MemoryRouter>,
+    );
+    // 8-K row's third column should now be "Material event", not
+    // a second "8-K". 10-K → "Annual report".
+    expect(await screen.findByText("Material event")).toBeInTheDocument();
+    expect(screen.getByText("Annual report")).toBeInTheDocument();
+  });
+
   it("hides Open button when filings capability is inactive", async () => {
     vi.spyOn(filingsApi, "fetchFilings").mockResolvedValue({
       instrument_id: 1,

@@ -14,8 +14,10 @@ import { fetchFilings } from "@/api/filings";
 import type { FilingsListResponse, InstrumentSummary } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { Pane } from "@/components/instrument/Pane";
+import { Term } from "@/components/Term";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
+import { filingTypeFriendlyName } from "@/lib/glossary";
 import { useCallback } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
@@ -135,15 +137,32 @@ export function FilingsPane({
               f.filing_type,
               f.accession_number,
             );
+            // When the XBRL ingest hasn't extracted a per-filing
+            // summary, the row's third column would previously
+            // render the raw form-type a SECOND time next to the
+            // already-shown form-type chip — operator-reported as
+            // a "10-K  10-K" / "8-K  8-K" duplicate (#684). Falls
+            // back to the glossary's friendly short name instead
+            // (e.g. "Annual report" / "Material event") so the
+            // row carries useful information at a glance.
+            const summary =
+              f.extracted_summary ?? filingTypeFriendlyName(f.filing_type);
             const label = (
               <span className="flex items-baseline gap-2">
                 <span className="text-slate-500">{f.filing_date}</span>
-                <span className="rounded bg-slate-100 px-1 py-0.5 text-[10px] text-slate-600">
-                  {f.filing_type ?? "?"}
-                </span>
-                <span className="truncate text-slate-700">
-                  {f.extracted_summary ?? f.filing_type ?? "filing"}
-                </span>
+                {f.filing_type !== null ? (
+                  <Term
+                    term={f.filing_type}
+                    className="rounded bg-slate-100 px-1 py-0.5 text-[10px] text-slate-600 no-underline"
+                  >
+                    {f.filing_type}
+                  </Term>
+                ) : (
+                  <span className="rounded bg-slate-100 px-1 py-0.5 text-[10px] text-slate-600">
+                    ?
+                  </span>
+                )}
+                <span className="truncate text-slate-700">{summary}</span>
               </span>
             );
             return (

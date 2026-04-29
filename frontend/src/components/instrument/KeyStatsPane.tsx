@@ -1,5 +1,7 @@
 import { Pane } from "@/components/instrument/Pane";
+import { Term } from "@/components/Term";
 import { EmptyState } from "@/components/states/EmptyState";
+import { lookupTerm } from "@/lib/glossary";
 import type { InstrumentSummary, KeyStatsFieldSource } from "@/api/types";
 
 function formatDecimal(
@@ -111,9 +113,16 @@ export function KeyStatsPane({ summary }: KeyStatsPaneProps): JSX.Element {
 }
 
 function KeyStatRow({ row }: { row: Row }): JSX.Element {
+  // Wrap the label in <Term> when the glossary recognises it (P/E,
+  // P/B, ROE, ROA, Debt / Equity, Payout ratio, etc. are all
+  // covered) — gives the operator a hover-tooltip with the formula
+  // and why-it-matters line. #684.
+  const hasGlossary = lookupTerm(row.label) !== null;
   return (
     <>
-      <dt className="text-slate-500">{row.label}</dt>
+      <dt className="text-slate-500">
+        {hasGlossary ? <Term term={row.label} /> : row.label}
+      </dt>
       <dd className="flex items-center tabular-nums">
         <span>{row.value}</span>
         <FieldSourceTag source={row.source} />

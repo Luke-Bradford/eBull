@@ -48,6 +48,7 @@ import {
   YieldOnCostChart,
 } from "@/components/dividends/dividendsCharts";
 import { Pane } from "@/components/instrument/Pane";
+import { Term } from "@/components/Term";
 import {
   DividendsSummaryBlock,
   formatDps,
@@ -195,6 +196,13 @@ export function DividendsPage(): JSX.Element {
         <h1 className="mt-1 text-lg font-semibold text-slate-900">
           Dividends — {symbol}
         </h1>
+        <p className="mt-1 text-xs text-slate-500">
+          SEC XBRL declared per-share / per-unit history. Charts read from
+          the per-quarter <Term term="DPS" /> stream; <Term term="TTM" />{" "}
+          summary uses the latest 4 quarters. <Term term="Payout ratio" />{" "}
+          and <Term term="Yield-on-cost" /> render only when their inputs
+          (annual cashflow / your entry price) are available.
+        </p>
       </header>
 
       {dividends.loading ? (

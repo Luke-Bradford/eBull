@@ -74,7 +74,14 @@ describe("DividendsPanel", () => {
     wrap(<DividendsPanel symbol="AAPL" provider="sec_dividend_summary" />);
 
     await waitFor(() => {
-      expect(screen.getByText(/TTM yield/i)).toBeInTheDocument();
+      // Label is now split across <Term term="TTM"> + " yield" so a
+      // contains-text matcher won't span the boundary. Use an
+      // element-level matcher that handles the split tree.
+      expect(
+        screen.getByText((_content, el) =>
+          el?.tagName === "DT" && (el.textContent ?? "").trim() === "TTM yield",
+        ),
+      ).toBeInTheDocument();
     });
     expect(screen.getByText(/0.52%/)).toBeInTheDocument();
     expect(screen.getByText(/FY2025 Q4/)).toBeInTheDocument();

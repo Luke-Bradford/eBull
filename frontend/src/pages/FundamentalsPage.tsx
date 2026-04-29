@@ -50,6 +50,7 @@ import {
   YoyGrowthChart,
 } from "@/components/fundamentals/fundamentalsCharts";
 import { Pane } from "@/components/instrument/Pane";
+import { Term } from "@/components/Term";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 import { joinStatements } from "@/lib/fundamentalsMetrics";
@@ -173,9 +174,13 @@ export function FundamentalsPage(): JSX.Element {
           </div>
         </div>
         <p className="mt-1 text-xs text-slate-500">
-          SEC XBRL company-facts data. Each pane shows "—" when a metric
-          is missing for a period; ROIC and FCF are derived (see
-          metric helpers for formulas).
+          SEC <Term term="XBRL" /> company-facts data — every line is
+          tagged in the issuer's 10-K / 10-Q so we can read them as
+          numbers (not narrative). Each pane shows "—" when a metric
+          is missing for a period. <Term term="ROIC" /> and{" "}
+          <Term term="FCF" /> are derived; <Term term="DuPont" />{" "}
+          breaks <Term term="ROE" /> into its three drivers so you
+          can see which one is doing the work.
         </p>
       </header>
 

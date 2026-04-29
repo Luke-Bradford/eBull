@@ -23,10 +23,16 @@ const SLICE = 8;
 
 interface SeriesRow {
   readonly period_end: string;
-  readonly revenue: number;
-  readonly operatingIncome: number;
-  readonly netIncome: number;
-  readonly totalDebt: number;
+  // Each metric is independently nullable. Per-cell render filters its
+  // own column rather than the whole row dropping when one column is
+  // missing — partnership/MLP issuers like IEP file
+  // `IncomeLossFromContinuingOperations` instead of the standard
+  // `OperatingIncomeLoss`, leaving operating_income null on every row,
+  // which previously hid the entire pane (#684 operator report).
+  readonly revenue: number | null;
+  readonly operatingIncome: number | null;
+  readonly netIncome: number | null;
+  readonly totalDebt: number | null;
 }
 
 function num(v: string | null | undefined): number | null {
@@ -46,21 +52,27 @@ function joinPeriods(
   for (const i of income) {
     const key = `${i.period_end}|${i.period_type}`;
     const b = bMap.get(key);
-    if (b === undefined) continue;
     const revenue = num(i.values["revenue"] ?? null);
     const operatingIncome = num(i.values["operating_income"] ?? null);
     const netIncome = num(i.values["net_income"] ?? null);
-    const lt = num(b.values["long_term_debt"] ?? null) ?? 0;
-    const st = num(b.values["short_term_debt"] ?? null) ?? 0;
-    if (revenue === null || operatingIncome === null || netIncome === null) {
+    const lt = b !== undefined ? num(b.values["long_term_debt"] ?? null) : null;
+    const st = b !== undefined ? num(b.values["short_term_debt"] ?? null) : null;
+    // Drop a row only when every income-side flagship metric is null
+    // — otherwise the pane has nothing to plot. Total debt is a
+    // best-effort sum (if either component is non-null we surface
+    // what we have; balance-side gaps don't kill the income-side
+    // sparklines).
+    if (revenue === null && operatingIncome === null && netIncome === null) {
       continue;
     }
+    const totalDebt =
+      lt === null && st === null ? null : (lt ?? 0) + (st ?? 0);
     joined.push({
       period_end: i.period_end,
       revenue,
       operatingIncome,
       netIncome,
-      totalDebt: lt + st,
+      totalDebt,
     });
   }
   // Sort newest first then take the latest SLICE; reverse so the
@@ -69,6 +81,21 @@ function joinPeriods(
   const latest = joined.slice(0, SLICE);
   latest.reverse();
   return latest;
+}
+
+/** Filter the per-period series down to non-null values for one
+ *  metric. Empty array means "this issuer doesn't report this metric"
+ *  — the cell renders an em dash + a small "no data" hint. */
+function nonNullValues(
+  series: ReadonlyArray<SeriesRow>,
+  pick: (row: SeriesRow) => number | null,
+): number[] {
+  const out: number[] = [];
+  for (const row of series) {
+    const v = pick(row);
+    if (v !== null) out.push(v);
+  }
+  return out;
 }
 
 function formatLatest(values: ReadonlyArray<number>): string {
@@ -154,22 +181,22 @@ export function FundamentalsPane({ summary }: FundamentalsPaneProps): JSX.Elemen
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <FundamentalCell
             label="Revenue"
-            values={series.map((r) => r.revenue)}
+            values={nonNullValues(series, (r) => r.revenue)}
             stroke="text-sky-500"
           />
           <FundamentalCell
             label="Op income"
-            values={series.map((r) => r.operatingIncome)}
+            values={nonNullValues(series, (r) => r.operatingIncome)}
             stroke="text-emerald-500"
           />
           <FundamentalCell
             label="Net income"
-            values={series.map((r) => r.netIncome)}
+            values={nonNullValues(series, (r) => r.netIncome)}
             stroke="text-emerald-500"
           />
           <FundamentalCell
             label="Total debt"
-            values={series.map((r) => r.totalDebt)}
+            values={nonNullValues(series, (r) => r.totalDebt)}
             stroke="text-amber-500"
           />
         </div>
