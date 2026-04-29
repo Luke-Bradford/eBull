@@ -46,16 +46,23 @@ describe("RecentNewsPane", () => {
     expect(items.length).toBeLessThanOrEqual(5);
   });
 
-  it("returns null when feed is empty (no card)", async () => {
+  it("renders an in-pane empty state when feed is empty (design-system v1)", async () => {
+    // Was: returned null. Codex review of design-system v1 caught
+    // that this left a dead grid slot since DensityGrid reserves
+    // space from capability flags, not runtime render decisions.
     vi.spyOn(newsApi, "fetchNews").mockResolvedValueOnce({
       items: [],
       total: 0,
     } as never);
-    const { container } = render(
+    render(
       <MemoryRouter>
         <RecentNewsPane instrumentId={1} symbol="X" />
       </MemoryRouter>,
     );
-    await waitFor(() => expect(container.firstChild).toBeNull());
+    await waitFor(() => {
+      expect(
+        screen.getByText(/No news on file for this instrument/i),
+      ).toBeInTheDocument();
+    });
   });
 });

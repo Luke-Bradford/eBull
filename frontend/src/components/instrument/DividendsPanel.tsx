@@ -8,8 +8,13 @@
  *   - DividendsSummaryBlock (TTM yield / TTM DPS / Latest DPS / Streak)
  *   - Last 4 HistoryBar rows
  *
- * Four-state empty rule: return null when both history and upcoming are
- * empty after data settles (capability active, no current/forward signal).
+ * Empty-state policy (Codex review of design-system v1): when both
+ * history and upcoming are empty after data settles we render Pane
+ * chrome with an empty-state line rather than null. Returning null
+ * left an empty `lg:col-span-6` slot in the bento grid's Health row
+ * (operator-visible dead space). Provider source + Open→ are
+ * preserved so the operator can still drill through to the L2
+ * dividends page for context.
  */
 
 import { fetchInstrumentDividends } from "@/api/instruments";
@@ -48,9 +53,10 @@ export function DividendsPanel({ symbol, provider }: DividendsPanelProps) {
     [symbol, provider],
   );
 
-  // Empty case: data loaded, no history AND no upcoming → no card at all.
-  // This implements the four-state empty-pane policy: capability active but
-  // no current and no forward signal → render null.
+  // Empty case: data loaded, no history AND no upcoming → render Pane
+  // chrome with empty-state copy (carry source + onExpand so operator
+  // can still drill to L2). Returning null would leave a dead 6-col
+  // slot in the bento Health row.
   if (
     !state.loading &&
     state.error === null &&
@@ -58,7 +64,21 @@ export function DividendsPanel({ symbol, provider }: DividendsPanelProps) {
     state.data.history.length === 0 &&
     state.data.upcoming.length === 0
   ) {
-    return null;
+    return (
+      <Pane
+        title="Dividends"
+        source={{ providers: [provider] }}
+        onExpand={() =>
+          navigate(
+            `/instrument/${encodeURIComponent(symbol)}/dividends?provider=${encodeURIComponent(provider)}`,
+          )
+        }
+      >
+        <p className="text-xs text-slate-500">
+          No dividend history or upcoming dividends on file.
+        </p>
+      </Pane>
+    );
   }
 
   const last4 =

@@ -3,6 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Tells dark-mode browser extensions (Dark Reader, browser auto-darken)
+      that the site is light-mode-native. Without this hint, those tools
+      fight our contrast — making opaque bg-white panels translucent and
+      letting scrolled content bleed through sticky headers (operator
+      report, design-system v1). Native dark mode tracked separately.
+    -->
+    <meta name="color-scheme" content="only light" />
     <title>eBull</title>
   </head>
   <body class="bg-slate-50 text-slate-900 antialiased">
