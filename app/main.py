@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -208,7 +209,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # clicked "Sync now". Recovery model is now: every boot
         # opportunistically catches up everything that drifted past
         # its freshness target.
-        if settings.orchestrator_enabled:
+        #
+        # Gated by EBULL_SKIP_BOOT_SWEEP (mirrors EBULL_SKIP_CATCH_UP)
+        # so the test suite can disable it — every TestClient(app)
+        # enter would otherwise dispatch a behind sync that holds the
+        # partial-unique-index gate and 409s subsequent POST /sync
+        # scope='behind' tests in unrelated test modules.
+        skip_boot_sweep = os.environ.get("EBULL_SKIP_BOOT_SWEEP") == "1"
+        if settings.orchestrator_enabled and not skip_boot_sweep:
             try:
                 asyncio.create_task(_boot_freshness_sweep())
             except Exception:
