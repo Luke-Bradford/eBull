@@ -45,6 +45,21 @@ class CredentialCryptoConfigError(RuntimeError):
     """Raised at startup when EBULL_SECRETS_KEY is missing or malformed."""
 
 
+class MasterKeyNotLoadedError(CredentialCryptoConfigError):
+    """Raised when ``encrypt`` / ``decrypt`` is called before
+    :func:`set_active_key` (i.e. before ``master_key.bootstrap()``).
+
+    Distinct from the env-key configuration errors above so the
+    sync orchestrator's exception classifier can map it to the
+    operator-actionable ``MASTER_KEY_MISSING`` category instead of
+    the generic ``INTERNAL_ERROR`` "Unclassified error" banner.
+
+    Inherits from :class:`CredentialCryptoConfigError` so existing
+    callers that catch the parent class continue to handle it
+    correctly (no behavior change for code paths that don't
+    distinguish the subclass)."""
+
+
 class CredentialDecryptError(Exception):
     """Raised when a ciphertext cannot be decrypted or authenticated."""
 
@@ -104,7 +119,7 @@ def clear_active_key() -> None:
 def _get_aesgcm() -> AESGCM:
     cached = _aesgcm
     if cached is None:
-        raise CredentialCryptoConfigError(
+        raise MasterKeyNotLoadedError(
             "broker-encryption key is not loaded -- master_key.bootstrap() must run before encrypt/decrypt is called"
         )
     return cached

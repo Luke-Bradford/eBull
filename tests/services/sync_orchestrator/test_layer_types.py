@@ -46,6 +46,10 @@ def test_failure_category_members() -> None:
         "db_constraint",
         "data_gap",
         "upstream_waiting",
+        # #643 — broker-encryption key not loaded; distinct category
+        # so the operator-actionable banner fires instead of the
+        # opaque INTERNAL_ERROR fallback.
+        "master_key_missing",
         "internal_error",
     }
 
@@ -65,6 +69,9 @@ def test_non_self_heal_categories_match_spec() -> None:
         FailureCategory.AUTH_EXPIRED,
         FailureCategory.SCHEMA_DRIFT,
         FailureCategory.DB_CONSTRAINT,
+        # #643 — backoff retry won't recover a missing master key;
+        # the operator must restart or run /recover.
+        FailureCategory.MASTER_KEY_MISSING,
     }
     for category in FailureCategory:
         assert REMEDIES[category].self_heal == (category not in non_self_heal)
