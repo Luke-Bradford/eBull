@@ -47,33 +47,32 @@ export function CollapsibleSection({
   }
 
   return (
-    <section
-      className="rounded-md border border-slate-200 bg-white shadow-sm"
-      id={sectionId}
-    >
+    <section className="border-t border-slate-200 pt-3" id={sectionId}>
       <button
         type="button"
         onClick={toggle}
         aria-expanded={isOpen}
-        className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-slate-50"
+        className="flex w-full items-baseline justify-between gap-2 text-left transition-colors hover:text-amber-600"
       >
-        <div className="flex items-center gap-2">
+        <div className="flex items-baseline gap-2">
           <span
             aria-hidden
             className={`inline-block text-slate-400 transition-transform ${isOpen ? "rotate-90" : ""}`}
           >
             ▸
           </span>
-          <h2 className="text-sm font-semibold text-slate-700">{title}</h2>
+          <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-700">
+            {title}
+          </h2>
           {summary ? (
             <span className="text-xs text-slate-500">— {summary}</span>
           ) : null}
         </div>
-        <span className="text-xs text-slate-400">
+        <span className="text-[11px] text-slate-500">
           {isOpen ? "Hide" : "Show"}
         </span>
       </button>
-      {isOpen ? <div className="border-t border-slate-100 p-4">{children}</div> : null}
+      {isOpen ? <div className="mt-3">{children}</div> : null}
     </section>
   );
 }
