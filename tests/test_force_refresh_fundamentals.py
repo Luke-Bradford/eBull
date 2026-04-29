@@ -5,44 +5,32 @@ is exercised by the existing fundamentals tests; this file just
 pins the resolver's contract: it must return CIK-having symbols
 in caller order, list missing ones separately, and tolerate dups
 + casing variations.
+
+Uses the canonical ``ebull_test_conn`` fixture (auto-imported via
+``tests/conftest.py``) so the test-DB URL is derived from
+``settings.database_url`` rather than hardcoded — a misconfigured CI
+environment fails visibly on connect rather than silently skipping
+every assertion (PR #680 review).
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import psycopg
-import pytest
 
 from scripts.force_refresh_fundamentals import (
     ResolvedSymbol,
     resolve_symbols,
 )
 
-TEST_DB_URL = "postgresql://postgres:postgres@127.0.0.1:5432/ebull_test"
-
-
-@pytest.fixture
-def conn() -> Iterator[psycopg.Connection]:  # type: ignore[type-arg]
-    try:
-        c = psycopg.connect(TEST_DB_URL)
-    except psycopg.OperationalError:
-        pytest.skip("ebull_test DB not available")
-    try:
-        yield c
-    finally:
-        c.rollback()
-        c.close()
-
 
 def _seed(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
+    ebull_test_conn: psycopg.Connection[tuple],
     instrument_id: int,
     symbol: str,
     *,
     cik: str | None,
 ) -> None:
-    conn.execute(
+    ebull_test_conn.execute(
         """
         INSERT INTO exchanges (exchange_id, description, country, asset_class)
         VALUES (%s, %s, 'US', 'us_equity')
@@ -50,7 +38,7 @@ def _seed(
         """,
         (f"frt_{instrument_id}", f"Test {instrument_id}"),
     )
-    conn.execute(
+    ebull_test_conn.execute(
         """
         INSERT INTO instruments (instrument_id, symbol, company_name, exchange)
         VALUES (%s, %s, %s, %s)
@@ -59,7 +47,7 @@ def _seed(
         (instrument_id, symbol, f"Test {symbol}", f"frt_{instrument_id}"),
     )
     if cik is not None:
-        conn.execute(
+        ebull_test_conn.execute(
             """
             INSERT INTO external_identifiers
                 (instrument_id, provider, identifier_type, identifier_value, is_primary)
@@ -71,13 +59,13 @@ def _seed(
 
 
 def test_resolve_returns_cik_having_symbols_and_separates_missing(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
+    ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    _seed(conn, 970001, "FRTA", cik="0000970001")
-    _seed(conn, 970002, "FRTB", cik=None)
-    _seed(conn, 970003, "FRTC", cik="0000970003")
+    _seed(ebull_test_conn, 970001, "FRTA", cik="0000970001")
+    _seed(ebull_test_conn, 970002, "FRTB", cik=None)
+    _seed(ebull_test_conn, 970003, "FRTC", cik="0000970003")
 
-    resolved, missing = resolve_symbols(conn, ["FRTA", "FRTB", "FRTC", "NEVER"])
+    resolved, missing = resolve_symbols(ebull_test_conn, ["FRTA", "FRTB", "FRTC", "NEVER"])
 
     assert resolved == [
         ResolvedSymbol(symbol="FRTA", instrument_id=970001, cik="0000970001"),
@@ -88,31 +76,31 @@ def test_resolve_returns_cik_having_symbols_and_separates_missing(
 
 
 def test_resolve_is_case_insensitive(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
+    ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    _seed(conn, 970010, "FRTUP", cik="0000970010")
-    resolved, missing = resolve_symbols(conn, ["frtup"])
+    _seed(ebull_test_conn, 970010, "FRTUP", cik="0000970010")
+    resolved, missing = resolve_symbols(ebull_test_conn, ["frtup"])
     assert len(resolved) == 1
     assert resolved[0].instrument_id == 970010
     assert missing == []
 
 
 def test_resolve_preserves_duplicate_inputs(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
+    ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     """The resolver itself is order-preserving and does NOT dedupe —
     every caller input slot resolves to a record. Dedupe happens in
     the script's ``main()`` before the expensive SEC fetch (so a
     typo like ``IEP IEP MPLX`` doesn't triple-fetch). Tested here so
     the resolver's contract is locked at the call-site interface."""
-    _seed(conn, 970020, "FRTDUP", cik="0000970020")
-    resolved, missing = resolve_symbols(conn, ["FRTDUP", "FRTDUP", "FRTDUP"])
+    _seed(ebull_test_conn, 970020, "FRTDUP", cik="0000970020")
+    resolved, missing = resolve_symbols(ebull_test_conn, ["FRTDUP", "FRTDUP", "FRTDUP"])
     assert len(resolved) == 3
     assert {r.instrument_id for r in resolved} == {970020}
     assert missing == []
 
 
 def test_resolve_handles_empty_input(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
+    ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    assert resolve_symbols(conn, []) == ([], [])
+    assert resolve_symbols(ebull_test_conn, []) == ([], [])
