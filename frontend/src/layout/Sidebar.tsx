@@ -14,8 +14,10 @@ const NAV_ITEMS: { to: string; label: string; end?: boolean }[] = [
 
 export function Sidebar() {
   return (
-    <aside className="flex w-56 flex-col border-r border-slate-200 bg-white">
-      <div className="px-5 py-4 text-lg font-semibold tracking-tight">eBull</div>
+    <aside className="flex w-56 flex-col border-r border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+      <div className="px-5 py-4 text-lg font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+        eBull
+      </div>
       <nav className="flex flex-col gap-1 px-2">
         {NAV_ITEMS.map((item) => (
           <NavLink
@@ -26,8 +28,8 @@ export function Sidebar() {
               [
                 "rounded-md px-3 py-2 text-sm font-medium",
                 isActive
-                  ? "bg-slate-900 text-white"
-                  : "text-slate-700 hover:bg-slate-100",
+                  ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
+                  : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800",
               ].join(" ")
             }
           >

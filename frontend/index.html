@@ -4,16 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!--
-      Tells dark-mode browser extensions (Dark Reader, browser auto-darken)
-      that the site is light-mode-native. Without this hint, those tools
-      fight our contrast — making opaque bg-white panels translucent and
-      letting scrolled content bleed through sticky headers (operator
-      report, design-system v1). Native dark mode tracked separately.
+      Native dark mode (#690 Phase 1) — ThemeProvider toggles
+      `<html class="dark">` based on operator preference. The
+      `light dark` declaration tells the browser we support both
+      modes for native form-control rendering.
     -->
-    <meta name="color-scheme" content="only light" />
+    <meta name="color-scheme" content="light dark" />
     <title>eBull</title>
   </head>
-  <body class="bg-slate-50 text-slate-900 antialiased">
+  <body class="bg-slate-50 text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

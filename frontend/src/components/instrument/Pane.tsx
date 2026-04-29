@@ -60,9 +60,11 @@ export function Pane({
   // Atomic className segments — null entries are filtered so optional
   // pieces do not leave double spaces when omitted.
   const articleCls = [
-    "border-t border-slate-200 pt-3 pb-1",
+    "border-t border-slate-200 pt-3 pb-1 dark:border-slate-800",
     fillHeight ? "flex h-full flex-col" : null,
-    clickable ? "cursor-pointer transition-colors hover:bg-slate-50/60" : null,
+    clickable
+      ? "cursor-pointer transition-colors hover:bg-slate-50/60 dark:hover:bg-slate-800/40"
+      : null,
     className ?? null,
   ]
     .filter((x): x is string => x !== null)
