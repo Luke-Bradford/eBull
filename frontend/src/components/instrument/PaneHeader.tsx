@@ -41,17 +41,19 @@ export function PaneHeader({
   return (
     <header className="flex items-baseline justify-between gap-2">
       <div className="flex min-w-0 items-baseline gap-2">
-        <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-700">
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-700 dark:text-slate-300">
           {title}
         </h2>
         {scope ? (
-          <span className="text-[10px] text-slate-500">{scope}</span>
+          <span className="text-[10px] text-slate-500 dark:text-slate-400">
+            {scope}
+          </span>
         ) : null}
       </div>
       <div className="flex flex-shrink-0 items-center gap-2">
         {sourceText !== null ? (
           <span
-            className="truncate text-[10px] uppercase tracking-wide text-slate-400"
+            className="truncate text-[10px] uppercase tracking-wide text-slate-400 dark:text-slate-500"
             title={sourceText}
           >
             {sourceText}
@@ -64,7 +66,7 @@ export function PaneHeader({
               e.stopPropagation();
               onExpand();
             }}
-            className="text-[11px] font-medium text-slate-600 transition-colors hover:text-amber-600 focus-visible:rounded focus-visible:outline-2 focus-visible:outline-amber-500"
+            className="text-[11px] font-medium text-slate-600 transition-colors hover:text-amber-600 focus-visible:rounded focus-visible:outline-2 focus-visible:outline-amber-500 dark:text-slate-400 dark:hover:text-amber-400"
           >
             Open →
           </button>

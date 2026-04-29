@@ -34,17 +34,19 @@ export function Section({
   // Hairline chrome — no background, no border, no shadow. The top-rule
   // + small-caps title pair carries the section break visually.
   const sectionClass = scrollable
-    ? "flex min-h-0 flex-1 flex-col overflow-hidden border-t border-slate-200 pt-3"
-    : "border-t border-slate-200 pt-3";
+    ? "flex min-h-0 flex-1 flex-col overflow-hidden border-t border-slate-200 pt-3 dark:border-slate-800"
+    : "border-t border-slate-200 pt-3 dark:border-slate-800";
   const bodyClass = scrollable ? "min-h-0 flex-1 overflow-auto pt-3" : "pt-3";
   return (
     <section className={sectionClass}>
       <header className="flex flex-shrink-0 items-baseline justify-between gap-2">
-        <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-700">
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-700 dark:text-slate-300">
           {title}
         </h2>
         {action ? (
-          <div className="text-[11px] text-slate-600">{action}</div>
+          <div className="text-[11px] text-slate-600 dark:text-slate-400">
+            {action}
+          </div>
         ) : null}
       </header>
       <div className={bodyClass}>{children}</div>
@@ -56,13 +58,13 @@ export function SectionError({ onRetry }: { onRetry: () => void }) {
   return (
     <div
       role="alert"
-      className="flex items-center justify-between rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+      className="flex items-center justify-between rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300"
     >
       <span>Failed to load. Check the browser console for details.</span>
       <button
         type="button"
         onClick={onRetry}
-        className="rounded border border-red-300 bg-white px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
+        className="rounded border border-red-300 bg-white px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100 dark:border-red-800 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-950/60"
       >
         Retry
       </button>
@@ -74,7 +76,7 @@ export function SectionSkeleton({ rows = 3 }: { rows?: number }) {
   return (
     <div role="status" aria-live="polite" className="animate-pulse space-y-2">
       {Array.from({ length: rows }).map((_, i) => (
-        <div key={i} className="h-4 rounded bg-slate-100" />
+        <div key={i} className="h-4 rounded bg-slate-100 dark:bg-slate-800" />
       ))}
     </div>
   );
