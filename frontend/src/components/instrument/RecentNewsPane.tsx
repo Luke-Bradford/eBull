@@ -38,8 +38,18 @@ export function RecentNewsPane({
       </Pane>
     );
   }
+  // Empty case: data loaded, zero items → render Pane chrome with
+  // empty-state copy (Codex review of design-system v1). Returning
+  // null left a dead full-width row in the bento grid since the
+  // capability flag had already reserved the slot.
   if (state.data === null || state.data.items.length === 0) {
-    return null;
+    return (
+      <Pane title="Recent news">
+        <p className="text-xs text-slate-500">
+          No news on file for this instrument.
+        </p>
+      </Pane>
+    );
   }
 
   const items = state.data.items.slice(0, ROW_LIMIT);

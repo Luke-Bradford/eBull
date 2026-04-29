@@ -90,17 +90,21 @@ describe("DividendsPanel", () => {
     expect(screen.getByText("40")).toBeInTheDocument();
   });
 
-  it("returns null when history is empty AND upcoming is empty", async () => {
+  it("renders an in-pane empty state when history AND upcoming are empty (design-system v1)", async () => {
+    // Was: returned null. Codex review of design-system v1 caught
+    // that this left a dead 6-col slot in the bento Health row.
     mockFetch.mockResolvedValueOnce({
       symbol: "X",
       summary: { has_dividend: false } as never,
       history: [],
       upcoming: [],
     } as never);
-    const { container } = wrap(
-      <DividendsPanel symbol="X" provider="sec_dividend_summary" />,
-    );
-    await waitFor(() => expect(container.firstChild).toBeNull());
+    wrap(<DividendsPanel symbol="X" provider="sec_dividend_summary" />);
+    await waitFor(() => {
+      expect(
+        screen.getByText(/No dividend history or upcoming dividends on file/i),
+      ).toBeInTheDocument();
+    });
   });
 
   it("renders Pane when history is empty but upcoming has 1 item", async () => {

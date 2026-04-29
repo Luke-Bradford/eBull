@@ -184,7 +184,9 @@ describe("FundamentalsPane", () => {
     expect(await screen.findByText(/180/)).toBeInTheDocument();
   });
 
-  it("returns null when capability active but joined series is empty (e.g. SEC ingest before any quarters)", async () => {
+  it("renders an in-pane empty state when capability active but joined series is empty (design-system v1)", async () => {
+    // Was: returned null. Codex review of design-system v1 caught
+    // that this left a dead 6-col wrapper in the bento Health row.
     vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
       ((_symbol: string, query: { statement: string }) =>
         Promise.resolve({
@@ -196,12 +198,16 @@ describe("FundamentalsPane", () => {
           rows: [],
         })) as never,
     );
-    const { container } = render(
+    render(
       <MemoryRouter>
         <FundamentalsPane summary={makeSummary(true)} />
       </MemoryRouter>,
     );
-    await waitFor(() => expect(container.firstChild).toBeNull());
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Insufficient quarterly history yet/i),
+      ).toBeInTheDocument();
+    });
   });
 
   it("renders the pane for partnership/MLP issuers that don't file operating_income (#684)", async () => {
@@ -301,7 +307,7 @@ describe("FundamentalsPane", () => {
     expect(await screen.findByText("2/4")).toBeInTheDocument();
   });
 
-  it("returns null when capability active but only 1 quarter has both income + balance data", async () => {
+  it("renders an in-pane empty state when capability active but only 1 quarter has data (design-system v1)", async () => {
     vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
       ((_symbol: string, query: { statement: string }) => {
         if (query.statement === "income") {
@@ -336,11 +342,15 @@ describe("FundamentalsPane", () => {
         });
       }) as never,
     );
-    const { container } = render(
+    render(
       <MemoryRouter>
         <FundamentalsPane summary={makeSummary(true)} />
       </MemoryRouter>,
     );
-    await waitFor(() => expect(container.firstChild).toBeNull());
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Insufficient quarterly history yet/i),
+      ).toBeInTheDocument();
+    });
   });
 });
