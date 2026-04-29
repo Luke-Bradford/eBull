@@ -13,6 +13,7 @@
 import { fetchBusinessSections } from "@/api/instruments";
 import type {
   BusinessSection,
+  BusinessSectionsParseStatus,
   BusinessSectionsResponse,
 } from "@/api/instruments";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
@@ -48,6 +49,83 @@ function pickTeaser(sections: ReadonlyArray<BusinessSection>): string {
   return "";
 }
 
+/**
+ * Format the absolute timestamp for the empty-state hint. Keeps
+ * conditionally-rendered absolute times consistent across the four
+ * empty-state branches and makes a future "use relative time" swap
+ * a one-line change.
+ */
+function formatStamp(iso: string | null): string | null {
+  if (!iso) return null;
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  } catch {
+    return null;
+  }
+}
+
+interface ParseStatusEmptyStateProps {
+  status: BusinessSectionsParseStatus;
+}
+
+function ParseStatusEmptyState({ status }: ParseStatusEmptyStateProps): JSX.Element {
+  // Distinct copy per state so the operator can tell at a glance
+  // whether the empty panel needs investigation, will fix itself, or
+  // is intrinsic to the filing.
+  if (status.state === "no_item_1") {
+    return (
+      <EmptyState
+        title="10-K has no Item 1"
+        description={
+          "The latest 10-K filed by this issuer does not contain a parseable Item 1 " +
+          "Business section — common for 10-K/A amendments and shell-company filings. " +
+          "Nothing to investigate."
+        }
+      />
+    );
+  }
+  if (status.state === "parse_failed") {
+    const stamp = formatStamp(status.last_attempted_at);
+    const retry = formatStamp(status.next_retry_at);
+    const desc = [
+      `Parser failed${status.failure_reason ? ` (${status.failure_reason})` : ""}.`,
+      stamp ? ` Last attempted ${stamp}.` : "",
+      retry ? ` Next retry after ${retry}.` : "",
+    ]
+      .join("")
+      .trim();
+    return (
+      <EmptyState
+        title="10-K Item 1 parse failed"
+        description={desc || "Parser failed; will retry on the next ingester pass."}
+      />
+    );
+  }
+  if (status.state === "sections_pending") {
+    return (
+      <EmptyState
+        title="Sections pending"
+        description={
+          "Item 1 was extracted but the section splitter has not written subsections " +
+          "yet. Should appear shortly."
+        }
+      />
+    );
+  }
+  // not_attempted
+  return (
+    <EmptyState
+      title="10-K Item 1 not yet parsed"
+      description={
+        "The narrative ingester has not visited this instrument yet. It will be " +
+        "picked up on the next scheduled SEC business-summary pass."
+      }
+    />
+  );
+}
+
 export function BusinessSectionsTeaser({ symbol }: BusinessSectionsTeaserProps) {
   const navigate = useNavigate();
   const state = useAsync<BusinessSectionsResponse>(
@@ -67,10 +145,17 @@ export function BusinessSectionsTeaser({ symbol }: BusinessSectionsTeaserProps) 
       ) : state.error !== null ? (
         <SectionError onRetry={state.refetch} />
       ) : state.data === null || state.data.sections.length === 0 ? (
-        <EmptyState
-          title="No 10-K Item 1 on file"
-          description="No 10-K business description has been parsed for this instrument yet."
-        />
+        // #648 — render distinct empty states instead of the generic
+        // "No 10-K Item 1 on file" so the operator can tell parse-
+        // pending from parse-failed from genuinely-no-Item-1.
+        state.data?.parse_status ? (
+          <ParseStatusEmptyState status={state.data.parse_status} />
+        ) : (
+          <EmptyState
+            title="No 10-K Item 1 on file"
+            description="No 10-K business description has been parsed for this instrument yet."
+          />
+        )
       ) : (
         <div className="space-y-2 text-sm">
           <p className="leading-relaxed text-slate-700">

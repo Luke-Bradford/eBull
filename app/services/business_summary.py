@@ -1100,6 +1100,85 @@ class BusinessSectionRow:
     tables: tuple[ParsedTable, ...] = ()
 
 
+@dataclass(frozen=True)
+class ParseStatus:
+    """Why ``get_business_sections`` returned empty for an instrument
+    (#648). Shape mirrors ``BusinessSectionsParseStatus`` in the API
+    layer; lifted here so service-side tests can assert on it without
+    pulling in FastAPI."""
+
+    state: str  # 'not_attempted' | 'parse_failed' | 'no_item_1' | 'sections_pending'
+    failure_reason: str | None = None
+    next_retry_at: object | None = None  # datetime, kept loose to avoid datetime import
+    last_attempted_at: object | None = None
+
+
+def get_parse_status(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+) -> ParseStatus | None:
+    """Classify the parse state when no sections are on file (#648).
+
+    Returns None when sections DO exist (caller shouldn't be asking).
+    Otherwise returns one of:
+      * ``not_attempted`` — no parent row.
+      * ``parse_failed`` — parent body empty + explicit failure_reason
+        other than the no-Item-1 marker.
+      * ``no_item_1`` — parent body empty AND failure_reason indicates
+        the filing has no Item 1 (no_item_1_marker / body_too_short).
+      * ``sections_pending`` — parent body non-empty but splitter
+        hasn't written children yet.
+
+    Caller is responsible for verifying ``sections`` is empty before
+    calling — this helper does not double-check (extra round-trip
+    against a hot path the API layer already handled).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT body, last_failure_reason, next_retry_at, last_parsed_at
+            FROM instrument_business_summary
+            WHERE instrument_id = %s
+            """,
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return ParseStatus(state="not_attempted")
+
+    body = row[0] or ""
+    failure_reason = row[1]
+    next_retry_at = row[2]
+    last_parsed_at = row[3]
+
+    if body:
+        # Body extracted but the splitter hasn't written sections yet —
+        # transient, the splitter trigger should run shortly.
+        return ParseStatus(
+            state="sections_pending",
+            last_attempted_at=last_parsed_at,
+        )
+
+    # body is empty — tombstone path. Distinguish "no Item 1 to extract"
+    # from a real parse failure.
+    if failure_reason in {"no_item_1_marker", "body_too_short"}:
+        return ParseStatus(
+            state="no_item_1",
+            failure_reason=str(failure_reason) if failure_reason is not None else None,
+            next_retry_at=next_retry_at,
+            last_attempted_at=last_parsed_at,
+        )
+
+    return ParseStatus(
+        state="parse_failed",
+        failure_reason=str(failure_reason) if failure_reason is not None else None,
+        next_retry_at=next_retry_at,
+        last_attempted_at=last_parsed_at,
+    )
+
+
 def get_business_sections(
     conn: psycopg.Connection[Any],
     *,

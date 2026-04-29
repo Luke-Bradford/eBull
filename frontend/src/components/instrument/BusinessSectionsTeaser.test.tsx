@@ -46,4 +46,108 @@ describe("BusinessSectionsTeaser", () => {
     await userEvent.click(btn);
     expect(navigateMock).toHaveBeenCalledWith("/instrument/GME/filings/10-k");
   });
+
+  it("renders the no_item_1 distinct empty state when parse_status.state is no_item_1 (#648)", async () => {
+    vi.spyOn(api, "fetchBusinessSections").mockResolvedValueOnce({
+      symbol: "GME",
+      source_accession: null,
+      cik: null,
+      sections: [],
+      parse_status: {
+        state: "no_item_1",
+        failure_reason: "no_item_1_marker",
+        next_retry_at: null,
+        last_attempted_at: "2026-04-01T00:00:00Z",
+      },
+    } as never);
+    render(
+      <MemoryRouter>
+        <BusinessSectionsTeaser symbol="GME" />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/10-K has no Item 1/i)).toBeInTheDocument();
+    // Generic legacy copy must NOT appear when the parse_status shape is set.
+    expect(screen.queryByText(/No 10-K Item 1 on file/i)).not.toBeInTheDocument();
+  });
+
+  it("renders the parse_failed empty state with reason + retry timestamps (#648)", async () => {
+    vi.spyOn(api, "fetchBusinessSections").mockResolvedValueOnce({
+      symbol: "GME",
+      source_accession: null,
+      cik: null,
+      sections: [],
+      parse_status: {
+        state: "parse_failed",
+        failure_reason: "parse_exception",
+        next_retry_at: "2026-04-29T03:00:00Z",
+        last_attempted_at: "2026-04-28T03:00:00Z",
+      },
+    } as never);
+    render(
+      <MemoryRouter>
+        <BusinessSectionsTeaser symbol="GME" />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/parse failed/i)).toBeInTheDocument();
+    expect(screen.getByText(/parse_exception/)).toBeInTheDocument();
+    expect(screen.getByText(/2026-04-28 03:00 UTC/)).toBeInTheDocument();
+    expect(screen.getByText(/2026-04-29 03:00 UTC/)).toBeInTheDocument();
+  });
+
+  it("renders the not_attempted empty state for fresh instruments (#648)", async () => {
+    vi.spyOn(api, "fetchBusinessSections").mockResolvedValueOnce({
+      symbol: "GME",
+      source_accession: null,
+      cik: null,
+      sections: [],
+      parse_status: {
+        state: "not_attempted",
+        failure_reason: null,
+        next_retry_at: null,
+        last_attempted_at: null,
+      },
+    } as never);
+    render(
+      <MemoryRouter>
+        <BusinessSectionsTeaser symbol="GME" />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/not yet parsed/i)).toBeInTheDocument();
+  });
+
+  it("renders the sections_pending empty state when body is set but splitter hasn't run (#648)", async () => {
+    vi.spyOn(api, "fetchBusinessSections").mockResolvedValueOnce({
+      symbol: "GME",
+      source_accession: null,
+      cik: null,
+      sections: [],
+      parse_status: {
+        state: "sections_pending",
+        failure_reason: null,
+        next_retry_at: null,
+        last_attempted_at: "2026-04-29T01:00:00Z",
+      },
+    } as never);
+    render(
+      <MemoryRouter>
+        <BusinessSectionsTeaser symbol="GME" />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/Sections pending/i)).toBeInTheDocument();
+  });
+
+  it("falls back to the legacy generic empty state when the API omits parse_status", async () => {
+    vi.spyOn(api, "fetchBusinessSections").mockResolvedValueOnce({
+      symbol: "GME",
+      source_accession: null,
+      cik: null,
+      sections: [],
+    } as never);
+    render(
+      <MemoryRouter>
+        <BusinessSectionsTeaser symbol="GME" />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/No 10-K Item 1 on file/i)).toBeInTheDocument();
+  });
 });

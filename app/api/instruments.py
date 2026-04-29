@@ -1262,6 +1262,39 @@ class BusinessSectionModel(BaseModel):
     tables: list[BusinessTableModel] = []
 
 
+class BusinessSectionsParseStatus(BaseModel):
+    """Why ``sections`` is empty (#648).
+
+    Populated only when ``sections`` is empty. Lets the operator UI
+    distinguish "the parser hasn't run yet" from "the parser tried
+    and failed" from "the filing genuinely has no Item 1" — all of
+    which used to render as the same opaque "No 10-K Item 1 on file"
+    empty state.
+
+    ``state``:
+      * ``not_attempted`` — no parent ``instrument_business_summary``
+        row exists. The ingester hasn't visited this instrument yet.
+      * ``parse_failed`` — parent row body is empty + an explicit
+        ``last_failure_reason`` from the FailureReason taxonomy is
+        set. Includes ``failure_reason``, ``next_retry_at``, and
+        ``last_attempted_at``.
+      * ``no_item_1`` — parent row body is empty AND the failure
+        reason was ``no_item_1_marker`` (or a body-too-short slice
+        from the same Item 1 absence). The 10-K filed by this issuer
+        doesn't have a parseable Item 1 — common for 10-K/A Part-III
+        amendments. Distinct from generic ``parse_failed`` so the
+        operator doesn't waste time investigating a fix.
+      * ``sections_pending`` — parent row body is non-empty (Item 1
+        was extracted) but the section splitter hasn't written
+        children yet. Should be transient.
+    """
+
+    state: Literal["not_attempted", "parse_failed", "no_item_1", "sections_pending"]
+    failure_reason: str | None = None
+    next_retry_at: datetime | None = None
+    last_attempted_at: datetime | None = None
+
+
 class BusinessSectionsResponse(BaseModel):
     """Response payload for ``/instruments/{symbol}/business_sections``.
 
@@ -1275,12 +1308,16 @@ class BusinessSectionsResponse(BaseModel):
     (``cgi-bin/viewer?cik=...&accession_number=...``) without an
     EDGAR search redirect (#563). NULL for instruments without a
     primary SEC CIK link (non-US tickers, crypto, etc.).
+
+    ``parse_status`` (#648) explains WHY ``sections`` is empty when
+    it is. NULL when ``sections`` has any content.
     """
 
     symbol: str
     source_accession: str | None
     cik: str | None
     sections: list[BusinessSectionModel]
+    parse_status: BusinessSectionsParseStatus | None = None
 
 
 @router.get(
@@ -1308,7 +1345,7 @@ def get_instrument_business_sections(
     specific historical filing. Returns 404 when no sections exist for
     the requested accession (#559).
     """
-    from app.services.business_summary import get_business_sections
+    from app.services.business_summary import get_business_sections, get_parse_status
 
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
@@ -1337,6 +1374,26 @@ def get_instrument_business_sections(
             detail=f"no 10-K sections for {symbol} accession {accession}",
         )
     source_accession = sections[0].source_accession if sections else None
+
+    # #648 — when the latest-filing path returns empty, classify why
+    # so the operator UI can render distinct empty states. We only
+    # attempt classification on the latest-filing path (accession=None)
+    # — when an explicit accession was requested and missed, the 404
+    # above is the right answer; parse status is for the "is the
+    # narrative panel waiting on parsing or did it fail?" use case.
+    parse_status_model: BusinessSectionsParseStatus | None = None
+    if not sections and accession is None:
+        ps = get_parse_status(conn, instrument_id=instrument_id)
+        if ps is not None:
+            parse_status_model = BusinessSectionsParseStatus(
+                # The Literal narrows it for the response model — the
+                # service-layer dataclass uses str so the service
+                # tests don't pull in fastapi.
+                state=ps.state,  # type: ignore[arg-type]
+                failure_reason=ps.failure_reason,
+                next_retry_at=ps.next_retry_at,  # type: ignore[arg-type]
+                last_attempted_at=ps.last_attempted_at,  # type: ignore[arg-type]
+            )
 
     # #563: plumb CIK so the frontend can build direct iXBRL viewer
     # URLs. Single SELECT against the existing primary SEC link;
@@ -1381,6 +1438,7 @@ def get_instrument_business_sections(
             )
             for s in sections
         ],
+        parse_status=parse_status_model,
     )
 
 

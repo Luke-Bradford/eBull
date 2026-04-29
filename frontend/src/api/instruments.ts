@@ -209,6 +209,23 @@ export interface BusinessSection {
   tables: BusinessTable[];
 }
 
+/**
+ * Why `sections` is empty (#648). Populated only when `sections` is
+ * empty. Lets the operator UI distinguish "the parser hasn't run yet"
+ * from "the parser tried and failed" from "the filing genuinely has
+ * no Item 1" — all of which used to render as the same opaque
+ * "No 10-K Item 1 on file" empty state.
+ */
+export interface BusinessSectionsParseStatus {
+  state: "not_attempted" | "parse_failed" | "no_item_1" | "sections_pending";
+  failure_reason: string | null;
+  /** ISO timestamp (UTC). Backoff schedule applies; the next ingester
+   * pass after this timestamp will retry. */
+  next_retry_at: string | null;
+  /** ISO timestamp (UTC) of the most recent parse attempt. */
+  last_attempted_at: string | null;
+}
+
 export interface BusinessSectionsResponse {
   symbol: string;
   source_accession: string | null;
@@ -221,6 +238,9 @@ export interface BusinessSectionsResponse {
    */
   cik: string | null;
   sections: BusinessSection[];
+  /** #648 — explains WHY sections is empty when it is. NULL when
+   * sections has any content. */
+  parse_status?: BusinessSectionsParseStatus | null;
 }
 
 export function fetchBusinessSections(
