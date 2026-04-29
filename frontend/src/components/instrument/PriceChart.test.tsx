@@ -514,6 +514,13 @@ describe("PriceChart — no-flicker on background refetch (#650)", () => {
     await waitFor(() => {
       expect(screen.getByTestId("price-chart-AAPL")).toBeInTheDocument();
     });
+    // Once the new range data lands, the skeleton must vanish — the
+    // skeleton-shown half of this contract is asserted above; the
+    // skeleton-hidden half belongs here so a regression that left
+    // the skeleton stuck on top of the chart would fail the test.
+    await waitFor(() => {
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    });
   });
 });
 
