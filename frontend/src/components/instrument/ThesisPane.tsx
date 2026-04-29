@@ -31,7 +31,7 @@ function ThesisBody({ thesis }: { thesis: ThesisDetail }): JSX.Element {
   const breaks = thesis.break_conditions_json ?? [];
   return (
     <div className="space-y-3 text-sm">
-      <div className="whitespace-pre-wrap text-slate-700">
+      <div className="max-w-prose whitespace-pre-wrap text-slate-700">
         {thesis.memo_markdown}
       </div>
       {(thesis.base_value !== null ||

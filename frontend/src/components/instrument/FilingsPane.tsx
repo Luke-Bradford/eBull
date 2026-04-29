@@ -130,7 +130,7 @@ export function FilingsPane({
           }
         />
       ) : (
-        <ul className="space-y-1.5 text-xs">
+        <ul className="max-w-2xl space-y-1.5 text-xs">
           {state.data.items.slice(0, ROW_LIMIT).map((f) => {
             const link = drilldownLink(
               symbol,
