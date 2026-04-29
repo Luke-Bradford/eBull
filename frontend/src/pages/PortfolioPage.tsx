@@ -344,7 +344,7 @@ function SummaryBar({
   const mirrorCount = mirrors.length;
 
   return (
-    <div className="flex flex-wrap gap-6 rounded-md border border-slate-200 bg-white px-5 py-3 text-sm shadow-sm">
+    <div className="flex flex-wrap gap-x-8 gap-y-2 border-t border-slate-200 px-1 pt-3 pb-2 text-sm">
       <Stat label="AUM" value={formatMoney(data.total_aum, currency)} />
       <Stat label="Cash" value={formatMoney(data.cash_balance, currency)} />
       <Stat
@@ -444,8 +444,8 @@ function PortfolioTable({
   onClose: (t: CloseTarget) => void;
 }) {
   return (
-    <div className="rounded-md border border-slate-200 bg-white shadow-sm">
-      <div className="border-b border-slate-100 px-4 py-2">
+    <div className="border-t border-slate-200 pt-3">
+      <div className="px-1 pb-3">
         <input
           ref={searchRef}
           type="text"
@@ -517,7 +517,7 @@ function PaginationBar({
   onNext: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs shadow-sm">
+    <div className="flex items-center justify-between border-t border-slate-200 px-1 pt-2 pb-1 text-xs">
       <button
         type="button"
         onClick={onPrev}
