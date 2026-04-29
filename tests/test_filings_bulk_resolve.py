@@ -58,8 +58,9 @@ def _seed_instrument(
     cik: str | None,
 ) -> None:
     """Seed an instrument + (optionally) a primary SEC CIK row.
-    Wrapped in a SAVEPOINT so the per-test rollback in the fixture
-    cleans up regardless of test outcome."""
+    The per-test fixture's `c.rollback()` cleans up regardless of
+    test outcome — every INSERT here lives in the test's open
+    transaction and is discarded at teardown."""
     conn.execute(
         """
         INSERT INTO exchanges (exchange_id, description, country, asset_class)

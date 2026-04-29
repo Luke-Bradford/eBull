@@ -55,26 +55,44 @@ def _bulk_resolve_identifiers(
     """
     if not instrument_ids:
         return {}
-    # Cast to int where possible so the ANY(%s) parameter binds
-    # against the int4 instrument_id column. Strings stored in the
-    # caller-supplied list pass through ANY-style comparison via
-    # implicit cast on Postgres' side.
+    # Cast the parameter list to int so `instrument_id = ANY(%s)`
+    # compares against the int4 column without any per-row cast that
+    # would defeat the primary-key index (PR #679 review). The
+    # caller-supplied list may contain str-typed ids — coerce here
+    # rather than at every call site.
+    int_ids: list[int] = []
+    for i in instrument_ids:
+        try:
+            int_ids.append(int(i))
+        except TypeError, ValueError:
+            # Caller passed a non-numeric id; skip rather than abort
+            # the whole refresh. Logged at DEBUG so a typo surfaces
+            # under verbose logging without inflating the aggregate
+            # skip count.
+            logger.debug("Skipping non-numeric instrument_id %r in bulk resolve", i)
+    if not int_ids:
+        return {}
     rows = conn.execute(
         """
-        SELECT instrument_id::text, identifier_value
+        SELECT instrument_id, identifier_value
         FROM external_identifiers
         WHERE provider = %(provider)s
           AND identifier_type = %(identifier_type)s
           AND is_primary = TRUE
-          AND instrument_id::text = ANY(%(ids)s)
+          AND instrument_id = ANY(%(ids)s)
         """,
         {
             "provider": provider_name,
             "identifier_type": identifier_type,
-            "ids": [str(i) for i in instrument_ids],
+            "ids": int_ids,
         },
     ).fetchall()
-    return {row[0]: row[1] for row in rows}
+    # Caller signature accepts str ids — return str-keyed map so the
+    # dict-iteration in `refresh_filings` keeps the same key type the
+    # original loop used (loop body passes `instrument_id` straight
+    # to `_upsert_filing`, which has historically tolerated either
+    # int or str).
+    return {str(row[0]): row[1] for row in rows}
 
 
 def refresh_filings(
