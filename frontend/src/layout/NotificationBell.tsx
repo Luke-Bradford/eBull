@@ -71,11 +71,11 @@ export function NotificationBell(): JSX.Element {
   return (
     <button
       type="button"
-      onClick={() => navigate("/dashboard")}
+      onClick={() => navigate("/")}
       aria-label={count > 0 ? `${count} unread notifications` : "Notifications"}
       data-testid="notification-bell"
       data-unseen-count={count}
-      title={count > 0 ? `${count} unread — click to open dashboard` : "No unread alerts"}
+      title={count > 0 ? `${count} unread — click to open the dashboard` : "No unread alerts"}
       className={[
         "relative rounded p-1 text-slate-600 transition hover:bg-slate-50",
         count > 0 ? "text-red-700" : "",
