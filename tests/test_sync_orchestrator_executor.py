@@ -228,6 +228,33 @@ class TestCategorizeError:
         exc = KeyError("nope")
         assert classify_exception(exc) is FailureCategory.INTERNAL_ERROR
 
+    def test_master_key_not_loaded_maps_to_master_key_missing(self) -> None:
+        # #643 — distinct category so the operator-actionable banner
+        # ("restart the backend / open /recover") fires instead of the
+        # opaque "Unclassified error" the path used to hit.
+        from app.security.secrets_crypto import MasterKeyNotLoadedError
+        from app.services.sync_orchestrator.exception_classifier import classify_exception
+        from app.services.sync_orchestrator.layer_types import FailureCategory
+
+        exc = MasterKeyNotLoadedError("broker-encryption key is not loaded")
+        assert classify_exception(exc) is FailureCategory.MASTER_KEY_MISSING
+
+    def test_master_key_missing_remedy_present(self) -> None:
+        # The classifier mapping is useless without the REMEDIES entry.
+        # Pin the wiring so a future contributor can't drop one without
+        # the other.
+        from app.services.sync_orchestrator.layer_types import REMEDIES, FailureCategory
+
+        assert FailureCategory.MASTER_KEY_MISSING in REMEDIES
+        remedy = REMEDIES[FailureCategory.MASTER_KEY_MISSING]
+        # operator_fix is required — this category exists specifically
+        # because there's an operator action to take.
+        assert remedy.operator_fix is not None
+        # NOT self_heal — backoff retry won't recover; the key has to
+        # come back via either the persisted root secret or the
+        # operator-driven recovery flow.
+        assert remedy.self_heal is False
+
 
 class TestSetExecutor:
     def test_submit_sync_raises_when_no_executor_set(self) -> None:

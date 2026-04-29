@@ -90,6 +90,7 @@ class ActionNeededItem(BaseModel):
         "db_constraint",
         "data_gap",
         "upstream_waiting",
+        "master_key_missing",
         "internal_error",
     ]
     operator_message: str

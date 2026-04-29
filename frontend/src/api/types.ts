@@ -963,6 +963,7 @@ export interface ActionNeededItem {
     | "db_constraint"
     | "data_gap"
     | "upstream_waiting"
+    | "master_key_missing"
     | "internal_error";
   operator_message: string;
   operator_fix: string | null;

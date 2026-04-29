@@ -11,6 +11,7 @@ import httpx
 import psycopg
 import psycopg.errors
 
+from app.security.secrets_crypto import MasterKeyNotLoadedError
 from app.services.sync_orchestrator.layer_types import FailureCategory, LayerRefreshFailed
 
 
@@ -29,6 +30,14 @@ def classify_exception(exc: BaseException) -> FailureCategory:
     # information than this helper can recover from the exception type.
     if isinstance(exc, LayerRefreshFailed):
         return exc.category
+    # #643 — broker-encryption key not loaded. Distinct from the
+    # generic AUTH_EXPIRED (which means the credential decrypted but
+    # the upstream provider rejected it) and from the catch-all
+    # INTERNAL_ERROR. Surfaced with an operator-actionable banner
+    # via REMEDIES[MASTER_KEY_MISSING] instead of the opaque
+    # "Unclassified error" the path used to hit.
+    if isinstance(exc, MasterKeyNotLoadedError):
+        return FailureCategory.MASTER_KEY_MISSING
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         if status in (401, 403):
