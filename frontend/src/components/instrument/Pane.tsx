@@ -8,32 +8,44 @@ export interface PaneProps extends PaneHeaderProps {
   /** Optional className overrides on the outer article. */
   readonly className?: string;
   /**
-   * Optional whole-card click handler. When provided, the Pane gets a
-   * cursor-pointer + hover-elevate affordance and clicking anywhere on
-   * the card invokes the handler. Internal interactive controls (e.g.
-   * range pickers) must call `e.stopPropagation()` so they don't also
-   * trigger this handler. The PaneHeader's "Open →" button stops
-   * propagation automatically — see PaneHeader.tsx.
+   * Optional whole-card click handler. When provided, clicking anywhere
+   * on the card invokes the handler. Internal interactive controls
+   * (range pickers, etc.) must call `e.stopPropagation()` so they don't
+   * also fire this handler. PaneHeader's "Open →" button stops
+   * propagation automatically.
    *
    * Accessibility: the article does NOT receive `role="button"` or
-   * `tabIndex` because it contains real `<button>` descendants
-   * (PaneHeader Open button, in-pane controls). Nesting interactive
-   * elements inside a custom button is an ARIA violation and can
-   * cause assistive tech to flatten the inner controls. Keyboard
-   * users navigate via the inner Open button instead — that button
-   * is always rendered when `onExpand` is provided, so the drill is
-   * keyboard-reachable without needing a card-level handler.
+   * `tabIndex` because it contains real `<button>` descendants. Nesting
+   * interactive elements inside a custom button is an ARIA violation
+   * and assistive tech may flatten the inner controls. Keyboard users
+   * navigate via the inner Open button instead.
    */
   readonly onCardClick?: () => void;
   /**
    * Stretch the pane (and its single child) to fill the parent grid
    * cell vertically. Use when the cell uses `lg:row-span-N` to span
-   * multiple rows — without this, the child sits at its intrinsic
-   * height and leaves whitespace below when the right rail is taller.
+   * multiple rows.
    */
   readonly fillHeight?: boolean;
 }
 
+/**
+ * Pane — borderless editorial chrome (design-system v1).
+ *
+ * Replaces the prior rounded card (border + shadow + bg-white) with a
+ * single hairline rule on top + a small-caps title row. The grid reads
+ * as one continuous editorial spread instead of a Trello-board of
+ * tiles, which suits financial data (operators scan across panes
+ * looking for cross-pane signal: revenue trend → dividend yield →
+ * insider buying — that's one document, not separate cards).
+ *
+ * Visual grouping comes from the top rule + title pair, not from a
+ * bordered box. Hover affordance for clickable panes is a subtle
+ * slate-50 tint, not a shadow lift (no layout shift).
+ *
+ * Horizontal padding is zero so the rule extends edge-to-edge of the
+ * grid cell — the parent grid container owns horizontal rhythm.
+ */
 export function Pane({
   title,
   scope,
@@ -45,17 +57,17 @@ export function Pane({
   children,
 }: PaneProps): JSX.Element {
   const clickable = onCardClick !== undefined;
-  // Build the article className from atomic segments so optional
-  // segments do not leave double spaces when omitted.
+  // Atomic className segments — null entries are filtered so optional
+  // pieces do not leave double spaces when omitted.
   const articleCls = [
-    "rounded-md border border-slate-200 bg-white px-3 py-2.5 shadow-sm",
+    "border-t border-slate-200 pt-3 pb-1",
     fillHeight ? "flex h-full flex-col" : null,
-    clickable ? "cursor-pointer transition hover:border-slate-300 hover:shadow-md" : null,
+    clickable ? "cursor-pointer transition-colors hover:bg-slate-50/60" : null,
     className ?? null,
   ]
     .filter((x): x is string => x !== null)
     .join(" ");
-  const childCls = fillHeight ? "mt-2 flex min-h-0 flex-1 flex-col" : "mt-2";
+  const childCls = fillHeight ? "mt-3 flex min-h-0 flex-1 flex-col" : "mt-3";
   return (
     <article
       className={articleCls}

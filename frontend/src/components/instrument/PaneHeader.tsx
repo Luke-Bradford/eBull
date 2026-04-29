@@ -8,13 +8,25 @@ export interface PaneHeaderProps {
     readonly lastSync?: string;
   };
   /**
-   * Renders an "Open →" button. The handler is invoked on click; the
-   * click event's propagation is stopped so an enclosing Pane with
-   * `onCardClick` doesn't also fire.
+   * Renders an "Open →" button. Click handler is invoked on click;
+   * propagation is stopped so an enclosing Pane with `onCardClick`
+   * doesn't also fire.
    */
   readonly onExpand?: () => void;
 }
 
+/**
+ * PaneHeader — small-caps editorial title row (design-system v1).
+ *
+ * Lives directly under the Pane's hairline top-rule with no extra
+ * border-bottom — the rule above the title is the visual section
+ * marker. Tracking-[0.08em] (slightly tighter than tracking-widest)
+ * keeps the small-caps feeling intentional without going into
+ * decorative-label territory.
+ *
+ * Open button uses amber-500 hover (Bloomberg-echo accent reserved
+ * for interactivity) instead of sky — keeps blue free for charts.
+ */
 export function PaneHeader({
   title,
   scope,
@@ -27,9 +39,9 @@ export function PaneHeader({
         (source.lastSync ? ` · ${source.lastSync}` : "")
       : null;
   return (
-    <header className="flex items-baseline justify-between gap-2 border-b border-slate-100 pb-1.5">
+    <header className="flex items-baseline justify-between gap-2">
       <div className="flex min-w-0 items-baseline gap-2">
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-600">
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-700">
           {title}
         </h2>
         {scope ? (
@@ -39,7 +51,7 @@ export function PaneHeader({
       <div className="flex flex-shrink-0 items-center gap-2">
         {sourceText !== null ? (
           <span
-            className="truncate rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600"
+            className="truncate text-[10px] uppercase tracking-wide text-slate-400"
             title={sourceText}
           >
             {sourceText}
@@ -52,7 +64,7 @@ export function PaneHeader({
               e.stopPropagation();
               onExpand();
             }}
-            className="text-[11px] text-sky-700 hover:underline focus-visible:rounded focus-visible:outline-2 focus-visible:outline-sky-500"
+            className="text-[11px] font-medium text-slate-600 transition-colors hover:text-amber-600 focus-visible:rounded focus-visible:outline-2 focus-visible:outline-amber-500"
           >
             Open →
           </button>

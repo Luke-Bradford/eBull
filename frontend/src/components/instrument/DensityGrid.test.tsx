@@ -262,6 +262,82 @@ describe("DensityGrid profiles", () => {
     expect(navigateMock).toHaveBeenCalledWith("/instrument/GME/chart?range=5y");
   });
 
+  it("v4 health row: Fundamentals + Dividends pair as 6+6 when both active (full-sec)", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={makeSummary({
+            fundamentals: { providers: ["sec_xbrl"], data_present: { sec_xbrl: true } },
+            filings: { providers: ["sec_edgar"], data_present: { sec_edgar: true } },
+            dividends: { providers: ["sec_dividend_summary"], data_present: { sec_dividend_summary: true } },
+          })}
+          thesis={null}
+          thesisErrored={false}
+        />
+      </MemoryRouter>,
+    );
+    // Both Health-zone slots are present and each carries lg:col-span-6,
+    // i.e. neither pane stretches full-width and neither leaves a gap.
+    const fundamentalsSlot = screen.getByText("Fundamentals").closest("div.col-span-12");
+    const dividendsSlot = screen.getByText("Dividends").closest("div.col-span-12");
+    expect(fundamentalsSlot?.className).toContain("lg:col-span-6");
+    expect(dividendsSlot?.className).toContain("lg:col-span-6");
+    // Sanity: container has the v1 design-system grid spacing (gap-x-8 gap-y-6).
+    const grid = container.querySelector(".grid.grid-cols-12");
+    expect(grid?.className).toContain("gap-x-8");
+    expect(grid?.className).toContain("gap-y-6");
+  });
+
+  it("v4 activity row: Filings + Insider pair as 6+6 when both active", () => {
+    render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={makeSummary({
+            fundamentals: { providers: ["sec_xbrl"], data_present: { sec_xbrl: true } },
+            filings: { providers: ["sec_edgar"], data_present: { sec_edgar: true } },
+            insider: { providers: ["sec_form4"], data_present: { sec_form4: true } },
+          })}
+          thesis={null}
+          thesisErrored={false}
+        />
+      </MemoryRouter>,
+    );
+    const filingsSlot = screen.getByText(/Recent filings/).closest("div.col-span-12");
+    const insiderSlot = screen.getByText(/Insider summary/).closest("div.col-span-12");
+    expect(filingsSlot?.className).toContain("lg:col-span-6");
+    expect(insiderSlot?.className).toContain("lg:col-span-6");
+  });
+
+  it("v4 zone B: BusinessSections sits directly under the hero (full-sec), not at page bottom", () => {
+    render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={makeSummary({
+            fundamentals: { providers: ["sec_xbrl"], data_present: { sec_xbrl: true } },
+            filings: { providers: ["sec_edgar"], data_present: { sec_edgar: true } },
+          })}
+          thesis={null}
+          thesisErrored={false}
+        />
+      </MemoryRouter>,
+    );
+    // Reading priority sequence in the DOM: hero → narrative → health → activity →
+    // news → thesis. Assert narrative appears BEFORE fundamentals/filings/news.
+    const narrative = screen.getByText(/Company narrative/);
+    const fundamentals = screen.getByText("Fundamentals");
+    const filings = screen.getByText(/Recent filings/);
+    const news = screen.getByText("Recent news");
+    expect(narrative.compareDocumentPosition(fundamentals)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(narrative.compareDocumentPosition(filings)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(narrative.compareDocumentPosition(news)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
   it("clicking the chart card body does NOT drill — only Open button drills (#601 follow-up)", async () => {
     navigateMock.mockClear();
     const user = userEvent.setup();
