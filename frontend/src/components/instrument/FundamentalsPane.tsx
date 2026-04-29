@@ -235,6 +235,17 @@ function FundamentalsGrid({
   );
 }
 
+/** Period-over-period delta as a percentage. Sign carried by the
+ *  display layer; null when fewer than 2 points OR when prior is
+ *  zero (undefined growth). */
+function periodDelta(values: ReadonlyArray<number>): number | null {
+  if (values.length < 2) return null;
+  const prev = values[values.length - 2]!;
+  const last = values[values.length - 1]!;
+  if (prev === 0) return null;
+  return ((last - prev) / Math.abs(prev)) * 100;
+}
+
 function FundamentalCell({
   label,
   values,
@@ -250,23 +261,42 @@ function FundamentalCell({
   readonly stroke: string;
 }) {
   const showCoverage = values.length > 0 && values.length < maxLen;
+  const delta = periodDelta(values);
+  const deltaClass =
+    delta === null
+      ? "text-slate-400"
+      : delta > 0
+        ? "text-emerald-600"
+        : delta < 0
+          ? "text-red-600"
+          : "text-slate-500";
   return (
-    <div className="flex flex-col items-start">
-      <span className="text-[10px] uppercase tracking-wider text-slate-500">
-        {label}
-      </span>
-      <Sparkline values={values} className={stroke} />
-      <span className="text-xs font-medium tabular-nums text-slate-800">
-        {formatLatest(values)}
-      </span>
-      {showCoverage ? (
-        <span
-          className="text-[9px] uppercase tracking-wider text-amber-600"
-          title={`This cell covers ${values.length} of the ${maxLen} periods rendered by sibling cells.`}
-        >
-          {values.length}/{maxLen} periods
+    <div className="flex flex-col items-start gap-0.5">
+      <span className="flex w-full items-baseline justify-between gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-slate-500">
+          {label}
         </span>
-      ) : null}
+        {showCoverage ? (
+          <span
+            className="text-[9px] uppercase tracking-wider text-amber-600"
+            title={`This cell covers ${values.length} of the ${maxLen} periods rendered by sibling cells.`}
+          >
+            {values.length}/{maxLen}
+          </span>
+        ) : null}
+      </span>
+      <Sparkline values={values} width={120} height={36} className={stroke} />
+      <span className="flex items-baseline gap-1.5">
+        <span className="text-sm font-semibold tabular-nums text-slate-800">
+          {formatLatest(values)}
+        </span>
+        {delta !== null ? (
+          <span className={`text-[10px] font-medium tabular-nums ${deltaClass}`}>
+            {delta > 0 ? "▲" : delta < 0 ? "▼" : "·"}
+            {Math.abs(delta).toFixed(1)}%
+          </span>
+        ) : null}
+      </span>
     </div>
   );
 }

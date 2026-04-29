@@ -50,7 +50,7 @@ export function RecentNewsPane({
         navigate(`/instrument/${encodeURIComponent(symbol)}?tab=news`)
       }
     >
-      <ul className="space-y-1.5 text-xs">
+      <ul className="max-w-3xl space-y-1.5 text-xs">
         {items.map((n) => (
           <li key={n.news_event_id} className="flex items-baseline gap-2">
             <span className="text-slate-500">

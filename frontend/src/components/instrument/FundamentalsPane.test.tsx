@@ -298,7 +298,7 @@ describe("FundamentalsPane", () => {
         <FundamentalsPane summary={makeSummary(true)} />
       </MemoryRouter>,
     );
-    expect(await screen.findByText(/2\/4 periods/)).toBeInTheDocument();
+    expect(await screen.findByText("2/4")).toBeInTheDocument();
   });
 
   it("returns null when capability active but only 1 quarter has both income + balance data", async () => {

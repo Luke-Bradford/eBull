@@ -158,7 +158,7 @@ export function BusinessSectionsTeaser({ symbol }: BusinessSectionsTeaserProps) 
         )
       ) : (
         <div className="space-y-2 text-sm">
-          <p className="leading-relaxed text-slate-700">
+          <p className="max-w-prose leading-relaxed text-slate-700">
             {pickTeaser(state.data.sections)}
           </p>
           {state.data.source_accession !== null && (
