@@ -150,16 +150,28 @@ TRACKED_CONCEPTS: dict[str, tuple[str, ...]] = {
     # under three parallel concepts depending on the issuer's legal
     # form (LP / LP+member-aggregate / pure LLC). All three report
     # in ``USD/shares`` units which the existing ``_UNIT_PRIORITY``
-    # list already covers, so no unit-priority change is needed. The
-    # legacy ``DistributionsPerLimitedPartnershipUnitOutstanding``
-    # tag is still emitted by some pre-2018 filers, kept for
-    # compatibility.
+    # list already covers, so no unit-priority change is needed.
+    #
+    # Excluded deliberately: ``DistributionsPerLimitedPartnership
+    # UnitOutstanding`` is an FY-cumulative concept that issuers
+    # report on the 10-K alongside prior-year comparatives. SEC's
+    # companyfacts emits the SAME period_end row under multiple
+    # ``fy`` contexts (the 10-K's filing year stamps every prior
+    # comparative). The normaliser keys on ``(fy, fp)`` rather than
+    # ``period_end``, so a 2026-filed 10-K's IEP row for 2023 (val
+    # = $6.00) lands as "fy=2025, fp=FY" alongside the actual 2025
+    # row, and `_canonical_merge` then derives a wrong Q4 = FY −
+    # YTD = $6 − $1.50 = $4.50. Tracked at #682 as a normaliser
+    # bug; until that lands, this concept's downside (wrong values)
+    # outweighs its upside (FY summary line for issuers that don't
+    # emit the primary concept). The primary
+    # ``DistributionMadeToLimitedPartnerDistributionsDeclaredPerUnit``
+    # already covers per-quarter for IEP / EPD / current-era MLPs.
     "dps_declared": (
         "CommonStockDividendsPerShareDeclared",
         "DistributionMadeToLimitedPartnerDistributionsDeclaredPerUnit",
         "DistributionMadeToMemberOrLimitedPartnerDistributionsDeclaredPerUnit",
         "DistributionMadeToLimitedLiabilityCompanyLLCMemberDistributionsDeclaredPerUnit",
-        "DistributionsPerLimitedPartnershipUnitOutstanding",
     ),
     # Cash actually distributed per share (often differs from declared
     # by a quarter). Captured separately so dividend-capture strategies

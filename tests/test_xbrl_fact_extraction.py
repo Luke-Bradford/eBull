@@ -358,8 +358,18 @@ class TestPartnershipDistributionConcepts:
         assert facts[0].val == Decimal("0.5")
         assert facts[0].unit == "USD/shares"
 
-    def test_lp_legacy_distributions_per_unit_outstanding_extracted(self) -> None:
-        # Older MLPs (some still filing) use this legacy concept name.
+    def test_lp_legacy_distributions_per_unit_outstanding_excluded(self) -> None:
+        # ``DistributionsPerLimitedPartnershipUnitOutstanding`` is
+        # deliberately NOT in the ``dps_declared`` allowlist (#682).
+        # SEC's companyfacts emits this FY-cumulative concept under
+        # multiple ``fy`` contexts when 10-K filings include prior-
+        # year comparatives, and the canonical normaliser keys on
+        # ``(fy, fp)`` not ``period_end`` — so a 2023 historical row
+        # restamped with the filing's 2025 fy lands as "FY 2025"
+        # and corrupts the chart. Until the normaliser is fixed
+        # (#682), this concept stays out and the primary
+        # ``DistributionMadeToLimitedPartnerDistributionsDeclaredPer
+        # Unit`` carries the load.
         gaap = {
             "DistributionsPerLimitedPartnershipUnitOutstanding": {
                 "units": {
@@ -370,8 +380,7 @@ class TestPartnershipDistributionConcepts:
             }
         }
         facts = _extract_facts_from_gaap(gaap)
-        assert len(facts) == 1
-        assert facts[0].concept == "DistributionsPerLimitedPartnershipUnitOutstanding"
+        assert facts == []
 
     def test_lp_cash_distributions_paid_per_unit_extracted(self) -> None:
         gaap = {
@@ -499,11 +508,14 @@ class TestPartnershipDistributionAliasing:
         assert corp_prio == 0
         assert prio > corp_prio
 
-    def test_lp_legacy_per_unit_aliases_to_dps_declared(self) -> None:
+    def test_lp_legacy_per_unit_NOT_in_alias_map(self) -> None:
+        # See test_lp_legacy_distributions_per_unit_outstanding_excluded
+        # — this concept is intentionally absent from TRACKED_CONCEPTS
+        # to prevent SEC's prior-year-comparative re-stamping bug
+        # from corrupting the chart (#682).
         from app.services.fundamentals import _TAG_TO_COLUMN
 
-        col, _ = _TAG_TO_COLUMN["DistributionsPerLimitedPartnershipUnitOutstanding"]
-        assert col == "dps_declared"
+        assert "DistributionsPerLimitedPartnershipUnitOutstanding" not in _TAG_TO_COLUMN
 
     def test_lp_cash_paid_per_unit_aliases_to_dps_cash_paid(self) -> None:
         from app.services.fundamentals import _TAG_TO_COLUMN
