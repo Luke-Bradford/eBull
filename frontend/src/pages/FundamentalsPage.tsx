@@ -204,7 +204,7 @@ export function FundamentalsPage(): JSX.Element {
       ) : (
         <div className="space-y-4">
           <Pane
-            title="Quarterly P&L"
+            title="P&L breakdown"
             scope={periodScope(period)}
             source={{ providers: ["sec_xbrl"] }}
           >
