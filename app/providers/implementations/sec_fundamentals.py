@@ -131,12 +131,48 @@ TRACKED_CONCEPTS: dict[str, tuple[str, ...]] = {
     "investing_cf": ("NetCashProvidedByUsedInInvestingActivities",),
     "financing_cf": ("NetCashProvidedByUsedInFinancingActivities",),
     "capex": ("PaymentsToAcquirePropertyPlantAndEquipment", "CapitalExpenditures"),
-    "dividends_paid": ("PaymentsOfDividends", "PaymentsOfDividendsCommonStock"),
-    "dps_declared": ("CommonStockDividendsPerShareDeclared",),
+    # Cash dividends/distributions paid in the period. Corp issuers
+    # use ``PaymentsOfDividends*``; pass-through entities (MLPs, LPs,
+    # LLCs taxed as partnerships, REIT operating-partnership tiers)
+    # report the same flow under the partnership taxonomy concepts
+    # ``DistributionMadeTo{LimitedPartner,MemberOrLimitedPartner,
+    # LimitedLiabilityCompanyLLCMember}CashDistributionsPaid``.
+    # Without these, IEP / ET / EPD / MPLX / pass-through LLCs land at
+    # zero recorded dividends paid post-LP-conversion — see #674.
+    "dividends_paid": (
+        "PaymentsOfDividends",
+        "PaymentsOfDividendsCommonStock",
+        "DistributionMadeToLimitedPartnerCashDistributionsPaid",
+        "DistributionMadeToMemberOrLimitedPartnerCashDistributionsPaid",
+        "DistributionMadeToLimitedLiabilityCompanyLLCMemberCashDistributionsPaid",
+    ),
+    # Per-unit/share declared. SEC tags partnership distributions
+    # under three parallel concepts depending on the issuer's legal
+    # form (LP / LP+member-aggregate / pure LLC). All three report
+    # in ``USD/shares`` units which the existing ``_UNIT_PRIORITY``
+    # list already covers, so no unit-priority change is needed. The
+    # legacy ``DistributionsPerLimitedPartnershipUnitOutstanding``
+    # tag is still emitted by some pre-2018 filers, kept for
+    # compatibility.
+    "dps_declared": (
+        "CommonStockDividendsPerShareDeclared",
+        "DistributionMadeToLimitedPartnerDistributionsDeclaredPerUnit",
+        "DistributionMadeToMemberOrLimitedPartnerDistributionsDeclaredPerUnit",
+        "DistributionMadeToLimitedLiabilityCompanyLLCMemberDistributionsDeclaredPerUnit",
+        "DistributionsPerLimitedPartnershipUnitOutstanding",
+    ),
     # Cash actually distributed per share (often differs from declared
     # by a quarter). Captured separately so dividend-capture strategies
-    # can tell declared-but-not-paid cases from paid.
-    "dps_cash_paid": ("CommonStockDividendsPerShareCashPaid",),
+    # can tell declared-but-not-paid cases from paid. Currently lands
+    # in ``financial_facts_raw`` only — `PeriodRow` doesn't surface
+    # this column yet, so adding more aliases here is purely about
+    # raw-store completeness for future analytics work.
+    "dps_cash_paid": (
+        "CommonStockDividendsPerShareCashPaid",
+        "DistributionMadeToLimitedPartnerCashDistributionsPaidPerUnit",
+        "DistributionMadeToMemberOrLimitedPartnerCashDistributionsPaidPerUnit",
+        "DistributionMadeToLimitedLiabilityCompanyLLCMemberDistributionsPaidPerUnit",
+    ),
     # Per-share declared amount still payable at period end.
     "dividends_payable_per_share": ("DividendsPayableAmountPerShare",),
     "buyback_spend": ("PaymentsForRepurchaseOfCommonStock",),
