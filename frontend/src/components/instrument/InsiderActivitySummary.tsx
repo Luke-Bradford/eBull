@@ -16,6 +16,7 @@ import { Pane } from "@/components/instrument/Pane";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 
 export interface InsiderActivitySummaryProps {
   readonly symbol: string;
@@ -46,12 +47,18 @@ export function InsiderActivitySummary({
     useCallback(() => fetchInsiderSummary(symbol), [symbol]),
     [symbol],
   );
+  const navigate = useNavigate();
+
+  const handleExpand = useCallback(() => {
+    navigate(`/instrument/${encodeURIComponent(symbol)}/insider`);
+  }, [navigate, symbol]);
 
   return (
     <Pane
       title="Insider activity"
       scope="last 90 days"
       source={{ providers: ["sec_form4"] }}
+      onExpand={handleExpand}
     >
       {state.loading ? (
         <SectionSkeleton rows={2} />

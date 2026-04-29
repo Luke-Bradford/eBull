@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { InsiderActivitySummary } from "@/components/instrument/InsiderActivitySummary";
 import * as api from "@/api/instruments";
 
@@ -62,5 +62,26 @@ describe("InsiderActivitySummary", () => {
     );
     // NET = 10000 - 30000 = -20000
     expect(await screen.findByText(/-20,?000/)).toBeInTheDocument();
+  });
+
+  it("Open → button navigates to /instrument/<symbol>/insider", async () => {
+    vi.spyOn(api, "fetchInsiderSummary").mockResolvedValue(payload);
+    render(
+      <MemoryRouter initialEntries={["/instrument/GME"]}>
+        <Routes>
+          <Route
+            path="/instrument/:symbol"
+            element={<InsiderActivitySummary symbol="GME" />}
+          />
+          <Route
+            path="/instrument/:symbol/insider"
+            element={<div>insider drill</div>}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const openBtn = await screen.findByRole("button", { name: /Open →/ });
+    fireEvent.click(openBtn);
+    expect(await screen.findByText("insider drill")).toBeInTheDocument();
   });
 });
