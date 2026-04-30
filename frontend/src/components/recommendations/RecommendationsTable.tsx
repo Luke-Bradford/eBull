@@ -90,7 +90,7 @@ function RecommendationRow({ item }: { item: RecommendationListItem }) {
   return (
     <>
       <tr
-        className="cursor-pointer hover:bg-slate-50"
+        className="cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40"
         onClick={() => setExpanded((prev) => !prev)}
       >
         <td className="px-2 py-2">
