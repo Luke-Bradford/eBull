@@ -182,10 +182,12 @@ def test_refresh_advances_both_watermarks(
         )
     ebull_test_conn.commit()
 
-    plan = RefreshPlan(refreshes=[("0000320193", "0000320193-26-000042")])
-    filings = StubFilingsProvider(
-        submissions_by_cik={"0000320193": _submissions_with_top("0000320193-26-000042")},
+    submissions_payload = _submissions_with_top("0000320193-26-000042")
+    plan = RefreshPlan(
+        refreshes=[("0000320193", "0000320193-26-000042")],
+        submissions_by_cik={"0000320193": submissions_payload},
     )
+    filings = StubFilingsProvider()  # body comes from the plan
     fundamentals = StubFundamentalsProvider(
         facts_by_cik={"0000320193": [_sample_fact("0000320193-26-000042")]},
     )
@@ -200,8 +202,11 @@ def test_refresh_advances_both_watermarks(
     assert outcome.refreshed == 1
     assert outcome.failed == []
 
-    # Refresh path must NOT call fetch_submissions — the planner
-    # already captured top_accession and passed it via known_top_accession.
+    # Refresh path must NOT call fetch_submissions — the planner already
+    # supplied both ``known_top_accession`` and ``known_submissions``
+    # (#675 contract: planner-fed submissions are how the executor
+    # avoids a second fetch AND still runs the items/entity-profile
+    # extractions).
     assert filings.fetch_calls == 0
 
     submissions_wm = get_watermark(ebull_test_conn, "sec.submissions", "0000320193")
@@ -307,6 +312,9 @@ def test_submissions_only_advance_skips_companyfacts(
 
     plan = RefreshPlan(
         submissions_only_advances=[("0000789019", "0000789019-26-000017")],
+        submissions_by_cik={
+            "0000789019": _submissions_with_top("0000789019-26-000017", form="8-K"),
+        },
     )
     filings = StubFilingsProvider()  # fetch_submissions must NOT be called
     fundamentals = StubFundamentalsProvider()  # extract_facts must NOT be called
@@ -319,6 +327,7 @@ def test_submissions_only_advance_skips_companyfacts(
     )
 
     assert outcome.submissions_advanced == 1
+    # Planner-fed submissions in plan → no fallback fetch.
     assert filings.fetch_calls == 0
     assert fundamentals.extract_calls == []
 
@@ -830,3 +839,202 @@ def test_cik_upsert_timing_row_persisted(
     assert outcome == "skip_instrument_missing"
     assert facts == 0
     assert float(seconds) >= 0
+
+
+# ---------------------------------------------------------------------------
+# #675: items[] + entity-profile must apply on the planner-driven refresh
+# path. Pre-fix the planner discarded the submissions body and the executor's
+# extractions sat inside a seed-only ``else`` branch — so 480k+ existing 8-K
+# rows had ``items=NULL`` and entity-profile rows went stale silently.
+# ---------------------------------------------------------------------------
+
+
+def _submissions_with_items(
+    accession: str,
+    form: str,
+    items_csv: str,
+    primary_doc: str = "doc.htm",
+) -> dict[str, object]:
+    """submissions.json shape carrying enough fields for both
+    ``parse_8k_items_by_accession`` and ``parse_entity_profile`` to
+    return a non-empty result."""
+    return {
+        "name": "TEST CORP",
+        "sic": "1234",
+        "sicDescription": "Test Industry",
+        "exchanges": ["NASDAQ"],
+        "tickers": ["TEST"],
+        "addresses": {"business": {}, "mailing": {}},
+        "formerNames": [],
+        "filings": {
+            "recent": {
+                "accessionNumber": [accession],
+                "form": [form],
+                "items": [items_csv],
+                "filingDate": ["2026-04-15"],
+                "primaryDocument": [primary_doc],
+                "reportDate": [""],
+                "acceptedDate": ["2026-04-15T09:00:00.000Z"],
+            }
+        },
+    }
+
+
+def test_refresh_path_applies_8k_items_from_planner_submissions(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Regression guard for #675: when the planner passes through the
+    submissions body via ``RefreshPlan.submissions_by_cik``, the
+    executor's refresh path MUST apply 8-K ``items[]`` to the
+    matching ``filing_events`` row. Pre-fix this UPDATE never ran on
+    the refresh path because the extraction lived inside a seed-only
+    ``else`` branch."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000320193")
+    with ebull_test_conn.transaction():
+        set_watermark(
+            ebull_test_conn,
+            source="sec.submissions",
+            key="0000320193",
+            watermark="0000320193-25-000108",
+        )
+        set_watermark(
+            ebull_test_conn,
+            source="sec.companyfacts",
+            key="0000320193",
+            watermark="0000320193-25-000108",
+        )
+    ebull_test_conn.commit()
+
+    accession_8k = "0000320193-26-000099"
+    submissions = _submissions_with_items(accession_8k, "8-K", "1.01,8.01")
+
+    plan = RefreshPlan(
+        refreshes=[("0000320193", "0000320193-26-000042")],
+        submissions_by_cik={"0000320193": submissions},
+        new_filings_by_cik={
+            "0000320193": [
+                _mk_entry("0000320193-26-000042", "10-Q"),
+                _mk_entry(accession_8k, "8-K"),
+            ],
+        },
+    )
+    filings = StubFilingsProvider()  # no fetch — known_submissions provided
+    fundamentals = StubFundamentalsProvider(
+        facts_by_cik={"0000320193": [_sample_fact("0000320193-26-000042")]},
+    )
+
+    outcome = execute_refresh(
+        ebull_test_conn,
+        filings_provider=cast(SecFilingsProvider, filings),
+        fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+        plan=plan,
+    )
+
+    assert outcome.refreshed == 1
+    assert outcome.failed == []
+    # Planner-fed submissions → no provider fetch expected.
+    assert filings.fetch_calls == 0
+
+    items_row = ebull_test_conn.execute(
+        "SELECT items FROM filing_events WHERE provider_filing_id = %s",
+        (accession_8k,),
+    ).fetchone()
+    assert items_row is not None
+    assert items_row[0] == ["1.01", "8.01"]
+
+
+def test_refresh_path_applies_entity_profile_from_planner_submissions(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Companion to the items test: the entity-profile upsert (#427)
+    sat in the same seed-only else branch and was equally affected
+    by #675. Refresh path with planner-fed submissions must upsert
+    the profile too."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000320193")
+    with ebull_test_conn.transaction():
+        set_watermark(
+            ebull_test_conn,
+            source="sec.submissions",
+            key="0000320193",
+            watermark="0000320193-25-000108",
+        )
+        set_watermark(
+            ebull_test_conn,
+            source="sec.companyfacts",
+            key="0000320193",
+            watermark="0000320193-25-000108",
+        )
+    ebull_test_conn.commit()
+
+    submissions = _submissions_with_items("0000320193-26-000042", "10-Q", "")
+
+    plan = RefreshPlan(
+        refreshes=[("0000320193", "0000320193-26-000042")],
+        submissions_by_cik={"0000320193": submissions},
+    )
+    filings = StubFilingsProvider()
+    fundamentals = StubFundamentalsProvider(
+        facts_by_cik={"0000320193": [_sample_fact("0000320193-26-000042")]},
+    )
+
+    execute_refresh(
+        ebull_test_conn,
+        filings_provider=cast(SecFilingsProvider, filings),
+        fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+        plan=plan,
+    )
+
+    profile = ebull_test_conn.execute(
+        "SELECT sic, sic_description FROM instrument_sec_profile WHERE instrument_id = 1"
+    ).fetchone()
+    assert profile is not None
+    assert profile[0] == "1234"
+    assert profile[1] == "Test Industry"
+
+
+def test_submissions_only_path_applies_8k_items(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """submissions_only_advances path (8-K only, no companyfacts)
+    must also apply items[] using the planner-fed submissions body
+    so ``dividend_calendar`` selectors that filter on
+    ``'8.01' = ANY(items)`` see today's filing."""
+    _seed_instrument(ebull_test_conn, instrument_id=1, symbol="TEST", cik="0000789019")
+    with ebull_test_conn.transaction():
+        set_watermark(
+            ebull_test_conn,
+            source="sec.submissions",
+            key="0000789019",
+            watermark="older",
+        )
+    ebull_test_conn.commit()
+
+    accession = "0000789019-26-000017"
+    submissions = _submissions_with_items(accession, "8-K", "8.01")
+
+    plan = RefreshPlan(
+        submissions_only_advances=[("0000789019", accession)],
+        submissions_by_cik={"0000789019": submissions},
+        new_filings_by_cik={
+            "0000789019": [_mk_entry(accession, "8-K", cik="0000789019")],
+        },
+    )
+    filings = StubFilingsProvider()
+    fundamentals = StubFundamentalsProvider()
+
+    outcome = execute_refresh(
+        ebull_test_conn,
+        filings_provider=cast(SecFilingsProvider, filings),
+        fundamentals_provider=cast(SecFundamentalsProvider, fundamentals),
+        plan=plan,
+    )
+
+    assert outcome.submissions_advanced == 1
+    assert filings.fetch_calls == 0
+
+    items_row = ebull_test_conn.execute(
+        "SELECT items FROM filing_events WHERE provider_filing_id = %s",
+        (accession,),
+    ).fetchone()
+    assert items_row is not None
+    assert items_row[0] == ["8.01"]
