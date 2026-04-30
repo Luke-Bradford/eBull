@@ -16,6 +16,7 @@ Single implementation used by all providers — not copy-pasted.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -62,6 +63,7 @@ class ResilientClient:
         max_retries: int = 3,
         backoff_schedule: tuple[float, ...] = _DEFAULT_BACKOFF,
         shared_last_request: list[float] | None = None,
+        shared_throttle_lock: threading.Lock | None = None,
     ) -> None:
         self._client = client
         self._min_interval = min_request_interval_s
@@ -73,6 +75,17 @@ class ResilientClient:
         # one advances the shared timestamp, preventing combined rates from
         # exceeding the API limit.
         self._last_request_at: list[float] = shared_last_request if shared_last_request is not None else [0.0]
+        # Lock around the read-modify-write of ``_last_request_at`` so
+        # concurrent fetchers (#726) cannot race past the rate-limit
+        # floor. Each instance holds its own lock so providers with
+        # independent rate budgets are isolated; providers sharing a
+        # ``shared_last_request`` list also need to share this lock to
+        # keep the throttle atomic across instances. We surface that
+        # via the ``shared_throttle_lock`` parameter — callers that
+        # share a clock pass the same lock object.
+        self._throttle_lock: threading.Lock = (
+            shared_throttle_lock if shared_throttle_lock is not None else threading.Lock()
+        )
 
     # ------------------------------------------------------------------
     # Public API — mirrors httpx.Client.get / .post
@@ -102,13 +115,28 @@ class ResilientClient:
     # Internal
     # ------------------------------------------------------------------
 
-    def _throttle(self) -> None:
-        """Sleep if needed to enforce the minimum inter-request interval."""
+    def _throttle_and_stamp(self) -> None:
+        """Sleep if needed to enforce the inter-request floor, then
+        advance the shared timestamp atomically.
+
+        Pre-#726 this was a separate ``_throttle`` step + an
+        unsynchronised ``_last_request_at[0] = ...`` write at the
+        request site. Under concurrent fetchers (issue #726) the
+        check-and-write race let multiple threads pass the floor
+        simultaneously and burst past the API rate limit. Combining
+        the two steps under a single lock keeps the floor atomic
+        across N concurrent callers — at most one thread is firing
+        a request per ``min_request_interval_s``.
+        """
         if self._min_interval <= 0:
+            with self._throttle_lock:
+                self._last_request_at[0] = time.monotonic()
             return
-        elapsed = time.monotonic() - self._last_request_at[0]
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
+        with self._throttle_lock:
+            elapsed = time.monotonic() - self._last_request_at[0]
+            if elapsed < self._min_interval:
+                time.sleep(self._min_interval - elapsed)
+            self._last_request_at[0] = time.monotonic()
 
     def _request(
         self,
@@ -127,8 +155,7 @@ class ResilientClient:
         last_response: httpx.Response | None = None
 
         for attempt in range(1 + self._max_retries):
-            self._throttle()
-            self._last_request_at[0] = time.monotonic()
+            self._throttle_and_stamp()
 
             request = self._client.build_request(
                 method,

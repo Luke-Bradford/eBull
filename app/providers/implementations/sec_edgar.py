@@ -27,6 +27,7 @@ Provider contract:
 
 import hashlib
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from types import TracebackType
@@ -68,6 +69,15 @@ _MIN_REQUEST_INTERVAL_S = 0.11
 # revive when #479 (multi-worker WS subscriber) lands and look
 # at a Postgres advisory-lock token bucket.
 _PROCESS_RATE_LIMIT_CLOCK: list[float] = [0.0]
+
+# Companion lock for ``_PROCESS_RATE_LIMIT_CLOCK`` (#726). Every
+# ``ResilientClient`` instance that shares the clock list must also
+# share this lock so the throttle's read-modify-write of the
+# timestamp is atomic across concurrent fetchers. Without the lock,
+# 8-thread concurrent fetchers could all clear the floor
+# simultaneously and burst SEC's 10 req/s ceiling — triggering UA
+# throttling and cascading 4xx/5xx tombstones.
+_PROCESS_RATE_LIMIT_LOCK: threading.Lock = threading.Lock()
 
 
 def _zero_pad_cik(cik: str | int) -> str:
@@ -204,11 +214,13 @@ class SecFilingsProvider(FilingsProvider):
             self._client,
             min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
             shared_last_request=_PROCESS_RATE_LIMIT_CLOCK,
+            shared_throttle_lock=_PROCESS_RATE_LIMIT_LOCK,
         )
         self._http_tickers = ResilientClient(
             self._tickers_client,
             min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
             shared_last_request=_PROCESS_RATE_LIMIT_CLOCK,
+            shared_throttle_lock=_PROCESS_RATE_LIMIT_LOCK,
         )
 
     def __enter__(self) -> SecFilingsProvider:
