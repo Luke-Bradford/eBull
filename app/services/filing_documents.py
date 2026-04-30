@@ -229,99 +229,34 @@ def ingest_filing_documents(
     """Scan ``filing_events`` for accessions missing any
     ``filing_documents`` children, fetch the index JSON, upsert.
 
-    Candidate selector:
+    Currently disabled (#723). Returns immediately with zero counts.
 
-    1. ``fe.provider = 'sec'`` — only SEC filings carry an index
-       JSON in this shape.
-    2. No existing ``filing_documents`` row for the filing_event_id.
-    3. Ordered by filing_date DESC so fresh filings always get
-       budget; historical backlog drains via the scheduler's
-       continuous tick.
+    Two independent bugs make the live path 100% broken:
 
-    Bounded per run (``limit=500``). The index JSON is small (~2 KB
-    typical) so the rate-limit cost is modest even on a large
-    backlog tick.
+    1. URL builder targets ``{accession}-index.json`` but SEC's actual
+       canonical manifest at that path is ``/index.json`` (no
+       accession prefix). Every fetch 404s.
+    2. ``parse_filing_index`` expects a top-level ``items: [...]``
+       shape that SEC has never returned for this endpoint — the real
+       response is ``{"directory": {"item": [...]}}`` with different
+       per-item fields.
+
+    ``filing_documents`` is empty in production (0 rows) and no
+    consumer reads from it, so disabling the ingest is a zero-impact
+    stop-the-bleeding step. The hourly schedule was burning ~50s of
+    SEC rate budget per tick on 404s. Re-enable in the rework PR
+    that fixes the URL + parser together.
     """
-    conn.commit()
-
-    candidates: list[tuple[int, str]] = []
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT fe.filing_event_id, fe.provider_filing_id
-            FROM filing_events fe
-            LEFT JOIN filing_documents fd
-                ON fd.filing_event_id = fe.filing_event_id
-            WHERE fe.provider = 'sec'
-              AND fd.id IS NULL
-            GROUP BY fe.filing_event_id, fe.provider_filing_id, fe.filing_date
-            ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
-            LIMIT %s
-            """,
-            (limit,),
-        )
-        for row in cur.fetchall():
-            candidates.append((int(row[0]), str(row[1])))
-    conn.commit()
-
-    filings_parsed = 0
-    documents_inserted = 0
-    fetch_errors = 0
-    parse_misses = 0
-
-    for filing_event_id, accession in candidates:
-        try:
-            raw = fetcher.fetch_filing_index(accession)
-        except Exception:
-            logger.warning(
-                "ingest_filing_documents: fetch failed accession=%s",
-                accession,
-                exc_info=True,
-            )
-            fetch_errors += 1
-            continue
-        if raw is None:
-            fetch_errors += 1
-            continue
-
-        docs = parse_filing_index(raw, accession_number=accession)
-        if not docs:
-            parse_misses += 1
-            continue
-
-        try:
-            upsert_filing_documents(
-                conn,
-                filing_event_id=filing_event_id,
-                accession_number=accession,
-                documents=docs,
-            )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            logger.warning(
-                "ingest_filing_documents: upsert failed accession=%s",
-                accession,
-                exc_info=True,
-            )
-            continue
-
-        filings_parsed += 1
-        documents_inserted += len(docs)
-
-    logger.info(
-        "ingest_filing_documents: parser_version=%d scanned=%d parsed=%d",
-        _PARSER_VERSION,
-        len(candidates),
-        filings_parsed,
-    )
-
+    # Touch params so unused-argument lints don't fire while the
+    # function body is stubbed pending #723.
+    del conn, fetcher, limit
+    logger.info("ingest_filing_documents: DISABLED pending rewrite (#723) — see filing_documents.py docstring")
     return IngestResult(
-        filings_scanned=len(candidates),
-        filings_parsed=filings_parsed,
-        documents_inserted=documents_inserted,
-        fetch_errors=fetch_errors,
-        parse_misses=parse_misses,
+        filings_scanned=0,
+        filings_parsed=0,
+        documents_inserted=0,
+        fetch_errors=0,
+        parse_misses=0,
     )
 
 
