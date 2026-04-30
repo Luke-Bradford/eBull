@@ -136,7 +136,7 @@ function InsiderPageBody({
 
   const rows = txnState.data.rows;
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 pt-6">
       <Pane
         title="Net by month"
         scope="last 24 months"

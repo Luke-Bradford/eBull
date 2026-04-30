@@ -43,7 +43,7 @@ export function AdminJobDetailPage() {
   );
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 pt-6">
       <div className="flex items-center justify-between">
         <div>
           <div className="text-xs text-slate-500">Admin / Jobs</div>

@@ -154,7 +154,7 @@ export function SyncDashboard({ syncTrigger }: SyncDashboardProps) {
   }, [layerList]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pt-6">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Data sync</h1>
       </div>

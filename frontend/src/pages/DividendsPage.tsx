@@ -348,7 +348,7 @@ function PerQuarterHistory({
     return Number.isFinite(n) && n > acc ? n : acc;
   }, 0);
   return (
-    <div className="space-y-1">
+    <div className="space-y-1 pt-6">
       {sorted.map((p) => (
         <HistoryBar
           key={`${p.period_end_date}-${p.period_type}`}

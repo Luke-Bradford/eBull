@@ -138,7 +138,7 @@ export function SummaryStrip({
   return (
     <div
       data-testid="summary-strip"
-      className="sticky top-0 z-20 border-b border-slate-200 bg-white px-4 py-3 shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:shadow-none"
+      className="sticky top-0 z-20 -mx-6 border-b border-slate-200 bg-white px-6 py-3 shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:shadow-none"
     >
       {/* Row 1: identity + price */}
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">

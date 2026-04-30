@@ -223,7 +223,7 @@ function Body({
   const secSearchUrl = secSearchUrlFor(data.source_accession, data.cik);
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[180px_minmax(0,1fr)_200px]">
+    <div className="grid gap-6 pt-6 lg:grid-cols-[180px_minmax(0,1fr)_200px]">
       <aside className="hidden lg:block">
         <TOCRail sections={data.sections} />
       </aside>

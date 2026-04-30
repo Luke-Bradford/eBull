@@ -109,7 +109,7 @@ export function OperatorsPage(): JSX.Element {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pt-6">
       <div>
         <h1 className="text-xl font-semibold">Operators</h1>
         <p className="text-xs text-slate-500">

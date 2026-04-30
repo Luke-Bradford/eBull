@@ -327,7 +327,7 @@ export function SetupPage(): JSX.Element {
           )}
 
           {/* Test connection — only in Create mode (both keys present). */}
-          <div className="space-y-1">
+          <div className="space-y-1 pt-6">
             <button
               type="button"
               onClick={() => void handleTestConnection()}

@@ -133,7 +133,11 @@ export const lightTheme: ChartTheme = {
  * memory ("blue line = SMA20" across sessions).
  */
 export const darkTheme: ChartTheme = {
-  bg: "#0f172a", // slate-900 — matches dark page card chrome
+  // slate-950 matches the dark body bg so the chart canvas blends
+  // with the page instead of rendering as a visible card outline.
+  // Chart elevation is conveyed by the Pane title rule above the
+  // chart, not by a panel surface tint.
+  bg: "#020617",
 
   textPrimary: "#f1f5f9", // slate-100
   textSecondary: "#94a3b8", // slate-400
