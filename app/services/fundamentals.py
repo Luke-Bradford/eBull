@@ -800,18 +800,46 @@ def _derive_periods_from_facts(
             # than fabricate one from filing-date metadata.
             continue
         period_end = max(f.period_end for f in mapped_facts)
-        starts = [f.period_start for f in mapped_facts if f.period_start is not None]
+
+        # #682: SEC re-stamps every prior-year comparative row in a
+        # 10-K/10-Q with the FILING's ``fy`` / ``fp`` context, not the
+        # comparative's own fiscal period. So a 2026-filed 10-K
+        # reporting comparatives for 2023 / 2024 / 2025 emits THREE
+        # facts under ``fy=2025, fp=FY`` for the same concept — one
+        # per ``period_end`` (2023-12-31 / 2024-12-31 / 2025-12-31).
+        # Pre-fix the iteration order picked the EARLIEST period_end's
+        # value (the comparative-year row, e.g. IEP's $6.00 from 2023)
+        # as the canonical FY 2025 value; ``_canonical_merge`` then
+        # derived Q4 as FY − YTD = $4.50, both wrong values flowed to
+        # the operator-visible dividend chart. Filter the value-bearing
+        # set to facts whose ``period_end`` matches the canonical
+        # max(period_end) for this fiscal period — only the actual
+        # fiscal-period-end row contributes values.
+        canonical_facts = [f for f in mapped_facts if f.period_end == period_end]
+        # Within the canonical-end set, prefer the most recently filed
+        # fact when the same concept appears under multiple accessions
+        # (10-K/A amendments, restatements). Sorting by filed_date DESC
+        # makes "first write wins" pull from the latest filing — same
+        # priority discriminator the issue calls out.
+        canonical_facts = sorted(
+            canonical_facts,
+            key=lambda f: (f.filed_date, f.accession_number),
+            reverse=True,
+        )
+
+        starts = [f.period_start for f in canonical_facts if f.period_start is not None]
         period_start = min(starts) if starts else None
         months = _months_between(period_start, period_end)
 
-        # Collect accession numbers for source_ref (from all facts in
-        # the group — filing provenance is independent of which
-        # concepts the row populates).
-        accession_numbers = sorted({f.accession_number for f in period_facts})
+        # Collect accession numbers for source_ref (only canonical
+        # facts — comparative-year accessions don't contribute values
+        # to this row, so they shouldn't appear in provenance).
+        accession_numbers = sorted({f.accession_number for f in canonical_facts})
         source_ref = accession_numbers[0] if len(accession_numbers) == 1 else ",".join(accession_numbers)
 
-        # Find the most recent filed_date and form_type
-        latest_filing = max(period_facts, key=lambda f: f.filed_date)
+        # Find the most recent filed_date and form_type from the
+        # canonical-end set (matches the value provenance).
+        latest_filing = max(canonical_facts, key=lambda f: f.filed_date)
 
         row = PeriodRow(
             period_end_date=period_end,
@@ -827,10 +855,11 @@ def _derive_periods_from_facts(
             filed_date=latest_filing.filed_date,
         )
 
-        # Apply values with tag priority
-        # Track which columns have been set and at what priority
+        # Apply values with tag priority. Iterating ``canonical_facts``
+        # in ``filed_date DESC`` order means "first-write-wins" pulls
+        # from the latest filing for any given (concept, period_end).
         col_priority: dict[str, int] = {}
-        for fact in period_facts:
+        for fact in canonical_facts:
             mapping = _TAG_TO_COLUMN.get(fact.concept)
             if mapping is None:
                 continue
@@ -1072,9 +1101,22 @@ def _canonical_merge_instrument(
         ``(fiscal_year, fiscal_quarter, period_type)`` — source
         priority first (sec_edgar > companies_house > others), then
         ``filed_date DESC`` (latest filing wins regardless of
-        arrival order), with ``period_end_date ASC`` as a final
-        tiebreak so the smallest (real fiscal end) wins on tied
+        arrival order), with ``period_end_date DESC`` as a final
+        tiebreak so the latest (real fiscal end) wins on tied
         filed_date.
+
+        Pre-#682 the tiebreak was ``period_end_date ASC`` on the
+        assumption that "smallest period_end is the real fiscal
+        end". That assumption was inverted for SEC's prior-year
+        comparative re-stamping pattern: when a 2026-filed 10-K
+        emits the same XBRL fact under ``fy=2025/fp=FY`` for THREE
+        period_ends (2023/2024/2025-12-31), the smallest end-date
+        (2023) is the comparative-year row, NOT the canonical FY
+        2025 row. ``DESC`` picks the canonical year correctly. Pairs
+        with the normaliser-side filter in
+        ``_derive_periods_from_facts`` that drops comparative-year
+        facts BEFORE they reach raw — DESC here is defence in depth
+        for raw rows persisted before the normaliser fix landed.
 
       * Phase B: ``deletions`` CTE removes canonical rows whose
         fiscal label collides with a winner but whose
@@ -1126,8 +1168,17 @@ def _canonical_merge_instrument(
                          WHEN 'companies_house' THEN 2
                          ELSE 99
                      END,
+                     -- #682 tiebreak chain: latest filing wins, then
+                     -- latest period_end (was ASC pre-fix; inverted
+                     -- assumption broke restamped comparatives), then
+                     -- source_ref ASC for the rare case where a
+                     -- pre-fix compound source_ref ("A,B") coexists
+                     -- with a post-fix single source_ref ("A") — the
+                     -- single value is lexicographically smaller, so
+                     -- ASC picks it deterministically.
                      filed_date DESC NULLS LAST,
-                     period_end_date ASC
+                     period_end_date DESC,
+                     source_ref ASC
         ) bs
         WHERE fp.instrument_id = %(iid)s
           AND fp.fiscal_year = bs.fiscal_year
@@ -1151,8 +1202,17 @@ def _canonical_merge_instrument(
                          WHEN 'companies_house' THEN 2
                          ELSE 99
                      END,
+                     -- #682 tiebreak chain: latest filing wins, then
+                     -- latest period_end (was ASC pre-fix; inverted
+                     -- assumption broke restamped comparatives), then
+                     -- source_ref ASC for the rare case where a
+                     -- pre-fix compound source_ref ("A,B") coexists
+                     -- with a post-fix single source_ref ("A") — the
+                     -- single value is lexicographically smaller, so
+                     -- ASC picks it deterministically.
                      filed_date DESC NULLS LAST,
-                     period_end_date ASC
+                     period_end_date DESC,
+                     source_ref ASC
         )
         INSERT INTO financial_periods (
             instrument_id, period_end_date, period_type,

@@ -550,3 +550,345 @@ class TestMultiYearNormalization:
         assert len(periods) == 2
         years = {p.fiscal_year for p in periods}
         assert years == {2023, 2024}
+
+
+# ---------------------------------------------------------------------------
+# #682: SEC re-stamps prior-year comparative XBRL facts under the FILING's
+# (fiscal_year, fiscal_period) context. Pre-fix the normaliser collapsed all
+# three years' rows into one ``(fy, fp)`` group and the iteration order
+# picked the EARLIEST period_end's value as canonical — IEP's 2023 $6.00
+# row landed as FY2025 dps_declared, which then drove a wrong Q4 = FY −
+# YTD = $4.50 via _canonical_merge. The fix filters value attribution to
+# facts whose ``period_end`` matches the canonical max for the group, and
+# prefers the latest ``filed_date`` on restatement ties.
+# ---------------------------------------------------------------------------
+
+
+class TestPriorYearComparativeMisattribution:
+    def _ten_k_with_three_comparative_years(self) -> list[FactRow]:
+        """Mirrors the IEP CIK 0000813762 case from issue #682: a 10-K
+        filed 2026-02-26 emits the same XBRL concept three times under
+        ``fy=2025/fp=FY``, one for each comparative year.
+        """
+        return [
+            _fact(
+                concept="CommonStockDividendsPerShareDeclared",
+                val=Decimal("6.00"),  # comparative two years prior
+                period_end="2023-12-31",
+                period_start="2023-01-01",
+                frame=None,  # SEC frame is missing on prior-year comparatives
+                fiscal_year=2025,
+                fiscal_period="FY",
+                form_type="10-K",
+                filed_date="2026-02-26",
+                accession_number="0001104659-26-019821",
+            ),
+            _fact(
+                concept="CommonStockDividendsPerShareDeclared",
+                val=Decimal("3.50"),  # comparative one year prior
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame=None,
+                fiscal_year=2025,
+                fiscal_period="FY",
+                form_type="10-K",
+                filed_date="2026-02-26",
+                accession_number="0001104659-26-019821",
+            ),
+            _fact(
+                concept="CommonStockDividendsPerShareDeclared",
+                val=Decimal("2.00"),  # actual current FY value
+                period_end="2025-12-31",
+                period_start="2025-01-01",
+                frame="CY2025",
+                fiscal_year=2025,
+                fiscal_period="FY",
+                form_type="10-K",
+                filed_date="2026-02-26",
+                accession_number="0001104659-26-019821",
+            ),
+        ]
+
+    def test_canonical_fy_value_comes_from_max_period_end(self) -> None:
+        """Acceptance criterion from issue #682: only the
+        ``period_end=2025-12-31`` row drives the canonical FY 2025 row.
+        """
+        periods = _derive_periods_from_facts(
+            self._ten_k_with_three_comparative_years(),
+            reported_currency="USD",
+        )
+
+        fy_rows = [p for p in periods if p.period_type == "FY"]
+        assert len(fy_rows) == 1
+        fy = fy_rows[0]
+        assert fy.fiscal_year == 2025
+        assert fy.period_end_date == date(2025, 12, 31)
+        assert fy.period_start_date == date(2025, 1, 1)
+        assert fy.dps_declared == Decimal("2.00")
+        assert fy.months_covered == 12
+
+    def test_comparative_year_facts_do_not_pollute_source_ref(self) -> None:
+        """Provenance for the FY row comes only from the accession that
+        actually contributed values — the comparative rows' accession
+        does not leak into ``source_ref`` for the canonical row (in
+        this fixture all three rows are from the same accession, so
+        the dedup yields a single accession either way; this test
+        guards against future fixtures where comparatives come from a
+        prior filing's accession).
+        """
+        facts = self._ten_k_with_three_comparative_years()
+        # Rewrite the comparative rows to a different (older) accession
+        # so a leak would show up in source_ref.
+        facts[0] = FactRow(
+            concept=facts[0].concept,
+            unit=facts[0].unit,
+            period_start=facts[0].period_start,
+            period_end=facts[0].period_end,
+            val=facts[0].val,
+            frame=facts[0].frame,
+            form_type=facts[0].form_type,
+            fiscal_year=facts[0].fiscal_year,
+            fiscal_period=facts[0].fiscal_period,
+            accession_number="prior-10k-accn",
+            filed_date=facts[0].filed_date,
+        )
+
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        fy = next(p for p in periods if p.period_type == "FY")
+        assert "prior-10k-accn" not in fy.source_ref
+        assert fy.source_ref == "0001104659-26-019821"
+
+
+class TestRestatementPicksLatestFiledDate:
+    def test_two_filings_same_period_end_latest_wins(self) -> None:
+        """When two facts share ``(period_end, concept)`` from
+        different accessions / filed_dates (a 10-K and a later 10-K/A
+        amendment), the canonical row uses the value from the LATEST
+        ``filed_date`` — restatement contract from issue #682.
+        """
+        facts = [
+            _fact(
+                concept="Revenues",
+                val=Decimal("100"),
+                period_end="2025-12-31",
+                period_start="2025-01-01",
+                frame="CY2025",
+                fiscal_year=2025,
+                fiscal_period="FY",
+                form_type="10-K",
+                accession_number="orig-10k",
+                filed_date="2026-02-26",
+            ),
+            _fact(
+                concept="Revenues",
+                val=Decimal("110"),  # restated
+                period_end="2025-12-31",
+                period_start="2025-01-01",
+                frame="CY2025",
+                fiscal_year=2025,
+                fiscal_period="FY",
+                form_type="10-K/A",
+                accession_number="amend-10k-a",
+                filed_date="2026-04-15",
+            ),
+        ]
+
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        fy = next(p for p in periods if p.period_type == "FY")
+        assert fy.revenue == Decimal("110")
+        assert fy.form_type == "10-K/A"
+        assert fy.filed_date == date(2026, 4, 15)
+
+
+class TestPriorYearComparativeWithFrame:
+    """Codex pre-flight: the previous fixture's comparative rows had
+    ``frame=None``, which the YTD-disambiguation prefilter at line ~777
+    drops before grouping — so ``canonical_facts = period_end == max(...)``
+    was never actually exercised. This class covers the case where
+    SEC restamps comparative rows WITH ``frame`` populated, so they
+    survive the prefilter and reach the new filter."""
+
+    def test_framed_comparatives_under_same_fy_fp_filtered_out(self) -> None:
+        facts = [
+            _fact(
+                concept="Revenues",
+                val=Decimal("1000"),  # comparative
+                period_end="2023-12-31",
+                period_start="2023-01-01",
+                frame="CY2023",  # framed → survives YTD prefilter
+                fiscal_year=2025,
+                fiscal_period="FY",
+                form_type="10-K",
+                accession_number="fy-2025-10k",
+                filed_date="2026-02-26",
+            ),
+            _fact(
+                concept="Revenues",
+                val=Decimal("2000"),  # comparative
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame="CY2024",
+                fiscal_year=2025,
+                fiscal_period="FY",
+                form_type="10-K",
+                accession_number="fy-2025-10k",
+                filed_date="2026-02-26",
+            ),
+            _fact(
+                concept="Revenues",
+                val=Decimal("3000"),  # current FY
+                period_end="2025-12-31",
+                period_start="2025-01-01",
+                frame="CY2025",
+                fiscal_year=2025,
+                fiscal_period="FY",
+                form_type="10-K",
+                accession_number="fy-2025-10k",
+                filed_date="2026-02-26",
+            ),
+        ]
+
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        fy = next(p for p in periods if p.period_type == "FY")
+        assert fy.fiscal_year == 2025
+        assert fy.period_end_date == date(2025, 12, 31)
+        assert fy.revenue == Decimal("3000")  # NOT 1000 (would be the bug)
+
+
+class TestRestatementSameFiledDateTieBreaker:
+    """Codex pre-flight: when two filings restate the same period
+    but happen to share ``filed_date`` (rare but possible — a
+    same-day 10-K and 10-K/A correction), the tiebreak should be
+    deterministic. Sorting by ``(filed_date, accession_number) DESC``
+    breaks ties on accession_number, which is the only other
+    deterministic identifier available at fact level."""
+
+    def test_same_filed_date_picks_higher_accession(self) -> None:
+        facts = [
+            _fact(
+                concept="Revenues",
+                val=Decimal("100"),
+                period_end="2025-12-31",
+                period_start="2025-01-01",
+                frame="CY2025",
+                fiscal_year=2025,
+                fiscal_period="FY",
+                form_type="10-K",
+                accession_number="0000000000-26-000001",
+                filed_date="2026-02-26",
+            ),
+            _fact(
+                concept="Revenues",
+                val=Decimal("110"),
+                period_end="2025-12-31",
+                period_start="2025-01-01",
+                frame="CY2025",
+                fiscal_year=2025,
+                fiscal_period="FY",
+                form_type="10-K/A",
+                accession_number="0000000000-26-000099",  # higher accession
+                filed_date="2026-02-26",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        fy = next(p for p in periods if p.period_type == "FY")
+        # Higher accession_number wins on tied filed_date — deterministic.
+        assert fy.revenue == Decimal("110")
+        assert fy.form_type == "10-K/A"
+
+
+class TestQ4DerivationAfterCanonicalFix:
+    def test_iep_shape_q4_dps_derives_to_correct_value(self) -> None:
+        """End-to-end IEP-shape regression: with the canonical FY
+        value at $2.00 (post-fix) and three quarterly $0.50 facts,
+        Q4 derivation produces $0.50, not $4.50.
+        """
+        facts: list[FactRow] = [
+            # Three quarterly facts at $0.50 each.
+            _fact(
+                concept="CommonStockDividendsPerShareDeclared",
+                val=Decimal("0.50"),
+                period_end="2025-03-31",
+                period_start="2025-01-01",
+                frame="CY2025Q1",
+                fiscal_year=2025,
+                fiscal_period="Q1",
+                form_type="10-Q",
+                accession_number="q1-2025",
+                filed_date="2025-05-01",
+            ),
+            _fact(
+                concept="CommonStockDividendsPerShareDeclared",
+                val=Decimal("0.50"),
+                period_end="2025-06-30",
+                period_start="2025-04-01",
+                frame="CY2025Q2",
+                fiscal_year=2025,
+                fiscal_period="Q2",
+                form_type="10-Q",
+                accession_number="q2-2025",
+                filed_date="2025-08-01",
+            ),
+            _fact(
+                concept="CommonStockDividendsPerShareDeclared",
+                val=Decimal("0.50"),
+                period_end="2025-09-30",
+                period_start="2025-07-01",
+                frame="CY2025Q3",
+                fiscal_year=2025,
+                fiscal_period="Q3",
+                form_type="10-Q",
+                accession_number="q3-2025",
+                filed_date="2025-11-01",
+            ),
+            # FY 10-K with three comparative-year FY rows under fy=2025/fp=FY.
+            _fact(
+                concept="CommonStockDividendsPerShareDeclared",
+                val=Decimal("6.00"),
+                period_end="2023-12-31",
+                period_start="2023-01-01",
+                frame=None,
+                fiscal_year=2025,
+                fiscal_period="FY",
+                form_type="10-K",
+                accession_number="fy-2025-10k",
+                filed_date="2026-02-26",
+            ),
+            _fact(
+                concept="CommonStockDividendsPerShareDeclared",
+                val=Decimal("3.50"),
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame=None,
+                fiscal_year=2025,
+                fiscal_period="FY",
+                form_type="10-K",
+                accession_number="fy-2025-10k",
+                filed_date="2026-02-26",
+            ),
+            _fact(
+                concept="CommonStockDividendsPerShareDeclared",
+                val=Decimal("2.00"),
+                period_end="2025-12-31",
+                period_start="2025-01-01",
+                frame="CY2025",
+                fiscal_year=2025,
+                fiscal_period="FY",
+                form_type="10-K",
+                accession_number="fy-2025-10k",
+                filed_date="2026-02-26",
+            ),
+        ]
+
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        by_type = {p.period_type: p for p in periods if p.fiscal_year == 2025}
+
+        assert by_type["FY"].dps_declared == Decimal("2.00")
+        assert by_type["Q1"].dps_declared == Decimal("0.50")
+        assert by_type["Q2"].dps_declared == Decimal("0.50")
+        assert by_type["Q3"].dps_declared == Decimal("0.50")
+        # Q4 is derived: FY (2.00) - Q1+Q2+Q3 (1.50) = 0.50.
+        assert "Q4" in by_type
+        q4 = by_type["Q4"]
+        assert q4.is_derived is True
+        assert q4.dps_declared == Decimal("0.50")
