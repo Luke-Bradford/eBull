@@ -453,7 +453,7 @@ export function ChartPage(): JSX.Element {
                   className={`rounded border px-2 py-0.5 text-xs font-medium ${
                     active
                       ? "bg-white dark:bg-slate-900 text-slate-700"
-                      : "bg-slate-50 text-slate-500 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-800"
+                      : "bg-slate-50 text-slate-500 hover:bg-slate-100 dark:bg-slate-900 dark:hover:bg-slate-800"
                   }`}
                   style={
                     active
@@ -484,7 +484,7 @@ export function ChartPage(): JSX.Element {
                   className={`rounded border px-2 py-0.5 text-xs font-medium ${
                     active
                       ? "border-orange-400 bg-white dark:bg-slate-900 text-orange-600"
-                      : "border-slate-200 dark:border-slate-800 bg-slate-50 text-slate-500 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-800"
+                      : "border-slate-200 dark:border-slate-800 bg-slate-50 text-slate-500 hover:bg-slate-100 dark:bg-slate-900 dark:hover:bg-slate-800"
                   }`}
                   data-testid={`trend-${id}`}
                 >
@@ -515,7 +515,7 @@ export function ChartPage(): JSX.Element {
                 className={`rounded border px-2 py-0.5 text-xs font-medium ${
                   on
                     ? "border-slate-400 bg-white dark:bg-slate-900 text-slate-700"
-                    : "border-slate-200 dark:border-slate-800 bg-slate-50 text-slate-500 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-800"
+                    : "border-slate-200 dark:border-slate-800 bg-slate-50 text-slate-500 hover:bg-slate-100 dark:bg-slate-900 dark:hover:bg-slate-800"
                 }`}
                 data-testid={`session-toggle-${key}`}
               >

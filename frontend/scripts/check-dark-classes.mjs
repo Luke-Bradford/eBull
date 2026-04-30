@@ -21,6 +21,13 @@
  *      had no light base bg, making every nav link look permanently
  *      selected in dark mode.
  *
+ *   E. Dead `dark:hover:bg-X` — the same color as the element's
+ *      `dark:bg-X` base, making hover a no-op in dark mode. Catches
+ *      the PR #711 round-2 ChartPage case where toggle buttons had
+ *      `dark:bg-slate-800 dark:hover:bg-slate-800` (light pair was
+ *      `bg-slate-50 hover:bg-slate-100`, dark should be `bg-slate-900
+ *      hover:bg-slate-800`).
+ *
  * Exits non-zero with file:line:reason for each violation.
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -77,6 +84,26 @@ function findMissingHoverPartner(line) {
   return "hover:bg-slate-50|100 missing dark:hover:bg- partner";
 }
 
+/** Check E: `dark:bg-X` and `dark:hover:bg-X` resolve to the same
+ *  token — the hover is dead in dark mode (the ChartPage dead-hover
+ *  bug from PR #711 round 2).
+ *
+ * Compares the body of the two tokens (after the `dark:` / `dark:hover:`
+ * prefix) and flags when they match. Same-line scope is intentional —
+ * the comparison only makes sense within one className.
+ */
+function findDeadDarkHover(line) {
+  const baseMatch = line.match(
+    /(?<![\w:-])dark:bg-([\w/-]+)/,
+  );
+  const hoverMatch = line.match(
+    /(?<![\w:-])dark:hover:bg-([\w/-]+)/,
+  );
+  if (!baseMatch || !hoverMatch) return null;
+  if (baseMatch[1] !== hoverMatch[1]) return null;
+  return `dark:bg-${baseMatch[1]} and dark:hover:bg-${hoverMatch[1]} are identical — hover is a no-op in dark mode`;
+}
+
 /** Check D: dark:bg-* base added to an element whose only light bg
  *  was a hover state — produces an always-on background in dark mode
  *  (the Sidebar permanent-hover bug from PR #711).
@@ -131,6 +158,10 @@ for (const file of files) {
     const orphanDark = findOrphanDarkBg(line);
     if (orphanDark) {
       violations.push({ file, line: lineNo, reason: orphanDark });
+    }
+    const deadHover = findDeadDarkHover(line);
+    if (deadHover) {
+      violations.push({ file, line: lineNo, reason: deadHover });
     }
   });
 }
