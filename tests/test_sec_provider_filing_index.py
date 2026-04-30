@@ -62,8 +62,10 @@ def test_filing_index_request_hits_www_sec_gov() -> None:
     assert len(captured) == 1
     assert captured[0].url.host == "www.sec.gov"
     # Path must use the int-coerced CIK (no leading zeros) per SEC's
-    # archive layout convention.
-    assert captured[0].url.path == "/Archives/edgar/data/320193/000032019324000001/000032019324000001-index.json"
+    # archive layout convention. The manifest filename is plain
+    # ``index.json`` (no accession prefix) — pre-#723 the code
+    # targeted ``{accession}-index.json`` which doesn't exist on SEC.
+    assert captured[0].url.path == "/Archives/edgar/data/320193/000032019324000001/index.json"
 
 
 def test_filing_index_returns_none_on_404() -> None:
