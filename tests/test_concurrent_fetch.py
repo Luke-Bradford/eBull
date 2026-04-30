@@ -90,6 +90,62 @@ class TestConcurrentFetch:
         assert result == {"u1": "body1"}
 
 
+class TestConcurrencyAchievesActualThroughput:
+    """Wall-clock regression guard for #726. Bot pre-flight raised
+    a concern that ``time.sleep`` inside the throttle lock would
+    serialise threads end-to-end and erase the concurrency gain.
+    Live SEC tests showed 7.5 req/s actual vs ~1 req/s sequential,
+    so the design works — but the bot's intuition is reasonable
+    enough that we want a deterministic CI check.
+
+    The math: with N concurrent workers, each lock holder spends
+    ``min_interval`` sleeping (since the previous holder just
+    stamped). After release, the next thread acquires and sleeps
+    ``min_interval`` again. Aggregate rate = ``1 / min_interval``
+    regardless of N (the lock IS the rate gate). Crucially, the
+    HTTP RTT happens AFTER lock release, in parallel across threads
+    — so total wall-clock for N requests with response_time R is
+    ``N * min_interval + R`` (the last request's response), NOT
+    ``N * (min_interval + R)`` which is what the sequential
+    pre-PR loop took.
+    """
+
+    def test_concurrent_total_time_smaller_than_sequential(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        from app.providers.resilient_client import ResilientClient
+
+        rc = ResilientClient.__new__(ResilientClient)
+        rc._min_interval = 0.02  # 20 ms floor
+        rc._last_request_at = [0.0]
+        rc._throttle_lock = threading.Lock()
+
+        # Simulated work: each worker stamps then sleeps 100ms
+        # (the "HTTP RTT") OUTSIDE the lock, exactly like the real
+        # ResilientClient._request flow.
+        N_REQUESTS = 16
+        RESPONSE_MS = 0.1
+
+        def fire() -> None:
+            rc._throttle_and_stamp()  # pyright: ignore[reportPrivateUsage]
+            time.sleep(RESPONSE_MS)  # outside the lock
+
+        sequential_estimate = N_REQUESTS * (rc._min_interval + RESPONSE_MS)
+
+        t0 = time.monotonic()
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda _: fire(), range(N_REQUESTS)))
+        elapsed = time.monotonic() - t0
+
+        # With 8 workers, response time overlaps. Wall-clock should
+        # be much closer to N*min_interval + RESPONSE_MS (~0.42s)
+        # than the sequential estimate (~1.92s).
+        assert elapsed < sequential_estimate * 0.5, (
+            f"Concurrent total {elapsed:.3f}s did not beat sequential {sequential_estimate:.3f}s "
+            "by ≥2x — throttle design may be serialising HTTP RTT across threads."
+        )
+
+
 class TestRateLimitSafetyUnderConcurrency:
     """ResilientClient throttle must remain atomic under concurrent
     callers. A regression here lets concurrent fetchers burst past the

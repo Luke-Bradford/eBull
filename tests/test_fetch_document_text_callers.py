@@ -41,6 +41,12 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "app/services/eight_k_events.py",
         # Provider implementation owns the method itself.
         "app/providers/implementations/sec_edgar.py",
+        # Bounded-concurrency wrapper (#726). Calls the method via a
+        # narrow Protocol but does NOT persist anything itself —
+        # callers (insider_transactions / dividend_calendar / etc.)
+        # own the SQL normalisation as before. The helper is
+        # transport-only.
+        "app/providers/concurrent_fetch.py",
         # Docstring-only reference in the scheduler job that invokes
         # one of the ingesters. No runtime call site.
         "app/workers/scheduler.py",
@@ -51,6 +57,7 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "tests/test_dividend_calendar_ingest.py",
         "tests/test_insider_transactions_ingest.py",
         "tests/test_eight_k_events_ingest.py",
+        "tests/test_concurrent_fetch.py",
         # This guard file itself references the method name in its
         # contract sentence.
         "tests/test_fetch_document_text_callers.py",
