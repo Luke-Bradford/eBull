@@ -55,6 +55,17 @@ logger = logging.getLogger(__name__)
 # re-fetch the universe of Form 4 XML from SEC.
 _PARSER_VERSION = 2
 
+# Backfill horizon for Form 4 ingestion. eBull's posture is long-
+# horizon (months-to-years holding periods), and the signal carried
+# by insider Form 4 trades decays sharply with age — the 2026-05
+# backlog audit found 1.02M un-ingested filings older than 2y vs
+# 221k under 2y. Draining the historical tail at 500/hr would burn
+# ~6 weeks of SEC bandwidth on filings that never reach the live
+# trading model. A 5-year floor keeps recent insider activity, the
+# COVID era, and the rate-cycle pivot, while skipping pre-2021
+# noise. Bump this if the operator decides to widen the window.
+INSIDER_FORM4_BACKFILL_FLOOR_YEARS: int = 5
+
 
 # ---------------------------------------------------------------------
 # Public types
@@ -1014,7 +1025,11 @@ def ingest_insider_transactions(
        is ingested exactly once per accession — tombstones live in the
        same table so a failed fetch writes a tombstone row and the
        hourly ingester never re-fetches the same dead URL.
-    4. Ordered by filing_date DESC so fresh filings always get budget.
+    4. ``fe.filing_date >= NOW() - INTERVAL '<floor> years'`` — see
+       :data:`INSIDER_FORM4_BACKFILL_FLOOR_YEARS`. Historical Form 4s
+       outside the floor are skipped permanently; the operator can
+       widen the floor if archaeology becomes a need.
+    5. Ordered by filing_date DESC so fresh filings always get budget.
 
     Bounded per run (``limit=500``) to match expected daily Form 4
     volume across the universe.
@@ -1034,10 +1049,11 @@ def ingest_insider_transactions(
               AND fe.filing_type IN ('4', '4/A')
               AND fe.primary_document_url IS NOT NULL
               AND fil.accession_number IS NULL
+              AND fe.filing_date >= NOW() - make_interval(years => %(floor_years)s)
             ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
-            LIMIT %s
+            LIMIT %(limit)s
             """,
-            (limit,),
+            {"limit": limit, "floor_years": INSIDER_FORM4_BACKFILL_FLOOR_YEARS},
         )
         for row in cur.fetchall():
             candidates.append((int(row[0]), str(row[1]), _canonical_form_4_url(str(row[2]))))
@@ -1168,11 +1184,12 @@ def ingest_insider_transactions_backfill(
               AND fe.filing_type IN ('4', '4/A')
               AND fe.primary_document_url IS NOT NULL
               AND fil.accession_number IS NULL
+              AND fe.filing_date >= NOW() - make_interval(years => %(floor_years)s)
             GROUP BY fe.instrument_id
             ORDER BY unfetched DESC
-            LIMIT %s
+            LIMIT %(limit)s
             """,
-            (instruments_per_tick,),
+            {"limit": instruments_per_tick, "floor_years": INSIDER_FORM4_BACKFILL_FLOOR_YEARS},
         )
         targets = [(int(r[0]), int(r[1])) for r in cur.fetchall()]
     conn.commit()
