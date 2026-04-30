@@ -337,7 +337,7 @@ function InfoStrip({
 }): JSX.Element {
   const amber = valuationSource !== "quote";
   return (
-    <div className="rounded border border-slate-200 dark:border-slate-800 bg-slate-50 px-2 py-1.5 text-xs text-slate-700">
+    <div className="rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 px-2 py-1.5 text-xs text-slate-700">
       <div>
         {formatNumber(trade.units, 6)} units @ {formatNumber(trade.open_rate, 4)}{" "}
         {currency}
@@ -388,7 +388,7 @@ function PreviewBlock({
       ? "using latest quote"
       : `using latest ${valuationSource} — backend may fall back to open rate`;
   return (
-    <div className="rounded border border-slate-200 dark:border-slate-800 bg-slate-50 px-2 py-1.5 text-xs">
+    <div className="rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 px-2 py-1.5 text-xs">
       <div>
         Closing: {formatNumber(unitsToClose, 6)} /{" "}
         {formatNumber(trade.units, 6)} units

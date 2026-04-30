@@ -266,7 +266,7 @@ function ReportDetail({ report }: { report: ReportSnapshot }) {
 
       <details className="text-xs">
         <summary className="cursor-pointer text-slate-500">Raw JSON</summary>
-        <pre className="mt-2 overflow-x-auto rounded bg-slate-50 p-2">
+        <pre className="mt-2 overflow-x-auto rounded bg-slate-50 dark:bg-slate-900/40 p-2">
           {JSON.stringify(json, null, 2)}
         </pre>
       </details>
@@ -342,7 +342,7 @@ function ReportList({ reports }: { reports: ReportSnapshot[] }) {
                 className={`w-full rounded px-2 py-1 text-left ${
                   r.snapshot_id === selected?.snapshot_id
                     ? "bg-slate-200 font-medium"
-                    : "hover:bg-slate-100 dark:hover:bg-slate-800"
+                    : "hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-800"
                 }`}
                 onClick={() => setSelectedId(r.snapshot_id)}
               >

@@ -156,7 +156,7 @@ export function PortfolioValueChart(): JSX.Element | null {
               className={`rounded px-2 py-0.5 text-xs font-medium ${
                 r.id === range
                   ? "bg-slate-800 text-white"
-                  : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                  : "bg-slate-100 dark:bg-slate-800 text-slate-600 hover:bg-slate-200"
               }`}
               data-testid={`value-range-${r.id}`}
             >

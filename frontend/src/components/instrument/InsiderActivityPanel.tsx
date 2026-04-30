@@ -115,7 +115,7 @@ function roleBadge(role: string | null): string {
 function formatDelta(raw: string): { label: string; colour: string } {
   const num = Number(raw);
   if (!Number.isFinite(num) || num === 0) {
-    return { label: "0", colour: "bg-slate-100 text-slate-700" };
+    return { label: "0", colour: "bg-slate-100 dark:bg-slate-800 text-slate-700" };
   }
   if (num > 0) {
     return {
@@ -211,7 +211,7 @@ function SummaryStrip({ summary }: { summary: InsiderSummary }) {
           grants doesn't read as insiders not buying. */}
       {(summary.open_market_buy_count_90d + summary.open_market_sell_count_90d > 0 ||
         openMarketNet !== 0) && (
-        <div className="rounded bg-slate-50 px-3 py-1.5 text-xs text-slate-600">
+        <div className="rounded bg-slate-50 dark:bg-slate-900/40 px-3 py-1.5 text-xs text-slate-600">
           <span className="font-medium text-slate-700">
             Open-market only (discretionary P/S):
           </span>{" "}
@@ -265,7 +265,7 @@ function Row({ txn }: { txn: InsiderTransactionDetail }) {
         {code}
         {planned && (
           <span
-            className="ml-1 rounded bg-slate-100 px-1 py-0.5 text-[10px] font-medium text-slate-600"
+            className="ml-1 rounded bg-slate-100 dark:bg-slate-800 px-1 py-0.5 text-[10px] font-medium text-slate-600"
             title="Pre-arranged under Rule 10b5-1"
           >
             10b5-1
@@ -293,14 +293,14 @@ function Row({ txn }: { txn: InsiderTransactionDetail }) {
         {txn.security_title ?? "—"}
         {txn.direct_indirect === "I" && (
           <span
-            className="ml-1 rounded bg-slate-100 px-1 py-0.5 text-[10px] font-medium text-slate-600"
+            className="ml-1 rounded bg-slate-100 dark:bg-slate-800 px-1 py-0.5 text-[10px] font-medium text-slate-600"
             title={txn.nature_of_ownership ?? "Held indirectly"}
           >
             Indirect
           </span>
         )}
         {txn.is_derivative && (
-          <span className="ml-1 rounded bg-slate-100 px-1 py-0.5 text-[10px] font-medium text-slate-600">
+          <span className="ml-1 rounded bg-slate-100 dark:bg-slate-800 px-1 py-0.5 text-[10px] font-medium text-slate-600">
             Derivative
           </span>
         )}

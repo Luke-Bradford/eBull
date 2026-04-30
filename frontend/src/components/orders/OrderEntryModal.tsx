@@ -332,7 +332,7 @@ function PreviewBlock({
     estimate = "No usable quote — submit will likely 422";
   }
   return (
-    <div className="rounded border border-slate-200 dark:border-slate-800 bg-slate-50 px-2 py-1.5 text-xs text-slate-700">
+    <div className="rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 px-2 py-1.5 text-xs text-slate-700">
       <div>{estimate}</div>
       <div className="text-slate-500">Estimated fees: 0.00 (demo)</div>
     </div>

@@ -10,7 +10,7 @@ import { EmptyState } from "@/components/states/EmptyState";
 const ACTION_TONE: Record<string, string> = {
   BUY: "bg-emerald-100 text-emerald-700",
   ADD: "bg-emerald-50 text-emerald-700",
-  HOLD: "bg-slate-100 text-slate-600",
+  HOLD: "bg-slate-100 dark:bg-slate-800 text-slate-600",
   EXIT: "bg-red-100 text-red-700",
 };
 
@@ -45,7 +45,7 @@ export function RecommendationsTable({ view }: { view: RecommendationsView }) {
         <button
           type="button"
           onClick={view.onRetry}
-          className="rounded border border-red-300 bg-white px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
+          className="rounded border border-red-300 bg-white dark:bg-slate-900 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
         >
           Retry
         </button>
@@ -90,7 +90,7 @@ function RecommendationRow({ item }: { item: RecommendationListItem }) {
   return (
     <>
       <tr
-        className="cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40"
+        className="cursor-pointer hover:bg-slate-50 dark:bg-slate-900/40 dark:hover:bg-slate-800/40"
         onClick={() => setExpanded((prev) => !prev)}
       >
         <td className="px-2 py-2">
@@ -103,12 +103,12 @@ function RecommendationRow({ item }: { item: RecommendationListItem }) {
           </Link>
         </td>
         <td className="px-2 py-2">
-          <Badge tone={ACTION_TONE[item.action] ?? "bg-slate-100 text-slate-600"}>
+          <Badge tone={ACTION_TONE[item.action] ?? "bg-slate-100 dark:bg-slate-800 text-slate-600"}>
             {item.action}
           </Badge>
         </td>
         <td className="px-2 py-2">
-          <Badge tone={STATUS_TONE[item.status] ?? "bg-slate-100 text-slate-600"}>
+          <Badge tone={STATUS_TONE[item.status] ?? "bg-slate-100 dark:bg-slate-800 text-slate-600"}>
             {item.status}
           </Badge>
         </td>
@@ -120,7 +120,7 @@ function RecommendationRow({ item }: { item: RecommendationListItem }) {
       </tr>
       {expanded ? (
         <tr>
-          <td colSpan={6} className="bg-slate-50 px-4 py-3">
+          <td colSpan={6} className="bg-slate-50 dark:bg-slate-900/40 px-4 py-3">
             <ExpandedDetail item={item} />
           </td>
         </tr>

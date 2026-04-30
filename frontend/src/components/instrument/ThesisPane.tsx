@@ -37,7 +37,7 @@ function ThesisBody({ thesis }: { thesis: ThesisDetail }): JSX.Element {
       {(thesis.base_value !== null ||
         thesis.bull_value !== null ||
         thesis.bear_value !== null) && (
-        <dl className="grid grid-cols-3 gap-2 rounded bg-slate-50 p-3 text-xs">
+        <dl className="grid grid-cols-3 gap-2 rounded bg-slate-50 dark:bg-slate-900/40 p-3 text-xs">
           <div>
             <dt className="text-slate-500">Bear</dt>
             <dd className="font-medium tabular-nums">

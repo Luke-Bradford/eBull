@@ -278,11 +278,11 @@ export function PortfolioPage() {
                 />
               ) : null}
               <div className="text-[10px] text-slate-400">
-                <kbd className="rounded bg-slate-100 px-1">/</kbd> search ·{" "}
-                <kbd className="rounded bg-slate-100 px-1">j</kbd>/
-                <kbd className="rounded bg-slate-100 px-1">k</kbd> move ·{" "}
-                <kbd className="rounded bg-slate-100 px-1">Enter</kbd> open ·{" "}
-                <kbd className="rounded bg-slate-100 px-1">Esc</kbd> clear
+                <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-1">/</kbd> search ·{" "}
+                <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-1">j</kbd>/
+                <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-1">k</kbd> move ·{" "}
+                <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-1">Enter</kbd> open ·{" "}
+                <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-1">Esc</kbd> clear
               </div>
             </>
           )}
@@ -453,7 +453,7 @@ function PortfolioTable({
           onChange={(e) => onSearchChange(e.target.value)}
           placeholder="Search positions…   (press / to focus)"
           aria-label="Search positions"
-          className="w-full rounded border border-slate-200 dark:border-slate-800 bg-slate-50 px-3 py-1.5 text-sm text-slate-700 placeholder-slate-400 outline-none focus:border-blue-300 focus:ring-1 focus:ring-blue-200"
+          className="w-full rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 px-3 py-1.5 text-sm text-slate-700 placeholder-slate-400 outline-none focus:border-blue-300 focus:ring-1 focus:ring-blue-200"
         />
       </div>
       {pageRows.length === 0 ? (
@@ -463,7 +463,7 @@ function PortfolioTable({
       ) : (
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+            <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
               <th className="px-4 py-2 text-left">Instrument</th>
               <th className="px-2 py-2 text-right">Trades</th>
               <th className="px-2 py-2 text-right">Units</th>
@@ -522,7 +522,7 @@ function PaginationBar({
         type="button"
         onClick={onPrev}
         disabled={page <= 1}
-        className="rounded border border-slate-200 dark:border-slate-800 bg-white px-2 py-0.5 font-medium text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40 disabled:opacity-40"
+        className="rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-2 py-0.5 font-medium text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40 disabled:opacity-40"
       >
         ← Prev
       </button>
@@ -533,7 +533,7 @@ function PaginationBar({
         type="button"
         onClick={onNext}
         disabled={page >= totalPages}
-        className="rounded border border-slate-200 dark:border-slate-800 bg-white px-2 py-0.5 font-medium text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40 disabled:opacity-40"
+        className="rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-2 py-0.5 font-medium text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40 disabled:opacity-40"
       >
         Next →
       </button>
@@ -569,7 +569,7 @@ function PositionRow({
   const rowClass = [
     "cursor-pointer border-t border-slate-100 transition-colors",
     focused
-      ? "bg-slate-100 border-l-2 border-l-slate-400"
+      ? "bg-slate-100 dark:bg-slate-800 border-l-2 border-l-slate-400"
       : "hover:bg-slate-50/70 dark:hover:bg-slate-800/40",
   ].join(" ");
 
@@ -623,7 +623,7 @@ function PositionRow({
             onAdd(p);
           }}
           aria-label={`Add to ${p.symbol}`}
-          className="mr-1 rounded border border-blue-300 bg-white px-2 py-0.5 text-xs font-medium text-blue-700 hover:bg-blue-50"
+          className="mr-1 rounded border border-blue-300 bg-white dark:bg-slate-900 px-2 py-0.5 text-xs font-medium text-blue-700 hover:bg-blue-50"
         >
           Add
         </button>
@@ -639,7 +639,7 @@ function PositionRow({
               });
             }}
             aria-label={`Close ${p.symbol}`}
-            className="rounded border border-red-300 bg-white px-2 py-0.5 text-xs font-medium text-red-700 hover:bg-red-50"
+            className="rounded border border-red-300 bg-white dark:bg-slate-900 px-2 py-0.5 text-xs font-medium text-red-700 hover:bg-red-50"
           >
             Close
           </button>
@@ -665,7 +665,7 @@ function MirrorRow({
 
   const rowClass = [
     "cursor-pointer border-t border-slate-100 transition-colors",
-    focused ? "bg-slate-100 border-l-2 border-l-slate-400" : "hover:bg-slate-50/70 dark:hover:bg-slate-800/40",
+    focused ? "bg-slate-100 dark:bg-slate-800 border-l-2 border-l-slate-400" : "hover:bg-slate-50/70 dark:hover:bg-slate-800/40",
   ].join(" ");
 
   return (
@@ -684,7 +684,7 @@ function MirrorRow({
           <span className="font-medium text-slate-800 dark:text-slate-100">
             {m.parent_username}
           </span>
-          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
+          <span className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
             COPY
           </span>
           <span className="text-[10px] text-slate-400">→</span>

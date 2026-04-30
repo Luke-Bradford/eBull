@@ -111,7 +111,7 @@ function KindPill({ kind }: { kind: AlertRow["kind"] }) {
   const style = {
     guard: "bg-amber-100 text-amber-800",
     position: "bg-red-100 text-red-800",
-    coverage: "bg-slate-100 text-slate-700",
+    coverage: "bg-slate-100 dark:bg-slate-800 text-slate-700",
   }[kind];
   const label = { guard: "GUARD", position: "POSITION", coverage: "COVERAGE" }[kind];
   return (
@@ -151,7 +151,7 @@ function RowShell({
     return (
       <Link
         to={`/instruments/${instrumentId}`}
-        className="block hover:bg-slate-50 dark:hover:bg-slate-800/40"
+        className="block hover:bg-slate-50 dark:bg-slate-900/40 dark:hover:bg-slate-800/40"
       >
         {content}
       </Link>

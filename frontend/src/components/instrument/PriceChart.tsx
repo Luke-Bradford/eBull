@@ -281,7 +281,7 @@ export function PriceChart({
               className={`rounded px-2 py-0.5 text-xs font-medium ${
                 r.id === range
                   ? "bg-slate-800 text-white"
-                  : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                  : "bg-slate-100 dark:bg-slate-800 text-slate-600 hover:bg-slate-200"
               }`}
               data-testid={`chart-range-${r.id}`}
             >
@@ -299,7 +299,7 @@ export function PriceChart({
                 className={`rounded px-2 py-0.5 text-xs font-medium ${
                   t.id === chartType
                     ? "bg-slate-800 text-white"
-                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                    : "bg-slate-100 dark:bg-slate-800 text-slate-600 hover:bg-slate-200"
                 }`}
                 data-testid={`chart-type-${t.id}`}
               >
@@ -314,7 +314,7 @@ export function PriceChart({
             className={`rounded px-2 py-0.5 text-xs font-medium ${
               priceScale === "log"
                 ? "bg-slate-800 text-white"
-                : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                : "bg-slate-100 dark:bg-slate-800 text-slate-600 hover:bg-slate-200"
             }`}
             data-testid="chart-scale-log"
             title="Toggle logarithmic price scale"
@@ -336,7 +336,7 @@ export function PriceChart({
                 className={`rounded px-2 py-0.5 text-xs font-medium ${
                   showPm
                     ? "bg-slate-800 text-white"
-                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                    : "bg-slate-100 dark:bg-slate-800 text-slate-600 hover:bg-slate-200"
                 }`}
                 data-testid="chart-toggle-pm"
                 title="Show / hide pre-market (04:00–09:30 ET)"
@@ -350,7 +350,7 @@ export function PriceChart({
                 className={`rounded px-2 py-0.5 text-xs font-medium ${
                   showAh
                     ? "bg-slate-800 text-white"
-                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                    : "bg-slate-100 dark:bg-slate-800 text-slate-600 hover:bg-slate-200"
                 }`}
                 data-testid="chart-toggle-ah"
                 title="Show / hide after-hours (16:00–20:00 ET)"

@@ -153,7 +153,7 @@ export function FundamentalsPage(): JSX.Element {
                 type="button"
                 onClick={() => setPeriod("quarterly")}
                 aria-pressed={period === "quarterly"}
-                className={`rounded px-2 py-0.5 font-medium ${period === "quarterly" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
+                className={`rounded px-2 py-0.5 font-medium ${period === "quarterly" ? "bg-slate-800 text-white" : "bg-slate-100 dark:bg-slate-800 text-slate-600 hover:bg-slate-200"}`}
                 data-testid="fundamentals-period-quarterly"
               >
                 Quarterly
@@ -162,7 +162,7 @@ export function FundamentalsPage(): JSX.Element {
                 type="button"
                 onClick={() => setPeriod("annual")}
                 aria-pressed={period === "annual"}
-                className={`rounded px-2 py-0.5 font-medium ${period === "annual" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
+                className={`rounded px-2 py-0.5 font-medium ${period === "annual" ? "bg-slate-800 text-white" : "bg-slate-100 dark:bg-slate-800 text-slate-600 hover:bg-slate-200"}`}
                 data-testid="fundamentals-period-annual"
               >
                 Annual

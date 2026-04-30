@@ -51,11 +51,11 @@ export interface PaginationProps {
 const BTN_BASE =
   "rounded border px-2 py-1 text-xs font-medium transition-colors";
 const BTN_IDLE =
-  "border-slate-200 dark:border-slate-800 bg-white text-slate-600 hover:bg-slate-50 dark:hover:bg-slate-800/40";
+  "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-600 hover:bg-slate-50 dark:hover:bg-slate-800/40";
 const BTN_ACTIVE =
   "border-blue-400 bg-blue-50 text-blue-700";
 const BTN_DISABLED =
-  "border-slate-200 dark:border-slate-800 bg-white text-slate-300 cursor-not-allowed";
+  "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-300 cursor-not-allowed";
 
 export function Pagination({ page, totalPages, onPageChange }: PaginationProps) {
   if (totalPages <= 1) return null;

@@ -164,7 +164,7 @@ export function useRecoveryPhraseModal(
             <button
               type="button"
               onClick={close}
-              className="rounded border border-rose-300 bg-white px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50"
+              className="rounded border border-rose-300 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50"
             >
               Close anyway
             </button>

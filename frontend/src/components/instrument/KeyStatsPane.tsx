@@ -27,7 +27,7 @@ function formatMarketCap(value: string | null): string | null {
 
 function FieldSourceTag({ source }: { source: KeyStatsFieldSource | undefined }) {
   if (!source) return null;
-  let tone = "bg-slate-100 text-slate-600";
+  let tone = "bg-slate-100 dark:bg-slate-800 text-slate-600";
   let label: string = source;
   switch (source) {
     case "sec_xbrl":
@@ -43,7 +43,7 @@ function FieldSourceTag({ source }: { source: KeyStatsFieldSource | undefined })
       label = "SEC · price?";
       break;
     case "unavailable":
-      tone = "bg-slate-100 text-slate-500";
+      tone = "bg-slate-100 dark:bg-slate-800 text-slate-500";
       label = "—";
       break;
   }

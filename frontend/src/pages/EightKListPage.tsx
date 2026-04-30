@@ -186,7 +186,7 @@ export function EightKListPage(): JSX.Element {
                     return (
                       <tr
                         key={f.accession_number}
-                        className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800/40 ${
+                        className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 dark:bg-slate-900/40 dark:hover:bg-slate-800/40 ${
                           isSelected ? "bg-sky-50" : ""
                         }`}
                         onClick={() => selectAccession(f.accession_number)}
@@ -198,7 +198,7 @@ export function EightKListPage(): JSX.Element {
                           {f.items.map((i) => (
                             <span
                               key={i.item_code}
-                              className="mr-1 rounded bg-slate-100 px-1 py-0.5 text-[10px]"
+                              className="mr-1 rounded bg-slate-100 dark:bg-slate-800 px-1 py-0.5 text-[10px]"
                             >
                               {i.item_code}
                             </span>

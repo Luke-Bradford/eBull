@@ -62,7 +62,7 @@ function GuardChecklist({ rules }: { rules: GuardRule[] }) {
 
 function GenericEvidence({ data }: { data: Record<string, unknown> | Record<string, unknown>[] }) {
   return (
-    <pre className="max-h-48 overflow-auto rounded bg-slate-100 p-2 text-xs text-slate-700">
+    <pre className="max-h-48 overflow-auto rounded bg-slate-100 dark:bg-slate-800 p-2 text-xs text-slate-700">
       {JSON.stringify(data, null, 2)}
     </pre>
   );

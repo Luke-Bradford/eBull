@@ -115,7 +115,7 @@ function SectionBlock({
           {section.cross_references.map((ref, idx) => (
             <span
               key={`${ref.reference_type}-${ref.target}-${idx}`}
-              className="rounded bg-slate-100 px-1.5 py-0.5 text-slate-700"
+              className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-slate-700"
               title={ref.context}
             >
               {ref.target}
