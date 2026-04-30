@@ -148,7 +148,7 @@ export function ClosePositionModal({
       <div className="flex flex-col gap-3">
         <header className="flex items-center justify-between">
           <div>
-            <h2 className="text-sm font-semibold text-slate-800">{title}</h2>
+            <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">{title}</h2>
             <p className="text-xs text-slate-500">Position #{positionId}</p>
           </div>
           <DemoLivePill />

@@ -96,7 +96,7 @@ export function LayerHealthList({ layers, onToggle }: LayerHealthListProps): JSX
           >
             <div className="flex-1">
               <div className="flex items-center gap-2">
-                <span className="font-medium text-slate-800">{entry.display_name}</span>
+                <span className="font-medium text-slate-800 dark:text-slate-100">{entry.display_name}</span>
                 <span
                   aria-label={`${entry.layer} state`}
                   className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${PILL_CLASS[pill]}`}

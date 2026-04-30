@@ -378,7 +378,7 @@ export function ChartPage(): JSX.Element {
           ← Back to overview
         </Link>
         <div className="flex items-baseline gap-2">
-          <h1 className="text-xl font-semibold text-slate-800">{symbol}</h1>
+          <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">{symbol}</h1>
           {summaryAsync.data?.identity.display_name && (
             <span className="text-sm text-slate-500">
               {summaryAsync.data.identity.display_name}
@@ -386,7 +386,7 @@ export function ChartPage(): JSX.Element {
           )}
         </div>
         {summaryAsync.data?.price?.current && (
-          <span className="ml-auto text-lg font-medium tabular-nums text-slate-800">
+          <span className="ml-auto text-lg font-medium tabular-nums text-slate-800 dark:text-slate-100">
             {summaryAsync.data.price.currency ?? ""}{" "}
             {Number(summaryAsync.data.price.current).toLocaleString(undefined, {
               maximumFractionDigits: 2,

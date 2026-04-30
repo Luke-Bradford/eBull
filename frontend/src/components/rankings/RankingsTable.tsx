@@ -89,7 +89,7 @@ export function RankingsTable({ view }: { view: RankingsView }) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-left text-sm">
-        <thead className="text-xs uppercase text-slate-500">
+        <thead className="text-xs uppercase text-slate-500 dark:text-slate-400">
           <tr>
             {COLUMNS.map((col) => {
               const active = col.key === sortKey;
@@ -104,7 +104,7 @@ export function RankingsTable({ view }: { view: RankingsView }) {
                   <button
                     type="button"
                     onClick={() => onHeaderClick(col)}
-                    className="font-semibold uppercase tracking-wide text-slate-500 hover:text-slate-800"
+                    className="font-semibold uppercase tracking-wide text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
                   >
                     {col.label}
                     {indicator}
@@ -150,7 +150,7 @@ export function RankingsTable({ view }: { view: RankingsView }) {
             <MessageRow>
               <div className="flex flex-col items-center justify-center rounded-md border border-dashed border-slate-200 bg-white p-8 text-center">
                 <h2 className="text-base font-semibold text-slate-700">{view.title}</h2>
-                <p className="mt-1 max-w-md text-sm text-slate-500">{view.description}</p>
+                <p className="mt-1 max-w-md text-sm text-slate-500 dark:text-slate-400">{view.description}</p>
                 {view.action ? <div className="mt-4">{view.action}</div> : null}
               </div>
             </MessageRow>
@@ -210,7 +210,7 @@ function RankingRow({ item }: { item: RankingItem }) {
       <td className="px-2 py-2 text-right tabular-nums">
         {item.coverage_tier === null ? "—" : item.coverage_tier}
       </td>
-      <td className="px-2 py-2 text-right font-semibold tabular-nums text-slate-800">
+      <td className="px-2 py-2 text-right font-semibold tabular-nums text-slate-800 dark:text-slate-100">
         {formatScore(item.total_score)}
       </td>
       <td className="px-2 py-2 text-right tabular-nums">{formatScore(item.quality_score)}</td>

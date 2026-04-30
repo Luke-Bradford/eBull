@@ -144,7 +144,7 @@ export function FundamentalsPage(): JSX.Element {
           ← Back to {symbol}
         </Link>
         <div className="mt-1 flex flex-wrap items-baseline justify-between gap-2">
-          <h1 className="text-lg font-semibold text-slate-900">
+          <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
             Fundamentals — {symbol}
           </h1>
           <div className="flex items-center gap-2 text-xs">

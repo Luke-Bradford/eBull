@@ -131,20 +131,20 @@ export function FundDataRow({
 function StatCell({ cell }: { cell: Cell }): JSX.Element {
   const valueTone =
     cell.tone === "ok"
-      ? "text-slate-800"
+      ? "text-slate-800 dark:text-slate-100"
       : cell.tone === "error"
         ? "text-red-700"
-        : "text-slate-400";
+        : "text-slate-400 dark:text-slate-500";
   return (
     <div title={cell.hint ?? undefined}>
-      <div className="text-[10px] font-medium uppercase tracking-wider text-slate-400">
+      <div className="text-[10px] font-medium uppercase tracking-wider text-slate-400 dark:text-slate-500">
         {cell.label}
       </div>
       <div className={`text-lg font-semibold tabular-nums ${valueTone}`}>
         {cell.value}
       </div>
       {cell.hint ? (
-        <div className="text-[11px] text-slate-400">{cell.hint}</div>
+        <div className="text-[11px] text-slate-400 dark:text-slate-500">{cell.hint}</div>
       ) : null}
     </div>
   );

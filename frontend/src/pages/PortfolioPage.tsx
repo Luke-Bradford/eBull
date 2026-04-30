@@ -224,7 +224,7 @@ export function PortfolioPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-slate-800">Portfolio</h1>
+        <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Portfolio</h1>
       </div>
 
       {portfolio.error !== null ? (
@@ -378,7 +378,7 @@ function Stat({
       <div className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
         {label}
       </div>
-      <div className="text-sm font-semibold text-slate-800">{value}</div>
+      <div className="text-sm font-semibold text-slate-800 dark:text-slate-100">{value}</div>
       {hint ? (
         <div
           className={`text-xs font-medium ${tone === "positive" ? "text-emerald-600" : "text-red-600"}`}
@@ -580,7 +580,7 @@ function PositionRow({
       data-testid={`position-row-${p.instrument_id}`}
     >
       <td className="px-4 py-2 text-left">
-        <span className="font-medium text-slate-800">{p.symbol}</span>
+        <span className="font-medium text-slate-800 dark:text-slate-100">{p.symbol}</span>
         <span className="ml-1.5 text-xs text-slate-500">{p.company_name}</span>
       </td>
       <td className="px-2 py-2 text-right tabular-nums text-slate-600">
@@ -681,7 +681,7 @@ function MirrorRow({
           >
             {m.parent_username.charAt(0).toUpperCase()}
           </span>
-          <span className="font-medium text-slate-800">
+          <span className="font-medium text-slate-800 dark:text-slate-100">
             {m.parent_username}
           </span>
           <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">

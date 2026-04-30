@@ -65,7 +65,7 @@ export function InsiderPage(): JSX.Element {
         <Link to={backHref} className="text-xs text-sky-700 hover:underline">
           ← Back to {symbol}
         </Link>
-        <h1 className="mt-1 text-lg font-semibold text-slate-900">
+        <h1 className="mt-1 text-lg font-semibold text-slate-900 dark:text-slate-100">
           Insider activity — {symbol}
         </h1>
         <p className="mt-1 text-xs text-slate-500">

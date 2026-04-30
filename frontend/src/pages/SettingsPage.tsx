@@ -454,7 +454,7 @@ function BrokerCredentialsSection(): JSX.Element {
                 className="flex items-center justify-between px-3 py-2 text-sm"
               >
                 <div>
-                  <span className="font-medium text-slate-800">{row.label}</span>
+                  <span className="font-medium text-slate-800 dark:text-slate-100">{row.label}</span>
                   <span className="ml-2 text-xs text-slate-500">
                     {row.provider} · {row.environment} · ••••{row.last_four}
                   </span>

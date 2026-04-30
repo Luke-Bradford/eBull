@@ -147,7 +147,7 @@ function SummaryStrip({ summary }: { summary: InsiderSummary }) {
       <div>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
           <div className="flex flex-col">
-            <span className="text-xs uppercase tracking-wide text-slate-500">
+            <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
               Net change
             </span>
             <span
@@ -158,14 +158,14 @@ function SummaryStrip({ summary }: { summary: InsiderSummary }) {
             </span>
           </div>
           <div className="flex flex-col">
-            <span className="text-xs uppercase tracking-wide text-slate-500">
+            <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
               Acquired
             </span>
             <span className="mt-1 font-mono text-base tabular-nums text-emerald-700">
               {totalAcquired > 0 ? "+" : ""}
               {Math.round(totalAcquired).toLocaleString("en-US")}
             </span>
-            <span className="text-[10px] text-slate-500">
+            <span className="text-[10px] text-slate-500 dark:text-slate-400">
               {summary.acquisition_count_90d} txns
               {summary.open_market_buy_count_90d > 0 && (
                 <> · {summary.open_market_buy_count_90d} open-market</>
@@ -173,14 +173,14 @@ function SummaryStrip({ summary }: { summary: InsiderSummary }) {
             </span>
           </div>
           <div className="flex flex-col">
-            <span className="text-xs uppercase tracking-wide text-slate-500">
+            <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
               Disposed
             </span>
             <span className="mt-1 font-mono text-base tabular-nums text-rose-700">
               {totalDisposed > 0 ? "-" : ""}
               {Math.round(totalDisposed).toLocaleString("en-US")}
             </span>
-            <span className="text-[10px] text-slate-500">
+            <span className="text-[10px] text-slate-500 dark:text-slate-400">
               {summary.disposition_count_90d} txns
               {summary.open_market_sell_count_90d > 0 && (
                 <> · {summary.open_market_sell_count_90d} open-market</>
@@ -188,18 +188,18 @@ function SummaryStrip({ summary }: { summary: InsiderSummary }) {
             </span>
           </div>
           <div className="flex flex-col">
-            <span className="text-xs uppercase tracking-wide text-slate-500">
+            <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
               Unique insiders
             </span>
-            <span className="mt-1 font-mono text-base tabular-nums text-slate-800">
+            <span className="mt-1 font-mono text-base tabular-nums text-slate-800 dark:text-slate-100">
               {summary.unique_filers_90d}
             </span>
           </div>
           <div className="flex flex-col">
-            <span className="text-xs uppercase tracking-wide text-slate-500">
+            <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
               Latest trade
             </span>
-            <span className="mt-1 font-mono text-base tabular-nums text-slate-800">
+            <span className="mt-1 font-mono text-base tabular-nums text-slate-800 dark:text-slate-100">
               {formatDate(summary.latest_txn_date)}
             </span>
           </div>
@@ -223,7 +223,7 @@ function SummaryStrip({ summary }: { summary: InsiderSummary }) {
           · {summary.open_market_buy_count_90d} buys ·{" "}
           {summary.open_market_sell_count_90d} sells
           <span
-            className="ml-1 text-slate-400"
+            className="ml-1 text-slate-400 dark:text-slate-500"
             title="Only SEC transaction codes P (open-market purchase) and S (open-market sale). Excludes grants, RSU vests, option exercises, tax withholding, gifts."
           >
             ⓘ
@@ -249,7 +249,7 @@ function Row({ txn }: { txn: InsiderTransactionDetail }) {
   return (
     <tr
       className={
-        txn.is_derivative ? "border-t border-slate-100 text-slate-500" : "border-t border-slate-100"
+        txn.is_derivative ? "border-t border-slate-100 text-slate-500 dark:text-slate-400" : "border-t border-slate-100"
       }
     >
       <td className="py-2 pr-3 font-mono tabular-nums text-xs">
@@ -257,8 +257,8 @@ function Row({ txn }: { txn: InsiderTransactionDetail }) {
       </td>
       <td className="py-2 pr-3">
         <div className="flex flex-col">
-          <span className="font-medium text-slate-800">{txn.filer_name}</span>
-          <span className="text-xs text-slate-500">{roleBadge(txn.filer_role)}</span>
+          <span className="font-medium text-slate-800 dark:text-slate-100">{txn.filer_name}</span>
+          <span className="text-xs text-slate-500 dark:text-slate-400">{roleBadge(txn.filer_role)}</span>
         </div>
       </td>
       <td className={`py-2 pr-3 text-xs ${codeColour}`}>
@@ -305,7 +305,7 @@ function Row({ txn }: { txn: InsiderTransactionDetail }) {
           </span>
         )}
       </td>
-      <td className="py-2 text-xs text-slate-500">
+      <td className="py-2 text-xs text-slate-500 dark:text-slate-400">
         {footnoteEntries.length === 0 ? (
           "—"
         ) : (
@@ -347,7 +347,7 @@ function Body({
       <div className="overflow-x-auto">
         <table className="w-full text-left text-sm">
           <thead>
-            <tr className="text-xs uppercase tracking-wide text-slate-500">
+            <tr className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
               <th className="pb-2 pr-3">Date</th>
               <th className="pb-2 pr-3">Insider</th>
               <th className="pb-2 pr-3">Transaction</th>

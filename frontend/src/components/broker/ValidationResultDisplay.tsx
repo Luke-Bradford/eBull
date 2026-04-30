@@ -31,7 +31,7 @@ export function ValidationResultDisplay({
           Authenticated, but environment check failed: {result.env_check}
         </div>
         {result.note && (
-          <p className="text-xs text-slate-400">{result.note}</p>
+          <p className="text-xs text-slate-400 dark:text-slate-500">{result.note}</p>
         )}
       </div>
     );
@@ -48,7 +48,7 @@ export function ValidationResultDisplay({
         )}
       </div>
       {result.note && (
-        <p className="text-xs text-slate-400">{result.note}</p>
+        <p className="text-xs text-slate-400 dark:text-slate-500">{result.note}</p>
       )}
     </div>
   );

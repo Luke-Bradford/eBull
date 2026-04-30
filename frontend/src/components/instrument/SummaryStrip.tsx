@@ -142,7 +142,7 @@ export function SummaryStrip({
     >
       {/* Row 1: identity + price */}
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h1 className="text-2xl font-semibold text-slate-800">
+        <h1 className="text-2xl font-semibold text-slate-800 dark:text-slate-100">
           {identity.symbol}
         </h1>
         <span className="text-lg text-slate-600">
@@ -158,7 +158,7 @@ export function SummaryStrip({
         ) : null}
         {price || livePrice ? (
           <>
-            <span className="ml-auto flex items-baseline gap-1.5 text-2xl font-semibold tabular-nums text-slate-800">
+            <span className="ml-auto flex items-baseline gap-1.5 text-2xl font-semibold tabular-nums text-slate-800 dark:text-slate-100">
               {formatPrice(displayCurrent, displayCurrency)}
               {live.connected ? (
                 <span

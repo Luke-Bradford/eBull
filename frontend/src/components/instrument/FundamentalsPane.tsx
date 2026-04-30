@@ -419,7 +419,7 @@ function FundamentalCell({
         ) : null}
       </div>
       <div className="flex items-baseline gap-2">
-        <span className="text-xl font-semibold tabular-nums text-slate-900">
+        <span className="text-xl font-semibold tabular-nums text-slate-900 dark:text-slate-100">
           {formatBigNumber(latestVal)}
         </span>
         {delta !== null ? (
