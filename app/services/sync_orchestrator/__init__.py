@@ -1,18 +1,15 @@
 """Sync orchestrator package.
 
-Public surface: types + registries + planner + public entry points
-(run_sync, submit_sync, set_executor). Adapters and reaper wired in
-subsequent tasks.
+Public surface: types + registries + planner + the synchronous
+``run_sync`` entry. The pre-#719 ``submit_sync`` / ``set_executor``
+in-process executor wiring is gone; the API publishes via
+``app.services.sync_orchestrator.dispatcher.publish_sync_request`` and
+the jobs-process listener invokes ``run_sync`` on its own executor.
 
-Spec: docs/superpowers/specs/2026-04-16-data-orchestrator-and-observability-design.md
-Plan: docs/superpowers/plans/2026-04-16-data-orchestrator-p1.md
+Spec: docs/superpowers/specs/2026-04-30-jobs-out-of-process-design.md
 """
 
-from app.services.sync_orchestrator.executor import (
-    run_sync,
-    set_executor,
-    submit_sync,
-)
+from app.services.sync_orchestrator.executor import run_sync
 from app.services.sync_orchestrator.planner import build_execution_plan
 from app.services.sync_orchestrator.registry import (
     JOB_TO_LAYERS,
@@ -54,6 +51,4 @@ __all__ = [
     "build_execution_plan",
     "prereq_skip_reason",
     "run_sync",
-    "set_executor",
-    "submit_sync",
 ]

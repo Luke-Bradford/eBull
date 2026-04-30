@@ -48,8 +48,21 @@
       "problemMatcher": []
     },
     {
+      "label": "stack: jobs",
+      "type": "shell",
+      "command": "uv run python -m app.jobs",
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "ebull-stack",
+        "clear": false
+      },
+      "problemMatcher": []
+    },
+    {
       "label": "stack: backend+frontend",
-      "dependsOn": ["stack: backend", "stack: frontend"],
+      "dependsOn": ["stack: backend", "stack: frontend", "stack: jobs"],
       "problemMatcher": []
     },
     {

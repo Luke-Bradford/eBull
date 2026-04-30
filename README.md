@@ -58,7 +58,9 @@ Currently in flight:
 cp .env.example .env
 docker compose up -d
 uv sync --group dev
+# Three processes run side-by-side in dev: API, jobs, frontend.
 uv run uvicorn app.main:app --reload --reload-dir app
+uv run python -m app.jobs
 pnpm --dir frontend install && pnpm --dir frontend dev
 ```
 

@@ -1,18 +1,24 @@
 #!/usr/bin/env pwsh
-# stack-restart.ps1 — restart the backend and/or frontend dev processes.
+# stack-restart.ps1 — restart the backend, jobs process, and/or frontend.
 #
 # Usage:
-#   .\stack-restart.ps1              # restart both
+#   .\stack-restart.ps1              # restart all three
 #   .\stack-restart.ps1 -Backend     # restart backend only
 #   .\stack-restart.ps1 -Frontend    # restart frontend only
+#   .\stack-restart.ps1 -Jobs        # restart jobs process only
 #
 # Why: uvicorn --reload on Windows misses file changes from git operations
 # (merge, checkout, rebase). After pulling or merging, run this to pick up
 # the latest code without touching postgres or migrations.
+#
+# The jobs process (#719) runs APScheduler + the manual-trigger executor +
+# the queue dispatcher in a separate process from the FastAPI API. It does
+# not auto-reload — restart it explicitly when its source changes.
 
 param(
     [switch]$Backend,
-    [switch]$Frontend
+    [switch]$Frontend,
+    [switch]$Jobs
 )
 
 Set-StrictMode -Version Latest
@@ -73,10 +79,11 @@ function Clear-Port {
     return $true
 }
 
-# Default: restart both if neither flag is passed
-if (-not $Backend -and -not $Frontend) {
+# Default: restart all three if no flag is passed
+if (-not $Backend -and -not $Frontend -and -not $Jobs) {
     $Backend = $true
     $Frontend = $true
+    $Jobs = $true
 }
 
 if ($Backend) {
@@ -112,6 +119,34 @@ if ($Backend) {
         Write-Error "  backend failed to start (exited with code $($proc.ExitCode))"
     } else {
         Write-Host "  backend started on http://127.0.0.1:8000 (pid $($proc.Id))" -ForegroundColor Green
+    }
+}
+
+if ($Jobs) {
+    Write-Host "Restarting jobs process..." -ForegroundColor Cyan
+
+    # Kill the running ``python -m app.jobs`` process if any. We
+    # match by command line because the executable name is just
+    # ``python.exe``; cmd-line is the only reliable selector.
+    $jobProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq "python.exe" -and $_.CommandLine -match "app\.jobs" }
+    if ($jobProcs) {
+        $jobProcs | ForEach-Object {
+            Write-Host "  stopping app.jobs (pid $($_.ProcessId))" -ForegroundColor Gray
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        # Give Postgres time to detect the dead session and release the
+        # singleton advisory lock before the new process tries to acquire.
+        Start-Sleep -Seconds 1
+    }
+
+    Write-Host "  starting app.jobs..." -ForegroundColor Gray
+    $proc = Start-Process pwsh -ArgumentList "-NoProfile", "-Command", "Set-Location '$PSScriptRoot'; uv run python -m app.jobs" -WindowStyle Normal -PassThru
+    Start-Sleep -Seconds 2
+    if ($proc.HasExited) {
+        Write-Error "  jobs process failed to start (exited with code $($proc.ExitCode))"
+    } else {
+        Write-Host "  jobs process started (pid $($proc.Id))" -ForegroundColor Green
     }
 }
 

@@ -113,6 +113,25 @@ _ALLOWED: dict[str, str] = {
     # opens its own connection internally; the test must connect to
     # the same DB the JobLock will resolve to via ``settings.database_url``.
     "test_jobs_locks.py": "read-only reachability probe + advisory-lock semantics; no row writes",
+    # #719 dispatcher tests open a connection against settings.database_url
+    # to exercise the durable-queue helpers against the real DB. Writes
+    # are scoped to the ``pending_job_requests`` table and a per-test
+    # cleanup fixture deletes the request_ids it created in teardown,
+    # so the dev DB's other tables are never touched. Cannot use
+    # ``ebull_test`` because the dispatcher's helpers themselves resolve
+    # the URL from ``settings.database_url`` internally.
+    "test_sync_orchestrator_dispatcher.py": "scoped writes to pending_job_requests with per-test cleanup",
+    # #719 listener / heartbeat / queue-recovery tests open connections
+    # against the dev DB to exercise queue claim + heartbeat upsert +
+    # boot-recovery branches. Writes are scoped to pending_job_requests,
+    # job_runtime_heartbeat, job_runs.linked_request_id, and
+    # sync_runs.linked_request_id, with per-test cleanup deleting only
+    # the rows the test created. Cannot use ``ebull_test`` because the
+    # helpers resolve ``settings.database_url`` internally.
+    "test_jobs_listener.py": "scoped writes via dispatcher helpers with per-test cleanup",
+    "test_jobs_heartbeat.py": "scoped writes to job_runtime_heartbeat with per-test cleanup",
+    "test_jobs_queue_recovery.py": "scoped writes to pending_job_requests + linked-run rows with per-test cleanup",
+    "test_jobs_queue_boot_drain.py": "scoped writes to pending_job_requests with per-test cleanup",
 }
 
 _TESTS_DIR = Path(__file__).resolve().parents[1]

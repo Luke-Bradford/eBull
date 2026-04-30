@@ -311,6 +311,31 @@ Paused until #313 + #314 ship: Plan B.1 (TRACKED_CONCEPTS expansion), Plan B.3 (
 
 ---
 
+## Process topology (#719, settled 2026-04-30)
+
+- The FastAPI process (`app.main`) serves HTTP only. No APScheduler, no
+  manual-trigger executor, no orchestrator executor, no reaper, no
+  boot freshness sweep.
+- The jobs process (`python -m app.jobs`) owns APScheduler, the
+  manual-trigger executor, the sync orchestrator's executor, the
+  reaper, the queue dispatcher, the boot-time freshness sweep, and
+  the heartbeat writer.
+- Inter-process communication is Postgres-only: durable rows in
+  `pending_job_requests`, `pg_notify('ebull_job_request', ...)` as a
+  wakeup hint. No HTTP, no Redis, no shared memory.
+- Both processes use the hardened `_open_pool` helper at `app/db/pool.py`.
+- Triggers are durable: every `POST /jobs/{name}/run` and `POST /sync`
+  writes a row before NOTIFY, so a trigger sent while the jobs process
+  is restarting is replayed on boot rather than lost.
+- A session-scoped Postgres advisory lock on a dedicated long-lived
+  connection (`JOBS_PROCESS_LOCK_KEY` in `app/jobs/locks.py`) enforces
+  the singleton: starting `python -m app.jobs` while another instance
+  is alive is a hard FATAL exit. Boot recovery's "claimed by stale
+  boot id" reset is only safe under that invariant.
+
+Do not re-introduce in-process scheduling in the API. Do not add a third
+pool with raw `ConnectionPool(...)` — use `open_pool`.
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:

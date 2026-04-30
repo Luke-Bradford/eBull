@@ -5,13 +5,15 @@ Implements the exact pseudocode from spec §2.2:
 - _start_sync_run: synchronous planning + gate (partial unique index)
 - _run_layers_loop: topological walk with composite emit handling,
   contract validation, dependency skip, PREREQ_SKIP resolution
-- _safe_run_and_finalize: crash-guarded wrapper used by BOTH entry
-  points (run_sync sync; submit_sync async) so any uncaught exception
-  still finalizes the sync_runs row and releases the gate
+- _safe_run_and_finalize: crash-guarded wrapper so any uncaught
+  exception still finalizes the sync_runs row and releases the gate
 - audit writers: _record_layer_* open fresh autocommit connections per
   write so a layer rollback can never erase its own progress row
 - _finalize_sync_run: authoritative counts read from sync_layer_progress
-- set_executor / run_sync / submit_sync: public entry points (spec §2.1)
+- run_sync: synchronous public entry point (spec §2.1). The pre-#719
+  in-process ``submit_sync`` / ``set_executor`` are deleted; the API
+  publishes via ``dispatcher.publish_sync_request`` and the
+  jobs-process listener invokes ``run_sync`` on its own executor.
 
 Every DB-writing function uses autocommit=True + with conn.transaction()
 so the block issues a real BEGIN/COMMIT (psycopg3 quirk — without
@@ -25,7 +27,7 @@ import logging
 import re
 import traceback
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Any
 
 import psycopg
 
@@ -49,48 +51,35 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Executor registration (set at app startup in main.py)
-# ---------------------------------------------------------------------------
-
-
-class _ExecutorLike(Protocol):
-    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any: ...
-
-
-_executor_ref: _ExecutorLike | None = None
-
-
-def set_executor(executor: _ExecutorLike) -> None:
-    """Register the worker pool used by submit_sync().
-
-    Called once at app startup with job_runtime._manual_executor. In
-    tests, pass a ThreadPoolExecutor (or a synchronous-inline stub).
-    """
-    global _executor_ref
-    _executor_ref = executor
-
-
-# ---------------------------------------------------------------------------
 # Public entry points (spec §2.1)
 # ---------------------------------------------------------------------------
+#
+# `set_executor` and `submit_sync` were deleted in #719. The API never
+# executes the orchestrator in-process; it publishes a request via
+# `dispatcher.publish_sync_request` and the jobs-process listener
+# claims + invokes `run_sync` on its own dedicated executor. `run_sync`
+# stays as the canonical worker entry — used by the listener, by the
+# scheduled-fire wrappers in `app/workers/scheduler.py`, and by tests
+# / CLI scripts.
 
 
-def run_sync(scope: SyncScope, trigger: SyncTrigger) -> SyncResult:
-    """Synchronous entry: plan + execute + finalize in caller's thread."""
-    sync_run_id, plan = _start_sync_run(scope, trigger)
+def run_sync(
+    scope: SyncScope,
+    trigger: SyncTrigger,
+    *,
+    linked_request_id: int | None = None,
+) -> SyncResult:
+    """Synchronous entry: plan + execute + finalize in caller's thread.
+
+    ``linked_request_id`` (#719) is the queue request that triggered
+    this run when the caller is the jobs-process dispatcher; the
+    column is mirrored onto ``sync_runs.linked_request_id`` so
+    boot-recovery's NOT EXISTS clause can suppress replay of completed
+    work. Scheduled fires and tests pass ``None``.
+    """
+    sync_run_id, plan = _start_sync_run(scope, trigger, linked_request_id=linked_request_id)
     outcomes = _safe_run_and_finalize(sync_run_id, plan)
     return SyncResult(sync_run_id=sync_run_id, outcomes=outcomes)
-
-
-def submit_sync(scope: SyncScope, trigger: SyncTrigger) -> tuple[int, ExecutionPlan]:
-    """Async entry: plan + submit to worker; return before layers run."""
-    if _executor_ref is None:
-        raise RuntimeError(
-            "sync orchestrator executor not set — app startup must call set_executor(job_runtime._manual_executor)"
-        )
-    sync_run_id, plan = _start_sync_run(scope, trigger)
-    _executor_ref.submit(_safe_run_and_finalize, sync_run_id, plan)
-    return sync_run_id, plan
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +90,8 @@ def submit_sync(scope: SyncScope, trigger: SyncTrigger) -> tuple[int, ExecutionP
 def _start_sync_run(
     scope: SyncScope,
     trigger: SyncTrigger,
+    *,
+    linked_request_id: int | None = None,
 ) -> tuple[int, ExecutionPlan]:
     """Plan the sync, INSERT sync_runs + pending sync_layer_progress rows.
 
@@ -116,7 +107,7 @@ def _start_sync_run(
         plan = build_execution_plan(conn, scope)
         try:
             with conn.transaction():
-                sync_run_id = _insert_sync_run(conn, scope, trigger, plan)
+                sync_run_id = _insert_sync_run(conn, scope, trigger, plan, linked_request_id)
                 _insert_layer_progress_rows(conn, sync_run_id, plan)
             return sync_run_id, plan
         except psycopg.errors.UniqueViolation:
@@ -132,14 +123,16 @@ def _insert_sync_run(
     scope: SyncScope,
     trigger: SyncTrigger,
     plan: ExecutionPlan,
+    linked_request_id: int | None,
 ) -> int:
     row = conn.execute(
         """
-        INSERT INTO sync_runs (scope, scope_detail, trigger, layers_planned)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO sync_runs
+            (scope, scope_detail, trigger, layers_planned, linked_request_id)
+        VALUES (%s, %s, %s, %s, %s)
         RETURNING sync_run_id
         """,
-        (scope.kind, scope.detail, trigger, len(plan.layers_to_refresh)),
+        (scope.kind, scope.detail, trigger, len(plan.layers_to_refresh), linked_request_id),
     ).fetchone()
     assert row is not None, "INSERT ... RETURNING sync_run_id returned no row"
     return row[0]

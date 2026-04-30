@@ -1,27 +1,31 @@
-"""Unit coverage for ``app.main._open_pool`` (#717).
+"""Unit coverage for ``app.db.pool.open_pool`` (#717, extracted #719).
 
 The dev stack went unresponsive after ~6h when a Docker port-forwarder
 silently closed a pooled connection — without TCP keepalives or a
 ``check`` validator, every subsequent ``pool.connection()`` blocked
 forever. The fix is config-only; this test pins the config so a
 future refactor cannot regress it without breaking the smoke gate.
+
+The helper was extracted to ``app.db.pool`` in #719 so both the FastAPI
+process and the out-of-process jobs runtime share a single source of
+truth.
 """
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import app.main as _main
+import app.db.pool as _pool
 
 
 def test_open_pool_applies_dead_conn_defences() -> None:
-    """`_open_pool` must hand `ConnectionPool` the keepalive kwargs,
+    """`open_pool` must hand `ConnectionPool` the keepalive kwargs,
     the per-checkout validator, and the recycle / timeout caps that
     together prevent the wedge described in #717.
     """
     fake_pool = MagicMock()
-    with patch.object(_main, "ConnectionPool", return_value=fake_pool) as ctor:
-        result = _main._open_pool("test_pool", min_size=1, max_size=10)
+    with patch.object(_pool, "ConnectionPool", return_value=fake_pool) as ctor:
+        result = _pool.open_pool("test_pool", min_size=1, max_size=10)
 
         assert result is fake_pool
         fake_pool.wait.assert_called_once()
@@ -42,11 +46,11 @@ def test_open_pool_applies_dead_conn_defences() -> None:
         }
 
         # Validator must come from the `ConnectionPool` symbol used by
-        # `_open_pool`, not a hand-rolled wrapper that could drift
+        # `open_pool`, not a hand-rolled wrapper that could drift
         # from upstream's SELECT-1 contract. The comparison runs while
         # the patch is active so both references point at the same
         # mock attribute.
-        assert kwargs["check"] is _main.ConnectionPool.check_connection
+        assert kwargs["check"] is _pool.ConnectionPool.check_connection
 
         # Proactive recycle so a single bad conn cannot wedge the pool
         # for the remainder of uptime.
@@ -145,13 +149,14 @@ def test_get_conn_does_not_swallow_handler_pool_timeout() -> None:
             app.state.db_pool = saved_pool
 
 
-def test_app_main_imports_real_connection_pool() -> None:
-    """`app.main.ConnectionPool` must be the real `psycopg_pool.ConnectionPool`,
-    not an alias or shim. A future refactor that quietly swaps the
-    import would break the dead-conn defences (the mock-based test
-    above only proves the helper builds the right config — this one
-    proves the helper builds it on top of the real upstream class).
+def test_db_pool_imports_real_connection_pool() -> None:
+    """`app.db.pool.ConnectionPool` must be the real
+    `psycopg_pool.ConnectionPool`, not an alias or shim. A future
+    refactor that quietly swaps the import would break the dead-conn
+    defences (the mock-based test above only proves the helper builds
+    the right config — this one proves the helper builds it on top of
+    the real upstream class).
     """
     from psycopg_pool import ConnectionPool
 
-    assert _main.ConnectionPool is ConnectionPool
+    assert _pool.ConnectionPool is ConnectionPool
