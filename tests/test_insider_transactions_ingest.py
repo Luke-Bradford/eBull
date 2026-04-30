@@ -874,6 +874,77 @@ class TestBackfill:
             assert deep_count[0] == 3
 
 
+class TestForm4DateFloor:
+    """Regression: ``INSIDER_FORM4_BACKFILL_FLOOR_YEARS`` keeps the
+    SEC ingest budget focused on operationally-useful filings. eBull
+    is long-horizon — pre-2021 insider trades aren't in the trading
+    model, so we skip them rather than burn 6 weeks of SEC bandwidth
+    draining the historical tail."""
+
+    def test_universe_path_skips_filings_older_than_floor(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn, iid=601, symbol="OLD")
+        # One filing inside the 5-year floor, one well outside.
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="ANCIENT-1",
+            url="https://www.sec.gov/Archives/ancient.xml",
+            filing_date="2010-06-01",
+        )
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="RECENT-1",
+            url="https://www.sec.gov/Archives/recent.xml",
+            filing_date=date.today().isoformat(),
+        )
+        recent_xml = _FORM_4_RICH_BUY.replace("2024-06-15", date.today().isoformat())
+        fetcher = _StubFetcher(
+            {
+                "https://www.sec.gov/Archives/ancient.xml": _FORM_4_RICH_BUY,
+                "https://www.sec.gov/Archives/recent.xml": recent_xml,
+            }
+        )
+
+        result = ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        # Only the recent filing is fetched — ancient is filtered out by SQL,
+        # never reaches the fetcher.
+        assert fetcher.calls == ["https://www.sec.gov/Archives/recent.xml"]
+        assert result.filings_scanned == 1
+
+    def test_backfill_path_skips_filings_older_than_floor(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        iid = _seed_instrument(ebull_test_conn, iid=602, symbol="OLD2")
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="ANCIENT-2",
+            url="https://www.sec.gov/Archives/ancient2.xml",
+            filing_date="2008-09-15",
+        )
+        # No filings within the floor → backfill SQL returns no targets.
+        fetcher = _StubFetcher({"https://www.sec.gov/Archives/ancient2.xml": _FORM_4_RICH_BUY})
+        totals = ingest_insider_transactions_backfill(
+            ebull_test_conn,
+            cast("object", fetcher),  # type: ignore[arg-type]
+            instruments_per_tick=5,
+            per_instrument_limit=50,
+        )
+
+        # Backfill skipped this CIK entirely: no targets, no fetches,
+        # no insider_filings inserts.
+        assert totals["instruments_processed"] == 0
+        assert fetcher.calls == []
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM insider_filings WHERE instrument_id = %s",
+                (iid,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == 0
+
+
 def test_fixture_imports_ok(ebull_test_conn: psycopg.Connection[tuple]) -> None:
     with ebull_test_conn.cursor() as cur:
         cur.execute(
