@@ -55,8 +55,9 @@ import { fetchInstrumentFinancials } from "@/api/instruments";
 import type { InstrumentFinancialRow, InstrumentSummary } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { Pane } from "@/components/instrument/Pane";
-import { chartTheme } from "@/lib/chartTheme";
+import { lightTheme } from "@/lib/chartTheme";
 import { useAsync } from "@/lib/useAsync";
+import { useChartTheme } from "@/lib/useChartTheme";
 import { useCallback, useId, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -341,7 +342,7 @@ function FundamentalsGrid({
         points={revenue}
         nonNull={nonNullCount(revenue)}
         totalLen={totalLen}
-        fillColor={chartTheme.accent[1]}
+        fillColor={lightTheme.accent[1]}
       />
       <FundamentalCell
         label="Op income"
@@ -349,7 +350,7 @@ function FundamentalsGrid({
         points={opIncome}
         nonNull={nonNullCount(opIncome)}
         totalLen={totalLen}
-        fillColor={chartTheme.up}
+        fillColor={lightTheme.up}
       />
       <FundamentalCell
         label="Net income"
@@ -357,7 +358,7 @@ function FundamentalsGrid({
         points={netIncome}
         nonNull={nonNullCount(netIncome)}
         totalLen={totalLen}
-        fillColor={chartTheme.up}
+        fillColor={lightTheme.up}
       />
       <FundamentalCell
         label="Total debt"
@@ -365,7 +366,7 @@ function FundamentalsGrid({
         points={totalDebt}
         nonNull={nonNullCount(totalDebt)}
         totalLen={totalLen}
-        fillColor={chartTheme.accent[3]}
+        fillColor={lightTheme.accent[3]}
       />
     </div>
   );
@@ -386,6 +387,7 @@ function FundamentalCell({
   readonly totalLen: number;
   readonly fillColor: string;
 }) {
+  const theme = useChartTheme();
   const showCoverage = nonNull > 0 && nonNull < totalLen;
   const delta = yoyDelta(points);
   const lastIdx = lastNonNullIndex(points);
@@ -448,13 +450,13 @@ function FundamentalCell({
                 tickFormatter={formatPeriodTick}
                 interval="preserveStartEnd"
                 minTickGap={28}
-                tick={{ fill: chartTheme.textMuted, fontSize: 9 }}
-                stroke={chartTheme.borderColor}
+                tick={{ fill: theme.textMuted, fontSize: 9 }}
+                stroke={theme.borderColor}
                 tickLine={false}
                 axisLine={false}
               />
               <Tooltip
-                cursor={{ stroke: chartTheme.crosshair, strokeWidth: 1, strokeDasharray: "3 3" }}
+                cursor={{ stroke: theme.crosshair, strokeWidth: 1, strokeDasharray: "3 3" }}
                 formatter={(value) => {
                   // Recharts ValueType is string | number | (string|number)[].
                   // For null-valued points we expect Recharts to skip the
@@ -471,7 +473,7 @@ function FundamentalCell({
                 labelFormatter={formatPeriodTick}
                 contentStyle={{
                   fontSize: "11px",
-                  borderColor: chartTheme.borderColor,
+                  borderColor: theme.borderColor,
                   borderRadius: 4,
                 }}
               />

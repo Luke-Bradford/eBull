@@ -31,16 +31,19 @@ import {
   humanizeVolume,
   tickFormatter,
 } from "@/lib/chartFormatters";
-import { chartTheme } from "@/lib/chartTheme";
+import { lightTheme } from "@/lib/chartTheme";
+import { useChartTheme } from "@/lib/useChartTheme";
 import { useLiveLastBar } from "@/lib/useLiveLastBar";
 
 export type IndicatorId = "sma20" | "sma50" | "ema20" | "ema50";
 export const INDICATOR_IDS: IndicatorId[] = ["sma20", "sma50", "ema20", "ema50"];
 
 // Keep palette keys exhaustively typed against IndicatorId so a missing or
-// misspelled key in chartTheme.indicator fails typecheck rather than
-// returning undefined at runtime.
-const SMA_COLORS: Record<IndicatorId, string> = chartTheme.indicator;
+// misspelled key in theme.indicator fails typecheck rather than
+// returning undefined at runtime. Indicator slots are saturated and
+// identical across light/dark, so reading from `lightTheme` directly
+// avoids threading the theme hook through every indicator setter.
+const SMA_COLORS: Record<IndicatorId, string> = lightTheme.indicator;
 
 const SMA_LABELS: Record<IndicatorId, string> = {
   sma20: "SMA(20)",
@@ -50,7 +53,8 @@ const SMA_LABELS: Record<IndicatorId, string> = {
 };
 
 // Fixed palette for compare overlays — distinct from SMA colors.
-export const COMPARE_COLORS: readonly string[] = chartTheme.compare;
+// Compare slots are also saturated and identical across light/dark.
+export const COMPARE_COLORS: readonly string[] = lightTheme.compare;
 
 export interface CompareSeries {
   readonly symbol: string;
@@ -218,6 +222,7 @@ export function ChartWorkspaceCanvas({
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const theme = useChartTheme();
   // Primary normalized line (used in compare mode instead of candles).
   const primaryLineRef = useRef<ISeriesApi<"Line"> | null>(null);
   const indicatorRefs = useRef<Map<IndicatorId, ISeriesApi<"Line">>>(new Map());
@@ -266,20 +271,20 @@ export function ChartWorkspaceCanvas({
     const chart = createChart(container, {
       autoSize: true,
       layout: {
-        background: { color: chartTheme.bg },
-        textColor: chartTheme.textSecondary,
+        background: { color: theme.bg },
+        textColor: theme.textSecondary,
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: chartTheme.gridLine },
-        horzLines: { color: chartTheme.gridLine },
+        vertLines: { color: theme.gridLine },
+        horzLines: { color: theme.gridLine },
       },
       rightPriceScale: {
-        borderColor: chartTheme.borderColor,
+        borderColor: theme.borderColor,
         scaleMargins: { top: 0.08, bottom: 0.3 },
       },
       timeScale: {
-        borderColor: chartTheme.borderColor,
+        borderColor: theme.borderColor,
         timeVisible: false,
         secondsVisible: false,
         // 5-bar right buffer keeps the rightmost axis tick on a clean
@@ -288,16 +293,16 @@ export function ChartWorkspaceCanvas({
         rightOffset: 5,
       },
       crosshair: {
-        vertLine: { width: 1, color: chartTheme.crosshair, style: 3 },
-        horzLine: { width: 1, color: chartTheme.crosshair, style: 3 },
+        vertLine: { width: 1, color: theme.crosshair, style: 3 },
+        horzLine: { width: 1, color: theme.crosshair, style: 3 },
       },
     });
 
     const candle = chart.addSeries(CandlestickSeries, {
-      upColor: chartTheme.up,
-      downColor: chartTheme.down,
-      wickUpColor: chartTheme.up,
-      wickDownColor: chartTheme.down,
+      upColor: theme.up,
+      downColor: theme.down,
+      wickUpColor: theme.up,
+      wickDownColor: theme.down,
       borderVisible: false,
     });
 
@@ -308,7 +313,7 @@ export function ChartWorkspaceCanvas({
     chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } });
 
     const primaryLine = chart.addSeries(LineSeries, {
-      color: chartTheme.primaryLine,
+      color: theme.primaryLine,
       lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: false,
@@ -338,7 +343,7 @@ export function ChartWorkspaceCanvas({
             // Read color from the symbol-keyed ref populated when the
             // LineSeries was created — keeps tooltip in sync with the
             // actual rendered series even if Map iteration order drifts.
-            color: compareColorRef.current.get(sym) ?? chartTheme.compare[0],
+            color: compareColorRef.current.get(sym) ?? theme.compare[0],
             value: norm[idx] ?? null,
           }));
         const date = formatHoverLabel(time, intradayRef.current);
@@ -403,6 +408,37 @@ export function ChartWorkspaceCanvas({
       compareLineRefs.current.clear();
     };
   }, [symbol]);
+
+  // Re-apply theme-driven options on light/dark toggle. Mirrors the
+  // construction effect's chrome-tone references. applyOptions instead
+  // of recreating the chart preserves operator pan/zoom and the
+  // live-tick subscription. See PriceChart for the same pattern.
+  useEffect(() => {
+    const chart = chartRef.current;
+    const candle = candleRef.current;
+    const primaryLine = primaryLineRef.current;
+    if (!chart || !candle || !primaryLine) return;
+    chart.applyOptions({
+      layout: { background: { color: theme.bg }, textColor: theme.textSecondary },
+      grid: {
+        vertLines: { color: theme.gridLine },
+        horzLines: { color: theme.gridLine },
+      },
+      rightPriceScale: { borderColor: theme.borderColor },
+      timeScale: { borderColor: theme.borderColor },
+      crosshair: {
+        vertLine: { color: theme.crosshair },
+        horzLine: { color: theme.crosshair },
+      },
+    });
+    candle.applyOptions({
+      upColor: theme.up,
+      downColor: theme.down,
+      wickUpColor: theme.up,
+      wickDownColor: theme.down,
+    });
+    primaryLine.applyOptions({ color: theme.primaryLine });
+  }, [theme]);
 
   // Numeric / null-filtered rows. Computed during render so values
   // are available to the live-tick aggregator's historical anchor on
@@ -471,7 +507,7 @@ export function ChartWorkspaceCanvas({
         if (v === null || v === undefined || !bar) continue;
         lineData.push({ time: bar.time as Time, value: v });
       }
-      primaryLine.applyOptions({ visible: true, color: chartTheme.primaryLine, lineWidth: 2 });
+      primaryLine.applyOptions({ visible: true, color: theme.primaryLine, lineWidth: 2 });
       primaryLine.setData(lineData);
     } else {
       // Normal mode: show candles + volume; hide primary normalized line.
@@ -494,7 +530,7 @@ export function ChartWorkspaceCanvas({
           return {
             time: b.time as Time,
             value: b.volume,
-            color: b.close >= prev ? chartTheme.volumeUpAlpha : chartTheme.volumeDownAlpha,
+            color: b.close >= prev ? theme.volumeUpAlpha : theme.volumeDownAlpha,
           };
         }),
       );
@@ -507,6 +543,10 @@ export function ChartWorkspaceCanvas({
       chart.timeScale().fitContent();
       fittedFingerprintRef.current = fingerprint;
     }
+    // `theme` intentionally NOT in deps: volume alphas are identical
+    // across light/dark; primaryLine recolouring is handled by the
+    // theme-update effect via applyOptions. See PriceChart for the
+    // same rationale.
   }, [clean, compareMode, range]);
 
 
@@ -532,7 +572,7 @@ export function ChartWorkspaceCanvas({
     // Add/update series for each compare symbol.
     compares.forEach((cs, colorIdx) => {
       const color =
-        COMPARE_COLORS[colorIdx % COMPARE_COLORS.length] ?? chartTheme.compare[0];
+        COMPARE_COLORS[colorIdx % COMPARE_COLORS.length] ?? theme.compare[0];
       compareColorRef.current.set(cs.symbol, color);
 
       const compareClean: NumericBar[] = cs.rows.flatMap((r) => {
@@ -660,7 +700,7 @@ export function ChartWorkspaceCanvas({
       const regValues = linearRegressionLine(closes);
       if (!regressionRef.current) {
         regressionRef.current = chart.addSeries(LineSeries, {
-          color: chartTheme.regression,
+          color: theme.regression,
           lineWidth: 1,
           lineStyle: 2, // dashed
           priceLineVisible: false,
@@ -687,7 +727,7 @@ export function ChartWorkspaceCanvas({
     if (showChannel && high !== null && low !== null && clean.length >= 2) {
       if (!channelHighRef.current) {
         channelHighRef.current = chart.addSeries(LineSeries, {
-          color: chartTheme.channelHigh,
+          color: theme.channelHigh,
           lineWidth: 1,
           lineStyle: 3, // dotted
           priceLineVisible: false,
@@ -696,7 +736,7 @@ export function ChartWorkspaceCanvas({
       }
       if (!channelLowRef.current) {
         channelLowRef.current = chart.addSeries(LineSeries, {
-          color: chartTheme.channelLow,
+          color: theme.channelLow,
           lineWidth: 1,
           lineStyle: 3, // dotted
           priceLineVisible: false,

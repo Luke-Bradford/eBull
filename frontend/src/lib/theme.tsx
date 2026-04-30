@@ -13,7 +13,7 @@
  *
  * Consumers:
  *   - Components: use Tailwind `dark:` utility variants directly.
- *   - Charts: import `useChartTheme()` from `@/lib/chartTheme` to
+ *   - Charts: import `useChartTheme()` from `@/lib/useChartTheme` to
  *     get a tone-aware theme object.
  */
 import {
@@ -37,7 +37,13 @@ interface ThemeContextValue {
   readonly setPreference: (next: ThemePreference) => void;
 }
 
-const ThemeContext = createContext<ThemeContextValue | null>(null);
+/**
+ * Exported so `useChartTheme()` can read the context directly with a
+ * defensive fallback to the light palette when no provider is mounted
+ * (matters for isolated chart unit tests). Components needing the
+ * provider's full contract should still call `useTheme()`.
+ */
+export const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 const STORAGE_KEY = "ebull.theme";
 

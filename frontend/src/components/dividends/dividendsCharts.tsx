@@ -27,7 +27,8 @@ import {
 
 import type { DividendPeriod } from "@/api/instruments";
 import type { InstrumentFinancialRow } from "@/api/types";
-import { chartTheme } from "@/lib/chartTheme";
+import { type ChartTheme, lightTheme } from "@/lib/chartTheme";
+import { useChartTheme } from "@/lib/useChartTheme";
 import {
   buildCumulativeDps,
   buildDpsSeries,
@@ -87,14 +88,16 @@ function NoData({ message }: { readonly message: string }) {
   return <p className="px-2 py-3 text-xs text-slate-500">{message}</p>;
 }
 
-const SHARED_AXIS = {
-  stroke: chartTheme.textSecondary,
-  tick: { fill: chartTheme.textMuted, fontSize: 10 } as const,
-};
+function sharedAxis(theme: ChartTheme) {
+  return {
+    stroke: theme.textSecondary,
+    tick: { fill: theme.textMuted, fontSize: 10 } as const,
+  };
+}
 
-const SHARED_GRID = (
-  <CartesianGrid stroke={chartTheme.gridLine} vertical={false} />
-);
+function SharedGrid({ theme }: { readonly theme: ChartTheme }): JSX.Element {
+  return <CartesianGrid stroke={theme.gridLine} vertical={false} />;
+}
 
 // ---------------------------------------------------------------------------
 // 1. DPS line chart
@@ -105,6 +108,7 @@ export interface HistoryProps {
 }
 
 export function DpsLineChart({ history }: HistoryProps): JSX.Element {
+  const theme = useChartTheme();
   const series = buildDpsSeries(history);
   const hasData = series.some((p) => p.dps !== null);
   if (!hasData) {
@@ -115,18 +119,18 @@ export function DpsLineChart({ history }: HistoryProps): JSX.Element {
     <div style={{ height: CHART_HEIGHT }} className="w-full">
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={series} margin={{ top: 8, right: 8, left: 8, bottom: 4 }}>
-          {SHARED_GRID}
+          <SharedGrid theme={theme} />
           <XAxis
             dataKey="period_end_date"
             tickFormatter={formatPeriod}
             interval="preserveStartEnd"
             minTickGap={20}
-            {...SHARED_AXIS}
+            {...sharedAxis(theme)}
           />
           <YAxis
             tickFormatter={(v: number) => formatDps(v, currency)}
             width={64}
-            {...SHARED_AXIS}
+            {...sharedAxis(theme)}
           />
           <Tooltip
             formatter={(value: number) => formatDps(value, currency)}
@@ -137,7 +141,7 @@ export function DpsLineChart({ history }: HistoryProps): JSX.Element {
             type="monotone"
             dataKey="dps"
             name="DPS declared"
-            stroke={chartTheme.accent[0]}
+            stroke={lightTheme.accent[0]}
             strokeWidth={2.5}
             dot={false}
             isAnimationActive={false}
@@ -153,6 +157,7 @@ export function DpsLineChart({ history }: HistoryProps): JSX.Element {
 // ---------------------------------------------------------------------------
 
 export function CumulativeDpsChart({ history }: HistoryProps): JSX.Element {
+  const theme = useChartTheme();
   const series = buildCumulativeDps(history);
   // Empty hint fires when:
   //   - the helper returned no rows at all, or
@@ -173,18 +178,18 @@ export function CumulativeDpsChart({ history }: HistoryProps): JSX.Element {
     <div style={{ height: CHART_HEIGHT }} className="w-full">
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={series} margin={{ top: 8, right: 8, left: 8, bottom: 4 }}>
-          {SHARED_GRID}
+          <SharedGrid theme={theme} />
           <XAxis
             dataKey="period_end_date"
             tickFormatter={formatPeriod}
             interval="preserveStartEnd"
             minTickGap={20}
-            {...SHARED_AXIS}
+            {...sharedAxis(theme)}
           />
           <YAxis
             tickFormatter={(v: number) => formatDps(v, currency)}
             width={64}
-            {...SHARED_AXIS}
+            {...sharedAxis(theme)}
           />
           <Tooltip
             formatter={(value: number) => formatDps(value, currency)}
@@ -195,8 +200,8 @@ export function CumulativeDpsChart({ history }: HistoryProps): JSX.Element {
             type="monotone"
             dataKey="cumulative_dps"
             name="Cumulative DPS"
-            stroke={chartTheme.accent[1]}
-            fill={chartTheme.accent[1]}
+            stroke={lightTheme.accent[1]}
+            fill={lightTheme.accent[1]}
             fillOpacity={0.15}
             strokeWidth={2.5}
             dot={false}
@@ -217,6 +222,7 @@ export interface PayoutRatioProps {
 }
 
 export function PayoutRatioChart({ cashflowRows }: PayoutRatioProps): JSX.Element {
+  const theme = useChartTheme();
   const series = buildPayoutRatio(cashflowRows);
   const hasData = series.some((p) => p.payout_pct !== null);
   if (!hasData) {
@@ -228,27 +234,27 @@ export function PayoutRatioChart({ cashflowRows }: PayoutRatioProps): JSX.Elemen
     <div style={{ height: CHART_HEIGHT }} className="w-full">
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={series} margin={{ top: 8, right: 8, left: 8, bottom: 4 }}>
-          {SHARED_GRID}
+          <SharedGrid theme={theme} />
           <XAxis
             dataKey="period_end_date"
             tickFormatter={formatPeriod}
             interval="preserveStartEnd"
             minTickGap={20}
-            {...SHARED_AXIS}
+            {...sharedAxis(theme)}
           />
           <YAxis
             tickFormatter={(v: number) => `${v.toFixed(0)}%`}
             width={48}
-            {...SHARED_AXIS}
+            {...sharedAxis(theme)}
           />
           <ReferenceLine
             y={100}
-            stroke={chartTheme.accent[3]}
+            stroke={lightTheme.accent[3]}
             strokeDasharray="4 4"
             label={{
               value: "100%",
               position: "right",
-              fill: chartTheme.textMuted,
+              fill: theme.textMuted,
               fontSize: 10,
             }}
           />
@@ -261,9 +267,9 @@ export function PayoutRatioChart({ cashflowRows }: PayoutRatioProps): JSX.Elemen
             type="monotone"
             dataKey="payout_pct"
             name="Payout / FCF"
-            stroke={chartTheme.accent[2]}
+            stroke={lightTheme.accent[2]}
             strokeWidth={2.5}
-            dot={{ r: 3, fill: chartTheme.accent[2] }}
+            dot={{ r: 3, fill: lightTheme.accent[2] }}
             isAnimationActive={false}
           />
         </LineChart>
@@ -288,6 +294,7 @@ export function YieldOnCostChart({
   history,
   avgEntry,
 }: YieldOnCostProps): JSX.Element {
+  const theme = useChartTheme();
   const series = buildYieldOnCost(history, avgEntry);
   if (series === null) {
     return <NoData message="Yield-on-cost is shown only when this instrument is held." />;
@@ -299,12 +306,12 @@ export function YieldOnCostChart({
     <div style={{ height: CHART_HEIGHT }} className="w-full">
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={series} margin={{ top: 8, right: 8, left: 8, bottom: 4 }}>
-          {SHARED_GRID}
-          <XAxis dataKey="fiscal_year" {...SHARED_AXIS} />
+          <SharedGrid theme={theme} />
+          <XAxis dataKey="fiscal_year" {...sharedAxis(theme)} />
           <YAxis
             tickFormatter={(v: number) => `${v.toFixed(1)}%`}
             width={48}
-            {...SHARED_AXIS}
+            {...sharedAxis(theme)}
           />
           <Tooltip
             formatter={(value: number, name: string) =>
@@ -317,7 +324,7 @@ export function YieldOnCostChart({
           />
           <Bar dataKey="yoc_pct" name="Yield-on-cost" isAnimationActive={false}>
             {series.map((s) => (
-              <Cell key={s.fiscal_year} fill={chartTheme.up} />
+              <Cell key={s.fiscal_year} fill={lightTheme.up} />
             ))}
           </Bar>
         </BarChart>

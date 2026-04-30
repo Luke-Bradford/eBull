@@ -21,7 +21,8 @@ import {
 } from "recharts";
 
 import type { InsiderTransactionDetail } from "@/api/instruments";
-import { chartTheme } from "@/lib/chartTheme";
+import { lightTheme } from "@/lib/chartTheme";
+import { useChartTheme } from "@/lib/useChartTheme";
 import { directionOf, signedShares } from "@/lib/insiderClassify";
 
 interface MonthBucket {
@@ -154,6 +155,7 @@ export interface InsiderNetByMonthProps {
 export function InsiderNetByMonth({
   transactions,
 }: InsiderNetByMonthProps): JSX.Element {
+  const theme = useChartTheme();
   const { buckets, hadActivity } = buildMonthBuckets(transactions);
   if (!hadActivity) {
     return (
@@ -166,29 +168,29 @@ export function InsiderNetByMonth({
     <div className="h-72 w-full" data-testid="insider-net-by-month">
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={buckets} margin={{ top: 8, right: 8, left: 8, bottom: 4 }}>
-          <CartesianGrid stroke={chartTheme.gridLine} vertical={false} />
+          <CartesianGrid stroke={theme.gridLine} vertical={false} />
           <XAxis
             dataKey="month"
             tickFormatter={shortMonthLabel}
-            stroke={chartTheme.textSecondary}
-            tick={{ fill: chartTheme.textMuted, fontSize: 10 }}
+            stroke={theme.textSecondary}
+            tick={{ fill: theme.textMuted, fontSize: 10 }}
             interval="preserveStartEnd"
             minTickGap={20}
           />
           <YAxis
             tickFormatter={formatShares}
-            stroke={chartTheme.textSecondary}
-            tick={{ fill: chartTheme.textMuted, fontSize: 10 }}
+            stroke={theme.textSecondary}
+            tick={{ fill: theme.textMuted, fontSize: 10 }}
             width={56}
           />
-          <ReferenceLine y={0} stroke={chartTheme.borderColor} />
-          <Tooltip content={<NetTooltip />} cursor={{ fill: chartTheme.gridLine }} />
+          <ReferenceLine y={0} stroke={theme.borderColor} />
+          <Tooltip content={<NetTooltip />} cursor={{ fill: theme.gridLine }} />
           <Bar dataKey="net" isAnimationActive={false}>
             {buckets.map((b) => (
               <Cell
                 key={b.month}
                 fill={
-                  b.net > 0 ? chartTheme.up : b.net < 0 ? chartTheme.down : chartTheme.borderColor
+                  b.net > 0 ? lightTheme.up : b.net < 0 ? lightTheme.down : theme.borderColor
                 }
               />
             ))}

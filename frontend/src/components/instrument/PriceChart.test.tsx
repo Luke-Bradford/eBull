@@ -89,6 +89,7 @@ vi.mock("lightweight-charts", () => {
     subscribeCrosshairMove: vi.fn((h: (p: unknown) => void) => {
       libState.crosshairHandlers.push(h);
     }),
+    applyOptions: vi.fn(),
     remove: libState.remove,
   };
   return {

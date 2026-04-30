@@ -9,7 +9,7 @@
  * polyline color via a Tailwind `text-*` class on `className` (e.g.
  * `text-emerald-500`). Existing FundamentalsPane callers rely on this.
  * For chart-theme alignment, new callers should pass
- * `stroke={chartTheme.accent[N]}` from `@/lib/chartTheme` — see #586.
+ * `stroke={lightTheme.accent[N]}` from `@/lib/chartTheme` — see #586.
  */
 
 import { useState, useCallback, type JSX } from "react";

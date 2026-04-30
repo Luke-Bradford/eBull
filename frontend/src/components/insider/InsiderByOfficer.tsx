@@ -21,7 +21,8 @@ import {
 } from "recharts";
 
 import type { InsiderTransactionDetail } from "@/api/instruments";
-import { chartTheme } from "@/lib/chartTheme";
+import { lightTheme } from "@/lib/chartTheme";
+import { useChartTheme } from "@/lib/useChartTheme";
 import {
   directionOf,
   signedShares,
@@ -165,6 +166,7 @@ export interface InsiderByOfficerProps {
 export function InsiderByOfficer({
   transactions,
 }: InsiderByOfficerProps): JSX.Element {
+  const theme = useChartTheme();
   const buckets = buildOfficerBuckets(transactions);
   if (buckets.length === 0) {
     return (
@@ -191,20 +193,20 @@ export function InsiderByOfficer({
             <XAxis
               type="number"
               tickFormatter={formatShares}
-              stroke={chartTheme.textSecondary}
-              tick={{ fill: chartTheme.textMuted, fontSize: 10 }}
+              stroke={theme.textSecondary}
+              tick={{ fill: theme.textMuted, fontSize: 10 }}
             />
             <YAxis
               type="category"
               dataKey="officer"
               width={180}
-              stroke={chartTheme.textSecondary}
-              tick={{ fill: chartTheme.textPrimary, fontSize: 10 }}
+              stroke={theme.textSecondary}
+              tick={{ fill: theme.textPrimary, fontSize: 10 }}
               interval={0}
             />
             <Tooltip
               content={<OfficerTooltip />}
-              cursor={{ fill: chartTheme.gridLine }}
+              cursor={{ fill: theme.gridLine }}
             />
             <Bar dataKey="net" isAnimationActive={false}>
               {buckets.map((b) => (
@@ -212,10 +214,10 @@ export function InsiderByOfficer({
                   key={b.key}
                   fill={
                     b.net > 0
-                      ? chartTheme.up
+                      ? lightTheme.up
                       : b.net < 0
-                        ? chartTheme.down
-                        : chartTheme.borderColor
+                        ? lightTheme.down
+                        : theme.borderColor
                   }
                 />
               ))}

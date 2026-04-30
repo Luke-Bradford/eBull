@@ -34,8 +34,8 @@ import {
 
 import type { InsiderTransactionDetail } from "@/api/instruments";
 import type { CandleBar } from "@/api/types";
-import { chartTheme } from "@/lib/chartTheme";
 import { tickFormatter } from "@/lib/chartFormatters";
+import { useChartTheme } from "@/lib/useChartTheme";
 import {
   directionOf,
   notionalValue,
@@ -150,6 +150,7 @@ export function InsiderPriceMarkers({
   const markersRef = useRef<ReturnType<typeof createSeriesMarkers<Time>> | null>(
     null,
   );
+  const theme = useChartTheme();
 
   // Anchor at the start of the calendar month 23 months ago so the
   // marker pane shares its window with `InsiderNetByMonth` exactly.
@@ -165,23 +166,23 @@ export function InsiderPriceMarkers({
     const chart = createChart(container, {
       autoSize: true,
       layout: {
-        background: { color: chartTheme.bg },
-        textColor: chartTheme.textSecondary,
+        background: { color: theme.bg },
+        textColor: theme.textSecondary,
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: chartTheme.gridLine },
-        horzLines: { color: chartTheme.gridLine },
+        vertLines: { color: theme.gridLine },
+        horzLines: { color: theme.gridLine },
       },
-      rightPriceScale: { borderColor: chartTheme.borderColor },
+      rightPriceScale: { borderColor: theme.borderColor },
       timeScale: {
-        borderColor: chartTheme.borderColor,
+        borderColor: theme.borderColor,
         timeVisible: false,
         secondsVisible: false,
       },
       crosshair: {
-        vertLine: { width: 1, color: chartTheme.crosshair, style: 3 },
-        horzLine: { width: 1, color: chartTheme.crosshair, style: 3 },
+        vertLine: { width: 1, color: theme.crosshair, style: 3 },
+        horzLine: { width: 1, color: theme.crosshair, style: 3 },
       },
     });
     chart.timeScale().applyOptions({
@@ -189,7 +190,7 @@ export function InsiderPriceMarkers({
     } as unknown as Parameters<ReturnType<IChartApi["timeScale"]>["applyOptions"]>[0]);
 
     const line = chart.addSeries(LineSeries, {
-      color: chartTheme.primaryLine,
+      color: theme.primaryLine,
       lineWidth: 2,
       lineType: LineType.Curved,
       priceLineVisible: false,
@@ -206,6 +207,29 @@ export function InsiderPriceMarkers({
       lineRef.current = null;
     };
   }, []);
+
+  // Re-apply theme-driven options on light/dark toggle. See PriceChart
+  // for the same pattern: applyOptions instead of recreating the chart
+  // preserves operator pan/zoom on the marker pane.
+  useEffect(() => {
+    const chart = chartRef.current;
+    const line = lineRef.current;
+    if (!chart || !line) return;
+    chart.applyOptions({
+      layout: { background: { color: theme.bg }, textColor: theme.textSecondary },
+      grid: {
+        vertLines: { color: theme.gridLine },
+        horzLines: { color: theme.gridLine },
+      },
+      rightPriceScale: { borderColor: theme.borderColor },
+      timeScale: { borderColor: theme.borderColor },
+      crosshair: {
+        vertLine: { color: theme.crosshair },
+        horzLine: { color: theme.crosshair },
+      },
+    });
+    line.applyOptions({ color: theme.primaryLine });
+  }, [theme]);
 
   // Feed price data. Filter to the last 24m window so the time axis
   // matches the markers' window.
@@ -239,13 +263,18 @@ export function InsiderPriceMarkers({
     const markers: SeriesMarker<Time>[] = buckets.map((b) => ({
       time: b.time as Time,
       position: b.direction === "acquired" ? "belowBar" : "aboveBar",
-      color: b.direction === "acquired" ? chartTheme.up : chartTheme.down,
+      color: b.direction === "acquired" ? theme.up : theme.down,
       shape: b.direction === "acquired" ? "arrowUp" : "arrowDown",
       size: markerSize(b.notional),
       text: bucketLabel(b),
     }));
     markersRef.current?.detach();
     markersRef.current = createSeriesMarkers(line, markers);
+    // `theme` intentionally NOT in deps: marker colours come from
+    // `theme.up` / `theme.down` which are identical across light and
+    // dark (saturated palette, operator color memory). A theme flip
+    // would otherwise rebuild the entire marker plugin for no visible
+    // change.
   }, [transactions, cutoffMs]);
 
   return (
