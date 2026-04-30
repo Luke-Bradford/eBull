@@ -200,7 +200,7 @@ export function SetupPage(): JSX.Element {
           onSubmit={handleOperatorSubmit}
           className="w-full max-w-sm rounded border border-slate-200 bg-white p-6 shadow-sm"
         >
-          <h1 className="mb-1 text-lg font-semibold text-slate-800">
+          <h1 className="mb-1 text-lg font-semibold text-slate-800 dark:text-slate-100">
             First-run setup
           </h1>
           <p className="mb-4 text-xs text-slate-500">
@@ -266,7 +266,7 @@ export function SetupPage(): JSX.Element {
         </form>
       ) : mode === "complete" ? (
         <div className="w-full max-w-sm rounded border border-slate-200 bg-white p-6 shadow-sm">
-          <h1 className="mb-1 text-lg font-semibold text-slate-800">
+          <h1 className="mb-1 text-lg font-semibold text-slate-800 dark:text-slate-100">
             Credentials configured
           </h1>
           <p className="mb-4 text-xs text-slate-500">
@@ -285,7 +285,7 @@ export function SetupPage(): JSX.Element {
           onSubmit={handleBrokerSubmit}
           className="w-full max-w-sm space-y-3 rounded border border-slate-200 bg-white p-6 shadow-sm"
         >
-          <h1 className="text-lg font-semibold text-slate-800">
+          <h1 className="text-lg font-semibold text-slate-800 dark:text-slate-100">
             {mode === "repair" ? "Complete credential setup" : "Add eToro credentials"}
           </h1>
           <p className="text-xs text-slate-500">

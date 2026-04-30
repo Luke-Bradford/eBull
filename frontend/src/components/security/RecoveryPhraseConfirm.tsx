@@ -269,7 +269,7 @@ export function RecoveryPhraseConfirm({
         </header>
         <ol
           aria-label="Recovery phrase words"
-          className="grid grid-cols-2 gap-x-6 gap-y-2 rounded border border-slate-200 bg-slate-50 p-4 font-mono text-sm text-slate-800"
+          className="grid grid-cols-2 gap-x-6 gap-y-2 rounded border border-slate-200 bg-slate-50 p-4 font-mono text-sm text-slate-800 dark:text-slate-100"
         >
           {phrase.map((word, index) => (
             <li

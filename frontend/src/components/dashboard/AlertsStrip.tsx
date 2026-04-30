@@ -164,11 +164,11 @@ function GuardRow({ row, unseen }: { row: GuardRejection; unseen: boolean }) {
   return (
     <RowShell kind="guard" unseen={unseen} instrumentId={row.instrument_id}>
       <span className="w-16 font-semibold tabular-nums">{row.symbol ?? "—"}</span>
-      <span className="w-16 text-xs uppercase text-slate-500">{row.action ?? "—"}</span>
+      <span className="w-16 text-xs uppercase text-slate-500 dark:text-slate-400">{row.action ?? "—"}</span>
       <span className="flex-1 truncate text-slate-700" title={row.explanation}>
         {row.explanation}
       </span>
-      <span className="w-20 text-right text-xs text-slate-400">
+      <span className="w-20 text-right text-xs text-slate-400 dark:text-slate-500">
         {formatRelativeTime(row.decision_time)}
       </span>
     </RowShell>
@@ -184,11 +184,11 @@ function PositionRow({ row, unseen }: { row: PositionAlert; unseen: boolean }) {
   return (
     <RowShell kind="position" unseen={unseen} instrumentId={row.instrument_id}>
       <span className="w-16 font-semibold tabular-nums">{row.symbol}</span>
-      <span className="w-16 text-xs uppercase text-slate-500">{alertLabel}</span>
+      <span className="w-16 text-xs uppercase text-slate-500 dark:text-slate-400">{alertLabel}</span>
       <span className="flex-1 truncate text-slate-700" title={row.detail}>
         {row.detail}
       </span>
-      <span className="w-20 text-right text-xs text-slate-400">
+      <span className="w-20 text-right text-xs text-slate-400 dark:text-slate-500">
         {formatRelativeTime(row.opened_at)}
       </span>
     </RowShell>
@@ -203,7 +203,7 @@ function CoverageRow({ row, unseen }: { row: CoverageStatusDrop; unseen: boolean
       <span className="flex-1 truncate text-slate-700" title={transition}>
         {transition}
       </span>
-      <span className="w-20 text-right text-xs text-slate-400">
+      <span className="w-20 text-right text-xs text-slate-400 dark:text-slate-500">
         {formatRelativeTime(row.changed_at)}
       </span>
     </RowShell>
@@ -435,7 +435,7 @@ export function AlertsStrip(): JSX.Element | null {
             </button>
             <Link
               to="/recommendations"
-              className="text-xs text-slate-500 underline hover:text-slate-700"
+              className="text-xs text-slate-500 dark:text-slate-400 underline hover:text-slate-700"
             >
               Triage at /recommendations
             </Link>

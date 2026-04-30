@@ -103,7 +103,7 @@ function FilingCard({ filing }: { filing: EightKFiling }) {
   return (
     <div className="rounded-sm border border-slate-200 p-3">
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <span className="font-mono text-xs text-slate-800">
+        <span className="font-mono text-xs text-slate-800 dark:text-slate-100">
           {dateText}
         </span>
         <span

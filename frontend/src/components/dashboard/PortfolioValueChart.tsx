@@ -130,7 +130,7 @@ export function PortfolioValueChart(): JSX.Element | null {
               since it already implies the live-FX context and the
               caption would just duplicate. */}
           {data?.fx_mode === "live" && hasMovement && fxSkipped === 0 ? (
-            <span className="text-[10px] text-slate-400">
+            <span className="text-[10px] text-slate-400 dark:text-slate-500">
               historical converted at today's FX
             </span>
           ) : null}
@@ -272,7 +272,7 @@ function ValueCanvas({
     <div className="relative mt-2">
       {hover !== null ? (
         <div className="absolute right-2 top-2 z-10 rounded bg-white/90 px-2 py-1 text-xs tabular-nums shadow-sm">
-          <span className="text-slate-400">{hover.date}</span>
+          <span className="text-slate-400 dark:text-slate-500">{hover.date}</span>
           <span className="ml-2 font-medium text-slate-700">
             {formatMoney(hover.value, currency)}
           </span>

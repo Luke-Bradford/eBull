@@ -325,7 +325,7 @@ export function InsiderTransactionsTable({
                   <td className="px-2 py-1 font-mono tabular-nums text-slate-700">
                     {r.txn_date}
                   </td>
-                  <td className="px-2 py-1 text-slate-800">{r.filer_name}</td>
+                  <td className="px-2 py-1 text-slate-800 dark:text-slate-100">{r.filer_name}</td>
                   <td className="px-2 py-1 text-slate-600">
                     {r.filer_role ?? "—"}
                   </td>

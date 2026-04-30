@@ -227,7 +227,7 @@ export function AdminPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-slate-800">Admin</h1>
+        <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Admin</h1>
         <SyncNowButton
           triggerKind={triggerKind}
           message={triggerMessage}

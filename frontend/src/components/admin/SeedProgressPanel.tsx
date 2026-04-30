@@ -201,19 +201,19 @@ function LatestRunRow({
       </div>
       <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 text-slate-600 sm:grid-cols-4">
         <div>
-          <span className="text-slate-500">Started </span>
+          <span className="text-slate-500 dark:text-slate-400">Started </span>
           {formatDateTime(run.started_at)}
         </div>
         <div>
-          <span className="text-slate-500">Finished </span>
+          <span className="text-slate-500 dark:text-slate-400">Finished </span>
           {run.finished_at ? formatDateTime(run.finished_at) : "—"}
         </div>
         <div>
-          <span className="text-slate-500">Rows upserted </span>
+          <span className="text-slate-500 dark:text-slate-400">Rows upserted </span>
           {run.rows_upserted.toLocaleString()}
         </div>
         <div>
-          <span className="text-slate-500">Rows skipped </span>
+          <span className="text-slate-500 dark:text-slate-400">Rows skipped </span>
           {run.rows_skipped.toLocaleString()}
         </div>
       </div>
@@ -234,7 +234,7 @@ function TimingSection({
   }
   if (data === null || data.ingestion_run_id === null) {
     return (
-      <p className="text-xs text-slate-500">
+      <p className="text-xs text-slate-500 dark:text-slate-400">
         Per-CIK timing will appear here after the next SEC ingest run.
       </p>
     );
@@ -243,12 +243,12 @@ function TimingSection({
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
           Per-CIK timing · run #{data.ingestion_run_id}
         </h3>
       </div>
       <table className="w-full text-xs">
-        <thead className="text-left text-[11px] uppercase text-slate-500">
+        <thead className="text-left text-[11px] uppercase text-slate-500 dark:text-slate-400">
           <tr>
             <th className="py-1">Mode</th>
             <th>Count</th>
@@ -278,7 +278,7 @@ function TimingSection({
             Slowest {data.slowest.length} CIKs
           </summary>
           <table className="mt-2 w-full">
-            <thead className="text-left text-[11px] uppercase text-slate-500">
+            <thead className="text-left text-[11px] uppercase text-slate-500 dark:text-slate-400">
               <tr>
                 <th className="py-1">CIK</th>
                 <th>Mode</th>

@@ -43,7 +43,7 @@ export function EightKDetailPanel({
             >
               Item {item.item_code}
             </span>
-            <span className="text-xs font-medium text-slate-800">
+            <span className="text-xs font-medium text-slate-800 dark:text-slate-100">
               {item.item_label}
             </span>
           </header>

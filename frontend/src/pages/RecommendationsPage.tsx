@@ -139,7 +139,7 @@ export function RecommendationsPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-semibold text-slate-800">Recommendations</h1>
+      <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Recommendations</h1>
 
       {allFailed ? (
         <ErrorBanner message="The API is unreachable. Check that the backend is running and the auth token is configured." />

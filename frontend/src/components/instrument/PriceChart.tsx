@@ -942,7 +942,7 @@ function RichTooltip({ hover }: { hover: RichHoverState }): JSX.Element {
       <span>
         <span className="text-slate-400">L</span> {fmt(hover.low)}
       </span>
-      <span className="font-medium text-slate-800">
+      <span className="font-medium text-slate-800 dark:text-slate-100">
         <span className="font-normal text-slate-400">C</span> {fmt(hover.close)}
       </span>
       <span>

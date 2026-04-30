@@ -887,7 +887,7 @@ function RichTooltip({ hover }: { hover: RichHoverState }): JSX.Element {
       <div className="absolute left-2 top-2 z-10 flex flex-wrap items-baseline gap-x-2 text-[11px] tabular-nums leading-tight text-slate-700">
         <span className="text-slate-500">{hover.date}</span>
         <span className="text-slate-400">·</span>
-        <span className="font-medium text-slate-800">{hover.primarySymbol}</span>
+        <span className="font-medium text-slate-800 dark:text-slate-100">{hover.primarySymbol}</span>
         <span className={primaryClass}>{fmtPct(hover.primaryPct)}</span>
         {hover.comparePcts?.map((cp) => (
           <span key={cp.symbol} className="flex items-baseline gap-1">
@@ -927,7 +927,7 @@ function RichTooltip({ hover }: { hover: RichHoverState }): JSX.Element {
       <span>
         <span className="text-slate-400">L</span> {fmt(hover.low ?? 0)}
       </span>
-      <span className="font-medium text-slate-800">
+      <span className="font-medium text-slate-800 dark:text-slate-100">
         <span className="font-normal text-slate-400">C</span> {fmt(hover.close ?? 0)}
       </span>
       <span>

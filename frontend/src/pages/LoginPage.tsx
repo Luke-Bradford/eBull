@@ -69,7 +69,7 @@ export function LoginPage(): JSX.Element {
         onSubmit={handleSubmit}
         className="w-full max-w-sm rounded border border-slate-200 bg-white p-6 shadow-sm"
       >
-        <h1 className="mb-4 text-lg font-semibold text-slate-800">eBull operator</h1>
+        <h1 className="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-100">eBull operator</h1>
         <label className="mb-3 block text-sm">
           <span className="mb-1 block text-slate-600">Username</span>
           <input
@@ -115,7 +115,7 @@ export function LoginPage(): JSX.Element {
           <div className="mt-3 text-center text-xs">
             <a
               href="/recover"
-              className="text-slate-600 underline hover:text-slate-800"
+              className="text-slate-600 underline hover:text-slate-800 dark:text-slate-300 dark:hover:text-slate-100"
             >
               Recover existing eBull data
             </a>

@@ -66,7 +66,7 @@ export function CrossRefPopover({
           </span>
           {target ? (
             <>
-              <span className="mt-1 block font-medium text-slate-800">
+              <span className="mt-1 block font-medium text-slate-800 dark:text-slate-100">
                 {target.section_label}
               </span>
               <span className="mt-1 block leading-relaxed text-slate-700">

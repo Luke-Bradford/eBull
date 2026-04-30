@@ -117,7 +117,7 @@ function SectionBody({
       id={sectionAnchorId(section)}
       className="relative pl-6 before:absolute before:bottom-0 before:left-0 before:top-0 before:w-0.5 before:bg-slate-200"
     >
-      <h3 className="text-base font-semibold text-slate-900">{section.section_label}</h3>
+      <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">{section.section_label}</h3>
       <div className="mt-2 space-y-3 text-sm">
         {parts.map((p, i) => {
           if (p.type === "prose" && p.prose !== undefined) {
@@ -235,7 +235,7 @@ function Body({
           >
             ← Back to {symbol}
           </Link>
-          <h2 className="mt-1 text-lg font-semibold text-slate-900">
+          <h2 className="mt-1 text-lg font-semibold text-slate-900 dark:text-slate-100">
             Form 10-K · Item 1 Business
           </h2>
         </header>

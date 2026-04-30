@@ -47,7 +47,7 @@ export function AdminJobDetailPage() {
       <div className="flex items-center justify-between">
         <div>
           <div className="text-xs text-slate-500">Admin / Jobs</div>
-          <h1 className="text-xl font-semibold text-slate-800">{name}</h1>
+          <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">{name}</h1>
         </div>
         <Link to="/admin" className="text-xs text-blue-700 hover:underline">
           ← Back to Admin
@@ -155,7 +155,7 @@ function RunRow({ row }: { row: JobRunResponse }) {
       {expandable && expanded ? (
         <tr>
           <td colSpan={6} className="bg-slate-50 px-4 py-3">
-            <pre className="whitespace-pre-wrap text-xs text-slate-800">
+            <pre className="whitespace-pre-wrap text-xs text-slate-800 dark:text-slate-100">
               {row.error_msg}
             </pre>
           </td>

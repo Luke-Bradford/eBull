@@ -32,7 +32,7 @@ export function CoverageInsufficientPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-slate-800">
+        <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">
           Coverage drill-down
         </h1>
         <Link

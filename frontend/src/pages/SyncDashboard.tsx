@@ -156,7 +156,7 @@ export function SyncDashboard({ syncTrigger }: SyncDashboardProps) {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-slate-800">Data sync</h1>
+        <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Data sync</h1>
       </div>
 
       {/* --- Status banner --- */}
@@ -345,7 +345,7 @@ function LayerCard({
       className={`rounded border ${border} bg-white p-3 text-sm shadow-sm`}
     >
       <div className="flex items-center justify-between">
-        <span className="font-medium text-slate-800">{layer.display_name}</span>
+        <span className="font-medium text-slate-800 dark:text-slate-100">{layer.display_name}</span>
         <span className="flex items-center gap-1">
           <span className="sr-only">
             {isRunning ? "running" : layer.is_fresh ? "fresh" : "stale"}

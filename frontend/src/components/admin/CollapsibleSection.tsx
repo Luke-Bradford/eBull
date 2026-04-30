@@ -57,7 +57,7 @@ export function CollapsibleSection({
         <div className="flex items-baseline gap-2">
           <span
             aria-hidden
-            className={`inline-block text-slate-400 transition-transform ${isOpen ? "rotate-90" : ""}`}
+            className={`inline-block text-slate-400 dark:text-slate-500 transition-transform ${isOpen ? "rotate-90" : ""}`}
           >
             ▸
           </span>
@@ -65,10 +65,10 @@ export function CollapsibleSection({
             {title}
           </h2>
           {summary ? (
-            <span className="text-xs text-slate-500">— {summary}</span>
+            <span className="text-xs text-slate-500 dark:text-slate-400">— {summary}</span>
           ) : null}
         </div>
-        <span className="text-[11px] text-slate-500 transition-colors group-hover:text-amber-600">
+        <span className="text-[11px] text-slate-500 dark:text-slate-400 transition-colors group-hover:text-amber-600">
           {isOpen ? "Hide" : "Show"}
         </span>
       </button>

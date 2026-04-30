@@ -29,12 +29,12 @@ export function WatchlistPanel({ items, onRemove }: Props) {
     <div className="overflow-x-auto">
       <table className="min-w-full text-sm">
         <thead>
-          <tr className="border-b border-slate-200 text-left text-xs text-slate-500">
+          <tr className="border-b border-slate-200 text-left text-xs text-slate-500 dark:text-slate-400">
             <th className="px-2 py-1">Symbol</th>
             <th className="px-2 py-1">Name</th>
             <th className="px-2 py-1">Sector</th>
             <th className="px-2 py-1">Notes</th>
-            <th className="px-2 py-1 text-xs text-slate-400">Added</th>
+            <th className="px-2 py-1 text-xs text-slate-400 dark:text-slate-500">Added</th>
             {onRemove && <th className="px-2 py-1" />}
           </tr>
         </thead>
@@ -53,11 +53,11 @@ export function WatchlistPanel({ items, onRemove }: Props) {
                 </Link>
               </td>
               <td className="px-2 py-1">{item.company_name}</td>
-              <td className="px-2 py-1 text-slate-500">{item.sector ?? "—"}</td>
-              <td className="px-2 py-1 text-xs text-slate-500">
+              <td className="px-2 py-1 text-slate-500 dark:text-slate-400">{item.sector ?? "—"}</td>
+              <td className="px-2 py-1 text-xs text-slate-500 dark:text-slate-400">
                 {item.notes ?? ""}
               </td>
-              <td className="px-2 py-1 text-xs text-slate-400">
+              <td className="px-2 py-1 text-xs text-slate-400 dark:text-slate-500">
                 {formatAddedAt(item.added_at)}
               </td>
               {onRemove && (

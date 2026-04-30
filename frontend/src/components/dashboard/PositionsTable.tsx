@@ -61,7 +61,7 @@ export function PositionsTable({
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-left text-sm">
-        <thead className="text-xs uppercase text-slate-500">
+        <thead className="text-xs uppercase text-slate-500 dark:text-slate-400">
           <tr>
             <Th>Name</Th>
             <Th className="hidden sm:table-cell" />
@@ -159,16 +159,16 @@ function MirrorRow({ m, currency }: { m: PortfolioMirrorItem; currency: string }
         </Link>
       </Td>
       <Td className="hidden sm:table-cell">
-        <span className="text-slate-500">
+        <span className="text-slate-500 dark:text-slate-400">
           {m.position_count} position{m.position_count !== 1 ? "s" : ""}
         </span>
       </Td>
       <Td align="right">
-        <span className="text-slate-400">—</span>
+        <span className="text-slate-400 dark:text-slate-500">—</span>
       </Td>
       <Td align="right">{formatMoney(m.funded, currency)}</Td>
       <Td align="right">
-        <span className="text-slate-400">—</span>
+        <span className="text-slate-400 dark:text-slate-500">—</span>
       </Td>
       <Td align="right">{formatMoney(m.mirror_equity, currency)}</Td>
       <Td align="right">

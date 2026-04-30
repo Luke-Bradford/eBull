@@ -49,8 +49,8 @@ export function TenKMetadataRail({
                     to={`/instrument/${encodeURIComponent(symbol)}/filings/10-k?accession=${encodeURIComponent(f.accession_number)}`}
                     className={`block hover:underline ${
                       isCurrent
-                        ? "font-medium text-slate-900"
-                        : "text-sky-700"
+                        ? "font-medium text-slate-900 dark:text-slate-100"
+                        : "text-sky-700 dark:text-sky-300"
                     }`}
                   >
                     {f.filing_date.slice(0, 4)}

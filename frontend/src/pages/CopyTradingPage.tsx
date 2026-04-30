@@ -45,12 +45,12 @@ export function CopyTradingPage() {
           ← Portfolio
         </Link>
         {username ? (
-          <h1 className="flex items-center gap-2 text-xl font-semibold text-slate-800">
+          <h1 className="flex items-center gap-2 text-xl font-semibold text-slate-800 dark:text-slate-100">
             <TraderAvatar username={username} />
             {username}
           </h1>
         ) : (
-          <h1 className="text-xl font-semibold text-slate-800">Mirror detail</h1>
+          <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Mirror detail</h1>
         )}
       </div>
 
@@ -242,7 +242,7 @@ function InstrumentGroupRow({
         onClick={hasMultiple ? () => setExpanded((v) => !v) : undefined}
       >
         <td className="px-2 py-2 text-left">
-          <span className="font-medium text-slate-800">
+          <span className="font-medium text-slate-800 dark:text-slate-100">
             {group.symbol ?? `#${group.instrument_id}`}
           </span>
           {group.company_name ? (
