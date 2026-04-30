@@ -71,7 +71,7 @@ export function Term({ term, children, className }: TermProps): JSX.Element {
       {open ? (
         <span
           role="tooltip"
-          className="absolute left-0 top-full z-50 mt-1 w-72 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs leading-snug text-slate-700 shadow-lg"
+          className="absolute left-0 top-full z-50 mt-1 w-72 rounded-md border border-slate-200 dark:border-slate-800 bg-white px-3 py-2 text-xs leading-snug text-slate-700 shadow-lg"
         >
           <span className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500">
             {entry.shortName}

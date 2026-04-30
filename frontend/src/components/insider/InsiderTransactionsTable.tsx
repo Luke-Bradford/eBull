@@ -268,7 +268,7 @@ export function InsiderTransactionsTable({
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           placeholder="Filter by officer / role / security title"
-          className="w-72 rounded border border-slate-200 px-2 py-1 text-xs focus:border-sky-500 focus:outline-none"
+          className="w-72 rounded border border-slate-200 dark:border-slate-800 px-2 py-1 text-xs focus:border-sky-500 focus:outline-none"
           data-testid="insider-table-filter"
         />
         <div className="flex items-center gap-2 text-[11px] text-slate-500">
@@ -286,14 +286,14 @@ export function InsiderTransactionsTable({
           </button>
         </div>
       </div>
-      <div className="max-h-[60vh] overflow-auto rounded border border-slate-200">
+      <div className="max-h-[60vh] overflow-auto rounded border border-slate-200 dark:border-slate-800">
         <table className="min-w-full text-xs">
           <thead className="sticky top-0 bg-slate-50 text-slate-500">
             <tr>
               {COLUMNS.map((col) => (
                 <th
                   key={col.key}
-                  className={`cursor-pointer px-2 py-1 font-medium uppercase tracking-wider ${col.align === "right" ? "text-right" : "text-left"} hover:bg-slate-100`}
+                  className={`cursor-pointer px-2 py-1 font-medium uppercase tracking-wider ${col.align === "right" ? "text-right" : "text-left"} hover:bg-slate-100 dark:hover:bg-slate-800`}
                   onClick={() => toggleSort(col.key)}
                   data-testid={`insider-table-sort-${col.key}`}
                 >
@@ -320,7 +320,7 @@ export function InsiderTransactionsTable({
               return (
                 <tr
                   key={`${r.accession_number}-${r.txn_row_num}`}
-                  className="border-t border-slate-100 hover:bg-slate-50"
+                  className="border-t border-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800/40"
                 >
                   <td className="px-2 py-1 font-mono tabular-nums text-slate-700">
                     {r.txn_date}

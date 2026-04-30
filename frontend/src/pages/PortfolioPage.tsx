@@ -344,7 +344,7 @@ function SummaryBar({
   const mirrorCount = mirrors.length;
 
   return (
-    <div className="flex flex-wrap gap-x-8 gap-y-2 border-t border-slate-200 px-1 pt-3 pb-2 text-sm">
+    <div className="flex flex-wrap gap-x-8 gap-y-2 border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-2 text-sm">
       <Stat label="AUM" value={formatMoney(data.total_aum, currency)} />
       <Stat label="Cash" value={formatMoney(data.cash_balance, currency)} />
       <Stat
@@ -444,7 +444,7 @@ function PortfolioTable({
   onClose: (t: CloseTarget) => void;
 }) {
   return (
-    <div className="border-t border-slate-200 pt-3">
+    <div className="border-t border-slate-200 dark:border-slate-800 pt-3">
       <div className="px-1 pb-3">
         <input
           ref={searchRef}
@@ -453,7 +453,7 @@ function PortfolioTable({
           onChange={(e) => onSearchChange(e.target.value)}
           placeholder="Search positions…   (press / to focus)"
           aria-label="Search positions"
-          className="w-full rounded border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm text-slate-700 placeholder-slate-400 outline-none focus:border-blue-300 focus:ring-1 focus:ring-blue-200"
+          className="w-full rounded border border-slate-200 dark:border-slate-800 bg-slate-50 px-3 py-1.5 text-sm text-slate-700 placeholder-slate-400 outline-none focus:border-blue-300 focus:ring-1 focus:ring-blue-200"
         />
       </div>
       {pageRows.length === 0 ? (
@@ -463,7 +463,7 @@ function PortfolioTable({
       ) : (
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+            <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
               <th className="px-4 py-2 text-left">Instrument</th>
               <th className="px-2 py-2 text-right">Trades</th>
               <th className="px-2 py-2 text-right">Units</th>
@@ -517,12 +517,12 @@ function PaginationBar({
   onNext: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between border-t border-slate-200 px-1 pt-2 pb-1 text-xs">
+    <div className="flex items-center justify-between border-t border-slate-200 dark:border-slate-800 px-1 pt-2 pb-1 text-xs">
       <button
         type="button"
         onClick={onPrev}
         disabled={page <= 1}
-        className="rounded border border-slate-200 bg-white px-2 py-0.5 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+        className="rounded border border-slate-200 dark:border-slate-800 bg-white px-2 py-0.5 font-medium text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40 disabled:opacity-40"
       >
         ← Prev
       </button>
@@ -533,7 +533,7 @@ function PaginationBar({
         type="button"
         onClick={onNext}
         disabled={page >= totalPages}
-        className="rounded border border-slate-200 bg-white px-2 py-0.5 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+        className="rounded border border-slate-200 dark:border-slate-800 bg-white px-2 py-0.5 font-medium text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40 disabled:opacity-40"
       >
         Next →
       </button>
@@ -570,7 +570,7 @@ function PositionRow({
     "cursor-pointer border-t border-slate-100 transition-colors",
     focused
       ? "bg-slate-100 border-l-2 border-l-slate-400"
-      : "hover:bg-slate-50/70",
+      : "hover:bg-slate-50/70 dark:hover:bg-slate-800/40",
   ].join(" ");
 
   return (
@@ -665,7 +665,7 @@ function MirrorRow({
 
   const rowClass = [
     "cursor-pointer border-t border-slate-100 transition-colors",
-    focused ? "bg-slate-100 border-l-2 border-l-slate-400" : "hover:bg-slate-50/70",
+    focused ? "bg-slate-100 border-l-2 border-l-slate-400" : "hover:bg-slate-50/70 dark:hover:bg-slate-800/40",
   ].join(" ");
 
   return (

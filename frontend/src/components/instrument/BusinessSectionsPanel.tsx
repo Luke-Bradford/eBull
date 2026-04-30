@@ -87,7 +87,7 @@ function SectionBlock({
   const hasRefs = section.cross_references.length > 0;
   const showExpandToggle = section.body.length > 360;
   return (
-    <div className="border-l-2 border-slate-200 pl-3">
+    <div className="border-l-2 border-slate-200 dark:border-slate-800 pl-3">
       <div className="mb-1 flex items-center justify-between gap-2">
         <div className="text-sm font-semibold text-slate-800 dark:text-slate-100">
           {labelFor(section)}

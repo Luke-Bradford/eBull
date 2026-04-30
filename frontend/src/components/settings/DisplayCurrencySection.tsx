@@ -49,13 +49,13 @@ export function DisplayCurrencySection({ currentCurrency, onChanged }: Props) {
         </p>
       </div>
 
-      <div className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4">
+      <div className="max-w-sm space-y-3 rounded border border-slate-200 dark:border-slate-800 bg-white p-4">
         <div className="flex items-center gap-3">
           <select
             value={selected}
             onChange={(e) => setSelected(e.target.value)}
             disabled={saving}
-            className="rounded border border-slate-300 px-2 py-1.5 text-sm"
+            className="rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"
           >
             {SUPPORTED_CURRENCIES.map((c) => (
               <option key={c} value={c}>

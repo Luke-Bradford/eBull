@@ -98,7 +98,7 @@ export function RawOhlcvTable({
       </div>
       <div className="overflow-auto">
         <table className="min-w-full text-sm">
-          <thead className="border-b border-slate-200">
+          <thead className="border-b border-slate-200 dark:border-slate-800">
             <tr className="text-left text-xs text-slate-500">
               <th className="px-2 py-1">
                 <button

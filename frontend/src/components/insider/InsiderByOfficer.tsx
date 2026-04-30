@@ -146,7 +146,7 @@ function OfficerTooltip({ active, payload }: TooltipProps) {
         ? "text-red-700"
         : "text-slate-600";
   return (
-    <div className="rounded border border-slate-200 bg-white px-2 py-1 text-xs shadow-md">
+    <div className="rounded border border-slate-200 dark:border-slate-800 bg-white px-2 py-1 text-xs shadow-md">
       <div className="font-medium text-slate-700">{bucket.officer}</div>
       <div className={`font-mono tabular-nums ${colorClass}`}>
         {bucket.net > 0 ? "+" : ""}

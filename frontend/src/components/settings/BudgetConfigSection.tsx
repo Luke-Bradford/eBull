@@ -118,7 +118,7 @@ export function BudgetConfigSection() {
     eventAmount === "" || !Number.isFinite(parsedEventAmount) || parsedEventAmount <= 0;
 
   return (
-    <section className="border-t border-slate-200 pt-3">
+    <section className="border-t border-slate-200 dark:border-slate-800 pt-3">
       <header>
         <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-700">
           Budget Configuration
@@ -158,7 +158,7 @@ export function BudgetConfigSection() {
                       setCashBufferPct(val === serverBufferPct ? null : val);
                     }}
                     disabled={configSaving}
-                    className="mt-1 block w-24 rounded border border-slate-300 px-2 py-1.5 text-sm"
+                    className="mt-1 block w-24 rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"
                   />
                 </label>
 
@@ -175,7 +175,7 @@ export function BudgetConfigSection() {
                       setCgtScenario(val === serverScenario ? null : val);
                     }}
                     disabled={configSaving}
-                    className="mt-1 block rounded border border-slate-300 px-2 py-1.5 text-sm"
+                    className="mt-1 block rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"
                   >
                     <option value="basic">basic</option>
                     <option value="higher">higher</option>
@@ -193,7 +193,7 @@ export function BudgetConfigSection() {
                   onChange={(e) => setConfigReason(e.target.value)}
                   disabled={configSaving}
                   placeholder="Why are you changing this?"
-                  className="mt-1 block w-full max-w-md rounded border border-slate-300 px-2 py-1.5 text-sm"
+                  className="mt-1 block w-full max-w-md rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"
                 />
               </label>
 
@@ -244,7 +244,7 @@ export function BudgetConfigSection() {
                     )
                   }
                   disabled={eventSaving}
-                  className="mt-1 block rounded border border-slate-300 px-2 py-1.5 text-sm"
+                  className="mt-1 block rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"
                 >
                   <option value="injection">injection</option>
                   <option value="withdrawal">withdrawal</option>
@@ -261,7 +261,7 @@ export function BudgetConfigSection() {
                   onChange={(e) => setEventAmount(e.target.value)}
                   disabled={eventSaving}
                   placeholder="0.00"
-                  className="mt-1 block w-32 rounded border border-slate-300 px-2 py-1.5 text-sm"
+                  className="mt-1 block w-32 rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"
                 />
               </label>
 
@@ -273,7 +273,7 @@ export function BudgetConfigSection() {
                     setEventCurrency(e.target.value as "USD" | "GBP")
                   }
                   disabled={eventSaving}
-                  className="mt-1 block rounded border border-slate-300 px-2 py-1.5 text-sm"
+                  className="mt-1 block rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"
                 >
                   <option value="USD">USD</option>
                   <option value="GBP">GBP</option>
@@ -288,7 +288,7 @@ export function BudgetConfigSection() {
                 onChange={(e) => setEventNote(e.target.value)}
                 disabled={eventSaving}
                 rows={2}
-                className="mt-1 block w-full max-w-md rounded border border-slate-300 px-2 py-1.5 text-sm"
+                className="mt-1 block w-full max-w-md rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"
               />
             </label>
 

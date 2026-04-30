@@ -60,7 +60,7 @@ export function CrossRefPopover({
         {cref.target}
       </button>
       {open && (
-        <span className="absolute left-0 top-full z-20 mt-1 block w-72 rounded border border-slate-200 bg-white p-3 text-xs shadow-lg">
+        <span className="absolute left-0 top-full z-20 mt-1 block w-72 rounded border border-slate-200 dark:border-slate-800 bg-white p-3 text-xs shadow-lg">
           <span className="block text-[10px] uppercase tracking-wider text-slate-500">
             {cref.reference_type === "item" ? "Preview" : "Reference"} · {cref.target}
           </span>

@@ -118,7 +118,7 @@ export function FundDataRow({
 
   return (
     <div
-      className="grid grid-cols-2 gap-x-6 gap-y-3 border-t border-slate-200 px-1 pt-3 pb-2 sm:grid-cols-4 lg:grid-cols-7"
+      className="grid grid-cols-2 gap-x-6 gap-y-3 border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-2 sm:grid-cols-4 lg:grid-cols-7"
       data-testid="fund-data-row"
     >
       {cells.map((c) => (

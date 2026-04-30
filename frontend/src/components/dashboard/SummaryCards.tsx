@@ -35,7 +35,7 @@ export function SummaryCards({
     return (
       <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2 lg:grid-cols-4">
         {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="border-t border-slate-200 px-1 pt-3 pb-1">
+          <div key={i} className="border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-1">
             <SectionSkeleton rows={2} />
           </div>
         ))}
@@ -91,7 +91,7 @@ function DeploymentCard({
       return <Card label="Available for deployment" value="—" hint="Budget unavailable" />;
     }
     return (
-      <div className="border-t border-slate-200 px-1 pt-3 pb-1">
+      <div className="border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-1">
         <SectionSkeleton rows={2} />
       </div>
     );
@@ -140,7 +140,7 @@ function Card({
         ? "text-rose-600 dark:text-rose-400"
         : "text-slate-900 dark:text-slate-100";
   return (
-    <div className="border-t border-slate-200 px-1 pt-3 pb-1">
+    <div className="border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-1">
       <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">
         {label}
       </div>

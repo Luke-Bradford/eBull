@@ -60,7 +60,7 @@ function ItemBlock({ item }: { item: EightKItem }) {
   const hasBody = item.body.length > 0;
   const showToggle = item.body.length > 200;
   return (
-    <div className="border-l-2 border-slate-200 pl-3">
+    <div className="border-l-2 border-slate-200 dark:border-slate-800 pl-3">
       <div className="mb-1 flex items-center gap-2">
         <span
           className={`rounded px-1.5 py-0.5 font-mono text-[11px] font-semibold ${severityTone(item.severity)}`}
@@ -101,7 +101,7 @@ function ItemBlock({ item }: { item: EightKItem }) {
 function FilingCard({ filing }: { filing: EightKFiling }) {
   const dateText = filing.date_of_report ?? "—";
   return (
-    <div className="rounded-sm border border-slate-200 p-3">
+    <div className="rounded-sm border border-slate-200 dark:border-slate-800 p-3">
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <span className="font-mono text-xs text-slate-800 dark:text-slate-100">
           {dateText}

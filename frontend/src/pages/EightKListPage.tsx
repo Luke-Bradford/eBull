@@ -172,7 +172,7 @@ export function EightKListPage(): JSX.Element {
             <div className="overflow-x-auto">
               <table className="min-w-full text-xs">
                 <thead>
-                  <tr className="border-b border-slate-200 text-left text-slate-500">
+                  <tr className="border-b border-slate-200 dark:border-slate-800 text-left text-slate-500">
                     <th className="px-2 py-1">Date</th>
                     <th className="px-2 py-1">Items</th>
                     <th className="px-2 py-1">Severity</th>
@@ -186,7 +186,7 @@ export function EightKListPage(): JSX.Element {
                     return (
                       <tr
                         key={f.accession_number}
-                        className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 ${
+                        className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800/40 ${
                           isSelected ? "bg-sky-50" : ""
                         }`}
                         onClick={() => selectAccession(f.accession_number)}

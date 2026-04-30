@@ -43,7 +43,7 @@ function Pill({
   // Tone is carried by text colour only — no border accent.
   return (
     <div
-      className="flex-1 border-t border-slate-200 px-3 pt-3 pb-1"
+      className="flex-1 border-t border-slate-200 dark:border-slate-800 px-3 pt-3 pb-1"
       data-testid={`rolling-pnl-${period.period}`}
     >
       <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">
@@ -67,7 +67,7 @@ export function RollingPnlStrip(): JSX.Element | null {
     return (
       <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-3">
         {[0, 1, 2].map((i) => (
-          <div key={i} className="border-t border-slate-200 px-3 pt-3 pb-1">
+          <div key={i} className="border-t border-slate-200 dark:border-slate-800 px-3 pt-3 pb-1">
             <SectionSkeleton rows={1} />
           </div>
         ))}

@@ -77,7 +77,7 @@ export function NotificationBell(): JSX.Element {
       data-unseen-count={count}
       title={count > 0 ? `${count} unread — click to open the dashboard` : "No unread alerts"}
       className={[
-        "relative rounded p-1 text-slate-600 transition hover:bg-slate-50",
+        "relative rounded p-1 text-slate-600 transition hover:bg-slate-50 dark:hover:bg-slate-800/40",
         count > 0 ? "text-red-700" : "",
       ].join(" ")}
     >

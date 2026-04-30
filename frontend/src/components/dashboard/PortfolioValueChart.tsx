@@ -117,7 +117,7 @@ export function PortfolioValueChart(): JSX.Element | null {
   if (!effectivelyLoading && !hasMovement && fxSkipped === 0) return null;
 
   return (
-    <div className="border-t border-slate-200 pt-3">
+    <div className="border-t border-slate-200 dark:border-slate-800 pt-3">
       <div className="flex items-baseline justify-between">
         <div className="flex items-baseline gap-2">
           <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-700">

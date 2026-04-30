@@ -29,7 +29,7 @@ export function WatchlistPanel({ items, onRemove }: Props) {
     <div className="overflow-x-auto">
       <table className="min-w-full text-sm">
         <thead>
-          <tr className="border-b border-slate-200 text-left text-xs text-slate-500 dark:text-slate-400">
+          <tr className="border-b border-slate-200 dark:border-slate-800 text-left text-xs text-slate-500 dark:text-slate-400">
             <th className="px-2 py-1">Symbol</th>
             <th className="px-2 py-1">Name</th>
             <th className="px-2 py-1">Sector</th>

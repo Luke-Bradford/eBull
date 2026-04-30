@@ -47,7 +47,7 @@ export function CollapsibleSection({
   }
 
   return (
-    <section className="border-t border-slate-200 pt-3" id={sectionId}>
+    <section className="border-t border-slate-200 dark:border-slate-800 pt-3" id={sectionId}>
       <button
         type="button"
         onClick={toggle}

@@ -168,7 +168,7 @@ export function OperatorsPage(): JSX.Element {
         <h2 className="mb-2 text-sm font-medium text-slate-700">Add operator</h2>
         <form
           onSubmit={handleCreate}
-          className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4"
+          className="max-w-sm space-y-3 rounded border border-slate-200 dark:border-slate-800 bg-white p-4"
         >
           <label className="block text-sm">
             <span className="mb-1 block text-slate-600">Username</span>
@@ -178,7 +178,7 @@ export function OperatorsPage(): JSX.Element {
               value={newUsername}
               onChange={(e) => setNewUsername(e.target.value)}
               required
-              className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+              className="w-full rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"
             />
           </label>
           <label className="block text-sm">
@@ -192,7 +192,7 @@ export function OperatorsPage(): JSX.Element {
               onChange={(e) => setNewPassword(e.target.value)}
               minLength={MIN_PASSWORD_LEN}
               required
-              className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+              className="w-full rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"
             />
           </label>
           {createError !== null && (
