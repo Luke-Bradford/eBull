@@ -470,7 +470,7 @@ function BrokerCredentialsSection(): JSX.Element {
                       type="button"
                       onClick={() => startEdit(editLabel)}
                       disabled={manageAction !== "idle"}
-                      className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50 dark:bg-slate-900/40 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
+ className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
                     >
                       Edit
                     </button>
@@ -506,14 +506,14 @@ function BrokerCredentialsSection(): JSX.Element {
               type="button"
               onClick={() => void handleTestStored()}
               disabled={validating}
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:bg-slate-900/40 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
+ className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
             >
               {validating ? "Testing…" : "Test connection"}
             </button>
             <button
               type="button"
               onClick={startReplace}
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:bg-slate-900/40 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
+ className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
             >
               Replace both
             </button>
@@ -568,7 +568,7 @@ function BrokerCredentialsSection(): JSX.Element {
               type="button"
               onClick={cancelManage}
               disabled={editing}
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:bg-slate-900/40 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
+ className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
             >
               Cancel
             </button>
@@ -623,7 +623,7 @@ function BrokerCredentialsSection(): JSX.Element {
                 userKey.length < MIN_SECRET_LEN ||
                 validating
               }
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:bg-slate-900/40 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
+ className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
             >
               {validating ? "Testing…" : "Test connection"}
             </button>
@@ -655,7 +655,7 @@ function BrokerCredentialsSection(): JSX.Element {
               type="button"
               onClick={cancelManage}
               disabled={editing}
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:bg-slate-900/40 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
+ className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
             >
               Cancel
             </button>
@@ -717,7 +717,7 @@ function BrokerCredentialsSection(): JSX.Element {
               type="button"
               onClick={() => void handleTestConnection()}
               disabled={!canTestConnection || validating}
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:bg-slate-900/40 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
+ className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
             >
               {validating ? "Testing…" : "Test connection"}
             </button>

@@ -151,7 +151,7 @@ function RowShell({
     return (
       <Link
         to={`/instruments/${instrumentId}`}
-        className="block hover:bg-slate-50 dark:bg-slate-900/40 dark:hover:bg-slate-800/40"
+ className="block hover:bg-slate-50 dark:hover:bg-slate-800/40"
       >
         {content}
       </Link>

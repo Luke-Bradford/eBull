@@ -332,7 +332,7 @@ export function SetupPage(): JSX.Element {
               type="button"
               onClick={() => void handleTestConnection()}
               disabled={!canTestConnection || validating}
-              className="rounded border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:bg-slate-900/40 dark:hover:bg-slate-800/40 disabled:opacity-50"
+ className="rounded border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40 disabled:opacity-50"
             >
               {validating ? "Testing…" : "Test connection"}
             </button>

@@ -79,7 +79,7 @@ export function EightKFilterStrip({
       {isDirty && (
         <button
           type="button"
-          className="ml-auto rounded border border-slate-300 px-2 py-1 hover:bg-white dark:bg-slate-900 dark:border-slate-700 dark:hover:bg-slate-800"
+          className="ml-auto rounded border border-slate-300 px-2 py-1 hover:bg-white dark:border-slate-700 dark:hover:bg-slate-800"
           onClick={() =>
             onChange({ severity: "", itemCode: "", dateFrom: "", dateTo: "" })
           }

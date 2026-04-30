@@ -34,7 +34,7 @@ export function Header() {
             onClick={() => {
               void logout();
             }}
-            className="rounded border border-slate-300 px-2 py-0.5 text-slate-600 hover:bg-slate-50 dark:bg-slate-900/40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+ className="rounded border border-slate-300 px-2 py-0.5 text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
           >
             Sign out
           </button>

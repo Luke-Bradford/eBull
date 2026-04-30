@@ -293,7 +293,7 @@ export function InsiderTransactionsTable({
               {COLUMNS.map((col) => (
                 <th
                   key={col.key}
-                  className={`cursor-pointer px-2 py-1 font-medium uppercase tracking-wider ${col.align === "right" ? "text-right" : "text-left"} hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-800`}
+ className={`cursor-pointer px-2 py-1 font-medium uppercase tracking-wider ${col.align === "right" ? "text-right" : "text-left"} hover:bg-slate-100 dark:hover:bg-slate-800`}
                   onClick={() => toggleSort(col.key)}
                   data-testid={`insider-table-sort-${col.key}`}
                 >
@@ -320,7 +320,7 @@ export function InsiderTransactionsTable({
               return (
                 <tr
                   key={`${r.accession_number}-${r.txn_row_num}`}
-                  className="border-t border-slate-100 hover:bg-slate-50 dark:bg-slate-900/40 dark:hover:bg-slate-800/40"
+ className="border-t border-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800/40"
                 >
                   <td className="px-2 py-1 font-mono tabular-nums text-slate-700">
                     {r.txn_date}

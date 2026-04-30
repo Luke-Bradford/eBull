@@ -340,7 +340,7 @@ function Pagination({
         type="button"
         disabled={!hasPrev}
         onClick={onPrev}
-        className="rounded border border-slate-300 dark:border-slate-700 px-1.5 py-0.5 text-xs hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+ className="rounded border border-slate-300 dark:border-slate-700 px-1.5 py-0.5 text-xs hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
       >
         Prev
       </button>
@@ -348,7 +348,7 @@ function Pagination({
         type="button"
         disabled={!hasNext}
         onClick={onNext}
-        className="rounded border border-slate-300 dark:border-slate-700 px-1.5 py-0.5 text-xs hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+ className="rounded border border-slate-300 dark:border-slate-700 px-1.5 py-0.5 text-xs hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
       >
         Next
       </button>
