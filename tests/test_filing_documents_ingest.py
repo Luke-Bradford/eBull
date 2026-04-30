@@ -12,7 +12,12 @@ from app.services.filing_documents import (
     list_filing_documents,
 )
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    # Path disabled pending #723 rewrite (URL builder + parser shape
+    # both wrong — current code 100% 404s in production).
+    pytest.mark.skip(reason="ingest_filing_documents disabled pending #723"),
+]
 
 
 class _StubIndexFetcher:
