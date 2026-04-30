@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 
@@ -37,6 +37,11 @@ from app.providers.implementations.sec_edgar import (
     parse_master_index,
 )
 from app.providers.implementations.sec_fundamentals import TRACKED_CONCEPTS
+from app.services.sec_entity_profile import parse_entity_profile, upsert_entity_profile
+from app.services.sec_filing_items import (
+    apply_8k_items_to_filing_events,
+    parse_8k_items_by_accession,
+)
 from app.services.sync_orchestrator.progress import report_progress
 from app.services.watermarks import get_watermark, set_watermark
 
@@ -1399,6 +1404,17 @@ class RefreshPlan:
       consumes this dict on the refresh + submissions-only paths; the
       seed path ignores it because seeds need full historical backfill
       (#268 Chunk E), not just this week's entries.
+    - ``submissions_by_cik`` — per-CIK ``submissions.json`` dict the
+      planner already fetched while computing ``top_accession``.
+      Populated for every CIK on the refresh / submissions-only /
+      stale-watermark-backfill paths so the executor reuses the body
+      to apply 8-K ``items[]`` and entity-profile extractions instead
+      of re-fetching (or, worse, silently skipping the extractions —
+      #675 was caused by the planner discarding this dict and the
+      executor's extractions sitting inside an ``else`` branch that
+      only fired on seed/first-time-refresh). Seed-path CIKs are
+      absent here because the planner doesn't fetch submissions for
+      seeds; the executor still fetches them directly in that case.
     """
 
     seeds: list[str] = field(default_factory=list)
@@ -1410,6 +1426,7 @@ class RefreshPlan:
     pending_master_index_writes: list[tuple[str, str, str]] = field(default_factory=list)
     ciks_by_day: dict[str, list[str]] = field(default_factory=dict)
     new_filings_by_cik: dict[str, list[MasterIndexEntry]] = field(default_factory=dict)
+    submissions_by_cik: dict[str, dict[str, Any]] = field(default_factory=dict)
     # CIKs skipped during planning itself (fetch_submissions returned None
     # or filings.recent was empty). These never make it to
     # seeds/refreshes/submissions_only_advances, so the executor's
@@ -1593,6 +1610,12 @@ def plan_refresh(
     seeds: list[str] = []
     refreshes: list[tuple[str, str]] = []
     submissions_only: list[tuple[str, str]] = []
+    # #675: keep the planner-fetched submissions body alive so the
+    # executor can apply 8-K items[] + entity profile without a second
+    # fetch (or, worse, silently skipping the extraction). Populated
+    # for every CIK that lands in refreshes / submissions_only /
+    # stale-backfill refreshes.
+    submissions_by_cik: dict[str, dict[str, Any]] = {}
     failed_plan_ciks: list[str] = []
 
     covered_set = set(covered)
@@ -1641,8 +1664,19 @@ def plan_refresh(
             continue
         if top_accession == wm.watermark:
             # Amendment or re-listing of a filing we already have.
+            # We still capture the submissions body — even when
+            # ``top_accession`` is unchanged, the executor may want
+            # the dict for items/entity-profile extraction. The
+            # current main path returns above without enqueueing
+            # this CIK, so we do too — extraction-only paths land
+            # via stale-watermark backfill.
             continue
 
+        # Capture the submissions body so the executor can apply 8-K
+        # items[] + entity profile without a second fetch (#675). Set
+        # before the form-type branching so both refreshes and
+        # submissions-only land in ``submissions_by_cik``.
+        submissions_by_cik[cik] = submissions
         hit_forms = {e.form_type for e in entries}
         if hit_forms & FUNDAMENTALS_FORMS:
             refreshes.append((cik, top_accession))
@@ -1722,7 +1756,10 @@ def plan_refresh(
             continue
         # A new filing arrived during the outage. Enqueue as refresh —
         # the executor will fetch companyfacts and advance both
-        # watermarks atomically.
+        # watermarks atomically. Capture the submissions body so the
+        # executor extracts 8-K items + entity profile without a
+        # second fetch (#675).
+        submissions_by_cik[cik] = submissions
         refreshes.append((cik, top_accession))
 
     return RefreshPlan(
@@ -1736,6 +1773,7 @@ def plan_refresh(
         # covered cohort above; pass it through so the executor can
         # upsert each hit into filing_events.
         new_filings_by_cik=master_hits_by_cik,
+        submissions_by_cik=submissions_by_cik,
     )
 
 
@@ -1850,6 +1888,59 @@ def _upsert_filing_from_master_index(
     )
 
 
+def _apply_submissions_extractions(
+    conn: psycopg.Connection[tuple],
+    *,
+    cik: str,
+    instrument_id: int,
+    submissions: dict[str, Any],
+) -> None:
+    """Apply zero-extra-HTTP extractions derived from a fetched
+    ``submissions.json`` dict.
+
+    Two extractions land here:
+
+    * #427 — entity profile (description, SIC, exchanges, former
+      names, addresses).
+    * #431 — 8-K ``items[]`` typing on existing ``filing_events``
+      rows.
+
+    Each extraction is wrapped in its own ``conn.transaction()``
+    savepoint per #439 so a parse/write failure cannot poison the
+    outer per-CIK transaction that still has XBRL facts to write.
+    Failures are logged at WARNING + ``exc_info=True`` and do not
+    propagate — these extractions are best-effort relative to the
+    fact upsert (#675: even when both fail, the executor must still
+    advance the watermarks for the CIKs whose facts wrote).
+    """
+    try:
+        profile = parse_entity_profile(
+            submissions,
+            instrument_id=instrument_id,
+            cik=cik,
+        )
+        with conn.transaction():
+            upsert_entity_profile(conn, profile)
+    except Exception:
+        logger.warning(
+            "sec_incremental: entity-profile upsert failed for cik=%s",
+            cik,
+            exc_info=True,
+        )
+
+    try:
+        items_map = parse_8k_items_by_accession(submissions)
+        if items_map:
+            with conn.transaction():
+                apply_8k_items_to_filing_events(conn, items_map)
+    except Exception:
+        logger.warning(
+            "sec_incremental: 8-K items apply failed for cik=%s",
+            cik,
+            exc_info=True,
+        )
+
+
 def _run_cik_upsert(
     conn: psycopg.Connection[tuple],
     *,
@@ -1859,6 +1950,7 @@ def _run_cik_upsert(
     run_id: int,
     failed: list[tuple[str, str]],
     known_top_accession: str | None = None,
+    known_submissions: dict[str, Any] | None = None,
     new_filings: list[MasterIndexEntry] | None = None,
 ) -> int | None:
     """Per-CIK seed/refresh body.
@@ -1869,6 +1961,14 @@ def _run_cik_upsert(
     executor would otherwise re-fetch to read the top accession again).
     Seeds pass ``None`` because the planner has no prior watermark and
     doesn't call ``fetch_submissions`` for them.
+
+    ``known_submissions`` carries the planner-fetched ``submissions.json``
+    body. When supplied, the executor runs the entity-profile upsert and
+    8-K items[] apply against it — these extractions are required on
+    EVERY refresh, not just the seed path. Pre-#675 the extractions
+    sat inside the seed-only ``else`` branch and the planner threw the
+    submissions body away, leaving items[] universally NULL on 8-K
+    rows and entity-profile rows stale forever after seed.
 
     Returns the number of fact rows upserted on success (``int >= 0``)
     or ``None`` on skip or failure. Failures additionally append
@@ -1912,12 +2012,23 @@ def _run_cik_upsert(
         # transaction for multi-second windows × hundreds of CIKs.
         conn.commit()
 
-        # Skip the second fetch_submissions round-trip if the planner
-        # already captured the top accession (refresh / submissions-only
-        # paths). Seeds have no prior watermark, so the planner never
-        # fetched for them — executor still fetches once.
-        if known_top_accession is not None:
-            top_accession: str | None = known_top_accession
+        # Resolve submissions body + top accession. Three valid input
+        # combinations:
+        #
+        #   1. Refresh via planner: known_top_accession AND
+        #      known_submissions both set. Skip fetch entirely.
+        #   2. Stale-backfill / new-cycle refresh where the planner
+        #      enqueued only top_accession (legacy callers): known_top_accession
+        #      set, known_submissions None. Re-fetch so extractions can
+        #      run. Cost: one extra HTTP per such CIK — uncommon path
+        #      after #675's planner update propagates.
+        #   3. Seed: neither set. Planner has no watermark for this
+        #      CIK so didn't fetch. Executor fetches.
+        submissions: dict[str, Any] | None
+        top_accession: str | None
+        if known_top_accession is not None and known_submissions is not None:
+            top_accession = known_top_accession
+            submissions = known_submissions
         else:
             submissions = filings_provider.fetch_submissions(cik)
             if submissions is None:
@@ -1933,7 +2044,7 @@ def _run_cik_upsert(
                 failed.append((cik, "SubmissionsMissing"))
                 outcome = "skip_submissions_missing"
                 return None
-            top_accession = _top_accession_from_submissions(submissions)
+            top_accession = known_top_accession or _top_accession_from_submissions(submissions)
             if top_accession is None:
                 # Transient: submissions.json returned but filings.recent
                 # is empty despite a master-index hit. Same invariant —
@@ -1945,64 +2056,6 @@ def _run_cik_upsert(
                 failed.append((cik, "EmptyFilingsRecent"))
                 outcome = "skip_empty_filings"
                 return None
-            # #427: extract rich entity metadata from the submissions
-            # dict we already have in memory. Zero extra HTTP. Only
-            # happens when the executor fetches submissions itself
-            # (seed path + first-time refresh) — on the refresh-via-
-            # planner path the dict is thrown away before we get here,
-            # which is acceptable because entity metadata (description,
-            # SIC, exchanges, former names) changes rarely; any stale
-            # row converges on the next seed cycle.
-            #
-            # Wrapped in ``with conn.transaction():`` so any DB error
-            # inside the upsert rolls back a SAVEPOINT rather than
-            # leaving the outer per-CIK transaction in
-            # ``InFailedSqlTransaction`` state. Without the savepoint,
-            # a bare ``except Exception`` still catches the error but
-            # the subsequent XBRL facts upsert below would fail with
-            # "current transaction is aborted, commands ignored".
-            # Review #439 BLOCKING.
-            try:
-                from app.services.sec_entity_profile import (
-                    parse_entity_profile,
-                    upsert_entity_profile,
-                )
-
-                profile = parse_entity_profile(
-                    submissions,
-                    instrument_id=instrument_id,
-                    cik=cik,
-                )
-                with conn.transaction():
-                    upsert_entity_profile(conn, profile)
-            except Exception:
-                logger.warning(
-                    "sec_incremental: entity-profile upsert failed for cik=%s",
-                    cik,
-                    exc_info=True,
-                )
-
-            # #431: 8-K items[] typing. Parse the items column in the
-            # submissions.filings.recent table and UPDATE the matching
-            # filing_events rows. Savepoint-scoped per the #439 pattern
-            # so a parse/write failure cannot poison the outer per-CIK
-            # transaction that still has XBRL facts to write.
-            try:
-                from app.services.sec_filing_items import (
-                    apply_8k_items_to_filing_events,
-                    parse_8k_items_by_accession,
-                )
-
-                items_map = parse_8k_items_by_accession(submissions)
-                if items_map:
-                    with conn.transaction():
-                        apply_8k_items_to_filing_events(conn, items_map)
-            except Exception:
-                logger.warning(
-                    "sec_incremental: 8-K items apply failed for cik=%s",
-                    cik,
-                    exc_info=True,
-                )
 
         # #451 Phase A — single fetch returns both fact rows and
         # catalogue entries. Fall back to ``extract_facts`` when a
@@ -2032,6 +2085,10 @@ def _run_cik_upsert(
             # Idempotent: ON CONFLICT preserves richer URLs stored by
             # the submissions-based ingest path. Atomic with the facts
             # upsert and watermark writes below.
+            #
+            # Order matters with the ``_apply_submissions_extractions``
+            # call below: master-index inserts FIRST so the items
+            # UPDATE has rows to match against (#675).
             if new_filings:
                 for entry in new_filings:
                     _upsert_filing_from_master_index(
@@ -2040,6 +2097,27 @@ def _run_cik_upsert(
                         entry=entry,
                         symbol=symbol,
                     )
+
+            # #427 + #431 + #675: extract entity profile + 8-K items[]
+            # from the submissions dict we have in memory. Zero extra
+            # HTTP. Runs on EVERY executor invocation that has
+            # submissions in hand — seed AND refresh. Pre-#675 these
+            # blocks lived inside a seed-only ``else`` branch and the
+            # planner discarded the submissions dict on the refresh
+            # path, so 8-K items[] never populated in steady state and
+            # entity-profile rows went stale silently. The #439
+            # invariant (savepoint-scoped so a parse/write failure
+            # cannot poison the outer per-CIK transaction) is
+            # preserved by the ``with conn.transaction():`` wrappers
+            # inside ``_apply_submissions_extractions`` — when called
+            # from inside this outer transaction they nest as
+            # SAVEPOINTs.
+            _apply_submissions_extractions(
+                conn,
+                cik=cik,
+                instrument_id=instrument_id,
+                submissions=submissions,
+            )
             set_watermark(
                 conn,
                 source="sec.submissions",
@@ -2257,6 +2335,7 @@ def execute_refresh(
                 run_id=run_id,
                 failed=failed,
                 known_top_accession=top_accession,
+                known_submissions=plan.submissions_by_cik.get(cik),
                 new_filings=plan.new_filings_by_cik.get(cik),
             )
             if upserted is not None:
@@ -2287,7 +2366,9 @@ def execute_refresh(
                     # Upsert filing_events for each master-index entry
                     # on this CIK so the 8-K (or similar) is visible to
                     # downstream event-driven triggers, even though we
-                    # don't fetch companyfacts.
+                    # don't fetch companyfacts. Order matters: insert
+                    # the master-index rows BEFORE applying items so
+                    # the items UPDATE has rows to match against.
                     if new_filings:
                         for entry in new_filings:
                             _upsert_filing_from_master_index(
@@ -2303,6 +2384,20 @@ def execute_refresh(
                         watermark=accession,
                     )
                 conn.commit()
+                # #675: apply 8-K items[] + entity profile from the
+                # planner-fetched submissions body. Best-effort — runs
+                # AFTER the watermark commit so a transient failure
+                # cannot un-advance the watermark, and uses its own
+                # savepoints inside ``_apply_submissions_extractions``
+                # for #439 compliance.
+                submissions_body = plan.submissions_by_cik.get(cik)
+                if submissions_body is not None:
+                    _apply_submissions_extractions(
+                        conn,
+                        cik=cik,
+                        instrument_id=instrument_id,
+                        submissions=submissions_body,
+                    )
                 submissions_advanced += 1
             except Exception as exc:
                 try:

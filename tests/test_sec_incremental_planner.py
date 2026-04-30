@@ -151,9 +151,10 @@ def test_master_index_hit_with_fundamentals_form_becomes_refresh(
             watermark="0000320193-25-000108",  # older than fixture top 0000320193-26-000042
         )
     master = FIXTURE_MASTER.read_bytes()
+    submissions_payload = json.loads(FIXTURE_SUBMISSIONS)
     provider = StubFilingsProvider(
         master_bodies={d: master if d == date(2026, 4, 15) else None for d in _window(date(2026, 4, 15))},
-        submissions_by_cik={"0000320193": json.loads(FIXTURE_SUBMISSIONS)},
+        submissions_by_cik={"0000320193": submissions_payload},
     )
     plan = plan_refresh(
         ebull_test_conn,
@@ -163,6 +164,11 @@ def test_master_index_hit_with_fundamentals_form_becomes_refresh(
     assert ("0000320193", "0000320193-26-000042") in plan.refreshes
     assert plan.seeds == []
     assert plan.submissions_only_advances == []
+    # #675: planner must keep the submissions body alive on the
+    # refreshes path so the executor can apply 8-K items + entity
+    # profile without a second fetch (or, worse, silently skipping
+    # the extractions).
+    assert plan.submissions_by_cik.get("0000320193") is submissions_payload
 
 
 def test_master_index_hit_with_8k_only_is_submissions_only_advance(
@@ -181,19 +187,19 @@ def test_master_index_hit_with_8k_only_is_submissions_only_advance(
         b"--------------------------------------------------------------------------------\n"
         b"789019|MICROSOFT CORP|8-K|2026-04-15|edgar/data/789019/0000789019-26-000017.txt\n"
     )
+    submissions_payload: dict[str, object] = {
+        "filings": {
+            "recent": {
+                "accessionNumber": ["0000789019-26-000017"],
+                "form": ["8-K"],
+                "items": ["8.01,2.02"],
+                "acceptedDate": ["2026-04-15T09:00:00.000Z"],
+            }
+        }
+    }
     provider = StubFilingsProvider(
         master_bodies={d: custom_master if d == date(2026, 4, 15) else None for d in _window(date(2026, 4, 15))},
-        submissions_by_cik={
-            "0000789019": {
-                "filings": {
-                    "recent": {
-                        "accessionNumber": ["0000789019-26-000017"],
-                        "form": ["8-K"],
-                        "acceptedDate": ["2026-04-15T09:00:00.000Z"],
-                    }
-                }
-            }
-        },
+        submissions_by_cik={"0000789019": submissions_payload},
     )
     plan = plan_refresh(
         ebull_test_conn,
@@ -203,6 +209,10 @@ def test_master_index_hit_with_8k_only_is_submissions_only_advance(
     assert plan.refreshes == []
     assert plan.seeds == []
     assert ("0000789019", "0000789019-26-000017") in plan.submissions_only_advances
+    # #675: planner must keep submissions body alive on the
+    # submissions-only path too — executor needs it to apply 8-K
+    # items[] for the freshly-inserted master-index row.
+    assert plan.submissions_by_cik.get("0000789019") is submissions_payload
 
 
 def test_master_index_hit_non_covered_cik_ignored(
