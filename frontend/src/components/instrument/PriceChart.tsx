@@ -52,8 +52,8 @@ import {
   humanizeVolume,
   tickFormatter,
 } from "@/lib/chartFormatters";
-import { chartTheme } from "@/lib/chartTheme";
 import { useAsync } from "@/lib/useAsync";
+import { useChartTheme } from "@/lib/useChartTheme";
 import { useLiveLastBar } from "@/lib/useLiveLastBar";
 
 const RANGES: { id: ChartRange; label: string }[] = [
@@ -437,6 +437,7 @@ export function ChartCanvas({
   const lineRef = useRef<ISeriesApi<"Line"> | null>(null);
   const areaRef = useRef<ISeriesApi<"Area"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const theme = useChartTheme();
   // Stable ref into `clean` for the crosshair handler — avoids stale
   // closure capture when rows update.
   const cleanRowsRef = useRef<NumericBar[]>([]);
@@ -467,22 +468,22 @@ export function ChartCanvas({
     const chart = createChart(container, {
       autoSize: true,
       layout: {
-        background: { color: chartTheme.bg },
-        textColor: chartTheme.textSecondary,
+        background: { color: theme.bg },
+        textColor: theme.textSecondary,
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: chartTheme.gridLine },
-        horzLines: { color: chartTheme.gridLine },
+        vertLines: { color: theme.gridLine },
+        horzLines: { color: theme.gridLine },
       },
       rightPriceScale: {
-        borderColor: chartTheme.borderColor,
+        borderColor: theme.borderColor,
         // Leave room at the bottom for the volume overlay — matches
         // the TradingView default chart feel.
         scaleMargins: { top: 0.08, bottom: 0.3 },
       },
       timeScale: {
-        borderColor: chartTheme.borderColor,
+        borderColor: theme.borderColor,
         timeVisible: false,
         secondsVisible: false,
         // rightOffset: 5 leaves a 5-bar buffer past the last bar so
@@ -501,23 +502,23 @@ export function ChartCanvas({
         // `applyOptions` effect below instead.
       },
       crosshair: {
-        vertLine: { width: 1, color: chartTheme.crosshair, style: 3 },
-        horzLine: { width: 1, color: chartTheme.crosshair, style: 3 },
+        vertLine: { width: 1, color: theme.crosshair, style: 3 },
+        horzLine: { width: 1, color: theme.crosshair, style: 3 },
       },
     });
 
     const candle = chart.addSeries(CandlestickSeries, {
-      upColor: chartTheme.up,
-      downColor: chartTheme.down,
-      wickUpColor: chartTheme.up,
-      wickDownColor: chartTheme.down,
+      upColor: theme.up,
+      downColor: theme.down,
+      wickUpColor: theme.up,
+      wickDownColor: theme.down,
       borderVisible: false,
     });
     // Robinhood-style smooth line. `LineType.Curved` (cardinal-spline)
     // applies to both Line and Area series; we set it here once and the
     // subsequent visibility toggles preserve the smoothing.
     const line = chart.addSeries(LineSeries, {
-      color: chartTheme.primaryLine,
+      color: theme.primaryLine,
       lineWidth: 2,
       lineType: LineType.Curved,
       priceLineVisible: false,
@@ -525,8 +526,8 @@ export function ChartCanvas({
       visible: false,
     });
     const area = chart.addSeries(AreaSeries, {
-      lineColor: chartTheme.primaryLine,
-      topColor: chartTheme.volumeUpAlpha,
+      lineColor: theme.primaryLine,
+      topColor: theme.volumeUpAlpha,
       bottomColor: "rgba(30,41,59,0.0)",
       lineWidth: 2,
       lineType: LineType.Curved,
@@ -597,6 +598,40 @@ export function ChartCanvas({
       volumeRef.current = null;
     };
   }, []);
+
+  // Re-apply theme-driven options whenever the operator toggles
+  // light / dark. lightweight-charts has no first-class theme API, so
+  // we mirror every theme reference from the construction effect
+  // here. Running through applyOptions instead of recreating the
+  // chart preserves operator pan/zoom and the live-tick subscription.
+  useEffect(() => {
+    const chart = chartRef.current;
+    const candle = candleRef.current;
+    const line = lineRef.current;
+    const area = areaRef.current;
+    if (!chart || !candle || !line || !area) return;
+    chart.applyOptions({
+      layout: { background: { color: theme.bg }, textColor: theme.textSecondary },
+      grid: {
+        vertLines: { color: theme.gridLine },
+        horzLines: { color: theme.gridLine },
+      },
+      rightPriceScale: { borderColor: theme.borderColor },
+      timeScale: { borderColor: theme.borderColor },
+      crosshair: {
+        vertLine: { color: theme.crosshair },
+        horzLine: { color: theme.crosshair },
+      },
+    });
+    candle.applyOptions({
+      upColor: theme.up,
+      downColor: theme.down,
+      wickUpColor: theme.up,
+      wickDownColor: theme.down,
+    });
+    line.applyOptions({ color: theme.primaryLine });
+    area.applyOptions({ lineColor: theme.primaryLine, topColor: theme.volumeUpAlpha });
+  }, [theme]);
 
   // Toggle which price series is visible whenever `chartType` changes.
   // The data effect always feeds all three series, so flipping
@@ -737,7 +772,7 @@ export function ChartCanvas({
         return {
           time: b.time as Time,
           value: b.volume,
-          color: b.close >= prev ? chartTheme.volumeUpAlpha : chartTheme.volumeDownAlpha,
+          color: b.close >= prev ? theme.volumeUpAlpha : theme.volumeDownAlpha,
         };
       }),
     );
@@ -751,7 +786,7 @@ export function ChartCanvas({
       chart.timeScale().fitContent();
       fittedRangeRef.current = fingerprint;
     }
-  }, [clean, range]);
+  }, [clean, range, theme]);
 
 
   // Live-tick aggregator (#602). Subscribes to the page-level
