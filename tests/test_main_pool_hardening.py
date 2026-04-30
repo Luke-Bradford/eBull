@@ -95,6 +95,56 @@ def test_get_conn_maps_pool_timeout_to_503() -> None:
             app.state.db_pool = saved
 
 
+def test_get_conn_does_not_swallow_handler_pool_timeout() -> None:
+    """Regression for PR #718 round 1 review: a `PoolTimeout` raised
+    inside a route handler (i.e. AFTER successful checkout) must
+    propagate untouched, not be silently rewritten as a 503. The
+    only PoolTimeout that maps to 503 is the one raised by checkout
+    itself.
+    """
+    from contextlib import contextmanager
+    from typing import Any
+
+    from fastapi import APIRouter, Depends
+    from fastapi.testclient import TestClient
+    from psycopg_pool import PoolTimeout
+
+    from app.db import get_conn
+    from app.main import app
+
+    class _GoodPool:
+        @contextmanager
+        def connection(self) -> Any:
+            yield object()  # checkout succeeds
+
+    saved_pool = getattr(app.state, "db_pool", None)
+    app.state.db_pool = _GoodPool()
+
+    router = APIRouter()
+
+    @router.get("/__pool_timeout_in_handler")
+    def _broken(_: object = Depends(get_conn)) -> dict[str, str]:
+        raise PoolTimeout("simulated handler-side raise")
+
+    app.include_router(router)
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/__pool_timeout_in_handler")
+        # 503 would mean the dependency caught + rewrote a handler-side
+        # raise. We require 500 (or any non-503) to prove propagation.
+        assert resp.status_code != 503, resp.text
+    finally:
+        # Strip the test route + restore pool.
+        app.router.routes[:] = [
+            r for r in app.router.routes if getattr(r, "path", None) != "/__pool_timeout_in_handler"
+        ]
+        if saved_pool is None:
+            if hasattr(app.state, "db_pool"):
+                delattr(app.state, "db_pool")
+        else:
+            app.state.db_pool = saved_pool
+
+
 def test_app_main_imports_real_connection_pool() -> None:
     """`app.main.ConnectionPool` must be the real `psycopg_pool.ConnectionPool`,
     not an alias or shim. A future refactor that quietly swaps the
