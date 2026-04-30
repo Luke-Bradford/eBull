@@ -358,18 +358,11 @@ class TestPartnershipDistributionConcepts:
         assert facts[0].val == Decimal("0.5")
         assert facts[0].unit == "USD/shares"
 
-    def test_lp_legacy_distributions_per_unit_outstanding_excluded(self) -> None:
-        # ``DistributionsPerLimitedPartnershipUnitOutstanding`` is
-        # deliberately NOT in the ``dps_declared`` allowlist (#682).
-        # SEC's companyfacts emits this FY-cumulative concept under
-        # multiple ``fy`` contexts when 10-K filings include prior-
-        # year comparatives, and the canonical normaliser keys on
-        # ``(fy, fp)`` not ``period_end`` — so a 2023 historical row
-        # restamped with the filing's 2025 fy lands as "FY 2025"
-        # and corrupts the chart. Until the normaliser is fixed
-        # (#682), this concept stays out and the primary
-        # ``DistributionMadeToLimitedPartnerDistributionsDeclaredPer
-        # Unit`` carries the load.
+    def test_lp_legacy_distributions_per_unit_outstanding_extracted(self) -> None:
+        # #682 (PR #721) fixed the normaliser's prior-year-comparative
+        # re-stamping bug, so this FY-cumulative concept is now safely
+        # included as a last-priority ``dps_declared`` fallback for
+        # issuers that don't emit the primary per-quarter concept.
         gaap = {
             "DistributionsPerLimitedPartnershipUnitOutstanding": {
                 "units": {
@@ -380,7 +373,9 @@ class TestPartnershipDistributionConcepts:
             }
         }
         facts = _extract_facts_from_gaap(gaap)
-        assert facts == []
+        assert len(facts) == 1
+        assert facts[0].concept == "DistributionsPerLimitedPartnershipUnitOutstanding"
+        assert facts[0].val == Decimal("1.25")
 
     def test_lp_cash_distributions_paid_per_unit_extracted(self) -> None:
         gaap = {
@@ -508,14 +503,21 @@ class TestPartnershipDistributionAliasing:
         assert corp_prio == 0
         assert prio > corp_prio
 
-    def test_lp_legacy_per_unit_NOT_in_alias_map(self) -> None:
-        # See test_lp_legacy_distributions_per_unit_outstanding_excluded
-        # — this concept is intentionally absent from TRACKED_CONCEPTS
-        # to prevent SEC's prior-year-comparative re-stamping bug
-        # from corrupting the chart (#682).
+    def test_lp_legacy_per_unit_aliases_to_dps_declared_lowest_priority(self) -> None:
+        # #682 (PR #721) fixed the normaliser's prior-year-comparative
+        # re-stamping bug, so this concept is now safe to include as a
+        # last-priority fallback for FY summary on issuers that don't
+        # emit the primary per-quarter concept.
         from app.services.fundamentals import _TAG_TO_COLUMN
 
-        assert "DistributionsPerLimitedPartnershipUnitOutstanding" not in _TAG_TO_COLUMN
+        assert "DistributionsPerLimitedPartnershipUnitOutstanding" in _TAG_TO_COLUMN
+        col, prio = _TAG_TO_COLUMN["DistributionsPerLimitedPartnershipUnitOutstanding"]
+        assert col == "dps_declared"
+        # Must be lowest priority (highest index) — primary per-quarter
+        # concepts take precedence when present.
+        primary_col, primary_prio = _TAG_TO_COLUMN["DistributionMadeToLimitedPartnerDistributionsDeclaredPerUnit"]
+        assert primary_col == "dps_declared"
+        assert prio > primary_prio
 
     def test_lp_cash_paid_per_unit_aliases_to_dps_cash_paid(self) -> None:
         from app.services.fundamentals import _TAG_TO_COLUMN

@@ -152,26 +152,25 @@ TRACKED_CONCEPTS: dict[str, tuple[str, ...]] = {
     # in ``USD/shares`` units which the existing ``_UNIT_PRIORITY``
     # list already covers, so no unit-priority change is needed.
     #
-    # Excluded deliberately: ``DistributionsPerLimitedPartnership
-    # UnitOutstanding`` is an FY-cumulative concept that issuers
-    # report on the 10-K alongside prior-year comparatives. SEC's
-    # companyfacts emits the SAME period_end row under multiple
-    # ``fy`` contexts (the 10-K's filing year stamps every prior
-    # comparative). The normaliser keys on ``(fy, fp)`` rather than
-    # ``period_end``, so a 2026-filed 10-K's IEP row for 2023 (val
-    # = $6.00) lands as "fy=2025, fp=FY" alongside the actual 2025
-    # row, and `_canonical_merge` then derives a wrong Q4 = FY −
-    # YTD = $6 − $1.50 = $4.50. Tracked at #682 as a normaliser
-    # bug; until that lands, this concept's downside (wrong values)
-    # outweighs its upside (FY summary line for issuers that don't
-    # emit the primary concept). The primary
-    # ``DistributionMadeToLimitedPartnerDistributionsDeclaredPerUnit``
-    # already covers per-quarter for IEP / EPD / current-era MLPs.
+    # ``DistributionsPerLimitedPartnershipUnitOutstanding`` is an
+    # FY-cumulative concept that issuers report on the 10-K alongside
+    # prior-year comparatives. SEC's companyfacts re-stamps the SAME
+    # XBRL fact under multiple ``(fy, fp)`` contexts (the 10-K's
+    # filing year stamps every prior comparative). Pre-#682 the
+    # normaliser keyed on ``(fy, fp)`` and picked the EARLIEST
+    # period_end's value as canonical (e.g. IEP's 2023 $6.00 row),
+    # which then drove a wrong Q4 = FY − YTD = $4.50 in
+    # ``_canonical_merge``. #682 (PR #721) fixed this by filtering
+    # value attribution to facts whose ``period_end`` matches the
+    # canonical max for the group, so this concept is safe to
+    # re-include now as a last-priority fallback for FY summary on
+    # issuers that don't emit the primary per-quarter concept.
     "dps_declared": (
         "CommonStockDividendsPerShareDeclared",
         "DistributionMadeToLimitedPartnerDistributionsDeclaredPerUnit",
         "DistributionMadeToMemberOrLimitedPartnerDistributionsDeclaredPerUnit",
         "DistributionMadeToLimitedLiabilityCompanyLLCMemberDistributionsDeclaredPerUnit",
+        "DistributionsPerLimitedPartnershipUnitOutstanding",
     ),
     # Cash actually distributed per share (often differs from declared
     # by a quarter). Captured separately so dividend-capture strategies
