@@ -136,6 +136,62 @@ describe("BusinessSectionsTeaser", () => {
     expect(await screen.findByText(/Sections pending/i)).toBeInTheDocument();
   });
 
+  it("renders up to three section cards as a 3-column grid", async () => {
+    vi.spyOn(api, "fetchBusinessSections").mockResolvedValueOnce({
+      symbol: "GME",
+      source_accession: null,
+      cik: null,
+      sections: [
+        {
+          section_order: 1,
+          section_key: "general",
+          section_label: "General",
+          body: "ACME Corp makes widgets globally.",
+          cross_references: [],
+          tables: [],
+        },
+        {
+          section_order: 2,
+          section_key: "products",
+          section_label: "Products",
+          body: "We build the best widgets in the market.",
+          cross_references: [],
+          tables: [],
+        },
+        {
+          section_order: 3,
+          section_key: "markets",
+          section_label: "Markets",
+          body: "We sell to retail and institutional buyers worldwide.",
+          cross_references: [],
+          tables: [],
+        },
+        {
+          section_order: 4,
+          section_key: "competition",
+          section_label: "Competition",
+          body: "We face several large competitors.",
+          cross_references: [],
+          tables: [],
+        },
+      ],
+    } as never);
+    render(
+      <MemoryRouter>
+        <BusinessSectionsTeaser symbol="GME" />
+      </MemoryRouter>,
+    );
+    // First three section labels render (4th truncated).
+    expect(await screen.findByText("General")).toBeInTheDocument();
+    expect(screen.getByText("Products")).toBeInTheDocument();
+    expect(screen.getByText("Markets")).toBeInTheDocument();
+    expect(screen.queryByText("Competition")).not.toBeInTheDocument();
+    // Body teasers render alongside their labels.
+    expect(screen.getByText(/ACME Corp/)).toBeInTheDocument();
+    expect(screen.getByText(/best widgets/)).toBeInTheDocument();
+    expect(screen.getByText(/retail and institutional/)).toBeInTheDocument();
+  });
+
   it("falls back to the legacy generic empty state when the API omits parse_status", async () => {
     vi.spyOn(api, "fetchBusinessSections").mockResolvedValueOnce({
       symbol: "GME",

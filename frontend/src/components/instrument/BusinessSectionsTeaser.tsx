@@ -1,13 +1,22 @@
 /**
- * BusinessSectionsTeaser — 240-char excerpt of the 10-K Item 1
- * narrative on the instrument page (#552). Replaces the full inline
- * BusinessSectionsPanel which was rendering the entire wall-of-text
- * (up to 102 KB pre-#550 fixes, still verbose post-fix).
+ * BusinessSectionsTeaser — up to three short section previews from
+ * the 10-K Item 1 narrative on the instrument page (#552). Replaces
+ * the full inline BusinessSectionsPanel which was rendering the
+ * entire wall-of-text (up to 102 KB pre-#550 fixes, still verbose
+ * post-fix).
  *
  * Pattern matches Bloomberg / Refinitiv / CapIQ — the main
  * instrument view shows a curated short summary + a link to the
  * full sectioned drilldown. Operator clicks through when they want
  * to read the issuer's authoritative wording.
+ *
+ * Grid layout: up to three section cards (`section_label` + 200-char
+ * body teaser) in a responsive 1/2/3-column grid that adapts to the
+ * 8-col Pane width. Fewer than 3 sections render the available cards
+ * across whatever columns the responsive grid resolves to — the
+ * empty grid cells are dead space the parent grid cell would have
+ * left anyway. More than 3 sections truncate; the page-level
+ * "Open →" drills to the full sectioned drilldown.
  */
 
 import { fetchBusinessSections } from "@/api/instruments";
@@ -27,26 +36,43 @@ export interface BusinessSectionsTeaserProps {
   readonly symbol: string;
 }
 
-const TEASER_LEN = 240;
+const TEASER_LEN = 200;
+const MAX_CARDS = 3;
 
-function pickTeaser(sections: ReadonlyArray<BusinessSection>): string {
-  // Prefer the first non-empty body — usually the "general" /
-  // "overview" intro paragraph. Fall back to any section's body
-  // if the first is unexpectedly empty.
+/** Per-section teaser: strip table sentinels + collapse whitespace,
+ *  truncate at the last word boundary inside the cap so the 200-char
+ *  preview reads as a clean sentence fragment. Returns the empty
+ *  string when the section body is empty so the caller can choose to
+ *  drop the card. */
+function teaseBody(body: string): string {
+  if (!body) return "";
+  const text = body
+    .replace(/␞TABLE_\d+␞/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length === 0) return "";
+  if (text.length <= TEASER_LEN) return text;
+  const slice = text.slice(0, TEASER_LEN);
+  const lastSpace = slice.lastIndexOf(" ");
+  const cut = lastSpace > TEASER_LEN * 0.7 ? lastSpace : TEASER_LEN;
+  return text.slice(0, cut).trim() + "…";
+}
+
+/** Pick the first up-to-MAX_CARDS sections that have a non-empty
+ *  body. `section_order` from the API is already authoritative — the
+ *  ingester emits sections in 10-K presentation order — so a simple
+ *  prefix is what we want. */
+function pickCards(
+  sections: ReadonlyArray<BusinessSection>,
+): Array<{ key: string; label: string; teaser: string }> {
+  const out: Array<{ key: string; label: string; teaser: string }> = [];
   for (const s of sections) {
-    if (s.body && s.body.length > 0) {
-      const text = s.body
-        .replace(/␞TABLE_\d+␞/g, "") // strip embedded-table sentinels
-        .replace(/\s+/g, " ")
-        .trim();
-      if (text.length <= TEASER_LEN) return text;
-      const slice = text.slice(0, TEASER_LEN);
-      const lastSpace = slice.lastIndexOf(" ");
-      const cut = lastSpace > TEASER_LEN * 0.7 ? lastSpace : TEASER_LEN;
-      return text.slice(0, cut).trim() + "…";
-    }
+    if (out.length >= MAX_CARDS) break;
+    const t = teaseBody(s.body);
+    if (t.length === 0) continue;
+    out.push({ key: s.section_key, label: s.section_label, teaser: t });
   }
-  return "";
+  return out;
 }
 
 /**
@@ -126,6 +152,42 @@ function ParseStatusEmptyState({ status }: ParseStatusEmptyStateProps): JSX.Elem
   );
 }
 
+/** Up-to-three card grid. When fewer than three sections have content,
+ *  the responsive grid still wraps to whatever columns the available
+ *  width resolves to — empty cells aren't created. When zero usable
+ *  sections exist, falls back to an EmptyState so the operator gets
+ *  the same parse-status branching as the original single-paragraph
+ *  layout. */
+function SectionCardGrid({
+  sections,
+}: {
+  readonly sections: ReadonlyArray<BusinessSection>;
+}): JSX.Element {
+  const cards = pickCards(sections);
+  if (cards.length === 0) {
+    return (
+      <EmptyState
+        title="No 10-K Item 1 body on file"
+        description="Item 1 sections were extracted but every body is empty — no preview to show."
+      />
+    );
+  }
+  return (
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {cards.map((c) => (
+        <div key={c.key} className="space-y-1">
+          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+            {c.label}
+          </h3>
+          <p className="leading-relaxed text-slate-700 dark:text-slate-300">
+            {c.teaser}
+          </p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function BusinessSectionsTeaser({ symbol }: BusinessSectionsTeaserProps) {
   const navigate = useNavigate();
   const state = useAsync<BusinessSectionsResponse>(
@@ -157,12 +219,10 @@ export function BusinessSectionsTeaser({ symbol }: BusinessSectionsTeaserProps) 
           />
         )
       ) : (
-        <div className="space-y-2 text-sm">
-          <p className="max-w-prose leading-relaxed text-slate-700">
-            {pickTeaser(state.data.sections)}
-          </p>
+        <div className="space-y-3 text-sm">
+          <SectionCardGrid sections={state.data.sections} />
           {state.data.source_accession !== null && (
-            <span className="text-[11px] text-slate-500">
+            <span className="text-[11px] text-slate-500 dark:text-slate-400">
               accession{" "}
               <span className="font-mono">{state.data.source_accession}</span>
             </span>
