@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -49,7 +48,6 @@ from app.config import settings
 from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
 from app.db.pool import open_pool
-from app.jobs.runtime import JobRuntime, shutdown_runtime, start_runtime
 from app.security import master_key
 from app.security.secrets_crypto import set_active_key as set_broker_encryption_key
 from app.services.broker_credentials import (
@@ -67,7 +65,6 @@ from app.services.operators import (
 from app.services.quote_stream import QuoteBus
 from app.services.sync_orchestrator.layer_state import compute_layer_states_from_db
 from app.services.sync_orchestrator.layer_types import LayerState
-from app.services.sync_orchestrator.reaper import reap_orphaned_syncs
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 
@@ -139,25 +136,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         boot.recovery_required,
     )
 
-    # Sync orchestrator: reap orphaned runs BEFORE the scheduler starts
-    # so the partial-unique-index gate is clear for the first new sync.
-    # Crash here must not block boot — log loud, continue.
-    #
-    # reap_all=True: orchestrator runs in-process, so any `status='running'`
-    # row at boot is from a prior dead process — there is no live sync to
-    # preserve. The age-based predicate would miss rows started within the
-    # same clock tick when timeout collapses to zero; reap_all bypasses the
-    # age check entirely. If the orchestrator ever becomes multi-process,
-    # this must switch to an activity-based liveness check.
-    try:
-        reaped = reap_orphaned_syncs(reap_all=True)
-        if reaped:
-            logger.info(
-                "orchestrator reaper: transitioned %d orphaned sync_runs row(s)",
-                reaped,
-            )
-    except Exception:
-        logger.exception("orchestrator reaper failed — continuing startup")
+    # Reaper relocates to the jobs entrypoint in #719. The API
+    # process must not start the orchestrator and must not reap on
+    # behalf of a process it no longer owns.
 
     # FX bootstrap (#502). Some non-SSE handlers (portfolio, copy-
     # trading, budget/execution) read ``live_fx_rates`` synchronously
@@ -166,60 +147,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # a fresh DB or wiped table would have no rates available until
     # the next 17:00 CET tick. Fire one inline Frankfurter fetch
     # here so the operator's first request post-boot has rates
-    # ready. Runs BEFORE ``start_runtime()`` so APScheduler's
-    # catch-up cannot race the inline write on the same row.
+    # ready.
     try:
         _bootstrap_fx_rates(pool)
     except Exception:
         logger.exception("fx bootstrap failed — continuing startup, daily cron will retry")
 
-    # Start the in-process job runtime (#13). All SCHEDULED_JOBS are
-    # registered with APScheduler; catch-up fires overdue jobs at boot.
-    job_runtime: JobRuntime | None
-    try:
-        job_runtime = start_runtime()
-    except Exception:
-        # Runtime startup failure must not block the app from booting --
-        # the operator can still log in, see system status, and diagnose.
-        # We log loud and continue with no runtime; manual trigger
-        # endpoints will return 503.
-        logger.exception("Job runtime failed to start; continuing without scheduler")
-        job_runtime = None
-    app.state.job_runtime = job_runtime
-
-    # Register the executor for submit_sync() — only when job_runtime
-    # started successfully. If None, submit_sync raises RuntimeError on
-    # call; POST /sync still returns 503 via ORCHESTRATOR_ENABLED flag.
-    if job_runtime is not None:
-        try:
-            from app.services.sync_orchestrator import set_executor
-
-            set_executor(job_runtime._manual_executor)
-        except Exception:
-            logger.exception("failed to register orchestrator executor")
-
-        # #649A — boot-time freshness sweep. Fires once on startup as
-        # a non-blocking asyncio task; uses scope='behind' which the
-        # planner short-circuits when nothing is past its freshness
-        # target, so this is cheap on a fresh dev DB. Without this
-        # the daily 03:00 UTC orchestrator_full_sync was the only
-        # scheduled refresh path and any restart that missed that
-        # window left the data stale until the operator manually
-        # clicked "Sync now". Recovery model is now: every boot
-        # opportunistically catches up everything that drifted past
-        # its freshness target.
-        #
-        # Gated by EBULL_SKIP_BOOT_SWEEP (mirrors EBULL_SKIP_CATCH_UP)
-        # so the test suite can disable it — every TestClient(app)
-        # enter would otherwise dispatch a behind sync that holds the
-        # partial-unique-index gate and 409s subsequent POST /sync
-        # scope='behind' tests in unrelated test modules.
-        skip_boot_sweep = os.environ.get("EBULL_SKIP_BOOT_SWEEP") == "1"
-        if settings.orchestrator_enabled and not skip_boot_sweep:
-            try:
-                asyncio.create_task(_boot_freshness_sweep())
-            except Exception:
-                logger.exception("failed to schedule boot freshness sweep")
+    # JobRuntime, sync orchestrator executor registration, reaper, and
+    # boot freshness sweep all moved to the out-of-process jobs runtime
+    # in #719 (`python -m app.jobs`). The API process serves HTTP only.
+    # Smoke tests assert ``app.state.job_runtime`` is not set.
 
     # In-process quote-tick fan-out bus (#274 Slice 3). Created here
     # so it lives for the full app lifetime; the WS subscriber
@@ -252,13 +189,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.warning("EtoroWebSocketSubscriber.stop exceeded 35s — proceeding with teardown")
         except Exception:
             logger.exception("EtoroWebSocketSubscriber.stop failed")
-
-    # Shut the runtime down BEFORE closing the pool so any in-flight
-    # job can still write to job_runs as part of its cleanup. The
-    # bounded wait inside JobRuntime.shutdown escalates to wait=False
-    # after timeout_s so a hung job cannot block teardown indefinitely.
-    shutdown_runtime(job_runtime)
-    app.state.job_runtime = None
 
     audit_pool.close()
     logger.info("Audit pool closed.")
@@ -306,48 +236,6 @@ def _bootstrap_fx_rates(pool: ConnectionPool[Any]) -> None:
             "fx bootstrap: fx_rates_refresh raised; daily cron will retry",
             exc_info=True,
         )
-
-
-async def _boot_freshness_sweep() -> None:
-    """Boot-time `scope='behind'` sweep (#649A).
-
-    Fires once per app startup as a non-blocking asyncio task.
-    Uses the existing `scope='behind'` planner which only refreshes
-    layers past their freshness target — cheap when the data is
-    current, useful when the daily 03:00 UTC slot was missed (dev
-    laptop asleep, prod restart, host reboot).
-
-    All exceptions swallowed: this is a best-effort recovery on top
-    of the regular schedule, not a critical path. The orchestrator's
-    own audit (sync_runs / sync_layer_progress) records what fired
-    and what failed; we just dispatch.
-    """
-    try:
-        from app.services.sync_orchestrator import (
-            SyncAlreadyRunning,
-            SyncScope,
-            submit_sync,
-        )
-
-        # Submit on a worker thread — submit_sync's planner does some
-        # synchronous DB work and `asyncio.create_task` runs us on
-        # the event loop. Off-load via to_thread so we don't block
-        # other startup tasks.
-        def _dispatch() -> None:
-            try:
-                submit_sync(SyncScope.behind(), trigger="boot_sweep")
-                logger.info("boot freshness sweep dispatched (scope=behind)")
-            except SyncAlreadyRunning:
-                # The 5-minute high_frequency tick may have beaten us
-                # to the gate, or a manual sync is already running.
-                # Fine — that sync covers the catch-up either way.
-                logger.info("boot freshness sweep skipped: sync already running")
-            except Exception:
-                logger.exception("boot freshness sweep dispatch failed")
-
-        await asyncio.to_thread(_dispatch)
-    except Exception:
-        logger.exception("boot freshness sweep helper failed")
 
 
 async def _maybe_start_etoro_ws(

@@ -39,12 +39,12 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import psycopg
+import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
-from app.jobs.runtime import JobRuntime
 from app.services.ops_monitor import (
     JobHealth,
     LayerHealth,
@@ -114,6 +114,10 @@ class JobOverviewResponse(BaseModel):
     cadence: str
     cadence_kind: Literal["every_n_minutes", "hourly", "daily", "weekly", "monthly"]
     next_run_time: datetime
+    # `next_run_time_source` retained for frontend compat; always
+    # "declared" since #719 — the API no longer hosts APScheduler so
+    # there is no live-fire-time source to compete with the cadence
+    # computation. The frontend can drop the discriminator at its leisure.
     next_run_time_source: Literal["live", "declared"]
     last_status: Literal["running", "success", "failure", "skipped"] | None
     last_started_at: datetime | None
@@ -121,9 +125,33 @@ class JobOverviewResponse(BaseModel):
     detail: str
 
 
+class JobsProcessSubsystemHealth(BaseModel):
+    """Per-subsystem heartbeat health for the jobs process (#719)."""
+
+    subsystem: str
+    last_beat_at: datetime | None
+    age_seconds: float | None
+    is_stale: bool
+
+
+class JobsProcessHealthResponse(BaseModel):
+    """Aggregate jobs-process health derived from the heartbeat table.
+
+    `state` is `healthy` only when every expected subsystem has beaten
+    within `STALE_THRESHOLD_SECONDS`. A single stale subsystem
+    downgrades to `degraded`; every subsystem stale (or no rows at all)
+    is `down`. Frontend renders the aggregate with a per-subsystem
+    drilldown.
+    """
+
+    state: Literal["healthy", "degraded", "down"]
+    subsystems: list[JobsProcessSubsystemHealth]
+
+
 class JobsListResponse(BaseModel):
     checked_at: datetime
     jobs: list[JobOverviewResponse]
+    jobs_process: JobsProcessHealthResponse
 
 
 # ---------------------------------------------------------------------------
@@ -195,20 +223,20 @@ def _build_jobs_overview(
     conn: psycopg.Connection[object],
     registry: list[ScheduledJob],
     now: datetime,
-    live_times: dict[str, datetime | None] | None = None,
 ) -> list[JobOverviewResponse]:
+    """Build the per-job overview view.
+
+    Since #719, next-run-time is always computed from the declared
+    cadence — the API no longer hosts APScheduler, so there is no live
+    fire-time to query. `compute_next_run(cadence, now)` returns the
+    next future occurrence, which is the same value APScheduler would
+    schedule against. The `_source="declared"` discriminator is kept
+    for frontend compat.
+    """
     overviews: list[JobOverviewResponse] = []
     for job in registry:
         health = check_job_health(conn, job.name)
-        # Prefer live next-fire time from APScheduler when available;
-        # fall back to declared cadence computation otherwise.
-        live_nrt = live_times.get(job.name) if live_times else None
-        if live_nrt is not None:
-            next_run = live_nrt
-            source: Literal["live", "declared"] = "live"
-        else:
-            next_run = compute_next_run(job.cadence, now)
-            source = "declared"
+        next_run = compute_next_run(job.cadence, now)
         overviews.append(
             JobOverviewResponse(
                 name=job.name,
@@ -216,7 +244,7 @@ def _build_jobs_overview(
                 cadence=job.cadence.label,
                 cadence_kind=job.cadence.kind,
                 next_run_time=next_run,
-                next_run_time_source=source,
+                next_run_time_source="declared",
                 last_status=health.last_status,
                 last_started_at=health.last_started_at,
                 last_finished_at=health.last_finished_at,
@@ -224,6 +252,62 @@ def _build_jobs_overview(
             )
         )
     return overviews
+
+
+# Stale threshold for a heartbeat row. Each subsystem writes every 10s;
+# 60s gives 6 missed beats of head-room before the API flags `degraded`.
+_HEARTBEAT_STALE_THRESHOLD_S: float = 60.0
+
+
+def _build_jobs_process_health(
+    conn: psycopg.Connection[object],
+    now: datetime,
+) -> JobsProcessHealthResponse:
+    """Aggregate per-subsystem heartbeat into a process-level state.
+
+    Returns `down` when the heartbeat table has no rows (jobs process
+    has never run, or every subsystem is stale). Returns `healthy`
+    only when every row's age is below the stale threshold. Anything
+    in between is `degraded`.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT subsystem, last_beat_at
+            FROM job_runtime_heartbeat
+            ORDER BY subsystem
+            """
+        )
+        rows = cur.fetchall()
+
+    subsystems: list[JobsProcessSubsystemHealth] = []
+    any_fresh = False
+    any_stale = False
+    for row in rows:
+        last_beat: datetime = row["last_beat_at"]
+        age = (now - last_beat).total_seconds()
+        is_stale = age > _HEARTBEAT_STALE_THRESHOLD_S
+        if is_stale:
+            any_stale = True
+        else:
+            any_fresh = True
+        subsystems.append(
+            JobsProcessSubsystemHealth(
+                subsystem=str(row["subsystem"]),
+                last_beat_at=last_beat,
+                age_seconds=age,
+                is_stale=is_stale,
+            )
+        )
+
+    if not subsystems or not any_fresh:
+        state: Literal["healthy", "degraded", "down"] = "down"
+    elif any_stale:
+        state = "degraded"
+    else:
+        state = "healthy"
+
+    return JobsProcessHealthResponse(state=state, subsystems=subsystems)
 
 
 # ---------------------------------------------------------------------------
@@ -274,19 +358,25 @@ def get_jobs(
     request: Request,
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> JobsListResponse:
-    """Declared scheduled jobs with live next-run time and last result.
+    """Declared scheduled jobs + per-subsystem jobs-process health (#719).
 
-    ``next_run_time`` is sourced from the live APScheduler scheduler
-    when the runtime is available (``next_run_time_source="live"``),
-    falling back to the declared cadence computation otherwise.
+    Next-run-time is computed from the declared cadence
+    (``compute_next_run(cadence, now)``) — same value APScheduler
+    schedules against. The ``jobs_process`` block exposes the
+    multi-subsystem heartbeat table so a stale subsystem
+    (manual_listener, queue_drainer, scheduler, main) is visible to
+    the operator without log grepping.
     """
+    # ``request`` is intentionally unused — kept in the signature for
+    # backwards compat with existing FastAPI dependency wiring; the
+    # runtime lookup off ``app.state.job_runtime`` is gone in #719.
+    _ = request
     now = _utcnow()
-    runtime: JobRuntime | None = getattr(request.app.state, "job_runtime", None)
     try:
-        live_times = runtime.get_next_run_times() if runtime is not None else None
-        overviews = _build_jobs_overview(conn, SCHEDULED_JOBS, now, live_times=live_times)
+        overviews = _build_jobs_overview(conn, SCHEDULED_JOBS, now)
+        jobs_process = _build_jobs_process_health(conn, now)
     except Exception as exc:
         logger.exception("get_jobs: failed to build overview")
         raise HTTPException(status_code=503, detail="job overview unavailable") from exc
 
-    return JobsListResponse(checked_at=now, jobs=overviews)
+    return JobsListResponse(checked_at=now, jobs=overviews, jobs_process=jobs_process)

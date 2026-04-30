@@ -15,7 +15,6 @@ from typing import Any, Literal
 import psycopg
 import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.api.auth import require_session_or_service_token
@@ -26,13 +25,9 @@ from app.services.fundamentals_observability import (
     get_seed_progress,
 )
 from app.services.layer_enabled import SAFETY_CRITICAL_LAYERS, set_layer_enabled
-from app.services.sync_orchestrator import (
-    ExecutionPlan,
-    SyncAlreadyRunning,
-    SyncScope,
-    submit_sync,
-)
+from app.services.sync_orchestrator import SyncScope
 from app.services.sync_orchestrator.cascade import collapse_cascades
+from app.services.sync_orchestrator.dispatcher import publish_sync_request
 from app.services.sync_orchestrator.layer_failure_history import (
     all_layer_error_excerpts,
     all_layer_histories,
@@ -198,40 +193,28 @@ def _scope_from(body: SyncRequest) -> SyncScope:
     raise HTTPException(status_code=422, detail=f"unknown scope {body.scope!r}")
 
 
-def _plan_to_json(plan: ExecutionPlan) -> dict[str, Any]:
-    return {
-        "layers_to_refresh": [
-            {
-                "name": lp.name,
-                "emits": list(lp.emits),
-                "reason": lp.reason,
-                "dependencies": list(lp.dependencies),
-                "is_blocking": lp.is_blocking,
-                "estimated_items": lp.estimated_items,
-            }
-            for lp in plan.layers_to_refresh
-        ],
-        "layers_skipped": [{"name": s.name, "reason": s.reason} for s in plan.layers_skipped],
-    }
-
-
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
 def post_sync(body: SyncRequest) -> Any:
+    """Publish a sync request to the durable queue (#719).
+
+    The API never executes the sync itself — that work belongs to the
+    out-of-process jobs runtime. This endpoint writes the request to
+    `pending_job_requests`, fires `pg_notify('ebull_job_request', ...)`,
+    and returns the new request_id. The jobs process picks it up via
+    LISTEN (or its 5s poll fallback) and runs the orchestrator on its
+    own executor.
+
+    The pre-#719 SyncAlreadyRunning / 409 path is gone. The orchestrator
+    enforces single-flight via the partial unique index on
+    sync_runs(status='running'); a duplicate request will reach the
+    listener, attempt to plan, and the orchestrator's gate will surface
+    via `pending_job_requests.error_msg`. Operator polls
+    `/jobs/requests?request_id=N` for status.
+    """
     if not settings.orchestrator_enabled:
         raise HTTPException(status_code=503, detail="sync orchestrator disabled (Phase 1)")
-    try:
-        sync_run_id, plan = submit_sync(_scope_from(body), trigger="manual")
-    except SyncAlreadyRunning as exc:
-        # Use JSONResponse to get a top-level body per spec §4.4 instead
-        # of FastAPI's HTTPException "detail" wrapper.
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": "sync_already_running",
-                "sync_run_id": exc.active_sync_run_id,
-            },
-        )
-    return {"sync_run_id": sync_run_id, "plan": _plan_to_json(plan)}
+    request_id = publish_sync_request(_scope_from(body), trigger="manual")
+    return {"request_id": request_id}
 
 
 @router.get("/status")

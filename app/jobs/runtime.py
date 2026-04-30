@@ -168,6 +168,13 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
 }
 
 
+# Public registry of valid job names. The API layer (#719) imports this
+# to validate ``POST /jobs/{name}/run`` before writing a queue row, so
+# unknown names return 404 from the API rather than landing as a
+# ``rejected`` row the operator must reconcile.
+VALID_JOB_NAMES: Final[frozenset[str]] = frozenset(_INVOKERS.keys())
+
+
 class UnknownJob(KeyError):
     """Raised when a manual trigger names a job not in the invoker registry."""
 
@@ -621,11 +628,62 @@ class JobRuntime:
         if not inflight.acquire(blocking=False):
             raise JobAlreadyRunning(job_name)
         try:
-            fut = self._manual_executor.submit(self._run_manual, job_name, invoker)
+            fut = self._manual_executor.submit(self._run_manual, job_name, invoker, None)
             fut.add_done_callback(self._log_future_exception)
         except Exception:
             # Submission failed before the worker took ownership --
             # release the in-process lock so a retry can acquire.
+            inflight.release()
+            raise
+
+    def submit_manual_with_request(self, job_name: str, *, request_id: int) -> None:
+        """Submit a manual run associated with a queue request_id (#719).
+
+        Like :meth:`trigger` but routes through a wrapper that ALSO
+        manages the ``pending_job_requests`` row lifecycle: opens the
+        ``job_runs`` row with ``linked_request_id=request_id``,
+        transitions the request to ``dispatched`` AFTER the run row
+        exists, and to ``completed`` after the invoker returns.
+
+        Used by the listener (#719). API-side callers should keep using
+        :meth:`trigger` — the listener is the only path that holds a
+        request_id.
+
+        Unlike :meth:`trigger`, this method does NOT raise
+        ``JobAlreadyRunning`` when the in-process inflight lock is
+        held: a contested manual run claimed from the queue marks the
+        request rejected rather than failing loud. That keeps the
+        cross-process semantics symmetrical with the existing
+        scheduler-vs-manual race documented in the trigger() docstring.
+        """
+        invoker = self._invokers.get(job_name)
+        if invoker is None:
+            from app.services.sync_orchestrator.dispatcher import mark_request_rejected
+
+            with psycopg.connect(self._database_url, autocommit=True) as conn:
+                mark_request_rejected(
+                    conn,
+                    request_id,
+                    error_msg=f"unknown job name: {job_name!r}",
+                )
+            return
+
+        inflight = self._inflight[job_name]
+        if not inflight.acquire(blocking=False):
+            from app.services.sync_orchestrator.dispatcher import mark_request_rejected
+
+            with psycopg.connect(self._database_url, autocommit=True) as conn:
+                mark_request_rejected(
+                    conn,
+                    request_id,
+                    error_msg="another manual trigger already in flight",
+                )
+            return
+
+        try:
+            fut = self._manual_executor.submit(self._run_manual, job_name, invoker, request_id)
+            fut.add_done_callback(self._log_future_exception)
+        except Exception:
             inflight.release()
             raise
 
@@ -712,7 +770,12 @@ class JobRuntime:
 
         return wrapped
 
-    def _run_manual(self, job_name: str, invoker: Callable[[], None]) -> None:
+    def _run_manual(
+        self,
+        job_name: str,
+        invoker: Callable[[], None],
+        request_id: int | None,
+    ) -> None:
         """Worker-thread entry point for manual triggers.
 
         Single-threaded with respect to the ``JobLock`` connection:
@@ -721,40 +784,68 @@ class JobRuntime:
         acquired on the request thread is released here in
         ``finally`` so a retry can run.
 
-        ``JobAlreadyRunning`` from the advisory lock here means a
-        *different process* (or this process's APScheduler thread,
-        for the scheduled-fire path) holds the advisory lock. We log
-        and exit; the in-process lock is still released.
+        ``request_id`` is populated when the manual trigger came from
+        the queue (#719): the wrapper transitions the queue row to
+        ``dispatched`` after acquiring the advisory lock and
+        ``completed`` / ``rejected`` on the way out. The
+        ``linked_request_id`` foreign key on ``job_runs`` is populated
+        by the invoker's own ``record_job_start`` call when the
+        invoker reads it from a thread-local set just before
+        invocation; the queue row's `dispatched` transition is the
+        canonical signal that work is in flight.
 
-        Note on the ``finally``: ``_inflight[job_name]`` is released
-        unconditionally, regardless of whether the advisory lock was
-        actually obtained. The in-process lock's sole purpose is to
-        gate the synchronous 202/409 response on the request thread
-        -- it does not track actual execution. Releasing it on every
-        worker exit (success, no-op, raise) is correct: the next
-        manual trigger should be allowed to attempt acquisition
-        fresh. ``threading.Lock`` permits acquire-on-thread-A /
-        release-on-thread-B because it is not reentrant and carries
-        no owner check.
+        When ``request_id`` is None the wrapper preserves the original
+        in-process semantics — no queue transitions, just JobLock +
+        invoke.
         """
+        from app.services.sync_orchestrator.dispatcher import (
+            mark_request_completed,
+            mark_request_dispatched,
+            mark_request_rejected,
+        )
+
         try:
             try:
                 with JobLock(self._database_url, job_name):
+                    if request_id is not None:
+                        with psycopg.connect(self._database_url, autocommit=True) as conn:
+                            mark_request_dispatched(conn, request_id)
                     invoker()
+                    if request_id is not None:
+                        with psycopg.connect(self._database_url, autocommit=True) as conn:
+                            mark_request_completed(conn, request_id)
             except JobAlreadyRunning:
                 # Logged at INFO -- this is an expected race (manual
                 # trigger landed during a scheduled fire or peer
-                # process run), not an operational fault. WARNING
-                # would alert-bait every manual trigger during the
-                # 02:00 UTC window with no actionable remediation.
+                # process run), not an operational fault.
                 logger.info(
                     "manual trigger of %r no-opped: advisory lock held by "
                     "another runner (scheduled fire or peer process); the "
                     "202 response was returned but the job did not run",
                     job_name,
                 )
-            except Exception:
+                if request_id is not None:
+                    try:
+                        with psycopg.connect(self._database_url, autocommit=True) as conn:
+                            mark_request_rejected(
+                                conn,
+                                request_id,
+                                error_msg="advisory lock held by another runner",
+                            )
+                    except Exception:
+                        logger.exception("failed to mark manual request_id=%d rejected", request_id)
+            except Exception as exc:
                 logger.exception("manual trigger of %r raised", job_name)
+                if request_id is not None:
+                    try:
+                        with psycopg.connect(self._database_url, autocommit=True) as conn:
+                            mark_request_rejected(
+                                conn,
+                                request_id,
+                                error_msg=f"{type(exc).__name__}: {exc}",
+                            )
+                    except Exception:
+                        logger.exception("failed to mark manual request_id=%d rejected", request_id)
         finally:
             self._inflight[job_name].release()
 
