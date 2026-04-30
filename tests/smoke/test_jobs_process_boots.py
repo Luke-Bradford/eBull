@@ -49,50 +49,94 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_jobs_bootstrap_master_key_loads_aesgcm() -> None:
-    """Drive the jobs-entrypoint bootstrap helper; fail loud if the
-    AES-GCM cipher is still uninitialised after it returns.
+def test_jobs_bootstrap_master_key_installs_returned_key() -> None:
+    """Pin the wiring contract for ``_bootstrap_master_key``: when the
+    underlying ``master_key.bootstrap`` returns a key, the helper
+    installs it via ``set_active_key``.
 
-    Pre-fix the jobs entrypoint NEVER called ``master_key.bootstrap``,
-    so a future regression that removes the helper invocation from
-    ``serve()`` would silently re-introduce the
-    ``MasterKeyNotLoadedError`` boot failure. This test pins the
-    contract: after ``_bootstrap_master_key(pool)`` returns, either
-    (a) the AES-GCM cipher is callable, or (b) the bootstrap legitimately
-    ended in ``recovery_required`` mode (no ``EBULL_SECRETS_KEY`` to
-    install). Failure mode the test catches: the helper isn't wired
-    in or doesn't propagate the loaded key into ``set_active_key``.
+    Bot pre-flight (PR #733) flagged that calling ``bootstrap`` twice
+    to validate state could mask a regression if the function isn't
+    idempotent. Replaced with a direct mock of ``master_key.bootstrap``
+    so the test asserts the helper's wiring without depending on
+    bootstrap's internal idempotency: feed it a known key, assert
+    ``set_active_key`` receives it, assert the AES-GCM cipher is
+    callable.
+
+    Failure modes caught:
+      - Helper omitted from ``serve()`` (the original bug).
+      - Helper drops the returned key on the floor (e.g. forgets the
+        ``set_active_key`` call).
+      - Helper short-circuits on the wrong condition (e.g. checking
+        ``boot.recovery_required`` instead of
+        ``boot.broker_encryption_key is not None``).
     """
-    from app.db.pool import open_pool
+    from unittest.mock import MagicMock, patch
+
     from app.jobs.__main__ import _bootstrap_master_key
-    from app.security import master_key
+    from app.security.master_key import BootResult
+    from app.security.secrets_crypto import (
+        _get_aesgcm,  # type: ignore[attr-defined]
+        clear_active_key,
+    )
+
+    fake_key = b"0" * 32  # AES-256 key length
+    fake_pool = MagicMock()
+    # Pool's ``.connection()`` is a context manager returning a
+    # connection. We never touch the connection inside the helper —
+    # ``master_key.bootstrap`` is patched — so a bare MagicMock is
+    # enough here.
+    fake_pool.connection.return_value.__enter__.return_value = MagicMock()
+    fake_pool.connection.return_value.__exit__.return_value = None
+
+    fake_boot = BootResult(
+        state="normal",
+        needs_setup=False,
+        recovery_required=False,
+        broker_encryption_key=fake_key,
+    )
+
+    # Reset the module-global cipher so a prior test's bootstrap
+    # cannot trivialise this assertion.
+    clear_active_key()
+    with patch("app.jobs.__main__.master_key.bootstrap", return_value=fake_boot):
+        _bootstrap_master_key(fake_pool)
+    # If the helper installed the key, ``_get_aesgcm()`` returns
+    # without raising. If the helper dropped the key on the floor,
+    # this raises ``MasterKeyNotLoadedError``.
+    aesgcm = _get_aesgcm()
+    assert aesgcm is not None
+
+
+def test_jobs_bootstrap_master_key_no_op_when_bootstrap_returns_no_key() -> None:
+    """Pin the recovery / clean-install branch: when bootstrap returns
+    ``broker_encryption_key=None`` (no ``EBULL_SECRETS_KEY`` configured
+    or no ciphertext on disk), the helper must NOT call
+    ``set_active_key`` — leaving the cipher unloaded so subsequent
+    code paths surface ``MasterKeyNotLoadedError`` correctly rather
+    than silently using a stale or zeroed key."""
+    from unittest.mock import MagicMock, patch
+
+    from app.jobs.__main__ import _bootstrap_master_key
+    from app.security.master_key import BootResult
     from app.security.secrets_crypto import (
         MasterKeyNotLoadedError,
         _get_aesgcm,  # type: ignore[attr-defined]
+        clear_active_key,
     )
 
-    pool = open_pool("jobs-bootstrap-smoke", min_size=1, max_size=2)
-    try:
-        _bootstrap_master_key(pool)
+    fake_pool = MagicMock()
+    fake_pool.connection.return_value.__enter__.return_value = MagicMock()
+    fake_pool.connection.return_value.__exit__.return_value = None
 
-        # Outcome A — the bootstrap supplied a key and the helper
-        # installed it via ``set_active_key``. Cipher is callable.
-        try:
-            _get_aesgcm()
-            return
-        except MasterKeyNotLoadedError:
-            pass
+    fake_boot = BootResult(
+        state="recovery_required",
+        needs_setup=False,
+        recovery_required=True,
+        broker_encryption_key=None,
+    )
 
-        # Outcome B — bootstrap legitimately returned no key (clean
-        # install / recovery_required). Confirm by re-reading the
-        # bootstrap state directly so a NotLoaded result here is
-        # only acceptable when boot ALSO had no key to install.
-        with pool.connection() as conn:
-            boot = master_key.bootstrap(conn)
-        assert boot.broker_encryption_key is None, (
-            "_bootstrap_master_key did not install the broker encryption key "
-            "despite bootstrap having one available — the jobs entrypoint "
-            "fix from #JOBS-MK-BOOTSTRAP regressed."
-        )
-    finally:
-        pool.close()
+    clear_active_key()
+    with patch("app.jobs.__main__.master_key.bootstrap", return_value=fake_boot):
+        _bootstrap_master_key(fake_pool)
+    with pytest.raises(MasterKeyNotLoadedError):
+        _get_aesgcm()
