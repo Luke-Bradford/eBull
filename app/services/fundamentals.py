@@ -2362,6 +2362,7 @@ def execute_refresh(
                     continue
                 instrument_id, symbol = inst
                 new_filings = plan.new_filings_by_cik.get(cik)
+                submissions_body = plan.submissions_by_cik.get(cik)
                 with conn.transaction():
                     # Upsert filing_events for each master-index entry
                     # on this CIK so the 8-K (or similar) is visible to
@@ -2377,6 +2378,25 @@ def execute_refresh(
                                 entry=entry,
                                 symbol=symbol,
                             )
+                    # #675: apply 8-K items[] + entity profile inside
+                    # the same per-CIK transaction, BEFORE the
+                    # watermark commit. Codex flagged a silent-skip
+                    # risk if extractions ran post-commit: a crash or
+                    # DB error in the post-commit window would leave
+                    # the accession marked done so the next planner
+                    # run skips this CIK and items[] never applies.
+                    # Inside the transaction, the helper's internal
+                    # savepoints still soak up parse/write failures
+                    # without rolling back the master-index inserts
+                    # (#439 invariant); the watermark advance and the
+                    # extraction attempt commit atomically.
+                    if submissions_body is not None:
+                        _apply_submissions_extractions(
+                            conn,
+                            cik=cik,
+                            instrument_id=instrument_id,
+                            submissions=submissions_body,
+                        )
                     set_watermark(
                         conn,
                         source="sec.submissions",
@@ -2384,20 +2404,6 @@ def execute_refresh(
                         watermark=accession,
                     )
                 conn.commit()
-                # #675: apply 8-K items[] + entity profile from the
-                # planner-fetched submissions body. Best-effort — runs
-                # AFTER the watermark commit so a transient failure
-                # cannot un-advance the watermark, and uses its own
-                # savepoints inside ``_apply_submissions_extractions``
-                # for #439 compliance.
-                submissions_body = plan.submissions_by_cik.get(cik)
-                if submissions_body is not None:
-                    _apply_submissions_extractions(
-                        conn,
-                        cik=cik,
-                        instrument_id=instrument_id,
-                        submissions=submissions_body,
-                    )
                 submissions_advanced += 1
             except Exception as exc:
                 try:

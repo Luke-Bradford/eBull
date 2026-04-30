@@ -160,7 +160,13 @@ def main(argv: list[str] | None = None) -> int:
     if not args.apply:
         logger.info("DRY RUN — no fetches, no writes. Use --apply to commit.")
 
-    with psycopg.connect(settings.database_url) as conn:
+    # autocommit=True so every per-CIK ``with conn.transaction()`` is a
+    # real BEGIN/COMMIT pair rather than a savepoint nested inside the
+    # implicit outer transaction that ``conn.execute(SELECT)`` would
+    # otherwise open. Without this, a process crash mid-loop would roll
+    # back every preceding CIK's writes when the outer transaction
+    # aborts. Codex checkpoint-2 flagged this.
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
         covered = _load_covered_ciks(conn, limit=args.limit, offset=args.offset)
         if not covered:
             logger.info("backfill: no covered CIKs found in slice (offset=%d, limit=%s)", args.offset, args.limit)
@@ -188,13 +194,26 @@ def main(argv: list[str] | None = None) -> int:
         failed_profile = 0
         with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
             for idx, (instrument_id, symbol, cik) in enumerate(covered, start=1):
-                items_updated, profile_updated, status = _process_cik(
-                    conn,
-                    instrument_id=instrument_id,
-                    cik=cik,
-                    provider=provider,
-                    apply=args.apply,
-                )
+                # Trap per-CIK provider exceptions (network, 5xx
+                # bursts, malformed JSON) so one bad CIK cannot abort
+                # the rest of the sweep. With autocommit=True, every
+                # prior CIK's writes are already durable.
+                try:
+                    items_updated, profile_updated, status = _process_cik(
+                        conn,
+                        instrument_id=instrument_id,
+                        cik=cik,
+                        provider=provider,
+                        apply=args.apply,
+                    )
+                except Exception:
+                    logger.warning(
+                        "backfill: _process_cik raised for cik=%s — skipping",
+                        cik,
+                        exc_info=True,
+                    )
+                    failed_items += 1
+                    continue
                 items_total += items_updated
                 profile_total += profile_updated
                 if status == "ok":
