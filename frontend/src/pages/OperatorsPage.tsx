@@ -168,7 +168,7 @@ export function OperatorsPage(): JSX.Element {
         <h2 className="mb-2 text-sm font-medium text-slate-700">Add operator</h2>
         <form
           onSubmit={handleCreate}
-          className="max-w-sm space-y-3 rounded border border-slate-200 dark:border-slate-800 bg-white p-4"
+          className="max-w-sm space-y-3 rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4"
         >
           <label className="block text-sm">
             <span className="mb-1 block text-slate-600">Username</span>

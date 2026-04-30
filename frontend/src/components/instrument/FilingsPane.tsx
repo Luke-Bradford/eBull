@@ -153,12 +153,12 @@ export function FilingsPane({
                 {f.filing_type !== null ? (
                   <Term
                     term={f.filing_type}
-                    className="rounded bg-slate-100 px-1 py-0.5 text-[10px] text-slate-600 no-underline"
+                    className="rounded bg-slate-100 dark:bg-slate-800 px-1 py-0.5 text-[10px] text-slate-600 no-underline"
                   >
                     {f.filing_type}
                   </Term>
                 ) : (
-                  <span className="rounded bg-slate-100 px-1 py-0.5 text-[10px] text-slate-600">
+                  <span className="rounded bg-slate-100 dark:bg-slate-800 px-1 py-0.5 text-[10px] text-slate-600">
                     ?
                   </span>
                 )}

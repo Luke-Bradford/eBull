@@ -170,7 +170,7 @@ function FinancialsTab({ symbol }: { symbol: string }) {
               key={s}
               type="button"
               className={`px-2 py-1 ${
-                statement === s ? "bg-slate-800 text-white" : "bg-white"
+                statement === s ? "bg-slate-800 text-white" : "bg-white dark:bg-slate-900"
               }`}
               onClick={() => setStatement(s)}
             >
@@ -183,7 +183,7 @@ function FinancialsTab({ symbol }: { symbol: string }) {
             <button
               key={p}
               type="button"
-              className={`px-2 py-1 ${period === p ? "bg-slate-800 text-white" : "bg-white"}`}
+              className={`px-2 py-1 ${period === p ? "bg-slate-800 text-white" : "bg-white dark:bg-slate-900"}`}
               onClick={() => setPeriod(p)}
             >
               {p}
@@ -318,7 +318,7 @@ function sentimentBadge(score: number | null) {
     ? "bg-emerald-100 text-emerald-700"
     : negative
       ? "bg-red-100 text-red-700"
-      : "bg-slate-100 text-slate-600";
+      : "bg-slate-100 dark:bg-slate-800 text-slate-600";
   const prefix = positive ? "+" : negative ? "" : "";
   return (
     <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${color}`}>
@@ -357,7 +357,7 @@ function NewsTab({ instrumentId }: { instrumentId: number }) {
               {n.source && <span className="text-xs text-slate-500">· {n.source}</span>}
               {sentimentBadge(n.sentiment_score)}
               {n.category && (
-                <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600">
+                <span className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-600">
                   {n.category}
                 </span>
               )}
@@ -395,7 +395,7 @@ function redFlagBadge(score: number | null) {
       ? "bg-red-100 text-red-700"
       : score > 0.2
         ? "bg-amber-100 text-amber-700"
-        : "bg-slate-100 text-slate-600";
+        : "bg-slate-100 dark:bg-slate-800 text-slate-600";
   return (
     <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${color}`}>
       red-flag {score.toFixed(2)}
@@ -429,7 +429,7 @@ function FilingsTab({ instrumentId }: { instrumentId: number }) {
           <li key={f.filing_event_id} className="border-b border-slate-100 pb-2 last:border-0">
             <div className="flex items-baseline gap-2">
               <span className="text-xs text-slate-500">{f.filing_date}</span>
-              <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600">
+              <span className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-600">
                 {f.filing_type ?? "?"}
               </span>
               <span className="text-xs text-slate-500">{f.provider}</span>

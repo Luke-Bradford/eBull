@@ -64,10 +64,10 @@ export function LoginPage(): JSX.Element {
   }
 
   return (
-    <div className="flex h-screen w-screen items-center justify-center bg-slate-50">
+    <div className="flex h-screen w-screen items-center justify-center bg-slate-50 dark:bg-slate-900/40">
       <form
         onSubmit={handleSubmit}
-        className="w-full max-w-sm rounded border border-slate-200 dark:border-slate-800 bg-white p-6 shadow-sm"
+        className="w-full max-w-sm rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 shadow-sm"
       >
         <h1 className="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-100">eBull operator</h1>
         <label className="mb-3 block text-sm">

@@ -194,11 +194,11 @@ export function SetupPage(): JSX.Element {
     (showUserKeyField ? brokerUserKey.length >= MIN_SECRET_LEN : true);
 
   return (
-    <div className="flex h-screen w-screen items-center justify-center bg-slate-50">
+    <div className="flex h-screen w-screen items-center justify-center bg-slate-50 dark:bg-slate-900/40">
       {step === "operator" ? (
         <form
           onSubmit={handleOperatorSubmit}
-          className="w-full max-w-sm rounded border border-slate-200 dark:border-slate-800 bg-white p-6 shadow-sm"
+          className="w-full max-w-sm rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 shadow-sm"
         >
           <h1 className="mb-1 text-lg font-semibold text-slate-800 dark:text-slate-100">
             First-run setup
@@ -265,7 +265,7 @@ export function SetupPage(): JSX.Element {
           </button>
         </form>
       ) : mode === "complete" ? (
-        <div className="w-full max-w-sm rounded border border-slate-200 dark:border-slate-800 bg-white p-6 shadow-sm">
+        <div className="w-full max-w-sm rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 shadow-sm">
           <h1 className="mb-1 text-lg font-semibold text-slate-800 dark:text-slate-100">
             Credentials configured
           </h1>
@@ -283,7 +283,7 @@ export function SetupPage(): JSX.Element {
       ) : (
         <form
           onSubmit={handleBrokerSubmit}
-          className="w-full max-w-sm space-y-3 rounded border border-slate-200 dark:border-slate-800 bg-white p-6 shadow-sm"
+          className="w-full max-w-sm space-y-3 rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 shadow-sm"
         >
           <h1 className="text-lg font-semibold text-slate-800 dark:text-slate-100">
             {mode === "repair" ? "Complete credential setup" : "Add eToro credentials"}
@@ -332,7 +332,7 @@ export function SetupPage(): JSX.Element {
               type="button"
               onClick={() => void handleTestConnection()}
               disabled={!canTestConnection || validating}
-              className="rounded border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40 disabled:opacity-50"
+ className="rounded border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40 disabled:opacity-50"
             >
               {validating ? "Testing…" : "Test connection"}
             </button>
@@ -361,7 +361,7 @@ export function SetupPage(): JSX.Element {
               type="button"
               onClick={handleSkipBroker}
               disabled={brokerSubmitting}
-              className="flex-1 rounded border border-slate-300 dark:border-slate-700 bg-white py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
+              className="flex-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
             >
               Skip for now
             </button>

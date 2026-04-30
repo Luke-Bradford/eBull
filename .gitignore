@@ -27,3 +27,6 @@ data/
 .tmp/
 tmp_pytest/
 .superpowers/
+
+# Playwright session screenshots dropped at repo root by the MCP
+/*.png

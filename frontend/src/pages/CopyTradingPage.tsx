@@ -238,7 +238,7 @@ function InstrumentGroupRow({
   return (
     <>
       <tr
-        className={`border-t border-slate-100 ${hasMultiple ? "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40" : ""}`}
+ className={`border-t border-slate-100 ${hasMultiple ? "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40" : ""}`}
         onClick={hasMultiple ? () => setExpanded((v) => !v) : undefined}
       >
         <td className="px-2 py-2 text-left">

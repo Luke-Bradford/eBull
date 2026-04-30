@@ -137,7 +137,7 @@ export function LayerHealthList({ layers, onToggle }: LayerHealthListProps): JSX
                       onToggle(entry.layer, nextEnabled);
                       setMenuOpen(null);
                     }}
-                    className="block w-full px-3 py-1 text-left text-xs text-slate-700 hover:bg-slate-50 dark:text-slate-100 dark:hover:bg-slate-800"
+ className="block w-full px-3 py-1 text-left text-xs text-slate-700 hover:bg-slate-50 dark:text-slate-100 dark:hover:bg-slate-800"
                   >
                     {isDisabled ? "Enable layer" : "Disable layer"}
                   </button>

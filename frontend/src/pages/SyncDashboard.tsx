@@ -342,7 +342,7 @@ function LayerCard({
       : "bg-amber-500";
   return (
     <div
-      className={`rounded border ${border} bg-white p-3 text-sm shadow-sm`}
+      className={`rounded border ${border} bg-white dark:bg-slate-900 p-3 text-sm shadow-sm`}
     >
       <div className="flex items-center justify-between">
         <span className="font-medium text-slate-800 dark:text-slate-100">{layer.display_name}</span>
@@ -370,7 +370,7 @@ function LayerCard({
           <span>· {formatDuration(layer.last_duration_seconds)}</span>
         )}
         {!layer.is_blocking && (
-          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-slate-500">
+          <span className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-slate-500">
             non-blocking
           </span>
         )}

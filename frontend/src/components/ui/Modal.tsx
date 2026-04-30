@@ -199,7 +199,7 @@ export function Modal({
         aria-label={label}
         tabIndex={-1}
         onKeyDown={handleKeyDown}
-        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-lg bg-white p-5 shadow-xl outline-none"
+        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-lg bg-white dark:bg-slate-900 p-5 shadow-xl outline-none"
       >
         {children}
       </div>

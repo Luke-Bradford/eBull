@@ -42,7 +42,7 @@ export function AuditTrail({ view }: { view: AuditView }) {
         <button
           type="button"
           onClick={view.onRetry}
-          className="rounded border border-red-300 bg-white px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
+          className="rounded border border-red-300 bg-white dark:bg-slate-900 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
         >
           Retry
         </button>
@@ -86,7 +86,7 @@ function AuditRow({ item }: { item: AuditListItem }) {
   return (
     <>
       <tr
-        className="cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40"
+ className="cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40"
         onClick={() => setExpanded((prev) => !prev)}
       >
         <td className="px-2 py-2 text-xs text-slate-500">{formatDateTime(item.decision_time)}</td>
@@ -115,7 +115,7 @@ function AuditRow({ item }: { item: AuditListItem }) {
       </tr>
       {expanded ? (
         <tr>
-          <td colSpan={5} className="bg-slate-50 px-4 py-3">
+          <td colSpan={5} className="bg-slate-50 dark:bg-slate-900/40 px-4 py-3">
             <ExpandedAudit item={item} />
           </td>
         </tr>

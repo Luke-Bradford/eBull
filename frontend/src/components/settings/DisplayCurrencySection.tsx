@@ -49,7 +49,7 @@ export function DisplayCurrencySection({ currentCurrency, onChanged }: Props) {
         </p>
       </div>
 
-      <div className="max-w-sm space-y-3 rounded border border-slate-200 dark:border-slate-800 bg-white p-4">
+      <div className="max-w-sm space-y-3 rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
         <div className="flex items-center gap-3">
           <select
             value={selected}

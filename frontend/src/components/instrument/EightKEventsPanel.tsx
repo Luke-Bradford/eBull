@@ -49,9 +49,9 @@ function severityTone(severity: string | null): string {
     case "material":
       return "bg-amber-100 text-amber-800";
     case "informational":
-      return "bg-slate-100 text-slate-600";
+      return "bg-slate-100 dark:bg-slate-800 text-slate-600";
     default:
-      return "bg-slate-100 text-slate-600";
+      return "bg-slate-100 dark:bg-slate-800 text-slate-600";
   }
 }
 
@@ -135,7 +135,7 @@ function FilingCard({ filing }: { filing: EightKFiling }) {
           {filing.exhibits.map((ex) => (
             <span
               key={`${filing.accession_number}-${ex.exhibit_number}`}
-              className="rounded bg-slate-100 px-1.5 py-0.5 text-slate-700"
+              className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-slate-700"
               title={ex.description ?? ""}
             >
               {ex.exhibit_number}

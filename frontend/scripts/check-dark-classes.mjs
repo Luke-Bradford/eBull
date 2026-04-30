@@ -2,7 +2,7 @@
 /**
  * Dark-mode class hygiene gate (#708).
  *
- * Three checks run line-by-line over every .tsx in frontend/src:
+ * Four checks run line-by-line over every .tsx in frontend/src:
  *
  *   A. Duplicate Tailwind variant utility on the same line. Catches
  *      the PR #707 case where two independent sweeps (#706 + #703)
@@ -13,6 +13,20 @@
  *
  *   C. `hover:bg-slate-50` / `hover:bg-slate-100` without a
  *      `dark:hover:bg-` partner on the same line.
+ *
+ *   D. `dark:bg-<X>` (non-hover) on a line that has no light base
+ *      `bg-<Y>` partner. Catches the PR #711 case where a regex
+ *      sweep over `bg-slate-100` matched inside `hover:bg-slate-100`
+ *      and added an always-on `dark:bg-slate-800` to elements that
+ *      had no light base bg, making every nav link look permanently
+ *      selected in dark mode.
+ *
+ *   E. Dead `dark:hover:bg-X` — the same color as the element's
+ *      `dark:bg-X` base, making hover a no-op in dark mode. Catches
+ *      the PR #711 round-2 ChartPage case where toggle buttons had
+ *      `dark:bg-slate-800 dark:hover:bg-slate-800` (light pair was
+ *      `bg-slate-50 hover:bg-slate-100`, dark should be `bg-slate-900
+ *      hover:bg-slate-800`).
  *
  * Exits non-zero with file:line:reason for each violation.
  */
@@ -70,6 +84,55 @@ function findMissingHoverPartner(line) {
   return "hover:bg-slate-50|100 missing dark:hover:bg- partner";
 }
 
+/** Check E: `dark:bg-X` and `dark:hover:bg-X` resolve to the same
+ *  token — the hover is dead in dark mode (the ChartPage dead-hover
+ *  bug from PR #711 round 2).
+ *
+ * Compares the body of the two tokens (after the `dark:` / `dark:hover:`
+ * prefix) and flags when they match. Same-line scope is intentional —
+ * the comparison only makes sense within one className.
+ */
+function findDeadDarkHover(line) {
+  const baseMatch = line.match(
+    /(?<![\w:-])dark:bg-([\w/-]+)/,
+  );
+  const hoverMatch = line.match(
+    /(?<![\w:-])dark:hover:bg-([\w/-]+)/,
+  );
+  if (!baseMatch || !hoverMatch) return null;
+  if (baseMatch[1] !== hoverMatch[1]) return null;
+  return `dark:bg-${baseMatch[1]} and dark:hover:bg-${hoverMatch[1]} are identical — hover is a no-op in dark mode`;
+}
+
+/** Check D: dark:bg-* base added to an element whose only light bg
+ *  was a hover state — produces an always-on background in dark mode
+ *  (the Sidebar permanent-hover bug from PR #711).
+ *
+ * Trigger: `hover:bg-slate-...` (light hover) AND `dark:bg-...`
+ * (non-state) on the same line, AND no light base `bg-...` (without
+ * a state prefix) on the same line.
+ *
+ * Inputs / selects without any light bg utility (default user-agent
+ * white) intentionally use `dark:bg-slate-900` to override only in
+ * dark mode — those don't trigger because they have no light hover
+ * either.
+ */
+function findOrphanDarkBg(line) {
+  const lightHover = /(?<![\w-])hover:bg-(?:slate|gray|white|red|emerald|sky|amber|rose|orange|cyan|blue|purple|pink|lime)/.test(
+    line,
+  );
+  if (!lightHover) return null;
+  const stripped = line
+    .replace(/dark:(?:hover|focus|active):bg-[\w/-]+/g, "")
+    .replace(/(?:hover|focus|active|group-hover|aria-[a-z-]+):dark:bg-[\w/-]+/g, "");
+  const darkBg = stripped.match(/(?<![\w:-])dark:bg-[\w/-]+/);
+  if (!darkBg) return null;
+  const baseRe =
+    /(?:^|[\s'"`{}])bg-(?:white|black|transparent|current|inherit|slate-\d+|gray-\d+|red-\d+|emerald-\d+|sky-\d+|amber-\d+|rose-\d+|orange-\d+|cyan-\d+|blue-\d+|purple-\d+|pink-\d+|lime-\d+|teal-\d+|indigo-\d+|violet-\d+|fuchsia-\d+|yellow-\d+)(?:\/\d+)?(?![\w-])/;
+  if (baseRe.test(line)) return null;
+  return `${darkBg[0]} on a hover-only element produces always-on dark bg (PR #711 sidebar bug)`;
+}
+
 const violations = [];
 const files = walk(ROOT);
 for (const file of files) {
@@ -91,6 +154,14 @@ for (const file of files) {
     const hoverMiss = findMissingHoverPartner(line);
     if (hoverMiss) {
       violations.push({ file, line: lineNo, reason: hoverMiss });
+    }
+    const orphanDark = findOrphanDarkBg(line);
+    if (orphanDark) {
+      violations.push({ file, line: lineNo, reason: orphanDark });
+    }
+    const deadHover = findDeadDarkHover(line);
+    if (deadHover) {
+      violations.push({ file, line: lineNo, reason: deadHover });
     }
   });
 }

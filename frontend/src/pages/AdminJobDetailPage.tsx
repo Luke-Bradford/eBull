@@ -154,7 +154,7 @@ function RunRow({ row }: { row: JobRunResponse }) {
       </tr>
       {expandable && expanded ? (
         <tr>
-          <td colSpan={6} className="bg-slate-50 px-4 py-3">
+          <td colSpan={6} className="bg-slate-50 dark:bg-slate-900/40 px-4 py-3">
             <pre className="whitespace-pre-wrap text-xs text-slate-800 dark:text-slate-100">
               {row.error_msg}
             </pre>

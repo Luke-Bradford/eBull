@@ -97,7 +97,7 @@ function FilingRow({ f }: { f: FilingItem }) {
   return (
     <li className="flex items-baseline justify-between gap-2">
       <span className="flex items-baseline gap-2 truncate">
-        <span className="inline-block min-w-[40px] rounded bg-slate-100 px-1 py-0.5 text-center text-[10px] font-semibold uppercase text-slate-600">
+        <span className="inline-block min-w-[40px] rounded bg-slate-100 dark:bg-slate-800 px-1 py-0.5 text-center text-[10px] font-semibold uppercase text-slate-600">
           {f.filing_type ?? "—"}
         </span>
         <span className="truncate text-slate-700">{f.filing_date}</span>
@@ -180,7 +180,7 @@ function PeerSnapshot({
                 to={`/instrument/${encodeURIComponent(p.symbol)}`}
                 className="flex items-baseline gap-2 truncate text-blue-700 hover:underline"
               >
-                <span className="inline-block min-w-[32px] rounded bg-slate-100 px-1 py-0.5 text-center text-[10px] font-semibold tabular-nums text-slate-600">
+                <span className="inline-block min-w-[32px] rounded bg-slate-100 dark:bg-slate-800 px-1 py-0.5 text-center text-[10px] font-semibold tabular-nums text-slate-600">
                   #{p.rank ?? "—"}
                 </span>
                 <span className="truncate font-medium">{p.symbol}</span>
@@ -224,10 +224,10 @@ function RecentNews({ instrumentId }: { instrumentId: number }) {
 }
 
 function sentimentTone(score: number | null): string {
-  if (score === null) return "bg-slate-100 text-slate-500";
+  if (score === null) return "bg-slate-100 dark:bg-slate-800 text-slate-500";
   if (score >= 0.3) return "bg-emerald-50 text-emerald-700";
   if (score <= -0.3) return "bg-red-50 text-red-700";
-  return "bg-slate-100 text-slate-600";
+  return "bg-slate-100 dark:bg-slate-800 text-slate-600";
 }
 
 // ---------------------------------------------------------------------------

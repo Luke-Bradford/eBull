@@ -58,12 +58,12 @@ function thesisTone(stance: string): string {
     case "buy":
       return "bg-emerald-50 text-emerald-700 border-emerald-300";
     case "hold":
-      return "bg-slate-100 text-slate-700 border-slate-300 dark:border-slate-700";
+      return "bg-slate-100 dark:bg-slate-800 text-slate-700 border-slate-300 dark:border-slate-700";
     case "exit":
     case "sell":
       return "bg-red-50 text-red-700 border-red-300";
     default:
-      return "bg-slate-100 text-slate-700 border-slate-300 dark:border-slate-700";
+      return "bg-slate-100 dark:bg-slate-800 text-slate-700 border-slate-300 dark:border-slate-700";
   }
 }
 
@@ -209,7 +209,7 @@ export function SummaryStrip({
         ) : thesisLoaded ? (
           <span
             data-testid="thesis-badge-missing"
-            className="inline-flex items-center rounded border border-slate-300 dark:border-slate-700 bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-500"
+            className="inline-flex items-center rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 px-2 py-0.5 text-xs font-medium text-slate-500"
           >
             No thesis yet
           </span>
@@ -246,7 +246,7 @@ export function SummaryStrip({
               type="button"
               data-testid="action-add"
               onClick={onAdd}
-              className="rounded border border-blue-300 bg-white px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50"
+              className="rounded border border-blue-300 bg-white dark:bg-slate-900 px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50"
             >
               Add
             </button>
@@ -256,7 +256,7 @@ export function SummaryStrip({
               type="button"
               data-testid="action-close"
               onClick={onClose}
-              className="rounded border border-red-300 bg-white px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
+              className="rounded border border-red-300 bg-white dark:bg-slate-900 px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
             >
               Close
             </button>

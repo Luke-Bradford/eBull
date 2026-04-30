@@ -213,7 +213,7 @@ export function RecoveryPhraseConfirm({
           <button
             type="button"
             onClick={onCancel}
-            className="rounded border border-red-300 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100"
+            className="rounded border border-red-300 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100"
           >
             Cancel
           </button>
@@ -269,7 +269,7 @@ export function RecoveryPhraseConfirm({
         </header>
         <ol
           aria-label="Recovery phrase words"
-          className="grid grid-cols-2 gap-x-6 gap-y-2 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 p-4 font-mono text-sm text-slate-800 dark:text-slate-100"
+          className="grid grid-cols-2 gap-x-6 gap-y-2 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 p-4 font-mono text-sm text-slate-800 dark:text-slate-100"
         >
           {phrase.map((word, index) => (
             <li

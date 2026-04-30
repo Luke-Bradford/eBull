@@ -153,7 +153,7 @@ export function RankingsPage() {
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Symbol or company name…"
-            className="w-full rounded border border-slate-200 dark:border-slate-800 bg-white px-3 py-1.5 text-sm text-slate-700 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+            className="w-full rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm text-slate-700 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
           />
           {/* Search is client-side over the page-bounded response.
               When the universe outgrows RANKINGS_PAGE_LIMIT a match
@@ -289,7 +289,7 @@ function ClearFiltersButton({ onClick }: { onClick: () => void }) {
     <button
       type="button"
       onClick={onClick}
-      className="rounded border border-slate-300 dark:border-slate-700 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+      className="rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
     >
       Clear filters
     </button>

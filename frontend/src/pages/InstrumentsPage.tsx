@@ -86,14 +86,14 @@ function sortValue(item: InstrumentListItem, key: SortKey): unknown {
 const TIER_TONE: Record<number, string> = {
   1: "bg-emerald-50 text-emerald-700 border-emerald-200",
   2: "bg-blue-50 text-blue-700 border-blue-200",
-  3: "bg-slate-50 text-slate-600 border-slate-200 dark:border-slate-800",
+  3: "bg-slate-50 dark:bg-slate-900/40 text-slate-600 border-slate-200 dark:border-slate-800",
 };
 
 function TierBadge({ tier }: { tier: number | null }) {
   if (tier === null) {
     return <span className="text-xs text-slate-400">—</span>;
   }
-  const tone = TIER_TONE[tier] ?? "bg-slate-50 text-slate-600 border-slate-200 dark:border-slate-800";
+  const tone = TIER_TONE[tier] ?? "bg-slate-50 dark:bg-slate-900/40 text-slate-600 border-slate-200 dark:border-slate-800";
   return (
     <span
       className={`inline-block rounded border px-1.5 py-0.5 text-[10px] font-medium ${tone}`}
@@ -424,7 +424,7 @@ function InstrumentsTable({
         </thead>
         <tbody className="divide-y divide-slate-100">
           {items.map((item) => (
-            <tr key={item.instrument_id} className="align-top hover:bg-slate-50 dark:hover:bg-slate-800/40">
+ <tr key={item.instrument_id} className="align-top hover:bg-slate-50 dark:hover:bg-slate-800/40">
               <td className="py-2 pr-4">
                 <Link
                   to={`/instrument/${encodeURIComponent(item.symbol)}`}

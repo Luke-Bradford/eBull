@@ -6,7 +6,7 @@ import { EmptyState } from "@/components/states/EmptyState";
 const ACTION_TONE: Record<string, string> = {
   BUY: "bg-emerald-100 text-emerald-700",
   ADD: "bg-emerald-50 text-emerald-700",
-  HOLD: "bg-slate-100 text-slate-600",
+  HOLD: "bg-slate-100 dark:bg-slate-800 text-slate-600",
   EXIT: "bg-red-100 text-red-700",
 };
 
@@ -44,10 +44,10 @@ export function RecentRecommendations({ items }: { items: RecommendationListItem
               >
                 {r.symbol}
               </Link>
-              <Badge tone={ACTION_TONE[r.action] ?? "bg-slate-100 text-slate-600"}>
+              <Badge tone={ACTION_TONE[r.action] ?? "bg-slate-100 dark:bg-slate-800 text-slate-600"}>
                 {r.action}
               </Badge>
-              <Badge tone={STATUS_TONE[r.status] ?? "bg-slate-100 text-slate-600"}>
+              <Badge tone={STATUS_TONE[r.status] ?? "bg-slate-100 dark:bg-slate-800 text-slate-600"}>
                 {r.status}
               </Badge>
             </div>

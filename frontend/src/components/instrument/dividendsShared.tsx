@@ -48,7 +48,7 @@ export function HistoryBar({
   return (
     <div className="flex items-center gap-2 text-xs">
       <span className="w-20 shrink-0 text-slate-500">{label}</span>
-      <div className="h-3 flex-1 rounded-sm bg-slate-100">
+      <div className="h-3 flex-1 rounded-sm bg-slate-100 dark:bg-slate-800">
         <div
           className="h-full rounded-sm bg-sky-500"
           style={{ width: `${pct}%` }}
