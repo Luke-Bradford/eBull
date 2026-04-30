@@ -58,7 +58,7 @@ Currently in flight:
 cp .env.example .env
 docker compose up -d
 uv sync --group dev
-uv run uvicorn app.main:app --reload
+uv run uvicorn app.main:app --reload --reload-dir app
 pnpm --dir frontend install && pnpm --dir frontend dev
 ```
 
