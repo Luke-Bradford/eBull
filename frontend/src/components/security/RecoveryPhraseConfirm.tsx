@@ -308,7 +308,7 @@ export function RecoveryPhraseConfirm({
           <button
             type="button"
             onClick={onCancel}
-            className="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+            className="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
           >
             Cancel
           </button>
@@ -362,7 +362,7 @@ export function RecoveryPhraseConfirm({
                 onChange={(event: ChangeEvent<HTMLInputElement>) =>
                   handleEntryChange(slot, event.target.value)
                 }
-                className="rounded border border-slate-300 px-2 py-1.5 font-mono text-sm text-slate-800"
+                className="rounded border border-slate-300 px-2 py-1.5 font-mono text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
               />
             </label>
           );
@@ -381,7 +381,7 @@ export function RecoveryPhraseConfirm({
         <button
           type="button"
           onClick={onCancel}
-          className="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+          className="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
         >
           Cancel
         </button>

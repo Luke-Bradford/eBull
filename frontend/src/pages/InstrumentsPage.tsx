@@ -227,7 +227,7 @@ export function InstrumentsPage() {
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Symbol or company name…"
-            className="w-full rounded border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+            className="w-full rounded border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500"
           />
         </div>
 
@@ -255,7 +255,7 @@ export function InstrumentsPage() {
                 e.target.value ? Number(e.target.value) : null,
               )
             }
-            className="rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700"
+            className="rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
           >
             <option value="">All</option>
             <option value="1">Tier 1</option>
@@ -270,7 +270,7 @@ export function InstrumentsPage() {
           >
             Dividend
           </label>
-          <label className="flex items-center gap-2 rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700">
+          <label className="flex items-center gap-2 rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
             <input
               id="filter-has-dividend"
               type="checkbox"
@@ -349,7 +349,7 @@ function FilterSelect({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value || null)}
-        className="rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700"
+        className="rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
       >
         <option value="">All</option>
         {options.map((opt) => (

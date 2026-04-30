@@ -249,7 +249,7 @@ export function ClosePositionModal({
                       value={rawUnits}
                       onChange={(e) => setRawUnits(e.target.value)}
                       placeholder={formatNumber(trade.units, 6)}
-                      className="w-28 rounded border border-slate-300 bg-white px-2 py-1 text-sm focus:border-blue-400 focus:outline-none"
+                      className="w-28 rounded border border-slate-300 bg-white px-2 py-1 text-sm focus:border-blue-400 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500"
                     />
                   </div>
                   {parsedUnits !== null && parsedUnits > trade.units ? (
@@ -293,7 +293,7 @@ export function ClosePositionModal({
             type="button"
             onClick={onRequestClose}
             disabled={submitting}
-            className="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            className="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
           >
             Cancel
           </button>

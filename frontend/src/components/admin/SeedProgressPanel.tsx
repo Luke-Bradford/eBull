@@ -107,7 +107,7 @@ export function SeedProgressPanel() {
           type="button"
           onClick={handleTogglePause}
           disabled={toggleBusy || seed === null}
-          className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
         >
           {toggleLabel}
         </button>
@@ -151,7 +151,7 @@ export function SeedProgressPanel() {
                       {formatPct(src.seeded, src.total)}
                     </span>
                   </div>
-                  <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                  <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
                     <div
                       className="h-full rounded-full bg-sky-500 transition-all"
                       style={{ width: `${pct}%` }}
@@ -194,9 +194,9 @@ function LatestRunRow({
           ? "text-amber-600"
           : "text-red-600";
   return (
-    <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+    <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs dark:border-slate-800 dark:bg-slate-900/40">
       <div className="flex items-center justify-between">
-        <span className="font-medium text-slate-700">Latest run #{run.ingestion_run_id}</span>
+        <span className="font-medium text-slate-700 dark:text-slate-200">Latest run #{run.ingestion_run_id}</span>
         <span className={`font-semibold ${tone}`}>{run.status}</span>
       </div>
       <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 text-slate-600 sm:grid-cols-4">

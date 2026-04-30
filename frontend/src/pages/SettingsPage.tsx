@@ -437,7 +437,7 @@ function BrokerCredentialsSection(): JSX.Element {
       ) : rows.length === 0 ? (
         <p className="text-xs text-slate-400">No broker credentials saved yet.</p>
       ) : (
-        <ul className="divide-y divide-slate-200 rounded border border-slate-200 bg-white">
+        <ul className="divide-y divide-slate-200 rounded border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
           {rows.map((row) => {
             const revoked = row.revoked_at !== null;
             const isActiveEtoro =
@@ -459,7 +459,7 @@ function BrokerCredentialsSection(): JSX.Element {
                     {row.provider} · {row.environment} · ••••{row.last_four}
                   </span>
                   {revoked && (
-                    <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-500">
+                    <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-500 dark:bg-slate-800 dark:text-slate-300">
                       revoked
                     </span>
                   )}
@@ -470,7 +470,7 @@ function BrokerCredentialsSection(): JSX.Element {
                       type="button"
                       onClick={() => startEdit(editLabel)}
                       disabled={manageAction !== "idle"}
-                      className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                      className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
                     >
                       Edit
                     </button>
@@ -499,21 +499,21 @@ function BrokerCredentialsSection(): JSX.Element {
 
       {/* Complete mode — management panel */}
       {mode === "complete" && manageAction === "idle" && (
-        <div className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4">
+        <div className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
           <p className="text-sm text-slate-700">Credentials configured.</p>
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
               onClick={() => void handleTestStored()}
               disabled={validating}
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
             >
               {validating ? "Testing…" : "Test connection"}
             </button>
             <button
               type="button"
               onClick={startReplace}
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
             >
               Replace both
             </button>
@@ -529,7 +529,7 @@ function BrokerCredentialsSection(): JSX.Element {
       {mode === "complete" && (manageAction === "edit-api_key" || manageAction === "edit-user_key") && (
         <form
           onSubmit={handleEditSave}
-          className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4"
+          className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"
         >
           <h3 className="text-sm font-medium text-slate-700">
             Edit {manageAction === "edit-api_key" ? "API key" : "user key"}
@@ -548,7 +548,7 @@ function BrokerCredentialsSection(): JSX.Element {
               onChange={(e) => setEditSecret(e.target.value)}
               minLength={MIN_SECRET_LEN}
               required
-              className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+              className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500"
             />
           </label>
           {editError !== null && (
@@ -568,7 +568,7 @@ function BrokerCredentialsSection(): JSX.Element {
               type="button"
               onClick={cancelManage}
               disabled={editing}
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
             >
               Cancel
             </button>
@@ -580,7 +580,7 @@ function BrokerCredentialsSection(): JSX.Element {
       {mode === "complete" && manageAction === "replace" && (
         <form
           onSubmit={handleReplaceSave}
-          className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4"
+          className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"
         >
           <h3 className="text-sm font-medium text-slate-700">Replace both keys</h3>
           <p className="text-xs text-slate-500">
@@ -597,7 +597,7 @@ function BrokerCredentialsSection(): JSX.Element {
               onChange={(e) => setApiKey(e.target.value)}
               minLength={MIN_SECRET_LEN}
               required
-              className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+              className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500"
             />
           </label>
           <label className="block text-sm">
@@ -610,7 +610,7 @@ function BrokerCredentialsSection(): JSX.Element {
               onChange={(e) => setUserKey(e.target.value)}
               minLength={MIN_SECRET_LEN}
               required
-              className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+              className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500"
             />
           </label>
 
@@ -623,7 +623,7 @@ function BrokerCredentialsSection(): JSX.Element {
                 userKey.length < MIN_SECRET_LEN ||
                 validating
               }
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
             >
               {validating ? "Testing…" : "Test connection"}
             </button>
@@ -655,7 +655,7 @@ function BrokerCredentialsSection(): JSX.Element {
               type="button"
               onClick={cancelManage}
               disabled={editing}
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
             >
               Cancel
             </button>
@@ -667,7 +667,7 @@ function BrokerCredentialsSection(): JSX.Element {
       {mode !== "complete" && (
         <form
           onSubmit={handleCreate}
-          className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4"
+          className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"
         >
           <h3 className="text-sm font-medium text-slate-700">
             {mode === "repair" ? "Complete credential setup" : "Add eToro credentials"}
@@ -690,7 +690,7 @@ function BrokerCredentialsSection(): JSX.Element {
                 onChange={(e) => setApiKey(e.target.value)}
                 minLength={MIN_SECRET_LEN}
                 required
-                className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+                className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500"
               />
             </label>
           )}
@@ -706,7 +706,7 @@ function BrokerCredentialsSection(): JSX.Element {
                 onChange={(e) => setUserKey(e.target.value)}
                 minLength={MIN_SECRET_LEN}
                 required
-                className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+                className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500"
               />
             </label>
           )}
@@ -717,7 +717,7 @@ function BrokerCredentialsSection(): JSX.Element {
               type="button"
               onClick={() => void handleTestConnection()}
               disabled={!canTestConnection || validating}
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-100 dark:hover:bg-slate-800"
             >
               {validating ? "Testing…" : "Test connection"}
             </button>

@@ -112,12 +112,12 @@ export function LayerHealthList({ layers, onToggle }: LayerHealthListProps): JSX
                 type="button"
                 aria-label={`${entry.layer} actions`}
                 onClick={() => setMenuOpen(menuOpen === entry.layer ? null : entry.layer)}
-                className="rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+                className="rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
               >
                 ⋯
               </button>
               {menuOpen === entry.layer ? (
-                <div className="absolute right-0 top-full z-10 mt-1 w-40 rounded border border-slate-200 bg-white shadow">
+                <div className="absolute right-0 top-full z-10 mt-1 w-40 rounded border border-slate-200 bg-white shadow dark:border-slate-700 dark:bg-slate-900">
                   <button
                     type="button"
                     onClick={() => {
@@ -137,7 +137,7 @@ export function LayerHealthList({ layers, onToggle }: LayerHealthListProps): JSX
                       onToggle(entry.layer, nextEnabled);
                       setMenuOpen(null);
                     }}
-                    className="block w-full px-3 py-1 text-left text-xs text-slate-700 hover:bg-slate-50"
+                    className="block w-full px-3 py-1 text-left text-xs text-slate-700 hover:bg-slate-50 dark:text-slate-100 dark:hover:bg-slate-800"
                   >
                     {isDisabled ? "Enable layer" : "Disable layer"}
                   </button>

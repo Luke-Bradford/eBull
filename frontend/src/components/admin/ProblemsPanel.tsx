@@ -86,7 +86,7 @@ export function ProblemsPanel({
   const allPending = pendingSources.length === 3;
   if (allPending) {
     return (
-      <div className="rounded-md border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-600">
+      <div className="rounded-md border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
         Checking for problems…
       </div>
     );
@@ -117,16 +117,16 @@ export function ProblemsPanel({
   const tone = totalProblems > 0 ? "red" : erroredSources.length > 0 ? "amber" : "neutral";
   const sectionTone =
     tone === "red"
-      ? "border-red-200 bg-red-50"
+      ? "border-red-200 bg-red-50 dark:border-red-900/60 dark:bg-red-950/30"
       : tone === "amber"
-        ? "border-amber-200 bg-amber-50"
-        : "border-slate-200 bg-slate-50";
+        ? "border-amber-200 bg-amber-50 dark:border-amber-900/60 dark:bg-amber-950/30"
+        : "border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-900/40";
   const headerTone =
     tone === "red"
-      ? "border-red-200 text-red-800"
+      ? "border-red-200 text-red-800 dark:border-red-900/60 dark:text-red-300"
       : tone === "amber"
-        ? "border-amber-200 text-amber-800"
-        : "border-slate-200 text-slate-700";
+        ? "border-amber-200 text-amber-800 dark:border-amber-900/60 dark:text-amber-300"
+        : "border-slate-200 text-slate-700 dark:border-slate-800 dark:text-slate-200";
 
   return (
     <section role="region" aria-label="Current problems" className={`rounded-md border shadow-sm ${sectionTone}`}>
