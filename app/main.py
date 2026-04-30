@@ -146,8 +146,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # table is empty. After PR C cut the cron from hourly to daily,
     # a fresh DB or wiped table would have no rates available until
     # the next 17:00 CET tick. Fire one inline Frankfurter fetch
-    # here so the operator's first request post-boot has rates
-    # ready.
+    # here so the operator's first request post-boot has rates ready.
+    #
+    # #719 race note: the jobs process also runs a boot-time freshness
+    # sweep that may call ``fx_rates_refresh`` if the layer is past its
+    # freshness target. The API's ``_bootstrap_fx_rates`` and the
+    # orchestrator both check the table is empty / stale before
+    # fetching, and the Frankfurter UPSERT keys on (asof, base, quote)
+    # so a concurrent double-fetch is at worst one wasted HTTP call —
+    # not a correctness bug. The API-side path is preserved because
+    # API request-handlers cannot wait on the jobs process to boot.
     try:
         _bootstrap_fx_rates(pool)
     except Exception:

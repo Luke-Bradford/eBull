@@ -176,12 +176,18 @@ def test_claim_oldest_pending_skips_locked_rows(
     """Two concurrent claimers must not both grab the same row.
     Simulated by holding a row-level lock on conn A and calling
     claim_oldest_pending on conn B — B sees the row but SKIP LOCKED
-    bypasses it and claims the next one (or returns None when only the
-    locked row exists).
+    bypasses it and claims the next eligible row.
+
+    The dev DB may carry pre-existing pending rows from prior runs; we
+    don't care which row B claims, only that it does NOT claim the one
+    A is holding.
     """
     rid_a = publish_manual_job_request("fundamentals_sync")
-    rid_b = publish_manual_job_request("fundamentals_sync")
-    _cleanup_requests.extend([rid_a, rid_b])
+    _cleanup_requests.append(rid_a)
+    publish_manual_job_request("fundamentals_sync")  # ensure at least one other claimable row exists
+    max_row = _dev_conn.execute("SELECT MAX(request_id) FROM pending_job_requests").fetchone()
+    assert max_row is not None
+    _cleanup_requests.append(int(max_row[0]))
 
     # Hold rid_a in a transaction on conn A.
     conn_a = psycopg.connect(settings.database_url)
@@ -190,10 +196,12 @@ def test_claim_oldest_pending_skips_locked_rows(
             "SELECT request_id FROM pending_job_requests WHERE request_id=%s FOR UPDATE",
             (rid_a,),
         )
-        # Conn B claims via the helper — should skip rid_a, return rid_b.
+        # Conn B claims via the helper — must skip rid_a (held by A).
         result = claim_oldest_pending(_dev_conn, boot_id="boot-B")
         assert result is not None
-        assert result["request_id"] == rid_b
+        assert result["request_id"] != rid_a, (
+            "claim_oldest_pending returned the row held by another connection — SKIP LOCKED isn't applied"
+        )
     finally:
         conn_a.rollback()
         conn_a.close()

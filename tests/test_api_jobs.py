@@ -1,92 +1,87 @@
-"""API tests for ``POST /jobs/{job_name}/run`` (issue #13, PR A).
+"""API tests for ``POST /jobs/{job_name}/run`` (rewritten for #719).
 
-Auth is overridden globally in ``conftest.py`` so these tests
-exercise the routing + status mapping in isolation. The runtime
-itself is replaced with a stub on ``app.state.job_runtime`` -- we
-are not exercising APScheduler timing or the real Postgres advisory
-lock here (those are covered by ``test_jobs_runtime.py`` and
-``test_jobs_locks.py``).
+Pre-#719: the endpoint called ``runtime.trigger(job_name)`` against
+an in-process JobRuntime. Tests stubbed that runtime on
+``app.state.job_runtime``.
 
-The module-level ``TestClient(app)`` pattern matches the rest of
-the API tests in this repo. Note that this construction does NOT
-run the FastAPI lifespan, so ``app.state.job_runtime`` is unset
-unless we set it explicitly -- which is what every test below does
-(or deliberately skips, for the 503 path).
+Post-#719: the endpoint validates the job name against
+``VALID_JOB_NAMES`` and publishes a row to ``pending_job_requests``
+via ``publish_manual_job_request``. The runtime no longer lives in
+the API process. These tests patch the publisher and assert the
+202 path returns the request_id and the 404 path is taken before
+any publish.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import psycopg
-import pytest
 from fastapi.testclient import TestClient
 
 from app.db import get_conn
-from app.jobs.locks import JobAlreadyRunning
-from app.jobs.runtime import UnknownJob
 from app.main import app
 
 client = TestClient(app)
 
 
-class _StubRuntime:
-    """Captures trigger calls and lets each test pick the outcome."""
-
-    def __init__(self) -> None:
-        self.triggered: list[str] = []
-        self._raise: BaseException | None = None
-
-    def will_raise(self, exc: BaseException) -> None:
-        self._raise = exc
-
-    def trigger(self, job_name: str) -> None:
-        self.triggered.append(job_name)
-        if self._raise is not None:
-            raise self._raise
-
-
-@pytest.fixture
-def stub_runtime() -> Iterator[_StubRuntime]:
-    rt = _StubRuntime()
-    app.state.job_runtime = rt
-    try:
-        yield rt
-    finally:
-        app.state.job_runtime = None
-
-
 class TestRunJob:
-    def test_accepted_returns_202_and_calls_trigger(self, stub_runtime: _StubRuntime) -> None:
-        resp = client.post("/jobs/nightly_universe_sync/run")
+    def test_accepted_returns_202_and_publishes(self) -> None:
+        with patch("app.api.jobs.publish_manual_job_request", return_value=42) as pub:
+            resp = client.post("/jobs/nightly_universe_sync/run")
         assert resp.status_code == 202
-        assert resp.content == b""
-        assert stub_runtime.triggered == ["nightly_universe_sync"]
+        assert resp.json() == {"request_id": 42}
+        assert pub.call_count == 1
+        # The publish call should carry the validated job name.
+        args, kwargs = pub.call_args
+        assert args[0] == "nightly_universe_sync"
 
-    def test_unknown_job_returns_404(self, stub_runtime: _StubRuntime) -> None:
-        stub_runtime.will_raise(UnknownJob("not_a_real_job"))
-        resp = client.post("/jobs/not_a_real_job/run")
+    def test_unknown_job_returns_404_without_publishing(self) -> None:
+        with patch("app.api.jobs.publish_manual_job_request") as pub:
+            resp = client.post("/jobs/not_a_real_job/run")
         assert resp.status_code == 404
         assert "not_a_real_job" in resp.json()["detail"]
+        assert pub.call_count == 0
 
-    def test_already_running_returns_409(self, stub_runtime: _StubRuntime) -> None:
-        stub_runtime.will_raise(JobAlreadyRunning("nightly_universe_sync"))
-        resp = client.post("/jobs/nightly_universe_sync/run")
-        assert resp.status_code == 409
-        assert "nightly_universe_sync" in resp.json()["detail"]
 
-    def test_runtime_missing_returns_503(self) -> None:
-        # Explicitly drop the runtime to simulate "lifespan never ran"
-        # (which is the case for the module-level TestClient).
-        app.state.job_runtime = None
-        try:
-            resp = client.post("/jobs/nightly_universe_sync/run")
-            assert resp.status_code == 503
-            assert "job runtime not started" in resp.json()["detail"]
-        finally:
-            app.state.job_runtime = None
+class TestListJobRequests:
+    """Smoke for the new GET /jobs/requests endpoint (#719)."""
+
+    def teardown_method(self) -> None:
+        app.dependency_overrides.pop(get_conn, None)
+
+    def test_returns_rows_in_response_shape(self) -> None:
+        rows: list[dict[str, object]] = [
+            {
+                "request_id": 7,
+                "request_kind": "manual_job",
+                "job_name": "nightly_universe_sync",
+                "payload": None,
+                "requested_at": datetime(2026, 4, 30, 12, 0, 0, tzinfo=UTC),
+                "requested_by": "operator:1",
+                "status": "completed",
+                "claimed_at": datetime(2026, 4, 30, 12, 0, 1, tzinfo=UTC),
+                "error_msg": None,
+            },
+        ]
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchall.return_value = rows
+        conn.cursor.return_value.__enter__.return_value = cur
+        conn.cursor.return_value.__exit__.return_value = None
+
+        def _gen():  # type: ignore[no-untyped-def]
+            yield conn
+
+        app.dependency_overrides[get_conn] = _gen
+        resp = client.get("/jobs/requests")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 1
+        assert body["items"][0]["request_id"] == 7
+        assert body["items"][0]["request_kind"] == "manual_job"
 
 
 def _override_conn(conn: MagicMock) -> None:

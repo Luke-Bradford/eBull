@@ -9,8 +9,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from app.services.sync_orchestrator import executor
 from app.services.sync_orchestrator.types import (
     ExecutionPlan,
@@ -256,10 +254,8 @@ class TestCategorizeError:
         assert remedy.self_heal is False
 
 
-class TestSetExecutor:
-    def test_submit_sync_raises_when_no_executor_set(self) -> None:
-        executor._executor_ref = None
-        with pytest.raises(RuntimeError, match="executor not set"):
-            from app.services.sync_orchestrator.types import SyncScope
-
-            executor.submit_sync(SyncScope.full(), trigger="manual")
+# `set_executor` and `submit_sync` were deleted in #719 — the API
+# publishes via dispatcher.publish_sync_request and the jobs-process
+# listener invokes `run_sync` on its own executor. The
+# `TestSetExecutor` class that lived here previously tested the
+# in-process executor wiring; obsoleted by the cross-process design.
