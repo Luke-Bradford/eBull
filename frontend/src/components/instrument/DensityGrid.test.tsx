@@ -288,7 +288,12 @@ describe("DensityGrid profiles", () => {
     expect(grid?.className).toContain("gap-y-6");
   });
 
-  it("v4 activity row: Filings + Insider pair as 6+6 when both active", () => {
+  it("v4 narrative pairing: Filings sits beside the 10-K narrative at 8+4 when both active", () => {
+    // The 10-K narrative is itself a filing summary, so pairing the
+    // Recent Filings rail beside it fills the right-half dead space
+    // the narrative leaves with contextually-related history. With
+    // filings consumed by the narrative pairing, Insider stands at
+    // col-span-6 in the activity zone.
     render(
       <MemoryRouter>
         <DensityGrid
@@ -302,10 +307,33 @@ describe("DensityGrid profiles", () => {
         />
       </MemoryRouter>,
     );
+    const narrativeSlot = screen.getByText(/Company narrative/).closest(
+      "div.col-span-12",
+    );
     const filingsSlot = screen.getByText(/Recent filings/).closest("div.col-span-12");
     const insiderSlot = screen.getByText(/Insider summary/).closest("div.col-span-12");
-    expect(filingsSlot?.className).toContain("lg:col-span-6");
+    expect(narrativeSlot?.className).toContain("lg:col-span-8");
+    expect(filingsSlot?.className).toContain("lg:col-span-4");
     expect(insiderSlot?.className).toContain("lg:col-span-6");
+  });
+
+  it("v4 narrative falls back to full-width when filings inactive", () => {
+    render(
+      <MemoryRouter>
+        <DensityGrid
+          summary={makeSummary({
+            fundamentals: { providers: ["sec_xbrl"], data_present: { sec_xbrl: true } },
+            filings: { providers: [], data_present: {} },
+          })}
+          thesis={null}
+          thesisErrored={false}
+        />
+      </MemoryRouter>,
+    );
+    const narrativeSlot = screen.getByText(/Company narrative/).closest(
+      "div.col-span-12",
+    );
+    expect(narrativeSlot?.className).not.toContain("lg:col-span-8");
   });
 
   it("v4 zone B: BusinessSections sits directly under the hero (full-sec), not at page bottom", () => {
