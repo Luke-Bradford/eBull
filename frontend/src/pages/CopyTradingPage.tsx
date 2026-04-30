@@ -55,7 +55,7 @@ export function CopyTradingPage() {
       </div>
 
       {detail.error !== null ? (
-        <div className="border-t border-slate-200 pt-3">
+        <div className="border-t border-slate-200 dark:border-slate-800 pt-3">
           <SectionError onRetry={detail.refetch} />
         </div>
       ) : detail.loading || detail.data === null ? (
@@ -107,7 +107,7 @@ function TraderAvatar({ username }: { username: string }) {
 
 function MirrorStats({ mirror, currency }: { mirror: MirrorSummary; currency: string }) {
   return (
-    <div className="grid grid-cols-2 gap-x-6 gap-y-2 border-t border-slate-200 px-1 pt-3 pb-2 text-sm sm:grid-cols-3">
+    <div className="grid grid-cols-2 gap-x-6 gap-y-2 border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-2 text-sm sm:grid-cols-3">
       <LabelValue label="Initial investment" value={formatMoney(mirror.initial_investment, currency)} />
       <LabelValue label="Deposits" value={formatMoney(mirror.deposit_summary, currency)} />
       <LabelValue label="Withdrawals" value={formatMoney(mirror.withdrawal_summary, currency)} />

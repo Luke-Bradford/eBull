@@ -65,7 +65,7 @@ export function RecommendationsTable({ view }: { view: RecommendationsView }) {
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
-          <tr className="border-b border-slate-200 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+          <tr className="border-b border-slate-200 dark:border-slate-800 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
             <th className="px-2 py-2">Symbol</th>
             <th className="px-2 py-2">Action</th>
             <th className="px-2 py-2">Status</th>

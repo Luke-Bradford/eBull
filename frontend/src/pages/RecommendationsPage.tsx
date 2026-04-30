@@ -305,7 +305,7 @@ function ClearFiltersButton({ onClick }: { onClick: () => void }) {
     <button
       type="button"
       onClick={onClick}
-      className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+      className="rounded border border-slate-300 dark:border-slate-700 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
     >
       Clear filters
     </button>
@@ -340,7 +340,7 @@ function Pagination({
         type="button"
         disabled={!hasPrev}
         onClick={onPrev}
-        className="rounded border border-slate-300 px-1.5 py-0.5 text-xs hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+        className="rounded border border-slate-300 dark:border-slate-700 px-1.5 py-0.5 text-xs hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
       >
         Prev
       </button>
@@ -348,7 +348,7 @@ function Pagination({
         type="button"
         disabled={!hasNext}
         onClick={onNext}
-        className="rounded border border-slate-300 px-1.5 py-0.5 text-xs hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+        className="rounded border border-slate-300 dark:border-slate-700 px-1.5 py-0.5 text-xs hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
       >
         Next
       </button>

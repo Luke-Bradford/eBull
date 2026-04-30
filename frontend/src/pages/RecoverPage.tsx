@@ -258,7 +258,7 @@ export function RecoverPage(): JSX.Element {
     <div className="flex h-screen w-screen items-center justify-center bg-slate-50">
       <form
         onSubmit={handleSubmit}
-        className="w-full max-w-2xl rounded border border-slate-200 bg-white p-6 shadow-sm"
+        className="w-full max-w-2xl rounded border border-slate-200 dark:border-slate-800 bg-white p-6 shadow-sm"
       >
         <h1 className="mb-1 text-lg font-semibold text-slate-800 dark:text-slate-100">
           Recover existing eBull data
@@ -306,7 +306,7 @@ export function RecoverPage(): JSX.Element {
                     handleWordChange(index, e.target.value)
                   }
                   onPaste={(e) => handlePaste(index, e)}
-                  className="w-full rounded border border-slate-300 px-2 py-1 font-mono text-sm text-slate-800 dark:text-slate-100"
+                  className="w-full rounded border border-slate-300 dark:border-slate-700 px-2 py-1 font-mono text-sm text-slate-800 dark:text-slate-100"
                 />
               </li>
             );

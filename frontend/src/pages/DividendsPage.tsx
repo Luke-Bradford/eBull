@@ -189,7 +189,7 @@ export function DividendsPage(): JSX.Element {
 
   return (
     <div className="mx-auto max-w-screen-xl space-y-4 p-4">
-      <header className="border-b border-slate-200 pb-3">
+      <header className="border-b border-slate-200 dark:border-slate-800 pb-3">
         <Link to={backHref} className="text-xs text-sky-700 hover:underline">
           ← Back to {symbol}
         </Link>
@@ -373,7 +373,7 @@ function FyTotalsTable({
   return (
     <table className="min-w-full text-xs">
       <thead>
-        <tr className="border-b border-slate-200 text-left text-slate-500">
+        <tr className="border-b border-slate-200 dark:border-slate-800 text-left text-slate-500">
           <th className="px-2 py-1">Fiscal year</th>
           <th className="px-2 py-1 text-right">Total DPS</th>
         </tr>

@@ -148,7 +148,7 @@ export function RankingsTable({ view }: { view: RankingsView }) {
             </MessageRow>
           ) : view.kind === "empty" ? (
             <MessageRow>
-              <div className="flex flex-col items-center justify-center rounded-md border border-dashed border-slate-200 bg-white p-8 text-center">
+              <div className="flex flex-col items-center justify-center rounded-md border border-dashed border-slate-200 dark:border-slate-800 bg-white p-8 text-center">
                 <h2 className="text-base font-semibold text-slate-700">{view.title}</h2>
                 <p className="mt-1 max-w-md text-sm text-slate-500 dark:text-slate-400">{view.description}</p>
                 {view.action ? <div className="mt-4">{view.action}</div> : null}

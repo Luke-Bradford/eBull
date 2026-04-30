@@ -67,7 +67,7 @@ export function LoginPage(): JSX.Element {
     <div className="flex h-screen w-screen items-center justify-center bg-slate-50">
       <form
         onSubmit={handleSubmit}
-        className="w-full max-w-sm rounded border border-slate-200 bg-white p-6 shadow-sm"
+        className="w-full max-w-sm rounded border border-slate-200 dark:border-slate-800 bg-white p-6 shadow-sm"
       >
         <h1 className="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-100">eBull operator</h1>
         <label className="mb-3 block text-sm">
@@ -78,7 +78,7 @@ export function LoginPage(): JSX.Element {
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             required
-            className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+            className="w-full rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"
           />
         </label>
         <label className="mb-4 block text-sm">
@@ -89,7 +89,7 @@ export function LoginPage(): JSX.Element {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
-            className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm"
+            className="w-full rounded border border-slate-300 dark:border-slate-700 px-2 py-1.5 text-sm"
           />
         </label>
         {error !== null && (

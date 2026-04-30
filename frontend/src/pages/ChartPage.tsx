@@ -484,7 +484,7 @@ export function ChartPage(): JSX.Element {
                   className={`rounded border px-2 py-0.5 text-xs font-medium ${
                     active
                       ? "border-orange-400 bg-white text-orange-600"
-                      : "border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                      : "border-slate-200 dark:border-slate-800 bg-slate-50 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
                   }`}
                   data-testid={`trend-${id}`}
                 >
@@ -515,7 +515,7 @@ export function ChartPage(): JSX.Element {
                 className={`rounded border px-2 py-0.5 text-xs font-medium ${
                   on
                     ? "border-slate-400 bg-white text-slate-700"
-                    : "border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                    : "border-slate-200 dark:border-slate-800 bg-slate-50 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
                 }`}
                 data-testid={`session-toggle-${key}`}
               >
@@ -540,7 +540,7 @@ export function ChartPage(): JSX.Element {
                 className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
                   hasFailed
                     ? "border-red-400 bg-red-50 text-red-700"
-                    : "border-slate-300 bg-slate-50 text-slate-700"
+                    : "border-slate-300 dark:border-slate-700 bg-slate-50 text-slate-700"
                 }`}
                 title={hasFailed ? "Failed to fetch — check ticker" : undefined}
                 aria-label={hasFailed ? `${sym} — failed to fetch` : sym}
@@ -579,7 +579,7 @@ export function ChartPage(): JSX.Element {
       )}
 
       {/* Body: chart or raw table */}
-      <div className="border-t border-slate-200 pt-3">
+      <div className="border-t border-slate-200 dark:border-slate-800 pt-3">
         {effectivelyLoading && candlesAsync.error === null ? (
           <div className="p-4">
             <SectionSkeleton rows={10} />

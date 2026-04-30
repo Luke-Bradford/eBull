@@ -172,7 +172,7 @@ export function EightKListPage(): JSX.Element {
             <div className="overflow-x-auto">
               <table className="min-w-full text-xs">
                 <thead>
-                  <tr className="border-b border-slate-200 text-left text-slate-500">
+                  <tr className="border-b border-slate-200 dark:border-slate-800 text-left text-slate-500">
                     <th className="px-2 py-1">Date</th>
                     <th className="px-2 py-1">Items</th>
                     <th className="px-2 py-1">Severity</th>

@@ -164,7 +164,7 @@ function FinancialsTab({ symbol }: { symbol: string }) {
   return (
     <Section title={`${statement.charAt(0).toUpperCase()}${statement.slice(1)} statement`}>
       <div className="mb-3 flex gap-2 text-xs">
-        <div className="flex rounded border border-slate-300">
+        <div className="flex rounded border border-slate-300 dark:border-slate-700">
           {(["income", "balance", "cashflow"] as const).map((s) => (
             <button
               key={s}
@@ -178,7 +178,7 @@ function FinancialsTab({ symbol }: { symbol: string }) {
             </button>
           ))}
         </div>
-        <div className="flex rounded border border-slate-300">
+        <div className="flex rounded border border-slate-300 dark:border-slate-700">
           {(["quarterly", "annual"] as const).map((p) => (
             <button
               key={p}
@@ -207,7 +207,7 @@ function FinancialsTab({ symbol }: { symbol: string }) {
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead>
-              <tr className="border-b border-slate-200 text-left text-xs text-slate-500">
+              <tr className="border-b border-slate-200 dark:border-slate-800 text-left text-xs text-slate-500">
                 <th className="px-2 py-1">Metric</th>
                 {rows.map((row) => (
                   <th key={row.period_end} className="px-2 py-1 text-right">
@@ -650,7 +650,7 @@ function InstrumentPageBody({
           persistent RightRail (filings / peer / news preview). */}
       {activeTab === "research" ? (
         <div className="space-y-4">
-          <nav className="flex gap-1 border-b border-slate-200">
+          <nav className="flex gap-1 border-b border-slate-200 dark:border-slate-800">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
@@ -675,7 +675,7 @@ function InstrumentPageBody({
       ) : (
         <div className="grid gap-4 lg:grid-cols-12">
           <div className="space-y-4 lg:col-span-8">
-            <nav className="flex gap-1 border-b border-slate-200">
+            <nav className="flex gap-1 border-b border-slate-200 dark:border-slate-800">
               {tabs.map((tab) => (
                 <button
                   key={tab.id}

@@ -61,7 +61,7 @@ export function InsiderPage(): JSX.Element {
 
   return (
     <div className="mx-auto max-w-screen-xl space-y-4 p-4">
-      <header className="border-b border-slate-200 pb-3">
+      <header className="border-b border-slate-200 dark:border-slate-800 pb-3">
         <Link to={backHref} className="text-xs text-sky-700 hover:underline">
           ← Back to {symbol}
         </Link>

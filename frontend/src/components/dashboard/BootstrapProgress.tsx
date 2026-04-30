@@ -120,7 +120,7 @@ export function BootstrapProgress({
             ) : step.active ? (
               <span className="inline-block h-3 w-3 animate-pulse rounded-full bg-blue-400" />
             ) : (
-              <span className="inline-block h-3 w-3 rounded-full border border-slate-300" />
+              <span className="inline-block h-3 w-3 rounded-full border border-slate-300 dark:border-slate-700" />
             )}
             <span
               className={

@@ -333,7 +333,7 @@ function ReportList({ reports }: { reports: ReportSnapshot[] }) {
 
   return (
     <div className="grid gap-4 md:grid-cols-[200px_1fr]">
-      <aside className="border-r border-slate-200 pr-3">
+      <aside className="border-r border-slate-200 dark:border-slate-800 pr-3">
         <ul className="space-y-1 text-sm">
           {reports.map((r) => (
             <li key={r.snapshot_id}>
@@ -381,13 +381,13 @@ export function ReportsPage() {
 
   return (
     <div className="space-y-4">
-      <header className="border-b border-slate-200 pb-2">
+      <header className="border-b border-slate-200 dark:border-slate-800 pb-2">
         <h1 className="text-xl font-semibold">Reports</h1>
         <p className="text-sm text-slate-500">
           Weekly + monthly performance snapshots from the report jobs.
         </p>
       </header>
-      <nav className="flex gap-1 border-b border-slate-200">
+      <nav className="flex gap-1 border-b border-slate-200 dark:border-slate-800">
         {(["weekly", "monthly"] as TabId[]).map((id) => (
           <button
             key={id}

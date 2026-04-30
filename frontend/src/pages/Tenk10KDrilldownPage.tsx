@@ -228,7 +228,7 @@ function Body({
         <TOCRail sections={data.sections} />
       </aside>
       <div className="min-w-0 space-y-6">
-        <header className="border-b border-slate-200 pb-3">
+        <header className="border-b border-slate-200 dark:border-slate-800 pb-3">
           <Link
             to={`/instrument/${encodeURIComponent(symbol)}`}
             className="text-xs text-sky-700 hover:underline"
