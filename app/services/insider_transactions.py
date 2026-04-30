@@ -48,6 +48,8 @@ from typing import Any, Protocol
 import psycopg
 from psycopg.types.json import Jsonb
 
+from app.providers.concurrent_fetch import fetch_document_texts
+
 logger = logging.getLogger(__name__)
 
 # Bump whenever parse_form_4_xml shape changes so the ingester can
@@ -1073,32 +1075,39 @@ def _process_candidates(
     canonical_url)``. Fetch errors / None bodies / parse misses all
     write a filing-level tombstone so the ingester never re-fetches
     a dead accession. Successful parses flow through
-    :func:`upsert_filing` which refreshes every column on conflict."""
+    :func:`upsert_filing` which refreshes every column on conflict.
+
+    #726: the network leg fans out to a thread pool so SEC's
+    ~800 ms per-request response time overlaps across workers.
+    Aggregate request rate stays bounded by the shared rate-limit
+    clock (``_PROCESS_RATE_LIMIT_CLOCK``) + lock
+    (``_PROCESS_RATE_LIMIT_LOCK``) inside ``ResilientClient``.
+    Parse + DB upsert stay serial on the caller's connection (no
+    concurrent psycopg writes — a future change could parallelise
+    that too with a per-thread connection but that's out of scope).
+    """
     filings_parsed = 0
     rows_inserted = 0
     fetch_errors = 0
     parse_misses = 0
 
+    # Pre-fetch every URL concurrently. ``bodies[url]`` is the XML
+    # text on success, ``None`` on 404 / fetch error / per-future
+    # exception (the helper traps + logs each).
+    bodies = fetch_document_texts(fetcher, (url for _, _, url in candidates))
+
     for instrument_id, accession, url in candidates:
-        try:
-            xml = fetcher.fetch_document_text(url)
-        except Exception:
+        xml = bodies.get(url)
+        if xml is None:
+            # Codex pre-flight: per-future exceptions logged
+            # generically by the helper. Re-emit at this scope with
+            # ``accession`` so operators can grep failures by
+            # filing identifier (matches the pre-#726 log shape).
             logger.warning(
                 "ingest_insider_transactions: fetch failed accession=%s url=%s",
                 accession,
                 url,
-                exc_info=True,
             )
-            fetch_errors += 1
-            _write_tombstone(
-                conn,
-                instrument_id=instrument_id,
-                accession_number=accession,
-                primary_document_url=url,
-            )
-            conn.commit()
-            continue
-        if xml is None:
             fetch_errors += 1
             _write_tombstone(
                 conn,

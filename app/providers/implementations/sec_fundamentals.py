@@ -46,7 +46,10 @@ from app.providers.fundamentals import (
     XbrlConceptCatalogEntry,
     XbrlFact,
 )
-from app.providers.implementations.sec_edgar import _PROCESS_RATE_LIMIT_CLOCK
+from app.providers.implementations.sec_edgar import (
+    _PROCESS_RATE_LIMIT_CLOCK,
+    _PROCESS_RATE_LIMIT_LOCK,
+)
 from app.providers.resilient_client import ResilientClient
 
 logger = logging.getLogger(__name__)
@@ -392,6 +395,7 @@ class SecFundamentalsProvider(FundamentalsProvider):
             self._client,
             min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
             shared_last_request=_PROCESS_RATE_LIMIT_CLOCK,
+            shared_throttle_lock=_PROCESS_RATE_LIMIT_LOCK,
         )
         # symbol → CIK cache, populated by caller before bulk refresh
         self._cik_cache: dict[str, str] = {}
