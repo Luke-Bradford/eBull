@@ -136,12 +136,12 @@ function RowShell({
 }) {
   const border = unseen
     ? "border-l-4 border-amber-400"
-    : "border-l-4 border-slate-200";
+    : "border-l-4 border-slate-200 dark:border-slate-800";
   const content = (
     <div
       data-testid="alerts-row"
       role="listitem"
-      className={`flex items-center gap-3 px-3 py-2 text-sm ${border} bg-white`}
+      className={`flex items-center gap-3 px-3 py-2 text-sm ${border} bg-white dark:bg-slate-900`}
     >
       <KindPill kind={kind} />
       {children}
@@ -149,7 +149,10 @@ function RowShell({
   );
   if (instrumentId !== null) {
     return (
-      <Link to={`/instruments/${instrumentId}`} className="block hover:bg-slate-50">
+      <Link
+        to={`/instruments/${instrumentId}`}
+        className="block hover:bg-slate-50 dark:hover:bg-slate-800/40"
+      >
         {content}
       </Link>
     );
@@ -416,7 +419,7 @@ export function AlertsStrip(): JSX.Element | null {
           <button
             type="button"
             onClick={onMarkAllRead}
-            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
           >
             Mark all read
           </button>

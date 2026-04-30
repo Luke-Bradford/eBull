@@ -29,11 +29,11 @@ export function EightKFilterStrip({
     value.dateTo !== "";
 
   return (
-    <div className="flex flex-wrap items-end gap-3 rounded border border-slate-200 bg-slate-50 p-3 text-xs">
+    <div className="flex flex-wrap items-end gap-3 rounded border border-slate-200 bg-slate-50 p-3 text-xs dark:border-slate-800 dark:bg-slate-900/40">
       <label className="flex flex-col">
-        <span className="text-slate-500">Severity</span>
+        <span className="text-slate-500 dark:text-slate-400">Severity</span>
         <select
-          className="mt-0.5 rounded border border-slate-300 bg-white px-2 py-1"
+          className="mt-0.5 rounded border border-slate-300 bg-white px-2 py-1 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
           value={value.severity}
           onChange={(e) =>
             onChange({
@@ -49,29 +49,29 @@ export function EightKFilterStrip({
         </select>
       </label>
       <label className="flex flex-col">
-        <span className="text-slate-500">Item code</span>
+        <span className="text-slate-500 dark:text-slate-400">Item code</span>
         <input
           type="text"
           placeholder="e.g. 5.02"
-          className="mt-0.5 rounded border border-slate-300 bg-white px-2 py-1"
+          className="mt-0.5 rounded border border-slate-300 bg-white px-2 py-1 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500"
           value={value.itemCode}
           onChange={(e) => onChange({ ...value, itemCode: e.target.value })}
         />
       </label>
       <label className="flex flex-col">
-        <span className="text-slate-500">From</span>
+        <span className="text-slate-500 dark:text-slate-400">From</span>
         <input
           type="date"
-          className="mt-0.5 rounded border border-slate-300 bg-white px-2 py-1"
+          className="mt-0.5 rounded border border-slate-300 bg-white px-2 py-1 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
           value={value.dateFrom}
           onChange={(e) => onChange({ ...value, dateFrom: e.target.value })}
         />
       </label>
       <label className="flex flex-col">
-        <span className="text-slate-500">To</span>
+        <span className="text-slate-500 dark:text-slate-400">To</span>
         <input
           type="date"
-          className="mt-0.5 rounded border border-slate-300 bg-white px-2 py-1"
+          className="mt-0.5 rounded border border-slate-300 bg-white px-2 py-1 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
           value={value.dateTo}
           onChange={(e) => onChange({ ...value, dateTo: e.target.value })}
         />
@@ -79,7 +79,7 @@ export function EightKFilterStrip({
       {isDirty && (
         <button
           type="button"
-          className="ml-auto rounded border border-slate-300 px-2 py-1 hover:bg-white"
+          className="ml-auto rounded border border-slate-300 px-2 py-1 hover:bg-white dark:border-slate-700 dark:hover:bg-slate-800"
           onClick={() =>
             onChange({ severity: "", itemCode: "", dateFrom: "", dateTo: "" })
           }

@@ -16,13 +16,13 @@ export function EightKDetailPanel({
 }: EightKDetailPanelProps): JSX.Element {
   if (filing === null) {
     return (
-      <div className="rounded border border-slate-200 bg-white p-4 text-sm text-slate-500">
+      <div className="rounded border border-slate-200 bg-white p-4 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
         Select a row to view item bodies + exhibits.
       </div>
     );
   }
   return (
-    <div className="space-y-4 rounded border border-slate-200 bg-white p-4 text-sm">
+    <div className="space-y-4 rounded border border-slate-200 bg-white p-4 text-sm dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100">
       <div>
         <div className="text-[10px] uppercase tracking-wider text-slate-500">
           Filing

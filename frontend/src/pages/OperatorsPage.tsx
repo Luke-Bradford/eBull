@@ -131,16 +131,16 @@ export function OperatorsPage(): JSX.Element {
         ) : rows.length === 0 ? (
           <p className="text-xs text-slate-400">No operators.</p>
         ) : (
-          <ul className="divide-y divide-slate-200 rounded border border-slate-200 bg-white">
+          <ul className="divide-y divide-slate-200 rounded border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
             {rows.map((row) => (
               <li
                 key={row.id}
                 className="flex items-center justify-between px-3 py-2 text-sm"
               >
                 <div>
-                  <span className="font-medium text-slate-800">{row.username}</span>
+                  <span className="font-medium text-slate-800 dark:text-slate-100">{row.username}</span>
                   {row.is_self && (
-                    <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-500">
+                    <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-500 dark:bg-slate-800 dark:text-slate-300">
                       you
                     </span>
                   )}
