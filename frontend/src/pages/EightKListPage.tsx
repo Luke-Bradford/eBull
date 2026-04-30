@@ -186,7 +186,7 @@ export function EightKListPage(): JSX.Element {
                     return (
                       <tr
                         key={f.accession_number}
-                        className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 ${
+                        className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800/40 ${
                           isSelected ? "bg-sky-50" : ""
                         }`}
                         onClick={() => selectAccession(f.accession_number)}

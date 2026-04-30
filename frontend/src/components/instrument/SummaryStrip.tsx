@@ -267,7 +267,7 @@ export function SummaryStrip({
               data-testid="action-generate-thesis"
               onClick={onGenerateThesis}
               disabled={generatingThesis}
-              className="rounded border border-slate-300 dark:border-slate-700 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              className="rounded border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800/40"
             >
               {generatingThesis ? "Generating…" : "Generate thesis"}
             </button>

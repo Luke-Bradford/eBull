@@ -453,7 +453,7 @@ export function ChartPage(): JSX.Element {
                   className={`rounded border px-2 py-0.5 text-xs font-medium ${
                     active
                       ? "bg-white text-slate-700"
-                      : "bg-slate-50 text-slate-500 hover:bg-slate-100"
+                      : "bg-slate-50 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
                   }`}
                   style={
                     active
@@ -484,7 +484,7 @@ export function ChartPage(): JSX.Element {
                   className={`rounded border px-2 py-0.5 text-xs font-medium ${
                     active
                       ? "border-orange-400 bg-white text-orange-600"
-                      : "border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100"
+                      : "border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
                   }`}
                   data-testid={`trend-${id}`}
                 >
@@ -515,7 +515,7 @@ export function ChartPage(): JSX.Element {
                 className={`rounded border px-2 py-0.5 text-xs font-medium ${
                   on
                     ? "border-slate-400 bg-white text-slate-700"
-                    : "border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100"
+                    : "border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
                 }`}
                 data-testid={`session-toggle-${key}`}
               >

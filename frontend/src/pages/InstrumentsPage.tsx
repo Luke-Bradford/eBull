@@ -424,7 +424,7 @@ function InstrumentsTable({
         </thead>
         <tbody className="divide-y divide-slate-100">
           {items.map((item) => (
-            <tr key={item.instrument_id} className="align-top hover:bg-slate-50">
+            <tr key={item.instrument_id} className="align-top hover:bg-slate-50 dark:hover:bg-slate-800/40">
               <td className="py-2 pr-4">
                 <Link
                   to={`/instrument/${encodeURIComponent(item.symbol)}`}

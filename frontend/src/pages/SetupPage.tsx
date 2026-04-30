@@ -332,7 +332,7 @@ export function SetupPage(): JSX.Element {
               type="button"
               onClick={() => void handleTestConnection()}
               disabled={!canTestConnection || validating}
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40 disabled:opacity-50"
             >
               {validating ? "Testing…" : "Test connection"}
             </button>
@@ -361,7 +361,7 @@ export function SetupPage(): JSX.Element {
               type="button"
               onClick={handleSkipBroker}
               disabled={brokerSubmitting}
-              className="flex-1 rounded border border-slate-300 bg-white py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+              className="flex-1 rounded border border-slate-300 bg-white py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
             >
               Skip for now
             </button>

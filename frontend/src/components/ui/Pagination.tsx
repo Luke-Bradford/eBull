@@ -51,7 +51,7 @@ export interface PaginationProps {
 const BTN_BASE =
   "rounded border px-2 py-1 text-xs font-medium transition-colors";
 const BTN_IDLE =
-  "border-slate-200 bg-white text-slate-600 hover:bg-slate-50";
+  "border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:hover:bg-slate-800/40";
 const BTN_ACTIVE =
   "border-blue-400 bg-blue-50 text-blue-700";
 const BTN_DISABLED =

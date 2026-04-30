@@ -530,7 +530,7 @@ function RunButton({
       ? "border-red-300 bg-red-50 text-red-700 hover:bg-red-100"
       : state.kind === "queued"
         ? "border-emerald-300 bg-emerald-50 text-emerald-700"
-        : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50";
+        : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40";
   return (
     <button
       type="button"

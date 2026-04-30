@@ -522,7 +522,7 @@ function PaginationBar({
         type="button"
         onClick={onPrev}
         disabled={page <= 1}
-        className="rounded border border-slate-200 bg-white px-2 py-0.5 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+        className="rounded border border-slate-200 bg-white px-2 py-0.5 font-medium text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40 disabled:opacity-40"
       >
         ← Prev
       </button>
@@ -533,7 +533,7 @@ function PaginationBar({
         type="button"
         onClick={onNext}
         disabled={page >= totalPages}
-        className="rounded border border-slate-200 bg-white px-2 py-0.5 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+        className="rounded border border-slate-200 bg-white px-2 py-0.5 font-medium text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40 disabled:opacity-40"
       >
         Next →
       </button>
@@ -570,7 +570,7 @@ function PositionRow({
     "cursor-pointer border-t border-slate-100 transition-colors",
     focused
       ? "bg-slate-100 border-l-2 border-l-slate-400"
-      : "hover:bg-slate-50/70",
+      : "hover:bg-slate-50/70 dark:hover:bg-slate-800/40",
   ].join(" ");
 
   return (
@@ -665,7 +665,7 @@ function MirrorRow({
 
   const rowClass = [
     "cursor-pointer border-t border-slate-100 transition-colors",
-    focused ? "bg-slate-100 border-l-2 border-l-slate-400" : "hover:bg-slate-50/70",
+    focused ? "bg-slate-100 border-l-2 border-l-slate-400" : "hover:bg-slate-50/70 dark:hover:bg-slate-800/40",
   ].join(" ");
 
   return (
