@@ -48,6 +48,7 @@ from app.api.watchlist import router as watchlist_router
 from app.config import settings
 from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
+from app.db.pool import open_pool
 from app.jobs.runtime import JobRuntime, shutdown_runtime, start_runtime
 from app.security import master_key
 from app.security.secrets_crypto import set_active_key as set_broker_encryption_key
@@ -86,47 +87,6 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
-# Pool hardening (#717). The dev stack went unresponsive after ~6h of
-# uptime when a Docker port-forwarder socket silently died — the pool
-# kept handing out the half-open conn and every request then blocked
-# on a TCP read that would never complete. Defence is layered:
-#
-#   1. TCP keepalives (libpq-level) so the OS detects dead peers in
-#      ~60s rather than the default ~2h.
-#   2. ``check=ConnectionPool.check_connection`` runs SELECT 1 on every
-#      checkout (~1ms) — catches conns the OS hasn't yet flagged dead.
-#   3. ``max_idle`` / ``max_lifetime`` proactively recycle conns so
-#      one bad conn cannot wedge the pool for the rest of uptime.
-#   4. ``timeout`` caps how long ``pool.connection()`` will wait, so a
-#      saturated or wedged pool surfaces as a 503 instead of hanging
-#      the asyncio event loop forever.
-_POOL_CONNECTION_KWARGS: dict[str, int] = {
-    "keepalives": 1,
-    "keepalives_idle": 30,
-    "keepalives_interval": 10,
-    "keepalives_count": 3,
-}
-
-
-def _open_pool(name: str, *, min_size: int, max_size: int) -> ConnectionPool[psycopg.Connection[Any]]:
-    """Open a hardened psycopg ConnectionPool. See `_POOL_CONNECTION_KWARGS`
-    rationale above. Caller still owns the pool's lifetime.
-    """
-    pool: ConnectionPool[psycopg.Connection[Any]] = ConnectionPool(
-        settings.database_url,
-        min_size=min_size,
-        max_size=max_size,
-        kwargs=_POOL_CONNECTION_KWARGS,
-        check=ConnectionPool.check_connection,
-        max_idle=600.0,
-        max_lifetime=1800.0,
-        timeout=15.0,
-        name=name,
-    )
-    pool.wait()
-    return pool
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Running pending migrations...")
@@ -137,7 +97,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("No pending migrations.")
 
     # Open the connection pool after migrations so the schema is up to date.
-    pool = _open_pool("db_pool", min_size=1, max_size=10)
+    pool = open_pool("db_pool", min_size=1, max_size=10)
     logger.info("Connection pool opened (min=1, max=10).")
     app.state.db_pool = pool
 
@@ -149,7 +109,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # are short-lived single-row INSERTs that don't need
     # parallelism. ADR 0001 requires audit-on-every-decryption to
     # be durable independent of caller outcome.
-    audit_pool = _open_pool("audit_pool", min_size=1, max_size=2)
+    audit_pool = open_pool("audit_pool", min_size=1, max_size=2)
     logger.info("Audit pool opened (min=1, max=2).")
     app.state.audit_pool = audit_pool
 

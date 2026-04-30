@@ -45,6 +45,22 @@ import psycopg
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Singleton fence (#719)
+# ---------------------------------------------------------------------------
+#
+# Constant BIGINT key for `pg_try_advisory_lock(JOBS_PROCESS_LOCK_KEY)` held
+# on a dedicated long-lived connection by the jobs entrypoint. Only one
+# `app.jobs` process may run at a time — boot recovery's "claimed by stale
+# boot id" reset is only safe under that invariant. Imported by the
+# entrypoint; never used inside the API process.
+#
+# Chosen as an arbitrary BIGINT well clear of any hashtext collision —
+# hashtext returns int4, so any value above INT_MAX is collision-free
+# against the per-job locks.
+JOBS_PROCESS_LOCK_KEY: int = 0x6562_756C_6C5F_4A52  # 'ebull_JR' (ASCII)
+
+
 class JobAlreadyRunning(RuntimeError):
     """Raised when ``JobLock`` cannot acquire because another holder exists.
 
