@@ -271,13 +271,29 @@ class SecFilingsProvider(FilingsProvider):
         return _normalise_filing_event(provider_filing_id, raw)
 
     def fetch_filing_index(self, provider_filing_id: str) -> dict[str, object] | None:
-        """Fetch a filing's ``{accession}-index.json`` manifest.
+        """Fetch a filing's directory listing JSON.
 
         Returns the parsed dict on 2xx, ``None`` on 404. Raises on
         other HTTP errors so the caller decides retry vs skip. Used
         by :func:`get_filing` for header metadata and by the
         ``filing_documents`` service for the per-document manifest
         (#452).
+
+        **URL (#723):** SEC's canonical machine-readable manifest at
+        the per-filing archive directory is ``/index.json`` (no
+        accession prefix). Pre-#723 this code targeted
+        ``{accession}-index.json`` on the assumption the dashed /
+        no-dashes accession was the filename — empirical testing
+        proved both forms 404 on every recent filing. The shape
+        returned is::
+
+            {"directory": {"item": [
+                {"name": "...", "type": "text.gif",
+                 "last-modified": "...", "size": "..."},
+                ...
+            ]}}
+
+        ``parse_filing_index`` knows how to walk that shape.
 
         **Host pin (#477):** the ``/Archives/edgar/data/...`` path
         is served only by ``www.sec.gov``. ``data.sec.gov`` (the
@@ -293,7 +309,7 @@ class SecFilingsProvider(FilingsProvider):
         if len(raw_id) != 18:
             raise FilingNotFound(f"Invalid accession number format: {provider_filing_id}")
         cik_padded = raw_id[:10]
-        absolute_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik_padded)}/{raw_id}/{raw_id}-index.json"
+        absolute_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik_padded)}/{raw_id}/index.json"
         resp = self._http_tickers.get(absolute_url)
         if resp.status_code == 404:
             return None

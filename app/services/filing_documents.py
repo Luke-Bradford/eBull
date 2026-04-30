@@ -1,9 +1,10 @@
-"""SEC filing-document manifest parser + ingester (#452 Phase A).
+"""SEC filing-document manifest parser + ingester (#452 / #723).
 
-Every SEC filing has an ``{accession}-index.json`` listing every
-document in the submission — primary doc, exhibits, XBRL files,
-graphics, cover page. Migration 062 added ``filing_documents`` to
-capture the manifest as SQL rows. This module parses the index
+Every SEC filing's archive directory exposes a JSON listing at
+``/Archives/edgar/data/{cik}/{accession_no_dashes}/index.json`` —
+one entry per file in the submission (primary doc, exhibits, XBRL
+files, graphics, cover page). Migration 062 added ``filing_documents``
+to capture the manifest as SQL rows. This module fetches the listing
 JSON and populates the table.
 
 Pure/impure split mirrors the other services in this family:
@@ -16,11 +17,24 @@ Pure/impure split mirrors the other services in this family:
 
 Retires the ``data/raw/sec/sec_filing_*.json`` disk dump now that
 every structured field lands in SQL (#453 contract).
+
+#723: this module's pre-rewrite implementation targeted a
+``{accession}-index.json`` URL that does not exist on SEC EDGAR and
+parsed a hypothetical top-level ``items: [...]`` shape that SEC has
+never returned. Both bugs are fixed here. ``document_type`` and
+``description`` columns stay NULL on this code path because SEC's
+``index.json`` ``type`` field is the content-type icon name
+(``text.gif``, ``compressed.gif``) — the rich SEC type labels
+(``EX-99.1``, ``GRAPHIC``, ``XBRL INSTANCE DOCUMENT``) live only
+in the ``-index.html`` rendering and parsing that requires HTML. A
+follow-up can layer the HTML parse on top if the cross-issuer
+type-scoped queries the schema mentions become an active need.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -29,7 +43,7 @@ import psycopg
 logger = logging.getLogger(__name__)
 
 
-_PARSER_VERSION = 1
+_PARSER_VERSION = 2  # bumped: rewrite for real SEC directory.item shape
 
 
 # ---------------------------------------------------------------------
@@ -54,55 +68,90 @@ class ParsedFilingDocument:
 # ---------------------------------------------------------------------
 
 
+def _coerce_int_size(raw: object) -> int | None:
+    """Parse SEC's ``size`` string to an int.
+
+    SEC sometimes emits an empty string for index/header entries
+    (e.g. ``0000320193-26-000011-index-headers.html``) — those map
+    to ``None``. Numeric-looking strings parse normally; anything
+    else maps to ``None``.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        if not raw.strip():
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+    return None
+
+
 def parse_filing_index(
-    raw_index: dict[str, object],
+    raw_index: Mapping[str, object],
     *,
     accession_number: str,
+    cik: str | int,
+    primary_document_name: str | None = None,
 ) -> tuple[ParsedFilingDocument, ...]:
-    """Walk the filing-index JSON and emit one ``ParsedFilingDocument``
-    per document entry.
+    """Walk a SEC filing's ``/index.json`` payload and emit one
+    :class:`ParsedFilingDocument` per file in the submission.
 
-    SEC's index JSON shape:
+    SEC's actual response shape (verified against live archive,
+    documented at #723):
 
     .. code:: json
 
         {
-          "cik": "320193",
-          "form": "10-K",
-          "primaryDocument": "aapl-20240930.htm",
-          "filingDate": "2024-11-01",
-          ...
-          "items": [
-            {"name": "aapl-20240930.htm", "type": "10-K",
-             "description": "10-K", "size": 1258402},
-            {"name": "ex-21.htm", "type": "EX-21",
-             "description": "Subsidiaries of the Registrant", "size": 1892},
-            ...
-          ]
+          "directory": {
+            "name": "/Archives/edgar/data/320193/000032019326000011",
+            "parent-dir": "/Archives/edgar/data/320193/",
+            "item": [
+              {"last-modified": "2026-04-30 16:30:41",
+               "name": "0000320193-26-000011-index-headers.html",
+               "type": "text.gif",
+               "size": ""},
+              {"last-modified": "2026-04-30 16:30:41",
+               "name": "aapl-20260430.htm",
+               "type": "text.gif",
+               "size": "37639"},
+              ...
+            ]
+          }
         }
 
-    The ``items`` list is the authoritative manifest. When a field is
-    absent in a row we preserve ``None`` rather than fabricating a
-    default — downstream renderers can distinguish "no description"
-    from "empty description".
+    The ``type`` field is a content-type icon (e.g. ``text.gif``,
+    ``compressed.gif``) and is NOT the SEC document-type label
+    (``EX-99.1``, ``GRAPHIC``, etc.) — those live only in the
+    ``-index.html`` rendering. This parser leaves ``document_type``
+    and ``description`` NULL; a future enhancement can layer in HTML
+    parsing if cross-issuer type-scoped queries become a need.
+
+    ``primary_document_name`` is supplied by the caller from
+    ``filing_events.primary_document_url`` (the submission-level
+    primary, which the archive listing does not flag). When
+    ``None``, no row is marked primary.
+
+    Returns an empty tuple when the payload is malformed (missing
+    ``directory.item``, wrong types) — callers treat that as a
+    parse miss, NOT a fetch error.
     """
-    items = raw_index.get("items")
+    directory = raw_index.get("directory")
+    if not isinstance(directory, dict):
+        return ()
+    items = directory.get("item")
     if not isinstance(items, list):
         return ()
-    cik_raw = raw_index.get("cik")
-    primary_name = raw_index.get("primaryDocument")
-    if not isinstance(primary_name, str):
-        primary_name = None
 
-    # CIK as an integer drops any leading zeroes, matching the SEC
-    # archive path shape (``/edgar/data/<int_cik>/<accession>/...``).
-    cik_int: int | None
     try:
-        cik_int = int(str(cik_raw)) if cik_raw is not None else None
+        cik_int = int(cik)
     except TypeError, ValueError:
-        cik_int = None
+        return ()
 
-    acc_no_dashes = accession_number.replace("-", "")
+    accession_no_dashes = accession_number.replace("-", "")
 
     docs: list[ParsedFilingDocument] = []
     seen_names: set[str] = set()
@@ -114,29 +163,17 @@ def parse_filing_index(
             continue
         seen_names.add(name)
 
-        doc_type_raw = entry.get("type")
-        doc_type = str(doc_type_raw) if isinstance(doc_type_raw, str) and doc_type_raw else None
-        desc_raw = entry.get("description")
-        description = str(desc_raw) if isinstance(desc_raw, str) and desc_raw else None
-        size_raw = entry.get("size")
-        size_bytes: int | None
-        try:
-            size_bytes = int(size_raw) if size_raw is not None else None
-        except TypeError, ValueError:
-            size_bytes = None
-
-        if cik_int is not None:
-            document_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_no_dashes}/{name}"
-        else:
-            document_url = name  # best effort when CIK missing from index
+        size_bytes = _coerce_int_size(entry.get("size"))
+        document_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_no_dashes}/{name}"
+        is_primary = primary_document_name is not None and name == primary_document_name
 
         docs.append(
             ParsedFilingDocument(
                 document_name=name,
-                document_type=doc_type,
-                description=description,
+                document_type=None,  # see docstring — needs HTML parse
+                description=None,
                 size_bytes=size_bytes,
-                is_primary=(name == primary_name),
+                is_primary=is_primary,
                 document_url=document_url,
             )
         )
@@ -229,34 +266,135 @@ def ingest_filing_documents(
     """Scan ``filing_events`` for accessions missing any
     ``filing_documents`` children, fetch the index JSON, upsert.
 
-    Currently disabled (#723). Returns immediately with zero counts.
+    Candidate selector:
 
-    Two independent bugs make the live path 100% broken:
+    1. ``fe.provider = 'sec'`` — only SEC filings carry an index
+       JSON in this shape.
+    2. No existing ``filing_documents`` row for the filing_event_id.
+    3. ``primary_document_url`` available — needed to flag the
+       submission-level primary (the archive listing does not).
+       Filings missing a primary URL skip silently; those rows
+       cannot anchor an ``is_primary=TRUE`` row and would produce
+       a misleading "all rows is_primary=FALSE" listing.
+    4. Ordered by filing_date DESC so fresh filings always get
+       budget; historical backlog drains via the scheduler's
+       continuous tick.
 
-    1. URL builder targets ``{accession}-index.json`` but SEC's actual
-       canonical manifest at that path is ``/index.json`` (no
-       accession prefix). Every fetch 404s.
-    2. ``parse_filing_index`` expects a top-level ``items: [...]``
-       shape that SEC has never returned for this endpoint — the real
-       response is ``{"directory": {"item": [...]}}`` with different
-       per-item fields.
-
-    ``filing_documents`` is empty in production (0 rows) and no
-    consumer reads from it, so disabling the ingest is a zero-impact
-    stop-the-bleeding step. The hourly schedule was burning ~50s of
-    SEC rate budget per tick on 404s. Re-enable in the rework PR
-    that fixes the URL + parser together.
+    Bounded per run (``limit=500``). The index JSON is small (~2 KB
+    typical) so the rate-limit cost is modest even on a large
+    backlog tick.
     """
-    # Touch params so unused-argument lints don't fire while the
-    # function body is stubbed pending #723.
-    del conn, fetcher, limit
-    logger.info("ingest_filing_documents: DISABLED pending rewrite (#723) — see filing_documents.py docstring")
+    conn.commit()
+
+    candidates: list[tuple[int, str, str, str | None]] = []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT fe.filing_event_id,
+                   fe.provider_filing_id,
+                   ei.identifier_value AS cik,
+                   fe.primary_document_url
+            FROM filing_events fe
+            LEFT JOIN filing_documents fd
+                ON fd.filing_event_id = fe.filing_event_id
+            JOIN external_identifiers ei
+                ON ei.instrument_id = fe.instrument_id
+                AND ei.provider = 'sec'
+                AND ei.identifier_type = 'cik'
+                AND ei.is_primary = TRUE
+            WHERE fe.provider = 'sec'
+              AND fd.id IS NULL
+              AND fe.primary_document_url IS NOT NULL
+            GROUP BY fe.filing_event_id, fe.provider_filing_id,
+                     ei.identifier_value, fe.primary_document_url, fe.filing_date
+            ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        for row in cur.fetchall():
+            candidates.append(
+                (
+                    int(row[0]),
+                    str(row[1]),
+                    str(row[2]),
+                    str(row[3]) if row[3] is not None else None,
+                )
+            )
+    conn.commit()
+
+    filings_parsed = 0
+    documents_inserted = 0
+    fetch_errors = 0
+    parse_misses = 0
+
+    for filing_event_id, accession, cik, primary_url in candidates:
+        try:
+            raw = fetcher.fetch_filing_index(accession)
+        except Exception:
+            logger.warning(
+                "ingest_filing_documents: fetch failed accession=%s",
+                accession,
+                exc_info=True,
+            )
+            fetch_errors += 1
+            continue
+        if raw is None:
+            fetch_errors += 1
+            continue
+
+        # Derive the primary document filename from the stored URL —
+        # the archive listing has no flag for it.
+        primary_name: str | None = None
+        if primary_url:
+            primary_name = primary_url.rsplit("/", 1)[-1] or None
+
+        docs = parse_filing_index(
+            raw,
+            accession_number=accession,
+            cik=cik,
+            primary_document_name=primary_name,
+        )
+        if not docs:
+            parse_misses += 1
+            continue
+
+        try:
+            upsert_filing_documents(
+                conn,
+                filing_event_id=filing_event_id,
+                accession_number=accession,
+                documents=docs,
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.warning(
+                "ingest_filing_documents: upsert failed accession=%s",
+                accession,
+                exc_info=True,
+            )
+            continue
+
+        filings_parsed += 1
+        documents_inserted += len(docs)
+
+    logger.info(
+        "ingest_filing_documents: parser_version=%d scanned=%d parsed=%d docs=%d fetch_errors=%d parse_misses=%d",
+        _PARSER_VERSION,
+        len(candidates),
+        filings_parsed,
+        documents_inserted,
+        fetch_errors,
+        parse_misses,
+    )
+
     return IngestResult(
-        filings_scanned=0,
-        filings_parsed=0,
-        documents_inserted=0,
-        fetch_errors=0,
-        parse_misses=0,
+        filings_scanned=len(candidates),
+        filings_parsed=filings_parsed,
+        documents_inserted=documents_inserted,
+        fetch_errors=fetch_errors,
+        parse_misses=parse_misses,
     )
 
 

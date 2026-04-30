@@ -1,4 +1,4 @@
-"""Integration tests for ``ingest_filing_documents`` (#452)."""
+"""Integration tests for ``ingest_filing_documents`` (#452 / #723)."""
 
 from __future__ import annotations
 
@@ -11,12 +11,14 @@ from app.services.filing_documents import (
     ingest_filing_documents,
     list_filing_documents,
 )
+from tests.fixtures.ebull_test_db import ebull_test_conn
+from tests.fixtures.ebull_test_db import test_db_available as _test_db_available
+
+__all__ = ["ebull_test_conn"]
 
 pytestmark = [
     pytest.mark.integration,
-    # Path disabled pending #723 rewrite (URL builder + parser shape
-    # both wrong — current code 100% 404s in production).
-    pytest.mark.skip(reason="ingest_filing_documents disabled pending #723"),
+    pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable"),
 ]
 
 
@@ -30,14 +32,27 @@ class _StubIndexFetcher:
         return self._by.get(accession)
 
 
-def _seed_instrument(conn: psycopg.Connection[tuple], iid: int = 501) -> int:
+def _seed_instrument(conn: psycopg.Connection[tuple], iid: int = 501, *, cik: str = "0000320193") -> int:
+    """Seed a tradable instrument with a primary SEC CIK identifier.
+
+    The ingester's candidate selector requires a primary
+    ``external_identifiers`` row of provider='sec',
+    identifier_type='cik', so the parser can build SEC archive URLs.
+    """
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO instruments (instrument_id, symbol, company_name) VALUES (%s, %s, %s) RETURNING instrument_id",
-            (iid, "APEX", "Apex Inc."),
+            "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
+            "VALUES (%s, %s, %s, TRUE) RETURNING instrument_id",
+            (iid, f"APEX{iid}", f"Apex Inc. {iid}"),
         )
         row = cur.fetchone()
         assert row is not None
+        cur.execute(
+            "INSERT INTO external_identifiers "
+            "(instrument_id, provider, identifier_type, identifier_value, is_primary) "
+            "VALUES (%s, 'sec', 'cik', %s, TRUE)",
+            (iid, cik),
+        )
     conn.commit()
     return int(row[0])
 
@@ -47,7 +62,7 @@ def _seed_filing(
     *,
     instrument_id: int,
     accession: str,
-    url: str = "https://www.sec.gov/doc.htm",
+    url: str | None = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000001/apex-10k.htm",
     filing_date: str = "2026-04-01",
     filing_type: str = "10-K",
 ) -> int:
@@ -68,15 +83,17 @@ def _seed_filing(
     return int(row[0])
 
 
-_INDEX_JSON = {
-    "cik": "320193",
-    "form": "10-K",
-    "primaryDocument": "apex-10k.htm",
-    "items": [
-        {"name": "apex-10k.htm", "type": "10-K", "description": "10-K", "size": 999000},
-        {"name": "ex-21.htm", "type": "EX-21", "description": "Subsidiaries", "size": 2000},
-        {"name": "ex-99-1.htm", "type": "EX-99.1", "description": "Press release", "size": 5000},
-    ],
+# Real SEC index.json shape — see test_filing_documents.py for the
+# verified-against-live-SEC fixture rationale (#723).
+_INDEX_JSON: dict[str, object] = {
+    "directory": {
+        "name": "/Archives/edgar/data/320193/000032019324000001",
+        "item": [
+            {"name": "apex-10k.htm", "type": "text.gif", "size": "999000", "last-modified": "2026-04-01 09:00:00"},
+            {"name": "ex-21.htm", "type": "text.gif", "size": "2000", "last-modified": "2026-04-01 09:00:00"},
+            {"name": "ex-99-1.htm", "type": "text.gif", "size": "5000", "last-modified": "2026-04-01 09:00:00"},
+        ],
+    }
 }
 
 
@@ -86,9 +103,9 @@ class TestIngestFilingDocuments:
         fid = _seed_filing(
             ebull_test_conn,
             instrument_id=iid,
-            accession="APEX-10K-1",
+            accession="0000320193-24-000001",
         )
-        fetcher = _StubIndexFetcher({"APEX-10K-1": _INDEX_JSON})
+        fetcher = _StubIndexFetcher({"0000320193-24-000001": _INDEX_JSON})
 
         result = ingest_filing_documents(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
 
@@ -97,26 +114,27 @@ class TestIngestFilingDocuments:
 
         docs = list_filing_documents(ebull_test_conn, filing_event_id=fid)
         assert len(docs) == 3
-        # Primary document always sorts first.
+        # Primary document always sorts first; primary derived from
+        # filing_events.primary_document_url filename.
         assert docs[0].is_primary is True
         assert docs[0].document_name == "apex-10k.htm"
-        ex_types = {d.document_type for d in docs}
-        assert "EX-21" in ex_types
-        assert "EX-99.1" in ex_types
+        # Type/description NULL on this code path — see module docstring.
+        assert docs[0].document_type is None
+        assert docs[0].description is None
 
     def test_rerun_skips_filings_with_existing_children(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument(ebull_test_conn, iid=502)
         _seed_filing(
             ebull_test_conn,
             instrument_id=iid,
-            accession="APEX-10K-2",
+            accession="0000320193-24-000002",
         )
-        fetcher = _StubIndexFetcher({"APEX-10K-2": _INDEX_JSON})
+        fetcher = _StubIndexFetcher({"0000320193-24-000002": _INDEX_JSON})
         ingest_filing_documents(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
 
         # Second pass: existing child rows mean the filing is no
         # longer a candidate.
-        second = _StubIndexFetcher({"APEX-10K-2": _INDEX_JSON})
+        second = _StubIndexFetcher({"0000320193-24-000002": _INDEX_JSON})
         ingest_filing_documents(ebull_test_conn, cast("object", second))  # type: ignore[arg-type]
         assert second.calls == []
 
@@ -127,9 +145,9 @@ class TestIngestFilingDocuments:
         _seed_filing(
             ebull_test_conn,
             instrument_id=iid,
-            accession="DEAD-ACC",
+            accession="0000320193-24-000003",
         )
-        fetcher = _StubIndexFetcher({"DEAD-ACC": None})
+        fetcher = _StubIndexFetcher({"0000320193-24-000003": None})
         result = ingest_filing_documents(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
         assert result.fetch_errors == 1
         assert result.filings_parsed == 0
@@ -152,3 +170,45 @@ class TestIngestFilingDocuments:
         result = ingest_filing_documents(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
         assert result.filings_scanned == 0
         assert fetcher.calls == []
+
+    def test_filing_without_primary_url_skipped(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Ingest selector requires ``primary_document_url`` — without
+        it we cannot flag the submission's primary document, and an
+        all-rows-non-primary listing is misleading. Such filings skip
+        silently and re-qualify automatically once the URL is
+        populated upstream."""
+        iid = _seed_instrument(ebull_test_conn, iid=505)
+        _seed_filing(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="0000320193-24-000005",
+            url=None,
+        )
+        fetcher = _StubIndexFetcher({"0000320193-24-000005": _INDEX_JSON})
+        result = ingest_filing_documents(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+        assert result.filings_scanned == 0
+        assert fetcher.calls == []
+
+    def test_filing_without_cik_mapping_skipped(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Ingest selector requires a primary SEC CIK identifier on
+        the parent instrument so the URL builder has a CIK to
+        substitute. Without one, the JOIN produces zero rows and the
+        filing is skipped silently."""
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
+                "VALUES (506, 'NOID', 'No CIK Inc.', TRUE)"
+            )
+            cur.execute(
+                """
+                INSERT INTO filing_events
+                    (instrument_id, filing_date, filing_type, provider,
+                     provider_filing_id, primary_document_url)
+                VALUES (506, CURRENT_DATE, '10-K', 'sec',
+                        '0000000506-24-000001', 'https://example.com/x.htm')
+                """,
+            )
+        ebull_test_conn.commit()
+        fetcher = _StubIndexFetcher({"0000000506-24-000001": _INDEX_JSON})
+        result = ingest_filing_documents(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+        assert result.filings_scanned == 0
