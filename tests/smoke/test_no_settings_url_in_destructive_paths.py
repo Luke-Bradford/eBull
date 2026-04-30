@@ -103,14 +103,6 @@ _ALLOWED: dict[str, str] = {
     # (the ``_FORBIDDEN_PATTERNS`` literals above). Exclude it to
     # avoid a self-match.
     "smoke/test_no_settings_url_in_destructive_paths.py": "the guard itself",
-    # Read-only reachability probe for the jobs entrypoint smoke
-    # (#JOBS-MK-BOOTSTRAP). Same shape as ``test_app_boots.py`` — runs
-    # ``SELECT 1`` to decide whether to skip and drives the
-    # ``_bootstrap_master_key`` helper which opens its own pool against
-    # ``settings.database_url``. The bootstrap path is a read of
-    # ``broker_credentials.ciphertext`` (verify the persisted key
-    # matches ``EBULL_SECRETS_KEY``) — no destructive statements.
-    "smoke/test_jobs_process_boots.py": "read-only bootstrap + reachability probe",
     # Read-only reachability probe + advisory-lock semantics test for
     # the JobLock primitive (#13 PR A). The probe runs ``SELECT 1`` to
     # decide whether to skip (no Postgres -> clean skip) and the test

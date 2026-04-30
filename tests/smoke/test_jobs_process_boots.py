@@ -12,41 +12,21 @@ crypto layer or tested the API process's bootstrap, so 3000+
 pytest checks were green while the jobs daemon was crashing every
 job that touched encrypted credentials.
 
-This test drives the bootstrap helper directly against the dev DB
-so it can run alongside the live jobs daemon (the daemon holds the
-singleton advisory lock — a full ``serve()`` invocation would
-SystemExit).
+These tests are fully mocked — no DB required. They patch
+``master_key.bootstrap`` to inject a known result and assert the
+helper's wiring (``set_active_key`` plumbed through on the
+key-supplied branch, no-op when the boot result has no key).
 
-Pattern mirrors ``test_app_boots.py``: minimal, fast, no mocks.
-The structural assertion is "the helper completes without raising
-``MasterKeyNotLoadedError``"; the post-boot probe is a coherence
-check that the AES-GCM cipher is callable.
+Originally drove the helper against the dev DB, but the bot
+pre-flight on PR #733 caught that the module-level skipif on
+DB-reachability would hollow out regression coverage in any CI
+environment without Postgres. Mocked design lets the contract
+test run everywhere.
 """
 
 from __future__ import annotations
 
 import pytest
-
-
-def _db_reachable() -> bool:
-    try:
-        import psycopg
-
-        from app.config import settings
-
-        with psycopg.connect(settings.database_url, connect_timeout=2) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                cur.fetchone()
-        return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _db_reachable(),
-    reason="dev Postgres not reachable; smoke test requires the real DB",
-)
 
 
 def test_jobs_bootstrap_master_key_installs_returned_key() -> None:
