@@ -786,7 +786,12 @@ export function ChartCanvas({
       chart.timeScale().fitContent();
       fittedRangeRef.current = fingerprint;
     }
-  }, [clean, range, theme]);
+    // `theme` intentionally NOT in deps: volumeUpAlpha / volumeDownAlpha
+    // are identical between light and dark (operator color memory), so
+    // a theme flip never changes the colour any bar should render.
+    // Re-running setData on every toggle would burn O(N bars) for no
+    // visible effect.
+  }, [clean, range]);
 
 
   // Live-tick aggregator (#602). Subscribes to the page-level

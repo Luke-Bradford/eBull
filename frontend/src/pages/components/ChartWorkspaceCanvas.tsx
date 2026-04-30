@@ -543,7 +543,11 @@ export function ChartWorkspaceCanvas({
       chart.timeScale().fitContent();
       fittedFingerprintRef.current = fingerprint;
     }
-  }, [clean, compareMode, range, theme]);
+    // `theme` intentionally NOT in deps: volume alphas are identical
+    // across light/dark; primaryLine recolouring is handled by the
+    // theme-update effect via applyOptions. See PriceChart for the
+    // same rationale.
+  }, [clean, compareMode, range]);
 
 
   // Compare series: fetch + render normalized lines per compare symbol.

@@ -270,7 +270,12 @@ export function InsiderPriceMarkers({
     }));
     markersRef.current?.detach();
     markersRef.current = createSeriesMarkers(line, markers);
-  }, [transactions, cutoffMs, theme]);
+    // `theme` intentionally NOT in deps: marker colours come from
+    // `theme.up` / `theme.down` which are identical across light and
+    // dark (saturated palette, operator color memory). A theme flip
+    // would otherwise rebuild the entire marker plugin for no visible
+    // change.
+  }, [transactions, cutoffMs]);
 
   return (
     <div className="relative h-72 w-full" data-testid="insider-price-markers">
