@@ -28,4 +28,13 @@ uv run ruff format --check .
 echo "==> Pre-push gate: pyright"
 uv run pyright
 
+# Frontend dark-mode class hygiene (#708). Skipped if frontend/ is
+# absent (e.g. backend-only worktrees) or if `pnpm` is not on PATH —
+# CI runs the same gate, so a missing local toolchain doesn't block
+# push.
+if [[ -d frontend && -f frontend/package.json ]] && command -v pnpm >/dev/null 2>&1; then
+  echo "==> Pre-push gate: dark-mode class check"
+  pnpm --dir frontend dark:check
+fi
+
 echo "==> Pre-push gate: green. Pushing."
