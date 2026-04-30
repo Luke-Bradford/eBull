@@ -2363,6 +2363,18 @@ def execute_refresh(
                 instrument_id, symbol = inst
                 new_filings = plan.new_filings_by_cik.get(cik)
                 submissions_body = plan.submissions_by_cik.get(cik)
+                # Codex residual finding (#675): if a hand-built /
+                # legacy plan supplies ``submissions_only_advances``
+                # without a matching ``submissions_by_cik`` entry, fall
+                # back to a fresh fetch so extractions still run. Real
+                # planner output always pairs them, but a
+                # silently-skipped extraction is exactly the bug class
+                # this PR exists to close. Mirrors the seed-path
+                # fallback inside ``_run_cik_upsert``.
+                if submissions_body is None:
+                    fetched = filings_provider.fetch_submissions(cik)
+                    if fetched is not None:
+                        submissions_body = fetched
                 with conn.transaction():
                     # Upsert filing_events for each master-index entry
                     # on this CIK so the 8-K (or similar) is visible to

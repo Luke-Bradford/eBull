@@ -312,6 +312,9 @@ def test_submissions_only_advance_skips_companyfacts(
 
     plan = RefreshPlan(
         submissions_only_advances=[("0000789019", "0000789019-26-000017")],
+        submissions_by_cik={
+            "0000789019": _submissions_with_top("0000789019-26-000017", form="8-K"),
+        },
     )
     filings = StubFilingsProvider()  # fetch_submissions must NOT be called
     fundamentals = StubFundamentalsProvider()  # extract_facts must NOT be called
@@ -324,6 +327,7 @@ def test_submissions_only_advance_skips_companyfacts(
     )
 
     assert outcome.submissions_advanced == 1
+    # Planner-fed submissions in plan → no fallback fetch.
     assert filings.fetch_calls == 0
     assert fundamentals.extract_calls == []
 
