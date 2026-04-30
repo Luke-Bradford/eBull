@@ -37,6 +37,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Dark-mode class gate (#708)
+        run: pnpm dark:check
+
       - name: Typecheck
         run: pnpm typecheck
 

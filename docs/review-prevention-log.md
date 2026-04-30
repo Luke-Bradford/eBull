@@ -1090,6 +1090,13 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Prevention: when a metric helper's null-handling contract changes (null-coerced → null-propagated, or vice versa), grep every call site for the empty-state guards that follow and re-verify each branch against the new contract. The guard must answer "does the user see *any* meaningful series?", not "is the latest scalar zero?". Self-review prompt: after editing a `build*` helper, grep for the helper name across the codebase and read each consumer's `if (...)` guard with the new return shape in mind. Test prompt: every chart component with an inline "no data" branch needs a vitest case where every row of its source data has a null in the relevant field.
 - Enforced in: this prevention log; PR #673 widens the cumulative-DPS guard to recognise the all-null case and adds a regression test (`CumulativeDpsChart` "renders the inline no-data hint when every row has null dps_declared").
 
+### Dark-mode token sweeps must produce neither duplicate nor missing partner utilities
+
+- First seen in: #707 review + #709 review (Phase 2 dark-mode rollout, #700 epic).
+- Symptom: two independent sweeps that each touch the same className end up with duplicate `dark:text-slate-100`s on one input (PR #707, RecoveryPhraseConfirm:365 — caught by `dark:text-slate-100.*dark:text-slate-100`); a follow-up PR adds `dark:hover:bg-slate-800/40` to a button but leaves its `border-slate-300` without the `dark:border-slate-700` partner the same PR's stated mapping requires (PR #709). Both shapes ship green CI because the existing typecheck + tests do not look at the visual tokens, only the runtime semantics — Tailwind dedupes duplicates at build, so there is no functional regression to catch.
+- Prevention: enforced by `frontend/scripts/check-dark-classes.mjs`, wired into the pre-push hook and `frontend-ci.yml`. Three checks per line in every `frontend/src/**/*.tsx`: (a) duplicate `dark:|sm:|md:|lg:|xl:|2xl:`-prefixed utility token; (b) `border-slate-200|300` without a `dark:border-` partner; (c) `hover:bg-slate-50|100` without a `dark:hover:bg-` partner. Run locally with `pnpm --dir frontend dark:check`. New mapping pairs (e.g. extending the gate to text or background utilities later) get added to the script; do not introduce a separate ad-hoc grep step in the hook.
+- Enforced in: `frontend/scripts/check-dark-classes.mjs`, `frontend/package.json` (`dark:check` script), `.githooks/pre-push`, `.github/workflows/frontend-ci.yml`.
+
 ### Column-side casts in WHERE clauses defeat indexes
 
 - First seen in: #669 review (PR #679).
