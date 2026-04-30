@@ -23,12 +23,16 @@
  *   Zone C — Health    :  Fundamentals + Dividends paired 6+6 — read
  *                         financial trajectory and shareholder return
  *                         together in one scan.
- *   Zone D — Activity  :  Insider activity. Filings have moved up to
- *                         pair with the narrative; when filings are
- *                         active but no narrative exists, Filings
- *                         drops back into this zone alongside Insider
- *                         at 6+6. Recent news full-width below since
- *                         news lists scan vertically.
+ *   Zone D — Activity  :  Insider activity + Recent news paired 6+6
+ *                         when both available — both are "what's
+ *                         happening recently" surfaces and the news
+ *                         list reads fine in a half-width column,
+ *                         filling the right-half dead space the
+ *                         insider strip would otherwise leave.
+ *                         Filings have moved up to pair with the
+ *                         narrative; when filings are active but no
+ *                         narrative exists, Filings sits full-width
+ *                         in its own row above this pairing.
  *   Zone E — Operator  :  Thesis pane — operator's own call, last so
  *                         it doesn't anchor your read of the data.
  *
@@ -122,18 +126,24 @@ export function DensityGrid({
 
   // Filings pairs with the 10-K narrative when both are active so the
   // right-half dead space next to the narrative gets contextually
-  // related content. Otherwise filings stay in the activity zone.
+  // related content. Otherwise filings sit full-width above the
+  // activity zone (the original layout for narrative-less profiles).
   const filingsPairedWithNarrative = hasNarrative && filingsActive;
   const filingsNode = filingsActive ? (
     <FilingsPane instrumentId={instrumentId} symbol={symbol} summary={summary} />
   ) : null;
+
+  // Activity zone — Insider summary (5-stat strip) + Recent news (list)
+  // pair as 6+6. Both convey "what's happening now" so they read
+  // together; pairing also kills the right-half dead space the
+  // insider strip would otherwise leave when filings are not in the
+  // activity row.
   const ActivityRow = renderActivityRow({
-    filingsActive: !filingsPairedWithNarrative && filingsActive,
-    filingsNode: filingsPairedWithNarrative ? null : filingsNode,
     insiderActive,
     insiderNode: insiderActive ? (
       <InsiderActivitySummary symbol={symbol} />
     ) : null,
+    newsNode: <RecentNewsPane instrumentId={instrumentId} symbol={symbol} />,
   });
 
   // Inter-pane vertical gap is 6 (gap-y-6) — without card borders, the
@@ -170,11 +180,14 @@ export function DensityGrid({
         ) : null}
         {/* Zone C — Health */}
         {HealthRow}
-        {/* Zone D — Activity */}
+        {/* When filings did not pair with narrative, render filings
+            full-width above the activity row (matches the legacy
+            narrative-less layout). */}
+        {filingsActive && !filingsPairedWithNarrative ? (
+          <div className="col-span-12">{filingsNode}</div>
+        ) : null}
+        {/* Zone D — Activity (Insider + Recent news 6+6) */}
         {ActivityRow}
-        <div className="col-span-12">
-          <RecentNewsPane instrumentId={instrumentId} symbol={symbol} />
-        </div>
         {/* Zone E — Operator */}
         {thesis !== null || thesisErrored ? (
           <div className="col-span-12">
@@ -213,11 +226,13 @@ export function DensityGrid({
         ) : null}
         {/* Zone C — Health (fundamentals optional in partial profile) */}
         {HealthRow}
-        {/* Zone D — Activity */}
+        {/* When filings did not pair with narrative, render filings
+            full-width above the activity row. */}
+        {filingsActive && !filingsPairedWithNarrative ? (
+          <div className="col-span-12">{filingsNode}</div>
+        ) : null}
+        {/* Zone D — Activity (Insider + Recent news 6+6) */}
         {ActivityRow}
-        <div className="col-span-12">
-          <RecentNewsPane instrumentId={instrumentId} symbol={symbol} />
-        </div>
         {/* Zone E — Operator */}
         {thesis !== null || thesisErrored ? (
           <div className="col-span-12">
@@ -249,9 +264,22 @@ export function DensityGrid({
           ))}
         </div>
       )}
-      <div className="col-span-12">
-        <RecentNewsPane instrumentId={instrumentId} symbol={symbol} />
-      </div>
+      {/* Insider + Recent news pair at 6+6 when insider is active;
+          otherwise news drops to full-width. */}
+      {insiderActive ? (
+        <>
+          <div className="col-span-12 lg:col-span-6">
+            <InsiderActivitySummary symbol={symbol} />
+          </div>
+          <div className="col-span-12 lg:col-span-6">
+            <RecentNewsPane instrumentId={instrumentId} symbol={symbol} />
+          </div>
+        </>
+      ) : (
+        <div className="col-span-12">
+          <RecentNewsPane instrumentId={instrumentId} symbol={symbol} />
+        </div>
+      )}
     </div>
   );
 }
@@ -291,34 +319,27 @@ function renderHealthRow({
   return null;
 }
 
-/** Activity zone — Filings + Insider. Pairs at 6+6 when both are
- *  active. Filings alone goes full-width (list scans wide fine);
- *  insider alone caps at 6 since the 5-stat strip looks stretched
- *  full-width. */
+/** Activity zone — Insider + Recent news. Pairs at 6+6 when insider
+ *  is active so the 5-stat strip and the news list sit side-by-side
+ *  ("what's happening now"). When insider is unavailable, news
+ *  drops to full-width since a list scans wide fine and there is no
+ *  partner left for it. */
 function renderActivityRow({
-  filingsActive,
-  filingsNode,
   insiderActive,
   insiderNode,
+  newsNode,
 }: {
-  readonly filingsActive: boolean;
-  readonly filingsNode: JSX.Element | null;
   readonly insiderActive: boolean;
   readonly insiderNode: JSX.Element | null;
-}): JSX.Element | null {
-  if (filingsActive && insiderActive) {
+  readonly newsNode: JSX.Element;
+}): JSX.Element {
+  if (insiderActive) {
     return (
       <>
-        <div className="col-span-12 lg:col-span-6">{filingsNode}</div>
         <div className="col-span-12 lg:col-span-6">{insiderNode}</div>
+        <div className="col-span-12 lg:col-span-6">{newsNode}</div>
       </>
     );
   }
-  if (filingsActive) {
-    return <div className="col-span-12">{filingsNode}</div>;
-  }
-  if (insiderActive) {
-    return <div className="col-span-12 lg:col-span-6">{insiderNode}</div>;
-  }
-  return null;
+  return <div className="col-span-12">{newsNode}</div>;
 }
