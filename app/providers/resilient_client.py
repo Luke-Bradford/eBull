@@ -4,8 +4,11 @@ Shared resilient HTTP client for all providers.
 Wraps httpx.Client with:
   - Throttle: configurable minimum interval between requests
   - Retry on 429: respects Retry-After header, exponential backoff
-  - Retry on 5xx: same backoff for transient server errors
-  - Logging: WARNING on each retry, ERROR on final failure
+  - Retry on 5xx: backoff for transient server errors; honours
+    Retry-After (delta-seconds or HTTP-date) when present and
+    shorter than the backoff schedule
+  - Logging: WARNING on each retry (status, Retry-After, correlation
+    ID, body preview), ERROR on final failure
 
 Single implementation used by all providers — not copy-pasted.
 """
@@ -15,6 +18,8 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -25,6 +30,11 @@ _RETRYABLE_5XX = frozenset({500, 502, 503, 504})
 
 # Default backoff schedule (seconds) for retries.  Length = max retries.
 _DEFAULT_BACKOFF = (1.0, 2.0, 4.0)
+
+# Cap on the response-body excerpt logged on retryable errors. Bodies
+# above this are truncated in-place; oversized payloads (e.g. an HTML
+# 502 page from a CDN) would otherwise blow up log lines.
+_BODY_PREVIEW_LIMIT = 200
 
 
 class ResilientClient:
@@ -143,14 +153,19 @@ class ResilientClient:
                     )
 
                 sleep_s = self._retry_delay(response, attempt)
+                diag = _diagnostics(response)
                 logger.warning(
-                    "Retryable %d from %s %s — attempt %d/%d, sleeping %.1fs",
+                    "Retryable %d from %s %s — attempt %d/%d, sleeping %gs"
+                    " (retry_after=%s, correlation_id=%s, body=%r)",
                     response.status_code,
                     method,
                     url,
                     attempt + 1,
                     self._max_retries,
                     sleep_s,
+                    diag["retry_after"],
+                    diag["correlation_id"],
+                    diag["body_preview"],
                 )
                 time.sleep(sleep_s)
                 continue
@@ -171,21 +186,84 @@ class ResilientClient:
     def _retry_delay(self, response: httpx.Response, attempt: int) -> float:
         """Determine how long to sleep before the next retry.
 
-        Uses ``Retry-After`` header if present (429 responses),
-        otherwise falls back to the backoff schedule.
+        - 429: ``Retry-After`` header overrides the backoff schedule
+          when parseable.
+        - 5xx: ``Retry-After`` (if parseable) caps the backoff from
+          above — server hint shortens our wait but cannot extend it
+          beyond our configured budget.
+        - Otherwise: fall back to the backoff schedule.
         """
-        if response.status_code == 429:
-            retry_after = response.headers.get("retry-after")
-            if retry_after is not None:
-                try:
-                    return max(float(retry_after), 0.1)
-                except ValueError:
-                    # Retry-After may be an HTTP-date (RFC 7231 §7.1.3).
-                    # We don't parse dates — log and fall back to backoff.
-                    logger.warning(
-                        "Unparseable Retry-After header %r, using backoff schedule",
-                        retry_after,
-                    )
-
         idx = min(attempt, len(self._backoff) - 1)
-        return self._backoff[idx]
+        backoff = self._backoff[idx]
+
+        retry_after = _parse_retry_after(response.headers.get("retry-after"))
+
+        if response.status_code == 429:
+            return retry_after if retry_after is not None else backoff
+
+        if response.status_code in _RETRYABLE_5XX and retry_after is not None:
+            return min(retry_after, backoff)
+
+        return backoff
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse a ``Retry-After`` header value (RFC 7231 §7.1.3) to seconds.
+
+    Accepts both forms the spec defines:
+      - delta-seconds: an integer or float number of seconds
+      - HTTP-date: an RFC 7231 IMF-fixdate timestamp
+
+    Returns ``None`` when the header is absent, blank, or unparseable —
+    callers fall back to the backoff schedule. A 0.1s floor stops a
+    malicious or buggy ``Retry-After: 0`` (or a past HTTP-date) from
+    busy-looping; on a healthy server hint the floor is a no-op.
+    """
+    if value is None or not value.strip():
+        return None
+    try:
+        return max(float(value), 0.1)
+    except ValueError:
+        pass
+
+    # HTTP-date form — parse, return delta vs now.
+    try:
+        target = parsedate_to_datetime(value)
+    except TypeError, ValueError:
+        target = None
+    if target is not None:
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=UTC)
+        delta = (target - datetime.now(UTC)).total_seconds()
+        return max(delta, 0.1)
+
+    logger.warning(
+        "Unparseable Retry-After header %r, using backoff schedule",
+        value,
+    )
+    return None
+
+
+def _diagnostics(response: httpx.Response) -> dict[str, object]:
+    """Extract structured diagnostics from a retryable response for
+    logging. Every field is best-effort — providers vary in which
+    headers they emit and a missing field never blocks logging.
+    """
+    correlation = response.headers.get("X-Correlation-ID") or response.headers.get("X-Request-ID")
+    body_preview: str | None
+    try:
+        text = response.text
+    except Exception:
+        body_preview = None
+    else:
+        if not text:
+            body_preview = None
+        elif len(text) > _BODY_PREVIEW_LIMIT:
+            body_preview = text[:_BODY_PREVIEW_LIMIT] + "…"
+        else:
+            body_preview = text
+    return {
+        "retry_after": response.headers.get("Retry-After"),
+        "correlation_id": correlation,
+        "body_preview": body_preview,
+    }
