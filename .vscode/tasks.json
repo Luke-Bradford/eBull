@@ -21,7 +21,7 @@
     {
       "label": "stack: backend",
       "type": "shell",
-      "command": "uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000",
+      "command": "uv run uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8000",
       "isBackground": true,
       "presentation": {
         "reveal": "always",
