@@ -13,14 +13,22 @@
  *   Zone A — Hero      :  Price chart (visual anchor), Key stats,
  *                         SEC profile (identity rail under stats)
  *   Zone B — Identity  :  10-K narrative (BusinessSections) — what is
- *                         this company? Reads like a column inch under
- *                         the hero rather than buried at page bottom.
+ *                         this company? Paired with Recent Filings at
+ *                         8+4 so the right-half dead space the
+ *                         narrative left behind is filled with
+ *                         contextually-related filing history (the
+ *                         narrative IS itself a filing). When filings
+ *                         are inactive, narrative falls back to
+ *                         full-width.
  *   Zone C — Health    :  Fundamentals + Dividends paired 6+6 — read
  *                         financial trajectory and shareholder return
  *                         together in one scan.
- *   Zone D — Activity  :  Filings + Insider paired 6+6 — what's
- *                         happening right now. Recent news full-width
- *                         below since news lists scan vertically.
+ *   Zone D — Activity  :  Insider activity. Filings have moved up to
+ *                         pair with the narrative; when filings are
+ *                         active but no narrative exists, Filings
+ *                         drops back into this zone alongside Insider
+ *                         at 6+6. Recent news full-width below since
+ *                         news lists scan vertically.
  *   Zone E — Operator  :  Thesis pane — operator's own call, last so
  *                         it doesn't anchor your read of the data.
  *
@@ -112,11 +120,16 @@ export function DensityGrid({
       ) : null,
   });
 
+  // Filings pairs with the 10-K narrative when both are active so the
+  // right-half dead space next to the narrative gets contextually
+  // related content. Otherwise filings stay in the activity zone.
+  const filingsPairedWithNarrative = hasNarrative && filingsActive;
+  const filingsNode = filingsActive ? (
+    <FilingsPane instrumentId={instrumentId} symbol={symbol} summary={summary} />
+  ) : null;
   const ActivityRow = renderActivityRow({
-    filingsActive,
-    filingsNode: filingsActive ? (
-      <FilingsPane instrumentId={instrumentId} symbol={symbol} summary={summary} />
-    ) : null,
+    filingsActive: !filingsPairedWithNarrative && filingsActive,
+    filingsNode: filingsPairedWithNarrative ? null : filingsNode,
     insiderActive,
     insiderNode: insiderActive ? (
       <InsiderActivitySummary symbol={symbol} />
@@ -142,12 +155,19 @@ export function DensityGrid({
             <SecProfilePanel symbol={symbol} />
           </div>
         )}
-        {/* Zone B — Identity */}
-        {hasNarrative && (
+        {/* Zone B — Identity (paired with Filings at 8+4 when both active) */}
+        {hasNarrative && filingsPairedWithNarrative ? (
+          <>
+            <div className="col-span-12 lg:col-span-8">
+              <BusinessSectionsTeaser symbol={symbol} />
+            </div>
+            <div className="col-span-12 lg:col-span-4">{filingsNode}</div>
+          </>
+        ) : hasNarrative ? (
           <div className="col-span-12">
             <BusinessSectionsTeaser symbol={symbol} />
           </div>
-        )}
+        ) : null}
         {/* Zone C — Health */}
         {HealthRow}
         {/* Zone D — Activity */}
@@ -178,12 +198,19 @@ export function DensityGrid({
             <SecProfilePanel symbol={symbol} />
           </div>
         )}
-        {/* Zone B — Identity (only when narrative source exists) */}
-        {hasNarrative && (
+        {/* Zone B — Identity (paired with Filings at 8+4 when both active) */}
+        {hasNarrative && filingsPairedWithNarrative ? (
+          <>
+            <div className="col-span-12 lg:col-span-8">
+              <BusinessSectionsTeaser symbol={symbol} />
+            </div>
+            <div className="col-span-12 lg:col-span-4">{filingsNode}</div>
+          </>
+        ) : hasNarrative ? (
           <div className="col-span-12">
             <BusinessSectionsTeaser symbol={symbol} />
           </div>
-        )}
+        ) : null}
         {/* Zone C — Health (fundamentals optional in partial profile) */}
         {HealthRow}
         {/* Zone D — Activity */}
