@@ -36,6 +36,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import psycopg
+import psycopg.sql
 
 from app.config import settings
 from app.jobs.runtime import VALID_JOB_NAMES, JobRuntime
@@ -44,7 +45,6 @@ from app.services.sync_orchestrator.dispatcher import (
     claim_oldest_pending,
     claim_request_by_id,
     mark_request_completed,
-    mark_request_dispatched,
     mark_request_rejected,
     scope_from_json,
 )
@@ -194,10 +194,16 @@ def _run_sync_with_request_lifecycle(
     transitions to ``rejected`` so the operator sees a terminal state
     rather than a row stuck at ``claimed``.
     """
+    # PR #719 review BLOCKING/WARNING: don't write `dispatched` here.
+    # ``run_sync`` opens the `sync_runs` row internally with
+    # ``linked_request_id`` populated; by the time it returns, the
+    # row is terminal. A ``dispatched`` transition between those
+    # two states is unobservable (same connection, back-to-back
+    # UPDATEs) and pollutes the operator-visible state machine. Go
+    # straight from ``claimed`` to ``completed``.
     try:
         run_sync(scope, trigger=trigger, linked_request_id=request_id)
         with psycopg.connect(settings.database_url, autocommit=True) as conn:
-            mark_request_dispatched(conn, request_id)
             mark_request_completed(conn, request_id)
     except Exception as exc:
         logger.exception("sync request_id=%d raised", request_id)
@@ -241,7 +247,10 @@ def listener_loop(
 
         try:
             with conn.cursor() as cur:
-                cur.execute(f"LISTEN {NOTIFY_CHANNEL}")
+                # ``LISTEN <channel>`` requires an SQL identifier, not
+                # a parameterised value — psycopg's `Identifier` is the
+                # canonical safe quoter. PR #719 review WARNING.
+                cur.execute(psycopg.sql.SQL("LISTEN {}").format(psycopg.sql.Identifier(NOTIFY_CHANNEL)))
             logger.info("listener: LISTEN %s active (boot_id=%s)", NOTIFY_CHANNEL, boot_id)
 
             while not stop_event.is_set():

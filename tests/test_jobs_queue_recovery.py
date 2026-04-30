@@ -175,6 +175,32 @@ def test_sync_with_running_sync_run_is_replayed(
     assert row[0] == "pending"
 
 
+def test_dispatched_with_no_run_row_is_replayed(
+    _dev_conn: psycopg.Connection[Any],
+    _cleanup_requests: list[int],
+) -> None:
+    """Regression for PR #719 review BLOCKING.
+
+    A row stuck at ``dispatched`` with no `job_runs` / `sync_runs` row
+    yet — possible only via a future bug since the wrapper now skips
+    the dispatched transition — must still be replayed by
+    ``reset_stale_in_flight``. Pin this branch so a future regression
+    that re-introduces the broken ordering surfaces here.
+    """
+    request_id = publish_manual_job_request("fundamentals_sync")
+    _cleanup_requests.append(request_id)
+    _force_to_dispatched(_dev_conn, request_id)
+    # Deliberately do NOT insert any job_runs row for this request_id.
+
+    reset_stale_in_flight(_dev_conn, current_boot_id="this-boot")
+
+    with _dev_conn.cursor() as cur:
+        cur.execute("SELECT status FROM pending_job_requests WHERE request_id=%s", (request_id,))
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "pending"
+
+
 def test_old_request_outside_ttl_not_replayed(
     _dev_conn: psycopg.Connection[Any],
     _cleanup_requests: list[int],

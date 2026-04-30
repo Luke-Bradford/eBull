@@ -800,16 +800,24 @@ class JobRuntime:
         """
         from app.services.sync_orchestrator.dispatcher import (
             mark_request_completed,
-            mark_request_dispatched,
             mark_request_rejected,
         )
 
+        # PR #719 review BLOCKING: do NOT mark the queue row as
+        # ``dispatched`` before invoker() runs. The wrapper has no
+        # visibility into when the invoker writes its `job_runs` row
+        # via ``record_job_start``, so any pre-invoker UPDATE creates
+        # a window where ``pending_job_requests.status='dispatched'``
+        # but no `job_runs` row exists with `linked_request_id` —
+        # operator confusion AND a violation of the boot-recovery
+        # contract. The row goes ``claimed`` → ``completed`` /
+        # ``rejected`` directly. The recovery query in
+        # ``reset_stale_in_flight`` already accepts both 'claimed' and
+        # 'dispatched' in its WHERE, so dropping the intermediate
+        # transition is forwards-compatible.
         try:
             try:
                 with JobLock(self._database_url, job_name):
-                    if request_id is not None:
-                        with psycopg.connect(self._database_url, autocommit=True) as conn:
-                            mark_request_dispatched(conn, request_id)
                     invoker()
                     if request_id is not None:
                         with psycopg.connect(self._database_url, autocommit=True) as conn:
