@@ -188,7 +188,7 @@ export function DividendsPage(): JSX.Element {
   const backHref = `/instrument/${encodeURIComponent(symbol)}`;
 
   return (
-    <div className="mx-auto max-w-screen-xl space-y-4 p-4">
+    <div className="mx-auto max-w-screen-xl space-y-4 p-4 pt-6">
       <header className="border-b border-slate-200 dark:border-slate-800 pb-3">
         <Link to={backHref} className="text-xs text-sky-700 hover:underline">
           ← Back to {symbol}
@@ -348,7 +348,7 @@ function PerQuarterHistory({
     return Number.isFinite(n) && n > acc ? n : acc;
   }, 0);
   return (
-    <div className="space-y-1 pt-6">
+    <div className="space-y-1">
       {sorted.map((p) => (
         <HistoryBar
           key={`${p.period_end_date}-${p.period_type}`}
