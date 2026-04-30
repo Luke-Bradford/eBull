@@ -118,7 +118,7 @@ function ReportDetail({ report }: { report: ReportSnapshot }) {
   const drags = periodContribution?.drags ?? [];
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 pt-6">
       <div className="flex items-baseline gap-3 text-sm">
         <span className="font-medium">
           {formatDate(report.period_start)} → {formatDate(report.period_end)}

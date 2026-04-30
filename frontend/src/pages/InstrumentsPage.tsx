@@ -206,7 +206,7 @@ export function InstrumentsPage() {
   );
 
   return (
-    <div className="flex h-full flex-col gap-6">
+    <div className="flex h-full flex-col gap-6 pt-6">
       <div className="flex flex-shrink-0 items-center justify-between">
         <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Instruments</h1>
         {result.data && (

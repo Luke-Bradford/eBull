@@ -147,7 +147,7 @@ export function EightKListPage(): JSX.Element {
   }, [selectedAccession, filtered, searchParams, setSearchParams, state.data]);
 
   return (
-    <div className="mx-auto max-w-screen-2xl space-y-3 p-4">
+    <div className="mx-auto max-w-screen-2xl space-y-3 p-4 pt-6">
       <Section title={`${symbol} — 8-K filings`}>
         <Link
           to={`/instrument/${encodeURIComponent(symbol)}`}

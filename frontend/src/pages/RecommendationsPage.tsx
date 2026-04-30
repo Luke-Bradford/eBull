@@ -138,7 +138,7 @@ export function RecommendationsPage() {
   const auditHasNext = auditOffset + AUDIT_PAGE_LIMIT < auditTotal;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pt-6">
       <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">Recommendations</h1>
 
       {allFailed ? (

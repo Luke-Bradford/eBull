@@ -8,7 +8,11 @@ export function AppShell() {
       <Sidebar />
       <div className="flex flex-1 flex-col overflow-hidden">
         <Header />
-        <main className="flex-1 overflow-auto p-6">
+        {/* No top padding: pages with sticky headers (e.g. SummaryStrip
+            on the instrument page) must be able to flush with the
+            <Header> bar above. Pages that need top breathing room add
+            their own `pt-6` to the root container. */}
+        <main className="flex-1 overflow-auto px-6 pb-6">
           <Outlet />
         </main>
       </div>

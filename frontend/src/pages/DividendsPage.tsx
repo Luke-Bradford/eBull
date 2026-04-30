@@ -188,7 +188,7 @@ export function DividendsPage(): JSX.Element {
   const backHref = `/instrument/${encodeURIComponent(symbol)}`;
 
   return (
-    <div className="mx-auto max-w-screen-xl space-y-4 p-4">
+    <div className="mx-auto max-w-screen-xl space-y-4 p-4 pt-6">
       <header className="border-b border-slate-200 dark:border-slate-800 pb-3">
         <Link to={backHref} className="text-xs text-sky-700 hover:underline">
           ← Back to {symbol}

@@ -43,7 +43,7 @@ type ManageAction = "idle" | "edit-api_key" | "edit-user_key" | "replace";
 export function SettingsPage(): JSX.Element {
   const displayCurrency = useDisplayCurrency();
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pt-6">
       <h1 className="text-xl font-semibold">Settings</h1>
       <DisplayCurrencySection
         currentCurrency={displayCurrency}

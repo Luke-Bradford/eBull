@@ -39,7 +39,7 @@ export function CopyTradingPage() {
   const username = detail.data?.parent_username;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pt-6">
       <div className="flex items-center gap-3">
         <Link to="/portfolio" className="text-sm text-slate-500 hover:text-slate-700">
           ← Portfolio

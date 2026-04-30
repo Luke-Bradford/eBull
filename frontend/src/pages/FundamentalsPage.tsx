@@ -207,7 +207,7 @@ export function FundamentalsPage(): JSX.Element {
           </Link>
         </EmptyState>
       ) : (
-        <div className="space-y-4">
+        <div className="space-y-4 pt-6">
           <Pane
             title="P&L breakdown"
             scope={periodScope(period)}
