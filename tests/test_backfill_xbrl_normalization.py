@@ -159,10 +159,10 @@ def test_cohort_picks_issuers_with_any_unprojected_088_column(
 def test_cohort_all_instruments_picks_every_issuer_with_raw_facts(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    _seed_instrument(ebull_test_conn, 9101, "EEE")
+    _seed_instrument(ebull_test_conn, 9101, "ALL_EEE")
     _seed_fact(ebull_test_conn, 9101, "Revenues")
 
-    _seed_instrument(ebull_test_conn, 9102, "FFF")
+    _seed_instrument(ebull_test_conn, 9102, "ALL_FFF")
     _seed_fact(ebull_test_conn, 9102, "TreasuryStockShares")
     _seed_period(
         ebull_test_conn,
@@ -173,7 +173,7 @@ def test_cohort_all_instruments_picks_every_issuer_with_raw_facts(
         retained_earnings=1,
     )  # already populated — still in cohort under --all-instruments.
 
-    _seed_instrument(ebull_test_conn, 9103, "GGG")
+    _seed_instrument(ebull_test_conn, 9103, "ALL_GGG")
     # No raw facts → EXCLUDED even with --all-instruments.
 
     cohort = select_cohort(ebull_test_conn, only_unprojected_088=False, limit=None)

@@ -231,16 +231,19 @@ def main(argv: list[str] | None = None) -> int:
         conn.commit()
         elapsed = time.monotonic() - started
 
-        # Post-normalize verification probe (codex review medium).
-        # ``normalize_financial_periods`` catches per-instrument
-        # exceptions and counts every input as ``processed``, so a
-        # partial failure looks identical to a clean run in its
-        # summary. Re-query the cohort: any instrument still missing a
-        # migration-088 column (despite having raw facts for it) is a
-        # rollback signal — surface that as a non-zero exit so a CI
-        # wrapper / shell pipeline can distinguish a clean
-        # backfill from one that needs the operator to read the log.
-        unresolved = count_unprojected_088(conn, cohort) if not args.all_instruments else 0
+        # Post-normalize verification probe (codex review medium / PR
+        # review WARNING). ``normalize_financial_periods`` catches
+        # per-instrument exceptions and counts every input as
+        # ``processed``, so a partial failure looks identical to a
+        # clean run in its summary. Re-query the cohort: any instrument
+        # still missing a migration-088 column (despite having raw
+        # facts for it) is a rollback signal — surface that as a
+        # non-zero exit so a CI wrapper / shell pipeline can
+        # distinguish a clean backfill from one that needs the operator
+        # to read the log. Probe runs in BOTH cohort modes —
+        # ``--all-instruments`` just expands the cohort, the same 088
+        # rollback signal still applies.
+        unresolved = count_unprojected_088(conn, cohort)
 
         logger.info(
             "backfill_xbrl_normalization: done in %.1fs — instruments=%d "
