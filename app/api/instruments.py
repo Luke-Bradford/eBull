@@ -2498,3 +2498,234 @@ def get_instrument(
         latest_quote=_parse_quote(row),
         external_identifiers=ext_ids,
     )
+
+
+# ---------------------------------------------------------------------------
+# Institutional holdings reader (#730 PR 4)
+# ---------------------------------------------------------------------------
+
+
+class InstitutionalFilerHolding(BaseModel):
+    """One filer's stake in this instrument as of a recent quarter."""
+
+    filer_cik: str
+    filer_name: str
+    filer_type: str  # 'ETF' | 'INV' | 'INS' | 'BD' | 'OTHER'
+    accession_number: str
+    period_of_report: date
+    shares: Decimal
+    market_value_usd: Decimal | None
+    voting_authority: str | None  # 'SOLE' | 'SHARED' | 'NONE' | None
+    is_put_call: str | None  # 'PUT' | 'CALL' | None (None = underlying equity)
+
+
+class InstitutionalHoldingsTotals(BaseModel):
+    """Per-slice rollups for the ownership card consumer (#729).
+
+    Slices follow the card's percentage-derivation contract. Only
+    underlying-equity rows participate (``is_put_call IS NULL``);
+    PUT / CALL exposure rows ship in ``filers`` for the drilldown
+    table but do NOT contribute to the slice totals — counting an
+    option position as ownership double-counts the underlying.
+    """
+
+    period_of_report: date
+    institutions_shares: Decimal  # sum across filer_type IN ('INV','INS','BD','OTHER')
+    etfs_shares: Decimal  # sum across filer_type = 'ETF'
+    total_filers: int
+    total_institutions_filers: int
+    total_etfs_filers: int
+
+
+class InstitutionalHoldingsResponse(BaseModel):
+    symbol: str
+    totals: InstitutionalHoldingsTotals | None  # None when no holdings on file
+    filers: list[InstitutionalFilerHolding]
+
+
+_DEFAULT_HOLDINGS_LIMIT = 50
+_MAX_HOLDINGS_LIMIT = 500
+
+
+@router.get("/{symbol}/institutional-holdings", response_model=InstitutionalHoldingsResponse)
+def get_instrument_institutional_holdings(
+    symbol: str,
+    limit: int = Query(default=_DEFAULT_HOLDINGS_LIMIT, ge=1, le=_MAX_HOLDINGS_LIMIT),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InstitutionalHoldingsResponse:
+    """13F-HR institutional + ETF holdings for one instrument.
+
+    Returns the most recent quarter's holdings — the per-instrument
+    ``period_of_report = MAX(period_of_report)`` cohort. Ownership
+    card (#729) consumers use:
+
+      * ``totals.institutions_shares`` / ``shares_outstanding`` for
+        the Institutions slice.
+      * ``totals.etfs_shares`` / ``shares_outstanding`` for the ETFs
+        slice.
+      * ``filers`` for the per-filer drilldown table (top-N by
+        share count, defaulting to 50 — bump via ``?limit=`` up to
+        500).
+
+    Empty state: a non-covered or pre-ingest instrument returns
+    ``200`` with ``totals=null`` and ``filers=[]``. The card
+    consumer renders the empty-per-slice fallback. 404 is reserved
+    for an unknown symbol.
+
+    Per-slice semantics:
+      * Only underlying-equity rows (``is_put_call IS NULL``) feed
+        the totals — option exposure is excluded so a PUT position
+        does not mis-attribute as long ownership.
+      * PUT / CALL rows DO appear in ``filers`` for audit /
+        drilldown.
+      * 'INS' (insurance) and 'BD' (broker-dealer) labels are
+        rolled into the institutions slice (their members file 13F
+        as institutional managers).
+    """
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+
+    # Latest period_of_report on file. NULL means no holdings ingested
+    # yet — return the empty payload rather than 404 so the card can
+    # render its no-coverage fallback uniformly.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT MAX(period_of_report) AS latest
+            FROM institutional_holdings
+            WHERE instrument_id = %s
+            """,
+            (instrument_id,),
+        )
+        latest_row = cur.fetchone()
+    latest_period = latest_row["latest"] if latest_row is not None else None  # type: ignore[index]
+    if latest_period is None:
+        return InstitutionalHoldingsResponse(
+            symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+            totals=None,
+            filers=[],
+        )
+
+    # Per-slice totals + filer counts. Two distinct cohorts in one
+    # query so the response is internally consistent:
+    #
+    #   * ``etfs_shares`` / ``institutions_shares`` and the slice
+    #     filer counts (``total_etfs_filers`` /
+    #     ``total_institutions_filers``) sum over the EQUITY-only
+    #     subset (``is_put_call IS NULL``). Option exposure is
+    #     excluded from the ownership-percentage rollup; counting
+    #     a protective put as long ownership double-counts the
+    #     underlying.
+    #
+    #   * ``total_filers`` counts EVERY distinct filer reporting
+    #     this instrument in the latest quarter — equity + PUT +
+    #     CALL — so it matches the drilldown ``filers`` list shown
+    #     to the operator. Pre-fix this was equity-only too, which
+    #     produced ``total_filers < len(filers)`` for any
+    #     instrument with option-only filers. Codex caught this on
+    #     the PR review.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT
+                COALESCE(SUM(h.shares) FILTER (
+                    WHERE f.filer_type = 'ETF' AND h.is_put_call IS NULL
+                ), 0) AS etfs_shares,
+                COALESCE(SUM(h.shares) FILTER (
+                    WHERE (f.filer_type IN ('INV','INS','BD','OTHER') OR f.filer_type IS NULL)
+                    AND h.is_put_call IS NULL
+                ), 0) AS institutions_shares,
+                COUNT(DISTINCT f.filer_id) AS total_filers,
+                COUNT(DISTINCT f.filer_id) FILTER (
+                    WHERE f.filer_type = 'ETF' AND h.is_put_call IS NULL
+                ) AS total_etfs_filers,
+                COUNT(DISTINCT f.filer_id) FILTER (
+                    WHERE (f.filer_type IN ('INV','INS','BD','OTHER') OR f.filer_type IS NULL)
+                    AND h.is_put_call IS NULL
+                ) AS total_institutions_filers
+            FROM institutional_holdings h
+            JOIN institutional_filers f USING (filer_id)
+            WHERE h.instrument_id = %(iid)s
+              AND h.period_of_report = %(period)s
+            """,
+            {"iid": instrument_id, "period": latest_period},
+        )
+        totals_row = cur.fetchone()
+    if totals_row is None:
+        # Defensive: the aggregate returns one row even when no
+        # input rows exist (zeros + counts), so ``None`` here is
+        # an unreachable invariant violation. Use HTTPException
+        # rather than ``assert`` so the guard survives ``python -O``.
+        raise HTTPException(status_code=500, detail="aggregate produced no row")
+
+    totals = InstitutionalHoldingsTotals(
+        period_of_report=latest_period,  # type: ignore[arg-type]
+        institutions_shares=Decimal(totals_row["institutions_shares"] or 0),  # type: ignore[arg-type]
+        etfs_shares=Decimal(totals_row["etfs_shares"] or 0),  # type: ignore[arg-type]
+        total_filers=int(totals_row["total_filers"] or 0),  # type: ignore[arg-type]
+        total_institutions_filers=int(totals_row["total_institutions_filers"] or 0),  # type: ignore[arg-type]
+        total_etfs_filers=int(totals_row["total_etfs_filers"] or 0),  # type: ignore[arg-type]
+    )
+
+    # Top-N filers by share count for the drilldown table. Includes
+    # PUT / CALL rows so the operator can see option exposure
+    # alongside underlying equity. Tie-break: market value descending,
+    # then accession_number ascending so a deterministic order
+    # survives same-share filings.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT f.cik AS filer_cik, f.name AS filer_name,
+                   COALESCE(f.filer_type, 'OTHER') AS filer_type,
+                   h.accession_number, h.period_of_report,
+                   h.shares, h.market_value_usd,
+                   h.voting_authority, h.is_put_call
+            FROM institutional_holdings h
+            JOIN institutional_filers f USING (filer_id)
+            WHERE h.instrument_id = %(iid)s
+              AND h.period_of_report = %(period)s
+            ORDER BY h.shares DESC,
+                     h.market_value_usd DESC NULLS LAST,
+                     h.accession_number ASC
+            LIMIT %(limit)s
+            """,
+            {"iid": instrument_id, "period": latest_period, "limit": limit},
+        )
+        rows = cur.fetchall()
+
+    filers = [
+        InstitutionalFilerHolding(
+            filer_cik=str(r["filer_cik"]),  # type: ignore[arg-type]
+            filer_name=str(r["filer_name"]),  # type: ignore[arg-type]
+            filer_type=str(r["filer_type"]),  # type: ignore[arg-type]
+            accession_number=str(r["accession_number"]),  # type: ignore[arg-type]
+            period_of_report=r["period_of_report"],  # type: ignore[arg-type]
+            shares=r["shares"],  # type: ignore[arg-type]
+            market_value_usd=r["market_value_usd"],  # type: ignore[arg-type]
+            voting_authority=r["voting_authority"],  # type: ignore[arg-type]
+            is_put_call=r["is_put_call"],  # type: ignore[arg-type]
+        )
+        for r in rows
+    ]
+
+    return InstitutionalHoldingsResponse(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        totals=totals,
+        filers=filers,
+    )
