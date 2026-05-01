@@ -260,4 +260,37 @@ describe("buildSunburstRings", () => {
     expect(inst.status).toBe("empty");
     expect(inst.leaves).toHaveLength(0);
   });
+
+  it("display_shares floors small known wedges to a visible minimum", () => {
+    // Insiders 0.06% of float against 4 unknown wedges absorbing
+    // the rest — without the floor, Insiders renders as a sub-pixel
+    // sliver. Floor = 5% of float per visible wedge.
+    const input: SunburstInputs = {
+      ...DEFAULT_INPUT,
+      free_float: 1_000_000_000,
+      holders: [holder("ceo", 600_000, "insiders")],
+      treasury_shares: null,
+      institutions_status: "unknown",
+      etfs_status: "unknown",
+    };
+    const r = buildSunburstRings(input);
+    expect(r).not.toBeNull();
+    const insiders = r!.categories.find((c) => c.key === "insiders")!;
+    // Real share is 600k (0.06% of 1B). Floor lifts display to 5% =
+    // 50M for the wedge to render visibly on the canvas.
+    expect(insiders.shares).toBe(600_000);
+    expect(insiders.display_shares).toBeGreaterThanOrEqual(50_000_000);
+  });
+
+  it("display_shares does NOT floor empty-status categories", () => {
+    // Insiders has no holders → status='empty'. The renderer skips
+    // empty wedges; the floor should not artificially lift them
+    // back into the canvas.
+    const r = buildSunburstRings({ ...DEFAULT_INPUT });
+    const insiders = r!.categories.find((c) => c.key === "insiders")!;
+    expect(insiders.status).toBe("empty");
+    // Empty categories keep display_shares=0 — the renderer
+    // filters them out via ``status === 'empty' && shares <= 0``.
+    expect(insiders.display_shares).toBe(0);
+  });
 });

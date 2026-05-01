@@ -329,20 +329,32 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
   const inner_known = known_shares + (unallocated.status === "ok" ? unallocated.shares : 0);
   const inner_gap = Math.max(0, float - inner_known);
 
-  // Distribute the float gap across unknown categories so each
-  // unknown wedge has a visible arc proportional to its (equal)
-  // share of the gap. Pre-fix the renderer emitted ``shares=1`` for
-  // every unknown category which made the visible wedge invisible
-  // when paired with a small-but-known category like Insiders
-  // (Recharts allocated 0.01° of the ring to the gap wedges and
-  // ~99.99° to Insiders even though Insiders held 0.06% of the
-  // float). Equal split because we have no per-category signal —
-  // operator sees "unknown gap of size X" rather than a weighted
-  // estimate that we cannot defend.
+  // Wedge-size policy:
+  //
+  // 1. Equally distribute the float gap across unknown categories
+  //    so each unknown wedge has a visible arc.
+  // 2. Floor every renderable wedge at a minimum proportional size
+  //    so a small-but-known category (e.g. Insiders 0.06% on AAPL)
+  //    doesn't collapse to a sub-pixel sliver against the huge
+  //    unknown wedges. Without this floor, faithful proportional
+  //    sizing makes the small wedge invisible — operator clicked
+  //    where Insiders should be and hit the gap wedge instead.
+  //
+  // Floor = ``MIN_WEDGE_FRACTION`` of the total ring per wedge.
+  // The cost is that the ring is no longer strictly
+  // proportional — small wedges read slightly larger than their
+  // actual share. The header summary line ("X% known · Y% gap")
+  // and the legend table carry the precise numbers; the wedge
+  // arcs are visual hints not measurement instruments.
+  const MIN_WEDGE_FRACTION = 0.05; // each visible wedge ≥ 5% of the ring
+
   const unknown_count = draft_categories.filter((c) => c.status === "unknown").length;
   const gap_per_unknown = unknown_count > 0 ? inner_gap / unknown_count : 0;
 
-  const categories: SunburstCategory[] = draft_categories.map((cat) => {
+  // Compute floor in absolute share-equivalent units.
+  const min_display_shares = float * MIN_WEDGE_FRACTION;
+
+  const categories_with_gap: SunburstCategory[] = draft_categories.map((cat) => {
     if (cat.status !== "unknown") return cat;
     return {
       ...cat,
@@ -351,6 +363,24 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
         ...leaf,
         display_shares: gap_per_unknown,
       })),
+    };
+  });
+
+  // Apply the minimum-wedge floor only to categories that will
+  // actually render (skip ``empty``-status wedges which are
+  // filtered out by the renderer).
+  const categories: SunburstCategory[] = categories_with_gap.map((cat) => {
+    const renders = !(cat.status === "empty" && cat.shares <= 0);
+    if (!renders) return cat;
+    if (cat.display_shares >= min_display_shares) return cat;
+    return {
+      ...cat,
+      display_shares: min_display_shares,
+      leaves: cat.leaves.map((leaf) =>
+        leaf.display_shares >= min_display_shares
+          ? leaf
+          : { ...leaf, display_shares: min_display_shares },
+      ),
     };
   });
 

@@ -120,7 +120,15 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
       if (target.kind === "category") params.set("category", target.category_key);
       if (target.kind === "leaf") {
         params.set("category", target.category_key);
-        params.set("filer", target.leaf_key);
+        // Synthetic gap leaves (key ``${category}-unknown`` or
+        // similar) carry no real filer identity — clicking them
+        // should drill to the category, not filter to a non-
+        // existent filer key. Detect via the ``-unknown`` suffix
+        // emitted by ``buildSunburstRings`` for unknown-category
+        // sentinel leaves.
+        if (!target.leaf_key.endsWith("-unknown")) {
+          params.set("filer", target.leaf_key);
+        }
       }
       const qs = params.toString();
       const suffix = qs.length > 0 ? `?${qs}` : "";

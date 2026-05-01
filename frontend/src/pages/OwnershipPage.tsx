@@ -119,7 +119,15 @@ export function OwnershipPage(): JSX.Element {
         next.delete("filer");
       } else if (target.kind === "leaf") {
         next.set("category", target.category_key);
-        next.set("filer", target.leaf_key);
+        // Synthetic gap leaves (key ``${category}-unknown``) carry
+        // no real filer identity — clicking drills to the category
+        // only; setting ``?filer=...-unknown`` would filter the
+        // table to an empty result set.
+        if (target.leaf_key.endsWith("-unknown")) {
+          next.delete("filer");
+        } else {
+          next.set("filer", target.leaf_key);
+        }
       } else {
         next.delete("category");
         next.delete("filer");
@@ -378,6 +386,13 @@ function OwnershipBody({
           highlightFiler={filerFilter}
           highlightRef={filerRowRef}
           onClearHighlight={onClearFiler}
+          emptyStateReason={
+            categoryFilter !== null &&
+            rings !== null &&
+            rings.categories.find((c) => c.key === categoryFilter)?.status === "unknown"
+              ? "coverage_gap"
+              : "no_match"
+          }
         />
       </div>
     </div>
@@ -439,6 +454,11 @@ interface FilerTableProps {
   readonly highlightRef: React.RefObject<HTMLTableRowElement>;
   /** Clicking the highlighted row clears the filer filter. */
   readonly onClearHighlight?: () => void;
+  /** Drives the empty-state copy when the active category is gated
+   *  on a coverage backfill (#740 / #735) — no per-filer detail
+   *  exists yet, so the generic "Try clearing the filter" hint is
+   *  misleading. */
+  readonly emptyStateReason?: "coverage_gap" | "no_match";
 }
 
 function FilerTable({
@@ -446,8 +466,17 @@ function FilerTable({
   highlightFiler,
   highlightRef,
   onClearHighlight,
+  emptyStateReason = "no_match",
 }: FilerTableProps): JSX.Element {
   if (rows.length === 0) {
+    if (emptyStateReason === "coverage_gap") {
+      return (
+        <EmptyState
+          title="Coverage gap — no per-filer detail yet"
+          description="Per-filer rows for this category are gated on the upstream backfill (#740 CUSIP map / #735 DEI projection). The category total is shown on the chart; the drilldown will populate once the backfill closes."
+        />
+      );
+    }
     return (
       <EmptyState
         title="No filers match this filter"

@@ -298,7 +298,8 @@ export function OwnershipSunburst({
                 key={`inner-${idx}`}
                 fill={d.fill}
                 fillOpacity={d.opacity}
-                stroke={wedgeStroke}
+                stroke={d.is_selected ? "#cbd5e1" : wedgeStroke}
+                strokeWidth={d.is_selected ? 3 : 1}
               />
             ))}
           </Pie>
@@ -316,7 +317,8 @@ export function OwnershipSunburst({
                 key={`middle-${idx}`}
                 fill={d.fill}
                 fillOpacity={d.opacity}
-                stroke={wedgeStroke}
+                stroke={d.is_selected ? "#cbd5e1" : wedgeStroke}
+                strokeWidth={d.is_selected ? 3 : 1}
               />
             ))}
           </Pie>
@@ -334,7 +336,8 @@ export function OwnershipSunburst({
                 key={`outer-${idx}`}
                 fill={d.fill}
                 fillOpacity={d.opacity}
-                stroke={wedgeStroke}
+                stroke={d.is_selected ? "#cbd5e1" : wedgeStroke}
+                strokeWidth={d.is_selected ? 3 : 1}
               />
             ))}
           </Pie>
