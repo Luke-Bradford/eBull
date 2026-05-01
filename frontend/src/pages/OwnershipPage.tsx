@@ -22,7 +22,7 @@
  */
 
 import { useCallback, useMemo, useRef } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { fetchInstitutionalHoldings } from "@/api/institutionalHoldings";
 import type {
@@ -75,7 +75,6 @@ const CATEGORY_LABELS: Record<string, string> = {
 export function OwnershipPage(): JSX.Element {
   const { symbol = "" } = useParams<{ symbol: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
 
   const categoryFilter = searchParams.get("category");
   const filerFilter = searchParams.get("filer");
@@ -176,7 +175,6 @@ export function OwnershipPage(): JSX.Element {
           viewMode={viewMode}
           onWedgeClick={handleWedgeClick}
           onClearFilters={clearFilters}
-          onNavigate={navigate}
         />
       )}
     </div>
@@ -193,7 +191,6 @@ interface OwnershipBodyProps {
   readonly viewMode: string | null;
   readonly onWedgeClick: (target: WedgeClick) => void;
   readonly onClearFilters: () => void;
-  readonly onNavigate: (url: string) => void;
 }
 
 function OwnershipBody({
@@ -222,33 +219,75 @@ function OwnershipBody({
 
   const inst_totals = institutional?.totals ?? null;
   const filers = institutional?.filers ?? [];
-  const equity_filers = filers.filter((f) => f.is_put_call === null);
 
-  const institutional_holders: SunburstHolder[] = equity_filers
-    .filter((f) => f.filer_type !== "ETF")
-    .map(filerToHolder("institutions"));
-  const etf_holders: SunburstHolder[] = equity_filers
-    .filter((f) => f.filer_type === "ETF")
-    .map(filerToHolder("etfs"));
-  const insider_holders = aggregateInsiderHoldersForSunburst(insiders);
+  // Memoise every derived array so downstream useMemo deps land on
+  // a stable identity. Pre-fix ``inputs.holders`` was a fresh array
+  // literal on every render → ``allRows``'s useMemo never hit
+  // cache and ``buildFilerRows`` re-ran on every keystroke into the
+  // search params. Codex caught this on PR review.
+  const equity_filers = useMemo(
+    () => filers.filter((f) => f.is_put_call === null),
+    [filers],
+  );
+  const institutional_holders = useMemo<readonly SunburstHolder[]>(
+    () =>
+      equity_filers
+        .filter((f) => f.filer_type !== "ETF")
+        .map(filerToHolder("institutions")),
+    [equity_filers],
+  );
+  const etf_holders = useMemo<readonly SunburstHolder[]>(
+    () =>
+      equity_filers
+        .filter((f) => f.filer_type === "ETF")
+        .map(filerToHolder("etfs")),
+    [equity_filers],
+  );
+  const insider_holders = useMemo(
+    () => aggregateInsiderHoldersForSunburst(insiders),
+    [insiders],
+  );
+  const allHolders = useMemo<readonly SunburstHolder[]>(
+    () => [...institutional_holders, ...etf_holders, ...insider_holders],
+    [institutional_holders, etf_holders, insider_holders],
+  );
 
-  const inputs: SunburstInputs = {
-    free_float,
-    holders: [...institutional_holders, ...etf_holders, ...insider_holders],
-    treasury_shares: treasury,
-    institutions_status: deriveCategoryStatus(institutional, institutional_holders, inst_totals?.institutions_shares),
-    etfs_status: deriveCategoryStatus(institutional, etf_holders, inst_totals?.etfs_shares),
-    insiders_status:
-      insiders === null ? "unknown" : insider_holders.length > 0 ? "ok" : "empty",
-  };
+  const inputs: SunburstInputs = useMemo(
+    () => ({
+      free_float,
+      holders: allHolders,
+      treasury_shares: treasury,
+      institutions_status: deriveCategoryStatus(
+        institutional,
+        institutional_holders,
+        inst_totals?.institutions_shares,
+      ),
+      etfs_status: deriveCategoryStatus(institutional, etf_holders, inst_totals?.etfs_shares),
+      insiders_status:
+        insiders === null ? "unknown" : insider_holders.length > 0 ? "ok" : "empty",
+    }),
+    [
+      free_float,
+      allHolders,
+      treasury,
+      institutional,
+      institutional_holders,
+      etf_holders,
+      insider_holders,
+      insiders,
+      inst_totals?.institutions_shares,
+      inst_totals?.etfs_shares,
+    ],
+  );
 
-  const rings = buildSunburstRings(inputs);
+  const rings = useMemo(() => buildSunburstRings(inputs), [inputs]);
+
   const allRows = useMemo(
     () =>
       rings === null
         ? ([] as FilerRow[])
-        : buildFilerRows(rings, filers, insiders, treasury, inputs.holders),
-    [rings, filers, insiders, treasury, inputs.holders],
+        : buildFilerRows(rings, filers, insiders, treasury),
+    [rings, filers, insiders, treasury],
   );
 
   const filteredRows = useMemo(() => {
@@ -523,7 +562,6 @@ function buildFilerRows(
   filers: readonly InstitutionalFilerHolding[],
   insiders: InsiderTransactionsList | null,
   treasury: number | null,
-  _holders: readonly SunburstHolder[],
 ): FilerRow[] {
   const rows: FilerRow[] = [];
 
@@ -624,17 +662,22 @@ export function buildCsv(rows: readonly FilerRow[]): string {
     "accession",
     "period_of_report",
   ].join(",");
+  // Every string-shaped column passes through csvEscape so a
+  // future schema change (e.g. an issuer name with a comma, a
+  // period_of_report that gets a textual qualifier) can't silently
+  // skip RFC 4180 quoting or smuggle a formula-injection payload.
+  // Numeric columns are formatted to ASCII digits in-line.
   const lines = rows.map((r) =>
     [
       csvEscape(r.key),
       csvEscape(r.label),
-      r.category,
+      csvEscape(r.category),
       r.shares.toString(),
       r.value_usd === null ? "" : r.value_usd.toString(),
-      r.voting ?? "",
-      r.is_put_call ?? "",
+      csvEscape(r.voting ?? ""),
+      csvEscape(r.is_put_call ?? ""),
       csvEscape(r.accession ?? ""),
-      r.period_of_report ?? "",
+      csvEscape(r.period_of_report ?? ""),
     ].join(","),
   );
   return [header, ...lines].join("\n");

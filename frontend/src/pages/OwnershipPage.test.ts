@@ -65,4 +65,20 @@ describe("buildCsv", () => {
     // Empty token between two commas in the value_usd position.
     expect(csv).toMatch(/,1234567,,SOLE,/);
   });
+
+  it("escapes voting + period_of_report through csvEscape (PR review pin)", () => {
+    // PR #749 review caught these two columns silently bypassing
+    // csvEscape. Pin the contract so a future schema change can't
+    // re-introduce the gap.
+    const csv = buildCsv([
+      row({
+        voting: "=cmd",
+        period_of_report: "2024,12,31",
+      }),
+    ]);
+    // voting prefixed with a single quote (formula-injection guard).
+    expect(csv).toContain("'=cmd");
+    // period_of_report with embedded commas wrapped in quotes.
+    expect(csv).toContain('"2024,12,31"');
+  });
 });
