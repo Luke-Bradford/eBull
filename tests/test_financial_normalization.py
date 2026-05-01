@@ -1115,12 +1115,13 @@ class TestOwnershipColumnProjection:
 
 # ---------------------------------------------------------------------------
 # #732: Tier 1 + Tier 2 allowlist expansion. Ten new aliases project into
-# financial_periods. Five flow items (comprehensive_income,
-# intangible_amortization, deferred_income_tax, other_nonoperating_income,
-# plus the implicit antidilutive_securities which the schema treats as
-# point-in-time so it inherits the FY value on Q4 derivation), and five
-# point-in-time items (assets_current, liabilities_current, cash_restricted,
-# additional_paid_in_capital, accumulated_oci, antidilutive_securities).
+# financial_periods. Four flow items (comprehensive_income,
+# intangible_amortization, deferred_income_tax, other_nonoperating_income),
+# and six point-in-time items (assets_current, liabilities_current,
+# cash_restricted, additional_paid_in_capital, accumulated_oci,
+# antidilutive_securities — the last is a weighted-average share count
+# kept as point-in-time so the Q4 derivation copies the FY value forward
+# instead of subtracting Q1+Q2+Q3 from FY).
 # ---------------------------------------------------------------------------
 
 
