@@ -420,23 +420,88 @@ def _resolve_cusip_to_instrument_id(
     return int(row[0]) if row is not None else None
 
 
+def classify_filer_type(
+    conn: psycopg.Connection[tuple],
+    cik: str,
+) -> str:
+    """Map a filer CIK to one of the constrained filer_type labels.
+
+    Cross-references the ``etf_filer_cik_seeds`` curated list. CIKs
+    on that list (and ``active=TRUE``) are tagged ``'ETF'``; every
+    other discovered 13F-HR filer defaults to ``'INV'`` (the
+    general institutional-manager bucket).
+
+    Future enhancements (out of scope for #730 PR 3):
+      * Ingest the SEC's quarterly RIC / mutual-fund registrant
+        list to auto-populate the seed table.
+      * Distinguish ``'INS'`` (insurance) and ``'BD'`` (broker-dealer)
+        based on Form CRD data — the schema already allows those
+        labels via the CHECK constraint on
+        ``institutional_filers.filer_type``.
+    """
+    cur = conn.execute(
+        """
+        SELECT 1 FROM etf_filer_cik_seeds
+        WHERE cik = %(cik)s AND active = TRUE
+        LIMIT 1
+        """,
+        {"cik": _zero_pad_cik(cik)},
+    )
+    return "ETF" if cur.fetchone() is not None else "INV"
+
+
+def seed_etf_filer(
+    conn: psycopg.Connection[tuple],
+    *,
+    cik: str | int,
+    label: str,
+    notes: str | None = None,
+    active: bool = True,
+) -> None:
+    """Idempotent helper for adding a CIK to the curated ETF list.
+    Mirrors :func:`seed_filer` for the institutional-filer seed
+    table; both are exposed for tests + admin scripts."""
+    conn.execute(
+        """
+        INSERT INTO etf_filer_cik_seeds (cik, label, active, notes)
+        VALUES (%(cik)s, %(label)s, %(active)s, %(notes)s)
+        ON CONFLICT (cik) DO UPDATE SET
+            label = EXCLUDED.label,
+            active = EXCLUDED.active,
+            notes = COALESCE(EXCLUDED.notes, etf_filer_cik_seeds.notes)
+        """,
+        {
+            "cik": _zero_pad_cik(cik),
+            "label": label,
+            "active": active,
+            "notes": notes,
+        },
+    )
+
+
 def _upsert_filer(
     conn: psycopg.Connection[tuple],
     info: ThirteenFFilerInfo,
 ) -> int:
     """Insert / update an institutional_filers row. Returns filer_id.
 
-    ``filer_type`` and ``aum_usd`` are not set here — the
-    classifier (#730 PR 3) populates filer_type from a curated
-    ETF-CIK list; AUM is computed from the holdings sum on each run
-    by an aggregator (PR 4). Both are nullable in the schema.
+    ``filer_type`` is derived from the curated ETF list (#730 PR 3)
+    via :func:`classify_filer_type` on every write. The classifier
+    is cheap (single index lookup) and idempotent, so re-running
+    after a seed-list update propagates the new label on the next
+    ingest cycle without a backfill migration.
+
+    ``aum_usd`` is not set here — the aggregator (#730 PR 4) sums
+    the latest-quarter holdings per filer on read.
     """
+    filer_type = classify_filer_type(conn, info.cik)
     cur = conn.execute(
         """
-        INSERT INTO institutional_filers (cik, name, last_filing_at)
-        VALUES (%(cik)s, %(name)s, %(last_filing_at)s)
+        INSERT INTO institutional_filers (cik, name, filer_type, last_filing_at)
+        VALUES (%(cik)s, %(name)s, %(filer_type)s, %(last_filing_at)s)
         ON CONFLICT (cik) DO UPDATE SET
             name = EXCLUDED.name,
+            filer_type = EXCLUDED.filer_type,
             last_filing_at = GREATEST(
                 COALESCE(institutional_filers.last_filing_at, '-infinity'),
                 COALESCE(EXCLUDED.last_filing_at, '-infinity')
@@ -447,6 +512,7 @@ def _upsert_filer(
         {
             "cik": info.cik,
             "name": info.name,
+            "filer_type": filer_type,
             "last_filing_at": info.filed_at,
         },
     )
