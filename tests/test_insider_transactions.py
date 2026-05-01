@@ -578,6 +578,29 @@ class TestCanonicalForm4Url:
         raw = "https://www.sec.gov/Archives/edgar/data/xslF345X06extra/form4.xml"
         assert _canonical_form_4_url(raw) == raw
 
+    def test_strips_older_xslf345x02_segment(self) -> None:
+        """Operator surfaced 2026-05-01: backfill against pre-2018
+        Form 4 filings hit a 98% parse_miss rate because the
+        ``xslF345X02`` / ``xslF345X03`` variants weren't matched by
+        the regex. The ingester fetched the XSL-rendered HTML and
+        the XML parser failed on every filing."""
+        raw = "https://www.sec.gov/Archives/edgar/data/871763/000120919108030833/xslF345X02/doc4.xml"
+        assert _canonical_form_4_url(raw) == (
+            "https://www.sec.gov/Archives/edgar/data/871763/000120919108030833/doc4.xml"
+        )
+
+    def test_strips_older_xslf345x03_segment(self) -> None:
+        raw = "https://www.sec.gov/Archives/edgar/data/871763/000120919108047089/xslF345X03/doc4.xml"
+        assert _canonical_form_4_url(raw) == (
+            "https://www.sec.gov/Archives/edgar/data/871763/000120919108047089/doc4.xml"
+        )
+
+    def test_strips_intermediate_xslf345x04_segment(self) -> None:
+        """Future-proofing: the ``[A-Z0-9]*`` suffix matches any new
+        SEC XSL variant without another regex patch."""
+        raw = "https://www.sec.gov/Archives/edgar/data/320193/abc/xslF345X04/form4.xml"
+        assert _canonical_form_4_url(raw) == ("https://www.sec.gov/Archives/edgar/data/320193/abc/form4.xml")
+
 
 class TestFilerRoleString:
     def _filer(self, **overrides: object) -> ParsedFiler:
