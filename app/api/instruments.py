@@ -470,6 +470,15 @@ _INCOME_COLUMNS: tuple[str, ...] = (
     "shares_basic",
     "shares_diluted",
     "sbc_expense",
+    # Tier 1 + Tier 2 expansion (#732). Comprehensive income (true-up
+    # vs net income via OCI), separated intangible amortisation,
+    # deferred-tax bridge, other non-operating, antidilutive share
+    # equivalents excluded from EPS.
+    "comprehensive_income",
+    "intangible_amortization",
+    "deferred_income_tax",
+    "other_nonoperating_income",
+    "antidilutive_securities",
 )
 
 _BALANCE_COLUMNS: tuple[str, ...] = (
@@ -491,6 +500,15 @@ _BALANCE_COLUMNS: tuple[str, ...] = (
     "shares_authorized",
     "shares_issued",
     "retained_earnings",
+    # Tier 1 + Tier 2 expansion (#732). Working-capital + liquidity
+    # additions (assets_current, liabilities_current, cash_restricted)
+    # plus equity-section components (additional_paid_in_capital,
+    # accumulated_oci).
+    "assets_current",
+    "liabilities_current",
+    "cash_restricted",
+    "additional_paid_in_capital",
+    "accumulated_oci",
 )
 
 _CASHFLOW_COLUMNS: tuple[str, ...] = (
