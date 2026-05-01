@@ -24,6 +24,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import psycopg
+from psycopg import sql as pgsql
 
 from app.providers.fundamentals import (
     FundamentalsProvider,
@@ -330,20 +331,50 @@ def finish_ingestion_run(
     )
 
 
-_UPSERT_FACT_SQL = """
+# Multi-row INSERT shape — one statement per chunk via genuine
+# ``VALUES (...), (...), (...)`` expansion (positional ``%s`` params)
+# rather than ``executemany`` over named-param rows. ``executemany``
+# in psycopg3 sends individual statements when ON CONFLICT prevents
+# auto-batching; the multi-row shape has Postgres parse + plan ONCE
+# per chunk, dropping per-CIK upsert wall clock by another ~10x
+# beyond the previous executemany shape (#763).
+_UPSERT_FACT_COLUMNS: tuple[str, ...] = (
+    "instrument_id",
+    "taxonomy",
+    "concept",
+    "unit",
+    "period_start",
+    "period_end",
+    "val",
+    "frame",
+    "accession_number",
+    "form_type",
+    "filed_date",
+    "fiscal_year",
+    "fiscal_period",
+    "decimals",
+    "ingestion_run_id",
+)
+# Hardcoded placeholder template — must match the count + order of
+# ``_UPSERT_FACT_COLUMNS`` (15 placeholders for 15 columns).
+# Hardcoded rather than ``"(" + ", ".join(...) + ")"`` so the string
+# carries ``LiteralString`` type for ``psycopg.sql.SQL`` (pyright
+# rejects runtime-built ``str`` as ``QueryNoTemplate``). The
+# ``len(_UPSERT_FACT_COLUMNS) == 15`` assert below pins the
+# invariant — adding/removing a column will fail-fast at import.
+_UPSERT_FACT_PLACEHOLDER = "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+assert _UPSERT_FACT_PLACEHOLDER.count("%s") == len(_UPSERT_FACT_COLUMNS), (
+    f"placeholder count {_UPSERT_FACT_PLACEHOLDER.count('%s')} != column count {len(_UPSERT_FACT_COLUMNS)}"
+)
+_UPSERT_FACT_SQL_PREFIX = """
 INSERT INTO financial_facts_raw (
     instrument_id, taxonomy, concept, unit,
     period_start, period_end, val, frame,
     accession_number, form_type, filed_date,
     fiscal_year, fiscal_period, decimals,
     ingestion_run_id
-) VALUES (
-    %(instrument_id)s, %(taxonomy)s, %(concept)s, %(unit)s,
-    %(period_start)s, %(period_end)s, %(val)s, %(frame)s,
-    %(accession_number)s, %(form_type)s, %(filed_date)s,
-    %(fiscal_year)s, %(fiscal_period)s, %(decimals)s,
-    %(ingestion_run_id)s
-)
+) VALUES """
+_UPSERT_FACT_SQL_SUFFIX = """
 ON CONFLICT (
     instrument_id, concept, unit,
     COALESCE(period_start, '0001-01-01'::date),
@@ -364,11 +395,11 @@ WHERE financial_facts_raw.val IS DISTINCT FROM EXCLUDED.val
 """
 
 
-# Batch size for executemany. A 10-K carries ~10k facts; a chunk of
-# 1000 keeps each round trip well under Postgres's default
-# max_parameter size (65k params ÷ 15 columns ≈ 4300 rows) while
-# being large enough to amortise per-round-trip latency. The ADR
-# 0004 bench showed this shape ~18× faster than the prior row-loop.
+# Page size for the multi-row INSERT chunks. 15 columns × 1000 rows
+# = 15000 placeholders/statement, well under Postgres's 65535
+# parameter ceiling. Larger chunks would cross the ceiling; smaller
+# would re-introduce per-round-trip latency. ADR 0004 measured 1000
+# rows as the sweet spot for batched fundamentals upserts.
 _UPSERT_PAGE_SIZE = 1000
 
 
@@ -464,44 +495,81 @@ def upsert_facts_for_instrument(
     if not facts:
         return 0, 0
 
-    rows: list[dict[str, object]] = [
-        {
-            "instrument_id": instrument_id,
-            "taxonomy": fact.taxonomy,
-            "concept": fact.concept,
-            "unit": fact.unit,
-            "period_start": fact.period_start,
-            "period_end": fact.period_end,
-            "val": fact.val,
-            "frame": fact.frame,
-            "accession_number": fact.accession_number,
-            "form_type": fact.form_type,
-            "filed_date": fact.filed_date,
-            "fiscal_year": fact.fiscal_year,
-            "fiscal_period": fact.fiscal_period,
-            "decimals": fact.decimals,
-            "ingestion_run_id": ingestion_run_id,
-        }
-        for fact in facts
-    ]
+    # Dedupe by ON CONFLICT key BEFORE building the multi-row INSERT
+    # statement. Postgres raises ``CardinalityViolation: ON CONFLICT
+    # DO UPDATE command cannot affect row a second time`` if two rows
+    # in the same statement collide — the prior ``executemany`` shape
+    # processed rows individually so this couldn't happen. Keep last
+    # occurrence so the resulting state matches what the sequential
+    # ON CONFLICT DO UPDATE chain would produce (codex review medium).
+    #
+    # Conflict key shape:
+    #   (instrument_id, concept, unit,
+    #    COALESCE(period_start, '0001-01-01'), period_end,
+    #    accession_number)
+    # ``period_start`` ``None`` and ``date(1, 1, 1)`` are treated as
+    # the same key by the unique index — mirror that here.
+    _SENTINEL = date(1, 1, 1)
+    deduped: dict[tuple[Any, ...], tuple[object, ...]] = {}
+    for fact in facts:
+        key = (
+            fact.concept,
+            fact.unit,
+            fact.period_start if fact.period_start is not None else _SENTINEL,
+            fact.period_end,
+            fact.accession_number,
+        )
+        deduped[key] = (
+            instrument_id,
+            fact.taxonomy,
+            fact.concept,
+            fact.unit,
+            fact.period_start,
+            fact.period_end,
+            fact.val,
+            fact.frame,
+            fact.accession_number,
+            fact.form_type,
+            fact.filed_date,
+            fact.fiscal_year,
+            fact.fiscal_period,
+            fact.decimals,
+            ingestion_run_id,
+        )
+    rows: list[tuple[object, ...]] = list(deduped.values())
 
     upserted = 0
     with conn.cursor() as cur:
         for start in range(0, len(rows), _UPSERT_PAGE_SIZE):
             chunk = rows[start : start + _UPSERT_PAGE_SIZE]
-            cur.executemany(_UPSERT_FACT_SQL, chunk)
-            # rowcount == -1 means the driver/pool adapter did not
-            # report a command tag. That breaks the upserted/skipped
-            # accounting contract — treating it as zero would
-            # silently mis-count every fact as "skipped" and
-            # contaminate downstream metrics. Fail loudly so the
-            # caller surfaces it as a per-CIK failure (the watermark
-            # then stays at its previous value and the next run
-            # retries) rather than drifting silently.
+            # Compose: ``INSERT ... VALUES (..), (..), .. ON CONFLICT ..``
+            # — Postgres parses + plans this once per chunk vs.
+            # executemany which sends individual statements (psycopg3
+            # cannot auto-batch INSERTs that have ON CONFLICT clauses).
+            # Each segment is a literal string; ``pgsql.Composed``
+            # joins them so pyright accepts the dynamically-sized
+            # VALUES list (raw ``str`` concatenation would be
+            # rejected as ``QueryNoTemplate``).
+            values_clause = pgsql.SQL(", ").join(pgsql.SQL(_UPSERT_FACT_PLACEHOLDER) for _ in range(len(chunk)))
+            stmt = pgsql.Composed(
+                [
+                    pgsql.SQL(_UPSERT_FACT_SQL_PREFIX),
+                    values_clause,
+                    pgsql.SQL(_UPSERT_FACT_SQL_SUFFIX),
+                ]
+            )
+            # Flatten every row's positional tuple into a single
+            # parameter sequence — psycopg substitutes left-to-right.
+            params: list[object] = [v for row in chunk for v in row]
+            cur.execute(stmt, params)
+            # rowcount == -1 means the driver did not report a command
+            # tag. Fail loudly — silent miscount would contaminate
+            # downstream metrics (the watermark stays at its previous
+            # value and the next run retries on raise).
             if cur.rowcount < 0:
                 raise RuntimeError(
                     "upsert_facts_for_instrument: driver returned rowcount=-1 "
-                    "after executemany; unable to account for upsert/skip counts"
+                    "after multi-row INSERT; unable to account for upsert/skip counts"
                 )
             upserted += cur.rowcount
 
