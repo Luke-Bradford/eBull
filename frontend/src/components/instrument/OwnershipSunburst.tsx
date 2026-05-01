@@ -52,6 +52,14 @@ interface ChartDatum {
   readonly fill: string;
   readonly stroke: string;
   readonly opacity: number;
+  /**
+   * True for synthetic wedges that exist only to convey "we don't
+   * know the number" — e.g. a Coverage gap (#740) category rendered
+   * with a placeholder ``shares=1`` so the arc has visible thickness.
+   * The tooltip suppresses the numeric share/pct rows for these
+   * datums so hovering doesn't surface "1 shares / 0% of float".
+   */
+  readonly is_gap: boolean;
   /** Click-target metadata propagated through Recharts' onClick. */
   readonly target: WedgeClick;
 }
@@ -92,6 +100,7 @@ export function OwnershipSunburst({
       fill: theme.borderColor,
       stroke: theme.bg,
       opacity: 0.6,
+      is_gap: false,
       target: { kind: "center" },
     },
   ];
@@ -220,12 +229,15 @@ function toCategoryDatum(
       // visibly. Since totals would otherwise sum to less than the
       // float, the visible gap on the outer ring still telegraphs
       // missing data; the synthetic value here just guarantees the
-      // wedge isn't a 0-degree arc.
+      // wedge isn't a 0-degree arc. ``is_gap=true`` tells the
+      // tooltip to suppress the numeric share/pct rows so hovering
+      // does not surface a misleading "1 shares".
       shares: 1,
       pct: 0,
       fill: UNKNOWN_FILL,
       stroke: bg,
       opacity: 0.3,
+      is_gap: true,
       target: { kind: "category", category_key: cat.key },
     };
   }
@@ -236,6 +248,7 @@ function toCategoryDatum(
     fill: baseFill,
     stroke: bg,
     opacity: cat.shares <= 0 ? 0 : 0.85,
+    is_gap: false,
     target: { kind: "category", category_key: cat.key },
   };
 }
@@ -255,6 +268,7 @@ function toLeafDatum(
       fill: UNKNOWN_FILL,
       stroke: bg,
       opacity: 0.2,
+      is_gap: true,
       target: { kind: "leaf", category_key: cat.key, leaf_key: leaf.key },
     };
   }
@@ -269,6 +283,7 @@ function toLeafDatum(
     fill: baseFill,
     stroke: bg,
     opacity: leaf.shares <= 0 ? 0 : opacity,
+    is_gap: false,
     target: { kind: "leaf", category_key: cat.key, leaf_key: leaf.key },
   };
 }
@@ -286,6 +301,20 @@ function SunburstTooltip(props: RechartsTooltipProps): JSX.Element | null {
   if (!props.active || props.payload === undefined || props.payload.length === 0) return null;
   const datum = props.payload[0]?.payload;
   if (datum === undefined) return null;
+  // Coverage-gap wedges carry synthetic ``shares=1`` so the arc has
+  // visible thickness; suppress the numeric rows so the tooltip
+  // does not surface a misleading "1 shares / 0% of float" — show
+  // the operator-facing copy explaining the gap instead.
+  if (datum.is_gap) {
+    return (
+      <div className="rounded border border-slate-300 bg-white px-3 py-2 text-xs shadow-md dark:border-slate-700 dark:bg-slate-900">
+        <div className="font-medium text-slate-900 dark:text-slate-100">{datum.name}</div>
+        <div className="text-slate-600 dark:text-slate-400">
+          Data not available — gated on the #740 CUSIP backfill.
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="rounded border border-slate-300 bg-white px-3 py-2 text-xs shadow-md dark:border-slate-700 dark:bg-slate-900">
       <div className="font-medium text-slate-900 dark:text-slate-100">{datum.name}</div>
