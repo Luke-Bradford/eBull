@@ -105,8 +105,10 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # cascade), but listing them explicitly keeps teardown
     # deterministic when a test populates filer / holding rows
     # without touching the instruments row in the same case.
+    "institutional_holdings_ingest_log",
     "institutional_holdings",
     "institutional_filers",
+    "institutional_filer_seeds",
     "filing_events",
     "decision_audit",  # #315 Phase 3 alerts
     "trade_recommendations",  # #315 Phase 3 alerts (FK parent of decision_audit)
