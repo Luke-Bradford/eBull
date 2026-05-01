@@ -1111,3 +1111,354 @@ class TestOwnershipColumnProjection:
         assert q4.is_derived is True
         assert q4.treasury_shares == Decimal("12500000")
         assert q4.retained_earnings == Decimal("180000000000")
+
+
+# ---------------------------------------------------------------------------
+# #732: Tier 1 + Tier 2 allowlist expansion. Ten new aliases project into
+# financial_periods. Five flow items (comprehensive_income,
+# intangible_amortization, deferred_income_tax, other_nonoperating_income,
+# plus the implicit antidilutive_securities which the schema treats as
+# point-in-time so it inherits the FY value on Q4 derivation), and five
+# point-in-time items (assets_current, liabilities_current, cash_restricted,
+# additional_paid_in_capital, accumulated_oci, antidilutive_securities).
+# ---------------------------------------------------------------------------
+
+
+class TestTier1Tier2AllowlistProjection:
+    def _bs_fact(
+        self,
+        *,
+        concept: str,
+        val: Decimal,
+        period_end: str = "2024-12-31",
+        fiscal_year: int = 2024,
+        fiscal_period: str = "FY",
+        accession_number: str = "fy",
+        unit: str = "USD",
+    ) -> FactRow:
+        return _fact(
+            concept=concept,
+            val=val,
+            period_end=period_end,
+            period_start=None,
+            frame=None,
+            fiscal_period=fiscal_period,
+            fiscal_year=fiscal_year,
+            accession_number=accession_number,
+            form_type="10-K",
+            unit=unit,
+        )
+
+    def _fy_anchor(self, fiscal_year: int = 2024) -> FactRow:
+        return _fact(
+            concept="Revenues",
+            val=Decimal("1000000"),
+            period_end=f"{fiscal_year}-12-31",
+            period_start=f"{fiscal_year}-01-01",
+            frame=f"CY{fiscal_year}",
+            fiscal_period="FY",
+            fiscal_year=fiscal_year,
+            accession_number="fy",
+            form_type="10-K",
+        )
+
+    def test_tier1_balance_sheet_aliases(self) -> None:
+        """AssetsCurrent / LiabilitiesCurrent / CashCashEquivalentsRestrictedCash
+        all project to their canonical columns from a single FY balance
+        sheet."""
+        facts = [
+            self._fy_anchor(),
+            self._bs_fact(concept="AssetsCurrent", val=Decimal("450000000")),
+            self._bs_fact(concept="LiabilitiesCurrent", val=Decimal("320000000")),
+            self._bs_fact(
+                concept="CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+                val=Decimal("85000000"),
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        assert len(periods) == 1
+        p = periods[0]
+        assert p.assets_current == Decimal("450000000")
+        assert p.liabilities_current == Decimal("320000000")
+        assert p.cash_restricted == Decimal("85000000")
+
+    def test_cash_restricted_separate_from_cash(self) -> None:
+        """CashAndCashEquivalentsAtCarryingValue → cash; the FASB
+        ASU 2016-18 concept → cash_restricted. The two columns must
+        not collide — they are distinct concepts and an issuer can
+        emit both."""
+        facts = [
+            self._fy_anchor(),
+            self._bs_fact(
+                concept="CashAndCashEquivalentsAtCarryingValue",
+                val=Decimal("60000000"),
+            ),
+            self._bs_fact(
+                concept="CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+                val=Decimal("85000000"),
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        p = periods[0]
+        assert p.cash == Decimal("60000000")
+        assert p.cash_restricted == Decimal("85000000")
+
+    def test_tier1_flow_aliases(self) -> None:
+        """ComprehensiveIncomeNetOfTax + AmortizationOfIntangibleAssets
+        project into the FY row alongside the revenue anchor."""
+        facts = [
+            _fact(
+                concept="Revenues",
+                val=Decimal("1000000"),
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame="CY2024",
+                fiscal_period="FY",
+                fiscal_year=2024,
+                accession_number="fy",
+                form_type="10-K",
+            ),
+            _fact(
+                concept="ComprehensiveIncomeNetOfTax",
+                val=Decimal("220000"),
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame="CY2024",
+                fiscal_period="FY",
+                fiscal_year=2024,
+                accession_number="fy",
+                form_type="10-K",
+            ),
+            _fact(
+                concept="AmortizationOfIntangibleAssets",
+                val=Decimal("18000"),
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame="CY2024",
+                fiscal_period="FY",
+                fiscal_year=2024,
+                accession_number="fy",
+                form_type="10-K",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        p = periods[0]
+        assert p.comprehensive_income == Decimal("220000")
+        assert p.intangible_amortization == Decimal("18000")
+
+    def test_tier2_flow_aliases(self) -> None:
+        facts = [
+            _fact(
+                concept="Revenues",
+                val=Decimal("1000000"),
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame="CY2024",
+                fiscal_period="FY",
+                fiscal_year=2024,
+                accession_number="fy",
+                form_type="10-K",
+            ),
+            _fact(
+                concept="DeferredIncomeTaxExpenseBenefit",
+                val=Decimal("12000"),
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame="CY2024",
+                fiscal_period="FY",
+                fiscal_year=2024,
+                accession_number="fy",
+                form_type="10-K",
+            ),
+            _fact(
+                concept="OtherNonoperatingIncomeExpense",
+                val=Decimal("-3500"),
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame="CY2024",
+                fiscal_period="FY",
+                fiscal_year=2024,
+                accession_number="fy",
+                form_type="10-K",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        p = periods[0]
+        assert p.deferred_income_tax == Decimal("12000")
+        assert p.other_nonoperating_income == Decimal("-3500")
+
+    def test_tier2_balance_sheet_aliases(self) -> None:
+        facts = [
+            self._fy_anchor(),
+            self._bs_fact(
+                concept="AdditionalPaidInCapital",
+                val=Decimal("250000000"),
+            ),
+            self._bs_fact(
+                concept="AccumulatedOtherComprehensiveIncomeLossNetOfTax",
+                val=Decimal("-15000000"),
+            ),
+            self._bs_fact(
+                concept="AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount",
+                val=Decimal("4500000"),
+                unit="shares",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        p = periods[0]
+        assert p.additional_paid_in_capital == Decimal("250000000")
+        assert p.accumulated_oci == Decimal("-15000000")
+        assert p.antidilutive_securities == Decimal("4500000")
+
+    def test_q4_derivation_subtracts_flow_columns(self) -> None:
+        """Tier 1 + Tier 2 flow items participate in the Q4 = FY -
+        Q1+Q2+Q3 subtraction. comprehensive_income is the canonical
+        one to pin (most-frequent flow concept in the Tier 1 audit)."""
+        facts = [
+            _fact(
+                concept="ComprehensiveIncomeNetOfTax",
+                fiscal_period="Q1",
+                val=Decimal("50"),
+                period_end="2024-03-31",
+                period_start="2024-01-01",
+                frame="CY2024Q1",
+                accession_number="q1",
+            ),
+            _fact(
+                concept="ComprehensiveIncomeNetOfTax",
+                fiscal_period="Q2",
+                val=Decimal("60"),
+                period_end="2024-06-30",
+                period_start="2024-04-01",
+                frame="CY2024Q2",
+                accession_number="q2",
+            ),
+            _fact(
+                concept="ComprehensiveIncomeNetOfTax",
+                fiscal_period="Q3",
+                val=Decimal("55"),
+                period_end="2024-09-30",
+                period_start="2024-07-01",
+                frame="CY2024Q3",
+                accession_number="q3",
+            ),
+            _fact(
+                concept="ComprehensiveIncomeNetOfTax",
+                fiscal_period="FY",
+                fiscal_year=2024,
+                val=Decimal("250"),
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame="CY2024",
+                form_type="10-K",
+                accession_number="fy",
+            ),
+            # Revenue facts so Q4 derivation triggers (driven by FY +
+            # all three quarters present for the canonical row).
+            _fact(
+                concept="Revenues",
+                fiscal_period="Q1",
+                val=Decimal("100"),
+                period_end="2024-03-31",
+                period_start="2024-01-01",
+                frame="CY2024Q1",
+                accession_number="q1",
+            ),
+            _fact(
+                concept="Revenues",
+                fiscal_period="Q2",
+                val=Decimal("120"),
+                period_end="2024-06-30",
+                period_start="2024-04-01",
+                frame="CY2024Q2",
+                accession_number="q2",
+            ),
+            _fact(
+                concept="Revenues",
+                fiscal_period="Q3",
+                val=Decimal("110"),
+                period_end="2024-09-30",
+                period_start="2024-07-01",
+                frame="CY2024Q3",
+                accession_number="q3",
+            ),
+            _fact(
+                concept="Revenues",
+                fiscal_period="FY",
+                fiscal_year=2024,
+                val=Decimal("500"),
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame="CY2024",
+                form_type="10-K",
+                accession_number="fy",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        q4 = next(p for p in periods if p.period_type == "Q4")
+        assert q4.is_derived is True
+        # 250 - 50 - 60 - 55 = 85
+        assert q4.comprehensive_income == Decimal("85")
+
+    def test_q4_balance_sheet_inherits_fy_for_tier1_tier2(self) -> None:
+        """Tier 1 / Tier 2 point-in-time columns (assets_current,
+        liabilities_current, additional_paid_in_capital, etc.) inherit
+        the FY value on Q4 derivation — same handling as total_assets."""
+        facts = [
+            _fact(
+                concept="Revenues",
+                fiscal_period="Q1",
+                val=Decimal("100"),
+                period_end="2024-03-31",
+                period_start="2024-01-01",
+                frame="CY2024Q1",
+                accession_number="q1",
+            ),
+            _fact(
+                concept="Revenues",
+                fiscal_period="Q2",
+                val=Decimal("120"),
+                period_end="2024-06-30",
+                period_start="2024-04-01",
+                frame="CY2024Q2",
+                accession_number="q2",
+            ),
+            _fact(
+                concept="Revenues",
+                fiscal_period="Q3",
+                val=Decimal("110"),
+                period_end="2024-09-30",
+                period_start="2024-07-01",
+                frame="CY2024Q3",
+                accession_number="q3",
+            ),
+            _fact(
+                concept="Revenues",
+                fiscal_period="FY",
+                fiscal_year=2024,
+                val=Decimal("500"),
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame="CY2024",
+                form_type="10-K",
+                accession_number="fy",
+            ),
+            self._bs_fact(
+                concept="AssetsCurrent",
+                val=Decimal("450000000"),
+            ),
+            self._bs_fact(
+                concept="LiabilitiesCurrent",
+                val=Decimal("320000000"),
+            ),
+            self._bs_fact(
+                concept="AdditionalPaidInCapital",
+                val=Decimal("250000000"),
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        q4 = next(p for p in periods if p.period_type == "Q4")
+        assert q4.is_derived is True
+        assert q4.assets_current == Decimal("450000000")
+        assert q4.liabilities_current == Decimal("320000000")
+        assert q4.additional_paid_in_capital == Decimal("250000000")

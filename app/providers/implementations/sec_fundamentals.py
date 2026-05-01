@@ -216,6 +216,26 @@ TRACKED_CONCEPTS: dict[str, tuple[str, ...]] = {
     "shares_authorized": ("CommonStockSharesAuthorized",),
     "shares_issued": ("CommonStockSharesIssued",),
     "retained_earnings": ("RetainedEarningsAccumulatedDeficit",),
+    # Tier 1 + Tier 2 allowlist expansion (#732). Top-30 most-frequent
+    # XBRL concepts that previously landed in financial_facts_raw but
+    # were dropped during normalisation. Working-capital + liquidity +
+    # supplementary P&L items.
+    "assets_current": ("AssetsCurrent",),
+    "liabilities_current": ("LiabilitiesCurrent",),
+    # FASB ASU 2016-18 concept (post-2017 filings include restricted
+    # cash by definition). Kept SEPARATE from the legacy `cash` column
+    # because the two concepts differ in scope by design.
+    "cash_restricted": ("CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",),
+    "comprehensive_income": ("ComprehensiveIncomeNetOfTax",),
+    "intangible_amortization": ("AmortizationOfIntangibleAssets",),
+    "deferred_income_tax": ("DeferredIncomeTaxExpenseBenefit",),
+    "other_nonoperating_income": ("OtherNonoperatingIncomeExpense",),
+    "additional_paid_in_capital": ("AdditionalPaidInCapital",),
+    "accumulated_oci": ("AccumulatedOtherComprehensiveIncomeLossNetOfTax",),
+    # Weighted-average count of share-equivalents excluded from EPS;
+    # treated as a point-in-time stock (mirrors how shares_basic /
+    # shares_diluted are aggregated — TTM uses latest, not sum).
+    "antidilutive_securities": ("AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount",),
 }
 
 # DEI (document-and-entity-information) cover-page facts. Thin set —

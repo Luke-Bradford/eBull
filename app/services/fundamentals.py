@@ -646,6 +646,11 @@ _FLOW_COLUMNS: frozenset[str] = frozenset(
         "buyback_spend",
         # shares_basic/shares_diluted are weighted averages for a period, so they
         # belong to the period, but TTM uses latest rather than sum.
+        # Tier 1 + Tier 2 expansion (#732) — flow items.
+        "comprehensive_income",
+        "intangible_amortization",
+        "deferred_income_tax",
+        "other_nonoperating_income",
     }
 )
 
@@ -668,6 +673,18 @@ _BALANCE_SHEET_COLUMNS: frozenset[str] = frozenset(
         "shares_authorized",
         "shares_issued",
         "retained_earnings",
+        # Tier 1 + Tier 2 expansion (#732) — point-in-time items.
+        # antidilutive_securities is a weighted-average share-equivalent
+        # count; treated as point-in-time so the Q4-derivation copy
+        # loop carries the FY value forward without a Q4 = FY - Q123
+        # subtraction (same handling as shares_basic / shares_diluted
+        # via the explicit copy at lines ~935–938).
+        "assets_current",
+        "liabilities_current",
+        "cash_restricted",
+        "additional_paid_in_capital",
+        "accumulated_oci",
+        "antidilutive_securities",
     }
 )
 
@@ -737,6 +754,21 @@ class PeriodRow:
     shares_authorized: Decimal | None = None
     shares_issued: Decimal | None = None
     retained_earnings: Decimal | None = None
+
+    # Tier 1 + Tier 2 allowlist expansion (#732). Working-capital,
+    # liquidity, comprehensive income, intangible amortisation,
+    # deferred-tax, paid-in capital, accumulated OCI, antidilutive
+    # share-equivalent count.
+    assets_current: Decimal | None = None
+    liabilities_current: Decimal | None = None
+    cash_restricted: Decimal | None = None
+    comprehensive_income: Decimal | None = None
+    intangible_amortization: Decimal | None = None
+    deferred_income_tax: Decimal | None = None
+    other_nonoperating_income: Decimal | None = None
+    additional_paid_in_capital: Decimal | None = None
+    accumulated_oci: Decimal | None = None
+    antidilutive_securities: Decimal | None = None
 
     # Provenance
     source: str = "sec_edgar"
@@ -981,6 +1013,11 @@ def _upsert_period_raw(
             operating_cf, investing_cf, financing_cf, capex,
             dividends_paid, dps_declared, buyback_spend,
             treasury_shares, shares_authorized, shares_issued, retained_earnings,
+            assets_current, liabilities_current, cash_restricted,
+            comprehensive_income, intangible_amortization,
+            deferred_income_tax, other_nonoperating_income,
+            additional_paid_in_capital, accumulated_oci,
+            antidilutive_securities,
             source, source_ref, reported_currency,
             form_type, filed_date, is_restated, is_derived,
             ingestion_run_id
@@ -997,6 +1034,11 @@ def _upsert_period_raw(
             %(operating_cf)s, %(investing_cf)s, %(financing_cf)s, %(capex)s,
             %(dividends_paid)s, %(dps_declared)s, %(buyback_spend)s,
             %(treasury_shares)s, %(shares_authorized)s, %(shares_issued)s, %(retained_earnings)s,
+            %(assets_current)s, %(liabilities_current)s, %(cash_restricted)s,
+            %(comprehensive_income)s, %(intangible_amortization)s,
+            %(deferred_income_tax)s, %(other_nonoperating_income)s,
+            %(additional_paid_in_capital)s, %(accumulated_oci)s,
+            %(antidilutive_securities)s,
             %(source)s, %(source_ref)s, %(reported_currency)s,
             %(form_type)s, %(filed_date)s, %(is_restated)s, %(is_derived)s,
             %(ingestion_run_id)s
@@ -1041,6 +1083,16 @@ def _upsert_period_raw(
             shares_authorized = EXCLUDED.shares_authorized,
             shares_issued = EXCLUDED.shares_issued,
             retained_earnings = EXCLUDED.retained_earnings,
+            assets_current = EXCLUDED.assets_current,
+            liabilities_current = EXCLUDED.liabilities_current,
+            cash_restricted = EXCLUDED.cash_restricted,
+            comprehensive_income = EXCLUDED.comprehensive_income,
+            intangible_amortization = EXCLUDED.intangible_amortization,
+            deferred_income_tax = EXCLUDED.deferred_income_tax,
+            other_nonoperating_income = EXCLUDED.other_nonoperating_income,
+            additional_paid_in_capital = EXCLUDED.additional_paid_in_capital,
+            accumulated_oci = EXCLUDED.accumulated_oci,
+            antidilutive_securities = EXCLUDED.antidilutive_securities,
             form_type = EXCLUDED.form_type,
             filed_date = EXCLUDED.filed_date,
             is_restated = EXCLUDED.is_restated,
@@ -1094,6 +1146,16 @@ def _upsert_period_raw(
             "shares_authorized": period.shares_authorized,
             "shares_issued": period.shares_issued,
             "retained_earnings": period.retained_earnings,
+            "assets_current": period.assets_current,
+            "liabilities_current": period.liabilities_current,
+            "cash_restricted": period.cash_restricted,
+            "comprehensive_income": period.comprehensive_income,
+            "intangible_amortization": period.intangible_amortization,
+            "deferred_income_tax": period.deferred_income_tax,
+            "other_nonoperating_income": period.other_nonoperating_income,
+            "additional_paid_in_capital": period.additional_paid_in_capital,
+            "accumulated_oci": period.accumulated_oci,
+            "antidilutive_securities": period.antidilutive_securities,
             "source": period.source,
             "source_ref": period.source_ref,
             "reported_currency": period.reported_currency,
@@ -1250,6 +1312,11 @@ def _canonical_merge_instrument(
             operating_cf, investing_cf, financing_cf, capex,
             dividends_paid, dps_declared, buyback_spend,
             treasury_shares, shares_authorized, shares_issued, retained_earnings,
+            assets_current, liabilities_current, cash_restricted,
+            comprehensive_income, intangible_amortization,
+            deferred_income_tax, other_nonoperating_income,
+            additional_paid_in_capital, accumulated_oci,
+            antidilutive_securities,
             source, source_ref, reported_currency,
             form_type, filed_date, is_restated, is_derived,
             normalization_status
@@ -1267,6 +1334,11 @@ def _canonical_merge_instrument(
             operating_cf, investing_cf, financing_cf, capex,
             dividends_paid, dps_declared, buyback_spend,
             treasury_shares, shares_authorized, shares_issued, retained_earnings,
+            assets_current, liabilities_current, cash_restricted,
+            comprehensive_income, intangible_amortization,
+            deferred_income_tax, other_nonoperating_income,
+            additional_paid_in_capital, accumulated_oci,
+            antidilutive_securities,
             source, source_ref, reported_currency,
             form_type, filed_date, is_restated, is_derived,
             'normalized'
@@ -1316,6 +1388,16 @@ def _canonical_merge_instrument(
             shares_authorized = EXCLUDED.shares_authorized,
             shares_issued = EXCLUDED.shares_issued,
             retained_earnings = EXCLUDED.retained_earnings,
+            assets_current = EXCLUDED.assets_current,
+            liabilities_current = EXCLUDED.liabilities_current,
+            cash_restricted = EXCLUDED.cash_restricted,
+            comprehensive_income = EXCLUDED.comprehensive_income,
+            intangible_amortization = EXCLUDED.intangible_amortization,
+            deferred_income_tax = EXCLUDED.deferred_income_tax,
+            other_nonoperating_income = EXCLUDED.other_nonoperating_income,
+            additional_paid_in_capital = EXCLUDED.additional_paid_in_capital,
+            accumulated_oci = EXCLUDED.accumulated_oci,
+            antidilutive_securities = EXCLUDED.antidilutive_securities,
             source = EXCLUDED.source,
             source_ref = EXCLUDED.source_ref,
             form_type = EXCLUDED.form_type,
