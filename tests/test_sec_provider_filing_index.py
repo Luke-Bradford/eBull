@@ -104,3 +104,71 @@ def test_filing_index_raises_on_500() -> None:
 
     with pytest.raises(httpx.HTTPStatusError):
         provider.fetch_filing_index("0000320193-24-000001")
+
+
+def test_filing_index_uses_explicit_issuer_cik_not_accession_prefix() -> None:
+    """Regression for #736. SEC accession numbers carry the
+    filing-of-record's CIK in the prefix, but the archive lives
+    under the **issuer's** CIK. For agent-filed accessions
+    (EdgarOnline 1213900, Donnelley 1571049, Workiva 1185185 etc.),
+    parsing the prefix as the URL CIK produces 404s on every
+    fetch. The fix takes ``issuer_cik`` as a keyword argument and
+    routes the URL under it.
+    """
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, content=json.dumps({"directory": {"item": []}}))
+
+    provider = SecFilingsProvider(user_agent="test test@example.com")
+    _rewire_tickers_transport(provider, httpx.MockTransport(handler))
+
+    # Accession filed by EdgarOnline (CIK 1213900) on behalf of
+    # issuer CIK 0000019617 (JPM). The URL must route under JPM,
+    # not the agent.
+    result = provider.fetch_filing_index(
+        "0001213900-26-050022",
+        issuer_cik="0000019617",
+    )
+    assert result == {"directory": {"item": []}}
+    assert len(captured) == 1
+    assert captured[0].url.path == "/Archives/edgar/data/19617/000121390026050022/index.json"
+
+
+def test_filing_index_strips_non_digits_from_issuer_cik() -> None:
+    """Defensive: issuer_cik may arrive with the ``CIK`` prefix
+    or whitespace from a stale data source. The provider strips
+    non-digits before constructing the URL."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, content=json.dumps({"directory": {"item": []}}))
+
+    provider = SecFilingsProvider(user_agent="test test@example.com")
+    _rewire_tickers_transport(provider, httpx.MockTransport(handler))
+
+    provider.fetch_filing_index("0000320193-24-000001", issuer_cik=" CIK0000320193 ")
+    assert len(captured) == 1
+    assert "/Archives/edgar/data/320193/" in captured[0].url.path
+
+
+def test_filing_index_legacy_path_still_works_for_self_filers() -> None:
+    """Back-compat: callers that don't pass ``issuer_cik`` (e.g.
+    bare ``get_filing(accession)`` lookups) keep the legacy
+    accession-prefix-as-CIK behaviour. Self-filers (issuer files
+    its own accessions — every 10-K from a publicly traded
+    company) work unchanged."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, content=json.dumps({"directory": {"item": []}}))
+
+    provider = SecFilingsProvider(user_agent="test test@example.com")
+    _rewire_tickers_transport(provider, httpx.MockTransport(handler))
+
+    provider.fetch_filing_index("0000320193-24-000001")
+    assert len(captured) == 1
+    assert captured[0].url.path == "/Archives/edgar/data/320193/000032019324000001/index.json"
