@@ -663,6 +663,11 @@ _BALANCE_SHEET_COLUMNS: frozenset[str] = frozenset(
         "payables",
         "goodwill",
         "ppe_net",
+        # Ownership / capital structure (#731).
+        "treasury_shares",
+        "shares_authorized",
+        "shares_issued",
+        "retained_earnings",
     }
 )
 
@@ -724,6 +729,14 @@ class PeriodRow:
     dividends_paid: Decimal | None = None
     dps_declared: Decimal | None = None
     buyback_spend: Decimal | None = None
+
+    # Ownership / capital structure (#731). Treasury and authorised /
+    # issued counts populate the ownership reporting card (#729);
+    # retained_earnings rounds out the equity slice.
+    treasury_shares: Decimal | None = None
+    shares_authorized: Decimal | None = None
+    shares_issued: Decimal | None = None
+    retained_earnings: Decimal | None = None
 
     # Provenance
     source: str = "sec_edgar"
@@ -967,6 +980,7 @@ def _upsert_period_raw(
             inventory, receivables, payables, goodwill, ppe_net,
             operating_cf, investing_cf, financing_cf, capex,
             dividends_paid, dps_declared, buyback_spend,
+            treasury_shares, shares_authorized, shares_issued, retained_earnings,
             source, source_ref, reported_currency,
             form_type, filed_date, is_restated, is_derived,
             ingestion_run_id
@@ -982,6 +996,7 @@ def _upsert_period_raw(
             %(inventory)s, %(receivables)s, %(payables)s, %(goodwill)s, %(ppe_net)s,
             %(operating_cf)s, %(investing_cf)s, %(financing_cf)s, %(capex)s,
             %(dividends_paid)s, %(dps_declared)s, %(buyback_spend)s,
+            %(treasury_shares)s, %(shares_authorized)s, %(shares_issued)s, %(retained_earnings)s,
             %(source)s, %(source_ref)s, %(reported_currency)s,
             %(form_type)s, %(filed_date)s, %(is_restated)s, %(is_derived)s,
             %(ingestion_run_id)s
@@ -1022,6 +1037,10 @@ def _upsert_period_raw(
             dividends_paid = EXCLUDED.dividends_paid,
             dps_declared = EXCLUDED.dps_declared,
             buyback_spend = EXCLUDED.buyback_spend,
+            treasury_shares = EXCLUDED.treasury_shares,
+            shares_authorized = EXCLUDED.shares_authorized,
+            shares_issued = EXCLUDED.shares_issued,
+            retained_earnings = EXCLUDED.retained_earnings,
             form_type = EXCLUDED.form_type,
             filed_date = EXCLUDED.filed_date,
             is_restated = EXCLUDED.is_restated,
@@ -1071,6 +1090,10 @@ def _upsert_period_raw(
             "dividends_paid": period.dividends_paid,
             "dps_declared": period.dps_declared,
             "buyback_spend": period.buyback_spend,
+            "treasury_shares": period.treasury_shares,
+            "shares_authorized": period.shares_authorized,
+            "shares_issued": period.shares_issued,
+            "retained_earnings": period.retained_earnings,
             "source": period.source,
             "source_ref": period.source_ref,
             "reported_currency": period.reported_currency,
@@ -1226,6 +1249,7 @@ def _canonical_merge_instrument(
             inventory, receivables, payables, goodwill, ppe_net,
             operating_cf, investing_cf, financing_cf, capex,
             dividends_paid, dps_declared, buyback_spend,
+            treasury_shares, shares_authorized, shares_issued, retained_earnings,
             source, source_ref, reported_currency,
             form_type, filed_date, is_restated, is_derived,
             normalization_status
@@ -1242,6 +1266,7 @@ def _canonical_merge_instrument(
             inventory, receivables, payables, goodwill, ppe_net,
             operating_cf, investing_cf, financing_cf, capex,
             dividends_paid, dps_declared, buyback_spend,
+            treasury_shares, shares_authorized, shares_issued, retained_earnings,
             source, source_ref, reported_currency,
             form_type, filed_date, is_restated, is_derived,
             'normalized'
@@ -1287,6 +1312,10 @@ def _canonical_merge_instrument(
             dividends_paid = EXCLUDED.dividends_paid,
             dps_declared = EXCLUDED.dps_declared,
             buyback_spend = EXCLUDED.buyback_spend,
+            treasury_shares = EXCLUDED.treasury_shares,
+            shares_authorized = EXCLUDED.shares_authorized,
+            shares_issued = EXCLUDED.shares_issued,
+            retained_earnings = EXCLUDED.retained_earnings,
             source = EXCLUDED.source,
             source_ref = EXCLUDED.source_ref,
             form_type = EXCLUDED.form_type,

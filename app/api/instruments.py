@@ -485,6 +485,12 @@ _BALANCE_COLUMNS: tuple[str, ...] = (
     "payables",
     "goodwill",
     "ppe_net",
+    # Ownership / capital structure (#731). Surfaced after migration
+    # 088 + the matching projection in app/services/fundamentals.py.
+    "treasury_shares",
+    "shares_authorized",
+    "shares_issued",
+    "retained_earnings",
 )
 
 _CASHFLOW_COLUMNS: tuple[str, ...] = (

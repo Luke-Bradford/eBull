@@ -299,15 +299,21 @@ For `EXIT`:
 
 ---
 
-## Product-visibility pivot (2026-04-18)
+## Product-visibility pivot (2026-04-18, lifted 2026-04-18)
 
-Infra track (filings cascade, raw housekeeping, fundamentals expansion) is **paused** until the operator can open eBull and place/close demo trades from the UI. Plan + backlog: [`docs/superpowers/plans/2026-04-18-product-visibility-pivot.md`](superpowers/plans/2026-04-18-product-visibility-pivot.md).
+Infra-track pause for filings cascade, raw housekeeping, and
+fundamentals expansion was scoped to "until #313 + #314 ship". Both
+shipped on 2026-04-18 (and #315 on 2026-04-21), so the pause is no
+longer in force. Plan B.1 (TRACKED_CONCEPTS expansion), Plan B.3
+(company metadata), Plan C.1/C.2/C.3 (insider/13F/segment), Chunk L
+flag-flip, and raw-retention dry-run-off may proceed once their own
+issues are prioritised.
 
-Open tickets: #313 (order modals), #314 (portfolio workstation), #315 (dashboard command center), #316 (instrument terminal), #317 (shell polish).
-
-Every ticket must answer yes to: *"Would the operator feel this moves the product closer to 'I can manage my fund from this screen'?"* — else rewrite or drop.
-
-Paused until #313 + #314 ship: Plan B.1 (TRACKED_CONCEPTS expansion), Plan B.3 (company metadata), Plan C.1/C.2/C.3 (insider/13F/segment), Chunk L flag-flip, raw-retention dry-run-off.
+The product-test that lives on independent of the pause: every new
+ticket should still answer yes to *"Would the operator feel this
+moves the product closer to 'I can manage my fund from this
+screen'?"* — else rewrite or drop. Plan + backlog still at
+[`docs/superpowers/plans/2026-04-18-product-visibility-pivot.md`](superpowers/plans/2026-04-18-product-visibility-pivot.md).
 
 ---
 

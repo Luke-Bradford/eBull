@@ -202,6 +202,20 @@ TRACKED_CONCEPTS: dict[str, tuple[str, ...]] = {
     # Effective tax rate — useful for cross-filer comparability when
     # net_income alone obscures tax-regime differences.
     "effective_tax_rate": ("EffectiveIncomeTaxRateContinuingOperations",),
+    # Ownership / capital-structure concepts (#731). All four are
+    # us-gaap balance-sheet items emitted on the same period_end as
+    # the rest of the balance sheet, so they project through the
+    # existing _derive_periods_from_facts canonical-end filter
+    # without special handling. EntityPublicFloat (DEI cover-page
+    # fact, period_end = issuer Q2-end ≠ fiscal year-end) is
+    # deferred to #735.
+    "treasury_shares": (
+        "TreasuryStockShares",
+        "TreasuryStockCommonShares",
+    ),
+    "shares_authorized": ("CommonStockSharesAuthorized",),
+    "shares_issued": ("CommonStockSharesIssued",),
+    "retained_earnings": ("RetainedEarningsAccumulatedDeficit",),
 }
 
 # DEI (document-and-entity-information) cover-page facts. Thin set —
