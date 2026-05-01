@@ -57,6 +57,8 @@ from app.jobs.listener import ListenerState, listener_loop
 from app.jobs.locks import JOBS_PROCESS_LOCK_KEY
 from app.jobs.runtime import JobRuntime
 from app.jobs.supervisor import supervise
+from app.security import master_key
+from app.security.secrets_crypto import set_active_key as set_broker_encryption_key
 from app.services.sync_orchestrator.dispatcher import (
     claim_oldest_pending,
     reset_stale_in_flight,
@@ -122,6 +124,44 @@ def _acquire_singleton_fence(database_url: str) -> psycopg.Connection[Any]:
     return fence
 
 
+def _bootstrap_master_key(pool: Any) -> None:
+    """Mirror the API lifespan's master-key bootstrap.
+
+    Pre-fix the jobs process opened the pool, started the scheduler,
+    and let the first ``daily_portfolio_sync`` / ``daily_candle_refresh``
+    tick raise ``MasterKeyNotLoadedError`` from inside
+    ``_load_etoro_credentials`` because no one had ever called
+    ``master_key.bootstrap(conn)`` in this process. The API process's
+    lifespan at ``app/main.py`` did the bootstrap correctly; the jobs
+    entrypoint silently skipped it.
+
+    Must run AFTER ``open_pool`` (we need a connection to verify
+    ciphertext) and BEFORE ``runtime.start()`` / boot-drain (so the
+    key is installed before the first job fires).
+
+    Never raises on a missing ``EBULL_SECRETS_KEY`` — a clean install
+    or a recovery_required state are valid post-boot conditions and
+    the operator clears them through the API setup flow. Raises only
+    on EBULL_SECRETS_KEY mismatch with existing ciphertext (fail-loud
+    per ADR-0003 §6).
+
+    Factored out as a module-level helper so the smoke test can drive
+    it without acquiring the singleton advisory lock — the live dev
+    jobs daemon holds that lock so a parallel ``serve()`` call would
+    abort.
+    """
+    with pool.connection() as conn:
+        boot = master_key.bootstrap(conn)
+    if boot.broker_encryption_key is not None:
+        set_broker_encryption_key(boot.broker_encryption_key)
+    logger.info(
+        "jobs entrypoint: master-key bootstrap state=%s recovery_required=%s broker_key_loaded=%s",
+        boot.state,
+        boot.recovery_required,
+        boot.broker_encryption_key is not None,
+    )
+
+
 def _drain_pending_at_boot(
     *,
     runtime: JobRuntime,
@@ -177,6 +217,8 @@ def serve(stop_event: threading.Event | None = None) -> int:
     pool = open_pool("jobs_pool", min_size=1, max_size=4)
     fence_conn = _acquire_singleton_fence(settings.database_url)
     logger.info("jobs entrypoint: singleton fence acquired")
+
+    _bootstrap_master_key(pool)
 
     sync_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jobs-sync")
 
