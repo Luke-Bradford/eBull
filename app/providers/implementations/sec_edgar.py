@@ -282,7 +282,12 @@ class SecFilingsProvider(FilingsProvider):
             raise FilingNotFound(f"Filing not found: {provider_filing_id}")
         return _normalise_filing_event(provider_filing_id, raw)
 
-    def fetch_filing_index(self, provider_filing_id: str) -> dict[str, object] | None:
+    def fetch_filing_index(
+        self,
+        provider_filing_id: str,
+        *,
+        issuer_cik: str | None = None,
+    ) -> dict[str, object] | None:
         """Fetch a filing's directory listing JSON.
 
         Returns the parsed dict on 2xx, ``None`` on 404. Raises on
@@ -290,6 +295,20 @@ class SecFilingsProvider(FilingsProvider):
         by :func:`get_filing` for header metadata and by the
         ``filing_documents`` service for the per-document manifest
         (#452).
+
+        **CIK (#736):** SEC archives a filing under the **issuer's**
+        CIK, not the filer-of-record's. For most filings the two
+        are the same (issuer self-files), but registered filing
+        agents (EdgarOnline CIK=1213900, Donnelley CIK=1571049,
+        Workiva CIK=1185185, etc.) file 10-Q / 8-K / etc. on behalf
+        of operating issuers — and the agent's CIK appears in the
+        accession-number prefix even though the archive lives
+        under the issuer. Caller MUST pass ``issuer_cik`` when the
+        filing is agent-filed; the legacy behaviour (parse the
+        first 10 digits of the accession) is preserved as a
+        fallback for callers that genuinely don't know the CIK
+        (e.g. the bare ``get_filing`` lookup), but logs a warning
+        because the URL may 404 for agent-filed accessions.
 
         **URL (#723):** SEC's canonical machine-readable manifest at
         the per-filing archive directory is ``/index.json`` (no
@@ -320,8 +339,23 @@ class SecFilingsProvider(FilingsProvider):
         raw_id = provider_filing_id.replace("-", "")
         if len(raw_id) != 18:
             raise FilingNotFound(f"Invalid accession number format: {provider_filing_id}")
-        cik_padded = raw_id[:10]
-        absolute_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik_padded)}/{raw_id}/index.json"
+        if issuer_cik is not None:
+            digits = "".join(ch for ch in issuer_cik if ch.isdigit())
+            if not digits:
+                raise FilingNotFound(f"Non-numeric issuer_cik: {issuer_cik!r}")
+            cik_for_url = int(digits)
+        else:
+            # Legacy fallback (#736): the accession prefix is the
+            # filer-of-record's CIK, which collides with the
+            # archive's issuer-CIK key only for self-filers. Log so
+            # an operator investigating 404 noise can correlate.
+            logger.debug(
+                "fetch_filing_index: using accession-prefix CIK fallback "
+                "for accession=%s — pass issuer_cik to avoid agent-CIK 404s",
+                provider_filing_id,
+            )
+            cik_for_url = int(raw_id[:10])
+        absolute_url = f"https://www.sec.gov/Archives/edgar/data/{cik_for_url}/{raw_id}/index.json"
         resp = self._http_tickers.get(absolute_url)
         if resp.status_code == 404:
             return None

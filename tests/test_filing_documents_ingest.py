@@ -25,10 +25,15 @@ pytestmark = [
 class _StubIndexFetcher:
     def __init__(self, by_accession: dict[str, dict[str, object] | None]) -> None:
         self._by = by_accession
-        self.calls: list[str] = []
+        self.calls: list[tuple[str, str | None]] = []
 
-    def fetch_filing_index(self, accession: str) -> dict[str, object] | None:
-        self.calls.append(accession)
+    def fetch_filing_index(
+        self,
+        accession: str,
+        *,
+        issuer_cik: str | None = None,
+    ) -> dict[str, object] | None:
+        self.calls.append((accession, issuer_cik))
         return self._by.get(accession)
 
 

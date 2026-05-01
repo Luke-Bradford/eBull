@@ -245,7 +245,12 @@ class _IndexFetcher(Protocol):
     implementing the full provider interface.
     """
 
-    def fetch_filing_index(self, provider_filing_id: str) -> dict[str, object] | None: ...
+    def fetch_filing_index(
+        self,
+        provider_filing_id: str,
+        *,
+        issuer_cik: str | None = None,
+    ) -> dict[str, object] | None: ...
 
 
 @dataclass(frozen=True)
@@ -330,7 +335,9 @@ def ingest_filing_documents(
 
     for filing_event_id, accession, cik, primary_url in candidates:
         try:
-            raw = fetcher.fetch_filing_index(accession)
+            # Pass the issuer CIK explicitly so the archive URL
+            # routes under the issuer-not-filer path (#736).
+            raw = fetcher.fetch_filing_index(accession, issuer_cik=cik)
         except Exception:
             logger.warning(
                 "ingest_filing_documents: fetch failed accession=%s",
