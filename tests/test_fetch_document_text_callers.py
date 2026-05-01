@@ -35,10 +35,12 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         #   dividend_calendar   — 8-K Item 8.01 (#434)
         #   insider_transactions — Form 4 XML (#429)
         #   eight_k_events      — 8-K full structure (#450)
+        #   institutional_holdings — 13F-HR primary_doc + infotable XML (#730)
         "app/services/business_summary.py",
         "app/services/dividend_calendar.py",
         "app/services/insider_transactions.py",
         "app/services/eight_k_events.py",
+        "app/services/institutional_holdings.py",
         # Provider implementation owns the method itself.
         "app/providers/implementations/sec_edgar.py",
         # Bounded-concurrency wrapper (#726). Calls the method via a
@@ -58,6 +60,7 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "tests/test_insider_transactions_ingest.py",
         "tests/test_eight_k_events_ingest.py",
         "tests/test_concurrent_fetch.py",
+        "tests/test_institutional_holdings_ingester.py",
         # This guard file itself references the method name in its
         # contract sentence.
         "tests/test_fetch_document_text_callers.py",
