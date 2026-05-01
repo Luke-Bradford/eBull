@@ -15,7 +15,7 @@ the repo. Each scenario pins a single behaviour:
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -130,7 +130,10 @@ class TestParsePrimaryDoc:
         assert info.cik == "0001067983"
         assert info.name == "BERKSHIRE HATHAWAY INC"
         assert info.period_of_report == date(2024, 9, 30)
-        assert info.filed_at == datetime(2024, 11, 14)
+        assert info.filed_at == datetime(2024, 11, 14, tzinfo=UTC)
+        # filed_at must be tz-aware so it lands in TIMESTAMPTZ
+        # without psycopg falling back to the server's local zone.
+        assert info.filed_at is not None and info.filed_at.tzinfo is UTC
         assert info.table_value_total_usd == Decimal("266380000000")
 
     def test_missing_signature_block_returns_none_filed_at(self) -> None:
@@ -212,7 +215,7 @@ class TestParsePrimaryDoc:
 """
         info = parse_primary_doc(xml)
         assert info.name == "BERKSHIRE HATHAWAY INC"
-        assert info.filed_at == datetime(2024, 11, 14)
+        assert info.filed_at == datetime(2024, 11, 14, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------

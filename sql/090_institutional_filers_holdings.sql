@@ -33,8 +33,16 @@
 --     (which can be reported as principal-amount equivalents on
 --     bond holdings) and exotic share counts don't overflow.
 --   * market_value_usd is reported by the filer in USD thousands
---     pre-2023 and USD whole dollars post-2022 — the parser layer
---     normalises both to whole dollars before insert.
+--     pre-2023 and USD whole dollars post-2022. The parser layer
+--     does NOT normalise — it returns the raw value as Decimal, and
+--     the service layer (PR 2) applies any unit conversion based on
+--     ``period_of_report``. This split keeps the parser pure and
+--     leaves the unit-policy decision in one place.
+--   * filed_at is nullable: ``primary_doc.xml`` may be missing the
+--     signature block on a malformed filing; the parser returns
+--     ``None`` rather than raising so the rest of the holding rows
+--     can still be ingested. The ingester (PR 2) decides whether to
+--     persist filings with NULL filed_at or to tombstone them.
 --
 -- _PLANNER_TABLES in tests/fixtures/ebull_test_db.py is updated in
 -- the same PR per the prevention-log entry "When a migration adds
@@ -66,7 +74,7 @@ CREATE TABLE IF NOT EXISTS institutional_holdings (
         CHECK (voting_authority IS NULL OR voting_authority IN ('SOLE', 'SHARED', 'NONE')),
     is_put_call        TEXT
         CHECK (is_put_call IS NULL OR is_put_call IN ('PUT', 'CALL')),
-    filed_at           TIMESTAMPTZ NOT NULL
+    filed_at           TIMESTAMPTZ
 );
 
 -- Idempotent re-ingest needs uniqueness on

@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 import xml.etree.ElementTree as ET  # noqa: S405 — SEC EDGAR is the trusted source for 13F-HR XML.
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Final, Literal
 
@@ -197,11 +197,15 @@ def _parse_date_mmddyyyy(text: str | None) -> date | None:
 
 
 def _parse_signature_date(text: str | None) -> datetime | None:
-    """Signature block carries a date but no time; coerce to midnight UTC."""
+    """Signature block carries a date but no time. Coerce to midnight
+    UTC and tag the timezone explicitly so the value lands in
+    ``filed_at TIMESTAMPTZ`` without psycopg falling back to the
+    server's local zone (which differs from UTC on non-UTC dev hosts
+    and would cause cross-tz drift in the persisted timestamp)."""
     parsed = _parse_date_mmddyyyy(text)
     if parsed is None:
         return None
-    return datetime(parsed.year, parsed.month, parsed.day)
+    return datetime(parsed.year, parsed.month, parsed.day, tzinfo=UTC)
 
 
 def _zero_pad_cik(text: str) -> str:
