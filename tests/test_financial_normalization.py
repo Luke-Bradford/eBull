@@ -892,3 +892,222 @@ class TestQ4DerivationAfterCanonicalFix:
         q4 = by_type["Q4"]
         assert q4.is_derived is True
         assert q4.dps_declared == Decimal("0.50")
+
+
+# ---------------------------------------------------------------------------
+# #731: project four us-gaap balance-sheet concepts (treasury_shares,
+# shares_authorized, shares_issued, retained_earnings) into the canonical
+# financial_periods table. Each test seeds a balance-sheet (instant) fact
+# alongside a revenue fact so the period row anchors on the fiscal end and
+# the new column populates via the existing _TAG_TO_COLUMN dispatch.
+# ---------------------------------------------------------------------------
+
+
+class TestOwnershipColumnProjection:
+    def _balance_sheet_fact(
+        self,
+        *,
+        concept: str,
+        val: Decimal,
+        period_end: str = "2024-12-31",
+        fiscal_year: int = 2024,
+        fiscal_period: str = "FY",
+        accession_number: str = "fy",
+        unit: str = "shares",
+    ) -> FactRow:
+        """Balance-sheet items are point-in-time facts: instant context
+        (period_start IS NULL), no frame, on the fiscal year-end."""
+        return _fact(
+            concept=concept,
+            val=val,
+            period_end=period_end,
+            period_start=None,
+            frame=None,
+            fiscal_period=fiscal_period,
+            fiscal_year=fiscal_year,
+            accession_number=accession_number,
+            form_type="10-K",
+            unit=unit,
+        )
+
+    def _anchor_fact(self, *, fiscal_year: int = 2024, period_end: str = "2024-12-31") -> FactRow:
+        """A revenue fact ensures the (fy, fp) group has a flow-item
+        anchor on the fiscal year-end. Without it the balance-sheet
+        fact alone could anchor the period."""
+        return _fact(
+            concept="Revenues",
+            val=Decimal("1000000"),
+            period_end=period_end,
+            period_start=f"{fiscal_year}-01-01",
+            frame=f"CY{fiscal_year}",
+            fiscal_period="FY",
+            fiscal_year=fiscal_year,
+            accession_number="fy",
+            form_type="10-K",
+        )
+
+    def test_treasury_stock_shares_alias(self) -> None:
+        facts = [
+            self._anchor_fact(),
+            self._balance_sheet_fact(
+                concept="TreasuryStockShares",
+                val=Decimal("12500000"),
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        assert len(periods) == 1
+        assert periods[0].treasury_shares == Decimal("12500000")
+
+    def test_treasury_stock_common_shares_fallback(self) -> None:
+        """``TreasuryStockCommonShares`` is the second-priority alias —
+        it must map when ``TreasuryStockShares`` is absent."""
+        facts = [
+            self._anchor_fact(),
+            self._balance_sheet_fact(
+                concept="TreasuryStockCommonShares",
+                val=Decimal("8000000"),
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        assert periods[0].treasury_shares == Decimal("8000000")
+
+    def test_treasury_priority_order(self) -> None:
+        """``TreasuryStockShares`` outranks ``TreasuryStockCommonShares``."""
+        facts = [
+            self._anchor_fact(),
+            self._balance_sheet_fact(
+                concept="TreasuryStockShares",
+                val=Decimal("12500000"),
+            ),
+            self._balance_sheet_fact(
+                concept="TreasuryStockCommonShares",
+                val=Decimal("8000000"),
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        assert periods[0].treasury_shares == Decimal("12500000")
+
+    def test_shares_authorized_alias(self) -> None:
+        facts = [
+            self._anchor_fact(),
+            self._balance_sheet_fact(
+                concept="CommonStockSharesAuthorized",
+                val=Decimal("5000000000"),
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        assert periods[0].shares_authorized == Decimal("5000000000")
+
+    def test_shares_issued_alias(self) -> None:
+        facts = [
+            self._anchor_fact(),
+            self._balance_sheet_fact(
+                concept="CommonStockSharesIssued",
+                val=Decimal("1750000000"),
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        assert periods[0].shares_issued == Decimal("1750000000")
+
+    def test_retained_earnings_alias(self) -> None:
+        facts = [
+            self._anchor_fact(),
+            self._balance_sheet_fact(
+                concept="RetainedEarningsAccumulatedDeficit",
+                val=Decimal("180000000000"),
+                unit="USD",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        assert periods[0].retained_earnings == Decimal("180000000000")
+
+    def test_all_four_columns_populate_together(self) -> None:
+        """End-to-end smoke: a single FY group with all four ownership
+        facts populates every new column on the canonical row."""
+        facts = [
+            self._anchor_fact(),
+            self._balance_sheet_fact(
+                concept="TreasuryStockShares",
+                val=Decimal("12500000"),
+            ),
+            self._balance_sheet_fact(
+                concept="CommonStockSharesAuthorized",
+                val=Decimal("5000000000"),
+            ),
+            self._balance_sheet_fact(
+                concept="CommonStockSharesIssued",
+                val=Decimal("1750000000"),
+            ),
+            self._balance_sheet_fact(
+                concept="RetainedEarningsAccumulatedDeficit",
+                val=Decimal("180000000000"),
+                unit="USD",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        assert len(periods) == 1
+        p = periods[0]
+        assert p.treasury_shares == Decimal("12500000")
+        assert p.shares_authorized == Decimal("5000000000")
+        assert p.shares_issued == Decimal("1750000000")
+        assert p.retained_earnings == Decimal("180000000000")
+
+    def test_q4_balance_sheet_inherits_fy_ownership_columns(self) -> None:
+        """Derived Q4 balance sheet copies FY values for all
+        ``_BALANCE_SHEET_COLUMNS`` entries (point-in-time = same
+        fiscal year-end). Confirms the four new columns participate
+        in the Q4 derivation copy loop."""
+        facts = [
+            _fact(
+                concept="Revenues",
+                fiscal_period="Q1",
+                val=Decimal("100"),
+                period_end="2024-03-31",
+                period_start="2024-01-01",
+                frame="CY2024Q1",
+                accession_number="q1",
+            ),
+            _fact(
+                concept="Revenues",
+                fiscal_period="Q2",
+                val=Decimal("120"),
+                period_end="2024-06-30",
+                period_start="2024-04-01",
+                frame="CY2024Q2",
+                accession_number="q2",
+            ),
+            _fact(
+                concept="Revenues",
+                fiscal_period="Q3",
+                val=Decimal("110"),
+                period_end="2024-09-30",
+                period_start="2024-07-01",
+                frame="CY2024Q3",
+                accession_number="q3",
+            ),
+            _fact(
+                concept="Revenues",
+                fiscal_period="FY",
+                fiscal_year=2024,
+                val=Decimal("500"),
+                period_end="2024-12-31",
+                period_start="2024-01-01",
+                frame="CY2024",
+                form_type="10-K",
+                accession_number="fy",
+            ),
+            self._balance_sheet_fact(
+                concept="TreasuryStockShares",
+                val=Decimal("12500000"),
+            ),
+            self._balance_sheet_fact(
+                concept="RetainedEarningsAccumulatedDeficit",
+                val=Decimal("180000000000"),
+                unit="USD",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        q4 = next(p for p in periods if p.period_type == "Q4")
+        assert q4.is_derived is True
+        assert q4.treasury_shares == Decimal("12500000")
+        assert q4.retained_earnings == Decimal("180000000000")
