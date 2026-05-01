@@ -38,6 +38,15 @@ export interface OwnershipSunburstProps {
   readonly onWedgeClick?: (target: WedgeClick) => void;
   /** Pixel size of the chart canvas (square). Default 280. */
   readonly size?: number;
+  /** When set, renders the matching middle-ring wedge with a
+   *  persistent "selected" treatment (brighter stroke + full
+   *  brightness). Wired to the L2 ``?category=`` query param so a
+   *  click-from-L1 sticks visually after navigation. */
+  readonly selectedCategory?: string | null;
+  /** When set together with ``selectedCategory``, highlights one
+   *  specific outer-ring leaf (filer / officer). Wired to the L2
+   *  ``?filer=`` query param. */
+  readonly selectedLeaf?: string | null;
 }
 
 export type WedgeClick =
@@ -48,10 +57,19 @@ export type WedgeClick =
 interface ChartDatum {
   readonly name: string;
   readonly shares: number;
+  /** Renderer-facing wedge size (Recharts proportions arcs by this
+   *  value). Differs from ``shares`` for unknown-status wedges that
+   *  use a synthetic gap-allocation size — the tooltip still shows
+   *  ``shares`` for the operator-facing number. */
+  readonly display_shares: number;
   readonly pct: number;
   readonly fill: string;
   readonly stroke: string;
   readonly opacity: number;
+  /** True when this wedge is the persistent "selected" target —
+   *  driven by URL state on L2 so a click-from-L1 sticks after
+   *  navigation. Bumps stroke-width + caps opacity to 1. */
+  readonly is_selected: boolean;
   /**
    * True for synthetic wedges that exist only to convey "we don't
    * know the number" — e.g. a Coverage gap (#740) category rendered
@@ -133,6 +151,8 @@ export function OwnershipSunburst({
   inputs,
   onWedgeClick,
   size = 280,
+  selectedCategory = null,
+  selectedLeaf = null,
 }: OwnershipSunburstProps): JSX.Element | null {
   const rings = useMemo(() => buildSunburstRings(inputs), [inputs]);
   const theme = useChartTheme();
@@ -156,11 +176,13 @@ export function OwnershipSunburst({
     innerData.push({
       name: "Known",
       shares: rings.inner.known_shares,
+      display_shares: rings.inner.known_shares,
       pct: rings.inner.known_pct,
       fill: theme.borderColor,
       stroke: theme.bg,
       opacity: 0.7,
       is_gap: false,
+      is_selected: false,
       target: { kind: "center" },
     });
   }
@@ -172,11 +194,13 @@ export function OwnershipSunburst({
     innerData.push({
       name: "Coverage gap",
       shares: rings.inner.gap_shares,
+      display_shares: rings.inner.gap_shares,
       pct: rings.inner.gap_pct,
       fill: theme.gridLine,
       stroke: theme.bg,
       opacity: 0.6,
       is_gap: true,
+      is_selected: false,
       target: { kind: "center" },
     });
   }
@@ -186,11 +210,13 @@ export function OwnershipSunburst({
     innerData.push({
       name: "Held",
       shares: 1,
+      display_shares: 1,
       pct: 0,
       fill: theme.borderColor,
       stroke: theme.bg,
       opacity: 0.4,
       is_gap: true,
+      is_selected: false,
       target: { kind: "center" },
     });
   }
@@ -201,7 +227,8 @@ export function OwnershipSunburst({
   const middleData: ChartDatum[] = [];
   for (const cat of rings.categories) {
     if (cat.status === "empty" && cat.shares <= 0) continue;
-    middleData.push(toCategoryDatum(cat, fillFor(cat.key), theme.bg));
+    const isSelected = selectedCategory === cat.key && selectedLeaf === null;
+    middleData.push(toCategoryDatum(cat, fillFor(cat.key), theme.bg, isSelected));
   }
 
   // Outer ring — leaves under every visible category, in the same
@@ -212,7 +239,8 @@ export function OwnershipSunburst({
     if (cat.leaves.length === 0) continue;
     const baseFill = fillFor(cat.key);
     for (const leaf of cat.leaves) {
-      outerData.push(toLeafDatum(leaf, cat, baseFill, theme.bg));
+      const isSelected = selectedCategory === cat.key && selectedLeaf === leaf.key;
+      outerData.push(toLeafDatum(leaf, cat, baseFill, theme.bg, isSelected));
     }
   }
 
@@ -258,7 +286,7 @@ export function OwnershipSunburst({
           <Tooltip content={<SunburstTooltip />} />
           <Pie
             data={innerData}
-            dataKey="shares"
+            dataKey="display_shares"
             innerRadius={innerInner}
             outerRadius={innerOuter}
             stroke={wedgeStroke}
@@ -276,7 +304,7 @@ export function OwnershipSunburst({
           </Pie>
           <Pie
             data={middleData}
-            dataKey="shares"
+            dataKey="display_shares"
             innerRadius={innerOuter}
             outerRadius={middleOuter}
             stroke={wedgeStroke}
@@ -294,7 +322,7 @@ export function OwnershipSunburst({
           </Pie>
           <Pie
             data={outerData}
-            dataKey="shares"
+            dataKey="display_shares"
             innerRadius={middleOuter}
             outerRadius={outerOuter}
             stroke={wedgeStroke}
@@ -328,36 +356,44 @@ function toCategoryDatum(
   cat: SunburstCategory,
   baseFill: string,
   bg: string,
+  isSelected: boolean,
 ): ChartDatum {
   if (cat.status === "unknown") {
     // Unknown categories keep their accent color but at low opacity
     // so the chart distinguishes "Institutions gap" from "ETFs gap"
     // from "Treasury gap" visually. Pre-fix every unknown wedge
     // collapsed to a single shared slate-600 → solid grey blob with
-    // no per-category identity.
+    // no per-category identity. ``display_shares`` is patched in by
+    // ``buildSunburstRings`` to be the proportional gap allocation,
+    // so the wedge has a visible arc instead of collapsing to a
+    // sub-pixel sliver next to a small-but-known category.
     return {
       name: `${cat.label} — coverage gap`,
-      // Synthetic non-zero share count so the wedge renders visibly.
-      // ``is_gap=true`` tells the tooltip to suppress the numeric
-      // share/pct rows so hovering does not surface a misleading
-      // "1 shares".
-      shares: 1,
+      // ``shares=0`` is the arithmetic truth (we don't know the
+      // count). ``is_gap=true`` tells the tooltip to suppress the
+      // numeric share/pct rows so hovering does not surface a
+      // misleading "0 shares".
+      shares: 0,
+      display_shares: Math.max(cat.display_shares, 1),
       pct: 0,
       fill: baseFill,
       stroke: bg,
-      opacity: GAP_CATEGORY_OPACITY,
+      opacity: isSelected ? 1 : GAP_CATEGORY_OPACITY,
       is_gap: true,
+      is_selected: isSelected,
       target: { kind: "category", category_key: cat.key },
     };
   }
   return {
     name: cat.label,
     shares: Math.max(cat.shares, 0),
+    display_shares: Math.max(cat.display_shares, 0),
     pct: cat.pct,
     fill: baseFill,
     stroke: bg,
-    opacity: cat.shares <= 0 ? 0 : 0.85,
+    opacity: cat.shares <= 0 ? 0 : isSelected ? 1 : 0.85,
     is_gap: false,
+    is_selected: isSelected,
     target: { kind: "category", category_key: cat.key },
   };
 }
@@ -367,37 +403,43 @@ function toLeafDatum(
   cat: SunburstCategory,
   baseFill: string,
   bg: string,
+  isSelected: boolean,
 ): ChartDatum {
   const status = cat.status;
   if (status === "unknown") {
     // Outer-ring leaf for an unknown category inherits the parent
     // accent at a lower opacity than the middle wedge so the rings
     // remain visually distinguishable while preserving category
-    // identity. Pre-fix the leaf used the same shared slate-600 as
-    // the middle wedge → both rings merged into one solid grey arc.
+    // identity. ``display_shares`` propagated from
+    // ``buildSunburstRings`` so the leaf occupies the same arc
+    // length as its parent middle wedge.
     return {
       name: leaf.label,
-      shares: 1,
+      shares: 0,
+      display_shares: Math.max(leaf.display_shares, 1),
       pct: 0,
       fill: baseFill,
       stroke: bg,
-      opacity: GAP_LEAF_OPACITY,
+      opacity: isSelected ? 1 : GAP_LEAF_OPACITY,
       is_gap: true,
+      is_selected: isSelected,
       target: { kind: "leaf", category_key: cat.key, leaf_key: leaf.key },
     };
   }
   // "Other" rolls up sub-threshold holders. Render with a desaturated
   // shade of the parent category's color so the operator sees it as
   // "tail of the same slice" rather than a separate category.
-  const opacity = leaf.is_other ? 0.55 : 0.9;
+  const baseOpacity = leaf.is_other ? 0.55 : 0.9;
   return {
     name: leaf.label,
     shares: Math.max(leaf.shares, 0),
+    display_shares: Math.max(leaf.display_shares, 0),
     pct: leaf.pct,
     fill: baseFill,
     stroke: bg,
-    opacity: leaf.shares <= 0 ? 0 : opacity,
+    opacity: leaf.shares <= 0 ? 0 : isSelected ? 1 : baseOpacity,
     is_gap: false,
+    is_selected: isSelected,
     target: { kind: "leaf", category_key: cat.key, leaf_key: leaf.key },
   };
 }

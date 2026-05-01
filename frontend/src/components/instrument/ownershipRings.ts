@@ -45,7 +45,15 @@ export type SunburstUnknownReason =
 export interface SunburstCategory {
   readonly key: string; // 'institutions' | 'etfs' | 'insiders' | 'treasury' | 'unallocated'
   readonly label: string;
+  /** Arithmetic share count — 0 when status is ``unknown``. The
+   *  renderer sizes wedges by ``display_shares`` so unknown
+   *  categories get a visible arc proportional to the float gap. */
   readonly shares: number;
+  /** Renderer-facing wedge size. Equals ``shares`` for known
+   *  categories. For unknown categories, set to the proportional
+   *  share of the aggregate float gap so the wedge has a visible
+   *  arc instead of collapsing to a 0-degree sliver. */
+  readonly display_shares: number;
   readonly pct: number; // share / float
   readonly status: SunburstCategoryStatus;
   /** Set only when ``status === 'unknown'``. */
@@ -58,6 +66,8 @@ export interface SunburstLeaf {
   readonly key: string; // stable id for click-drill (filer cik, officer name, "other-etfs")
   readonly label: string;
   readonly shares: number;
+  /** Renderer-facing wedge size — see ``SunburstCategory.display_shares``. */
+  readonly display_shares: number;
   readonly pct: number; // share / float
   /** True for the aggregated tail wedge. */
   readonly is_other: boolean;
@@ -221,7 +231,12 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
   const treasury: SunburstCategory = {
     key: "treasury",
     label: CATEGORY_LABEL.treasury!,
+    // Arithmetic shares = the actual treasury count (0 when unknown).
+    // The renderer-facing wedge size is patched further down by
+    // ``distributeGapShares`` so unknown wedges have visible arcs
+    // proportional to the float gap.
     shares: treasury_shares,
+    display_shares: treasury_shares,
     pct: treasury_shares / float,
     status: treasury_status,
     ...(treasury_status === "unknown"
@@ -234,6 +249,7 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
               key: "treasury-unknown",
               label: "Treasury — DEI projection pending",
               shares: 0,
+              display_shares: 0,
               pct: 0,
               is_other: false,
             },
@@ -244,6 +260,7 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
                 key: "treasury",
                 label: "Treasury",
                 shares: treasury_shares,
+                display_shares: treasury_shares,
                 pct: treasury_shares / float,
                 is_other: false,
               },
@@ -277,6 +294,7 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
     key: "unallocated",
     label: CATEGORY_LABEL.unallocated!,
     shares: has_unknown ? 0 : residual_shares,
+    display_shares: has_unknown ? 0 : residual_shares,
     pct: has_unknown ? 0 : residual_shares / float,
     status: has_unknown ? "empty" : residual_shares > 0 ? "ok" : "empty",
     leaves: has_unknown
@@ -287,6 +305,7 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
               key: "unallocated",
               label: "Unallocated",
               shares: residual_shares,
+              display_shares: residual_shares,
               pct: residual_shares / float,
               is_other: false,
             },
@@ -294,7 +313,13 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
         : [],
   };
 
-  const categories = [institutions, etfs, insiders, treasury, unallocated];
+  const draft_categories: SunburstCategory[] = [
+    institutions,
+    etfs,
+    insiders,
+    treasury,
+    unallocated,
+  ];
 
   // Inner-ring split: known (sum of OK categories + the
   // ok-status Unallocated residual) vs gap (everything else =
@@ -303,6 +328,31 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
   // arc even when 95% of the float was in coverage gaps.
   const inner_known = known_shares + (unallocated.status === "ok" ? unallocated.shares : 0);
   const inner_gap = Math.max(0, float - inner_known);
+
+  // Distribute the float gap across unknown categories so each
+  // unknown wedge has a visible arc proportional to its (equal)
+  // share of the gap. Pre-fix the renderer emitted ``shares=1`` for
+  // every unknown category which made the visible wedge invisible
+  // when paired with a small-but-known category like Insiders
+  // (Recharts allocated 0.01° of the ring to the gap wedges and
+  // ~99.99° to Insiders even though Insiders held 0.06% of the
+  // float). Equal split because we have no per-category signal —
+  // operator sees "unknown gap of size X" rather than a weighted
+  // estimate that we cannot defend.
+  const unknown_count = draft_categories.filter((c) => c.status === "unknown").length;
+  const gap_per_unknown = unknown_count > 0 ? inner_gap / unknown_count : 0;
+
+  const categories: SunburstCategory[] = draft_categories.map((cat) => {
+    if (cat.status !== "unknown") return cat;
+    return {
+      ...cat,
+      display_shares: gap_per_unknown,
+      leaves: cat.leaves.map((leaf) => ({
+        ...leaf,
+        display_shares: gap_per_unknown,
+      })),
+    };
+  });
 
   return {
     free_float: float,
@@ -327,6 +377,9 @@ function buildCategory(
       key: spec.key,
       label: spec.label,
       shares: 0,
+      // ``display_shares`` patched in by the caller via
+      // ``distributeGapShares``; placeholder here.
+      display_shares: 0,
       pct: 0,
       status: "unknown",
       ...(spec.unknown_reason !== undefined ? { unknown_reason: spec.unknown_reason } : {}),
@@ -335,6 +388,7 @@ function buildCategory(
           key: `${spec.key}-unknown`,
           label: unknownLeafLabel(spec.label, spec.unknown_reason),
           shares: 0,
+          display_shares: 0,
           pct: 0,
           is_other: false,
         },
@@ -347,6 +401,7 @@ function buildCategory(
       key: spec.key,
       label: spec.label,
       shares: 0,
+      display_shares: 0,
       pct: 0,
       status: "empty",
       leaves: [],
@@ -359,6 +414,7 @@ function buildCategory(
       key: spec.key,
       label: spec.label,
       shares: 0,
+      display_shares: 0,
       pct: 0,
       status: "empty",
       leaves: [],
@@ -379,6 +435,7 @@ function buildCategory(
         key: h.key,
         label: h.label,
         shares: h.shares,
+        display_shares: h.shares,
         pct: h.shares / float,
         is_other: false,
       });
@@ -395,6 +452,7 @@ function buildCategory(
       key: `${spec.key}-other`,
       label: `Other ${spec.label.toLowerCase()}`,
       shares: aggregate_shares,
+      display_shares: aggregate_shares,
       pct: aggregate_shares / float,
       is_other: true,
       tail_meta: {
@@ -411,6 +469,7 @@ function buildCategory(
     key: spec.key,
     label: spec.label,
     shares: total_shares,
+    display_shares: total_shares,
     pct: total_shares / float,
     status: "ok",
     leaves,

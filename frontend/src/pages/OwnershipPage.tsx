@@ -343,7 +343,13 @@ function OwnershipBody({
     <div className="grid grid-cols-12 gap-6">
       <div className="col-span-12 lg:col-span-5">
         <div className="flex justify-center">
-          <OwnershipSunburst inputs={inputs} onWedgeClick={onWedgeClick} size={420} />
+          <OwnershipSunburst
+            inputs={inputs}
+            onWedgeClick={onWedgeClick}
+            size={420}
+            selectedCategory={categoryFilter}
+            selectedLeaf={filerFilter}
+          />
         </div>
         <p className="mt-3 text-center text-xs">
           <span className="font-medium text-slate-700 dark:text-slate-200">
