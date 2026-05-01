@@ -109,6 +109,7 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "institutional_holdings",
     "institutional_filers",
     "institutional_filer_seeds",
+    "etf_filer_cik_seeds",
     "filing_events",
     "decision_audit",  # #315 Phase 3 alerts
     "trade_recommendations",  # #315 Phase 3 alerts (FK parent of decision_audit)
