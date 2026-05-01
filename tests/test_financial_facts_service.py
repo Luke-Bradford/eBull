@@ -69,12 +69,12 @@ class TestFinishIngestionRun:
 
 def _mock_conn_with_rowcount(rowcount: int) -> tuple[MagicMock, MagicMock]:
     """Return ``(conn, cur)`` where ``conn.cursor()`` yields a cursor
-    whose ``executemany`` sets ``rowcount`` to the provided value.
+    whose ``execute`` sets ``rowcount`` to the provided value.
 
-    The ADR 0004 shape calls ``conn.cursor()`` as a context manager,
-    then ``cur.executemany(sql, chunk)``, then reads ``cur.rowcount``.
-    The test double models that path so unit tests do not need a real
-    Postgres.
+    Post-#763 shape: ``conn.cursor()`` as a context manager, then
+    ``cur.execute(stmt, flat_params)`` for each chunk (multi-row
+    INSERT VALUES rather than executemany), then reads
+    ``cur.rowcount``.
     """
     conn = MagicMock()
     cur = MagicMock()
@@ -90,7 +90,8 @@ class TestUpsertFacts:
         upserted, skipped = upsert_facts_for_instrument(conn, instrument_id=1, facts=facts, ingestion_run_id=42)
         assert upserted == 1
         assert skipped == 0
-        cur.executemany.assert_called_once()
+        # Multi-row INSERT shape (#763): one ``execute`` per chunk.
+        cur.execute.assert_called_once()
 
     def test_handles_empty_facts(self) -> None:
         conn = MagicMock()
@@ -110,24 +111,26 @@ class TestUpsertFacts:
         assert upserted == 0
         assert skipped == 1
 
-    def test_batches_large_payload_via_executemany(self) -> None:
+    def test_batches_large_payload_into_chunks(self) -> None:
         # 2500 facts must split into three chunks at page_size=1000.
         # ``set_rowcount`` side-effect refreshes ``cur.rowcount`` to
-        # the chunk length on every call, so the cumulative upsert
-        # count equals the total facts.
+        # the row count of each chunk's flat-params list (15 columns
+        # × N rows = len(params) // 15) on every call, so the
+        # cumulative upsert count equals the total facts.
         conn = MagicMock()
         cur = MagicMock()
 
-        def set_rowcount(_sql: object, params: list[object]) -> None:
-            cur.rowcount = len(params)
+        def set_rowcount(_stmt: object, params: list[object]) -> None:
+            cur.rowcount = len(params) // 15
 
-        cur.executemany.side_effect = set_rowcount
+        cur.execute.side_effect = set_rowcount
         conn.cursor.return_value.__enter__.return_value = cur
         facts = [_make_fact(accession_number=f"acc-{i:05d}") for i in range(2500)]
         upserted, skipped = upsert_facts_for_instrument(conn, instrument_id=1, facts=facts, ingestion_run_id=42)
-        assert cur.executemany.call_count == 3
-        chunk_sizes = [len(call.args[1]) for call in cur.executemany.call_args_list]
-        assert chunk_sizes == [1000, 1000, 500]
+        # Three multi-row INSERT statements, one per chunk.
+        assert cur.execute.call_count == 3
+        chunk_row_counts = [len(call.args[1]) // 15 for call in cur.execute.call_args_list]
+        assert chunk_row_counts == [1000, 1000, 500]
         assert upserted == 2500
         assert skipped == 0
 

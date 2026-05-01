@@ -132,6 +132,72 @@ def test_refresh_runs_fetches_in_parallel(
     assert summary.facts_upserted == 16  # 8 symbols × 2 facts each
 
 
+def test_upsert_dedupes_duplicate_conflict_keys_in_same_chunk(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    # Multi-row INSERT VALUES (#763) raises ``CardinalityViolation``
+    # when two rows in the same statement hit the same ON CONFLICT
+    # key. ``upsert_facts_for_instrument`` must dedupe by conflict
+    # key before the INSERT. Codex review medium on PR #764.
+    from datetime import date as _date
+    from decimal import Decimal
+
+    from app.providers.implementations.sec_fundamentals import XbrlFact
+    from app.services.fundamentals import upsert_facts_for_instrument
+
+    _seed_instrument(ebull_test_conn, 982_001, "RFP_DUP", "0000982001")
+    # FK to data_ingestion_runs requires a real run id.
+    cur = ebull_test_conn.execute(
+        """
+        INSERT INTO data_ingestion_runs (source, endpoint, instrument_count)
+        VALUES ('test', '/api/test', 1)
+        RETURNING ingestion_run_id
+        """,
+    )
+    run_row = cur.fetchone()
+    assert run_row is not None
+    run_id = int(run_row[0])
+
+    # Two facts with IDENTICAL conflict keys but different ``val``
+    # values — pre-dedupe-fix this would raise CardinalityViolation.
+    common_args = {
+        "concept": "Revenues",
+        "unit": "USD",
+        "period_start": None,
+        "period_end": _date(2024, 12, 31),
+        "frame": None,
+        "accession_number": "acc-dup-1",
+        "form_type": "10-K",
+        "filed_date": _date(2025, 2, 1),
+        "fiscal_year": 2024,
+        "fiscal_period": "FY",
+        "decimals": None,
+        "taxonomy": "us-gaap",
+    }
+    facts = [
+        XbrlFact(val=Decimal(1000), **common_args),
+        XbrlFact(val=Decimal(2000), **common_args),  # duplicate conflict key
+    ]
+
+    upserted, skipped = upsert_facts_for_instrument(
+        ebull_test_conn,
+        instrument_id=982_001,
+        facts=facts,
+        ingestion_run_id=run_id,
+    )
+
+    # Only the deduplicated row lands; last occurrence wins (matches
+    # the sequential ON CONFLICT DO UPDATE chain semantics).
+    assert upserted == 1
+    assert skipped == 0
+    cur = ebull_test_conn.execute(
+        "SELECT val FROM financial_facts_raw WHERE instrument_id = 982001 AND concept = 'Revenues'"
+    )
+    rows = cur.fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == Decimal(2000)
+
+
 def test_refresh_isolates_per_symbol_fetch_exceptions(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
