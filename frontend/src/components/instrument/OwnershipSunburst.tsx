@@ -116,7 +116,11 @@ const SUNBURST_STYLES = [
   "  outline: none;",
   "}",
   ".ownership-sunburst .recharts-pie-sector path:focus-visible {",
-  "  outline: 2px solid currentColor;",
+  // slate-400 reads visibly on both light (white) and dark
+  // (slate-950) backgrounds. ``currentColor`` inherits SVG
+  // ``color`` which is unset on these path elements and defaults
+  // to black — invisible on dark mode.
+  "  outline: 2px solid #94a3b8;",
   "  outline-offset: -1px;",
   "}",
   ".ownership-sunburst .recharts-pie-sector:hover path {",
