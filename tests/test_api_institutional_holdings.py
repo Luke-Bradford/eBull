@@ -283,6 +283,61 @@ class TestInstitutionalHoldingsEndpoint:
         put_calls = sorted([f["is_put_call"] for f in data["filers"]], key=lambda v: v or "")
         assert put_calls == [None, "PUT"]
 
+    def test_total_filers_matches_drilldown_with_option_only_filer(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        client: TestClient,
+    ) -> None:
+        """Codex review pin: a filer holding ONLY a PUT/CALL on this
+        instrument shows up in ``filers`` (drilldown). ``total_filers``
+        must match the visible drilldown count, otherwise card
+        arithmetic that asserts ``total_filers == len(filers)``
+        silently breaks. Slice counts stay equity-only."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=730_405, symbol="AAPL_T7")
+        seed_etf_filer(conn, cik="0000102909", label="VANGUARD")
+        conn.commit()
+
+        # Vanguard — equity holding, ETF.
+        van_id = _upsert_filer(conn, _make_filer_info(cik="0000102909", name="VANGUARD"))
+        _upsert_holding(
+            conn,
+            filer_id=van_id,
+            instrument_id=730_405,
+            accession_number="0000102909-25-Q4",
+            period_of_report=date(2024, 12, 31),
+            filed_at=datetime(2025, 2, 14, tzinfo=UTC),
+            holding=_make_holding(shares="3000000"),
+        )
+        # Berkshire — PUT-only on this instrument.
+        brk_id = _upsert_filer(conn, _make_filer_info(cik="0001067983", name="BERKSHIRE"))
+        _upsert_holding(
+            conn,
+            filer_id=brk_id,
+            instrument_id=730_405,
+            accession_number="0001067983-25-Q4",
+            period_of_report=date(2024, 12, 31),
+            filed_at=datetime(2025, 2, 14, tzinfo=UTC),
+            holding=_make_holding(shares="500000", put_call="PUT"),
+        )
+        conn.commit()
+
+        resp = client.get("/instruments/AAPL_T7/institutional-holdings")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # Drilldown shows BOTH filers (Vanguard equity + Berkshire PUT).
+        assert len(data["filers"]) == 2
+        # total_filers matches the drilldown count.
+        assert data["totals"]["total_filers"] == 2
+        # Slice counts stay equity-only — Berkshire's PUT-only
+        # contribution is excluded from the ETF/Institutions split.
+        assert data["totals"]["total_etfs_filers"] == 1  # Vanguard equity
+        assert data["totals"]["total_institutions_filers"] == 0  # Berkshire's only row is a PUT
+        # Slice totals reflect the equity-only sums.
+        assert Decimal(data["totals"]["etfs_shares"]) == Decimal("3000000")
+        assert Decimal(data["totals"]["institutions_shares"]) == Decimal(0)
+
     def test_limit_param_caps_filer_list(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

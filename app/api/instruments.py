@@ -2622,32 +2622,57 @@ def get_instrument_institutional_holdings(
             filers=[],
         )
 
-    # Per-slice totals on the latest-quarter equity rows only. Option
-    # exposure (``is_put_call IS NOT NULL``) is excluded from the
-    # ownership-percentage rollup but ships in the filer list below.
+    # Per-slice totals + filer counts. Two distinct cohorts in one
+    # query so the response is internally consistent:
+    #
+    #   * ``etfs_shares`` / ``institutions_shares`` and the slice
+    #     filer counts (``total_etfs_filers`` /
+    #     ``total_institutions_filers``) sum over the EQUITY-only
+    #     subset (``is_put_call IS NULL``). Option exposure is
+    #     excluded from the ownership-percentage rollup; counting
+    #     a protective put as long ownership double-counts the
+    #     underlying.
+    #
+    #   * ``total_filers`` counts EVERY distinct filer reporting
+    #     this instrument in the latest quarter — equity + PUT +
+    #     CALL — so it matches the drilldown ``filers`` list shown
+    #     to the operator. Pre-fix this was equity-only too, which
+    #     produced ``total_filers < len(filers)`` for any
+    #     instrument with option-only filers. Codex caught this on
+    #     the PR review.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
             SELECT
-                COALESCE(SUM(h.shares) FILTER (WHERE f.filer_type = 'ETF'), 0) AS etfs_shares,
                 COALESCE(SUM(h.shares) FILTER (
-                    WHERE f.filer_type IN ('INV','INS','BD','OTHER') OR f.filer_type IS NULL
+                    WHERE f.filer_type = 'ETF' AND h.is_put_call IS NULL
+                ), 0) AS etfs_shares,
+                COALESCE(SUM(h.shares) FILTER (
+                    WHERE (f.filer_type IN ('INV','INS','BD','OTHER') OR f.filer_type IS NULL)
+                    AND h.is_put_call IS NULL
                 ), 0) AS institutions_shares,
                 COUNT(DISTINCT f.filer_id) AS total_filers,
-                COUNT(DISTINCT f.filer_id) FILTER (WHERE f.filer_type = 'ETF') AS total_etfs_filers,
                 COUNT(DISTINCT f.filer_id) FILTER (
-                    WHERE f.filer_type IN ('INV','INS','BD','OTHER') OR f.filer_type IS NULL
+                    WHERE f.filer_type = 'ETF' AND h.is_put_call IS NULL
+                ) AS total_etfs_filers,
+                COUNT(DISTINCT f.filer_id) FILTER (
+                    WHERE (f.filer_type IN ('INV','INS','BD','OTHER') OR f.filer_type IS NULL)
+                    AND h.is_put_call IS NULL
                 ) AS total_institutions_filers
             FROM institutional_holdings h
             JOIN institutional_filers f USING (filer_id)
             WHERE h.instrument_id = %(iid)s
               AND h.period_of_report = %(period)s
-              AND h.is_put_call IS NULL
             """,
             {"iid": instrument_id, "period": latest_period},
         )
         totals_row = cur.fetchone()
-    assert totals_row is not None
+    if totals_row is None:
+        # Defensive: the aggregate returns one row even when no
+        # input rows exist (zeros + counts), so ``None`` here is
+        # an unreachable invariant violation. Use HTTPException
+        # rather than ``assert`` so the guard survives ``python -O``.
+        raise HTTPException(status_code=500, detail="aggregate produced no row")
 
     totals = InstitutionalHoldingsTotals(
         period_of_report=latest_period,  # type: ignore[arg-type]
