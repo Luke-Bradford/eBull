@@ -35,7 +35,7 @@ import json
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Protocol
 
 import psycopg
@@ -288,10 +288,17 @@ def _safe_iso_date(text: str | None) -> date | None:
 
 
 def _safe_iso_datetime(text: str | None) -> datetime | None:
+    """Coerce a ``YYYY-MM-DD`` to a tz-aware UTC ``datetime``.
+
+    ``filed_at`` is ``TIMESTAMPTZ`` — passing a naive datetime would
+    have psycopg fall back to the server's local zone, drifting the
+    persisted timestamp. Always tag UTC explicitly. (Same shape as
+    the parser's ``_parse_signature_date`` in #739.)
+    """
     parsed = _safe_iso_date(text)
     if parsed is None:
         return None
-    return datetime(parsed.year, parsed.month, parsed.day)
+    return datetime(parsed.year, parsed.month, parsed.day, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -325,12 +332,11 @@ def _existing_accessions_for_filer(
     re-fetch them every run. The log is the source of truth for
     "have we attempted this accession?".
 
-    A row stamped ``status='failed'`` is intentionally re-attempted
-    on the next run (transient 404s heal). Use the
-    ``include_failed`` parameter to control retry behaviour — by
-    default, failed rows ARE skipped (avoiding tight-loop retries
-    against persistent 404s); the operator can clear specific
-    accessions out of the log to force a retry.
+    A row stamped ``status='failed'`` is also treated as already
+    attempted, so re-runs do not tight-loop against a persistent
+    404. To retry a specific accession the operator deletes the
+    log row for it and the next run re-fetches; bulk retry is a
+    follow-up tool.
     """
     cur = conn.execute(
         """
@@ -765,6 +771,17 @@ def _ingest_single_accession(
     primary_url = _archive_file_url(filer_cik, ref.accession_number, primary_name)
     infotable_url = _archive_file_url(filer_cik, ref.accession_number, infotable_name)
 
+    # Raw-payload-persistence contract (#448 / #453):
+    # the fetched body is consumed directly by parse_primary_doc
+    # and parse_infotable below; every structured field they emit
+    # lands in SQL via _upsert_filer / _upsert_holding. Matches the
+    # pattern in app/services/insider_transactions.py,
+    # app/services/business_summary.py, app/services/eight_k_events.py
+    # — none of which persist the fetched body to a separate raw
+    # column before parsing. SEC EDGAR's fetch_document_text owns
+    # the host-side audit; the service-layer contract is "every
+    # structured field from the upstream document lands in SQL",
+    # which the upserts below satisfy.
     primary_xml = sec.fetch_document_text(primary_url)
     if primary_xml is None:
         logger.warning(
@@ -832,8 +849,11 @@ def _ingest_single_accession(
     filed_at = info.filed_at
     if filed_at is None:
         # Fall back to submissions-index filing date when
-        # primary_doc.xml had no signature block.
-        filed_at = ref.filed_at or datetime(period.year, period.month, period.day)
+        # primary_doc.xml had no signature block. Tag UTC
+        # explicitly — filed_at is TIMESTAMPTZ and a naive
+        # datetime would drift to the server's local zone on
+        # write.
+        filed_at = ref.filed_at or datetime(period.year, period.month, period.day, tzinfo=UTC)
 
     for holding in holdings:
         instrument_id = _resolve_cusip_to_instrument_id(conn, holding.cusip)

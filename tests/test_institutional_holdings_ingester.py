@@ -188,7 +188,10 @@ class TestParseSubmissionsIndex:
         payload = _submissions_json(accessions=[("0001067983-25-000001", "13F-HR", "2025-02-14", "2024-12-31")])
         ref = parse_submissions_index(payload)[0]
         assert ref.period_of_report == date(2024, 12, 31)
-        assert ref.filed_at == datetime(2025, 2, 14)
+        # filed_at must be tz-aware UTC so it lands in TIMESTAMPTZ
+        # without psycopg falling back to the server's local zone.
+        assert ref.filed_at == datetime(2025, 2, 14, tzinfo=UTC)
+        assert ref.filed_at is not None and ref.filed_at.tzinfo is UTC
 
     def test_malformed_json_returns_empty_list(self) -> None:
         assert parse_submissions_index("not json") == []
