@@ -89,6 +89,42 @@ const CATEGORY_FILL_INDEX: Record<string, number> = {
 const GAP_CATEGORY_OPACITY = 0.7;
 const GAP_LEAF_OPACITY = 0.5;
 
+/**
+ * Module-level CSS string for the sunburst's wedge interactions.
+ * Defined out-of-line because TypeScript's JSX strict-mode child
+ * typing rejects template-literal children of bare ``<style>`` (it
+ * sees ``string`` as a value-not-callable when it expects
+ * ``ReactNode``). Plain string assignment side-steps the parse trip.
+ *
+ * Click affordance: suppress only the mouse-click focus rect so the
+ * browser's default white rectangle stops drawing on click. Keyboard
+ * focus (``:focus-visible``) keeps a custom outline so keyboard
+ * users retain visual feedback.
+ *
+ * Hover affordance: stroke-width bump + ``filter: brightness(...)``.
+ * Crucially does NOT set CSS ``opacity`` — the wedges encode
+ * known-vs-coverage-gap via SVG ``fillOpacity``; a CSS opacity hover
+ * rule would override that and snap a 0.5-opacity gap wedge to
+ * fully opaque, erasing the "no signal" semantic.
+ */
+const SUNBURST_STYLES = [
+  ".ownership-sunburst .recharts-pie-sector path {",
+  "  transition: stroke-width 120ms ease, filter 120ms ease;",
+  "  cursor: pointer;",
+  "}",
+  ".ownership-sunburst .recharts-pie-sector path:focus {",
+  "  outline: none;",
+  "}",
+  ".ownership-sunburst .recharts-pie-sector path:focus-visible {",
+  "  outline: 2px solid currentColor;",
+  "  outline-offset: -1px;",
+  "}",
+  ".ownership-sunburst .recharts-pie-sector:hover path {",
+  "  stroke-width: 2;",
+  "  filter: brightness(1.2);",
+  "}",
+].join("\n");
+
 export function OwnershipSunburst({
   inputs,
   onWedgeClick,
@@ -203,29 +239,16 @@ export function OwnershipSunburst({
     >
       {/*
         Suppress the browser's default focus rect on Recharts'
-        inner <path> elements — clicking a wedge moved focus to the
-        path which then drew a white rectangular outline that read
-        as "selected" but ignored the wedge geometry. Use a wedge-
-        shaped feedback affordance instead: hover bumps stroke
-        width + opacity, click triggers the existing onWedgeClick
-        navigation. The ``ownership-sunburst`` class scopes the
-        outline removal so it doesn't bleed to other charts.
+        inner SVG path elements -- clicking a wedge moved focus to
+        the path which then drew a white rectangular outline that
+        read as "selected" but ignored the wedge geometry. Use a
+        wedge-shaped feedback affordance instead: hover bumps
+        stroke + brightness; click triggers the existing
+        onWedgeClick navigation. The ownership-sunburst class
+        scopes the outline removal so it does not bleed to other
+        charts.
       */}
-      <style>{`
-        .ownership-sunburst .recharts-pie-sector path {
-          outline: none;
-          transition: opacity 120ms ease, stroke-width 120ms ease;
-          cursor: pointer;
-        }
-        .ownership-sunburst .recharts-pie-sector path:focus,
-        .ownership-sunburst .recharts-pie-sector path:focus-visible {
-          outline: none;
-        }
-        .ownership-sunburst .recharts-pie-sector:hover path {
-          opacity: 1;
-          stroke-width: 2;
-        }
-      `}</style>
+      <style>{SUNBURST_STYLES}</style>
       <ResponsiveContainer width="100%" height="100%">
         <PieChart>
           <Tooltip content={<SunburstTooltip />} />
