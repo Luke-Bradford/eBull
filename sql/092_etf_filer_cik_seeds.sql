@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS etf_filer_cik_seeds (
     notes       TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_etf_seeds_active
-    ON etf_filer_cik_seeds (cik)
-    WHERE active = TRUE;
+-- No additional index — ``classify_filer_type`` is a point-lookup
+-- on ``cik`` and the PK index already covers it. Adding a partial
+-- index on ``(cik) WHERE active = TRUE`` is dead weight (the
+-- planner picks the PK index for the eq-predicate path and ignores
+-- a smaller-but-redundant secondary).
