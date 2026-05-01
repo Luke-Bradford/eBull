@@ -148,13 +148,25 @@ def concurrent_iter[T, R](
             )
             return item, None
 
-    with concurrent.futures.ThreadPoolExecutor(
+    # Manual lifecycle (not ``with`` block) so abandoned generators
+    # don't block teardown waiting for in-flight SEC requests. PR
+    # review WARNING on #762: a ``with ThreadPoolExecutor`` wrapping
+    # a yielding loop calls ``shutdown(wait=True)`` on
+    # ``GeneratorExit``, which can hang the process indefinitely on
+    # an unresponsive SEC endpoint when the caller breaks early.
+    # ``cancel_futures=True`` cancels pending futures; in-flight
+    # ones still drain (``shutdown`` has no per-future timeout) but
+    # the pending queue is cleared so abandon completes promptly.
+    pool = concurrent.futures.ThreadPoolExecutor(
         max_workers=workers,
         thread_name_prefix="sec-fetch",
-    ) as pool:
+    )
+    try:
         futures = [pool.submit(_safe, item) for item in items_list]
         for fut in concurrent.futures.as_completed(futures):
             yield fut.result()
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 # ---------------------------------------------------------------------------
