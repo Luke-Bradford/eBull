@@ -1,30 +1,34 @@
 /**
  * Ownership reporting card (#729).
  *
- * Renders Institutions / ETFs / Insiders / Unallocated slices with
- * percentages computed against the free-float denominator
- * (shares_outstanding − treasury_shares). Treasury appears as a
- * memo line because it IS the gap between outstanding and float.
+ * Renders a three-ring sunburst:
+ *   ring 1 — Held (free-float total in the center hole)
+ *   ring 2 — Institutions / ETFs / Insiders / Treasury / Unallocated
+ *   ring 3 — per-filer / per-officer wedges + "Other [Category]" tail
  *
  * Coverage gating:
  *   * No shares_outstanding on file → whole-card empty state.
- *   * Per-slice missing → "—" for that row, NOT 0%.
+ *   * Per-category data missing → wedge renders as a desaturated
+ *     "coverage gap" arc rather than vanishing or rendering 0%.
  *
  * Effective slice coverage depends on:
- *   * #731 — shares_outstanding + treasury_shares from financial_periods
- *   * #730 — institutional_holdings via the new reader endpoint
- *   * #740 — CUSIP backfill so the ingester actually resolves
- *     holdings to instrument_ids (currently most are dropped)
+ *   * #731 — shares_outstanding + treasury_shares from financial_periods (merged)
+ *   * #730 — institutional_holdings via the new reader endpoint (merged)
+ *   * #740 — CUSIP backfill so the ingester resolves holdings to instrument_ids (open)
  *
- * Until #740 lands, the Institutions + ETFs slices return zero or
- * "—" for most US instruments. Operator-side ownership of the
- * coverage-gap copy is via the per-slice ``source_label`` link.
+ * Click on any wedge → drill to the L2 ownership page (route lands
+ * in the next PR; for now the click handler is a no-op surfaced via
+ * ``onWedgeClick`` so the integration test can pin the wiring).
  */
 
 import { useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { fetchInstitutionalHoldings } from "@/api/institutionalHoldings";
-import type { InstitutionalHoldingsResponse } from "@/api/institutionalHoldings";
+import type {
+  InstitutionalFilerHolding,
+  InstitutionalHoldingsResponse,
+} from "@/api/institutionalHoldings";
 import {
   fetchInsiderTransactions,
   fetchInstrumentFinancials,
@@ -32,14 +36,20 @@ import {
 import type { InsiderTransactionsList } from "@/api/instruments";
 import type { InstrumentFinancials } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { OwnershipSunburst } from "@/components/instrument/OwnershipSunburst";
+import type { WedgeClick } from "@/components/instrument/OwnershipSunburst";
 import { Pane } from "@/components/instrument/Pane";
 import {
-  aggregateInsiderHoldings,
-  computeOwnership,
   formatPct,
   formatShares,
   parseShareCount,
 } from "@/components/instrument/ownershipMetrics";
+import {
+  type SunburstCategoryStatus,
+  type SunburstHolder,
+  type SunburstInputs,
+  buildSunburstRings,
+} from "@/components/instrument/ownershipRings";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 
@@ -50,11 +60,14 @@ export interface OwnershipPanelProps {
 interface OwnershipData {
   readonly outstanding: number | null;
   readonly treasury: number | null;
-  readonly institutions: number | null;
-  readonly etfs: number | null;
-  readonly insiders: number | null;
+  readonly free_float: number | null;
+  readonly institutional_holders: readonly SunburstHolder[];
+  readonly etf_holders: readonly SunburstHolder[];
+  readonly insider_holders: readonly SunburstHolder[];
+  readonly institutions_status: SunburstCategoryStatus;
+  readonly etfs_status: SunburstCategoryStatus;
+  readonly insiders_status: SunburstCategoryStatus;
   readonly as_of_period: string | null;
-  readonly institutional_period: string | null;
 }
 
 function pickLatestBalance(
@@ -71,10 +84,10 @@ function pickLatestBalance(
 
 export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
   // Three parallel fetches: balance sheet (outstanding + treasury),
-  // institutional holdings (institutions + ETFs), insider
-  // transactions (insiders aggregate). Each fetch fails
+  // institutional holdings (institutions + ETFs + per-filer rows),
+  // insider transactions (insiders aggregate). Each fetch fails
   // independently — a missing input degrades the corresponding
-  // slice rather than the whole card.
+  // category rather than the whole card.
   const balanceState = useAsync<InstrumentFinancials>(
     useCallback(
       () =>
@@ -88,13 +101,32 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
   );
 
   const institutionalState = useAsync<InstitutionalHoldingsResponse>(
-    useCallback(() => fetchInstitutionalHoldings(symbol, 50), [symbol]),
+    useCallback(() => fetchInstitutionalHoldings(symbol, 500), [symbol]),
     [symbol],
   );
 
   const insidersState = useAsync<InsiderTransactionsList>(
     useCallback(() => fetchInsiderTransactions(symbol, 200), [symbol]),
     [symbol],
+  );
+
+  const navigate = useNavigate();
+  const handleWedgeClick = useCallback(
+    (target: WedgeClick) => {
+      // L2 drill page lands in the next PR; stub the navigation now
+      // so the integration is wired and the route handler can be
+      // added without touching this component.
+      const params = new URLSearchParams();
+      if (target.kind === "category") params.set("category", target.category_key);
+      if (target.kind === "leaf") {
+        params.set("category", target.category_key);
+        params.set("filer", target.leaf_key);
+      }
+      const qs = params.toString();
+      const suffix = qs.length > 0 ? `?${qs}` : "";
+      navigate(`/instrument/${encodeURIComponent(symbol)}/ownership${suffix}`);
+    },
+    [navigate, symbol],
   );
 
   const isLoading =
@@ -119,13 +151,16 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
           }}
         />
       ) : (
-        renderBody(extractData(balanceState.data, institutionalState.data, insidersState.data))
+        renderBody(
+          extractData(balanceState.data, institutionalState.data, insidersState.data),
+          handleWedgeClick,
+        )
       )}
     </Pane>
   );
 }
 
-function extractData(
+export function extractData(
   balance: InstrumentFinancials | null,
   institutional: InstitutionalHoldingsResponse | null,
   insiders: InsiderTransactionsList | null,
@@ -135,41 +170,146 @@ function extractData(
   const treasury =
     balance !== null ? pickLatestBalance(balance, "treasury_shares") : null;
 
+  const free_float =
+    outstanding !== null ? Math.max(0, outstanding - (treasury ?? 0)) : null;
+
+  // Institutional + ETF wedges. Split the ``filers`` list by
+  // filer_type — equity-only rows feed the sunburst since option
+  // exposure double-counts the underlying.
   const inst_totals = institutional?.totals ?? null;
-  const institutions = inst_totals
-    ? parseShareCount(inst_totals.institutions_shares)
-    : null;
-  const etfs = inst_totals ? parseShareCount(inst_totals.etfs_shares) : null;
+  const filers = institutional?.filers ?? [];
+  const equity_filers = filers.filter((f) => f.is_put_call === null);
 
-  const insiderShares = insiders ? aggregateInsiderHoldings(insiders.rows) : null;
+  const institutional_holders: SunburstHolder[] = equity_filers
+    .filter((f) => f.filer_type !== "ETF")
+    .map(filerToHolder("institutions"));
+  const etf_holders: SunburstHolder[] = equity_filers
+    .filter((f) => f.filer_type === "ETF")
+    .map(filerToHolder("etfs"));
 
-  // The "as-of" surfaced in the header is the latest signal we
-  // have — institutional period when present, else the balance row.
+  // Insider holders — aggregate latest non-derivative
+  // post-transaction shares per officer. The list is short enough
+  // (~10-30 officers) that we render every officer as their own
+  // wedge; the sunburst transformer bypasses the visibility
+  // threshold for this category.
+  const insider_holders = aggregateInsiderHoldersForSunburst(insiders);
+
+  const institutions_status: SunburstCategoryStatus = deriveCategoryStatus(
+    institutional,
+    institutional_holders,
+    inst_totals?.institutions_shares,
+  );
+  const etfs_status: SunburstCategoryStatus = deriveCategoryStatus(
+    institutional,
+    etf_holders,
+    inst_totals?.etfs_shares,
+  );
+  const insiders_status: SunburstCategoryStatus =
+    insiders === null
+      ? "unknown"
+      : insider_holders.length > 0
+        ? "ok"
+        : "empty";
+
   const as_of_period =
-    inst_totals?.period_of_report ??
-    (balance?.rows[0]?.period_end ?? null);
+    inst_totals?.period_of_report ?? balance?.rows[0]?.period_end ?? null;
 
   return {
     outstanding,
     treasury,
-    institutions,
-    etfs,
-    insiders: insiderShares,
+    free_float,
+    institutional_holders,
+    etf_holders,
+    insider_holders,
+    institutions_status,
+    etfs_status,
+    insiders_status,
     as_of_period,
-    institutional_period: inst_totals?.period_of_report ?? null,
   };
 }
 
-function renderBody(data: OwnershipData): JSX.Element {
-  const breakdown = computeOwnership({
-    shares_outstanding: data.outstanding,
-    treasury_shares: data.treasury,
-    institutions: { shares: data.institutions, source_label: "13F filers" },
-    etfs: { shares: data.etfs, source_label: "13F filers (ETF)" },
-    insiders: { shares: data.insiders, source_label: "Form 4" },
+function filerToHolder(
+  category: SunburstHolder["category"],
+): (f: InstitutionalFilerHolding) => SunburstHolder {
+  return (f) => ({
+    key: f.filer_cik,
+    label: f.filer_name,
+    shares: parseShareCount(f.shares) ?? 0,
+    category,
   });
+}
 
-  if (breakdown === null) {
+interface InsiderRowShape {
+  readonly filer_cik: string | null;
+  readonly filer_name: string;
+  readonly txn_date: string;
+  readonly post_transaction_shares: string | null;
+  readonly is_derivative: boolean;
+}
+
+function aggregateInsiderHoldersForSunburst(
+  insiders: InsiderTransactionsList | null,
+): readonly SunburstHolder[] {
+  if (insiders === null) return [];
+  // Latest non-derivative post-transaction-shares per officer.
+  // Keyed on filer_cik when present, falls back to filer_name so a
+  // filer with no CIK in the audit trail still gets distinct rows.
+  const latestByFiler = new Map<
+    string,
+    { txn_date: string; shares: number; label: string }
+  >();
+  for (const row of insiders.rows as readonly InsiderRowShape[]) {
+    if (row.is_derivative) continue;
+    const shares = parseShareCount(row.post_transaction_shares);
+    if (shares === null) continue;
+    const key = row.filer_cik ?? `name:${row.filer_name}`;
+    const existing = latestByFiler.get(key);
+    if (existing === undefined || row.txn_date > existing.txn_date) {
+      latestByFiler.set(key, {
+        txn_date: row.txn_date,
+        shares,
+        label: row.filer_name,
+      });
+    }
+  }
+  const holders: SunburstHolder[] = [];
+  for (const [key, entry] of latestByFiler.entries()) {
+    holders.push({
+      key,
+      label: entry.label,
+      shares: entry.shares,
+      category: "insiders",
+    });
+  }
+  return holders;
+}
+
+function deriveCategoryStatus(
+  institutional: InstitutionalHoldingsResponse | null,
+  holders: readonly SunburstHolder[],
+  raw_total: string | undefined,
+): SunburstCategoryStatus {
+  // No fetch result at all — likely API error or pre-coverage.
+  if (institutional === null) return "unknown";
+  // ``totals`` is null when no holdings on file. The card surfaces
+  // this as a coverage gap so the operator sees that 13F ingest
+  // hasn't run for this instrument.
+  if (institutional.totals === null) return "unknown";
+  // Total reported but every CUSIP unresolved (the #740 backfill
+  // gap). The total may be 0 even though filers exist; render as
+  // ``unknown`` rather than ``empty`` so the coverage-gap copy
+  // shows.
+  const total = parseShareCount(raw_total ?? "0") ?? 0;
+  if (total <= 0 && holders.length === 0) return "empty";
+  if (holders.length === 0 && total > 0) return "unknown";
+  return "ok";
+}
+
+function renderBody(
+  data: OwnershipData,
+  onWedgeClick: (target: WedgeClick) => void,
+): JSX.Element {
+  if (data.free_float === null || data.free_float <= 0) {
     return (
       <EmptyState
         title="No ownership data"
@@ -178,62 +318,76 @@ function renderBody(data: OwnershipData): JSX.Element {
     );
   }
 
+  const inputs: SunburstInputs = {
+    free_float: data.free_float,
+    holders: [
+      ...data.institutional_holders,
+      ...data.etf_holders,
+      ...data.insider_holders,
+    ],
+    treasury_shares: data.treasury,
+    institutions_status: data.institutions_status,
+    etfs_status: data.etfs_status,
+    insiders_status: data.insiders_status,
+  };
+  const rings = buildSunburstRings(inputs);
+  if (rings === null) {
+    return (
+      <EmptyState
+        title="No ownership data"
+        description="Sunburst rings could not be derived — free float resolved to zero or the input snapshot is malformed."
+      />
+    );
+  }
+
   return (
-    <div className="space-y-3">
-      {data.as_of_period !== null && (
-        <p className="text-xs text-slate-500 dark:text-slate-400">
-          As of {data.as_of_period}. Free float ={" "}
-          {formatShares(breakdown.denominator)} shares.
-        </p>
-      )}
-      {breakdown.has_overflow && (
-        <p className="text-xs text-amber-700 dark:text-amber-400">
-          Reported slice shares exceed free float — likely a 13F-HR
-          filing that lags the latest XBRL share count. Unallocated
-          clamped to 0%.
-        </p>
-      )}
-      <table className="w-full text-sm">
-        <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-          <tr>
-            <th className="pb-1 text-left">Slice</th>
-            <th className="pb-1 text-right">Shares</th>
-            <th className="pb-1 text-right">% of float</th>
-          </tr>
-        </thead>
-        <tbody>
-          {breakdown.slices.map((slice) => (
-            <tr
-              key={slice.label}
-              className="border-t border-slate-100 dark:border-slate-800"
-            >
-              <td className="py-1.5 text-slate-700 dark:text-slate-200">
-                {slice.label}
-                {slice.source_label !== undefined && (
-                  <span className="ml-2 text-xs text-slate-400 dark:text-slate-500">
-                    {slice.source_label}
-                  </span>
-                )}
-              </td>
-              <td className="py-1.5 text-right font-mono text-slate-700 dark:text-slate-200">
-                {formatShares(slice.shares)}
-              </td>
-              <td className="py-1.5 text-right font-mono text-slate-900 dark:text-slate-100">
-                {formatPct(slice.pct)}
-              </td>
+    <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
+      <div className="flex justify-center">
+        <OwnershipSunburst inputs={inputs} onWedgeClick={onWedgeClick} />
+      </div>
+      <div className="min-w-0 flex-1">
+        {data.as_of_period !== null && (
+          <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
+            As of {data.as_of_period}. Free float ={" "}
+            {formatShares(data.free_float)} shares.
+          </p>
+        )}
+        <table className="w-full text-sm">
+          <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            <tr>
+              <th className="pb-1 text-left">Category</th>
+              <th className="pb-1 text-right">Shares</th>
+              <th className="pb-1 text-right">% of float</th>
             </tr>
-          ))}
-          <tr className="border-t border-slate-200 dark:border-slate-700 text-xs text-slate-500 dark:text-slate-400">
-            <td className="py-1.5 italic">Treasury (memo)</td>
-            <td className="py-1.5 text-right font-mono">
-              {formatShares(breakdown.treasury.shares)}
-            </td>
-            <td className="py-1.5 text-right font-mono">
-              {formatPct(breakdown.treasury.pct)}
-            </td>
-          </tr>
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rings.categories.map((cat) => (
+              <tr
+                key={cat.key}
+                className="border-t border-slate-100 dark:border-slate-800"
+              >
+                <td className="py-1.5 text-slate-700 dark:text-slate-200">
+                  {cat.label}
+                  {cat.status === "unknown" && (
+                    <span className="ml-2 text-xs text-amber-600 dark:text-amber-400">
+                      coverage gap
+                    </span>
+                  )}
+                </td>
+                <td className="py-1.5 text-right font-mono text-slate-700 dark:text-slate-200">
+                  {cat.status === "unknown" ? "—" : formatShares(cat.shares)}
+                </td>
+                <td className="py-1.5 text-right font-mono text-slate-900 dark:text-slate-100">
+                  {cat.status === "unknown" ? "—" : formatPct(cat.pct)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
+          Click any wedge for the per-filer drilldown.
+        </p>
+      </div>
     </div>
   );
 }
