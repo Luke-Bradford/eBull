@@ -473,7 +473,12 @@ function FilerTable({
             // Clicking the highlighted row clears the filter — the
             // operator can dismiss the per-filer drilldown without
             // hunting for the Clear button.
-            const baseCls = "border-t border-slate-100 dark:border-slate-800";
+            // Use logical-side ``border-t-*`` instead of the all-sides
+            // shorthand so an isHighlight row's ``border-l-sky-500``
+            // can't be silently overridden if Tailwind emits the
+            // shorthand color rule after the side-specific one. PR
+            // #750 review caught this.
+            const baseCls = "border-t border-t-slate-100 dark:border-t-slate-800";
             const highlightCls = isHighlight
               ? "border-l-2 border-l-sky-500 bg-sky-50/40 dark:bg-sky-950/20 cursor-pointer"
               : "";
