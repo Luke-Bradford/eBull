@@ -97,16 +97,42 @@ def test_cohort_start_from_skips_lower_ids(
     assert 9605 in cohort_ids
 
 
-def test_cohort_limit_caps_size_after_start_from(
+def test_cohort_limit_caps_size_within_seeded_range(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    for iid in range(9701, 9706):
+    seeded = list(range(9701, 9706))
+    for iid in seeded:
         _seed(ebull_test_conn, iid, f"BCF_L{iid}", cik=f"00001{iid:05d}")
 
-    cohort = select_cohort(ebull_test_conn, start_from=0, limit=3)
+    # Pin the LIMIT contract robustly even if the fixture's
+    # per-test TRUNCATE stops working: rather than asserting the
+    # cohort equals a positional slice of seeded ids (which would
+    # break the moment IDs from a sibling test leak in), assert
+    # ``limit`` truncates AND the truncated set is a subset of what
+    # this test actually seeded. Reviewer PREVENTION pin on PR #760.
+    cohort = select_cohort(ebull_test_conn, start_from=9700, limit=3)
     assert len(cohort) == 3
-    # ORDER BY instrument_id ASC — first 3 by ID.
-    assert [r.instrument_id for r in cohort] == [9701, 9702, 9703]
+    cohort_ids = {r.instrument_id for r in cohort}
+    assert cohort_ids.issubset(set(seeded))
+    # ORDER BY instrument_id ASC — the three smallest seeded IDs.
+    assert sorted(cohort_ids) == seeded[:3]
+
+
+def test_cohort_start_from_combined_with_limit_advances_window(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    seeded = list(range(9751, 9756))
+    for iid in seeded:
+        _seed(ebull_test_conn, iid, f"BCF_W{iid}", cik=f"00002{iid:05d}")
+
+    # ``start_from=9752`` skips ID 9751 + 9752; ``limit=2`` then caps
+    # at 9753, 9754. Reviewer NITPICK pin: previously test name
+    # implied this interaction but called ``start_from=0``.
+    cohort = select_cohort(ebull_test_conn, start_from=9752, limit=2)
+    assert len(cohort) == 2
+    cohort_ids = {r.instrument_id for r in cohort}
+    assert cohort_ids.issubset(set(seeded))
+    assert sorted(cohort_ids) == [9753, 9754]
 
 
 def test_cohort_returns_symbol_and_cik(
