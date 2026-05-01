@@ -183,17 +183,11 @@ export function OwnershipSunburst({
 
   const wedgeStroke = theme.gridLine;
 
-  // Recharts' Pie crashes on empty data — keep ring 3 alive with a
-  // single transparent wedge when there are no categories at all
-  // (``denom`` known but every category total null).
-  const safeOuter: ChartDatum[] =
-    outerData.length === 0
-      ? [makeGapDatum("outer-empty", "Unaccounted", denom, denom)]
-      : outerData;
-  const safeMiddle: ChartDatum[] =
-    middleData.length === 0
-      ? [makeGapDatum("middle-empty", "Unaccounted", denom, denom)]
-      : middleData;
+  // ``middleData`` and ``outerData`` are always non-empty when
+  // ``denom > 0``: buildSunburstRings guarantees ``category_residual
+  // = total_shares - sum_known``, so when no category renders the
+  // residual gap is the entire denominator and gets pushed below.
+  // (Codex review pin — no defensive fallback needed.)
 
   return (
     <div
@@ -220,15 +214,15 @@ export function OwnershipSunburst({
             <Cell fill={theme.borderColor} fillOpacity={0.6} stroke={wedgeStroke} />
           </Pie>
           <Pie
-            data={safeMiddle}
+            data={middleData}
             dataKey="shares"
             innerRadius={innerOuter}
             outerRadius={middleOuter}
             stroke={wedgeStroke}
             isAnimationActive={false}
-            onClick={(_, idx) => handleClick(safeMiddle[idx])}
+            onClick={(_, idx) => handleClick(middleData[idx])}
           >
-            {safeMiddle.map((d) => (
+            {middleData.map((d) => (
               <Cell
                 key={d.id}
                 fill={d.fill}
@@ -238,15 +232,15 @@ export function OwnershipSunburst({
             ))}
           </Pie>
           <Pie
-            data={safeOuter}
+            data={outerData}
             dataKey="shares"
             innerRadius={middleOuter}
             outerRadius={outerOuter}
             stroke={wedgeStroke}
             isAnimationActive={false}
-            onClick={(_, idx) => handleClick(safeOuter[idx])}
+            onClick={(_, idx) => handleClick(outerData[idx])}
           >
-            {safeOuter.map((d) => (
+            {outerData.map((d) => (
               <Cell
                 key={d.id}
                 fill={d.fill}
