@@ -14,6 +14,7 @@ import { ChartPage } from "@/pages/ChartPage";
 import { DividendsPage } from "@/pages/DividendsPage";
 import { FundamentalsPage } from "@/pages/FundamentalsPage";
 import { InsiderPage } from "@/pages/InsiderPage";
+import { OwnershipPage } from "@/pages/OwnershipPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { RecommendationsPage } from "@/pages/RecommendationsPage";
 import { AdminPage } from "@/pages/AdminPage";
@@ -81,6 +82,10 @@ export function App() {
           <Route
             path="instrument/:symbol/insider"
             element={<InsiderPage />}
+          />
+          <Route
+            path="instrument/:symbol/ownership"
+            element={<OwnershipPage />}
           />
           <Route
             path="instrument/:symbol/fundamentals"
