@@ -102,17 +102,26 @@ export function computeOwnership(input: OwnershipInputs): OwnershipBreakdown | n
   const etfs = sliceFrom("ETFs", input.etfs);
   const insiders = sliceFrom("Insiders", input.insiders);
 
-  const allocated = (institutions.pct ?? 0) + (etfs.pct ?? 0) + (insiders.pct ?? 0);
-  const has_overflow = allocated > 1;
-  const unallocated_pct = Math.max(0, 1 - allocated);
-  // Convert pct back to a share count for display symmetry.
-  const unallocated_shares = Math.round(unallocated_pct * denominator);
+  // Unallocated is residual = (1 − Σ slice_pct). Only meaningful
+  // when every slice has a known share count; otherwise the
+  // residual silently absorbs the unknown slices and overstates
+  // genuine "unallocated equity". Render as null/"—" instead of
+  // coercing null inputs to 0 — Codex caught this on PR review.
+  const has_unknown_slice =
+    institutions.shares === null || etfs.shares === null || insiders.shares === null;
+  const allocated_pct =
+    (institutions.pct ?? 0) + (etfs.pct ?? 0) + (insiders.pct ?? 0);
+  const has_overflow = !has_unknown_slice && allocated_pct > 1;
+
+  const unallocated_pct = has_unknown_slice ? null : Math.max(0, 1 - allocated_pct);
+  const unallocated_shares =
+    unallocated_pct === null ? null : Math.round(unallocated_pct * denominator);
 
   const unallocated: OwnershipSlice = {
     label: "Unallocated",
     shares: unallocated_shares,
     pct: unallocated_pct,
-    source_label: "residual",
+    source_label: has_unknown_slice ? "needs full slice coverage" : "residual",
   };
 
   return {

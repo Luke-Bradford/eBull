@@ -122,8 +122,26 @@ describe("computeOwnership", () => {
     expect(r!.slices[0]!.pct).toBeNull();
     expect(r!.slices[1]!.pct).toBeCloseTo(0.2);
     expect(r!.slices[2]!.pct).toBeNull();
-    // Unallocated absorbs only the populated allocation.
-    expect(r!.slices[3]!.pct).toBeCloseTo(0.8);
+    // Unallocated must be null when some inputs are missing — we
+    // cannot distinguish "genuinely unallocated equity" from
+    // "unknown institutional / insider float". Pre-fix this
+    // silently absorbed the unknown slices into Unallocated and
+    // produced a misleading shares column.
+    expect(r!.slices[3]!.pct).toBeNull();
+    expect(r!.slices[3]!.shares).toBeNull();
+  });
+
+  it("Unallocated shares are computed when every slice is populated", () => {
+    const r = computeOwnership({
+      shares_outstanding: 1000,
+      treasury_shares: 0,
+      institutions: { shares: 350 },
+      etfs: { shares: 200 },
+      insiders: { shares: 100 },
+    });
+    expect(r).not.toBeNull();
+    expect(r!.slices[3]!.shares).toBe(350);
+    expect(r!.slices[3]!.pct).toBeCloseTo(0.35);
   });
 
   it("flags overflow when slices sum past 100%", () => {
