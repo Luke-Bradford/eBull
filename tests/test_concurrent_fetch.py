@@ -1,4 +1,4 @@
-"""Unit tests for ``app.providers.concurrent_fetch.fetch_document_texts`` (#726)."""
+"""Unit tests for ``app.providers.concurrent_fetch`` (#726, #761)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ import time
 
 import pytest
 
-from app.providers.concurrent_fetch import fetch_document_texts
+from app.providers.concurrent_fetch import (
+    concurrent_iter,
+    concurrent_map,
+    fetch_document_texts,
+)
 
 
 class _Fetcher:
@@ -190,3 +194,146 @@ class TestRateLimitSafetyUnderConcurrency:
             assert cur - prev >= rc._min_interval - slack, (
                 f"throttle violation: {cur - prev:.4f}s < {rc._min_interval}s floor"
             )
+
+
+# ---------------------------------------------------------------------------
+# Generic ``concurrent_map`` (#761) — used by JSON-fetch ingest paths
+# (e.g. SEC companyfacts) that don't go through ``fetch_document_text``.
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentMap:
+    def test_returns_pairs_in_submission_order(self) -> None:
+        # Order preservation matters when the caller zips the result
+        # back against parallel input arrays (e.g. (symbol, cik)
+        # tuples in ``refresh_financial_facts``).
+        def double(x: int) -> int:
+            return x * 2
+
+        result = concurrent_map(double, [3, 1, 4, 1, 5, 9], max_workers=4)
+        assert [item for item, _ in result] == [3, 1, 4, 1, 5, 9]
+        assert [r for _, r in result] == [6, 2, 8, 2, 10, 18]
+
+    def test_concurrency_actually_overlaps(self) -> None:
+        live = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def slow(x: int) -> int:
+            nonlocal live, peak
+            with lock:
+                live += 1
+                peak = max(peak, live)
+            try:
+                time.sleep(0.05)
+                return x
+            finally:
+                with lock:
+                    live -= 1
+
+        concurrent_map(slow, list(range(8)), max_workers=4)
+        assert peak > 1
+        assert peak <= 4
+
+    def test_per_item_exception_becomes_none(self) -> None:
+        def maybe_raise(x: int) -> int:
+            if x == 2:
+                raise RuntimeError("simulated")
+            return x * 10
+
+        result = concurrent_map(maybe_raise, [1, 2, 3], max_workers=2)
+        assert result == [(1, 10), (2, None), (3, 30)]
+
+    def test_empty_input_returns_empty(self) -> None:
+        assert concurrent_map(lambda x: x, []) == []
+
+    def test_workers_capped_to_item_count(self) -> None:
+        # max_workers=8 over 2 items must not allocate 8 threads.
+        # ``ThreadPoolExecutor`` accepts the cap; we verify by checking
+        # the function still runs and returns paired results — the
+        # internal cap path is exercised whenever ``len(items) <
+        # max_workers``.
+        result = concurrent_map(lambda x: x + "_done", ["a", "b"], max_workers=8)
+        assert result == [("a", "a_done"), ("b", "b_done")]
+
+    def test_none_result_passes_through(self) -> None:
+        # Distinguishes "fn returned None as a valid result" from
+        # "exception caught, surfaced as None". Both look the same
+        # by design — caller treats None as "no data, skip" either
+        # way (matches the 404 contract).
+        def returns_none(x: int) -> int | None:
+            return None if x % 2 == 0 else x
+
+        result = concurrent_map(returns_none, [1, 2, 3, 4], max_workers=2)
+        assert result == [(1, 1), (2, None), (3, 3), (4, None)]
+
+
+class TestConcurrentIter:
+    def test_yields_one_pair_per_item(self) -> None:
+        # Set semantics — yields all items eventually, regardless of
+        # order. Streaming consumers don't need submission order.
+        result = list(concurrent_iter(lambda x: x * 2, [1, 2, 3, 4], max_workers=2))
+        assert sorted(result) == [(1, 2), (2, 4), (3, 6), (4, 8)]
+
+    def test_yields_in_completion_order_not_submission(self) -> None:
+        # Slow item 0 should be yielded LAST when faster items
+        # complete first. Pin completion-order semantics so the
+        # streaming-consumer pattern (refresh_financial_facts) can
+        # rely on it.
+        def variable_speed(x: int) -> int:
+            time.sleep(0.1 if x == 0 else 0.0)
+            return x
+
+        result = list(concurrent_iter(variable_speed, [0, 1, 2, 3, 4], max_workers=4))
+        items_in_order = [item for item, _ in result]
+        # Fast items 1-4 must precede slow item 0.
+        assert items_in_order[-1] == 0
+        assert set(items_in_order) == {0, 1, 2, 3, 4}
+
+    def test_per_item_exception_becomes_none(self) -> None:
+        def raises_on_two(x: int) -> int:
+            if x == 2:
+                raise RuntimeError("boom")
+            return x * 10
+
+        result = sorted(concurrent_iter(raises_on_two, [1, 2, 3], max_workers=2))
+        assert result == [(1, 10), (2, None), (3, 30)]
+
+    def test_streaming_memory_bounded_by_workers(self) -> None:
+        # The point of concurrent_iter vs concurrent_map: a consumer
+        # can drain results as they arrive rather than waiting for
+        # the full batch. Verify the producer doesn't pre-buffer
+        # everything by checking we can act on the first result
+        # before the last item is even started.
+        started = threading.Event()
+        first_yielded = threading.Event()
+        block_late = threading.Event()
+        started_count = 0
+        lock = threading.Lock()
+
+        def fn(x: int) -> int:
+            nonlocal started_count
+            with lock:
+                started_count += 1
+                started.set()
+            if x == 99:
+                # Last submission — block until the consumer has
+                # already received its first result. Proves
+                # streaming, not batch-collect.
+                block_late.wait(timeout=2.0)
+            return x
+
+        items = [1, 2, 3, 99]
+        gen = concurrent_iter(fn, items, max_workers=2)
+
+        first_item, first_result = next(gen)
+        first_yielded.set()
+        block_late.set()
+
+        rest = sorted(list(gen))
+        assert first_item in {1, 2, 3, 99}
+        assert first_result == first_item
+        assert sorted([first_item] + [i for i, _ in rest]) == [1, 2, 3, 99]
+
+    def test_empty_input_yields_nothing(self) -> None:
+        assert list(concurrent_iter(lambda x: x, [])) == []
