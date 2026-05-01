@@ -77,11 +77,17 @@ const CATEGORY_FILL_INDEX: Record<string, number> = {
  * status is ``unknown``. Pre-fix every unknown wedge collapsed to a
  * single shared slate-600 so the chart read as a solid grey blob —
  * operator couldn't distinguish "Institutions gap" from "ETFs gap"
- * from "Treasury gap". Now each category keeps its identity and the
- * low opacity carries the "no signal" semantic.
+ * from "Treasury gap". Each category keeps its accent identity; the
+ * lower opacity carries the "no signal" semantic.
+ *
+ * Opacity bumped on the second pass — at 0.35 / 0.22 over a
+ * slate-950 dark-mode background every accent washed out to muddy
+ * indistinguishable purples. Higher values keep the accent
+ * recognisable while still reading as desaturated vs known data
+ * (~85% opacity).
  */
-const GAP_CATEGORY_OPACITY = 0.35;
-const GAP_LEAF_OPACITY = 0.22;
+const GAP_CATEGORY_OPACITY = 0.7;
+const GAP_LEAF_OPACITY = 0.5;
 
 export function OwnershipSunburst({
   inputs,
@@ -180,13 +186,46 @@ export function OwnershipSunburst({
     onWedgeClick?.(datum.target);
   };
 
+  // Wedge stroke uses the theme's grid-line slate (slate-100 light /
+  // slate-800 dark) rather than the page background. With
+  // bg-coloured strokes between two adjacent dark-mode wedges at
+  // <100% opacity, the dark stroke + dark fill merged into one
+  // blob; a slightly lighter slate stroke keeps wedge boundaries
+  // legible without dominating the canvas.
+  const wedgeStroke = theme.gridLine;
+
   return (
     <div
-      className="relative"
+      className="ownership-sunburst relative"
       style={{ width: size, height: size }}
       role="img"
       aria-label={`Ownership breakdown: free float ${formatShares(rings.free_float)} shares.`}
     >
+      {/*
+        Suppress the browser's default focus rect on Recharts'
+        inner <path> elements — clicking a wedge moved focus to the
+        path which then drew a white rectangular outline that read
+        as "selected" but ignored the wedge geometry. Use a wedge-
+        shaped feedback affordance instead: hover bumps stroke
+        width + opacity, click triggers the existing onWedgeClick
+        navigation. The ``ownership-sunburst`` class scopes the
+        outline removal so it doesn't bleed to other charts.
+      */}
+      <style>{`
+        .ownership-sunburst .recharts-pie-sector path {
+          outline: none;
+          transition: opacity 120ms ease, stroke-width 120ms ease;
+          cursor: pointer;
+        }
+        .ownership-sunburst .recharts-pie-sector path:focus,
+        .ownership-sunburst .recharts-pie-sector path:focus-visible {
+          outline: none;
+        }
+        .ownership-sunburst .recharts-pie-sector:hover path {
+          opacity: 1;
+          stroke-width: 2;
+        }
+      `}</style>
       <ResponsiveContainer width="100%" height="100%">
         <PieChart>
           <Tooltip content={<SunburstTooltip />} />
@@ -195,7 +234,7 @@ export function OwnershipSunburst({
             dataKey="shares"
             innerRadius={innerInner}
             outerRadius={innerOuter}
-            stroke={theme.bg}
+            stroke={wedgeStroke}
             isAnimationActive={false}
             onClick={(_, idx) => handleClick(innerData[idx]!)}
           >
@@ -204,7 +243,7 @@ export function OwnershipSunburst({
                 key={`inner-${idx}`}
                 fill={d.fill}
                 fillOpacity={d.opacity}
-                stroke={d.stroke}
+                stroke={wedgeStroke}
               />
             ))}
           </Pie>
@@ -213,7 +252,7 @@ export function OwnershipSunburst({
             dataKey="shares"
             innerRadius={innerOuter}
             outerRadius={middleOuter}
-            stroke={theme.bg}
+            stroke={wedgeStroke}
             isAnimationActive={false}
             onClick={(_, idx) => handleClick(middleData[idx]!)}
           >
@@ -222,7 +261,7 @@ export function OwnershipSunburst({
                 key={`middle-${idx}`}
                 fill={d.fill}
                 fillOpacity={d.opacity}
-                stroke={d.stroke}
+                stroke={wedgeStroke}
               />
             ))}
           </Pie>
@@ -231,7 +270,7 @@ export function OwnershipSunburst({
             dataKey="shares"
             innerRadius={middleOuter}
             outerRadius={outerOuter}
-            stroke={theme.bg}
+            stroke={wedgeStroke}
             isAnimationActive={false}
             onClick={(_, idx) => handleClick(outerData[idx]!)}
           >
@@ -240,7 +279,7 @@ export function OwnershipSunburst({
                 key={`outer-${idx}`}
                 fill={d.fill}
                 fillOpacity={d.opacity}
-                stroke={d.stroke}
+                stroke={wedgeStroke}
               />
             ))}
           </Pie>
