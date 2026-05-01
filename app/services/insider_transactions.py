@@ -926,17 +926,24 @@ class _DocFetcher(Protocol):
 
 # SEC submissions.json ``primaryDocument`` for ownership filings
 # (Forms 3/4/5) commonly points at an XSL-rendered HTML view rather
-# than the raw XML. The rendered path carries an ``xslF345X06/`` (or
-# sibling ``xslF345X05/`` / ``xslF345/``) segment before the filename;
-# the same file without that segment is the canonical XML.
+# than the raw XML. The rendered path carries an ``xslF345`` segment
+# (with a versioned suffix that has rotated over the years —
+# ``xslF345X02``, ``xslF345X03``, ``xslF345X04``, ``xslF345X05``,
+# ``xslF345X06`` are all observed in production filings) before the
+# filename; the same file without that segment is the canonical XML.
 #
 #   XSL:  /Archives/edgar/data/320193/000114036126015421/xslF345X06/form4.xml  → text/html
 #   Raw:  /Archives/edgar/data/320193/000114036126015421/form4.xml             → text/xml
 #
-# Without normalisation the ingester fetches HTML, the parser sees an
-# ``<html>`` root instead of ``<ownershipDocument>``, and every filing
-# gets tombstoned (#454).
-_XSL_FORM345_PREFIX_RE = re.compile(r"/xslF345(?:X0[56])?/")
+# Pre-fix the regex matched only ``xslF345``, ``xslF345X05`` and
+# ``xslF345X06``. Older filings (pre-2018) carry ``X02`` / ``X03`` /
+# ``X04`` suffixes — those passed through unchanged, the ingester
+# fetched HTML, and the parser failed with a 98%+ parse_miss rate
+# on backfill ticks against historical Form 4s.
+#
+# Match any ``xslF345`` followed by an optional alphanumeric suffix
+# so future SEC variants are absorbed without another patch.
+_XSL_FORM345_PREFIX_RE = re.compile(r"/xslF345[A-Z0-9]*/")
 
 
 def _canonical_form_4_url(url: str) -> str:
