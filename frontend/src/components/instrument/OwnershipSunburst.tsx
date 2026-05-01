@@ -72,7 +72,16 @@ const CATEGORY_FILL_INDEX: Record<string, number> = {
   unallocated: 4, // pink
 };
 
-const UNKNOWN_FILL = "#475569"; // slate-600 — desaturated to read as "no signal"
+/**
+ * Opacity applied to a category's accent color when the category
+ * status is ``unknown``. Pre-fix every unknown wedge collapsed to a
+ * single shared slate-600 so the chart read as a solid grey blob —
+ * operator couldn't distinguish "Institutions gap" from "ETFs gap"
+ * from "Treasury gap". Now each category keeps its identity and the
+ * low opacity carries the "no signal" semantic.
+ */
+const GAP_CATEGORY_OPACITY = 0.35;
+const GAP_LEAF_OPACITY = 0.22;
 
 export function OwnershipSunburst({
   inputs,
@@ -110,13 +119,17 @@ export function OwnershipSunburst({
     });
   }
   if (rings.inner.gap_shares > 0) {
+    // Inner-ring gap arc represents the aggregate "we don't know"
+    // share — keep it as a single neutral grey so it reads as
+    // "missing data" rather than implying it belongs to any one
+    // accent-colored category.
     innerData.push({
       name: "Coverage gap",
       shares: rings.inner.gap_shares,
       pct: rings.inner.gap_pct,
-      fill: UNKNOWN_FILL,
+      fill: theme.gridLine,
       stroke: theme.bg,
-      opacity: 0.45,
+      opacity: 0.6,
       is_gap: true,
       target: { kind: "center" },
     });
@@ -251,23 +264,22 @@ function toCategoryDatum(
   bg: string,
 ): ChartDatum {
   if (cat.status === "unknown") {
-    // Unknown categories use a dedicated grey so the operator
-    // distinguishes "we don't know what's here" from "this slice is
-    // genuinely 0%".
+    // Unknown categories keep their accent color but at low opacity
+    // so the chart distinguishes "Institutions gap" from "ETFs gap"
+    // from "Treasury gap" visually. Pre-fix every unknown wedge
+    // collapsed to a single shared slate-600 → solid grey blob with
+    // no per-category identity.
     return {
       name: `${cat.label} — coverage gap`,
-      // Use a synthetic non-zero share count so the wedge renders
-      // visibly. Since totals would otherwise sum to less than the
-      // float, the visible gap on the outer ring still telegraphs
-      // missing data; the synthetic value here just guarantees the
-      // wedge isn't a 0-degree arc. ``is_gap=true`` tells the
-      // tooltip to suppress the numeric share/pct rows so hovering
-      // does not surface a misleading "1 shares".
+      // Synthetic non-zero share count so the wedge renders visibly.
+      // ``is_gap=true`` tells the tooltip to suppress the numeric
+      // share/pct rows so hovering does not surface a misleading
+      // "1 shares".
       shares: 1,
       pct: 0,
-      fill: UNKNOWN_FILL,
+      fill: baseFill,
       stroke: bg,
-      opacity: 0.3,
+      opacity: GAP_CATEGORY_OPACITY,
       is_gap: true,
       target: { kind: "category", category_key: cat.key },
     };
@@ -292,13 +304,18 @@ function toLeafDatum(
 ): ChartDatum {
   const status = cat.status;
   if (status === "unknown") {
+    // Outer-ring leaf for an unknown category inherits the parent
+    // accent at a lower opacity than the middle wedge so the rings
+    // remain visually distinguishable while preserving category
+    // identity. Pre-fix the leaf used the same shared slate-600 as
+    // the middle wedge → both rings merged into one solid grey arc.
     return {
       name: leaf.label,
       shares: 1,
       pct: 0,
-      fill: UNKNOWN_FILL,
+      fill: baseFill,
       stroke: bg,
-      opacity: 0.2,
+      opacity: GAP_LEAF_OPACITY,
       is_gap: true,
       target: { kind: "leaf", category_key: cat.key, leaf_key: leaf.key },
     };
