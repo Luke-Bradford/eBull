@@ -77,7 +77,12 @@ class FakeSecProvider:
             raise self._resp.page_raises[name]
         return self._resp.pages.get(name)
 
-    def get_filing(self, provider_filing_id: str) -> FilingEvent:
+    def get_filing(
+        self,
+        provider_filing_id: str,
+        *,
+        issuer_cik: str | None = None,  # noqa: ARG002 — protocol uniformity
+    ) -> FilingEvent:
         self.get_filing_calls.append(provider_filing_id)
         if self._resp.get_filing_raises and provider_filing_id in self._resp.get_filing_raises:
             raise self._resp.get_filing_raises[provider_filing_id]
