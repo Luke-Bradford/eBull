@@ -91,19 +91,50 @@ export function OwnershipSunburst({
     return accent[idx % accent.length]!;
   };
 
-  // Inner ring — single arc.
-  const innerData: ChartDatum[] = [
-    {
-      name: "Held",
-      shares: rings.inner.shares,
-      pct: rings.inner.pct,
+  // Inner ring — known + gap split. Pre-#746-followup the inner
+  // ring rendered as a single 100% arc that included synthetic
+  // unknown-padding from upstream categories — visually misleading
+  // when most of the float was in coverage gaps. Two arcs make the
+  // gap proportion legible at the very center of the chart.
+  const innerData: ChartDatum[] = [];
+  if (rings.inner.known_shares > 0) {
+    innerData.push({
+      name: "Known",
+      shares: rings.inner.known_shares,
+      pct: rings.inner.known_pct,
       fill: theme.borderColor,
       stroke: theme.bg,
-      opacity: 0.6,
+      opacity: 0.7,
       is_gap: false,
       target: { kind: "center" },
-    },
-  ];
+    });
+  }
+  if (rings.inner.gap_shares > 0) {
+    innerData.push({
+      name: "Coverage gap",
+      shares: rings.inner.gap_shares,
+      pct: rings.inner.gap_pct,
+      fill: UNKNOWN_FILL,
+      stroke: theme.bg,
+      opacity: 0.45,
+      is_gap: true,
+      target: { kind: "center" },
+    });
+  }
+  // Defensive: if both segments are zero (degenerate), still render
+  // a single placeholder so the inner ring outline is preserved.
+  if (innerData.length === 0) {
+    innerData.push({
+      name: "Held",
+      shares: 1,
+      pct: 0,
+      fill: theme.borderColor,
+      stroke: theme.bg,
+      opacity: 0.4,
+      is_gap: true,
+      target: { kind: "center" },
+    });
+  }
 
   // Middle ring — one wedge per category. Categories with shares=0
   // and status='empty' are skipped so the ring doesn't render a

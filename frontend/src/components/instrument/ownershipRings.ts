@@ -29,12 +29,27 @@
 
 export type SunburstCategoryStatus = "ok" | "unknown" | "empty";
 
+/**
+ * Why a category resolves to ``status='unknown'``. Drives the
+ * tooltip + summary copy so the operator distinguishes a CUSIP
+ * backfill gap (#740) from a missing DEI cover-page projection
+ * (#735) etc. Today only ``cusip_backfill`` is wired through;
+ * ``dei_projection`` is reserved for treasury_shares specifically
+ * and lights up once #735 surfaces the column.
+ */
+export type SunburstUnknownReason =
+  | "cusip_backfill"
+  | "dei_projection"
+  | "no_data";
+
 export interface SunburstCategory {
   readonly key: string; // 'institutions' | 'etfs' | 'insiders' | 'treasury' | 'unallocated'
   readonly label: string;
   readonly shares: number;
   readonly pct: number; // share / float
   readonly status: SunburstCategoryStatus;
+  /** Set only when ``status === 'unknown'``. */
+  readonly unknown_reason?: SunburstUnknownReason;
   /** Outer-ring wedges within this category. */
   readonly leaves: readonly SunburstLeaf[];
 }
@@ -82,10 +97,27 @@ export interface SunburstInputs {
   readonly insiders_status: SunburstCategoryStatus;
 }
 
+/**
+ * Inner-ring split. Pre-#746 the inner ring reported "Held" as a
+ * single arc summing every category including the synthetic
+ * ``unknown`` placeholders — so an instrument with 95% of its
+ * float in coverage-gap categories rendered a 100% Held arc,
+ * which lied. Now the inner ring carries explicit ``known`` and
+ * ``gap`` segments and the renderer draws them as two arcs.
+ */
+export interface InnerRing {
+  /** Sum of every category whose status is ``ok``. */
+  readonly known_shares: number;
+  /** Sum of every category whose status is ``unknown`` — i.e. the
+   *  free-float residual that we cannot account for today. */
+  readonly gap_shares: number;
+  readonly known_pct: number;
+  readonly gap_pct: number;
+}
+
 export interface SunburstRings {
   readonly free_float: number;
-  /** ring 1 — single inner-ring arc representing "Held" total. */
-  readonly inner: { readonly shares: number; readonly pct: number };
+  readonly inner: InnerRing;
   /** ring 2 — per-category wedges. */
   readonly categories: readonly SunburstCategory[];
 }
@@ -107,6 +139,9 @@ interface CategorySpec {
   readonly key: "institutions" | "etfs" | "insiders" | "treasury" | "unallocated";
   readonly label: string;
   readonly status: SunburstCategoryStatus;
+  /** Reason an unknown-status category resolved unknown — drives
+   *  the operator-facing tooltip + summary copy. */
+  readonly unknown_reason?: SunburstUnknownReason;
   /** True = bypass the visibility threshold (insiders, treasury, unallocated). */
   readonly bypass_threshold: boolean;
 }
@@ -140,6 +175,7 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
       key: "institutions",
       label: CATEGORY_LABEL.institutions!,
       status: input.institutions_status,
+      unknown_reason: "cusip_backfill",
       bypass_threshold: false,
     },
     inst_holders,
@@ -151,6 +187,7 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
       key: "etfs",
       label: CATEGORY_LABEL.etfs!,
       status: input.etfs_status,
+      unknown_reason: "cusip_backfill",
       bypass_threshold: false,
     },
     etf_holders,
@@ -162,6 +199,7 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
       key: "insiders",
       label: CATEGORY_LABEL.insiders!,
       status: input.insiders_status,
+      unknown_reason: "no_data",
       bypass_threshold: true,
     },
     insider_holders,
@@ -170,31 +208,54 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
   );
 
   // Treasury renders as a single leaf wedge.
+  // Distinguish "treasury reported as zero" from "DEI projection
+  // missing" — treasury_shares=null is the #735 / #731 follow-up,
+  // not the CUSIP-backfill #740 gap.
   const treasury_shares = input.treasury_shares ?? 0;
+  const treasury_status: SunburstCategoryStatus =
+    input.treasury_shares === null
+      ? "unknown"
+      : treasury_shares > 0
+        ? "ok"
+        : "empty";
   const treasury: SunburstCategory = {
     key: "treasury",
     label: CATEGORY_LABEL.treasury!,
     shares: treasury_shares,
     pct: treasury_shares / float,
-    status: input.treasury_shares === null ? "unknown" : treasury_shares > 0 ? "ok" : "empty",
+    status: treasury_status,
+    ...(treasury_status === "unknown"
+      ? { unknown_reason: "dei_projection" as const }
+      : {}),
     leaves:
-      treasury_shares > 0
+      treasury_status === "unknown"
         ? [
             {
-              key: "treasury",
-              label: "Treasury",
-              shares: treasury_shares,
-              pct: treasury_shares / float,
+              key: "treasury-unknown",
+              label: "Treasury — DEI projection pending",
+              shares: 0,
+              pct: 0,
               is_other: false,
             },
           ]
-        : [],
+        : treasury_shares > 0
+          ? [
+              {
+                key: "treasury",
+                label: "Treasury",
+                shares: treasury_shares,
+                pct: treasury_shares / float,
+                is_other: false,
+              },
+            ]
+          : [],
   };
 
   // Unallocated absorbs whatever's left after every known category. When
   // any category is ``unknown`` we cannot derive Unallocated cleanly —
-  // emit it as ``unknown`` so the visual signals "we don't know what
-  // sits here" rather than reporting a fabricated residual.
+  // emit it as ``empty`` so the operator's eye lands on the
+  // upstream-unknown wedges as the source of the gap, not on a
+  // fabricated "Unallocated coverage gap" downstream wedge.
   const known_shares =
     (institutions.status === "ok" ? institutions.shares : 0) +
     (etfs.status === "ok" ? etfs.shares : 0) +
@@ -208,35 +269,49 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
     treasury.status === "unknown";
 
   const residual_shares = Math.max(0, float - known_shares);
+  // When every category is ``ok``, residual is the genuine
+  // Unallocated slice (retail + small holders below the 13F threshold).
+  // When any category is ``unknown``, the residual is contaminated
+  // by the upstream gap and would mislead — collapse to ``empty``.
   const unallocated: SunburstCategory = {
     key: "unallocated",
     label: CATEGORY_LABEL.unallocated!,
-    shares: residual_shares,
-    pct: residual_shares / float,
-    status: has_unknown ? "unknown" : residual_shares > 0 ? "ok" : "empty",
-    leaves: [
-      {
-        key: "unallocated",
-        label: has_unknown ? "Coverage gap (#740)" : "Unallocated",
-        shares: residual_shares,
-        pct: residual_shares / float,
-        is_other: false,
-      },
-    ],
+    shares: has_unknown ? 0 : residual_shares,
+    pct: has_unknown ? 0 : residual_shares / float,
+    status: has_unknown ? "empty" : residual_shares > 0 ? "ok" : "empty",
+    leaves: has_unknown
+      ? []
+      : residual_shares > 0
+        ? [
+            {
+              key: "unallocated",
+              label: "Unallocated",
+              shares: residual_shares,
+              pct: residual_shares / float,
+              is_other: false,
+            },
+          ]
+        : [],
   };
 
   const categories = [institutions, etfs, insiders, treasury, unallocated];
 
-  // Inner-ring "Held" = sum of every known category. When any
-  // category is ``unknown``, ``inner`` reports the known portion only;
-  // the visible gap on ring 1 implicitly conveys "not all held shares
-  // are accounted for".
-  const inner_shares = known_shares + residual_shares;
-  const inner_pct = inner_shares / float;
+  // Inner-ring split: known (sum of OK categories + the
+  // ok-status Unallocated residual) vs gap (everything else =
+  // float minus known). Pre-fix the inner ring carried the synthetic
+  // unknown-padding through unaltered, lighting up as a 100% Held
+  // arc even when 95% of the float was in coverage gaps.
+  const inner_known = known_shares + (unallocated.status === "ok" ? unallocated.shares : 0);
+  const inner_gap = Math.max(0, float - inner_known);
 
   return {
     free_float: float,
-    inner: { shares: inner_shares, pct: inner_pct },
+    inner: {
+      known_shares: inner_known,
+      gap_shares: inner_gap,
+      known_pct: inner_known / float,
+      gap_pct: inner_gap / float,
+    },
     categories,
   };
 }
@@ -254,10 +329,11 @@ function buildCategory(
       shares: 0,
       pct: 0,
       status: "unknown",
+      ...(spec.unknown_reason !== undefined ? { unknown_reason: spec.unknown_reason } : {}),
       leaves: [
         {
           key: `${spec.key}-unknown`,
-          label: "Coverage gap (#740)",
+          label: unknownLeafLabel(spec.label, spec.unknown_reason),
           shares: 0,
           pct: 0,
           is_other: false,
@@ -339,4 +415,18 @@ function buildCategory(
     status: "ok",
     leaves,
   };
+}
+
+function unknownLeafLabel(
+  category_label: string,
+  reason: SunburstUnknownReason | undefined,
+): string {
+  switch (reason) {
+    case "cusip_backfill":
+      return `${category_label} — needs CUSIP backfill (#740)`;
+    case "dei_projection":
+      return `${category_label} — DEI projection pending (#735)`;
+    default:
+      return `${category_label} — data not available`;
+  }
 }

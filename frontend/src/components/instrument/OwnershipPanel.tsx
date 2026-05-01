@@ -340,6 +340,11 @@ function renderBody(
     );
   }
 
+  const knownPct = rings.inner.known_pct;
+  const gapPct = rings.inner.gap_pct;
+  const hasMaterialGap = gapPct > 0.005; // > 0.5% counts as material to surface
+  const gapReasons = collectGapReasons(rings.categories);
+
   return (
     <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
       <div className="flex justify-center">
@@ -347,11 +352,29 @@ function renderBody(
       </div>
       <div className="min-w-0 flex-1">
         {data.as_of_period !== null && (
-          <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
+          <p className="mb-1 text-xs text-slate-500 dark:text-slate-400">
             As of {data.as_of_period}. Free float ={" "}
             {formatShares(data.free_float)} shares.
           </p>
         )}
+        <p className="mb-2 text-xs">
+          <span className="font-medium text-slate-700 dark:text-slate-200">
+            {formatPct(knownPct)} known
+          </span>
+          {hasMaterialGap && (
+            <>
+              <span className="mx-1.5 text-slate-400">·</span>
+              <span className="font-medium text-amber-700 dark:text-amber-400">
+                {formatPct(gapPct)} coverage gap
+              </span>
+              {gapReasons.length > 0 && (
+                <span className="ml-1 text-slate-500 dark:text-slate-400">
+                  ({gapReasons.join(", ")})
+                </span>
+              )}
+            </>
+          )}
+        </p>
         <table className="w-full text-sm">
           <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
             <tr>
@@ -370,7 +393,7 @@ function renderBody(
                   {cat.label}
                   {cat.status === "unknown" && (
                     <span className="ml-2 text-xs text-amber-600 dark:text-amber-400">
-                      coverage gap
+                      {unknownReasonShort(cat.unknown_reason)}
                     </span>
                   )}
                 </td>
@@ -390,4 +413,43 @@ function renderBody(
       </div>
     </div>
   );
+}
+
+function collectGapReasons(
+  categories: readonly { unknown_reason?: string; status: string }[],
+): string[] {
+  // Dedupes across categories so a stock with both
+  // institutions and ETFs gated on #740 doesn't repeat the
+  // ticket. Generic 'no_data' / undefined reasons fall back to a
+  // neutral label so the header parenthetical still surfaces
+  // when an unknown category cannot be tied to a tracked
+  // follow-up — "X% coverage gap" with no parenthetical was
+  // ambiguous and dropped a real gap below the operator's
+  // attention threshold.
+  const reasons = new Set<string>();
+  for (const cat of categories) {
+    if (cat.status !== "unknown") continue;
+    switch (cat.unknown_reason) {
+      case "cusip_backfill":
+        reasons.add("#740 CUSIP backfill");
+        break;
+      case "dei_projection":
+        reasons.add("#735 DEI projection");
+        break;
+      default:
+        reasons.add("data not on file");
+    }
+  }
+  return Array.from(reasons);
+}
+
+function unknownReasonShort(reason: string | undefined): string {
+  switch (reason) {
+    case "cusip_backfill":
+      return "needs CUSIPs (#740)";
+    case "dei_projection":
+      return "needs DEI tag (#735)";
+    default:
+      return "no data";
+  }
 }

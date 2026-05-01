@@ -6,10 +6,13 @@ import {
 } from "./ownershipRings";
 import type { SunburstHolder, SunburstInputs } from "./ownershipRings";
 
+// treasury_shares=0 (a positive "we know there is no treasury" signal)
+// means the default category set is fully known — individual tests
+// override to ``null`` to exercise the DEI-projection-gap path.
 const DEFAULT_INPUT: SunburstInputs = {
   free_float: 1_000_000_000,
   holders: [],
-  treasury_shares: null,
+  treasury_shares: 0,
   institutions_status: "ok",
   etfs_status: "ok",
   insiders_status: "ok",
@@ -43,16 +46,18 @@ describe("buildSunburstRings", () => {
     expect(buildSunburstRings({ ...DEFAULT_INPUT, free_float: NaN })).toBeNull();
   });
 
-  it("inner ring reports known + residual sum / float", () => {
+  it("inner ring known/gap split = full float when every category is known", () => {
     const input: SunburstInputs = {
       ...DEFAULT_INPUT,
       holders: [holder("vanguard", 100_000_000, "institutions")],
     };
     const r = buildSunburstRings(input);
     expect(r).not.toBeNull();
-    // Free float = 1B. Held = 100M (institutions) + 900M (unallocated residual) = 1B.
-    expect(r!.inner.shares).toBe(1_000_000_000);
-    expect(r!.inner.pct).toBeCloseTo(1);
+    // Float=1B, institutions=100M, unallocated=900M, gap=0.
+    expect(r!.inner.known_shares).toBe(1_000_000_000);
+    expect(r!.inner.gap_shares).toBe(0);
+    expect(r!.inner.known_pct).toBeCloseTo(1);
+    expect(r!.inner.gap_pct).toBeCloseTo(0);
   });
 
   it("filer above threshold gets its own outer-ring wedge", () => {
@@ -158,11 +163,36 @@ describe("buildSunburstRings", () => {
     const r = buildSunburstRings(input);
     const inst = r!.categories.find((c) => c.key === "institutions")!;
     expect(inst.status).toBe("unknown");
+    expect(inst.unknown_reason).toBe("cusip_backfill");
     expect(inst.leaves).toHaveLength(1);
-    expect(inst.leaves[0]!.label).toContain("Coverage gap");
-    // Unallocated also flagged unknown when any category is unknown.
+    expect(inst.leaves[0]!.label).toContain("CUSIP backfill");
+    // Unallocated collapses to 'empty' when an upstream category
+    // is unknown — its residual would be contaminated by the
+    // upstream gap and would mislead the operator if surfaced.
     const unalloc = r!.categories.find((c) => c.key === "unallocated")!;
-    expect(unalloc.status).toBe("unknown");
+    expect(unalloc.status).toBe("empty");
+    expect(unalloc.shares).toBe(0);
+  });
+
+  it("inner ring splits known vs gap when categories are unknown", () => {
+    // Only insiders + treasury known; institutions + ETFs gated by
+    // CUSIP backfill. Inner ring's gap_shares should equal float
+    // minus everything we genuinely know.
+    const input: SunburstInputs = {
+      ...DEFAULT_INPUT,
+      holders: [holder("ceo", 50_000_000, "insiders")],
+      treasury_shares: 30_000_000,
+      institutions_status: "unknown",
+      etfs_status: "unknown",
+    };
+    const r = buildSunburstRings(input);
+    expect(r).not.toBeNull();
+    // Known = insiders 50M + treasury 30M = 80M.
+    expect(r!.inner.known_shares).toBe(80_000_000);
+    // Gap = float 1B - 80M = 920M.
+    expect(r!.inner.gap_shares).toBe(920_000_000);
+    expect(r!.inner.known_pct).toBeCloseTo(0.08);
+    expect(r!.inner.gap_pct).toBeCloseTo(0.92);
   });
 
   it("treasury wedge present when treasury_shares > 0", () => {
@@ -177,7 +207,10 @@ describe("buildSunburstRings", () => {
     expect(treasury.leaves).toHaveLength(1);
   });
 
-  it("treasury status='unknown' when input is null", () => {
+  it("treasury status='unknown' with reason='dei_projection' when input is null", () => {
+    // Treasury_shares null is the #735 / DEI projection gap, not
+    // the CUSIP backfill. Operator-facing copy should surface that
+    // distinction so they don't conflate the two follow-ups.
     const input: SunburstInputs = {
       ...DEFAULT_INPUT,
       treasury_shares: null,
@@ -185,6 +218,8 @@ describe("buildSunburstRings", () => {
     const r = buildSunburstRings(input);
     const treasury = r!.categories.find((c) => c.key === "treasury")!;
     expect(treasury.status).toBe("unknown");
+    expect(treasury.unknown_reason).toBe("dei_projection");
+    expect(treasury.leaves[0]!.label).toContain("DEI projection");
   });
 
   it("unallocated absorbs the float residual when every category is known", () => {
