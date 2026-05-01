@@ -99,6 +99,14 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "insider_transactions",
     "insider_filers",
     "insider_filings",
+    # #730 — 13F-HR institutional holdings. Child-to-parent:
+    # institutional_holdings FKs into institutional_filers AND
+    # instruments (so the instrument truncation further down would
+    # cascade), but listing them explicitly keeps teardown
+    # deterministic when a test populates filer / holding rows
+    # without touching the instruments row in the same case.
+    "institutional_holdings",
+    "institutional_filers",
     "filing_events",
     "decision_audit",  # #315 Phase 3 alerts
     "trade_recommendations",  # #315 Phase 3 alerts (FK parent of decision_audit)
