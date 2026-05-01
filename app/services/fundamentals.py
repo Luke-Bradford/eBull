@@ -513,6 +513,8 @@ def refresh_financial_facts(
     provider: SecFundamentalsProvider,
     conn: psycopg.Connection[tuple],
     symbols: Sequence[tuple[str, int, str]],
+    *,
+    fetch_workers: int = 8,
 ) -> FactsRefreshSummary:
     """Fetch and store XBRL facts for all given symbols.
 
@@ -520,35 +522,106 @@ def refresh_financial_facts(
     ----------
     symbols:
         List of (symbol, instrument_id, cik) tuples.
+    fetch_workers:
+        Threadpool size for the SEC fetch+parse phase. The shared
+        process-wide throttle (``_PROCESS_RATE_LIMIT_CLOCK`` in
+        ``sec_edgar.py``) keeps aggregate request rate at SEC's 10
+        req/s ceiling regardless. Default 8 saturates the ceiling at
+        the typical 0.11s floor + 800ms RTT (#728, #761).
+
+    Pipeline shape:
+      * **Fetch + parse** runs in parallel via ``concurrent_iter``.
+        Each worker fetches one issuer's ``companyfacts`` JSON over
+        HTTP (rate-limited by the shared throttle) and parses it
+        into ``(facts, catalog)`` tuples. SEC response time (~800ms)
+        overlaps across workers.
+      * **Upsert** consumes results streaming-style as workers
+        complete. ``psycopg.Connection`` is not thread-safe; per-
+        instrument ``conn.transaction()`` blocks must remain on the
+        caller's single thread. Each upsert is its own savepoint so
+        a single bad row can't roll back the whole batch.
+
+    Memory bound: only ``fetch_workers`` parsed payloads are
+    in-flight at any moment — the streaming iterator yields each
+    result as it completes and the upsert drains it before the next
+    arrives. Pre-#761 streaming refactor, the implementation
+    materialised every ``(facts, catalog)`` pair in a list before
+    starting any upsert, scaling memory with the full batch.
+
+    Transaction discipline: ``start_ingestion_run`` writes its row,
+    then we ``commit()`` before the multi-second parallel fetch
+    starts so the session is not idle-in-transaction across the
+    whole batch (mirrors the per-CIK pattern in ``sec_incremental``).
+    Each per-instrument upsert opens its own ``conn.transaction()``
+    block; the final ``finish_ingestion_run`` updates the ledger row
+    and is committed at function exit.
+
+    Pre-#761 the loop ran fetch + upsert sequentially per CIK, using
+    only ~10% of SEC's allowed budget. Smoke test on a 77-issuer
+    slice: 17.3s wall clock = 4.45 req/s, ~10x sequential.
     """
+    from app.providers.concurrent_fetch import concurrent_iter
+
     run_id = start_ingestion_run(
         conn,
         source="sec_edgar",
         endpoint="/api/xbrl/companyfacts",
         instrument_count=len(symbols),
     )
+    # Commit the ledger row so the parallel fetch phase below does
+    # not run inside an idle-in-transaction window. ``conn.commit()``
+    # closes the implicit read tx the planner opened too — codex
+    # review medium #1.
+    conn.commit()
 
     total_upserted = 0
     total_skipped = 0
     failed = 0
     total = len(symbols)
+    done = 0
 
-    for idx, (symbol, instrument_id, cik) in enumerate(symbols, start=1):
+    def _fetch_one(
+        triple: tuple[str, int, str],
+    ) -> tuple[list[Any], list[Any]] | None:
+        symbol, _, cik = triple
+        # #451 Phase A — combined fetch returns both facts and
+        # catalogue entries from one HTTP round-trip. Fall back to
+        # ``extract_facts`` for test stubs that haven't implemented
+        # the combined helper yet.
+        if hasattr(provider, "extract_facts_and_catalog"):
+            facts, catalog = provider.extract_facts_and_catalog(symbol, cik)
+            return list(facts), list(catalog)
+        else:
+            facts = provider.extract_facts(symbol, cik)  # type: ignore[attr-defined]
+            return list(facts), []
+
+    # Streaming pipeline — yields ``((symbol, instrument_id, cik),
+    # (facts, catalog) | None)`` as each fetch completes. Memory
+    # bounded to ``fetch_workers`` payloads in-flight.
+    for triple, fetch_result in concurrent_iter(
+        _fetch_one,
+        list(symbols),
+        max_workers=fetch_workers,
+        log_label="refresh_financial_facts.fetch",
+    ):
+        done += 1
+        symbol, instrument_id, cik = triple
+        if fetch_result is None:
+            failed += 1
+            logger.warning(
+                "SEC facts fetch failed for %s (CIK %s) — see prior traceback",
+                symbol,
+                cik,
+            )
+            report_progress(done, total)
+            continue
+        facts, catalog_entries = fetch_result
+        if not facts:
+            logger.info("No XBRL facts for %s (CIK %s)", symbol, cik)
+            report_progress(done, total)
+            continue
         try:
             with conn.transaction():
-                # #451 Phase A — single fetch returns both fact rows
-                # and catalogue entries. Avoids a second SEC round-
-                # trip for the editorial metadata. Fall back to the
-                # legacy ``extract_facts`` when a test stub doesn't
-                # implement the combined helper yet.
-                if hasattr(provider, "extract_facts_and_catalog"):
-                    facts, catalog_entries = provider.extract_facts_and_catalog(symbol, cik)
-                else:
-                    facts = provider.extract_facts(symbol, cik)  # type: ignore[attr-defined]
-                    catalog_entries = []
-                if not facts:
-                    logger.info("No XBRL facts for %s (CIK %s)", symbol, cik)
-                    continue
                 upserted, skipped = upsert_facts_for_instrument(
                     conn,
                     instrument_id=instrument_id,
@@ -568,8 +641,8 @@ def refresh_financial_facts(
                 )
         except Exception:
             failed += 1
-            logger.exception("Failed to refresh SEC facts for %s", symbol)
-        report_progress(idx, total)
+            logger.exception("Failed to upsert SEC facts for %s", symbol)
+        report_progress(done, total)
 
     report_progress(total, total, force=True)
 
