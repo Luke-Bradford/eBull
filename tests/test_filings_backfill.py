@@ -63,7 +63,10 @@ class FakeSecProvider:
         self._resp = resp
         self.fetch_submissions_calls: list[str] = []
         self.fetch_page_calls: list[str] = []
-        self.get_filing_calls: list[str] = []
+        # Records (provider_filing_id, issuer_cik) so tests can pin
+        # that callers (e.g. coverage.py 8-K backfill) thread the
+        # CIK hint through correctly — #736 followup.
+        self.get_filing_calls: list[tuple[str, str | None]] = []
 
     def fetch_submissions(self, cik: str) -> dict[str, object] | None:
         self.fetch_submissions_calls.append(cik)
@@ -77,8 +80,13 @@ class FakeSecProvider:
             raise self._resp.page_raises[name]
         return self._resp.pages.get(name)
 
-    def get_filing(self, provider_filing_id: str) -> FilingEvent:
-        self.get_filing_calls.append(provider_filing_id)
+    def get_filing(
+        self,
+        provider_filing_id: str,
+        *,
+        issuer_cik: str | None = None,
+    ) -> FilingEvent:
+        self.get_filing_calls.append((provider_filing_id, issuer_cik))
         if self._resp.get_filing_raises and provider_filing_id in self._resp.get_filing_raises:
             raise self._resp.get_filing_raises[provider_filing_id]
         if provider_filing_id not in self._resp.filings:
@@ -787,7 +795,13 @@ class TestEightKGap:
             result = backfill_filings(ebull_test_conn, provider, "0000000001", 1)  # type: ignore[arg-type]
 
             assert result.outcome == BackfillOutcome.STILL_INSUFFICIENT_HTTP_ERROR
-            assert provider.get_filing_calls == ["K-26-000100"]
+            # #736 followup: coverage.py threads the issuer's CIK
+            # through to get_filing so the archive URL routes under
+            # the issuer rather than the agent. Pin the keyword
+            # value here too — without this assertion a future
+            # refactor that drops the keyword silently re-introduces
+            # the agent-CIK 404 bug for backfilled 8-Ks.
+            assert provider.get_filing_calls == [("K-26-000100", "0000000001")]
         finally:
             backfill_module._upsert_filing = orig_upsert
 
