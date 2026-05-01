@@ -418,11 +418,27 @@ function renderBody(
 function collectGapReasons(
   categories: readonly { unknown_reason?: string; status: string }[],
 ): string[] {
+  // Dedupes across categories so a stock with both
+  // institutions and ETFs gated on #740 doesn't repeat the
+  // ticket. Generic 'no_data' / undefined reasons fall back to a
+  // neutral label so the header parenthetical still surfaces
+  // when an unknown category cannot be tied to a tracked
+  // follow-up — "X% coverage gap" with no parenthetical was
+  // ambiguous and dropped a real gap below the operator's
+  // attention threshold.
   const reasons = new Set<string>();
   for (const cat of categories) {
     if (cat.status !== "unknown") continue;
-    if (cat.unknown_reason === "cusip_backfill") reasons.add("#740 CUSIP backfill");
-    if (cat.unknown_reason === "dei_projection") reasons.add("#735 DEI projection");
+    switch (cat.unknown_reason) {
+      case "cusip_backfill":
+        reasons.add("#740 CUSIP backfill");
+        break;
+      case "dei_projection":
+        reasons.add("#735 DEI projection");
+        break;
+      default:
+        reasons.add("data not on file");
+    }
   }
   return Array.from(reasons);
 }
