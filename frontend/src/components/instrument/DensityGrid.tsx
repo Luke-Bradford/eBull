@@ -51,6 +51,7 @@ import { FilingsPane } from "@/components/instrument/FilingsPane";
 import { FundamentalsPane } from "@/components/instrument/FundamentalsPane";
 import { InsiderActivitySummary } from "@/components/instrument/InsiderActivitySummary";
 import { KeyStatsPane } from "@/components/instrument/KeyStatsPane";
+import { OwnershipPanel } from "@/components/instrument/OwnershipPanel";
 import { Pane } from "@/components/instrument/Pane";
 import { PriceChart } from "@/components/instrument/PriceChart";
 import { RecentNewsPane } from "@/components/instrument/RecentNewsPane";
@@ -188,7 +189,13 @@ export function DensityGrid({
         ) : null}
         {/* Zone D — Activity (Insider + Recent news 6+6) */}
         {ActivityRow}
-        {/* Zone E — Operator */}
+        {/* Zone E — Ownership (#729). Full-width for now; operator
+            can refine pairing once #740 closes the CUSIP backfill
+            and the slices show real data. */}
+        <div className="col-span-12">
+          <OwnershipPanel symbol={symbol} />
+        </div>
+        {/* Zone F — Operator */}
         {thesis !== null || thesisErrored ? (
           <div className="col-span-12">
             <ThesisPane thesis={thesis} errored={thesisErrored} />
