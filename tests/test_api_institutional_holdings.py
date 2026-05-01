@@ -289,10 +289,19 @@ class TestInstitutionalHoldingsEndpoint:
         client: TestClient,
     ) -> None:
         """Codex review pin: a filer holding ONLY a PUT/CALL on this
-        instrument shows up in ``filers`` (drilldown). ``total_filers``
-        must match the visible drilldown count, otherwise card
-        arithmetic that asserts ``total_filers == len(filers)``
-        silently breaks. Slice counts stay equity-only."""
+        instrument shows up in ``filers`` (drilldown). The pre-fix
+        version counted only equity-cohort filers, so a PUT-only
+        filer appeared in ``filers`` but not in any count — breaking
+        the invariant ``total_filers >= len(filers)`` whenever
+        ``filers`` was unpaginated.
+
+        With ``len(filers) <= limit`` AND filer count below the cap
+        (this fixture has 2 filers + default limit 50), the two
+        match exactly. The general invariant under pagination is
+        ``total_filers >= len(filers)`` — pinned in
+        :py:meth:`test_total_filers_exceeds_filers_when_paginated`.
+        Slice counts stay equity-only because they tie to the
+        slice-share totals."""
         conn = ebull_test_conn
         _seed_instrument(conn, iid=730_405, symbol="AAPL_T7")
         seed_etf_filer(conn, cik="0000102909", label="VANGUARD")
@@ -368,6 +377,44 @@ class TestInstitutionalHoldingsEndpoint:
         # Top-N by shares DESC.
         assert Decimal(data["filers"][0]["shares"]) == Decimal("3000000")
         assert Decimal(data["filers"][1]["shares"]) == Decimal("2000000")
+
+    def test_total_filers_exceeds_filers_when_paginated(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        client: TestClient,
+    ) -> None:
+        """When the filer cohort exceeds ``?limit=``, the response's
+        ``filers`` list is capped while ``total_filers`` remains the
+        full distinct-filer count. The card consumer needs that
+        contract to render "showing N of M" correctly. Pinning the
+        general invariant ``total_filers >= len(filers)``."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=730_406, symbol="AAPL_T8")
+
+        # Five filers, all equity holdings. Bigger than ?limit=2 below.
+        for i, cik in enumerate(["0000000010", "0000000011", "0000000012", "0000000013", "0000000014"]):
+            seed_filer(conn, cik=cik, label=f"FILER_{i}")
+            filer_id = _upsert_filer(conn, _make_filer_info(cik=cik, name=f"FILER_{i}"))
+            _upsert_holding(
+                conn,
+                filer_id=filer_id,
+                instrument_id=730_406,
+                accession_number=f"{cik}-25-Q4",
+                period_of_report=date(2024, 12, 31),
+                filed_at=datetime(2025, 2, 14, tzinfo=UTC),
+                holding=_make_holding(shares=str(1_000_000 * (i + 1))),
+            )
+        conn.commit()
+
+        resp = client.get("/instruments/AAPL_T8/institutional-holdings?limit=2")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # Drilldown is capped by limit; total_filers is unbounded.
+        assert len(data["filers"]) == 2
+        assert data["totals"]["total_filers"] == 5
+        # The general invariant: total_filers >= len(filers).
+        assert data["totals"]["total_filers"] >= len(data["filers"])
 
     def test_limit_clamped_to_max(
         self,
