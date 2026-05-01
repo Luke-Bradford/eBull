@@ -1,371 +1,270 @@
 /**
- * Sunburst data transformer for the ownership card (#729).
+ * Ownership sunburst data model (#729).
  *
- * Three concentric rings:
+ * Three concentric rings keyed on a single denominator:
+ * ``total_shares`` (= ``shares_outstanding + treasury_shares``).
+ * Treasury counts toward the denominator because the operator's
+ * mental model is "100% of issued / allotted shares — some held in
+ * the market, some held back in the company's vault". Treasury
+ * appears as one of the categories.
  *
- *   ring 1 (inner)  : single arc — "Held" (sum of all categories below)
- *   ring 2 (middle) : per-category — Institutions / ETFs / Insiders / Treasury / Unallocated
- *   ring 3 (outer)  : per-filer / per-officer wedges within each category, plus
- *                     "Other [Category]" tail-aggregate when individual filers
- *                     fall below the visibility threshold.
+ *   ring 1 (inner)  : center hole shows ``total_shares``.
+ *   ring 2 (middle) : per-category wedges sized faithfully against
+ *                     ``total_shares``. Categories with shares=0 are
+ *                     not rendered. After every known category, a
+ *                     single transparent wedge soaks up the residual
+ *                     so the visible arcs stop short and the operator
+ *                     sees a literal empty arc for the unaccounted
+ *                     portion of the float.
+ *   ring 3 (outer)  : per-filer / per-officer wedges within each
+ *                     category, sized faithfully. If a category's
+ *                     known leaves sum to less than the category
+ *                     total (e.g. Institutions reports 50% of
+ *                     outstanding via 13F totals but only resolves
+ *                     47% to named filers), the outer ring shows
+ *                     a transparent arc for the within-category
+ *                     gap.
  *
- * Threshold-based grouping (vs top-N):
- *   * 0.5% of float OR 10,000 shares — whichever is larger
- *   * The float-relative floor keeps mega-caps with hundreds of small
- *     13F filers from drowning the canvas in confetti while still
- *     promoting any holder large enough to move the thesis.
- *   * The 10,000-share absolute floor prevents thinly-floated
- *     micro-caps from setting an effectively-zero threshold that
- *     would render every legitimate holder.
- *   * Insiders bypass the threshold — the officer set is small and
- *     every officer's holding is signal.
+ * Threshold-based grouping for outer-ring leaves: every filer that
+ * meets ``max(0.5% of outstanding, 10,000 shares)`` gets its own
+ * wedge. Sub-threshold filers aggregate into "Other [Category]"
+ * with tail metadata.
  *
- * Coverage gating: when a category's total is unknown (Institutions /
- * ETFs gated on #740 CUSIP backfill), the transformer emits a
- * sentinel ``status='unknown'`` middle wedge sized to the residual
- * (free-float minus known categories) so the operator sees the gap
- * visually rather than as missing slices.
+ * Snapshot-lag / oversubscription handling — both can occur because
+ * totals (13F aggregate snapshot, XBRL period-end balance) and
+ * per-filer detail (13F filings) carry independent snapshot dates:
+ *
+ *   * Per-category leaf cap: when filer detail sums to MORE than the
+ *     category total (snapshot lag), the category's reported total
+ *     is bumped to ``max(reported, sum_of_leaves)``. The leaves are
+ *     more recent ground truth — using their sum as the wedge size
+ *     keeps ring 3 inside ring 2 geometrically.
+ *   * Cross-category oversubscription: when category totals sum to
+ *     more than the input ``total_shares`` (XBRL outstanding +
+ *     treasury can lag), the effective denominator is bumped to the
+ *     sum so wedges aren't silently renormalised by Recharts.
+ *
+ * No synthetic placeholders. No "unknown" status hack. The chart
+ * faithfully reports what we know and literally leaves the rest
+ * empty.
  */
-
-export type SunburstCategoryStatus = "ok" | "unknown" | "empty";
-
-/**
- * Why a category resolves to ``status='unknown'``. Drives the
- * tooltip + summary copy so the operator distinguishes a CUSIP
- * backfill gap (#740) from a missing DEI cover-page projection
- * (#735) etc. Today only ``cusip_backfill`` is wired through;
- * ``dei_projection`` is reserved for treasury_shares specifically
- * and lights up once #735 surfaces the column.
- */
-export type SunburstUnknownReason =
-  | "cusip_backfill"
-  | "dei_projection"
-  | "no_data";
-
-export interface SunburstCategory {
-  readonly key: string; // 'institutions' | 'etfs' | 'insiders' | 'treasury' | 'unallocated'
-  readonly label: string;
-  readonly shares: number;
-  readonly pct: number; // share / float
-  readonly status: SunburstCategoryStatus;
-  /** Set only when ``status === 'unknown'``. */
-  readonly unknown_reason?: SunburstUnknownReason;
-  /** Outer-ring wedges within this category. */
-  readonly leaves: readonly SunburstLeaf[];
-}
-
-export interface SunburstLeaf {
-  readonly key: string; // stable id for click-drill (filer cik, officer name, "other-etfs")
-  readonly label: string;
-  readonly shares: number;
-  readonly pct: number; // share / float
-  /** True for the aggregated tail wedge. */
-  readonly is_other: boolean;
-  /** Counts only meaningful on the "Other" tail wedge. */
-  readonly tail_meta?: SunburstTailMeta;
-}
-
-export interface SunburstTailMeta {
-  readonly count: number;
-  readonly aggregate_shares: number;
-  readonly aggregate_pct: number;
-  readonly largest_label: string;
-  readonly largest_pct: number;
-}
 
 export interface SunburstHolder {
   /** Stable identifier — filer CIK, officer CIK, or fallback name. */
   readonly key: string;
   readonly label: string;
   readonly shares: number;
-  readonly category: "institutions" | "etfs" | "insiders";
+  readonly category: "institutions" | "etfs" | "insiders" | "treasury";
 }
 
 export interface SunburstInputs {
-  readonly free_float: number;
-  /** Holders contributing to Institutions / ETFs / Insiders. */
+  /** Denominator. Every category + leaf is sized as a proportion of
+   *  this number; the visible arcs sum to ≤100%. Callers typically
+   *  compute this as ``shares_outstanding + (treasury_shares ?? 0)``. */
+  readonly total_shares: number;
+
+  /** Per-filer detail for institutional / ETF / insider categories.
+   *  May be incomplete (e.g. CUSIP-backfill #740 means many filers
+   *  resolve to no instrument and are dropped). */
   readonly holders: readonly SunburstHolder[];
-  /** Treasury memo line — single wedge under its own middle category. */
+
+  /** Aggregate share counts per category from the upstream API.
+   *  These can exceed ``sum(holders.shares)`` when the per-filer
+   *  detail is incomplete — the ring 3 transparent arc visualises
+   *  that gap. ``null`` = the API returned no data; the category
+   *  does not render at all (its share of the ring stays empty). */
+  readonly institutions_total: number | null;
+  readonly etfs_total: number | null;
+  readonly insiders_total: number | null;
+
+  /** Treasury (issuer-held) shares from XBRL. ``null`` = not on
+   *  file; treasury wedge does not render. Counted in the
+   *  denominator when present. */
   readonly treasury_shares: number | null;
-  /**
-   * Per-category status flags. ``unknown`` short-circuits the
-   * transformer for that category so ungated CUSIP coverage doesn't
-   * silently appear as 0%.
-   */
-  readonly institutions_status: SunburstCategoryStatus;
-  readonly etfs_status: SunburstCategoryStatus;
-  readonly insiders_status: SunburstCategoryStatus;
 }
 
-/**
- * Inner-ring split. Pre-#746 the inner ring reported "Held" as a
- * single arc summing every category including the synthetic
- * ``unknown`` placeholders — so an instrument with 95% of its
- * float in coverage-gap categories rendered a 100% Held arc,
- * which lied. Now the inner ring carries explicit ``known`` and
- * ``gap`` segments and the renderer draws them as two arcs.
- */
-export interface InnerRing {
-  /** Sum of every category whose status is ``ok``. */
-  readonly known_shares: number;
-  /** Sum of every category whose status is ``unknown`` — i.e. the
-   *  free-float residual that we cannot account for today. */
-  readonly gap_shares: number;
-  readonly known_pct: number;
-  readonly gap_pct: number;
+export type CategoryKey = "institutions" | "etfs" | "insiders" | "treasury";
+
+export interface SunburstLeaf {
+  readonly key: string;
+  readonly label: string;
+  readonly shares: number;
+  /** True for the aggregated tail wedge from threshold grouping. */
+  readonly is_other: boolean;
+  readonly tail_meta?: SunburstTailMeta;
+}
+
+export interface SunburstTailMeta {
+  readonly count: number;
+  readonly aggregate_shares: number;
+  readonly largest_label: string;
+  readonly largest_shares: number;
+}
+
+export interface SunburstCategory {
+  readonly key: CategoryKey;
+  readonly label: string;
+  /** Aggregate share count for the category. Drives the middle-ring
+   *  wedge size. Bumped to ``sum(leaves)`` when filer detail
+   *  oversubscribes the upstream-reported total (snapshot lag). */
+  readonly shares: number;
+  /** Upstream-reported total before snapshot-lag bump. Surfaced for
+   *  diagnostics — operator-facing copy can flag when ``shares !=
+   *  reported_total``. */
+  readonly reported_total: number;
+  /** Sum of named-filer shares we have detail on. Equals
+   *  ``shares`` when detail is complete; less when incomplete. */
+  readonly resolved_leaf_shares: number;
+  /** Per-filer wedges. */
+  readonly leaves: readonly SunburstLeaf[];
+  /** Outer-ring residual = ``shares - resolved_leaf_shares``. The
+   *  renderer paints a transparent wedge of this size so the named
+   *  leaves don't get inflated to fill the parent arc. */
+  readonly within_category_gap: number;
 }
 
 export interface SunburstRings {
-  readonly free_float: number;
-  readonly inner: InnerRing;
-  /** ring 2 — per-category wedges. */
+  /** Effective denominator. Equals input ``total_shares`` unless
+   *  category totals oversubscribe — in that case bumped to the
+   *  sum so wedges aren't silently renormalised by Recharts. */
+  readonly total_shares: number;
+  /** Input ``total_shares`` before oversubscription bump. Surfaced
+   *  for diagnostic copy when the two diverge. */
+  readonly reported_total: number;
+  /** Categories that render. Any category whose total is null/0 is
+   *  omitted; its proportion of the ring stays empty. */
   readonly categories: readonly SunburstCategory[];
+  /** ``total_shares - sum(categories.shares)``. The renderer paints
+   *  a transparent wedge of this size on ring 2 so the visible arcs
+   *  faithfully report only what we know. */
+  readonly category_residual: number;
 }
 
 const SHARES_FLOOR = 10_000;
-const FLOAT_PCT_FLOOR = 0.005; // 0.5%
+const OUTSTANDING_PCT_FLOOR = 0.005; // 0.5%
 
 /**
- * Compute the per-category visibility threshold for outer-ring wedges.
+ * Per-category visibility threshold for outer-ring leaves. Filers
+ * below this size aggregate into the category's "Other" wedge.
  *
- * Insiders ignore this — every officer surfaces.
+ * Insiders ignore the threshold — every officer surfaces.
  */
-export function visibilityThreshold(free_float: number): number {
-  if (free_float <= 0) return SHARES_FLOOR;
-  return Math.max(SHARES_FLOOR, free_float * FLOAT_PCT_FLOOR);
+export function visibilityThreshold(total_shares: number): number {
+  if (total_shares <= 0) return SHARES_FLOOR;
+  return Math.max(SHARES_FLOOR, total_shares * OUTSTANDING_PCT_FLOOR);
 }
 
-interface CategorySpec {
-  readonly key: "institutions" | "etfs" | "insiders" | "treasury" | "unallocated";
-  readonly label: string;
-  readonly status: SunburstCategoryStatus;
-  /** Reason an unknown-status category resolved unknown — drives
-   *  the operator-facing tooltip + summary copy. */
-  readonly unknown_reason?: SunburstUnknownReason;
-  /** True = bypass the visibility threshold (insiders, treasury, unallocated). */
-  readonly bypass_threshold: boolean;
-}
-
-const CATEGORY_LABEL: Record<string, string> = {
+const CATEGORY_LABEL: Record<CategoryKey, string> = {
   institutions: "Institutions",
   etfs: "ETFs",
   insiders: "Insiders",
   treasury: "Treasury",
-  unallocated: "Unallocated",
 };
 
 /**
- * Transform raw inputs into the three-ring sunburst data model.
- *
- * Returns ``null`` when ``free_float`` is missing / zero — the caller
- * renders the card empty state (no denominator → no rings).
+ * Build the ring data. Returns ``null`` when ``total_shares`` is
+ * missing / zero — caller renders the empty state.
  */
 export function buildSunburstRings(input: SunburstInputs): SunburstRings | null {
-  if (input.free_float <= 0 || !Number.isFinite(input.free_float)) return null;
-
-  const float = input.free_float;
-  const threshold = visibilityThreshold(float);
+  const reported_total = input.total_shares;
+  if (reported_total <= 0 || !Number.isFinite(reported_total)) return null;
 
   const inst_holders = input.holders.filter((h) => h.category === "institutions");
   const etf_holders = input.holders.filter((h) => h.category === "etfs");
   const insider_holders = input.holders.filter((h) => h.category === "insiders");
 
-  const institutions = buildCategory(
-    {
-      key: "institutions",
-      label: CATEGORY_LABEL.institutions!,
-      status: input.institutions_status,
-      unknown_reason: "cusip_backfill",
-      bypass_threshold: false,
-    },
-    inst_holders,
-    float,
-    threshold,
-  );
-  const etfs = buildCategory(
-    {
-      key: "etfs",
-      label: CATEGORY_LABEL.etfs!,
-      status: input.etfs_status,
-      unknown_reason: "cusip_backfill",
-      bypass_threshold: false,
-    },
-    etf_holders,
-    float,
-    threshold,
-  );
-  const insiders = buildCategory(
-    {
-      key: "insiders",
-      label: CATEGORY_LABEL.insiders!,
-      status: input.insiders_status,
-      unknown_reason: "no_data",
-      bypass_threshold: true,
-    },
-    insider_holders,
-    float,
-    threshold,
-  );
+  // Threshold should align with the effective denominator the chart
+  // ends up rendering against. When category totals oversubscribe
+  // ``reported_total`` (snapshot lag), the renderer bumps the
+  // denominator to ``sum_known`` — base the visibility threshold on
+  // a pessimistic upper bound (max of reported_total and the sum of
+  // every input holder's shares) so the 0.5% rule applies to the
+  // denom the operator actually sees.
+  const sum_holders = input.holders.reduce((s, h) => s + h.shares, 0);
+  const threshold = visibilityThreshold(Math.max(reported_total, sum_holders));
 
-  // Treasury renders as a single leaf wedge.
-  // Distinguish "treasury reported as zero" from "DEI projection
-  // missing" — treasury_shares=null is the #735 / #731 follow-up,
-  // not the CUSIP-backfill #740 gap.
-  const treasury_shares = input.treasury_shares ?? 0;
-  const treasury_status: SunburstCategoryStatus =
-    input.treasury_shares === null
-      ? "unknown"
-      : treasury_shares > 0
-        ? "ok"
-        : "empty";
-  const treasury: SunburstCategory = {
-    key: "treasury",
-    label: CATEGORY_LABEL.treasury!,
-    shares: treasury_shares,
-    pct: treasury_shares / float,
-    status: treasury_status,
-    ...(treasury_status === "unknown"
-      ? { unknown_reason: "dei_projection" as const }
-      : {}),
-    leaves:
-      treasury_status === "unknown"
-        ? [
-            {
-              key: "treasury-unknown",
-              label: "Treasury — DEI projection pending",
-              shares: 0,
-              pct: 0,
-              is_other: false,
-            },
-          ]
-        : treasury_shares > 0
-          ? [
-              {
-                key: "treasury",
-                label: "Treasury",
-                shares: treasury_shares,
-                pct: treasury_shares / float,
-                is_other: false,
-              },
-            ]
-          : [],
-  };
+  const categories: SunburstCategory[] = [];
 
-  // Unallocated absorbs whatever's left after every known category. When
-  // any category is ``unknown`` we cannot derive Unallocated cleanly —
-  // emit it as ``empty`` so the operator's eye lands on the
-  // upstream-unknown wedges as the source of the gap, not on a
-  // fabricated "Unallocated coverage gap" downstream wedge.
-  const known_shares =
-    (institutions.status === "ok" ? institutions.shares : 0) +
-    (etfs.status === "ok" ? etfs.shares : 0) +
-    (insiders.status === "ok" ? insiders.shares : 0) +
-    (treasury.status === "ok" ? treasury.shares : 0);
-
-  const has_unknown =
-    institutions.status === "unknown" ||
-    etfs.status === "unknown" ||
-    insiders.status === "unknown" ||
-    treasury.status === "unknown";
-
-  const residual_shares = Math.max(0, float - known_shares);
-  // When every category is ``ok``, residual is the genuine
-  // Unallocated slice (retail + small holders below the 13F threshold).
-  // When any category is ``unknown``, the residual is contaminated
-  // by the upstream gap and would mislead — collapse to ``empty``.
-  const unallocated: SunburstCategory = {
-    key: "unallocated",
-    label: CATEGORY_LABEL.unallocated!,
-    shares: has_unknown ? 0 : residual_shares,
-    pct: has_unknown ? 0 : residual_shares / float,
-    status: has_unknown ? "empty" : residual_shares > 0 ? "ok" : "empty",
-    leaves: has_unknown
-      ? []
-      : residual_shares > 0
-        ? [
-            {
-              key: "unallocated",
-              label: "Unallocated",
-              shares: residual_shares,
-              pct: residual_shares / float,
-              is_other: false,
-            },
-          ]
-        : [],
-  };
-
-  const categories = [institutions, etfs, insiders, treasury, unallocated];
-
-  // Inner-ring split: known (sum of OK categories + the
-  // ok-status Unallocated residual) vs gap (everything else =
-  // float minus known). Pre-fix the inner ring carried the synthetic
-  // unknown-padding through unaltered, lighting up as a 100% Held
-  // arc even when 95% of the float was in coverage gaps.
-  const inner_known = known_shares + (unallocated.status === "ok" ? unallocated.shares : 0);
-  const inner_gap = Math.max(0, float - inner_known);
-
-  return {
-    free_float: float,
-    inner: {
-      known_shares: inner_known,
-      gap_shares: inner_gap,
-      known_pct: inner_known / float,
-      gap_pct: inner_gap / float,
-    },
-    categories,
-  };
-}
-
-function buildCategory(
-  spec: CategorySpec,
-  holders: readonly SunburstHolder[],
-  float: number,
-  threshold: number,
-): SunburstCategory {
-  if (spec.status === "unknown") {
-    return {
-      key: spec.key,
-      label: spec.label,
-      shares: 0,
-      pct: 0,
-      status: "unknown",
-      ...(spec.unknown_reason !== undefined ? { unknown_reason: spec.unknown_reason } : {}),
+  if (input.institutions_total !== null && input.institutions_total > 0) {
+    categories.push(
+      buildCategoryFromTotal("institutions", input.institutions_total, inst_holders, threshold, false),
+    );
+  }
+  if (input.etfs_total !== null && input.etfs_total > 0) {
+    categories.push(
+      buildCategoryFromTotal("etfs", input.etfs_total, etf_holders, threshold, false),
+    );
+  }
+  if (input.insiders_total !== null && input.insiders_total > 0) {
+    categories.push(
+      buildCategoryFromTotal(
+        "insiders",
+        input.insiders_total,
+        insider_holders,
+        threshold,
+        true, // bypass threshold — every officer surfaces
+      ),
+    );
+  }
+  if (input.treasury_shares !== null && input.treasury_shares > 0) {
+    categories.push({
+      key: "treasury",
+      label: CATEGORY_LABEL.treasury,
+      shares: input.treasury_shares,
+      reported_total: input.treasury_shares,
+      resolved_leaf_shares: input.treasury_shares,
       leaves: [
         {
-          key: `${spec.key}-unknown`,
-          label: unknownLeafLabel(spec.label, spec.unknown_reason),
-          shares: 0,
-          pct: 0,
+          key: "treasury",
+          label: "Treasury",
+          shares: input.treasury_shares,
           is_other: false,
         },
       ],
-    };
+      within_category_gap: 0,
+    });
   }
 
+  // Cross-category oversubscription guard. If reported category
+  // totals sum to MORE than input total_shares, bump the effective
+  // denominator to the sum so Recharts doesn't silently renormalise
+  // ring 2 to occupy 360° at the wrong proportions.
+  const sum_known = categories.reduce((s, c) => s + c.shares, 0);
+  const total_shares = Math.max(reported_total, sum_known);
+  const category_residual = total_shares - sum_known;
+
+  return {
+    total_shares,
+    reported_total,
+    categories,
+    category_residual,
+  };
+}
+
+function buildCategoryFromTotal(
+  key: CategoryKey,
+  reported_total: number,
+  holders: readonly SunburstHolder[],
+  threshold: number,
+  bypass_threshold: boolean,
+): SunburstCategory {
   if (holders.length === 0) {
+    // Total from upstream API but zero per-filer detail (e.g.
+    // CUSIP-backfill #740 dropped every filer at ingest). Middle
+    // ring renders the category total; outer ring is one big
+    // transparent within-category gap.
     return {
-      key: spec.key,
-      label: spec.label,
-      shares: 0,
-      pct: 0,
-      status: "empty",
+      key,
+      label: CATEGORY_LABEL[key],
+      shares: reported_total,
+      reported_total,
+      resolved_leaf_shares: 0,
       leaves: [],
+      within_category_gap: reported_total,
     };
   }
 
-  const total_shares = holders.reduce((sum, h) => sum + h.shares, 0);
-  if (total_shares <= 0) {
-    return {
-      key: spec.key,
-      label: spec.label,
-      shares: 0,
-      pct: 0,
-      status: "empty",
-      leaves: [],
-    };
-  }
-
-  // Sort largest-first so the canvas reads counter-clockwise from
+  // Sort largest-first so wedges read counter-clockwise from
   // 12 o'clock with the dominant holders most visually prominent.
   const sorted = [...holders].sort((a, b) => b.shares - a.shares);
 
@@ -373,13 +272,12 @@ function buildCategory(
   const tail: SunburstHolder[] = [];
 
   for (const h of sorted) {
-    const passes = spec.bypass_threshold || h.shares >= threshold;
+    const passes = bypass_threshold || h.shares >= threshold;
     if (passes) {
       visible.push({
         key: h.key,
         label: h.label,
         shares: h.shares,
-        pct: h.shares / float,
         is_other: false,
       });
     } else {
@@ -392,41 +290,37 @@ function buildCategory(
     const aggregate_shares = tail.reduce((sum, h) => sum + h.shares, 0);
     const largest = tail.reduce((biggest, h) => (h.shares > biggest.shares ? h : biggest), tail[0]!);
     leaves.push({
-      key: `${spec.key}-other`,
-      label: `Other ${spec.label.toLowerCase()}`,
+      key: `${key}-other`,
+      label: `Other ${CATEGORY_LABEL[key].toLowerCase()}`,
       shares: aggregate_shares,
-      pct: aggregate_shares / float,
       is_other: true,
       tail_meta: {
         count: tail.length,
         aggregate_shares,
-        aggregate_pct: aggregate_shares / float,
         largest_label: largest.label,
-        largest_pct: largest.shares / float,
+        largest_shares: largest.shares,
       },
     });
   }
 
-  return {
-    key: spec.key,
-    label: spec.label,
-    shares: total_shares,
-    pct: total_shares / float,
-    status: "ok",
-    leaves,
-  };
-}
+  const resolved_leaf_shares = leaves.reduce((s, l) => s + l.shares, 0);
 
-function unknownLeafLabel(
-  category_label: string,
-  reason: SunburstUnknownReason | undefined,
-): string {
-  switch (reason) {
-    case "cusip_backfill":
-      return `${category_label} — needs CUSIP backfill (#740)`;
-    case "dei_projection":
-      return `${category_label} — DEI projection pending (#735)`;
-    default:
-      return `${category_label} — data not available`;
-  }
+  // Snapshot-lag bump: if filer detail sums to MORE than the
+  // upstream-reported category total, the leaves are more recent
+  // ground truth (13F filings post-date the aggregate snapshot).
+  // Use ``max(reported, sum_of_leaves)`` so ring 3 fits inside
+  // ring 2 geometrically; the ``reported_total`` field is preserved
+  // for diagnostic copy.
+  const shares = Math.max(reported_total, resolved_leaf_shares);
+  const within_category_gap = shares - resolved_leaf_shares;
+
+  return {
+    key,
+    label: CATEGORY_LABEL[key],
+    shares,
+    reported_total,
+    resolved_leaf_shares,
+    leaves,
+    within_category_gap,
+  };
 }

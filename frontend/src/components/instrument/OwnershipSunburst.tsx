@@ -1,21 +1,27 @@
 /**
- * Three-ring ownership sunburst (#729 follow-up).
+ * Three-ring ownership sunburst (#729).
+ *
+ * Faithful proportional rendering. Single denominator
+ * (``shares_outstanding``); every wedge is sized as its true share of
+ * the total. Categories or filers we don't have data for render as
+ * transparent arcs — literal empty space — so the operator sees the
+ * coverage gap in proper proportion rather than a synthetic
+ * placeholder.
+ *
+ *   ring 1 (inner)  — single solid band, decorative; denominator
+ *                     label sits in the center hole.
+ *   ring 2 (middle) — per-category wedges (Institutions / ETFs /
+ *                     Insiders / Treasury) plus a transparent wedge
+ *                     for the unaccounted residual.
+ *   ring 3 (outer)  — per-filer / per-officer wedges within each
+ *                     category, plus a transparent wedge for any
+ *                     within-category gap (filer detail incomplete)
+ *                     and a transparent wedge for the same outer
+ *                     residual so ring 3 reaches the same
+ *                     circumference as ring 2.
  *
  * Recharts has no native sunburst primitive — built from three nested
  * ``<Pie>`` components at increasing ``innerRadius`` / ``outerRadius``.
- *
- *   ring 1 (innermost) — single-arc "Held" total, labelled with the
- *                        absolute float in the center hole.
- *   ring 2             — per-category wedges (Institutions / ETFs /
- *                        Insiders / Treasury / Unallocated).
- *   ring 3 (outermost) — per-filer / per-officer wedges within each
- *                        category, plus an "Other" tail when many
- *                        sub-threshold holders exist.
- *
- * Coverage gating: a category with ``status='unknown'`` (today's
- * Institutions / ETFs while the #740 CUSIP backfill is pending)
- * renders as a hatched grey wedge sized to its share of float so the
- * operator sees the gap visually rather than as a missing slice.
  */
 
 import { useMemo } from "react";
@@ -23,18 +29,21 @@ import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 
 import { formatPct, formatShares } from "@/components/instrument/ownershipMetrics";
 import {
+  type CategoryKey,
   type SunburstCategory,
+  type SunburstInputs,
   type SunburstLeaf,
   type SunburstRings,
   buildSunburstRings,
 } from "@/components/instrument/ownershipRings";
-import type { SunburstInputs } from "@/components/instrument/ownershipRings";
+import { type ChartTheme } from "@/lib/chartTheme";
 import { useChartTheme } from "@/lib/useChartTheme";
 
 export interface OwnershipSunburstProps {
   readonly inputs: SunburstInputs;
-  /** Click handler for any wedge. Receives the wedge identity for
-   *  drill-to-L2 navigation. */
+  /** Click handler for any colored (known-data) wedge. Transparent
+   *  gap wedges are non-interactive — they have no identity to
+   *  drill into. */
   readonly onWedgeClick?: (target: WedgeClick) => void;
   /** Pixel size of the chart canvas (square). Default 280. */
   readonly size?: number;
@@ -42,88 +51,75 @@ export interface OwnershipSunburstProps {
 
 export type WedgeClick =
   | { readonly kind: "center" }
-  | { readonly kind: "category"; readonly category_key: string }
-  | { readonly kind: "leaf"; readonly category_key: string; readonly leaf_key: string };
+  | { readonly kind: "category"; readonly category_key: CategoryKey }
+  | {
+      readonly kind: "leaf";
+      readonly category_key: CategoryKey;
+      readonly leaf_key: string;
+    };
+
+/** Index into ``ChartTheme.accent`` for each category's color. */
+export const CATEGORY_FILL_INDEX: Record<CategoryKey, number> = {
+  institutions: 0, // cyan-500
+  etfs: 1, // blue-500
+  insiders: 2, // purple-500
+  treasury: 3, // amber-500
+};
+
+export function categoryFill(theme: ChartTheme, key: CategoryKey): string {
+  const idx = CATEGORY_FILL_INDEX[key];
+  return theme.accent[idx % theme.accent.length] ?? theme.accent[0]!;
+}
 
 interface ChartDatum {
+  readonly id: string;
   readonly name: string;
   readonly shares: number;
   readonly pct: number;
   readonly fill: string;
-  readonly stroke: string;
-  readonly opacity: number;
-  /**
-   * True for synthetic wedges that exist only to convey "we don't
-   * know the number" — e.g. a Coverage gap (#740) category rendered
-   * with a placeholder ``shares=1`` so the arc has visible thickness.
-   * The tooltip suppresses the numeric share/pct rows for these
-   * datums so hovering doesn't surface "1 shares / 0% of float".
-   */
+  /** True for transparent wedges — they are non-interactive and
+   *  the tooltip / hover affordances suppress on them. */
   readonly is_gap: boolean;
-  /** Click-target metadata propagated through Recharts' onClick. */
-  readonly target: WedgeClick;
+  readonly target: WedgeClick | null;
 }
 
-const CATEGORY_FILL_INDEX: Record<string, number> = {
-  institutions: 0, // cyan
-  etfs: 1, // blue
-  insiders: 2, // purple
-  treasury: 3, // amber
-  unallocated: 4, // pink
-};
-
 /**
- * Opacity applied to a category's accent color when the category
- * status is ``unknown``. Pre-fix every unknown wedge collapsed to a
- * single shared slate-600 so the chart read as a solid grey blob —
- * operator couldn't distinguish "Institutions gap" from "ETFs gap"
- * from "Treasury gap". Each category keeps its accent identity; the
- * lower opacity carries the "no signal" semantic.
- *
- * Opacity bumped on the second pass — at 0.35 / 0.22 over a
- * slate-950 dark-mode background every accent washed out to muddy
- * indistinguishable purples. Higher values keep the accent
- * recognisable while still reading as desaturated vs known data
- * (~85% opacity).
- */
-const GAP_CATEGORY_OPACITY = 0.7;
-const GAP_LEAF_OPACITY = 0.5;
-
-/**
- * Module-level CSS string for the sunburst's wedge interactions.
- * Defined out-of-line because TypeScript's JSX strict-mode child
- * typing rejects template-literal children of bare ``<style>`` (it
- * sees ``string`` as a value-not-callable when it expects
- * ``ReactNode``). Plain string assignment side-steps the parse trip.
- *
- * Click affordance: suppress only the mouse-click focus rect so the
- * browser's default white rectangle stops drawing on click. Keyboard
- * focus (``:focus-visible``) keeps a custom outline so keyboard
- * users retain visual feedback.
- *
- * Hover affordance: stroke-width bump + ``filter: brightness(...)``.
- * Crucially does NOT set CSS ``opacity`` — the wedges encode
- * known-vs-coverage-gap via SVG ``fillOpacity``; a CSS opacity hover
- * rule would override that and snap a 0.5-opacity gap wedge to
- * fully opaque, erasing the "no signal" semantic.
+ * Module-level CSS for wedge interactions. Defined out-of-line because
+ * TypeScript's strict JSX child typing rejects template-literal
+ * children of bare ``<style>`` (sees ``string`` as not-callable). The
+ * ``[data-known='true']`` attribute, set per-Cell, scopes hover and
+ * focus affordances to colored wedges only — gap arcs stay inert.
  */
 const SUNBURST_STYLES = [
   ".ownership-sunburst .recharts-pie-sector path {",
   "  transition: stroke-width 120ms ease, filter 120ms ease;",
-  "  cursor: pointer;",
   "}",
   ".ownership-sunburst .recharts-pie-sector path:focus {",
   "  outline: none;",
   "}",
-  ".ownership-sunburst .recharts-pie-sector path:focus-visible {",
-  // slate-400 reads visibly on both light (white) and dark
-  // (slate-950) backgrounds. ``currentColor`` inherits SVG
-  // ``color`` which is unset on these path elements and defaults
-  // to black — invisible on dark mode.
+  // Sector wrapper hit-testing — Recharts' click + tooltip handlers
+  // attach on the parent ``.recharts-pie-sector`` Layer, not on the
+  // path Cell ``style`` lands on. Use ``:has()`` to disable hit
+  // tests on the wrapper for any sector whose Cell carries
+  // ``data-known='false'`` so transparent gap wedges don't absorb
+  // clicks/hover at all (instead of relying on the JS click filter
+  // to no-op them after the fact).
+  ".ownership-sunburst .recharts-pie-sector:has(path[data-known='false']) {",
+  "  pointer-events: none;",
+  "}",
+  ".ownership-sunburst .recharts-pie-sector:has(path[data-known='true']) path {",
+  "  cursor: pointer;",
+  "}",
+  // slate-400 outline reads on both light (white) and dark
+  // (slate-950) backgrounds. Default ``currentColor`` defaults to
+  // black — invisible on dark mode.
+  ".ownership-sunburst .recharts-pie-sector:has(path[data-known='true']) path:focus-visible {",
   "  outline: 2px solid #94a3b8;",
   "  outline-offset: -1px;",
   "}",
-  ".ownership-sunburst .recharts-pie-sector:hover path {",
+  // Hover affordance via ``filter: brightness`` — never via CSS
+  // ``opacity`` so the gap-vs-known semantic survives hover.
+  ".ownership-sunburst .recharts-pie-sector:has(path[data-known='true']):hover path {",
   "  stroke-width: 2;",
   "  filter: brightness(1.2);",
   "}",
@@ -139,81 +135,39 @@ export function OwnershipSunburst({
 
   if (rings === null) return null;
 
-  const accent = theme.accent;
-  const fillFor = (categoryKey: string): string => {
-    const idx = CATEGORY_FILL_INDEX[categoryKey];
-    if (idx === undefined) return accent[0];
-    return accent[idx % accent.length]!;
-  };
+  const denom = rings.total_shares;
+  const fillFor = (key: CategoryKey): string => categoryFill(theme, key);
 
-  // Inner ring — known + gap split. Pre-#746-followup the inner
-  // ring rendered as a single 100% arc that included synthetic
-  // unknown-padding from upstream categories — visually misleading
-  // when most of the float was in coverage gaps. Two arcs make the
-  // gap proportion legible at the very center of the chart.
-  const innerData: ChartDatum[] = [];
-  if (rings.inner.known_shares > 0) {
-    innerData.push({
-      name: "Known",
-      shares: rings.inner.known_shares,
-      pct: rings.inner.known_pct,
-      fill: theme.borderColor,
-      stroke: theme.bg,
-      opacity: 0.7,
-      is_gap: false,
-      target: { kind: "center" },
-    });
-  }
-  if (rings.inner.gap_shares > 0) {
-    // Inner-ring gap arc represents the aggregate "we don't know"
-    // share — keep it as a single neutral grey so it reads as
-    // "missing data" rather than implying it belongs to any one
-    // accent-colored category.
-    innerData.push({
-      name: "Coverage gap",
-      shares: rings.inner.gap_shares,
-      pct: rings.inner.gap_pct,
-      fill: theme.gridLine,
-      stroke: theme.bg,
-      opacity: 0.6,
-      is_gap: true,
-      target: { kind: "center" },
-    });
-  }
-  // Defensive: if both segments are zero (degenerate), still render
-  // a single placeholder so the inner ring outline is preserved.
-  if (innerData.length === 0) {
-    innerData.push({
-      name: "Held",
-      shares: 1,
-      pct: 0,
-      fill: theme.borderColor,
-      stroke: theme.bg,
-      opacity: 0.4,
-      is_gap: true,
-      target: { kind: "center" },
-    });
+  // Middle ring — per-category wedges + transparent residual.
+  const middleData: ChartDatum[] = rings.categories.map((cat) =>
+    toCategoryDatum(cat, fillFor(cat.key), denom),
+  );
+  if (rings.category_residual > 0) {
+    middleData.push(makeGapDatum("middle-residual", "Unaccounted", rings.category_residual, denom));
   }
 
-  // Middle ring — one wedge per category. Categories with shares=0
-  // and status='empty' are skipped so the ring doesn't render a
-  // sliver of unstyled chrome.
-  const middleData: ChartDatum[] = [];
-  for (const cat of rings.categories) {
-    if (cat.status === "empty" && cat.shares <= 0) continue;
-    middleData.push(toCategoryDatum(cat, fillFor(cat.key), theme.bg));
-  }
-
-  // Outer ring — leaves under every visible category, in the same
-  // order so wedges stack alphabetically with their parent.
+  // Outer ring — leaves under each visible category, then the
+  // category's within_category_gap (transparent), then the same
+  // outer residual so ring 3 closes flush with ring 2.
   const outerData: ChartDatum[] = [];
   for (const cat of rings.categories) {
-    if (cat.status === "empty" && cat.shares <= 0) continue;
-    if (cat.leaves.length === 0) continue;
     const baseFill = fillFor(cat.key);
     for (const leaf of cat.leaves) {
-      outerData.push(toLeafDatum(leaf, cat, baseFill, theme.bg));
+      outerData.push(toLeafDatum(leaf, cat.key, baseFill, denom));
     }
+    if (cat.within_category_gap > 0) {
+      outerData.push(
+        makeGapDatum(
+          `${cat.key}-gap`,
+          `${cat.label} — unresolved filers`,
+          cat.within_category_gap,
+          denom,
+        ),
+      );
+    }
+  }
+  if (rings.category_residual > 0) {
+    outerData.push(makeGapDatum("outer-residual", "Unaccounted", rings.category_residual, denom));
   }
 
   const totalRadius = size / 2;
@@ -222,57 +176,42 @@ export function OwnershipSunburst({
   const middleOuter = totalRadius * 0.62;
   const outerOuter = totalRadius * 0.92;
 
-  const handleClick = (datum: ChartDatum): void => {
+  const handleClick = (datum: ChartDatum | undefined): void => {
+    if (datum === undefined || datum.target === null) return;
     onWedgeClick?.(datum.target);
   };
 
-  // Wedge stroke uses the theme's grid-line slate (slate-100 light /
-  // slate-800 dark) rather than the page background. With
-  // bg-coloured strokes between two adjacent dark-mode wedges at
-  // <100% opacity, the dark stroke + dark fill merged into one
-  // blob; a slightly lighter slate stroke keeps wedge boundaries
-  // legible without dominating the canvas.
   const wedgeStroke = theme.gridLine;
+
+  // ``middleData`` and ``outerData`` are always non-empty when
+  // ``denom > 0``: buildSunburstRings guarantees ``category_residual
+  // = total_shares - sum_known``, so when no category renders the
+  // residual gap is the entire denominator and gets pushed below.
+  // (Codex review pin — no defensive fallback needed.)
 
   return (
     <div
       className="ownership-sunburst relative"
       style={{ width: size, height: size }}
       role="img"
-      aria-label={`Ownership breakdown: free float ${formatShares(rings.free_float)} shares.`}
+      aria-label={`Ownership breakdown: ${formatShares(denom)} total shares.`}
     >
-      {/*
-        Suppress the browser's default focus rect on Recharts'
-        inner SVG path elements -- clicking a wedge moved focus to
-        the path which then drew a white rectangular outline that
-        read as "selected" but ignored the wedge geometry. Use a
-        wedge-shaped feedback affordance instead: hover bumps
-        stroke + brightness; click triggers the existing
-        onWedgeClick navigation. The ownership-sunburst class
-        scopes the outline removal so it does not bleed to other
-        charts.
-      */}
       <style>{SUNBURST_STYLES}</style>
       <ResponsiveContainer width="100%" height="100%">
         <PieChart>
           <Tooltip content={<SunburstTooltip />} />
+          {/* Inner ring — single solid arc. Click navigates without a
+              filter (operator-side: "show me the L2 view"). */}
           <Pie
-            data={innerData}
+            data={[{ name: "Total", shares: 1 }]}
             dataKey="shares"
             innerRadius={innerInner}
             outerRadius={innerOuter}
             stroke={wedgeStroke}
             isAnimationActive={false}
-            onClick={(_, idx) => handleClick(innerData[idx]!)}
+            onClick={() => onWedgeClick?.({ kind: "center" })}
           >
-            {innerData.map((d, idx) => (
-              <Cell
-                key={`inner-${idx}`}
-                fill={d.fill}
-                fillOpacity={d.opacity}
-                stroke={wedgeStroke}
-              />
-            ))}
+            <Cell fill={theme.borderColor} fillOpacity={0.6} stroke={wedgeStroke} />
           </Pie>
           <Pie
             data={middleData}
@@ -281,14 +220,14 @@ export function OwnershipSunburst({
             outerRadius={middleOuter}
             stroke={wedgeStroke}
             isAnimationActive={false}
-            onClick={(_, idx) => handleClick(middleData[idx]!)}
+            onClick={(_, idx) => handleClick(middleData[idx])}
           >
-            {middleData.map((d, idx) => (
+            {middleData.map((d) => (
               <Cell
-                key={`middle-${idx}`}
+                key={d.id}
                 fill={d.fill}
-                fillOpacity={d.opacity}
-                stroke={wedgeStroke}
+                stroke={d.is_gap ? "transparent" : wedgeStroke}
+                data-known={d.is_gap ? "false" : "true"}
               />
             ))}
           </Pie>
@@ -299,14 +238,14 @@ export function OwnershipSunburst({
             outerRadius={outerOuter}
             stroke={wedgeStroke}
             isAnimationActive={false}
-            onClick={(_, idx) => handleClick(outerData[idx]!)}
+            onClick={(_, idx) => handleClick(outerData[idx])}
           >
-            {outerData.map((d, idx) => (
+            {outerData.map((d) => (
               <Cell
-                key={`outer-${idx}`}
+                key={d.id}
                 fill={d.fill}
-                fillOpacity={d.opacity}
-                stroke={wedgeStroke}
+                stroke={d.is_gap ? "transparent" : wedgeStroke}
+                data-known={d.is_gap ? "false" : "true"}
               />
             ))}
           </Pie>
@@ -314,10 +253,10 @@ export function OwnershipSunburst({
       </ResponsiveContainer>
       <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
         <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-          Free float
+          Total shares
         </span>
         <span className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-          {formatShares(rings.free_float)}
+          {formatShares(denom)}
         </span>
       </div>
     </div>
@@ -327,36 +266,14 @@ export function OwnershipSunburst({
 function toCategoryDatum(
   cat: SunburstCategory,
   baseFill: string,
-  bg: string,
+  denom: number,
 ): ChartDatum {
-  if (cat.status === "unknown") {
-    // Unknown categories keep their accent color but at low opacity
-    // so the chart distinguishes "Institutions gap" from "ETFs gap"
-    // from "Treasury gap" visually. Pre-fix every unknown wedge
-    // collapsed to a single shared slate-600 → solid grey blob with
-    // no per-category identity.
-    return {
-      name: `${cat.label} — coverage gap`,
-      // Synthetic non-zero share count so the wedge renders visibly.
-      // ``is_gap=true`` tells the tooltip to suppress the numeric
-      // share/pct rows so hovering does not surface a misleading
-      // "1 shares".
-      shares: 1,
-      pct: 0,
-      fill: baseFill,
-      stroke: bg,
-      opacity: GAP_CATEGORY_OPACITY,
-      is_gap: true,
-      target: { kind: "category", category_key: cat.key },
-    };
-  }
   return {
+    id: `cat-${cat.key}`,
     name: cat.label,
-    shares: Math.max(cat.shares, 0),
-    pct: cat.pct,
+    shares: cat.shares,
+    pct: denom > 0 ? cat.shares / denom : 0,
     fill: baseFill,
-    stroke: bg,
-    opacity: cat.shares <= 0 ? 0 : 0.85,
     is_gap: false,
     target: { kind: "category", category_key: cat.key },
   };
@@ -364,41 +281,30 @@ function toCategoryDatum(
 
 function toLeafDatum(
   leaf: SunburstLeaf,
-  cat: SunburstCategory,
+  category_key: CategoryKey,
   baseFill: string,
-  bg: string,
+  denom: number,
 ): ChartDatum {
-  const status = cat.status;
-  if (status === "unknown") {
-    // Outer-ring leaf for an unknown category inherits the parent
-    // accent at a lower opacity than the middle wedge so the rings
-    // remain visually distinguishable while preserving category
-    // identity. Pre-fix the leaf used the same shared slate-600 as
-    // the middle wedge → both rings merged into one solid grey arc.
-    return {
-      name: leaf.label,
-      shares: 1,
-      pct: 0,
-      fill: baseFill,
-      stroke: bg,
-      opacity: GAP_LEAF_OPACITY,
-      is_gap: true,
-      target: { kind: "leaf", category_key: cat.key, leaf_key: leaf.key },
-    };
-  }
-  // "Other" rolls up sub-threshold holders. Render with a desaturated
-  // shade of the parent category's color so the operator sees it as
-  // "tail of the same slice" rather than a separate category.
-  const opacity = leaf.is_other ? 0.55 : 0.9;
   return {
+    id: `leaf-${category_key}-${leaf.key}`,
     name: leaf.label,
-    shares: Math.max(leaf.shares, 0),
-    pct: leaf.pct,
+    shares: leaf.shares,
+    pct: denom > 0 ? leaf.shares / denom : 0,
     fill: baseFill,
-    stroke: bg,
-    opacity: leaf.shares <= 0 ? 0 : opacity,
     is_gap: false,
-    target: { kind: "leaf", category_key: cat.key, leaf_key: leaf.key },
+    target: { kind: "leaf", category_key, leaf_key: leaf.key },
+  };
+}
+
+function makeGapDatum(id: string, name: string, shares: number, denom: number): ChartDatum {
+  return {
+    id,
+    name,
+    shares,
+    pct: denom > 0 ? shares / denom : 0,
+    fill: "transparent",
+    is_gap: true,
+    target: null,
   };
 }
 
@@ -414,21 +320,7 @@ interface RechartsTooltipProps {
 function SunburstTooltip(props: RechartsTooltipProps): JSX.Element | null {
   if (!props.active || props.payload === undefined || props.payload.length === 0) return null;
   const datum = props.payload[0]?.payload;
-  if (datum === undefined) return null;
-  // Coverage-gap wedges carry synthetic ``shares=1`` so the arc has
-  // visible thickness; suppress the numeric rows so the tooltip
-  // does not surface a misleading "1 shares / 0% of float" — show
-  // the operator-facing copy explaining the gap instead.
-  if (datum.is_gap) {
-    return (
-      <div className="rounded border border-slate-300 bg-white px-3 py-2 text-xs shadow-md dark:border-slate-700 dark:bg-slate-900">
-        <div className="font-medium text-slate-900 dark:text-slate-100">{datum.name}</div>
-        <div className="text-slate-600 dark:text-slate-400">
-          Data not available — gated on the #740 CUSIP backfill.
-        </div>
-      </div>
-    );
-  }
+  if (datum === undefined || datum.is_gap) return null;
   return (
     <div className="rounded border border-slate-300 bg-white px-3 py-2 text-xs shadow-md dark:border-slate-700 dark:bg-slate-900">
       <div className="font-medium text-slate-900 dark:text-slate-100">{datum.name}</div>
@@ -436,9 +328,83 @@ function SunburstTooltip(props: RechartsTooltipProps): JSX.Element | null {
         {formatShares(datum.shares)} shares
       </div>
       <div className="text-slate-600 dark:text-slate-400">
-        {formatPct(datum.pct)} of float
+        {formatPct(datum.pct)} of total shares
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Color legend
+// ---------------------------------------------------------------------------
+
+export interface OwnershipLegendProps {
+  readonly rings: SunburstRings;
+}
+
+/**
+ * Color legend for the sunburst. Renders one row per category that
+ * actually rendered, plus an "Unaccounted" row for the residual. Each
+ * row shows the swatch, label, share count, and % of outstanding so
+ * the operator can read the ring at a glance without hovering.
+ */
+export function OwnershipLegend({ rings }: OwnershipLegendProps): JSX.Element | null {
+  const theme = useChartTheme();
+  const denom = rings.total_shares;
+  if (denom <= 0) return null;
+
+  interface LegendRow {
+    readonly key: string;
+    readonly label: string;
+    readonly shares: number;
+    readonly pct: number;
+    readonly swatch_fill: string;
+    readonly swatch_outline: boolean;
+  }
+
+  const rows: LegendRow[] = rings.categories.map((cat) => ({
+    key: cat.key,
+    label: cat.label,
+    shares: cat.shares,
+    pct: cat.shares / denom,
+    swatch_fill: categoryFill(theme, cat.key),
+    swatch_outline: false,
+  }));
+  if (rings.category_residual > 0) {
+    rows.push({
+      key: "unaccounted",
+      label: "Unaccounted",
+      shares: rings.category_residual,
+      pct: rings.category_residual / denom,
+      swatch_fill: "transparent",
+      swatch_outline: true,
+    });
+  }
+  if (rows.length === 0) return null;
+
+  return (
+    <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+      {rows.map((row) => (
+        <li key={row.key} className="flex items-center gap-1.5">
+          <span
+            aria-hidden
+            className={`inline-block h-3 w-3 rounded-sm ${
+              row.swatch_outline
+                ? "border border-dashed border-slate-400 dark:border-slate-500"
+                : ""
+            }`}
+            style={{ backgroundColor: row.swatch_fill }}
+          />
+          <span className="text-slate-700 dark:text-slate-200">{row.label}</span>
+          <span className="font-mono text-slate-500 dark:text-slate-400">
+            {formatShares(row.shares)}
+          </span>
+          <span className="font-mono text-slate-400 dark:text-slate-500">
+            ({formatPct(row.pct)})
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }
 

@@ -1,24 +1,28 @@
 /**
  * Ownership reporting card (#729).
  *
- * Renders a three-ring sunburst:
- *   ring 1 — Held (free-float total in the center hole)
- *   ring 2 — Institutions / ETFs / Insiders / Treasury / Unallocated
- *   ring 3 — per-filer / per-officer wedges + "Other [Category]" tail
+ * Three-ring sunburst keyed on ``shares_outstanding`` as the
+ * denominator. Treasury is one of the categories — the denominator
+ * includes it, not free float.
  *
- * Coverage gating:
- *   * No shares_outstanding on file → whole-card empty state.
- *   * Per-category data missing → wedge renders as a desaturated
- *     "coverage gap" arc rather than vanishing or rendering 0%.
+ *   ring 1 (inner)  — total shares outstanding (label in center hole)
+ *   ring 2 (middle) — Institutions / ETFs / Insiders / Treasury,
+ *                     plus a transparent residual for the unaccounted
+ *                     portion.
+ *   ring 3 (outer)  — per-filer / per-officer wedges, plus a
+ *                     transparent within-category gap when the filer
+ *                     detail is incomplete (e.g. Institutions reports
+ *                     a 50% aggregate but the #740 CUSIP backfill
+ *                     hasn't resolved every filer to an instrument).
  *
- * Effective slice coverage depends on:
+ * Effective coverage depends on:
  *   * #731 — shares_outstanding + treasury_shares from financial_periods (merged)
  *   * #730 — institutional_holdings via the new reader endpoint (merged)
  *   * #740 — CUSIP backfill so the ingester resolves holdings to instrument_ids (open)
+ *   * #735 — DEI projection so XBRL ownership columns (treasury, public float) flow (open)
  *
- * Click on any wedge → drill to the L2 ownership page (route lands
- * in the next PR; for now the click handler is a no-op surfaced via
- * ``onWedgeClick`` so the integration test can pin the wiring).
+ * Click on any colored wedge → drill to the L2 ownership page with
+ * the corresponding filter pre-applied.
  */
 
 import { useCallback } from "react";
@@ -36,7 +40,10 @@ import {
 import type { InsiderTransactionsList } from "@/api/instruments";
 import type { InstrumentFinancials } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
-import { OwnershipSunburst } from "@/components/instrument/OwnershipSunburst";
+import {
+  OwnershipLegend,
+  OwnershipSunburst,
+} from "@/components/instrument/OwnershipSunburst";
 import type { WedgeClick } from "@/components/instrument/OwnershipSunburst";
 import { Pane } from "@/components/instrument/Pane";
 import {
@@ -45,7 +52,6 @@ import {
   parseShareCount,
 } from "@/components/instrument/ownershipMetrics";
 import {
-  type SunburstCategoryStatus,
   type SunburstHolder,
   type SunburstInputs,
   buildSunburstRings,
@@ -60,13 +66,12 @@ export interface OwnershipPanelProps {
 interface OwnershipData {
   readonly outstanding: number | null;
   readonly treasury: number | null;
-  readonly free_float: number | null;
+  readonly institutions_total: number | null;
+  readonly etfs_total: number | null;
+  readonly insiders_total: number | null;
   readonly institutional_holders: readonly SunburstHolder[];
   readonly etf_holders: readonly SunburstHolder[];
   readonly insider_holders: readonly SunburstHolder[];
-  readonly institutions_status: SunburstCategoryStatus;
-  readonly etfs_status: SunburstCategoryStatus;
-  readonly insiders_status: SunburstCategoryStatus;
   readonly as_of_period: string | null;
 }
 
@@ -83,11 +88,6 @@ function pickLatestBalance(
 }
 
 export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
-  // Three parallel fetches: balance sheet (outstanding + treasury),
-  // institutional holdings (institutions + ETFs + per-filer rows),
-  // insider transactions (insiders aggregate). Each fetch fails
-  // independently — a missing input degrades the corresponding
-  // category rather than the whole card.
   const balanceState = useAsync<InstrumentFinancials>(
     useCallback(
       () =>
@@ -113,9 +113,6 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
   const navigate = useNavigate();
   const handleWedgeClick = useCallback(
     (target: WedgeClick) => {
-      // L2 drill page lands in the next PR; stub the navigation now
-      // so the integration is wired and the route handler can be
-      // added without touching this component.
       const params = new URLSearchParams();
       if (target.kind === "category") params.set("category", target.category_key);
       if (target.kind === "leaf") {
@@ -170,14 +167,9 @@ export function extractData(
   const treasury =
     balance !== null ? pickLatestBalance(balance, "treasury_shares") : null;
 
-  const free_float =
-    outstanding !== null ? Math.max(0, outstanding - (treasury ?? 0)) : null;
-
-  // Institutional + ETF wedges. Split the ``filers`` list by
-  // filer_type — equity-only rows feed the sunburst since option
-  // exposure double-counts the underlying.
   const inst_totals = institutional?.totals ?? null;
   const filers = institutional?.filers ?? [];
+  // Equity-only — option exposure double-counts the underlying.
   const equity_filers = filers.filter((f) => f.is_put_call === null);
 
   const institutional_holders: SunburstHolder[] = equity_filers
@@ -186,30 +178,17 @@ export function extractData(
   const etf_holders: SunburstHolder[] = equity_filers
     .filter((f) => f.filer_type === "ETF")
     .map(filerToHolder("etfs"));
-
-  // Insider holders — aggregate latest non-derivative
-  // post-transaction shares per officer. The list is short enough
-  // (~10-30 officers) that we render every officer as their own
-  // wedge; the sunburst transformer bypasses the visibility
-  // threshold for this category.
   const insider_holders = aggregateInsiderHoldersForSunburst(insiders);
 
-  const institutions_status: SunburstCategoryStatus = deriveCategoryStatus(
-    institutional,
-    institutional_holders,
-    inst_totals?.institutions_shares,
-  );
-  const etfs_status: SunburstCategoryStatus = deriveCategoryStatus(
-    institutional,
-    etf_holders,
-    inst_totals?.etfs_shares,
-  );
-  const insiders_status: SunburstCategoryStatus =
-    insiders === null
-      ? "unknown"
-      : insider_holders.length > 0
-        ? "ok"
-        : "empty";
+  const institutions_total = parseShareCount(inst_totals?.institutions_shares ?? null);
+  const etfs_total = parseShareCount(inst_totals?.etfs_shares ?? null);
+  // Form 4 has no aggregate-total endpoint — sum the per-officer
+  // post-transaction balances. When no officer rows are on file the
+  // total is null (category does not render).
+  const insiders_total =
+    insider_holders.length === 0
+      ? null
+      : insider_holders.reduce((s, h) => s + h.shares, 0);
 
   const as_of_period =
     inst_totals?.period_of_report ?? balance?.rows[0]?.period_end ?? null;
@@ -217,13 +196,12 @@ export function extractData(
   return {
     outstanding,
     treasury,
-    free_float,
+    institutions_total,
+    etfs_total,
+    insiders_total,
     institutional_holders,
     etf_holders,
     insider_holders,
-    institutions_status,
-    etfs_status,
-    insiders_status,
     as_of_period,
   };
 }
@@ -251,9 +229,6 @@ function aggregateInsiderHoldersForSunburst(
   insiders: InsiderTransactionsList | null,
 ): readonly SunburstHolder[] {
   if (insiders === null) return [];
-  // Latest non-derivative post-transaction-shares per officer.
-  // Keyed on filer_cik when present, falls back to filer_name so a
-  // filer with no CIK in the audit trail still gets distinct rows.
   const latestByFiler = new Map<
     string,
     { txn_date: string; shares: number; label: string }
@@ -284,95 +259,83 @@ function aggregateInsiderHoldersForSunburst(
   return holders;
 }
 
-function deriveCategoryStatus(
-  institutional: InstitutionalHoldingsResponse | null,
-  holders: readonly SunburstHolder[],
-  raw_total: string | undefined,
-): SunburstCategoryStatus {
-  // No fetch result at all — likely API error or pre-coverage.
-  if (institutional === null) return "unknown";
-  // ``totals`` is null when no holdings on file. The card surfaces
-  // this as a coverage gap so the operator sees that 13F ingest
-  // hasn't run for this instrument.
-  if (institutional.totals === null) return "unknown";
-  // Total reported but every CUSIP unresolved (the #740 backfill
-  // gap). The total may be 0 even though filers exist; render as
-  // ``unknown`` rather than ``empty`` so the coverage-gap copy
-  // shows.
-  const total = parseShareCount(raw_total ?? "0") ?? 0;
-  if (total <= 0 && holders.length === 0) return "empty";
-  if (holders.length === 0 && total > 0) return "unknown";
-  return "ok";
-}
-
 function renderBody(
   data: OwnershipData,
   onWedgeClick: (target: WedgeClick) => void,
 ): JSX.Element {
-  if (data.free_float === null || data.free_float <= 0) {
+  if (data.outstanding === null || data.outstanding <= 0) {
     return (
       <EmptyState
         title="No ownership data"
-        description="Shares outstanding is not on file for this instrument yet — the ownership breakdown needs SEC XBRL coverage to compute the float denominator."
+        description="Shares outstanding is not on file for this instrument yet — the ownership breakdown needs SEC XBRL coverage to compute the denominator."
       />
     );
   }
 
+  // Denominator = outstanding + treasury. Operator's mental model:
+  // "100% of issued / allotted shares — some held in market, some
+  // held back in vault." Treasury renders as a category wedge.
+  const total_shares = data.outstanding + (data.treasury ?? 0);
   const inputs: SunburstInputs = {
-    free_float: data.free_float,
+    total_shares,
     holders: [
       ...data.institutional_holders,
       ...data.etf_holders,
       ...data.insider_holders,
     ],
+    institutions_total: data.institutions_total,
+    etfs_total: data.etfs_total,
+    insiders_total: data.insiders_total,
     treasury_shares: data.treasury,
-    institutions_status: data.institutions_status,
-    etfs_status: data.etfs_status,
-    insiders_status: data.insiders_status,
   };
   const rings = buildSunburstRings(inputs);
   if (rings === null) {
     return (
       <EmptyState
         title="No ownership data"
-        description="Sunburst rings could not be derived — free float resolved to zero or the input snapshot is malformed."
+        description="Sunburst rings could not be derived — shares outstanding resolved to zero or the input snapshot is malformed."
       />
     );
   }
 
-  const knownPct = rings.inner.known_pct;
-  const gapPct = rings.inner.gap_pct;
-  const hasMaterialGap = gapPct > 0.005; // > 0.5% counts as material to surface
-  const gapReasons = collectGapReasons(rings.categories);
+  const denom = rings.total_shares;
+  const accountedFor = rings.categories.reduce((s, c) => s + c.shares, 0);
+  const accountedPct = accountedFor / denom;
+  const oversubscribed = rings.total_shares > rings.reported_total;
 
   return (
     <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
-      <div className="flex justify-center">
+      <div className="flex flex-col items-center gap-3">
         <OwnershipSunburst inputs={inputs} onWedgeClick={onWedgeClick} />
+        <OwnershipLegend rings={rings} />
       </div>
       <div className="min-w-0 flex-1">
         {data.as_of_period !== null && (
           <p className="mb-1 text-xs text-slate-500 dark:text-slate-400">
-            As of {data.as_of_period}. Free float ={" "}
-            {formatShares(data.free_float)} shares.
+            As of {data.as_of_period}. {formatShares(data.outstanding)} outstanding
+            {data.treasury !== null && data.treasury > 0 && (
+              <> + {formatShares(data.treasury)} treasury</>
+            )}
+            .
           </p>
         )}
         <p className="mb-2 text-xs">
           <span className="font-medium text-slate-700 dark:text-slate-200">
-            {formatPct(knownPct)} known
+            {formatPct(accountedPct)} accounted for
           </span>
-          {hasMaterialGap && (
-            <>
-              <span className="mx-1.5 text-slate-400">·</span>
-              <span className="font-medium text-amber-700 dark:text-amber-400">
-                {formatPct(gapPct)} coverage gap
-              </span>
-              {gapReasons.length > 0 && (
-                <span className="ml-1 text-slate-500 dark:text-slate-400">
-                  ({gapReasons.join(", ")})
-                </span>
-              )}
-            </>
+          {accountedPct < 0.999 && (
+            <span className="ml-1.5 text-slate-500 dark:text-slate-400">
+              · remainder is unallocated public float (gated on
+              {" "}
+              <span className="font-mono">#740</span> CUSIP backfill +{" "}
+              <span className="font-mono">#735</span> DEI projection).
+            </span>
+          )}
+          {oversubscribed && (
+            <span className="ml-1.5 text-amber-700 dark:text-amber-400">
+              · category totals exceed reported total shares by{" "}
+              {formatShares(rings.total_shares - rings.reported_total)} (snapshot lag).
+            </span>
           )}
         </p>
         <table className="w-full text-sm">
@@ -380,76 +343,42 @@ function renderBody(
             <tr>
               <th className="pb-1 text-left">Category</th>
               <th className="pb-1 text-right">Shares</th>
-              <th className="pb-1 text-right">% of float</th>
+              <th className="pb-1 text-right">% of total</th>
+              <th className="pb-1 text-right">Resolved filers</th>
             </tr>
           </thead>
           <tbody>
-            {rings.categories.map((cat) => (
-              <tr
-                key={cat.key}
-                className="border-t border-slate-100 dark:border-slate-800"
-              >
-                <td className="py-1.5 text-slate-700 dark:text-slate-200">
-                  {cat.label}
-                  {cat.status === "unknown" && (
-                    <span className="ml-2 text-xs text-amber-600 dark:text-amber-400">
-                      {unknownReasonShort(cat.unknown_reason)}
-                    </span>
-                  )}
-                </td>
-                <td className="py-1.5 text-right font-mono text-slate-700 dark:text-slate-200">
-                  {cat.status === "unknown" ? "—" : formatShares(cat.shares)}
-                </td>
-                <td className="py-1.5 text-right font-mono text-slate-900 dark:text-slate-100">
-                  {cat.status === "unknown" ? "—" : formatPct(cat.pct)}
-                </td>
-              </tr>
-            ))}
+            {rings.categories.map((cat) => {
+              const resolvedPct =
+                cat.shares > 0 ? cat.resolved_leaf_shares / cat.shares : 0;
+              return (
+                <tr
+                  key={cat.key}
+                  className="border-t border-t-slate-100 dark:border-t-slate-800"
+                >
+                  <td className="py-1.5 text-slate-700 dark:text-slate-200">
+                    {cat.label}
+                  </td>
+                  <td className="py-1.5 text-right font-mono text-slate-700 dark:text-slate-200">
+                    {formatShares(cat.shares)}
+                  </td>
+                  <td className="py-1.5 text-right font-mono text-slate-900 dark:text-slate-100">
+                    {formatPct(cat.shares / denom)}
+                  </td>
+                  <td className="py-1.5 text-right font-mono text-slate-500 dark:text-slate-400">
+                    {cat.leaves.length === 0 && cat.shares > 0
+                      ? "—"
+                      : formatPct(resolvedPct)}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
         <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
-          Click any wedge for the per-filer drilldown.
+          Click any colored wedge for the per-filer drilldown.
         </p>
       </div>
     </div>
   );
-}
-
-function collectGapReasons(
-  categories: readonly { unknown_reason?: string; status: string }[],
-): string[] {
-  // Dedupes across categories so a stock with both
-  // institutions and ETFs gated on #740 doesn't repeat the
-  // ticket. Generic 'no_data' / undefined reasons fall back to a
-  // neutral label so the header parenthetical still surfaces
-  // when an unknown category cannot be tied to a tracked
-  // follow-up — "X% coverage gap" with no parenthetical was
-  // ambiguous and dropped a real gap below the operator's
-  // attention threshold.
-  const reasons = new Set<string>();
-  for (const cat of categories) {
-    if (cat.status !== "unknown") continue;
-    switch (cat.unknown_reason) {
-      case "cusip_backfill":
-        reasons.add("#740 CUSIP backfill");
-        break;
-      case "dei_projection":
-        reasons.add("#735 DEI projection");
-        break;
-      default:
-        reasons.add("data not on file");
-    }
-  }
-  return Array.from(reasons);
-}
-
-function unknownReasonShort(reason: string | undefined): string {
-  switch (reason) {
-    case "cusip_backfill":
-      return "needs CUSIPs (#740)";
-    case "dei_projection":
-      return "needs DEI tag (#735)";
-    default:
-      return "no data";
-  }
 }

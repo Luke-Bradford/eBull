@@ -1,24 +1,16 @@
 /**
- * Ownership L2 drill page (#729 follow-up).
+ * Ownership L2 drill page (#729).
  *
- * Mirrors the L1 ``OwnershipPanel`` data model but renders bigger
- * + adds a per-filer drilldown table with three operator-side
- * controls:
+ * Mirrors the L1 ``OwnershipPanel`` data model — same denominator
+ * (``shares_outstanding``), same faithful-proportional rings, same
+ * transparent gap arcs — at a larger size with a per-filer drilldown
+ * table and three operator-side controls:
  *
- *   * ``?category=etf|institutions|insiders|treasury|unallocated`` —
- *     filter the table to that category. Matches the L1 click
- *     handler's query param so a click on a middle-ring wedge
- *     lands here pre-filtered.
+ *   * ``?category=etf|institutions|insiders|treasury`` — filter the
+ *     table to that category. Set by L1 / L2 middle-ring clicks.
  *   * ``?filer=<cik|name-fallback>`` — scroll to + highlight a
- *     specific filer row. Set by L1 outer-ring clicks.
- *   * ``?view=raw`` — emit the table as a downloadable CSV via the
- *     browser's Blob download path. Audit-grade export so the
- *     operator can spreadsheet a quarter's worth of filings.
- *
- * Coverage gating mirrors the L1 panel — categories gated on #740
- * / #735 render with the same desaturated wedge + reason copy so
- * the L2 stays consistent with the operator's mental model from
- * L1.
+ *     specific filer row. Set by L1 / L2 outer-ring clicks.
+ *   * ``?view=raw`` — emit the table as a downloadable CSV.
  */
 
 import { useCallback, useMemo, useRef } from "react";
@@ -36,7 +28,10 @@ import {
 import type { InsiderTransactionsList } from "@/api/instruments";
 import type { InstrumentFinancials } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
-import { OwnershipSunburst } from "@/components/instrument/OwnershipSunburst";
+import {
+  OwnershipLegend,
+  OwnershipSunburst,
+} from "@/components/instrument/OwnershipSunburst";
 import type { WedgeClick } from "@/components/instrument/OwnershipSunburst";
 import {
   formatPct,
@@ -44,6 +39,7 @@ import {
   parseShareCount,
 } from "@/components/instrument/ownershipMetrics";
 import {
+  type CategoryKey,
   type SunburstHolder,
   type SunburstInputs,
   buildSunburstRings,
@@ -54,7 +50,7 @@ import { useAsync } from "@/lib/useAsync";
 export interface FilerRow {
   readonly key: string;
   readonly label: string;
-  readonly category: "institutions" | "etfs" | "insiders" | "treasury" | "unallocated";
+  readonly category: CategoryKey;
   readonly category_label: string;
   readonly shares: number;
   readonly value_usd: number | null;
@@ -64,12 +60,11 @@ export interface FilerRow {
   readonly period_of_report: string | null;
 }
 
-const CATEGORY_LABELS: Record<string, string> = {
+const CATEGORY_LABELS: Record<CategoryKey, string> = {
   institutions: "Institutions",
   etfs: "ETFs",
   insiders: "Insiders",
   treasury: "Treasury",
-  unallocated: "Unallocated",
 };
 
 export function OwnershipPage(): JSX.Element {
@@ -154,9 +149,9 @@ export function OwnershipPage(): JSX.Element {
           Ownership — {symbol}
         </h1>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          Three-ring breakdown of free float by category, filer, and
-          officer. SEC 13F-HR institutional + ETF holdings, Form 4
-          insider transactions, XBRL treasury share counts.
+          Three-ring breakdown of shares outstanding by category, filer, and
+          officer. SEC 13F-HR institutional + ETF holdings, Form 4 insider
+          transactions, XBRL treasury share counts.
         </p>
       </header>
 
@@ -217,13 +212,12 @@ function OwnershipBody({
 }: OwnershipBodyProps): JSX.Element {
   const outstanding = balance !== null ? pickLatestBalance(balance, "shares_outstanding") : null;
   const treasury = balance !== null ? pickLatestBalance(balance, "treasury_shares") : null;
-  const free_float = outstanding !== null ? Math.max(0, outstanding - (treasury ?? 0)) : null;
 
-  if (free_float === null || free_float <= 0) {
+  if (outstanding === null || outstanding <= 0) {
     return (
       <EmptyState
         title="No ownership data"
-        description={`Shares outstanding is not on file for ${symbol} yet — the ownership breakdown needs SEC XBRL coverage to compute the float denominator.`}
+        description={`Shares outstanding is not on file for ${symbol} yet — the ownership breakdown needs SEC XBRL coverage to compute the denominator.`}
       />
     );
   }
@@ -235,7 +229,7 @@ function OwnershipBody({
   // a stable identity. Pre-fix ``inputs.holders`` was a fresh array
   // literal on every render → ``allRows``'s useMemo never hit
   // cache and ``buildFilerRows`` re-ran on every keystroke into the
-  // search params. Codex caught this on PR review.
+  // search params.
   const equity_filers = useMemo(
     () => filers.filter((f) => f.is_put_call === null),
     [filers],
@@ -263,42 +257,47 @@ function OwnershipBody({
     [institutional_holders, etf_holders, insider_holders],
   );
 
+  const institutions_total = useMemo(
+    () => parseShareCount(inst_totals?.institutions_shares ?? null),
+    [inst_totals?.institutions_shares],
+  );
+  const etfs_total = useMemo(
+    () => parseShareCount(inst_totals?.etfs_shares ?? null),
+    [inst_totals?.etfs_shares],
+  );
+  const insiders_total = useMemo(
+    () =>
+      insider_holders.length === 0
+        ? null
+        : insider_holders.reduce((s, h) => s + h.shares, 0),
+    [insider_holders],
+  );
+
+  // Denominator = outstanding + treasury (issued/allotted). Treasury
+  // renders as a category wedge so the operator sees the issuer's
+  // held-back portion in proportion.
+  const total_shares = useMemo(
+    () => outstanding + (treasury ?? 0),
+    [outstanding, treasury],
+  );
+
   const inputs: SunburstInputs = useMemo(
     () => ({
-      free_float,
+      total_shares,
       holders: allHolders,
+      institutions_total,
+      etfs_total,
+      insiders_total,
       treasury_shares: treasury,
-      institutions_status: deriveCategoryStatus(
-        institutional,
-        institutional_holders,
-        inst_totals?.institutions_shares,
-      ),
-      etfs_status: deriveCategoryStatus(institutional, etf_holders, inst_totals?.etfs_shares),
-      insiders_status:
-        insiders === null ? "unknown" : insider_holders.length > 0 ? "ok" : "empty",
     }),
-    [
-      free_float,
-      allHolders,
-      treasury,
-      institutional,
-      institutional_holders,
-      etf_holders,
-      insider_holders,
-      insiders,
-      inst_totals?.institutions_shares,
-      inst_totals?.etfs_shares,
-    ],
+    [total_shares, allHolders, institutions_total, etfs_total, insiders_total, treasury],
   );
 
   const rings = useMemo(() => buildSunburstRings(inputs), [inputs]);
 
   const allRows = useMemo(
-    () =>
-      rings === null
-        ? ([] as FilerRow[])
-        : buildFilerRows(rings, filers, insiders, treasury),
-    [rings, filers, insiders, treasury],
+    () => buildFilerRows(filers, insiders, treasury),
+    [filers, insiders, treasury],
   );
 
   const filteredRows = useMemo(() => {
@@ -306,15 +305,15 @@ function OwnershipBody({
     return allRows.filter((r) => r.category === categoryFilter);
   }, [allRows, categoryFilter]);
 
-  const knownPct = rings?.inner.known_pct ?? 0;
-  const gapPct = rings?.inner.gap_pct ?? 0;
-  const hasMaterialGap = gapPct > 0.005;
+  const accountedFor = rings?.categories.reduce((s, c) => s + c.shares, 0) ?? 0;
+  const accountedPct =
+    rings !== null && rings.total_shares > 0
+      ? accountedFor / rings.total_shares
+      : 0;
+  const oversubscribed = rings !== null && rings.total_shares > rings.reported_total;
 
-  // Ref + scroll-to behaviour for filer drilldown highlighting.
   const filerRowRef = useRef<HTMLTableRowElement | null>(null);
 
-  // CSV export — when ?view=raw, render a download trigger instead
-  // of the table. Operator-side audit pathway.
   if (viewMode === "raw") {
     const csv = buildCsv(filteredRows);
     return (
@@ -322,7 +321,7 @@ function OwnershipBody({
         <p className="text-xs text-slate-500 dark:text-slate-400">
           Raw view: {filteredRows.length} rows
           {categoryFilter !== null && (
-            <> · filtered to <strong>{CATEGORY_LABELS[categoryFilter] ?? categoryFilter}</strong></>
+            <> · filtered to <strong>{labelFor(categoryFilter)}</strong></>
           )}
         </p>
         <pre className="overflow-x-auto rounded border border-slate-200 bg-slate-50 p-3 text-xs dark:border-slate-700 dark:bg-slate-950">
@@ -342,20 +341,32 @@ function OwnershipBody({
   return (
     <div className="grid grid-cols-12 gap-6">
       <div className="col-span-12 lg:col-span-5">
-        <div className="flex justify-center">
+        <div className="flex flex-col items-center gap-3">
           <OwnershipSunburst inputs={inputs} onWedgeClick={onWedgeClick} size={420} />
+          {rings !== null && <OwnershipLegend rings={rings} />}
         </div>
-        <p className="mt-3 text-center text-xs">
+        <p className="mt-3 text-center text-xs text-slate-500 dark:text-slate-400">
+          {formatShares(outstanding)} outstanding
+          {treasury !== null && treasury > 0 && (
+            <> + {formatShares(treasury)} treasury</>
+          )}
+          {" = "}
+          {formatShares(total_shares)} total shares
+        </p>
+        <p className="mt-1 text-center text-xs">
           <span className="font-medium text-slate-700 dark:text-slate-200">
-            {formatPct(knownPct)} known
+            {formatPct(accountedPct)} accounted for
           </span>
-          {hasMaterialGap && (
-            <>
-              <span className="mx-1.5 text-slate-400">·</span>
-              <span className="font-medium text-amber-700 dark:text-amber-400">
-                {formatPct(gapPct)} coverage gap
-              </span>
-            </>
+          {accountedPct < 0.999 && (
+            <span className="ml-1.5 text-slate-500 dark:text-slate-400">
+              · remainder is unallocated public float
+            </span>
+          )}
+          {oversubscribed && rings !== null && (
+            <span className="ml-1.5 text-amber-700 dark:text-amber-400">
+              · category totals exceed reported total shares by{" "}
+              {formatShares(rings.total_shares - rings.reported_total)} (snapshot lag)
+            </span>
           )}
         </p>
       </div>
@@ -396,7 +407,7 @@ function FilterStrip({
   if (categoryFilter === null && filerFilter === null) {
     return (
       <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
-        Showing all {totalCount} filer rows. Click any wedge in the chart to filter.
+        Showing all {totalCount} filer rows. Click any colored wedge in the chart to filter.
       </p>
     );
   }
@@ -406,8 +417,7 @@ function FilterStrip({
         Showing {rowCount} of {totalCount}
         {categoryFilter !== null && (
           <>
-            {" "}· category{" "}
-            <strong>{CATEGORY_LABELS[categoryFilter] ?? categoryFilter}</strong>
+            {" "}· category <strong>{labelFor(categoryFilter)}</strong>
           </>
         )}
         {filerFilter !== null && (
@@ -431,7 +441,6 @@ interface FilerTableProps {
   readonly rows: readonly FilerRow[];
   readonly highlightFiler: string | null;
   readonly highlightRef: React.RefObject<HTMLTableRowElement>;
-  /** Clicking the highlighted row clears the filer filter. */
   readonly onClearHighlight?: () => void;
 }
 
@@ -466,18 +475,10 @@ function FilerTable({
         <tbody>
           {rows.map((row) => {
             const isHighlight = highlightFiler !== null && row.key === highlightFiler;
-            // Highlighted row uses a left-border accent rather than
-            // a full-row background tint. Amber backgrounds read as
-            // "warning / error" in dashboard convention; the
-            // operator-facing semantic here is "selected", not "alert".
-            // Clicking the highlighted row clears the filter — the
-            // operator can dismiss the per-filer drilldown without
-            // hunting for the Clear button.
-            // Use logical-side ``border-t-*`` instead of the all-sides
-            // shorthand so an isHighlight row's ``border-l-sky-500``
-            // can't be silently overridden if Tailwind emits the
-            // shorthand color rule after the side-specific one. PR
-            // #750 review caught this.
+            // Logical-side ``border-t-*`` instead of all-sides shorthand
+            // so an isHighlight row's ``border-l-sky-500`` can't be
+            // silently overridden if Tailwind emits the shorthand color
+            // rule after the side-specific one.
             const baseCls = "border-t border-t-slate-100 dark:border-t-slate-800";
             const highlightCls = isHighlight
               ? "border-l-2 border-l-sky-500 bg-sky-50/40 dark:bg-sky-950/20 cursor-pointer"
@@ -521,6 +522,10 @@ function FilerTable({
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function labelFor(key: string): string {
+  return (CATEGORY_LABELS as Record<string, string>)[key] ?? key;
+}
 
 function pickLatestBalance(
   financials: InstrumentFinancials,
@@ -578,41 +583,20 @@ function aggregateInsiderHoldersForSunburst(
   return holders;
 }
 
-function deriveCategoryStatus(
-  institutional: InstitutionalHoldingsResponse | null,
-  holders: readonly SunburstHolder[],
-  raw_total: string | undefined,
-): "ok" | "unknown" | "empty" {
-  if (institutional === null) return "unknown";
-  if (institutional.totals === null) return "unknown";
-  const total = parseShareCount(raw_total ?? "0") ?? 0;
-  if (total <= 0 && holders.length === 0) return "empty";
-  if (holders.length === 0 && total > 0) return "unknown";
-  return "ok";
-}
-
-interface RingsRef {
-  readonly free_float: number;
-  readonly categories: readonly { readonly key: string; readonly label: string }[];
-}
-
 function buildFilerRows(
-  _rings: RingsRef,
   filers: readonly InstitutionalFilerHolding[],
   insiders: InsiderTransactionsList | null,
   treasury: number | null,
 ): FilerRow[] {
   const rows: FilerRow[] = [];
 
-  // Institutional + ETF rows from the reader endpoint. Includes
-  // PUT/CALL exposure for the audit trail.
   for (const f of filers) {
-    const cat: FilerRow["category"] = f.filer_type === "ETF" ? "etfs" : "institutions";
+    const cat: CategoryKey = f.filer_type === "ETF" ? "etfs" : "institutions";
     rows.push({
       key: f.filer_cik,
       label: f.filer_name,
       category: cat,
-      category_label: CATEGORY_LABELS[cat] ?? cat,
+      category_label: CATEGORY_LABELS[cat],
       shares: parseShareCount(f.shares) ?? 0,
       value_usd: parseShareCount(f.market_value_usd ?? null),
       voting: f.voting_authority,
@@ -622,8 +606,6 @@ function buildFilerRows(
     });
   }
 
-  // Insider rows — latest non-derivative post-transaction-shares
-  // per officer.
   if (insiders !== null) {
     const latestByFiler = new Map<
       string,
@@ -644,7 +626,7 @@ function buildFilerRows(
         key,
         label: entry.row.filer_name,
         category: "insiders",
-        category_label: CATEGORY_LABELS.insiders!,
+        category_label: CATEGORY_LABELS.insiders,
         shares: entry.shares,
         value_usd: null,
         voting: null,
@@ -655,13 +637,12 @@ function buildFilerRows(
     }
   }
 
-  // Treasury memo row.
   if (treasury !== null && treasury > 0) {
     rows.push({
       key: "treasury",
       label: "Treasury (memo)",
       category: "treasury",
-      category_label: CATEGORY_LABELS.treasury!,
+      category_label: CATEGORY_LABELS.treasury,
       shares: treasury,
       value_usd: null,
       voting: null,
@@ -671,14 +652,7 @@ function buildFilerRows(
     });
   }
 
-  // Sort by shares DESC within category, categories in canonical order.
-  const categoryOrder: FilerRow["category"][] = [
-    "institutions",
-    "etfs",
-    "insiders",
-    "treasury",
-    "unallocated",
-  ];
+  const categoryOrder: CategoryKey[] = ["institutions", "etfs", "insiders", "treasury"];
   rows.sort((a, b) => {
     const ai = categoryOrder.indexOf(a.category);
     const bi = categoryOrder.indexOf(b.category);
@@ -701,11 +675,6 @@ export function buildCsv(rows: readonly FilerRow[]): string {
     "accession",
     "period_of_report",
   ].join(",");
-  // Every string-shaped column passes through csvEscape so a
-  // future schema change (e.g. an issuer name with a comma, a
-  // period_of_report that gets a textual qualifier) can't silently
-  // skip RFC 4180 quoting or smuggle a formula-injection payload.
-  // Numeric columns are formatted to ASCII digits in-line.
   const lines = rows.map((r) =>
     [
       csvEscape(r.key),
@@ -723,11 +692,8 @@ export function buildCsv(rows: readonly FilerRow[]): string {
 }
 
 function csvEscape(value: string): string {
-  // Standard RFC 4180 escaping: wrap in quotes, double internal
-  // quotes. Plus the formula-injection guard from
-  // app.api.instruments — prefix with a single quote when the
-  // first char would otherwise be interpreted as a formula by
-  // Excel / Sheets / Numbers.
+  // RFC 4180 escaping + formula-injection guard (mirrors
+  // app.api.instruments).
   let v = value;
   if (v !== "" && /^[=+\-@]/.test(v)) v = `'${v}`;
   if (/[",\n]/.test(v)) {

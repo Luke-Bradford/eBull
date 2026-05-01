@@ -1,21 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  buildSunburstRings,
-  visibilityThreshold,
-} from "./ownershipRings";
+import { buildSunburstRings, visibilityThreshold } from "./ownershipRings";
 import type { SunburstHolder, SunburstInputs } from "./ownershipRings";
 
-// treasury_shares=0 (a positive "we know there is no treasury" signal)
-// means the default category set is fully known — individual tests
-// override to ``null`` to exercise the DEI-projection-gap path.
 const DEFAULT_INPUT: SunburstInputs = {
-  free_float: 1_000_000_000,
+  total_shares: 1_000_000_000,
   holders: [],
-  treasury_shares: 0,
-  institutions_status: "ok",
-  etfs_status: "ok",
-  insiders_status: "ok",
+  institutions_total: null,
+  etfs_total: null,
+  insiders_total: null,
+  treasury_shares: null,
 };
 
 function holder(
@@ -27,237 +21,244 @@ function holder(
 }
 
 describe("visibilityThreshold", () => {
-  it("returns 0.5% of float for normal-cap floats", () => {
+  it("returns 0.5% of denominator for normal-cap counts", () => {
     expect(visibilityThreshold(1_000_000_000)).toBe(5_000_000);
     expect(visibilityThreshold(15_000_000_000)).toBe(75_000_000);
   });
 
-  it("clamps to 10,000-share floor for micro-cap floats", () => {
-    // 1M float * 0.5% = 5,000 shares — below 10k floor.
+  it("clamps to 10,000-share floor for micro-cap counts", () => {
     expect(visibilityThreshold(1_000_000)).toBe(10_000);
     expect(visibilityThreshold(0)).toBe(10_000);
     expect(visibilityThreshold(-50_000)).toBe(10_000);
   });
 });
 
-describe("buildSunburstRings", () => {
-  it("returns null on missing or zero float", () => {
-    expect(buildSunburstRings({ ...DEFAULT_INPUT, free_float: 0 })).toBeNull();
-    expect(buildSunburstRings({ ...DEFAULT_INPUT, free_float: NaN })).toBeNull();
+describe("buildSunburstRings — denominator + null handling", () => {
+  it("returns null on missing or non-positive total_shares", () => {
+    expect(buildSunburstRings({ ...DEFAULT_INPUT, total_shares: 0 })).toBeNull();
+    expect(buildSunburstRings({ ...DEFAULT_INPUT, total_shares: -1 })).toBeNull();
+    expect(buildSunburstRings({ ...DEFAULT_INPUT, total_shares: NaN })).toBeNull();
   });
 
-  it("inner ring known/gap split = full float when every category is known", () => {
-    const input: SunburstInputs = {
+  it("preserves total_shares as the denominator and exposes reported_total", () => {
+    const r = buildSunburstRings({ ...DEFAULT_INPUT });
+    expect(r!.total_shares).toBe(1_000_000_000);
+    expect(r!.reported_total).toBe(1_000_000_000);
+  });
+
+  it("renders no categories when every total is null/zero", () => {
+    const r = buildSunburstRings({ ...DEFAULT_INPUT });
+    expect(r!.categories).toEqual([]);
+    expect(r!.category_residual).toBe(1_000_000_000);
+  });
+});
+
+describe("buildSunburstRings — category sizing", () => {
+  it("includes a category when its total is positive", () => {
+    const r = buildSunburstRings({
       ...DEFAULT_INPUT,
-      holders: [holder("vanguard", 100_000_000, "institutions")],
-    };
-    const r = buildSunburstRings(input);
-    expect(r).not.toBeNull();
-    // Float=1B, institutions=100M, unallocated=900M, gap=0.
-    expect(r!.inner.known_shares).toBe(1_000_000_000);
-    expect(r!.inner.gap_shares).toBe(0);
-    expect(r!.inner.known_pct).toBeCloseTo(1);
-    expect(r!.inner.gap_pct).toBeCloseTo(0);
+      institutions_total: 500_000_000,
+      holders: [holder("vanguard", 200_000_000, "institutions")],
+    });
+    const inst = r!.categories.find((c) => c.key === "institutions")!;
+    expect(inst.shares).toBe(500_000_000);
+    expect(inst.reported_total).toBe(500_000_000);
   });
 
+  it("category_residual equals denom minus sum of category totals", () => {
+    const r = buildSunburstRings({
+      ...DEFAULT_INPUT,
+      institutions_total: 500_000_000,
+      etfs_total: 200_000_000,
+      insiders_total: 50_000_000,
+      treasury_shares: 30_000_000,
+      holders: [
+        holder("inst1", 200_000_000, "institutions"),
+        holder("etf1", 100_000_000, "etfs"),
+        holder("officer", 30_000_000, "insiders"),
+      ],
+    });
+    // 1B − (500M + 200M + 50M + 30M) = 220M residual.
+    expect(r!.category_residual).toBe(220_000_000);
+  });
+
+  it("category_residual stays at total_shares when no categories render", () => {
+    const r = buildSunburstRings({ ...DEFAULT_INPUT });
+    expect(r!.category_residual).toBe(1_000_000_000);
+  });
+
+  it("treasury renders as a single-leaf category", () => {
+    const r = buildSunburstRings({
+      ...DEFAULT_INPUT,
+      treasury_shares: 50_000_000,
+    });
+    const treasury = r!.categories.find((c) => c.key === "treasury")!;
+    expect(treasury.shares).toBe(50_000_000);
+    expect(treasury.leaves).toHaveLength(1);
+    expect(treasury.within_category_gap).toBe(0);
+  });
+});
+
+describe("buildSunburstRings — within-category gaps", () => {
+  it("renders within_category_gap = total − resolved when filers are incomplete", () => {
+    // Institutions total = 500M; we resolve only 350M to named filers
+    // (CUSIP-backfill gap). Outer ring should leave 150M empty.
+    const r = buildSunburstRings({
+      ...DEFAULT_INPUT,
+      institutions_total: 500_000_000,
+      holders: [
+        holder("vanguard", 200_000_000, "institutions"),
+        holder("blackrock", 150_000_000, "institutions"),
+      ],
+    });
+    const inst = r!.categories.find((c) => c.key === "institutions")!;
+    expect(inst.shares).toBe(500_000_000);
+    expect(inst.resolved_leaf_shares).toBe(350_000_000);
+    expect(inst.within_category_gap).toBe(150_000_000);
+  });
+
+  it("within_category_gap is zero when filers fully cover the total", () => {
+    const r = buildSunburstRings({
+      ...DEFAULT_INPUT,
+      institutions_total: 350_000_000,
+      holders: [
+        holder("vanguard", 200_000_000, "institutions"),
+        holder("blackrock", 150_000_000, "institutions"),
+      ],
+    });
+    const inst = r!.categories.find((c) => c.key === "institutions")!;
+    expect(inst.within_category_gap).toBe(0);
+  });
+
+  it("snapshot-lag: bumps category shares to sum(leaves) when filers oversubscribe", () => {
+    // 13F filer detail can be slightly newer than the totals
+    // snapshot — a holder may report shares the aggregate doesn't
+    // yet reflect. ``shares`` becomes max(reported, sum_of_leaves)
+    // so ring 3 fits inside ring 2; ``reported_total`` preserved for
+    // diagnostics; within_category_gap becomes 0.
+    const r = buildSunburstRings({
+      ...DEFAULT_INPUT,
+      institutions_total: 100_000_000,
+      holders: [holder("vanguard", 120_000_000, "institutions")],
+    });
+    const inst = r!.categories.find((c) => c.key === "institutions")!;
+    expect(inst.shares).toBe(120_000_000);
+    expect(inst.reported_total).toBe(100_000_000);
+    expect(inst.resolved_leaf_shares).toBe(120_000_000);
+    expect(inst.within_category_gap).toBe(0);
+  });
+
+  it("within_category_gap = total when API reports a total but no per-filer detail", () => {
+    // Common case: institutional total known via reader endpoint
+    // but CUSIP-backfill (#740) hasn't run, filers list empty.
+    // Whole category renders as a transparent within-category gap.
+    const r = buildSunburstRings({
+      ...DEFAULT_INPUT,
+      institutions_total: 500_000_000,
+      holders: [],
+    });
+    const inst = r!.categories.find((c) => c.key === "institutions")!;
+    expect(inst.shares).toBe(500_000_000);
+    expect(inst.resolved_leaf_shares).toBe(0);
+    expect(inst.within_category_gap).toBe(500_000_000);
+    expect(inst.leaves).toHaveLength(0);
+  });
+});
+
+describe("buildSunburstRings — cross-category oversubscription", () => {
+  it("bumps total_shares to sum_known when category totals exceed input denominator", () => {
+    // Outstanding lag: XBRL period-end is slightly older than the
+    // 13F snapshot, and reported institutional + insider shares
+    // exceed the recorded outstanding. Bumping the effective denom
+    // prevents Recharts from renormalising ring 2 to 360° at the
+    // wrong proportions.
+    const r = buildSunburstRings({
+      ...DEFAULT_INPUT,
+      total_shares: 1_000_000_000,
+      institutions_total: 800_000_000,
+      etfs_total: 300_000_000,
+      holders: [
+        holder("vanguard", 800_000_000, "institutions"),
+        holder("spdr", 300_000_000, "etfs"),
+      ],
+    });
+    expect(r!.reported_total).toBe(1_000_000_000);
+    expect(r!.total_shares).toBe(1_100_000_000);
+    expect(r!.category_residual).toBe(0);
+  });
+
+  it("leaves total_shares unchanged when categories fit within reported_total", () => {
+    const r = buildSunburstRings({
+      ...DEFAULT_INPUT,
+      institutions_total: 500_000_000,
+    });
+    expect(r!.total_shares).toBe(1_000_000_000);
+    expect(r!.reported_total).toBe(1_000_000_000);
+    expect(r!.category_residual).toBe(500_000_000);
+  });
+});
+
+describe("buildSunburstRings — outer-ring threshold grouping", () => {
   it("filer above threshold gets its own outer-ring wedge", () => {
-    // Threshold for 1B float = 5M. Vanguard at 100M passes.
-    const input: SunburstInputs = {
+    const r = buildSunburstRings({
       ...DEFAULT_INPUT,
+      institutions_total: 100_000_000,
       holders: [holder("vanguard", 100_000_000, "institutions")],
-    };
-    const r = buildSunburstRings(input);
-    expect(r).not.toBeNull();
+    });
     const inst = r!.categories.find((c) => c.key === "institutions")!;
     expect(inst.leaves).toHaveLength(1);
     expect(inst.leaves[0]!.key).toBe("vanguard");
-    expect(inst.leaves[0]!.is_other).toBe(false);
   });
 
-  it("filer below threshold rolls into 'Other' aggregate wedge", () => {
-    const input: SunburstInputs = {
+  it("sub-threshold filers aggregate into 'Other' with tail metadata", () => {
+    const r = buildSunburstRings({
       ...DEFAULT_INPUT,
+      institutions_total: 102_000_000,
       holders: [
-        holder("vanguard", 100_000_000, "institutions"),  // visible
-        holder("small1", 1_000_000, "institutions"),       // < 5M threshold
-        holder("small2", 500_000, "institutions"),         // < 5M threshold
-        holder("small3", 100_000, "institutions"),         // < 5M threshold
+        holder("vanguard", 100_000_000, "institutions"),
+        holder("small1", 1_000_000, "institutions"),
+        holder("small2", 800_000, "institutions"),
+        holder("small3", 200_000, "institutions"),
       ],
-    };
-    const r = buildSunburstRings(input);
+    });
     const inst = r!.categories.find((c) => c.key === "institutions")!;
     expect(inst.leaves).toHaveLength(2);
     const other = inst.leaves[1]!;
     expect(other.is_other).toBe(true);
-    expect(other.shares).toBe(1_600_000);
+    expect(other.shares).toBe(2_000_000);
     expect(other.tail_meta!.count).toBe(3);
-    expect(other.tail_meta!.aggregate_shares).toBe(1_600_000);
     expect(other.tail_meta!.largest_label).toBe("small1");
   });
 
-  it("'Other' tail meta surfaces the largest sub-threshold holder for context", () => {
-    // Operator wants to know the top of the tail without expanding —
-    // pin that ``largest_label`` is correct on a multi-holder tail.
-    const input: SunburstInputs = {
-      ...DEFAULT_INPUT,
-      holders: [
-        holder("BIG", 100_000_000, "institutions"),
-        holder("renaissance", 4_000_000, "institutions"), // below 5M
-        holder("citadel", 4_500_000, "institutions"),     // below 5M, biggest in tail
-        holder("two_sigma", 500_000, "institutions"),
-      ],
-    };
-    const r = buildSunburstRings(input);
-    const inst = r!.categories.find((c) => c.key === "institutions")!;
-    const other = inst.leaves.find((l) => l.is_other)!;
-    expect(other.tail_meta!.largest_label).toBe("citadel");
-    expect(other.tail_meta!.largest_pct).toBeCloseTo(0.0045);
-  });
-
-  it("micro-cap respects 10k-share floor — not 0.5%-of-float", () => {
-    // 1M float, 0.5% = 5k shares — but floor is 10k.
-    // Holder with 8k shares should fall into "Other" not visible.
-    const input: SunburstInputs = {
-      free_float: 1_000_000,
-      holders: [
-        holder("alice", 50_000, "institutions"),  // visible (>10k)
-        holder("bob", 8_000, "institutions"),     // < 10k floor
-      ],
-      treasury_shares: null,
-      institutions_status: "ok",
-      etfs_status: "ok",
-      insiders_status: "ok",
-    };
-    const r = buildSunburstRings(input);
-    const inst = r!.categories.find((c) => c.key === "institutions")!;
-    expect(inst.leaves.find((l) => l.key === "alice")).toBeDefined();
-    const other = inst.leaves.find((l) => l.is_other);
-    expect(other?.tail_meta?.count).toBe(1);
-    expect(other?.shares).toBe(8_000);
-  });
-
   it("insiders bypass the threshold — every officer surfaces", () => {
-    // Threshold for 1B float = 5M. Officer holding 1M would normally
-    // fall into "Other" for institutions, but for insiders every
-    // officer should surface as their own wedge.
-    const input: SunburstInputs = {
+    const r = buildSunburstRings({
       ...DEFAULT_INPUT,
+      insiders_total: 1_600_000,
       holders: [
         holder("ceo", 1_000_000, "insiders"),
         holder("cfo", 500_000, "insiders"),
         holder("cto", 100_000, "insiders"),
       ],
-    };
-    const r = buildSunburstRings(input);
+    });
     const insiders = r!.categories.find((c) => c.key === "insiders")!;
     expect(insiders.leaves).toHaveLength(3);
     expect(insiders.leaves.every((l) => !l.is_other)).toBe(true);
   });
 
-  it("category status='unknown' renders a coverage-gap leaf, not 0%", () => {
-    const input: SunburstInputs = {
+  it("micro-cap respects 10k-share floor — not 0.5% of total", () => {
+    const r = buildSunburstRings({
       ...DEFAULT_INPUT,
-      institutions_status: "unknown",
-      etfs_status: "unknown",
-    };
-    const r = buildSunburstRings(input);
-    const inst = r!.categories.find((c) => c.key === "institutions")!;
-    expect(inst.status).toBe("unknown");
-    expect(inst.unknown_reason).toBe("cusip_backfill");
-    expect(inst.leaves).toHaveLength(1);
-    expect(inst.leaves[0]!.label).toContain("CUSIP backfill");
-    // Unallocated collapses to 'empty' when an upstream category
-    // is unknown — its residual would be contaminated by the
-    // upstream gap and would mislead the operator if surfaced.
-    const unalloc = r!.categories.find((c) => c.key === "unallocated")!;
-    expect(unalloc.status).toBe("empty");
-    expect(unalloc.shares).toBe(0);
-  });
-
-  it("inner ring splits known vs gap when categories are unknown", () => {
-    // Only insiders + treasury known; institutions + ETFs gated by
-    // CUSIP backfill. Inner ring's gap_shares should equal float
-    // minus everything we genuinely know.
-    const input: SunburstInputs = {
-      ...DEFAULT_INPUT,
-      holders: [holder("ceo", 50_000_000, "insiders")],
-      treasury_shares: 30_000_000,
-      institutions_status: "unknown",
-      etfs_status: "unknown",
-    };
-    const r = buildSunburstRings(input);
-    expect(r).not.toBeNull();
-    // Known = insiders 50M + treasury 30M = 80M.
-    expect(r!.inner.known_shares).toBe(80_000_000);
-    // Gap = float 1B - 80M = 920M.
-    expect(r!.inner.gap_shares).toBe(920_000_000);
-    expect(r!.inner.known_pct).toBeCloseTo(0.08);
-    expect(r!.inner.gap_pct).toBeCloseTo(0.92);
-  });
-
-  it("treasury wedge present when treasury_shares > 0", () => {
-    const input: SunburstInputs = {
-      ...DEFAULT_INPUT,
-      treasury_shares: 10_000_000,
-    };
-    const r = buildSunburstRings(input);
-    const treasury = r!.categories.find((c) => c.key === "treasury")!;
-    expect(treasury.status).toBe("ok");
-    expect(treasury.shares).toBe(10_000_000);
-    expect(treasury.leaves).toHaveLength(1);
-  });
-
-  it("treasury status='unknown' with reason='dei_projection' when input is null", () => {
-    // Treasury_shares null is the #735 / DEI projection gap, not
-    // the CUSIP backfill. Operator-facing copy should surface that
-    // distinction so they don't conflate the two follow-ups.
-    const input: SunburstInputs = {
-      ...DEFAULT_INPUT,
-      treasury_shares: null,
-    };
-    const r = buildSunburstRings(input);
-    const treasury = r!.categories.find((c) => c.key === "treasury")!;
-    expect(treasury.status).toBe("unknown");
-    expect(treasury.unknown_reason).toBe("dei_projection");
-    expect(treasury.leaves[0]!.label).toContain("DEI projection");
-  });
-
-  it("unallocated absorbs the float residual when every category is known", () => {
-    // 1B float, 100M institutions, 50M ETFs, 20M insiders, 10M
-    // treasury → 820M unallocated.
-    const input: SunburstInputs = {
-      ...DEFAULT_INPUT,
+      total_shares: 1_000_000,
+      institutions_total: 58_000,
       holders: [
-        holder("inst", 100_000_000, "institutions"),
-        holder("etf", 50_000_000, "etfs"),
-        holder("officer", 20_000_000, "insiders"),
+        holder("alice", 50_000, "institutions"),
+        holder("bob", 8_000, "institutions"),
       ],
-      treasury_shares: 10_000_000,
-    };
-    const r = buildSunburstRings(input);
-    const unalloc = r!.categories.find((c) => c.key === "unallocated")!;
-    expect(unalloc.shares).toBe(820_000_000);
-    expect(unalloc.status).toBe("ok");
-  });
-
-  it("category sort: largest leaf first within each category", () => {
-    const input: SunburstInputs = {
-      ...DEFAULT_INPUT,
-      holders: [
-        holder("smaller", 50_000_000, "institutions"),
-        holder("larger", 200_000_000, "institutions"),
-      ],
-    };
-    const r = buildSunburstRings(input);
+    });
     const inst = r!.categories.find((c) => c.key === "institutions")!;
-    expect(inst.leaves[0]!.key).toBe("larger");
-    expect(inst.leaves[1]!.key).toBe("smaller");
-  });
-
-  it("empty category renders status='empty' with no leaves", () => {
-    const r = buildSunburstRings({ ...DEFAULT_INPUT });
-    const inst = r!.categories.find((c) => c.key === "institutions")!;
-    expect(inst.status).toBe("empty");
-    expect(inst.leaves).toHaveLength(0);
+    expect(inst.leaves.find((l) => l.key === "alice")).toBeDefined();
+    const other = inst.leaves.find((l) => l.is_other);
+    expect(other?.tail_meta?.count).toBe(1);
+    expect(other?.shares).toBe(8_000);
   });
 });
