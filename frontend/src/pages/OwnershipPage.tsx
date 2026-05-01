@@ -136,6 +136,12 @@ export function OwnershipPage(): JSX.Element {
     setSearchParams(next, { replace: false });
   }, [searchParams, setSearchParams]);
 
+  const clearFiler = useCallback(() => {
+    const next = new URLSearchParams(searchParams);
+    next.delete("filer");
+    setSearchParams(next, { replace: false });
+  }, [searchParams, setSearchParams]);
+
   const backHref = `/instrument/${encodeURIComponent(symbol)}`;
 
   return (
@@ -175,6 +181,7 @@ export function OwnershipPage(): JSX.Element {
           viewMode={viewMode}
           onWedgeClick={handleWedgeClick}
           onClearFilters={clearFilters}
+          onClearFiler={clearFiler}
         />
       )}
     </div>
@@ -191,6 +198,9 @@ interface OwnershipBodyProps {
   readonly viewMode: string | null;
   readonly onWedgeClick: (target: WedgeClick) => void;
   readonly onClearFilters: () => void;
+  /** Clear only the per-filer filter; keeps the category filter
+   *  in place so the operator stays in the same drilldown view. */
+  readonly onClearFiler: () => void;
 }
 
 function OwnershipBody({
@@ -203,6 +213,7 @@ function OwnershipBody({
   viewMode,
   onWedgeClick,
   onClearFilters,
+  onClearFiler,
 }: OwnershipBodyProps): JSX.Element {
   const outstanding = balance !== null ? pickLatestBalance(balance, "shares_outstanding") : null;
   const treasury = balance !== null ? pickLatestBalance(balance, "treasury_shares") : null;
@@ -356,7 +367,12 @@ function OwnershipBody({
           totalCount={allRows.length}
           onClear={onClearFilters}
         />
-        <FilerTable rows={filteredRows} highlightFiler={filerFilter} highlightRef={filerRowRef} />
+        <FilerTable
+          rows={filteredRows}
+          highlightFiler={filerFilter}
+          highlightRef={filerRowRef}
+          onClearHighlight={onClearFiler}
+        />
       </div>
     </div>
   );
@@ -415,9 +431,16 @@ interface FilerTableProps {
   readonly rows: readonly FilerRow[];
   readonly highlightFiler: string | null;
   readonly highlightRef: React.RefObject<HTMLTableRowElement>;
+  /** Clicking the highlighted row clears the filer filter. */
+  readonly onClearHighlight?: () => void;
 }
 
-function FilerTable({ rows, highlightFiler, highlightRef }: FilerTableProps): JSX.Element {
+function FilerTable({
+  rows,
+  highlightFiler,
+  highlightRef,
+  onClearHighlight,
+}: FilerTableProps): JSX.Element {
   if (rows.length === 0) {
     return (
       <EmptyState
@@ -443,13 +466,24 @@ function FilerTable({ rows, highlightFiler, highlightRef }: FilerTableProps): JS
         <tbody>
           {rows.map((row) => {
             const isHighlight = highlightFiler !== null && row.key === highlightFiler;
+            // Highlighted row uses a left-border accent rather than
+            // a full-row background tint. Amber backgrounds read as
+            // "warning / error" in dashboard convention; the
+            // operator-facing semantic here is "selected", not "alert".
+            // Clicking the highlighted row clears the filter — the
+            // operator can dismiss the per-filer drilldown without
+            // hunting for the Clear button.
+            const baseCls = "border-t border-slate-100 dark:border-slate-800";
+            const highlightCls = isHighlight
+              ? "border-l-2 border-l-sky-500 bg-sky-50/40 dark:bg-sky-950/20 cursor-pointer"
+              : "";
             return (
               <tr
                 key={`${row.category}-${row.key}`}
                 ref={isHighlight ? highlightRef : null}
-                className={`border-t border-slate-100 dark:border-slate-800 ${
-                  isHighlight ? "bg-amber-50 dark:bg-amber-950/40" : ""
-                }`}
+                className={`${baseCls} ${highlightCls}`}
+                onClick={isHighlight ? onClearHighlight : undefined}
+                title={isHighlight ? "Click to clear the per-filer filter" : undefined}
               >
                 <td className="py-1.5 text-slate-700 dark:text-slate-200">{row.label}</td>
                 <td className="py-1.5 text-slate-500 dark:text-slate-400">
