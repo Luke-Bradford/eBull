@@ -105,10 +105,19 @@ class CompaniesHouseFilingsProvider(FilingsProvider):
 
         return _normalise_filings(company_number, raw, start_date, end_date, filing_types)
 
-    def get_filing(self, provider_filing_id: str) -> FilingEvent:
+    def get_filing(
+        self,
+        provider_filing_id: str,
+        *,
+        issuer_cik: str | None = None,  # noqa: ARG002 — protocol uniformity; SEC-only
+    ) -> FilingEvent:
         """
         Fetch a filing by its Companies House transaction ID.
         Raises FilingNotFound if not found (404).
+
+        ``issuer_cik`` is part of the protocol for SEC compatibility
+        (#736) and is ignored here — Companies House filings are
+        keyed on company_number + transaction_id, not CIK.
 
         Note: Companies House filing-history items do not have a stable
         single-document URL in the same way as EDGAR. This method fetches

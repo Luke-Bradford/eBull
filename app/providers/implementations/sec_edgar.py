@@ -264,12 +264,28 @@ class SecFilingsProvider(FilingsProvider):
 
         return _normalise_filings(raw, cik_padded, start_date, end_date, filing_types)
 
-    def get_filing(self, provider_filing_id: str) -> FilingEvent:
+    def get_filing(
+        self,
+        provider_filing_id: str,
+        *,
+        issuer_cik: str | None = None,
+    ) -> FilingEvent:
         """
         Fetch metadata for a single filing by accession number.
 
         provider_filing_id is the accession number, e.g. '0000320193-24-000001'.
         Raises FilingNotFound if the accession number cannot be resolved.
+
+        ``issuer_cik`` (#736) routes the archive URL under the issuer's
+        CIK rather than the filing-of-record CIK. SEC accessions filed
+        by registered filing agents (EdgarOnline 1213900, GlobeNewswire
+        1493152, Donnelley 1571049, etc.) prefix the accession number
+        with the agent's CIK; the archive directory always lives under
+        the issuer's CIK. Without this hint every agent-filed accession
+        404s on the legacy fallback path. Callers that have the issuer
+        CIK from ``external_identifiers`` MUST pass it; bare
+        ``get_filing(accession)`` retains the legacy fallback for
+        diagnostic / one-off use.
 
         Does not persist the raw index JSON — every structured field
         from that JSON now lands in ``filing_documents`` via the
@@ -277,7 +293,7 @@ class SecFilingsProvider(FilingsProvider):
         would re-introduce the "body text on disk without a matching
         SQL table" anti-pattern (see docs/review-prevention-log.md).
         """
-        raw = self.fetch_filing_index(provider_filing_id)
+        raw = self.fetch_filing_index(provider_filing_id, issuer_cik=issuer_cik)
         if raw is None:
             raise FilingNotFound(f"Filing not found: {provider_filing_id}")
         return _normalise_filing_event(provider_filing_id, raw)

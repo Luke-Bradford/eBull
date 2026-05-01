@@ -154,6 +154,40 @@ def test_filing_index_strips_non_digits_from_issuer_cik() -> None:
     assert "/Archives/edgar/data/320193/" in captured[0].url.path
 
 
+def test_get_filing_threads_issuer_cik_through_to_archive_url() -> None:
+    """Regression for the second wave of #736. ``get_filing`` is the
+    bare-accession entry point used by ``coverage.py`` 8-K backfill;
+    pre-fix it called ``fetch_filing_index`` without forwarding any
+    CIK hint, so the legacy accession-prefix fallback fired and
+    every agent-filed accession 404'd. This pins that the keyword
+    flows through to the URL builder."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            content=json.dumps(
+                {
+                    "directory": {
+                        "name": "/Archives/edgar/data/19617/000149315226019548",
+                        "item": [],
+                    }
+                }
+            ),
+        )
+
+    provider = SecFilingsProvider(user_agent="test test@example.com")
+    _rewire_tickers_transport(provider, httpx.MockTransport(handler))
+
+    # Accession filed by GlobeNewswire / Issuer Direct (CIK 1493152)
+    # on behalf of issuer CIK 19617. Pre-fix the URL routed under
+    # 1493152 and 404'd; post-fix it routes under the issuer.
+    provider.get_filing("0001493152-26-019548", issuer_cik="0000019617")
+    assert len(captured) == 1
+    assert captured[0].url.path == "/Archives/edgar/data/19617/000149315226019548/index.json"
+
+
 def test_filing_index_legacy_path_still_works_for_self_filers() -> None:
     """Back-compat: callers that don't pass ``issuer_cik`` (e.g.
     bare ``get_filing(accession)`` lookups) keep the legacy

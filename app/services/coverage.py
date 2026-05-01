@@ -1801,7 +1801,13 @@ def backfill_filings(
 
     for missing_accession in sorted(fetched_eight_ks - db_eight_ks):
         try:
-            event = provider.get_filing(missing_accession)
+            # Pass the issuer's CIK (#736) so the archive URL routes
+            # under the issuer rather than the filing-of-record. SEC
+            # accessions filed by registered agents (EdgarOnline,
+            # GlobeNewswire, Donnelley etc.) carry the agent's CIK in
+            # the prefix; without this hint every agent-filed 8-K
+            # 404s on the archive index fetch.
+            event = provider.get_filing(missing_accession, issuer_cik=cik_padded)
         except FilingNotFound:
             continue  # SEC deleted between pages; skip.
         except httpx.HTTPError:

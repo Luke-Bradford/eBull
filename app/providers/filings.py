@@ -92,8 +92,20 @@ class FilingsProvider(ABC):
         """
 
     @abstractmethod
-    def get_filing(self, provider_filing_id: str) -> FilingEvent:
+    def get_filing(
+        self,
+        provider_filing_id: str,
+        *,
+        issuer_cik: str | None = None,
+    ) -> FilingEvent:
         """
         Fetch a single filing by its provider-native ID.
         Raises FilingNotFound if the ID does not exist on the provider.
+
+        ``issuer_cik`` (#736) is provider-specific. SEC implementations
+        use it to route the archive URL under the issuer's CIK rather
+        than the filing-of-record CIK (agent-filed accessions like
+        EdgarOnline / GlobeNewswire / Donnelley would otherwise 404).
+        Other providers (Companies House) ignore it because their
+        per-filing endpoint is not CIK-keyed.
         """
