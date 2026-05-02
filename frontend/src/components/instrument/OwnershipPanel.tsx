@@ -28,6 +28,8 @@
 import { useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { fetchBlockholders } from "@/api/blockholders";
+import type { BlockholdersResponse } from "@/api/blockholders";
 import { fetchInstitutionalHoldings } from "@/api/institutionalHoldings";
 import type {
   InstitutionalFilerHolding,
@@ -79,9 +81,11 @@ interface OwnershipData {
   readonly institutions_total: number | null;
   readonly etfs_total: number | null;
   readonly insiders_total: number | null;
+  readonly blockholders_total: number | null;
   readonly institutional_holders: readonly SunburstHolder[];
   readonly etf_holders: readonly SunburstHolder[];
   readonly insider_holders: readonly SunburstHolder[];
+  readonly blockholder_holders: readonly SunburstHolder[];
   /** 13F snapshot date — applies to both Institutions and ETFs (same
    *  ``period_of_report`` cohort across filer types). */
   readonly thirteen_f_as_of: string | null;
@@ -89,6 +93,8 @@ interface OwnershipData {
   readonly insiders_as_of: string | null;
   /** XBRL period_end of the row that produced ``treasury``. */
   readonly treasury_as_of: string | null;
+  /** Latest 13D/G filed_at across the blocks on this issuer (#766). */
+  readonly blockholders_as_of: string | null;
 }
 
 function pickLatestBalance(
@@ -131,6 +137,11 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
     [symbol],
   );
 
+  const blockholdersState = useAsync<BlockholdersResponse>(
+    useCallback(() => fetchBlockholders(symbol, 200), [symbol]),
+    [symbol],
+  );
+
   const navigate = useNavigate();
   const handleWedgeClick = useCallback(
     (target: WedgeClick) => {
@@ -151,15 +162,20 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
     balanceState.loading ||
     institutionalState.loading ||
     insidersState.loading ||
-    baselineState.loading;
+    baselineState.loading ||
+    blockholdersState.loading;
   const allErrored =
     balanceState.error !== null &&
     institutionalState.error !== null &&
     insidersState.error !== null &&
-    baselineState.error !== null;
+    baselineState.error !== null &&
+    blockholdersState.error !== null;
 
   return (
-    <Pane title="Ownership" source={{ providers: ["sec_13f", "sec_form3", "sec_form4", "sec_xbrl"] }}>
+    <Pane
+      title="Ownership"
+      source={{ providers: ["sec_13f", "sec_form3", "sec_form4", "sec_13dg", "sec_xbrl"] }}
+    >
       {isLoading ? (
         <SectionSkeleton rows={4} />
       ) : allErrored ? (
@@ -169,6 +185,7 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
             institutionalState.refetch();
             insidersState.refetch();
             baselineState.refetch();
+            blockholdersState.refetch();
           }}
         />
       ) : (
@@ -177,6 +194,7 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
           institutional={institutionalState.data}
           insiders={insidersState.data}
           baseline={baselineState.data}
+          blockholders={blockholdersState.data}
           onWedgeClick={handleWedgeClick}
         />
       )}
@@ -189,6 +207,7 @@ interface PanelBodyProps {
   readonly institutional: InstitutionalHoldingsResponse | null;
   readonly insiders: InsiderTransactionsList | null;
   readonly baseline: InsiderBaselineList | null;
+  readonly blockholders: BlockholdersResponse | null;
   readonly onWedgeClick: (target: WedgeClick) => void;
 }
 
@@ -202,11 +221,12 @@ function PanelBody({
   institutional,
   insiders,
   baseline,
+  blockholders,
   onWedgeClick,
 }: PanelBodyProps): JSX.Element {
   const today = useMemo(() => new Date(), []);
   return renderBody(
-    extractData(balance, institutional, insiders, baseline),
+    extractData(balance, institutional, insiders, baseline, blockholders),
     onWedgeClick,
     today,
   );
@@ -217,6 +237,7 @@ export function extractData(
   institutional: InstitutionalHoldingsResponse | null,
   insiders: InsiderTransactionsList | null,
   baseline: InsiderBaselineList | null,
+  blockholders: BlockholdersResponse | null,
 ): OwnershipData {
   const outstanding =
     balance !== null ? pickLatestBalance(balance, "shares_outstanding") : null;
@@ -249,6 +270,20 @@ export function extractData(
 
   const institutions_total = parseShareCount(inst_totals?.institutions_shares ?? null);
   const etfs_total = parseShareCount(inst_totals?.etfs_shares ?? null);
+
+  // Blockholders (#766): one wedge per ≥5% block. The reader
+  // returns per-reporter chain rows (matching the issue spec); the
+  // frontend dedupes by accession so joint-filing reporters
+  // collapse to a single wedge whose ``shares`` matches the
+  // backend's per-accession ``MAX(aggregate_amount_owned)`` rollup.
+  // Without this dedupe, two joint reporters claiming the same 1.5M
+  // block would surface as 2 wedges summing to 3M, which then
+  // triggers the snapshot-lag leaf-sum bump in ``buildSunburstRings``
+  // and double-counts the block in the category total. Codex
+  // pre-push review caught this.
+  const blockholder_holders: readonly SunburstHolder[] = blockholdersToHolders(blockholders);
+  const blockholders_total = parseShareCount(blockholders?.totals?.blockholders_shares ?? null);
+  const blockholders_as_of = blockholders?.totals?.as_of_date ?? null;
   // Form 4 has no aggregate-total endpoint — sum the per-officer
   // post-transaction balances. When no officer rows are on file the
   // total is null (category does not render).
@@ -289,13 +324,49 @@ export function extractData(
     institutions_total,
     etfs_total,
     insiders_total,
+    blockholders_total,
     institutional_holders,
     etf_holders,
     insider_holders,
+    blockholder_holders,
     thirteen_f_as_of,
     insiders_as_of,
     treasury_as_of,
+    blockholders_as_of,
   };
+}
+
+/** Map blockholder API rows into SunburstHolder wedges, deduping
+ *  by accession_number so joint-filing reporters collapse to one
+ *  wedge per block. The backend orders rows by
+ *  ``aggregate_amount_owned DESC`` per accession, so the first
+ *  occurrence of each accession is the largest-aggregate
+ *  representative — keep that one and drop the rest.
+ *
+ *  Wedge identity uses reporter_cik (or name fallback) rather than
+ *  filer_cik because two distinct beneficial owners can share one
+ *  EDGAR submitter; keying on filer_cik would collide their
+ *  wedges. Codex pre-push review caught this. */
+function blockholdersToHolders(
+  blockholders: BlockholdersResponse | null,
+): readonly SunburstHolder[] {
+  if (blockholders === null) return [];
+  const seen_accessions = new Set<string>();
+  const out: SunburstHolder[] = [];
+  for (const row of blockholders.blockholders) {
+    if (seen_accessions.has(row.accession_number)) continue;
+    seen_accessions.add(row.accession_number);
+    const shares = parseShareCount(row.aggregate_amount_owned);
+    if (shares === null || shares <= 0) continue;
+    const reporter_identity = row.reporter_cik ?? `name:${row.reporter_name}`;
+    out.push({
+      key: `block:${reporter_identity}`,
+      label: row.filer_name,
+      shares,
+      category: "blockholders",
+    });
+  }
+  return out;
 }
 
 /** Map baseline-API rows into the SunburstHolder shape so the
@@ -438,15 +509,18 @@ function renderBody(
       ...data.institutional_holders,
       ...data.etf_holders,
       ...data.insider_holders,
+      ...data.blockholder_holders,
     ],
     institutions_total: data.institutions_total,
     etfs_total: data.etfs_total,
     insiders_total: data.insiders_total,
+    blockholders_total: data.blockholders_total,
     treasury_shares: data.treasury,
     institutions_as_of: data.thirteen_f_as_of,
     etfs_as_of: data.thirteen_f_as_of,
     insiders_as_of: data.insiders_as_of,
     treasury_as_of: data.treasury_as_of,
+    blockholders_as_of: data.blockholders_as_of,
   };
   const rings = buildSunburstRings(inputs);
   if (rings === null) {

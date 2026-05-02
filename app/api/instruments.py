@@ -2842,3 +2842,301 @@ def get_instrument_institutional_holdings(
         totals=totals,
         filers=filers,
     )
+
+
+# ---------------------------------------------------------------------------
+# 13D/G blockholders — #766 PR 3 of 3
+# ---------------------------------------------------------------------------
+
+
+class BlockholderRow(BaseModel):
+    """One block on the cap table — the latest non-superseded 13D / 13G
+    filing for a (primary filer, issuer) pair.
+
+    Joint filings have N reporting persons under one accession, all
+    typically claiming the same beneficial ownership. The reader
+    collapses them to one row per primary filer (the EDGAR
+    submitter), picking the largest-aggregate reporter as the
+    canonical "block representative". The ``additional_reporters``
+    count surfaces the joint-filing depth so the operator knows the
+    block is held jointly without inflating the totals.
+    """
+
+    filer_cik: str  # primary filer's CIK (the EDGAR submitter)
+    filer_name: str
+    reporter_cik: str | None  # representative reporter's CIK
+    reporter_name: str
+    submission_type: str  # 'SCHEDULE 13D' | 'SCHEDULE 13D/A' | 'SCHEDULE 13G' | 'SCHEDULE 13G/A'
+    status: str  # 'active' | 'passive'
+    accession_number: str
+    aggregate_amount_owned: Decimal | None
+    percent_of_class: Decimal | None
+    additional_reporters: int  # joint-filing co-reporters omitted from this row
+    date_of_event: date | None
+    filed_at: datetime | None
+
+
+class BlockholdersTotals(BaseModel):
+    """Per-instrument blockholders rollup for the ownership card.
+
+    ``blockholders_shares`` sums the per-block ``aggregate_amount_owned``
+    across every block (one block per primary filer). The reader
+    deduplicates joint-filing reporters via the per-filer DISTINCT ON
+    so two indirect beneficial owners of the same 1.5M-share block
+    contribute 1.5M, not 3M.
+
+    ``active_shares`` and ``passive_shares`` partition the same total
+    by ``status`` (13D = active, 13G = passive) so the card can show
+    a stacked "engaged vs index" sub-bar if the operator wants it.
+
+    ``as_of_date`` is the latest ``filed_at`` across the included
+    blocks — drives the per-category freshness chip (#767).
+    """
+
+    blockholders_shares: Decimal
+    active_shares: Decimal
+    passive_shares: Decimal
+    total_filers: int
+    as_of_date: date | None
+
+
+class BlockholdersResponse(BaseModel):
+    symbol: str
+    totals: BlockholdersTotals | None
+    blockholders: list[BlockholderRow]
+
+
+_DEFAULT_BLOCKHOLDERS_LIMIT = 50
+_MAX_BLOCKHOLDERS_LIMIT = 500
+
+
+@router.get("/{symbol}/blockholders", response_model=BlockholdersResponse)
+def get_instrument_blockholders(
+    symbol: str,
+    limit: int = Query(default=_DEFAULT_BLOCKHOLDERS_LIMIT, ge=1, le=_MAX_BLOCKHOLDERS_LIMIT),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> BlockholdersResponse:
+    """13D / 13G blockholders for one instrument (#766 PR 3).
+
+    Returns the latest non-superseded filing per primary-filer per
+    issuer, with joint-filing reporters collapsed to a single
+    representative row. Each row corresponds to one ≥5% block on the
+    cap table.
+
+    Empty state: a non-covered or pre-ingest instrument returns
+    ``200`` with ``totals=null`` and ``blockholders=[]``. Card
+    consumers render the empty-per-slice fallback. 404 is reserved
+    for an unknown symbol.
+
+    Aggregation semantics match :func:`app.services.blockholders.
+    latest_blockholder_positions` but at the *primary filer* grain
+    rather than per-reporter-identity, so the ownership card's
+    blockholders slice does not double-count joint filers.
+    """
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+
+    # Per-reporter chain: pick the latest filing per
+    # ``(reporter_identity, issuer_cik)`` where ``reporter_identity =
+    # COALESCE(reporter_cik, reporter_name)``. Matches the schema's
+    # hot-path index from migration 095 and the PR 2 aggregator's
+    # supersession semantic — a 13D filed after a prior 13G/A by the
+    # same reporter wins regardless of which submitter (filer_id)
+    # routed it.
+    #
+    # ``additional_reporters`` is computed per-accession to surface
+    # joint-filing depth on each row (e.g. "Carl Icahn + 2 others").
+    # The totals query downstream dedupes by accession to avoid
+    # double-counting joint filers.
+    #
+    # Codex pre-push review caught the prior version of this query
+    # which deduped on ``filer_id`` (the EDGAR submitter, not the
+    # beneficial-owner identity) — that broke supersession across
+    # submitter changes and conflated distinct holders that shared
+    # one submitter.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            WITH per_reporter_chain AS (
+                SELECT DISTINCT ON (COALESCE(bf.reporter_cik, bf.reporter_name), bf.issuer_cik)
+                    bf.filer_id,
+                    bf.accession_number,
+                    bf.submission_type,
+                    bf.status,
+                    bf.reporter_cik,
+                    bf.reporter_name,
+                    bf.aggregate_amount_owned,
+                    bf.percent_of_class,
+                    bf.date_of_event,
+                    bf.filed_at
+                FROM blockholder_filings bf
+                WHERE bf.instrument_id = %(iid)s
+                ORDER BY
+                    COALESCE(bf.reporter_cik, bf.reporter_name),
+                    bf.issuer_cik,
+                    bf.filed_at DESC NULLS LAST,
+                    bf.accession_number DESC
+            ),
+            accession_reporter_count AS (
+                SELECT
+                    accession_number,
+                    COUNT(*) AS reporter_count
+                FROM per_reporter_chain
+                GROUP BY accession_number
+            )
+            SELECT
+                f.cik AS filer_cik,
+                f.name AS filer_name,
+                prc.accession_number,
+                prc.submission_type,
+                prc.status,
+                prc.reporter_cik,
+                prc.reporter_name,
+                prc.aggregate_amount_owned,
+                prc.percent_of_class,
+                prc.date_of_event,
+                prc.filed_at,
+                COALESCE(arc.reporter_count, 1) - 1 AS additional_reporters
+            FROM per_reporter_chain prc
+            JOIN blockholder_filers f ON f.filer_id = prc.filer_id
+            LEFT JOIN accession_reporter_count arc
+              ON arc.accession_number = prc.accession_number
+            ORDER BY prc.aggregate_amount_owned DESC NULLS LAST,
+                     prc.filed_at DESC NULLS LAST,
+                     prc.accession_number DESC,
+                     prc.reporter_name
+            LIMIT %(limit)s
+            """,
+            {"iid": instrument_id, "limit": limit},
+        )
+        block_rows = cur.fetchall()
+
+    if not block_rows:
+        return BlockholdersResponse(
+            symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+            totals=None,
+            blockholders=[],
+        )
+
+    # Totals span every block, not just the per-page slice. Compute
+    # in a separate query so a small ``limit`` does not truncate the
+    # rollup.
+    #
+    # Two-step rollup so joint-filing reporters (multiple per-reporter
+    # chain rows that share an accession) do not double-count:
+    #
+    #   1. ``per_reporter_chain`` — same shape as the drilldown query
+    #      above. One row per reporter chain.
+    #   2. ``per_accession_block`` — collapse to one row per
+    #      accession by picking the largest aggregate_amount_owned
+    #      among the joint reporters. SEC instructions require all
+    #      joint filers to claim the same beneficial ownership, so
+    #      MAX is canonical (and tolerates the rare misfiling where
+    #      one reporter's row defers to the prior cover page with
+    #      NULL aggregate). ``MAX(filed_at)`` so the per-block
+    #      filed_at is the most recent in the chain.
+    #   3. Sum across blocks — that is the slice total.
+    #
+    # ``total_filers`` counts distinct *blocks* (= accessions in the
+    # latest-per-reporter set), not reporter rows — matches the
+    # operator's "how many ≥5% blocks are on the cap table" mental
+    # model. Codex pre-push review caught the prior filer_id-keyed
+    # approach for the same reason.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            WITH per_reporter_chain AS (
+                SELECT DISTINCT ON (COALESCE(bf.reporter_cik, bf.reporter_name), bf.issuer_cik)
+                    bf.accession_number,
+                    bf.status,
+                    bf.aggregate_amount_owned,
+                    bf.filed_at
+                FROM blockholder_filings bf
+                WHERE bf.instrument_id = %(iid)s
+                ORDER BY
+                    COALESCE(bf.reporter_cik, bf.reporter_name),
+                    bf.issuer_cik,
+                    bf.filed_at DESC NULLS LAST,
+                    bf.accession_number DESC
+            ),
+            per_accession_block AS (
+                SELECT
+                    accession_number,
+                    -- ``BOOL_OR(status = 'active')`` so an accession
+                    -- with any active reporter row counts as active
+                    -- in the partition (typical: all reporters of
+                    -- one accession share the same status, but the
+                    -- check survives an edge-case mixed-status
+                    -- joint filing without raising).
+                    BOOL_OR(status = 'active') AS is_active,
+                    MAX(aggregate_amount_owned) AS aggregate_amount_owned,
+                    MAX(filed_at) AS filed_at
+                FROM per_reporter_chain
+                GROUP BY accession_number
+            )
+            SELECT
+                COALESCE(SUM(aggregate_amount_owned), 0) AS blockholders_shares,
+                COALESCE(SUM(aggregate_amount_owned) FILTER (WHERE is_active), 0) AS active_shares,
+                COALESCE(SUM(aggregate_amount_owned) FILTER (WHERE NOT is_active), 0) AS passive_shares,
+                COUNT(*) AS total_filers,
+                MAX(filed_at) AS latest_filed_at
+            FROM per_accession_block
+            """,
+            {"iid": instrument_id},
+        )
+        totals_row = cur.fetchone()
+    if totals_row is None:
+        # Defensive: aggregate always returns one row even on empty
+        # input. ``None`` here would be an invariant violation.
+        raise HTTPException(status_code=500, detail="aggregate produced no row")
+
+    latest_filed_at = totals_row["latest_filed_at"]  # type: ignore[index]
+    as_of_date = latest_filed_at.date() if isinstance(latest_filed_at, datetime) else None
+
+    totals = BlockholdersTotals(
+        blockholders_shares=Decimal(totals_row["blockholders_shares"] or 0),  # type: ignore[arg-type]
+        active_shares=Decimal(totals_row["active_shares"] or 0),  # type: ignore[arg-type]
+        passive_shares=Decimal(totals_row["passive_shares"] or 0),  # type: ignore[arg-type]
+        total_filers=int(totals_row["total_filers"] or 0),  # type: ignore[arg-type]
+        as_of_date=as_of_date,
+    )
+
+    blockholders = [
+        BlockholderRow(
+            filer_cik=str(r["filer_cik"]),  # type: ignore[arg-type]
+            filer_name=str(r["filer_name"]),  # type: ignore[arg-type]
+            reporter_cik=(str(r["reporter_cik"]) if r["reporter_cik"] is not None else None),  # type: ignore[arg-type]
+            reporter_name=str(r["reporter_name"]),  # type: ignore[arg-type]
+            submission_type=str(r["submission_type"]),  # type: ignore[arg-type]
+            status=str(r["status"]),  # type: ignore[arg-type]
+            accession_number=str(r["accession_number"]),  # type: ignore[arg-type]
+            aggregate_amount_owned=r["aggregate_amount_owned"],  # type: ignore[arg-type]
+            percent_of_class=r["percent_of_class"],  # type: ignore[arg-type]
+            additional_reporters=int(r["additional_reporters"] or 0),  # type: ignore[arg-type]
+            date_of_event=r["date_of_event"],  # type: ignore[arg-type]
+            filed_at=r["filed_at"],  # type: ignore[arg-type]
+        )
+        for r in block_rows
+    ]
+
+    return BlockholdersResponse(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        totals=totals,
+        blockholders=blockholders,
+    )

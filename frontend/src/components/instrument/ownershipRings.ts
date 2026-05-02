@@ -54,7 +54,12 @@ export interface SunburstHolder {
   readonly key: string;
   readonly label: string;
   readonly shares: number;
-  readonly category: "institutions" | "etfs" | "insiders" | "treasury";
+  readonly category:
+    | "institutions"
+    | "etfs"
+    | "insiders"
+    | "treasury"
+    | "blockholders";
 }
 
 export interface SunburstInputs {
@@ -76,6 +81,11 @@ export interface SunburstInputs {
   readonly institutions_total: number | null;
   readonly etfs_total: number | null;
   readonly insiders_total: number | null;
+  /** 13D/G blockholders aggregate (#766). One block per primary
+   *  filer per issuer (joint reporters collapse upstream so this
+   *  count does NOT double-count co-reporters of the same filing).
+   *  Null = no 13D/G blocks on file. */
+  readonly blockholders_total: number | null;
 
   /** Treasury (issuer-held) shares from XBRL. ``null`` = not on
    *  file; treasury wedge does not render. Counted in the
@@ -95,9 +105,17 @@ export interface SunburstInputs {
   readonly etfs_as_of?: string | null;
   readonly insiders_as_of?: string | null;
   readonly treasury_as_of?: string | null;
+  /** Blockholders as_of_date — latest filed_at across the included
+   *  blocks (the reader endpoint returns this directly). */
+  readonly blockholders_as_of?: string | null;
 }
 
-export type CategoryKey = "institutions" | "etfs" | "insiders" | "treasury";
+export type CategoryKey =
+  | "institutions"
+  | "etfs"
+  | "insiders"
+  | "treasury"
+  | "blockholders";
 
 export interface SunburstLeaf {
   readonly key: string;
@@ -177,6 +195,7 @@ const CATEGORY_LABEL: Record<CategoryKey, string> = {
   etfs: "ETFs",
   insiders: "Insiders",
   treasury: "Treasury",
+  blockholders: "Blockholders",
 };
 
 /**
@@ -190,6 +209,9 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
   const inst_holders = input.holders.filter((h) => h.category === "institutions");
   const etf_holders = input.holders.filter((h) => h.category === "etfs");
   const insider_holders = input.holders.filter((h) => h.category === "insiders");
+  const blockholder_holders = input.holders.filter(
+    (h) => h.category === "blockholders",
+  );
 
   // Threshold should align with the effective denominator the chart
   // ends up rendering against. When category totals oversubscribe
@@ -236,6 +258,18 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
         threshold,
         true, // bypass threshold — every officer surfaces
         input.insiders_as_of ?? null,
+      ),
+    );
+  }
+  if (input.blockholders_total !== null && input.blockholders_total > 0) {
+    categories.push(
+      buildCategoryFromTotal(
+        "blockholders",
+        input.blockholders_total,
+        blockholder_holders,
+        threshold,
+        true, // bypass threshold — every ≥5% block is, by definition, large enough
+        input.blockholders_as_of ?? null,
       ),
     );
   }
