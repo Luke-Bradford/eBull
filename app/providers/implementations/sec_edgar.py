@@ -80,6 +80,35 @@ _PROCESS_RATE_LIMIT_CLOCK: list[float] = [0.0]
 _PROCESS_RATE_LIMIT_LOCK: threading.Lock = threading.Lock()
 
 
+# Known SEC filing-agent CIKs (#752 defense-in-depth). These are
+# registered EDGAR submitters that file ON BEHALF of issuers — their
+# CIK appears as the prefix of the accession number for any filing
+# they submit, but the archive directory ALWAYS lives under the
+# issuer's CIK. Routing an archive fetch under any of these CIKs is
+# guaranteed to 404. The ``fetch_filing_index`` legacy fallback
+# rejects on hit so a stale long-running process running pre-#736
+# code surfaces a clear log line ("known agent CIK; pass issuer_cik")
+# instead of generating thousands of 404 round-trips against SEC.
+#
+# Source: cross-referenced from accession-prefix patterns observed in
+# the SEC master-index across 2024-2026. Adding a new agent here is
+# a code change rather than a DB migration so the block-list is
+# auditable in version control.
+KNOWN_FILING_AGENT_CIKS: frozenset[str] = frozenset(
+    {
+        "0001213900",  # EdgarOnline (Issuer Direct)
+        "0001493152",  # GlobeNewswire / Issuer Direct
+        "0001193125",  # Donnelley R.R. & Sons
+        "0001437749",  # Edgar Agents LLC
+        "0001571049",  # Donnelley Financial Solutions (DFIN)
+        "0001185185",  # Workiva
+        "0001387131",  # RR Donnelley
+        "0001469734",  # Toppan Merrill
+        "0001628280",  # Sec Compliance Services
+    }
+)
+
+
 def _zero_pad_cik(cik: str | int) -> str:
     """Return a 10-digit zero-padded CIK string."""
     return str(int(cik)).zfill(10)
@@ -363,8 +392,29 @@ class SecFilingsProvider(FilingsProvider):
         else:
             # Legacy fallback (#736): the accession prefix is the
             # filer-of-record's CIK, which collides with the
-            # archive's issuer-CIK key only for self-filers. Log so
-            # an operator investigating 404 noise can correlate.
+            # archive's issuer-CIK key only for self-filers.
+            #
+            # Defense-in-depth (#752): if the prefix CIK is a known
+            # filing-agent (EdgarOnline, GlobeNewswire, Donnelley
+            # etc.) the legacy URL is GUARANTEED to 404 — the agent
+            # never owns archive directories. Reject early with an
+            # explicit warning so a stale long-running process holding
+            # pre-#736 code surfaces a clear log line instead of
+            # generating thousands of 404 round-trips. Operator action
+            # on this warning: restart the jobs process so the
+            # post-#736 routing is in-memory.
+            prefix_cik = raw_id[:10]
+            if prefix_cik in KNOWN_FILING_AGENT_CIKS:
+                logger.warning(
+                    "fetch_filing_index: refusing legacy fallback for "
+                    "accession=%s — prefix CIK %s is a known filing-agent "
+                    "(URL would 404). Caller MUST pass issuer_cik. If this "
+                    "fires from a long-running worker, the process is "
+                    "running pre-#736 code; restart to pick up the routing fix.",
+                    provider_filing_id,
+                    prefix_cik,
+                )
+                return None
             logger.debug(
                 "fetch_filing_index: using accession-prefix CIK fallback "
                 "for accession=%s — pass issuer_cik to avoid agent-CIK 404s",
