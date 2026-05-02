@@ -95,13 +95,15 @@ _INSTITUTIONAL_SEEDS: list[tuple[str, str]] = [
     ("0000866787", "Wellington Management Group LLP"),
 ]
 
-# CIKs from above to also tag as ETFs (Vanguard, BlackRock,
-# State Street, Geode = iShares custodian).
+# CIKs from above to also tag as ETFs. Vanguard, BlackRock, and
+# State Street are the three primary US ETF issuers; Geode Capital
+# Management runs the index-fund engine behind Fidelity's index ETFs
+# and is treated as ETF-flavoured for the operator-facing chip.
 _ETF_OVERRIDES: list[tuple[str, str]] = [
     ("0000102909", "Vanguard ETF franchise"),
     ("0001364742", "iShares (BlackRock) ETF franchise"),
     ("0000093751", "SPDR (State Street) ETF franchise"),
-    ("0001029160", "iShares custodian (Geode)"),
+    ("0001029160", "Geode Capital (Fidelity index-fund engine)"),
 ]
 
 # Activist hedge funds + founder-family holdcos that file 13D/G
