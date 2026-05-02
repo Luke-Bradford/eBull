@@ -245,6 +245,49 @@ describe("buildSunburstRings — outer-ring threshold grouping", () => {
     expect(insiders.leaves.every((l) => !l.is_other)).toBe(true);
   });
 
+  it("propagates per-category as_of_date from inputs to output", () => {
+    // #767 freshness: each category total has its own source-row
+    // date. ``buildSunburstRings`` carries them through unchanged
+    // so the freshness classifier can read them off the rings
+    // model without a second prop trip.
+    const r = buildSunburstRings({
+      ...DEFAULT_INPUT,
+      institutions_total: 100_000_000,
+      etfs_total: 50_000_000,
+      treasury_shares: 25_000_000,
+      holders: [
+        holder("vanguard", 100_000_000, "institutions"),
+        holder("spdr", 50_000_000, "etfs"),
+      ],
+      institutions_as_of: "2026-03-31",
+      etfs_as_of: "2026-03-31",
+      insiders_as_of: "2026-04-28",
+      treasury_as_of: "2026-03-28",
+    });
+    expect(r!.categories.find((c) => c.key === "institutions")!.as_of_date).toBe(
+      "2026-03-31",
+    );
+    expect(r!.categories.find((c) => c.key === "etfs")!.as_of_date).toBe("2026-03-31");
+    expect(r!.categories.find((c) => c.key === "treasury")!.as_of_date).toBe(
+      "2026-03-28",
+    );
+  });
+
+  it("as_of_date defaults to null when caller omits it", () => {
+    // #767: optional inputs so existing call sites that pre-date
+    // freshness chips still compile. Output side keeps a strict
+    // ``string | null`` so renderers can branch without optional
+    // chaining noise.
+    const r = buildSunburstRings({
+      ...DEFAULT_INPUT,
+      institutions_total: 100_000_000,
+      treasury_shares: 25_000_000,
+      holders: [holder("vanguard", 100_000_000, "institutions")],
+    });
+    expect(r!.categories.find((c) => c.key === "institutions")!.as_of_date).toBeNull();
+    expect(r!.categories.find((c) => c.key === "treasury")!.as_of_date).toBeNull();
+  });
+
   it("micro-cap respects 10k-share floor — not 0.5% of total", () => {
     const r = buildSunburstRings({
       ...DEFAULT_INPUT,

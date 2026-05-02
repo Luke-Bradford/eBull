@@ -28,6 +28,7 @@ import {
 import type { InsiderTransactionsList } from "@/api/instruments";
 import type { InstrumentFinancials } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { OwnershipFreshnessChips } from "@/components/instrument/OwnershipFreshnessChips";
 import {
   OwnershipLegend,
   OwnershipSunburst,
@@ -281,6 +282,31 @@ function OwnershipBody({
     [outstanding, treasury],
   );
 
+  // Per-category freshness sources (#767).
+  const thirteen_f_as_of = inst_totals?.period_of_report ?? null;
+  const insiders_as_of = useMemo(() => {
+    if (insiders === null || insiders.rows.length === 0) return null;
+    let latest: string | null = null;
+    // Same eligibility predicate as the holders aggregator below
+    // and ``buildFilerRows`` — Codex (review of #767) caught that
+    // a divergent predicate would advance the freshness chip ahead
+    // of the actual snapshot the ring renders.
+    for (const row of insiders.rows as readonly InsiderRowShape[]) {
+      if (!isInsiderHoldingRow(row)) continue;
+      if (latest === null || row.txn_date > latest) latest = row.txn_date;
+    }
+    return latest;
+  }, [insiders]);
+  const treasury_as_of = useMemo(() => {
+    if (balance === null || treasury === null) return null;
+    for (const row of balance.rows) {
+      const raw = row.values["treasury_shares"];
+      const parsed = parseShareCount(raw ?? null);
+      if (parsed !== null) return row.period_end;
+    }
+    return null;
+  }, [balance, treasury]);
+
   const inputs: SunburstInputs = useMemo(
     () => ({
       total_shares,
@@ -289,8 +315,22 @@ function OwnershipBody({
       etfs_total,
       insiders_total,
       treasury_shares: treasury,
+      institutions_as_of: thirteen_f_as_of,
+      etfs_as_of: thirteen_f_as_of,
+      insiders_as_of,
+      treasury_as_of,
     }),
-    [total_shares, allHolders, institutions_total, etfs_total, insiders_total, treasury],
+    [
+      total_shares,
+      allHolders,
+      institutions_total,
+      etfs_total,
+      insiders_total,
+      treasury,
+      thirteen_f_as_of,
+      insiders_as_of,
+      treasury_as_of,
+    ],
   );
 
   const rings = useMemo(() => buildSunburstRings(inputs), [inputs]);
@@ -344,6 +384,7 @@ function OwnershipBody({
         <div className="flex flex-col items-center gap-3">
           <OwnershipSunburst inputs={inputs} onWedgeClick={onWedgeClick} size={420} />
           {rings !== null && <OwnershipLegend rings={rings} />}
+          {rings !== null && <OwnershipFreshnessChips rings={rings} today={new Date()} />}
         </div>
         <p className="mt-3 text-center text-xs text-slate-500 dark:text-slate-400">
           {formatShares(outstanding)} outstanding
@@ -558,6 +599,24 @@ interface InsiderRowShape {
   readonly is_derivative: boolean;
 }
 
+/**
+ * Single eligibility predicate for an insider Form 4 row to count
+ * toward the holdings snapshot. Shared by:
+ *   * the per-filer holders aggregator (ring 3)
+ *   * the L2 ``buildFilerRows`` table writer
+ *   * the L2 freshness chip's ``insiders_as_of`` derivation
+ *
+ * Codex (review of #767) caught that the chip's date predicate had
+ * drifted to "any non-derivative row" while the aggregators required
+ * a parseable ``post_transaction_shares``. With separate predicates a
+ * Form 4 row with a null share count would advance the chip ahead of
+ * the actual snapshot the ring renders.
+ */
+function isInsiderHoldingRow(row: InsiderRowShape): boolean {
+  if (row.is_derivative) return false;
+  return parseShareCount(row.post_transaction_shares) !== null;
+}
+
 function aggregateInsiderHoldersForSunburst(
   insiders: InsiderTransactionsList | null,
 ): readonly SunburstHolder[] {
@@ -567,9 +626,9 @@ function aggregateInsiderHoldersForSunburst(
     { txn_date: string; shares: number; label: string }
   >();
   for (const row of insiders.rows as readonly InsiderRowShape[]) {
-    if (row.is_derivative) continue;
-    const shares = parseShareCount(row.post_transaction_shares);
-    if (shares === null) continue;
+    if (!isInsiderHoldingRow(row)) continue;
+    // Predicate guarantees the share count is parseable.
+    const shares = parseShareCount(row.post_transaction_shares)!;
     const key = row.filer_cik ?? `name:${row.filer_name}`;
     const existing = latestByFiler.get(key);
     if (existing === undefined || row.txn_date > existing.txn_date) {
@@ -612,9 +671,8 @@ function buildFilerRows(
       { row: InsiderRowShape; shares: number }
     >();
     for (const row of insiders.rows as readonly InsiderRowShape[]) {
-      if (row.is_derivative) continue;
-      const shares = parseShareCount(row.post_transaction_shares);
-      if (shares === null) continue;
+      if (!isInsiderHoldingRow(row)) continue;
+      const shares = parseShareCount(row.post_transaction_shares)!;
       const key = row.filer_cik ?? `name:${row.filer_name}`;
       const existing = latestByFiler.get(key);
       if (existing === undefined || row.txn_date > existing.row.txn_date) {

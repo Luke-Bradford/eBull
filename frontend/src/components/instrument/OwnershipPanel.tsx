@@ -40,6 +40,7 @@ import {
 import type { InsiderTransactionsList } from "@/api/instruments";
 import type { InstrumentFinancials } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { OwnershipFreshnessChips } from "@/components/instrument/OwnershipFreshnessChips";
 import {
   OwnershipLegend,
   OwnershipSunburst,
@@ -72,7 +73,13 @@ interface OwnershipData {
   readonly institutional_holders: readonly SunburstHolder[];
   readonly etf_holders: readonly SunburstHolder[];
   readonly insider_holders: readonly SunburstHolder[];
-  readonly as_of_period: string | null;
+  /** 13F snapshot date — applies to both Institutions and ETFs (same
+   *  ``period_of_report`` cohort across filer types). */
+  readonly thirteen_f_as_of: string | null;
+  /** Latest Form 4 transaction date for any insider on this issuer. */
+  readonly insiders_as_of: string | null;
+  /** XBRL period_end of the row that produced ``treasury``. */
+  readonly treasury_as_of: string | null;
 }
 
 function pickLatestBalance(
@@ -190,8 +197,24 @@ export function extractData(
       ? null
       : insider_holders.reduce((s, h) => s + h.shares, 0);
 
-  const as_of_period =
-    inst_totals?.period_of_report ?? balance?.rows[0]?.period_end ?? null;
+  // Per-category freshness sources (#767):
+  //   * 13F (Institutions + ETFs): one shared period_of_report from
+  //     the totals row — both filer-type buckets are computed from
+  //     the same ``MAX(period_of_report)`` cohort backend-side.
+  //   * Insiders: latest txn_date observed across non-derivative
+  //     post-transaction rows. The reader endpoint exposes a
+  //     summary.latest_txn_date but the panel hits the per-row list;
+  //     derive locally so we don't add a second round trip.
+  //   * Treasury: balance-sheet row period_end that produced the
+  //     value — already the latest non-null treasury_shares row from
+  //     pickLatestBalance.
+  const thirteen_f_as_of = inst_totals?.period_of_report ?? null;
+  const insiders_as_of =
+    insiders === null || insiders.rows.length === 0
+      ? null
+      : latestTxnDate(insiders.rows as readonly InsiderRowShape[]);
+  const treasury_as_of =
+    treasury !== null && balance !== null ? findRowDateFor(balance, "treasury_shares") : null;
 
   return {
     outstanding,
@@ -202,8 +225,45 @@ export function extractData(
     institutional_holders,
     etf_holders,
     insider_holders,
-    as_of_period,
+    thirteen_f_as_of,
+    insiders_as_of,
+    treasury_as_of,
   };
+}
+
+/**
+ * Single row-eligibility predicate shared by ``latestTxnDate`` and
+ * ``aggregateInsiderHoldersForSunburst``. Codex (review of #767) caught
+ * that the two had drifted: the date helper accepted any non-derivative
+ * row, but the holders aggregator additionally requires a parseable
+ * ``post_transaction_shares``. With separate predicates a Form 4 row
+ * with a null share count would advance the freshness chip ahead of the
+ * actual holdings snapshot the ring renders. Keep them in lockstep here.
+ */
+function isInsiderHoldingRow(row: InsiderRowShape): boolean {
+  if (row.is_derivative) return false;
+  return parseShareCount(row.post_transaction_shares) !== null;
+}
+
+function latestTxnDate(rows: readonly InsiderRowShape[]): string | null {
+  let latest: string | null = null;
+  for (const row of rows) {
+    if (!isInsiderHoldingRow(row)) continue;
+    if (latest === null || row.txn_date > latest) latest = row.txn_date;
+  }
+  return latest;
+}
+
+/** Find the period_end of the first balance-sheet row that has a
+ *  non-null value for ``column``. Mirrors the iteration in
+ *  ``pickLatestBalance`` so the date and value stay paired. */
+function findRowDateFor(financials: InstrumentFinancials, column: string): string | null {
+  for (const row of financials.rows) {
+    const raw = row.values[column];
+    const parsed = parseShareCount(raw ?? null);
+    if (parsed !== null) return row.period_end;
+  }
+  return null;
 }
 
 function filerToHolder(
@@ -234,9 +294,9 @@ function aggregateInsiderHoldersForSunburst(
     { txn_date: string; shares: number; label: string }
   >();
   for (const row of insiders.rows as readonly InsiderRowShape[]) {
-    if (row.is_derivative) continue;
-    const shares = parseShareCount(row.post_transaction_shares);
-    if (shares === null) continue;
+    if (!isInsiderHoldingRow(row)) continue;
+    // Predicate above guarantees parseShareCount is non-null.
+    const shares = parseShareCount(row.post_transaction_shares)!;
     const key = row.filer_cik ?? `name:${row.filer_name}`;
     const existing = latestByFiler.get(key);
     if (existing === undefined || row.txn_date > existing.txn_date) {
@@ -287,6 +347,10 @@ function renderBody(
     etfs_total: data.etfs_total,
     insiders_total: data.insiders_total,
     treasury_shares: data.treasury,
+    institutions_as_of: data.thirteen_f_as_of,
+    etfs_as_of: data.thirteen_f_as_of,
+    insiders_as_of: data.insiders_as_of,
+    treasury_as_of: data.treasury_as_of,
   };
   const rings = buildSunburstRings(inputs);
   if (rings === null) {
@@ -310,15 +374,16 @@ function renderBody(
         <OwnershipLegend rings={rings} />
       </div>
       <div className="min-w-0 flex-1">
-        {data.as_of_period !== null && (
-          <p className="mb-1 text-xs text-slate-500 dark:text-slate-400">
-            As of {data.as_of_period}. {formatShares(data.outstanding)} outstanding
-            {data.treasury !== null && data.treasury > 0 && (
-              <> + {formatShares(data.treasury)} treasury</>
-            )}
-            .
-          </p>
-        )}
+        <div className="mb-2">
+          <OwnershipFreshnessChips rings={rings} today={new Date()} />
+        </div>
+        <p className="mb-1 text-xs text-slate-500 dark:text-slate-400">
+          {formatShares(data.outstanding)} outstanding
+          {data.treasury !== null && data.treasury > 0 && (
+            <> + {formatShares(data.treasury)} treasury</>
+          )}
+          .
+        </p>
         <p className="mb-2 text-xs">
           <span className="font-medium text-slate-700 dark:text-slate-200">
             {formatPct(accountedPct)} accounted for

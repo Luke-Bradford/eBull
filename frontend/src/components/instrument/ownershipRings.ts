@@ -81,6 +81,20 @@ export interface SunburstInputs {
    *  file; treasury wedge does not render. Counted in the
    *  denominator when present. */
   readonly treasury_shares: number | null;
+
+  /** Source-row date that produced each category's totals. Drives
+   *  the per-category freshness chip strip on the card header so the
+   *  operator can tell which slice is the stalest at a glance — 13F
+   *  lags 45-135d, Form 4 lags 0-2d, XBRL treasury lags 0-90d.
+   *  ``null`` = caller has no date for that category (e.g. before
+   *  the first ingest landed); the chip renders without an age
+   *  delta. ISO ``YYYY-MM-DD``. Optional so existing call sites that
+   *  pre-date #767 keep compiling — they'll render no chips until
+   *  threaded through. */
+  readonly institutions_as_of?: string | null;
+  readonly etfs_as_of?: string | null;
+  readonly insiders_as_of?: string | null;
+  readonly treasury_as_of?: string | null;
 }
 
 export type CategoryKey = "institutions" | "etfs" | "insiders" | "treasury";
@@ -121,6 +135,10 @@ export interface SunburstCategory {
    *  renderer paints a transparent wedge of this size so the named
    *  leaves don't get inflated to fill the parent arc. */
   readonly within_category_gap: number;
+  /** Source-row date that produced ``shares`` for this category. ISO
+   *  ``YYYY-MM-DD``. ``null`` when the caller didn't supply one. The
+   *  freshness chip renders without an age delta in that case. */
+  readonly as_of_date: string | null;
 }
 
 export interface SunburstRings {
@@ -187,12 +205,26 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
 
   if (input.institutions_total !== null && input.institutions_total > 0) {
     categories.push(
-      buildCategoryFromTotal("institutions", input.institutions_total, inst_holders, threshold, false),
+      buildCategoryFromTotal(
+        "institutions",
+        input.institutions_total,
+        inst_holders,
+        threshold,
+        false,
+        input.institutions_as_of ?? null,
+      ),
     );
   }
   if (input.etfs_total !== null && input.etfs_total > 0) {
     categories.push(
-      buildCategoryFromTotal("etfs", input.etfs_total, etf_holders, threshold, false),
+      buildCategoryFromTotal(
+        "etfs",
+        input.etfs_total,
+        etf_holders,
+        threshold,
+        false,
+        input.etfs_as_of ?? null,
+      ),
     );
   }
   if (input.insiders_total !== null && input.insiders_total > 0) {
@@ -203,6 +235,7 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
         insider_holders,
         threshold,
         true, // bypass threshold — every officer surfaces
+        input.insiders_as_of ?? null,
       ),
     );
   }
@@ -222,6 +255,7 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
         },
       ],
       within_category_gap: 0,
+      as_of_date: input.treasury_as_of ?? null,
     });
   }
 
@@ -247,6 +281,7 @@ function buildCategoryFromTotal(
   holders: readonly SunburstHolder[],
   threshold: number,
   bypass_threshold: boolean,
+  as_of_date: string | null,
 ): SunburstCategory {
   if (holders.length === 0) {
     // Total from upstream API but zero per-filer detail (e.g.
@@ -261,6 +296,7 @@ function buildCategoryFromTotal(
       resolved_leaf_shares: 0,
       leaves: [],
       within_category_gap: reported_total,
+      as_of_date,
     };
   }
 
@@ -322,5 +358,6 @@ function buildCategoryFromTotal(
     resolved_leaf_shares,
     leaves,
     within_category_gap,
+    as_of_date,
   };
 }
