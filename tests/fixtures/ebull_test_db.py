@@ -97,6 +97,7 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # without touching instruments).
     "insider_transaction_footnotes",
     "insider_transactions",
+    "insider_initial_holdings",  # #768 — Form 3 baseline, FK → instruments
     "insider_filers",
     "insider_filings",
     # #730 — 13F-HR institutional holdings. Child-to-parent:

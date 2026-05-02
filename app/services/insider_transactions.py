@@ -588,6 +588,301 @@ def _parse_one_transaction(
 
 
 # ---------------------------------------------------------------------
+# Form 3 parser (#768) — initial holdings snapshot
+# ---------------------------------------------------------------------
+#
+# Form 3 is filed once when an insider becomes subject to Section 16
+# reporting (officer / director / 10% holder appointment). It carries
+# the *snapshot* of their positions on that date — no transactions, no
+# acquired/disposed codes. Cumulative balance at any later point =
+# Form 3 baseline + signed sum of Form 4 deltas since.
+#
+# XML structure mirrors Form 4 but uses ``nonDerivativeHolding`` /
+# ``derivativeHolding`` (not ``...Transaction``) under
+# ``nonDerivativeTable`` / ``derivativeTable``. Each holding carries
+# ``postTransactionAmounts/sharesOwnedFollowingTransaction/value`` for
+# the share count (the only "transaction" semantics on a Form 3 are
+# the synthetic "you now hold this many shares as of periodOfReport").
+
+
+@dataclass(frozen=True)
+class ParsedHolding:
+    """One row from a Form 3 (non-derivative or derivative) holding
+    table. Mirrors :class:`ParsedTransaction` but drops the
+    transaction-state fields (``txn_code``, ``acquired_disposed_code``,
+    ``shares`` of the transaction itself) since a holding row records
+    the snapshot, not a delta.
+
+    Share-vs-value semantics: SEC ``postTransactionAmounts`` allows
+    *either* ``sharesOwnedFollowingTransaction`` *or*
+    ``valueOwnedFollowingTransaction`` (typically used for
+    fractional-undivided-interest securities). Both surface here so
+    the ingester / reader can pick the populated branch without a
+    silent drop. Same shape as ``ParsedTransaction`` for Form 4 (post-
+    migration 057): every structured field surfaced, no silent drops.
+    """
+
+    row_num: int
+    is_derivative: bool
+    # Filer linkage — same convention as Form 4 transactions: when the
+    # filing has multiple owners, attribute each row to the first
+    # listed owner (joint-filing convention).
+    filer_cik: str | None
+    security_title: str | None
+    shares: Decimal | None
+    value_owned: Decimal | None
+    direct_indirect: str | None
+    nature_of_ownership: str | None
+    # Derivative-only fields. ``None`` on non-derivative rows.
+    conversion_exercise_price: Decimal | None
+    exercise_date: date | None
+    expiration_date: date | None
+    underlying_security_title: str | None
+    underlying_shares: Decimal | None
+    # Value-branch alternative for derivative underlyings — parallels
+    # ParsedTransaction.underlying_value added in migration 057.
+    underlying_value: Decimal | None
+    # Pointers from this row to footnote bodies on the filing. Mirrors
+    # ParsedTransaction.footnote_refs — operator-facing UX must surface
+    # the footnote next to the field it qualifies. Form 3 footnotes
+    # commonly explain indirect-ownership chains (e.g. "Held by family
+    # trust of which the reporting person is trustee"). Dropping them
+    # silently violates the migration-057 "every structured field
+    # surfaced" precedent.
+    footnote_refs: tuple[ParsedFootnoteRef, ...] = ()
+
+
+@dataclass(frozen=True)
+class ParsedForm3:
+    """Structured extraction of one Form 3 XML primary document.
+
+    Holding rows for both tables are flattened into a single
+    ``holdings`` tuple with stable ``row_num`` so the
+    ``(accession, row_num)`` UNIQUE key in
+    :data:`insider_initial_holdings` doesn't collide between
+    non-derivative and derivative rows from the same filing.
+
+    ``footnotes`` carries the body of every ``<footnote id="...">``
+    on the filing; ``ParsedHolding.footnote_refs`` points at them by
+    id so the reader can render the body next to the field it
+    qualifies (matches the Form 4 model post-057).
+
+    ``no_securities_owned`` is the Form 3 header flag asserting the
+    filer holds nothing. Set to ``True`` on a "blank" Form 3 (newly-
+    appointed director with no positions yet); the holdings list will
+    also be empty in that case but the explicit flag lets the operator
+    distinguish "we know they hold nothing" from "data not on file".
+
+    ``date_of_original_submission`` is non-null on ``3/A`` amendments
+    and points back at the date of the original Form 3 being amended
+    — useful for chaining + drift detection.
+    """
+
+    document_type: str
+    period_of_report: date | None
+    date_of_original_submission: date | None
+    no_securities_owned: bool | None
+    issuer_cik: str | None
+    issuer_name: str | None
+    issuer_trading_symbol: str | None
+    remarks: str | None
+    signature_name: str | None
+    signature_date: date | None
+    filers: tuple[ParsedFiler, ...]
+    footnotes: tuple[ParsedFootnote, ...]
+    holdings: tuple[ParsedHolding, ...]
+
+
+def parse_form_3_xml(raw_xml: str) -> ParsedForm3 | None:
+    """Extract the structured holdings snapshot from a Form 3 primary
+    document.
+
+    Returns ``None`` when:
+
+    - Input is empty or fails to parse as XML.
+    - Document root is not ``ownershipDocument`` (URL rot — caller
+      pointed us at a cover page or a wrong document).
+    - ``documentType`` is not ``3`` or ``3/A`` (caller mis-routed a
+      Form 4 / 5 / amendment).
+    - Zero reporting owners (the file is unattributable — drop rather
+      than persist a phantom).
+
+    Empty holdings tables are *not* an error: a filer can submit a
+    Form 3 declaring "no holdings" (e.g. a newly-appointed director
+    who holds nothing yet). The caller writes a row with no holdings
+    so re-runs skip it; the absence of a row in
+    ``insider_initial_holdings`` is then meaningful (vs "we never
+    looked").
+    """
+    if not raw_xml:
+        return None
+    cleaned_xml = _XMLNS_RE.sub("", raw_xml)
+    try:
+        root = ET.fromstring(cleaned_xml)  # noqa: S314 — same trust posture as Form 4 parser.
+    except ET.ParseError:
+        return None
+
+    if _localname(root.tag) != "ownershipDocument":
+        return None
+
+    document_type = _text(root.find("./documentType")) or "3"
+    if document_type not in ("3", "3/A"):
+        return None
+
+    period_of_report = _date(_text(root.find("./periodOfReport")))
+    date_of_original_submission = _date(_text(root.find("./dateOfOriginalSubmission")))
+    no_securities_owned = _flag(_text(root.find("./noSecuritiesOwned")))
+
+    issuer_el = root.find("./issuer")
+    issuer_cik = _text(issuer_el.find("./issuerCik")) if issuer_el is not None else None
+    issuer_name = _text(issuer_el.find("./issuerName")) if issuer_el is not None else None
+    issuer_trading_symbol = _text(issuer_el.find("./issuerTradingSymbol")) if issuer_el is not None else None
+
+    filers = _extract_filers(root)
+    if not filers:
+        return None
+    default_filer_cik = filers[0].filer_cik
+
+    footnotes = _extract_footnotes(root)
+    holdings = _extract_holdings(root, default_filer_cik=default_filer_cik)
+
+    remarks = _text(root.find("./remarks"))
+    owner_sig = root.find("./ownerSignature")
+    signature_name = _text(owner_sig.find("./signatureName")) if owner_sig is not None else None
+    signature_date = _date(_text(owner_sig.find("./signatureDate"))) if owner_sig is not None else None
+
+    return ParsedForm3(
+        document_type=document_type,
+        period_of_report=period_of_report,
+        date_of_original_submission=date_of_original_submission,
+        no_securities_owned=no_securities_owned,
+        issuer_cik=issuer_cik,
+        issuer_name=issuer_name,
+        issuer_trading_symbol=issuer_trading_symbol,
+        remarks=remarks,
+        signature_name=signature_name,
+        signature_date=signature_date,
+        filers=filers,
+        footnotes=footnotes,
+        holdings=holdings,
+    )
+
+
+def _extract_holdings(
+    root: ET.Element,
+    *,
+    default_filer_cik: str,
+) -> tuple[ParsedHolding, ...]:
+    """Walk ``nonDerivativeTable/nonDerivativeHolding`` then
+    ``derivativeTable/derivativeHolding`` in document order. Row index
+    is shared across both tables so ``(accession, row_num)`` is a
+    stable dedup key for the upsert path."""
+    holdings: list[ParsedHolding] = []
+    row_num = 0
+    for non_der in root.findall("./nonDerivativeTable/nonDerivativeHolding"):
+        holdings.append(
+            _parse_one_holding(non_der, row_num=row_num, is_derivative=False, default_filer_cik=default_filer_cik)
+        )
+        row_num += 1
+    for der in root.findall("./derivativeTable/derivativeHolding"):
+        holdings.append(
+            _parse_one_holding(der, row_num=row_num, is_derivative=True, default_filer_cik=default_filer_cik)
+        )
+        row_num += 1
+    return tuple(holdings)
+
+
+def _parse_one_holding(
+    el: ET.Element,
+    *,
+    row_num: int,
+    is_derivative: bool,
+    default_filer_cik: str,
+) -> ParsedHolding:
+    security_title = _child_text(el.find("./securityTitle"), "./value")
+    # SEC postTransactionAmounts allows EITHER a share count OR a value
+    # (fractional-undivided-interest securities use the value branch).
+    # Surface both — the ingester picks whichever is populated.
+    shares = _safe_decimal(
+        _child_text(
+            el.find("./postTransactionAmounts/sharesOwnedFollowingTransaction"),
+            "./value",
+        ),
+        max_value=_MAX_SHARES,
+    )
+    value_owned = _safe_decimal(
+        _child_text(
+            el.find("./postTransactionAmounts/valueOwnedFollowingTransaction"),
+            "./value",
+        ),
+        max_value=_MAX_PRICE,
+    )
+    own_nature = el.find("./ownershipNature")
+    direct_indirect = _child_text(
+        own_nature.find("./directOrIndirectOwnership") if own_nature is not None else None,
+        "./value",
+    )
+    # Sanitise direct/indirect — SEC enumerates only "D" and "I"; any
+    # other value is malformed and persisting it would mislead the
+    # ownership-card filter that branches on this column. Mirrors the
+    # Form 4 sanitiser at _parse_one_transaction.
+    if direct_indirect not in ("D", "I"):
+        direct_indirect = None
+    nature_of_ownership = _child_text(
+        own_nature.find("./natureOfOwnership") if own_nature is not None else None,
+        "./value",
+    )
+
+    conversion_exercise_price: Decimal | None = None
+    exercise_date: date | None = None
+    expiration_date: date | None = None
+    underlying_security_title: str | None = None
+    underlying_shares: Decimal | None = None
+    underlying_value: Decimal | None = None
+    if is_derivative:
+        conversion_exercise_price = _safe_decimal(
+            _child_text(el.find("./conversionOrExercisePrice"), "./value"),
+            max_value=_MAX_PRICE,
+        )
+        exercise_date = _date(_child_text(el.find("./exerciseDate"), "./value"))
+        expiration_date = _date(_child_text(el.find("./expirationDate"), "./value"))
+        underlying = el.find("./underlyingSecurity")
+        if underlying is not None:
+            underlying_security_title = _child_text(underlying.find("./underlyingSecurityTitle"), "./value")
+            underlying_shares = _safe_decimal(
+                _child_text(underlying.find("./underlyingSecurityShares"), "./value"),
+                max_value=_MAX_SHARES,
+            )
+            # Value-branch alternative (matches ParsedTransaction
+            # .underlying_value added in migration 057). Some
+            # derivative grants — particularly performance / dollar-
+            # denominated awards — express the underlying as a value
+            # rather than a share count.
+            underlying_value = _safe_decimal(
+                _child_text(underlying.find("./underlyingSecurityValue"), "./value"),
+                max_value=_MAX_PRICE,
+            )
+
+    return ParsedHolding(
+        row_num=row_num,
+        is_derivative=is_derivative,
+        filer_cik=default_filer_cik,
+        security_title=security_title,
+        shares=shares,
+        value_owned=value_owned,
+        direct_indirect=direct_indirect,
+        nature_of_ownership=nature_of_ownership,
+        conversion_exercise_price=conversion_exercise_price,
+        exercise_date=exercise_date,
+        expiration_date=expiration_date,
+        underlying_security_title=underlying_security_title,
+        underlying_shares=underlying_shares,
+        underlying_value=underlying_value,
+        footnote_refs=_collect_footnote_refs(el),
+    )
+
+
+# ---------------------------------------------------------------------
 # DB upsert
 # ---------------------------------------------------------------------
 
