@@ -90,10 +90,27 @@ class SecArchiveFetcher(Protocol):
 # ---------------------------------------------------------------------------
 
 
-# SEC submissions JSON labels SC 13D forms with the abbreviated
-# ``SC`` prefix; primary_doc.xml carries the long-form
-# ``SCHEDULE 13D`` instead. Both representations are valid.
-_SUBMISSIONS_INDEX_FORMS: frozenset[str] = frozenset(("SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A"))
+# SEC submissions JSON uses BOTH form-label conventions in
+# practice. Pre-2024-12-19 (BOM rule effective date) filings show
+# the short ``SC 13D`` / ``SC 13D/A`` form; post-2024-12-19
+# filings — which carry the structured primary_doc.xml the parser
+# in #766 PR 1 consumes — show the long ``SCHEDULE 13D`` /
+# ``SCHEDULE 13D/A`` form. The filter accepts both so we don't
+# silently miss every modern (post-BOM) filing — verified against
+# Carl Icahn (CIK 0000921669) submissions JSON, which has
+# ``SCHEDULE 13D/A`` for 2025+ entries.
+_SUBMISSIONS_INDEX_FORMS: frozenset[str] = frozenset(
+    (
+        "SC 13D",
+        "SC 13D/A",
+        "SC 13G",
+        "SC 13G/A",
+        "SCHEDULE 13D",
+        "SCHEDULE 13D/A",
+        "SCHEDULE 13G",
+        "SCHEDULE 13G/A",
+    )
+)
 
 
 @dataclass(frozen=True)
