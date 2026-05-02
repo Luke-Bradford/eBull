@@ -251,7 +251,6 @@ class TestBlockholdersEndpoint:
         # beneficial ownership.
         assert Decimal(body["blockholders"][0]["aggregate_amount_owned"]) == Decimal("1500000")
         assert Decimal(body["blockholders"][1]["aggregate_amount_owned"]) == Decimal("1500000")
-        assert Decimal(body["blockholders"][0]["aggregate_amount_owned"]) == Decimal("1500000")
 
     def test_amendment_chain_supersession(
         self,
