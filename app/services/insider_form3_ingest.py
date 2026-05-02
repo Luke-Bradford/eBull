@@ -415,11 +415,11 @@ def ingest_form_3_filings_for_instrument(
               AND fe.filing_type IN ('3', '3/A')
               AND fe.primary_document_url IS NOT NULL
               AND fe.instrument_id = %s
-              AND fil.accession_number IS NULL
+              AND (fil.accession_number IS NULL OR fil.parser_version < %s)
             ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
             LIMIT %s
             """,
-            (instrument_id, limit),
+            (instrument_id, _FORM3_PARSER_VERSION, limit),
         )
         for row in cur.fetchall():
             candidates.append((int(row[0]), str(row[1]), _canonical_form_4_url(str(row[2]))))
@@ -439,7 +439,10 @@ def ingest_form_3_filings(
     Candidate selector:
       1. ``fe.filing_type IN ('3', '3/A')``.
       2. ``fe.primary_document_url IS NOT NULL``.
-      3. No existing ``insider_filings`` row.
+      3. No existing ``insider_filings`` row, OR the existing row's
+         ``parser_version`` is below the current
+         ``_FORM3_PARSER_VERSION`` (re-parse trigger when the parser
+         shape changes — Codex round 1 / round 2 review of #768 PR2).
       4. No backfill floor — Form 3 volume per issuer is bounded
          (~5-30 lifetime), and a 10-year-old Form 3 for a still-
          serving officer IS the correct baseline.
@@ -460,11 +463,11 @@ def ingest_form_3_filings(
             WHERE fe.provider = 'sec'
               AND fe.filing_type IN ('3', '3/A')
               AND fe.primary_document_url IS NOT NULL
-              AND fil.accession_number IS NULL
+              AND (fil.accession_number IS NULL OR fil.parser_version < %s)
             ORDER BY fe.filing_date DESC, fe.filing_event_id DESC
             LIMIT %s
             """,
-            (limit,),
+            (_FORM3_PARSER_VERSION, limit),
         )
         for row in cur.fetchall():
             candidates.append((int(row[0]), str(row[1]), _canonical_form_4_url(str(row[2]))))
@@ -539,6 +542,20 @@ def _process_form_3_candidates(
                 accession,
                 exc_info=True,
             )
+            # Tombstone the accession so a persistent constraint
+            # violation (or any other deterministic upsert failure)
+            # doesn't loop the scheduler refetching the same dead
+            # XML on every tick. A fix-and-bump of the parser version
+            # will re-pick the accession via the parser_version <
+            # selector branch above. Codex round 2 review of #768 PR2.
+            _write_form_3_tombstone(
+                conn,
+                instrument_id=instrument_id,
+                accession_number=accession,
+                primary_document_url=url,
+            )
+            conn.commit()
+            parse_misses += 1
             continue
 
         filings_parsed += 1

@@ -379,6 +379,109 @@ class TestIdempotency:
             assert row[0] == 1
 
 
+class TestParserVersionRefresh:
+    def test_existing_filing_below_current_parser_version_is_re_picked(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        # Codex round 1+2 review of #768 PR2: bumping
+        # _FORM3_PARSER_VERSION must trigger re-ingest of stored
+        # accessions (the module docstring promises this). Pin the
+        # selector branch so a future regression that drops the
+        # ``OR fil.parser_version < %s`` clause is caught.
+        iid = _seed_instrument(ebull_test_conn)
+        url = "https://example.test/form3.xml"
+        accession = "0000000111-26-000001"
+        _seed_filing(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession=accession,
+            url=url,
+        )
+
+        # Pre-populate insider_filings with a stale parser_version.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO insider_filings (
+                    accession_number, instrument_id, document_type,
+                    primary_document_url, parser_version, is_tombstone
+                ) VALUES (%s, %s, '3', %s, 0, FALSE)
+                """,
+                (accession, iid, url),
+            )
+        ebull_test_conn.commit()
+
+        # Even though the filing already has an insider_filings row,
+        # parser_version=0 is below _FORM3_PARSER_VERSION=1 so the
+        # selector picks it up for re-parse.
+        fetcher = _StubFetcher({url: _FORM_3_RICH})
+        result = ingest_form_3_filings(ebull_test_conn, fetcher)
+        assert result.filings_parsed == 1
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT parser_version FROM insider_filings WHERE accession_number = %s",
+                (accession,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            # Parser version bumped to current.
+            assert row[0] >= 1
+
+
+class TestUpsertFailureTombstone:
+    def test_upsert_exception_writes_tombstone_so_scheduler_does_not_retry(
+        self, ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Codex round 2 review of #768 PR2: a persistent upsert
+        # failure (e.g. DB constraint violation, deterministic bug in
+        # the upsert path) must tombstone the accession so the
+        # scheduler doesn't re-fetch the same dead XML on every tick.
+        # Pre-fix the except branch only rollback'd + continue'd,
+        # leaving the accession eligible for re-fetch forever.
+        from app.services import insider_form3_ingest
+
+        iid = _seed_instrument(ebull_test_conn)
+        url = "https://example.test/form3.xml"
+        accession = "0000000222-26-000001"
+        _seed_filing(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession=accession,
+            url=url,
+        )
+
+        # Force the upsert path to raise. Monkey-patch is more
+        # contract-faithful than dropping FKs at runtime — we want
+        # to test the EXCEPT branch, not a specific kind of DB
+        # failure.
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("simulated upsert failure")
+
+        monkeypatch.setattr(insider_form3_ingest, "upsert_form_3_filing", _boom)
+
+        fetcher = _StubFetcher({url: _FORM_3_RICH})
+        result = ingest_form_3_filings(ebull_test_conn, fetcher)
+        # Upsert raised — accession tombstoned, parsed_count=0.
+        assert result.filings_parsed == 0
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT is_tombstone FROM insider_filings WHERE accession_number = %s",
+                (accession,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] is True
+
+        # Second pass: with the tombstone written, the candidate
+        # selector excludes the row (parser_version >= current,
+        # tombstone or not). Confirm by un-patching and re-running.
+        monkeypatch.undo()
+        result2 = ingest_form_3_filings(ebull_test_conn, fetcher)
+        assert result2.filings_scanned == 0
+
+
 class TestStaleChildCleanup:
     def test_reparse_to_smaller_xml_drops_stale_footnotes_and_filers(
         self, ebull_test_conn: psycopg.Connection[tuple]
