@@ -354,6 +354,56 @@ export function fetchInsiderTransactions(
   );
 }
 
+/** Form 3 baseline insider holding (#768 PR 4). Per-officer initial-
+ *  snapshot from a Form 3 filing, surfaced only when the filer has
+ *  no Form 4 activity on file (otherwise the cumulative balance is
+ *  derivable from the latest ``post_transaction_shares`` observation
+ *  on the ``insider_transactions`` reader). */
+export interface InsiderBaselineHolding {
+  filer_cik: string;
+  filer_name: string;
+  filer_role: string | null;
+  security_title: string | null;
+  is_derivative: boolean;
+  direct_indirect: string | null;
+  shares: string | null;
+  value_owned: string | null;
+  as_of_date: string;
+}
+
+export interface InsiderBaselineList {
+  symbol: string;
+  rows: InsiderBaselineHolding[];
+}
+
+/** Baseline-only insider holdings for an instrument. Returns
+ *  ``rows: []`` for non-covered or pre-ingest issuers (200, not
+ *  404 — same empty-state contract as ``insider_transactions``).
+ *  404 only on unknown symbol or no SEC coverage. */
+export async function fetchInsiderBaseline(
+  symbol: string,
+  provider?: string,
+): Promise<InsiderBaselineList> {
+  const params = new URLSearchParams();
+  if (provider !== undefined) params.set("provider", provider);
+  const qs = params.toString();
+  const suffix = qs.length > 0 ? `?${qs}` : "";
+  try {
+    return await apiFetch<InsiderBaselineList>(
+      `/instruments/${encodeURIComponent(symbol)}/insider_baseline${suffix}`,
+    );
+  } catch (err) {
+    const { ApiError } = await import("@/api/client");
+    // No SEC coverage / unknown symbol: treat as empty rather than
+    // breaking the panel render. Matches the existing
+    // ``fetchInstrumentEmployees`` 404-tolerance pattern.
+    if (err instanceof ApiError && err.status === 404) {
+      return { symbol, rows: [] };
+    }
+    throw err;
+  }
+}
+
 export interface InstrumentHeadcount {
   symbol: string;
   employees: number;

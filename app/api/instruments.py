@@ -1161,7 +1161,7 @@ class EightKFilingsResponse(BaseModel):
 # wires a single provider; per-region integration PRs add more.
 _EIGHT_K_PROVIDERS: tuple[str, ...] = ("sec_8k_events",)
 _DIVIDEND_PROVIDERS: tuple[str, ...] = ("sec_dividend_summary",)
-_INSIDER_PROVIDERS: tuple[str, ...] = ("sec_form4",)
+_INSIDER_PROVIDERS: tuple[str, ...] = ("sec_form4", "sec_form3")
 
 
 def _validate_provider(provider: str | None, allowed: tuple[str, ...]) -> None:
@@ -1998,6 +1998,114 @@ def get_instrument_insider_transactions(
                 footnotes=d.footnotes,
             )
             for d in detail_rows
+        ],
+    )
+
+
+# ---------------------------------------------------------------------
+# Form 3 baseline-only insider holdings (#768 PR 4)
+# ---------------------------------------------------------------------
+#
+# Surfaces insiders who hold a Form 3 baseline grant but have no Form 4
+# activity on file — the "invisible insiders" the ownership card
+# currently misses (RSU on appointment, never traded after). Frontend
+# merges these rows with the Form 4 holders to produce the per-officer
+# ring 3 wedges.
+
+
+class InsiderBaselineHoldingModel(BaseModel):
+    filer_cik: str
+    filer_name: str
+    filer_role: str | None
+    security_title: str | None
+    is_derivative: bool
+    direct_indirect: str | None  # 'D' / 'I' / None
+    shares: Decimal | None
+    value_owned: Decimal | None
+    as_of_date: date
+
+
+class InsiderBaselineListModel(BaseModel):
+    symbol: str
+    rows: list[InsiderBaselineHoldingModel]
+
+
+@router.get(
+    "/{symbol}/insider_baseline",
+    response_model=InsiderBaselineListModel,
+)
+def get_instrument_insider_baseline(
+    symbol: str,
+    provider: str | None = Query(
+        default=None,
+        description="Capability provider tag. Today only 'sec_form3'.",
+    ),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InsiderBaselineListModel:
+    """Return Form 3 baseline holdings for filers with no Form 4
+    activity on file (#768 PR 4).
+
+    Operationally meaningful slice: officers who received an RSU /
+    initial grant on appointment and never traded after are invisible
+    to the per-filer ring 3 today (no Form 4 events for them). The
+    ownership panel merges these rows with the Form 4 holders to
+    surface the complete current insider population.
+
+    Filers with any non-tombstoned Form 4 row are excluded — their
+    cumulative balance is already derivable from the latest
+    ``post_transaction_shares`` observation on the
+    ``insider_transactions`` reader. Including them here would
+    double-count the per-filer wedge.
+
+    Empty-state contract: a non-covered or pre-ingest instrument
+    returns ``200`` with ``rows=[]``. Reserved 404 for unknown
+    symbol or no SEC coverage (matches the existing
+    ``/insider_transactions`` endpoint).
+    """
+    from app.services.insider_form3_ingest import list_baseline_only_insider_holdings
+
+    _validate_provider(provider, _INSIDER_PROVIDERS)
+
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    if not _has_sec_cik(conn, instrument_id):
+        # Form 3 is an SEC filing — no SEC CIK = no source.
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} has no SEC coverage")
+
+    holdings = list_baseline_only_insider_holdings(conn, instrument_id=instrument_id)
+    return InsiderBaselineListModel(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        rows=[
+            InsiderBaselineHoldingModel(
+                filer_cik=h.filer_cik,
+                filer_name=h.filer_name,
+                filer_role=h.filer_role,
+                security_title=h.security_title,
+                is_derivative=h.is_derivative,
+                direct_indirect=h.direct_indirect,
+                shares=h.shares,
+                value_owned=h.value_owned,
+                as_of_date=h.as_of_date,
+            )
+            for h in holdings
         ],
     )
 

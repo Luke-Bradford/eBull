@@ -87,6 +87,7 @@ def _clear() -> None:
         "/instruments/AAPL/dividends",
         "/instruments/AAPL/insider_summary",
         "/instruments/AAPL/insider_transactions",
+        "/instruments/AAPL/insider_baseline",
     ],
 )
 def test_no_sec_cik_returns_404_no_sec_coverage(client: TestClient, endpoint: str) -> None:
@@ -111,6 +112,7 @@ def test_no_sec_cik_returns_404_no_sec_coverage(client: TestClient, endpoint: st
         "/instruments/AAPL/dividends",
         "/instruments/AAPL/insider_summary",
         "/instruments/AAPL/insider_transactions",
+        "/instruments/AAPL/insider_baseline",
     ],
 )
 def test_with_sec_cik_does_not_404_with_no_sec_coverage(client: TestClient, endpoint: str) -> None:

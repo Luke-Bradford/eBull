@@ -22,10 +22,14 @@ import type {
   InstitutionalHoldingsResponse,
 } from "@/api/institutionalHoldings";
 import {
+  fetchInsiderBaseline,
   fetchInsiderTransactions,
   fetchInstrumentFinancials,
 } from "@/api/instruments";
-import type { InsiderTransactionsList } from "@/api/instruments";
+import type {
+  InsiderBaselineList,
+  InsiderTransactionsList,
+} from "@/api/instruments";
 import type { InstrumentFinancials } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { OwnershipFreshnessChips } from "@/components/instrument/OwnershipFreshnessChips";
@@ -102,14 +106,21 @@ export function OwnershipPage(): JSX.Element {
     [symbol],
   );
 
+  const baselineState = useAsync<InsiderBaselineList>(
+    useCallback(() => fetchInsiderBaseline(symbol), [symbol]),
+    [symbol],
+  );
+
   const isLoading =
     balanceState.loading ||
     institutionalState.loading ||
-    insidersState.loading;
+    insidersState.loading ||
+    baselineState.loading;
   const allErrored =
     balanceState.error !== null &&
     institutionalState.error !== null &&
-    insidersState.error !== null;
+    insidersState.error !== null &&
+    baselineState.error !== null;
 
   const handleWedgeClick = useCallback(
     (target: WedgeClick) => {
@@ -168,6 +179,7 @@ export function OwnershipPage(): JSX.Element {
             balanceState.refetch();
             institutionalState.refetch();
             insidersState.refetch();
+            baselineState.refetch();
           }}
         />
       ) : (
@@ -176,6 +188,7 @@ export function OwnershipPage(): JSX.Element {
           balance={balanceState.data}
           institutional={institutionalState.data}
           insiders={insidersState.data}
+          baseline={baselineState.data}
           categoryFilter={categoryFilter}
           filerFilter={filerFilter}
           viewMode={viewMode}
@@ -193,6 +206,7 @@ interface OwnershipBodyProps {
   readonly balance: InstrumentFinancials | null;
   readonly institutional: InstitutionalHoldingsResponse | null;
   readonly insiders: InsiderTransactionsList | null;
+  readonly baseline: InsiderBaselineList | null;
   readonly categoryFilter: string | null;
   readonly filerFilter: string | null;
   readonly viewMode: string | null;
@@ -208,6 +222,7 @@ function OwnershipBody({
   balance,
   institutional,
   insiders,
+  baseline,
   categoryFilter,
   filerFilter,
   viewMode,
@@ -253,9 +268,20 @@ function OwnershipBody({
         .map(filerToHolder("etfs")),
     [equity_filers],
   );
-  const insider_holders = useMemo(
+  const form4_insider_holders = useMemo(
     () => aggregateInsiderHoldersForSunburst(insiders),
     [insiders],
+  );
+  // Form-3-only filers (#768 PR4) — officers who hold a baseline
+  // grant but never traded after appointment. Backend NOT EXISTS
+  // gate guarantees no overlap with form4_insider_holders.
+  const baseline_insider_holders = useMemo<readonly SunburstHolder[]>(
+    () => baselineToInsiderHolders(baseline),
+    [baseline],
+  );
+  const insider_holders = useMemo<readonly SunburstHolder[]>(
+    () => [...form4_insider_holders, ...baseline_insider_holders],
+    [form4_insider_holders, baseline_insider_holders],
   );
   const allHolders = useMemo<readonly SunburstHolder[]>(
     () => [...institutional_holders, ...etf_holders, ...insider_holders],
@@ -294,18 +320,36 @@ function OwnershipBody({
   const today = useMemo(() => new Date(), []);
 
   const insiders_as_of = useMemo(() => {
-    if (insiders === null || insiders.rows.length === 0) return null;
-    let latest: string | null = null;
-    // Same eligibility predicate as the holders aggregator below
-    // and ``buildFilerRows`` — Codex (review of #767) caught that
-    // a divergent predicate would advance the freshness chip ahead
-    // of the actual snapshot the ring renders.
-    for (const row of insiders.rows as readonly InsiderRowShape[]) {
-      if (!isInsiderHoldingRow(row)) continue;
-      if (latest === null || row.txn_date > latest) latest = row.txn_date;
+    // Insider freshness factors in BOTH sources: latest Form 4
+    // txn_date AND latest Form 3 baseline as_of_date (#768 PR4).
+    // An issuer where every observed insider holds via a Form 3
+    // grant and never trades has no Form 4 rows but should still
+    // surface the latest baseline date as the chip's "as of".
+    let latest_form4: string | null = null;
+    if (insiders !== null && insiders.rows.length > 0) {
+      // Same eligibility predicate as the holders aggregator below
+      // and ``buildFilerRows`` — Codex (review of #767) caught that
+      // a divergent predicate would advance the freshness chip
+      // ahead of the actual snapshot the ring renders.
+      for (const row of insiders.rows as readonly InsiderRowShape[]) {
+        if (!isInsiderHoldingRow(row)) continue;
+        if (latest_form4 === null || row.txn_date > latest_form4) {
+          latest_form4 = row.txn_date;
+        }
+      }
     }
-    return latest;
-  }, [insiders]);
+    let latest_baseline: string | null = null;
+    if (baseline !== null && baseline.rows.length > 0) {
+      for (const row of baseline.rows) {
+        if (latest_baseline === null || row.as_of_date > latest_baseline) {
+          latest_baseline = row.as_of_date;
+        }
+      }
+    }
+    if (latest_form4 === null) return latest_baseline;
+    if (latest_baseline === null) return latest_form4;
+    return latest_form4 >= latest_baseline ? latest_form4 : latest_baseline;
+  }, [insiders, baseline]);
   const treasury_as_of = useMemo(() => {
     if (balance === null || treasury === null) return null;
     for (const row of balance.rows) {
@@ -345,8 +389,8 @@ function OwnershipBody({
   const rings = useMemo(() => buildSunburstRings(inputs), [inputs]);
 
   const allRows = useMemo(
-    () => buildFilerRows(filers, insiders, treasury),
-    [filers, insiders, treasury],
+    () => buildFilerRows(filers, insiders, baseline, treasury),
+    [filers, insiders, baseline, treasury],
   );
 
   const filteredRows = useMemo(() => {
@@ -625,9 +669,34 @@ function aggregateInsiderHoldersForSunburst(
   return holders;
 }
 
+/** Map baseline-API rows to SunburstHolder shape (#768 PR4). The
+ *  ``baseline:`` key prefix prevents collisions with same-CIK Form 4
+ *  leaves — the backend NOT EXISTS gate already excludes overlap, but
+ *  this defends against a future regression. Rows with null/zero
+ *  shares are dropped so the wedge sizing never goes negative. */
+function baselineToInsiderHolders(
+  baseline: InsiderBaselineList | null,
+): readonly SunburstHolder[] {
+  if (baseline === null || baseline.rows.length === 0) return [];
+  const out: SunburstHolder[] = [];
+  for (const row of baseline.rows) {
+    const shares = parseShareCount(row.shares);
+    if (shares === null || shares <= 0) continue;
+    out.push({
+      key: `baseline:${row.filer_cik}:${row.is_derivative ? "d" : "n"}`,
+      label: row.filer_name,
+      shares,
+      category: "insiders",
+    });
+  }
+  return out;
+}
+
+
 function buildFilerRows(
   filers: readonly InstitutionalFilerHolding[],
   insiders: InsiderTransactionsList | null,
+  baseline: InsiderBaselineList | null,
   treasury: number | null,
 ): FilerRow[] {
   const rows: FilerRow[] = [];
@@ -674,6 +743,29 @@ function buildFilerRows(
         is_put_call: null,
         accession: null,
         period_of_report: entry.row.txn_date,
+      });
+    }
+  }
+
+  // Form 3 baseline-only insiders (#768 PR4). Backend gate
+  // guarantees no CIK overlap with the Form 4 set above; the
+  // ``baseline:`` key prefix matches the SunburstHolder key so a
+  // wedge click on the L1 ring lands on the right L2 row.
+  if (baseline !== null) {
+    for (const row of baseline.rows) {
+      const shares = parseShareCount(row.shares);
+      if (shares === null || shares <= 0) continue;
+      rows.push({
+        key: `baseline:${row.filer_cik}:${row.is_derivative ? "d" : "n"}`,
+        label: row.filer_name,
+        category: "insiders",
+        category_label: CATEGORY_LABELS.insiders,
+        shares,
+        value_usd: parseShareCount(row.value_owned ?? null),
+        voting: null,
+        is_put_call: null,
+        accession: null,
+        period_of_report: row.as_of_date,
       });
     }
   }
