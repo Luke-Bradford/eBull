@@ -383,6 +383,30 @@ def test_in_table_subheading_does_not_anchor_section_window() -> None:
     assert all(r.shares != Decimal("50000") for r in parsed.rows)
 
 
+def test_holder_named_common_fund_is_not_treated_as_subheader() -> None:
+    """A holder cell containing the word ``"common"`` (e.g. a fund
+    named ``"Common Fund LLC"``) must not be silently promoted to
+    column-headers and dropped from the data set. Codex / bot
+    review caught this on PR review — ``common`` was originally in
+    the sub-header keyword list as a share-class indicator but
+    collided with legitimate holder names."""
+    body = """
+    <table>
+      <tr>
+        <th>Name and Address of Beneficial Owner</th>
+        <th>Number of Shares</th>
+        <th>Percent of Class</th>
+      </tr>
+      <tr><td>Common Fund LLC</td><td>3,000,000</td><td>11.0%</td></tr>
+      <tr><td>Other Holder</td><td>1,000,000</td><td>3.5%</td></tr>
+    </table>
+    """
+    parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+    assert len(parsed.rows) == 2
+    names = [r.holder_name for r in parsed.rows]
+    assert "Common Fund LLC" in names
+
+
 def test_two_row_header_with_sole_shared_total_promotes_subheader() -> None:
     """Some DEF 14As use a merged top header
     (``Name | Amount and Nature | Percent``) with a sub-row

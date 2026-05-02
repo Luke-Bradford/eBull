@@ -411,7 +411,14 @@ def _looks_like_subheader(cells: tuple[str, ...]) -> bool:
         if _NUMERIC_LIKE_RE.search(c):
             return False
     joined = " ".join(cells).lower()
-    sub_keywords = ("sole", "shared", "total", "voting", "dispositive", "common", "preferred")
+    # Sub-header keywords scope tightly to ownership-block subdivisions.
+    # ``common`` / ``preferred`` were originally on this list as share
+    # class indicators but they collide with legitimate holder names
+    # (e.g. ``"Common Fund LLC"``) — Codex / bot review caught the
+    # false positive: a one-cell holder-name row with "common" in the
+    # name AND no numeric cell would be silently promoted to column
+    # headers and dropped from the data set. Removed both.
+    sub_keywords = ("sole", "shared", "total", "voting", "dispositive")
     return any(k in joined for k in sub_keywords)
 
 
@@ -468,8 +475,8 @@ def _parse_table_html(table_html: str) -> _RawTable | None:
     # still recognisable as the beneficial-ownership table). Codex
     # pre-push review caught the missing parent-row score combine.
     if body:
-        median_data_width = max(len(r) for r in body)
-        if len(parent_headers) < median_data_width and _looks_like_subheader(body[0]):
+        max_data_width = max(len(r) for r in body)
+        if len(parent_headers) < max_data_width and _looks_like_subheader(body[0]):
             column_headers = body[0]
             score_headers = parent_headers + body[0]
             body = body[1:]
