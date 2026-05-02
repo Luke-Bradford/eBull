@@ -241,6 +241,7 @@ JOB_SEC_BUSINESS_SUMMARY_INGEST = "sec_business_summary_ingest"
 JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP = "sec_business_summary_bootstrap"
 JOB_SEC_INSIDER_TRANSACTIONS_INGEST = "sec_insider_transactions_ingest"
 JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
+JOB_SEC_FORM3_INGEST = "sec_form3_ingest"
 JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
 JOB_SEC_FILING_DOCUMENTS_INGEST = "sec_filing_documents_ingest"
 JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
@@ -576,6 +577,23 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "the historical tail drains predictably."
         ),
         cadence=Cadence.hourly(minute=45),
+        catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_FORM3_INGEST,
+        description=(
+            "Parse SEC Form 3 filings into ``insider_initial_holdings`` "
+            "(#768). Form 3 is the per-officer initial-snapshot filing "
+            "(once per appointment); volume per issuer is bounded "
+            "(~5-30 lifetime) and the data isn't time-sensitive once "
+            "captured, so a daily cadence is plenty. Idempotent via "
+            "the (accession, row_num) UNIQUE key on the holdings table; "
+            "parser-version-bump triggers re-parse via the candidate "
+            "selector. Fills the ownership-card gap where insiders who "
+            "held a Form 3 grant but never traded after appointment "
+            "were invisible to the per-filer ring."
+        ),
+        cadence=Cadence.daily(hour=4, minute=20),
         catch_up_on_boot=False,
     ),
     ScheduledJob(
@@ -3197,6 +3215,38 @@ def sec_insider_transactions_ingest() -> None:
         tracker.row_count = result.rows_inserted
         logger.info(
             "sec_insider_transactions_ingest: scanned=%d parsed=%d inserted=%d fetch_errors=%d parse_misses=%d",
+            result.filings_scanned,
+            result.filings_parsed,
+            result.rows_inserted,
+            result.fetch_errors,
+            result.parse_misses,
+        )
+
+
+def sec_form3_ingest() -> None:
+    """Parse SEC Form 3 filings into ``insider_initial_holdings`` (#768).
+
+    Form 3 is the per-officer initial-snapshot filing — one per
+    Section-16 appointment, no transactions. Without this ingest,
+    insiders who get an RSU grant on appointment and never trade
+    after are invisible to the ownership card's per-officer ring
+    (no Form 4 events for them). Daily cadence is plenty: Form 3
+    volume is bounded (~5-30 lifetime per issuer) and the snapshot
+    isn't time-sensitive once captured.
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.insider_form3_ingest import ingest_form_3_filings
+
+    with _tracked_job(JOB_SEC_FORM3_INGEST) as tracker:
+        with (
+            psycopg.connect(settings.database_url) as conn,
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+        ):
+            result = ingest_form_3_filings(conn, provider)
+
+        tracker.row_count = result.rows_inserted
+        logger.info(
+            "sec_form3_ingest: scanned=%d parsed=%d inserted=%d fetch_errors=%d parse_misses=%d",
             result.filings_scanned,
             result.filings_parsed,
             result.rows_inserted,

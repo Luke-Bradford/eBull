@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
 from typing import Any, Protocol
 
 import psycopg
@@ -568,3 +570,137 @@ def _process_form_3_candidates(
         fetch_errors=fetch_errors,
         parse_misses=parse_misses,
     )
+
+
+# ---------------------------------------------------------------------
+# Reader — baseline-only insider holdings (#768 PR 3)
+# ---------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BaselineInsiderHolding:
+    """Form 3 holding for a filer who has no Form 4 activity on file
+    for this instrument.
+
+    These are the operationally-meaningful "invisible insiders" — they
+    received a grant on appointment, never traded after, and therefore
+    never produced a Form 4 row. Without surfacing the baseline
+    snapshot, the per-filer ownership ring under-counts current
+    insiders.
+
+    The ingester writes one row per holding-line in a Form 3 (non-
+    derivative + derivative interleaved). The reader here aggregates
+    to one row per (filer_cik, security_title, is_derivative) and
+    picks the latest ``as_of_date`` per group, mirroring the Form 4
+    reader's ``post_transaction_shares`` latest-observation pattern.
+    """
+
+    filer_cik: str
+    filer_name: str
+    filer_role: str | None
+    security_title: str | None
+    is_derivative: bool
+    direct_indirect: str | None
+    shares: Decimal | None
+    value_owned: Decimal | None
+    as_of_date: date
+
+
+def list_baseline_only_insider_holdings(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+) -> list[BaselineInsiderHolding]:
+    """Return Form 3 baseline holdings for filers who have *no* Form 4
+    transaction on file for this instrument.
+
+    Filers with any non-tombstoned Form 4 row in
+    ``insider_transactions`` are excluded — their cumulative balance
+    is already derivable from
+    :func:`app.services.insider_transactions.list_insider_transactions`
+    via the latest ``post_transaction_shares`` observation. Returning
+    them here would double-count the per-filer ring 3 wedge.
+
+    Tombstoned Form 3 filings (fetch / parse failures) excluded via an
+    INNER JOIN to ``insider_filings`` with ``is_tombstone = FALSE``,
+    matching the convention used by ``get_insider_summary``.
+
+    Returns rows ordered by ``shares DESC NULLS LAST`` so the consumer
+    can render largest-first without a second pass.
+    """
+    rows: list[BaselineInsiderHolding] = []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH baseline AS (
+                SELECT DISTINCT ON (
+                    iih.filer_cik, iih.security_title, iih.is_derivative
+                )
+                    iih.filer_cik,
+                    iih.filer_name,
+                    iih.filer_role,
+                    iih.security_title,
+                    iih.is_derivative,
+                    iih.direct_indirect,
+                    iih.shares,
+                    iih.value_owned,
+                    iih.as_of_date
+                FROM insider_initial_holdings iih
+                INNER JOIN insider_filings f
+                    ON f.accession_number = iih.accession_number
+                   AND f.is_tombstone = FALSE
+                WHERE iih.instrument_id = %s
+                ORDER BY
+                    iih.filer_cik,
+                    iih.security_title,
+                    iih.is_derivative,
+                    -- Tie-break in priority order:
+                    --   1. Latest as_of_date (period_of_report) wins.
+                    --   2. Within the same as_of_date (the realistic
+                    --      3/A case where the amendment keeps the
+                    --      original snapshot date), prefer the larger
+                    --      accession_number — within a filer, SEC
+                    --      assigns monotonically increasing
+                    --      sequence numbers, so the amendment's
+                    --      accession sorts after the original. Codex
+                    --      review of #768 PR3 caught the original
+                    --      ordering's silent loss of amendment
+                    --      precedence.
+                    --   3. Within the same accession (option exposure
+                    --      vs underlying-equity rows on a single
+                    --      filing), prefer the lower row_num so the
+                    --      first listed holding wins.
+                    iih.as_of_date DESC,
+                    iih.accession_number DESC,
+                    iih.row_num ASC
+            )
+            SELECT b.*
+            FROM baseline b
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM insider_transactions it
+                INNER JOIN insider_filings ft
+                    ON ft.accession_number = it.accession_number
+                   AND ft.is_tombstone = FALSE
+                WHERE it.instrument_id = %s
+                  AND it.filer_cik = b.filer_cik
+            )
+            ORDER BY b.shares DESC NULLS LAST, b.filer_name ASC
+            """,
+            (instrument_id, instrument_id),
+        )
+        for row in cur.fetchall():
+            rows.append(
+                BaselineInsiderHolding(
+                    filer_cik=str(row[0]),
+                    filer_name=str(row[1]),
+                    filer_role=row[2],
+                    security_title=row[3],
+                    is_derivative=bool(row[4]),
+                    direct_indirect=row[5],
+                    shares=Decimal(row[6]) if row[6] is not None else None,
+                    value_owned=Decimal(row[7]) if row[7] is not None else None,
+                    as_of_date=row[8],
+                )
+            )
+    return rows
