@@ -134,6 +134,12 @@ class _AccessionOutcome:
     rows_inserted: int
     rows_updated: int
     error: str | None
+    # Resolved issuer CIK (or _CIK_MISSING_SENTINEL when no
+    # ``instrument_sec_profile`` row exists). Threaded out of the
+    # per-accession driver so the outer loop's tombstone log write
+    # does not re-issue the same lookup. Bot review of the first
+    # PR draft caught the double DB round-trip on every success.
+    issuer_cik: str
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +349,13 @@ def _ingest_single_accession(
     malformed input). Same defensive shape as
     :mod:`app.services.blockholders`.
     """
+    # Resolve the issuer CIK once, up-front. Every outcome path
+    # (success, partial, failed) carries it on the returned
+    # ``_AccessionOutcome`` so the outer loop's tombstone log write
+    # never has to re-issue the lookup. Bot review caught the
+    # double round-trip on the success path.
+    issuer_cik = _resolve_issuer_cik(conn, instrument_id=ref.instrument_id) or _CIK_MISSING_SENTINEL
+
     if ref.primary_document_url is None:
         # Should be filtered out by the discovery query, but defensive
         # in case a caller passes an ad-hoc ref with no URL.
@@ -351,6 +364,7 @@ def _ingest_single_accession(
             rows_inserted=0,
             rows_updated=0,
             error="primary_document_url is NULL",
+            issuer_cik=issuer_cik,
         )
 
     body = fetcher.fetch_document_text(ref.primary_document_url)
@@ -365,6 +379,7 @@ def _ingest_single_accession(
             rows_inserted=0,
             rows_updated=0,
             error="primary doc fetch failed",
+            issuer_cik=issuer_cik,
         )
 
     try:
@@ -379,6 +394,7 @@ def _ingest_single_accession(
             rows_inserted=0,
             rows_updated=0,
             error=f"parse failed: {exc}",
+            issuer_cik=issuer_cik,
         )
 
     if not parsed.rows:
@@ -392,9 +408,9 @@ def _ingest_single_accession(
             rows_inserted=0,
             rows_updated=0,
             error=f"no beneficial-ownership table identified (best_score={parsed.raw_table_score})",
+            issuer_cik=issuer_cik,
         )
 
-    issuer_cik = _resolve_issuer_cik(conn, instrument_id=ref.instrument_id) or _CIK_MISSING_SENTINEL
     inserted = 0
     updated = 0
 
@@ -417,6 +433,7 @@ def _ingest_single_accession(
         rows_inserted=inserted,
         rows_updated=updated,
         error=None,
+        issuer_cik=issuer_cik,
     )
 
 
@@ -482,11 +499,13 @@ def ingest_def14a(
             # try.
             try:
                 outcome = _ingest_single_accession(conn, fetcher, ref=ref)
-                issuer_cik = _resolve_issuer_cik(conn, instrument_id=ref.instrument_id) or _CIK_MISSING_SENTINEL
+                # Issuer CIK travels on the outcome — it was
+                # resolved once inside the per-accession driver
+                # so the log write does not re-issue the lookup.
                 _record_ingest_attempt(
                     conn,
                     accession_number=ref.accession_number,
-                    issuer_cik=issuer_cik,
+                    issuer_cik=outcome.issuer_cik,
                     status=outcome.status,
                     rows_inserted=outcome.rows_inserted,
                     rows_skipped=0,
