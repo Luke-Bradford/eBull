@@ -9,6 +9,7 @@ const DEFAULT_INPUT: SunburstInputs = {
   institutions_total: null,
   etfs_total: null,
   insiders_total: null,
+  blockholders_total: null,
   treasury_shares: null,
 };
 

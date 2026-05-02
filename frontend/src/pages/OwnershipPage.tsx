@@ -16,6 +16,8 @@
 import { useCallback, useMemo, useRef } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
+import { fetchBlockholders } from "@/api/blockholders";
+import type { BlockholdersResponse } from "@/api/blockholders";
 import { fetchInstitutionalHoldings } from "@/api/institutionalHoldings";
 import type {
   InstitutionalFilerHolding,
@@ -75,6 +77,7 @@ const CATEGORY_LABELS: Record<CategoryKey, string> = {
   etfs: "ETFs",
   insiders: "Insiders",
   treasury: "Treasury",
+  blockholders: "Blockholders",
 };
 
 export function OwnershipPage(): JSX.Element {
@@ -112,16 +115,23 @@ export function OwnershipPage(): JSX.Element {
     [symbol],
   );
 
+  const blockholdersState = useAsync<BlockholdersResponse>(
+    useCallback(() => fetchBlockholders(symbol, 500), [symbol]),
+    [symbol],
+  );
+
   const isLoading =
     balanceState.loading ||
     institutionalState.loading ||
     insidersState.loading ||
-    baselineState.loading;
+    baselineState.loading ||
+    blockholdersState.loading;
   const allErrored =
     balanceState.error !== null &&
     institutionalState.error !== null &&
     insidersState.error !== null &&
-    baselineState.error !== null;
+    baselineState.error !== null &&
+    blockholdersState.error !== null;
 
   const handleWedgeClick = useCallback(
     (target: WedgeClick) => {
@@ -181,6 +191,7 @@ export function OwnershipPage(): JSX.Element {
             institutionalState.refetch();
             insidersState.refetch();
             baselineState.refetch();
+            blockholdersState.refetch();
           }}
         />
       ) : (
@@ -190,6 +201,7 @@ export function OwnershipPage(): JSX.Element {
           institutional={institutionalState.data}
           insiders={insidersState.data}
           baseline={baselineState.data}
+          blockholders={blockholdersState.data}
           categoryFilter={categoryFilter}
           filerFilter={filerFilter}
           viewMode={viewMode}
@@ -208,6 +220,7 @@ interface OwnershipBodyProps {
   readonly institutional: InstitutionalHoldingsResponse | null;
   readonly insiders: InsiderTransactionsList | null;
   readonly baseline: InsiderBaselineList | null;
+  readonly blockholders: BlockholdersResponse | null;
   readonly categoryFilter: string | null;
   readonly filerFilter: string | null;
   readonly viewMode: string | null;
@@ -224,6 +237,7 @@ function OwnershipBody({
   institutional,
   insiders,
   baseline,
+  blockholders,
   categoryFilter,
   filerFilter,
   viewMode,
@@ -284,9 +298,18 @@ function OwnershipBody({
     () => [...form4_insider_holders, ...baseline_insider_holders],
     [form4_insider_holders, baseline_insider_holders],
   );
+  const blockholder_holders = useMemo<readonly SunburstHolder[]>(
+    () => blockholdersToHolders(blockholders),
+    [blockholders],
+  );
   const allHolders = useMemo<readonly SunburstHolder[]>(
-    () => [...institutional_holders, ...etf_holders, ...insider_holders],
-    [institutional_holders, etf_holders, insider_holders],
+    () => [
+      ...institutional_holders,
+      ...etf_holders,
+      ...insider_holders,
+      ...blockholder_holders,
+    ],
+    [institutional_holders, etf_holders, insider_holders, blockholder_holders],
   );
 
   const institutions_total = useMemo(
@@ -366,6 +389,12 @@ function OwnershipBody({
     return null;
   }, [balance, treasury]);
 
+  const blockholders_total = useMemo(
+    () => parseShareCount(blockholders?.totals?.blockholders_shares ?? null),
+    [blockholders?.totals?.blockholders_shares],
+  );
+  const blockholders_as_of = blockholders?.totals?.as_of_date ?? null;
+
   const inputs: SunburstInputs = useMemo(
     () => ({
       total_shares,
@@ -373,11 +402,13 @@ function OwnershipBody({
       institutions_total,
       etfs_total,
       insiders_total,
+      blockholders_total,
       treasury_shares: treasury,
       institutions_as_of: thirteen_f_as_of,
       etfs_as_of: thirteen_f_as_of,
       insiders_as_of,
       treasury_as_of,
+      blockholders_as_of,
     }),
     [
       total_shares,
@@ -385,18 +416,20 @@ function OwnershipBody({
       institutions_total,
       etfs_total,
       insiders_total,
+      blockholders_total,
       treasury,
       thirteen_f_as_of,
       insiders_as_of,
       treasury_as_of,
+      blockholders_as_of,
     ],
   );
 
   const rings = useMemo(() => buildSunburstRings(inputs), [inputs]);
 
   const allRows = useMemo(
-    () => buildFilerRows(filers, insiders, baseline, treasury),
-    [filers, insiders, baseline, treasury],
+    () => buildFilerRows(filers, insiders, baseline, treasury, blockholders),
+    [filers, insiders, baseline, treasury, blockholders],
   );
 
   const filteredRows = useMemo(() => {
@@ -700,11 +733,43 @@ function baselineToInsiderHolders(
 }
 
 
+/** Map blockholder API rows into SunburstHolder wedges, deduping
+ *  by accession_number so joint-filing reporters collapse to one
+ *  wedge per block. Mirrors the L1 implementation in
+ *  ``OwnershipPanel.tsx`` so a wedge click on the L1 ring lands on
+ *  the corresponding wedge on the L2 ring. Codex pre-push review
+ *  caught the prior version that surfaced one wedge per per-reporter
+ *  row, which double-counted joint filings via the snapshot-lag
+ *  leaf-sum bump in ``buildSunburstRings``. */
+function blockholdersToHolders(
+  blockholders: BlockholdersResponse | null,
+): readonly SunburstHolder[] {
+  if (blockholders === null) return [];
+  const seen_accessions = new Set<string>();
+  const out: SunburstHolder[] = [];
+  for (const row of blockholders.blockholders) {
+    if (seen_accessions.has(row.accession_number)) continue;
+    seen_accessions.add(row.accession_number);
+    const shares = parseShareCount(row.aggregate_amount_owned);
+    if (shares === null || shares <= 0) continue;
+    const reporter_identity = row.reporter_cik ?? `name:${row.reporter_name}`;
+    out.push({
+      key: `block:${reporter_identity}`,
+      label: row.filer_name,
+      shares,
+      category: "blockholders",
+    });
+  }
+  return out;
+}
+
+
 function buildFilerRows(
   filers: readonly InstitutionalFilerHolding[],
   insiders: InsiderTransactionsList | null,
   baseline: InsiderBaselineList | null,
   treasury: number | null,
+  blockholders: BlockholdersResponse | null,
 ): FilerRow[] {
   const rows: FilerRow[] = [];
 
@@ -793,7 +858,51 @@ function buildFilerRows(
     });
   }
 
-  const categoryOrder: CategoryKey[] = ["institutions", "etfs", "insiders", "treasury"];
+  // 13D / 13G blockholders (#766). The drilldown table keeps every
+  // per-reporter chain row so the operator can see joint filings in
+  // detail. Wedges, by contrast, are deduped per-accession in
+  // ``blockholdersToHolders`` so the chart's leaf-sum matches the
+  // backend totals.
+  //
+  // Row key matches the wedge leaf key (``block:${reporter_identity}``)
+  // verbatim so a wedge click that navigates to ``?filer=block:CIK``
+  // highlights the corresponding L2 row. The backend's
+  // ``per_reporter_chain`` DISTINCT ON guarantees one row per
+  // reporter per issuer, so reporter_identity alone is unique
+  // within the table without an accession suffix. Codex pre-push
+  // review caught the wedge↔table key mismatch from a prior fix.
+  if (blockholders !== null) {
+    for (const row of blockholders.blockholders) {
+      const shares = parseShareCount(row.aggregate_amount_owned);
+      if (shares === null || shares <= 0) continue;
+      const reporter_identity = row.reporter_cik ?? `name:${row.reporter_name}`;
+      rows.push({
+        key: `block:${reporter_identity}`,
+        // Label includes the joint-filing depth so the operator can
+        // see at a glance which blocks are held by groups.
+        label:
+          row.additional_reporters > 0
+            ? `${row.reporter_name} (+${row.additional_reporters} co-reporter${row.additional_reporters === 1 ? "" : "s"})`
+            : row.reporter_name,
+        category: "blockholders",
+        category_label: CATEGORY_LABELS.blockholders,
+        shares,
+        value_usd: null,
+        voting: row.submission_type, // surface 13D / 13G as the "voting" column
+        is_put_call: null,
+        accession: row.accession_number,
+        period_of_report: row.date_of_event ?? null,
+      });
+    }
+  }
+
+  const categoryOrder: CategoryKey[] = [
+    "institutions",
+    "etfs",
+    "blockholders",
+    "insiders",
+    "treasury",
+  ];
   rows.sort((a, b) => {
     const ai = categoryOrder.indexOf(a.category);
     const bi = categoryOrder.indexOf(b.category);

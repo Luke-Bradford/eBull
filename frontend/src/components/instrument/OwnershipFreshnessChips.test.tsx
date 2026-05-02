@@ -16,6 +16,7 @@ function category(
     etfs: "ETFs",
     insiders: "Insiders",
     treasury: "Treasury",
+    blockholders: "Blockholders",
   };
   return {
     key,

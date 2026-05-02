@@ -43,6 +43,13 @@ export const CADENCE: Record<CategoryKey, CadenceThresholds> = {
   etfs: { aging_days: 135, stale_days: 270 },
   insiders: { aging_days: 30, stale_days: 90 },
   treasury: { aging_days: 100, stale_days: 200 },
+  // Blockholders (13D / 13G #766) are event-driven, not periodic —
+  // a reporter only re-files when their position changes materially
+  // (>=1% delta) or on the annual 13G refresh. Long quiet periods
+  // are normal, but a 9-month-old block on a small-cap is usually
+  // either a stale ingest or a position that quietly evaporated.
+  // Aging > 180d, stale > 365d.
+  blockholders: { aging_days: 180, stale_days: 365 },
 };
 
 /**

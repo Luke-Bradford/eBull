@@ -64,6 +64,11 @@ export const CATEGORY_FILL_INDEX: Record<CategoryKey, number> = {
   etfs: 1, // blue-500
   insiders: 2, // purple-500
   treasury: 3, // amber-500
+  blockholders: 4, // rose-500 — distinct from the other four; activist
+  //                            holds usually warrant a high-contrast
+  //                            wedge so an Icahn / Ackman position
+  //                            does not blend into the institutions
+  //                            cyan band on small-caps.
 };
 
 export function categoryFill(theme: ChartTheme, key: CategoryKey): string {
