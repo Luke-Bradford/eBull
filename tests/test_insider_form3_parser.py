@@ -462,16 +462,6 @@ def test_joint_filing_extracts_every_reporting_owner() -> None:
     # attributes every holding row to the first listed owner (matches
     # Form 4 default_filer_cik); the full filer list still surfaces so
     # PR2's ingester can persist all owners under their own dim rows.
-    xml = (
-        _wrap(_NON_DERIVATIVE_HOLDING)
-        .replace(
-            "<reportingOwner>",
-            _TWO_OWNER_HEADER + "<!--orig-->",
-            1,
-        )
-        .replace("<!--orig--><reportingOwner>", "<reportingOwner>")
-    )
-    # The above replace is a tad fragile — simpler: build directly.
     xml = f"""<?xml version="1.0"?>
 <ownershipDocument>
   <documentType>3</documentType>
