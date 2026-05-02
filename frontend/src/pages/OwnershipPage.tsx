@@ -30,6 +30,10 @@ import type { InstrumentFinancials } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { OwnershipFreshnessChips } from "@/components/instrument/OwnershipFreshnessChips";
 import {
+  type InsiderRowShape,
+  isInsiderHoldingRow,
+} from "@/components/instrument/ownershipInsiders";
+import {
   OwnershipLegend,
   OwnershipSunburst,
 } from "@/components/instrument/OwnershipSunburst";
@@ -284,6 +288,11 @@ function OwnershipBody({
 
   // Per-category freshness sources (#767).
   const thirteen_f_as_of = inst_totals?.period_of_report ?? null;
+  // Stable ``today`` reference for the freshness chip strip — pre-fix
+  // ``new Date()`` inline forced the chip to re-render on every parent
+  // re-render even when its rings data was identical.
+  const today = useMemo(() => new Date(), []);
+
   const insiders_as_of = useMemo(() => {
     if (insiders === null || insiders.rows.length === 0) return null;
     let latest: string | null = null;
@@ -384,7 +393,7 @@ function OwnershipBody({
         <div className="flex flex-col items-center gap-3">
           <OwnershipSunburst inputs={inputs} onWedgeClick={onWedgeClick} size={420} />
           {rings !== null && <OwnershipLegend rings={rings} />}
-          {rings !== null && <OwnershipFreshnessChips rings={rings} today={new Date()} />}
+          {rings !== null && <OwnershipFreshnessChips rings={rings} today={today} />}
         </div>
         <p className="mt-3 text-center text-xs text-slate-500 dark:text-slate-400">
           {formatShares(outstanding)} outstanding
@@ -589,32 +598,6 @@ function filerToHolder(
     shares: parseShareCount(f.shares) ?? 0,
     category,
   });
-}
-
-interface InsiderRowShape {
-  readonly filer_cik: string | null;
-  readonly filer_name: string;
-  readonly txn_date: string;
-  readonly post_transaction_shares: string | null;
-  readonly is_derivative: boolean;
-}
-
-/**
- * Single eligibility predicate for an insider Form 4 row to count
- * toward the holdings snapshot. Shared by:
- *   * the per-filer holders aggregator (ring 3)
- *   * the L2 ``buildFilerRows`` table writer
- *   * the L2 freshness chip's ``insiders_as_of`` derivation
- *
- * Codex (review of #767) caught that the chip's date predicate had
- * drifted to "any non-derivative row" while the aggregators required
- * a parseable ``post_transaction_shares``. With separate predicates a
- * Form 4 row with a null share count would advance the chip ahead of
- * the actual snapshot the ring renders.
- */
-function isInsiderHoldingRow(row: InsiderRowShape): boolean {
-  if (row.is_derivative) return false;
-  return parseShareCount(row.post_transaction_shares) !== null;
 }
 
 function aggregateInsiderHoldersForSunburst(

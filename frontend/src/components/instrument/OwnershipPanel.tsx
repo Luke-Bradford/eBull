@@ -25,7 +25,7 @@
  * the corresponding filter pre-applied.
  */
 
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { fetchInstitutionalHoldings } from "@/api/institutionalHoldings";
@@ -52,6 +52,10 @@ import {
   formatShares,
   parseShareCount,
 } from "@/components/instrument/ownershipMetrics";
+import {
+  type InsiderRowShape,
+  isInsiderHoldingRow,
+} from "@/components/instrument/ownershipInsiders";
 import {
   type SunburstHolder,
   type SunburstInputs,
@@ -155,13 +159,37 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
           }}
         />
       ) : (
-        renderBody(
-          extractData(balanceState.data, institutionalState.data, insidersState.data),
-          handleWedgeClick,
-        )
+        <PanelBody
+          balance={balanceState.data}
+          institutional={institutionalState.data}
+          insiders={insidersState.data}
+          onWedgeClick={handleWedgeClick}
+        />
       )}
     </Pane>
   );
+}
+
+interface PanelBodyProps {
+  readonly balance: InstrumentFinancials | null;
+  readonly institutional: InstitutionalHoldingsResponse | null;
+  readonly insiders: InsiderTransactionsList | null;
+  readonly onWedgeClick: (target: WedgeClick) => void;
+}
+
+/** Wraps ``renderBody`` so the freshness chip's ``today`` reference can
+ *  be a stable ``useMemo`` value. Pre-fix the panel passed
+ *  ``new Date()`` inline on every render, which the chip strip then
+ *  treated as a new prop and re-rendered against. Captured once per
+ *  mount so the chips memoise cleanly across parent re-renders. */
+function PanelBody({
+  balance,
+  institutional,
+  insiders,
+  onWedgeClick,
+}: PanelBodyProps): JSX.Element {
+  const today = useMemo(() => new Date(), []);
+  return renderBody(extractData(balance, institutional, insiders), onWedgeClick, today);
 }
 
 export function extractData(
@@ -231,20 +259,6 @@ export function extractData(
   };
 }
 
-/**
- * Single row-eligibility predicate shared by ``latestTxnDate`` and
- * ``aggregateInsiderHoldersForSunburst``. Codex (review of #767) caught
- * that the two had drifted: the date helper accepted any non-derivative
- * row, but the holders aggregator additionally requires a parseable
- * ``post_transaction_shares``. With separate predicates a Form 4 row
- * with a null share count would advance the freshness chip ahead of the
- * actual holdings snapshot the ring renders. Keep them in lockstep here.
- */
-function isInsiderHoldingRow(row: InsiderRowShape): boolean {
-  if (row.is_derivative) return false;
-  return parseShareCount(row.post_transaction_shares) !== null;
-}
-
 function latestTxnDate(rows: readonly InsiderRowShape[]): string | null {
   let latest: string | null = null;
   for (const row of rows) {
@@ -275,14 +289,6 @@ function filerToHolder(
     shares: parseShareCount(f.shares) ?? 0,
     category,
   });
-}
-
-interface InsiderRowShape {
-  readonly filer_cik: string | null;
-  readonly filer_name: string;
-  readonly txn_date: string;
-  readonly post_transaction_shares: string | null;
-  readonly is_derivative: boolean;
 }
 
 function aggregateInsiderHoldersForSunburst(
@@ -322,6 +328,7 @@ function aggregateInsiderHoldersForSunburst(
 function renderBody(
   data: OwnershipData,
   onWedgeClick: (target: WedgeClick) => void,
+  today: Date,
 ): JSX.Element {
   if (data.outstanding === null || data.outstanding <= 0) {
     return (
@@ -375,7 +382,7 @@ function renderBody(
       </div>
       <div className="min-w-0 flex-1">
         <div className="mb-2">
-          <OwnershipFreshnessChips rings={rings} today={new Date()} />
+          <OwnershipFreshnessChips rings={rings} today={today} />
         </div>
         <p className="mb-1 text-xs text-slate-500 dark:text-slate-400">
           {formatShares(data.outstanding)} outstanding
