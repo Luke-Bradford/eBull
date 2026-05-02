@@ -159,6 +159,11 @@ describe("extractData — Form 3 baseline merging (#768 PR4)", () => {
     };
     const data = extractData(_BALANCE, _EMPTY_INSTITUTIONAL, _EMPTY_INSIDERS, baseline);
     expect(data.insider_holders).toHaveLength(0);
+    // Codex / bot review of #768 PR4: the freshness chip's
+    // ``insiders_as_of`` must use the same eligibility predicate as
+    // the holders builder. A null/zero-shares baseline row that
+    // never renders must not advance the chip past the actual ring.
+    expect(data.insiders_as_of).toBeNull();
   });
 
   it("insiders_as_of takes the max of latest Form 4 txn_date and baseline as_of_date", () => {

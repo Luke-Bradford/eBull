@@ -45,3 +45,29 @@ export function isInsiderHoldingRow(row: InsiderRowShape): boolean {
   if (row.is_derivative) return false;
   return parseShareCount(row.post_transaction_shares) !== null;
 }
+
+/** Shape every consumer of the insider-baseline endpoint reads. The
+ *  full row carries more fields; consumers TypeScript-narrow to this
+ *  subset. */
+export interface InsiderBaselineRowShape {
+  readonly filer_cik: string;
+  readonly filer_name: string;
+  readonly is_derivative: boolean;
+  readonly shares: string | null;
+  readonly as_of_date: string;
+}
+
+/**
+ * True when a Form 3 baseline row should count toward the rendered
+ * ring. Single source of truth for "is this baseline row part of the
+ * snapshot?" — the holders builder, the L2 table writer, and the
+ * Insiders freshness chip's ``as_of`` derivation must all use this
+ * predicate so a null/zero-shares baseline row never advances the
+ * chip past the actual rendered ring (PR #774 round 2 — same drift
+ * class as the PR #770 ``isInsiderHoldingRow`` extraction).
+ */
+export function isBaselineHoldingRow(row: InsiderBaselineRowShape): boolean {
+  const shares = parseShareCount(row.shares);
+  if (shares === null) return false;
+  return shares > 0;
+}

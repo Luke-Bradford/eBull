@@ -35,6 +35,7 @@ import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { OwnershipFreshnessChips } from "@/components/instrument/OwnershipFreshnessChips";
 import {
   type InsiderRowShape,
+  isBaselineHoldingRow,
   isInsiderHoldingRow,
 } from "@/components/instrument/ownershipInsiders";
 import {
@@ -340,7 +341,12 @@ function OwnershipBody({
     }
     let latest_baseline: string | null = null;
     if (baseline !== null && baseline.rows.length > 0) {
+      // Same eligibility predicate as ``baselineToInsiderHolders``
+      // and ``buildFilerRows`` — without the guard a null/zero-
+      // shares row would advance the chip past a wedge that never
+      // renders (Codex / bot review of #768 PR4).
       for (const row of baseline.rows) {
+        if (!isBaselineHoldingRow(row)) continue;
         if (latest_baseline === null || row.as_of_date > latest_baseline) {
           latest_baseline = row.as_of_date;
         }
@@ -669,19 +675,20 @@ function aggregateInsiderHoldersForSunburst(
   return holders;
 }
 
-/** Map baseline-API rows to SunburstHolder shape (#768 PR4). The
- *  ``baseline:`` key prefix prevents collisions with same-CIK Form 4
- *  leaves — the backend NOT EXISTS gate already excludes overlap, but
- *  this defends against a future regression. Rows with null/zero
- *  shares are dropped so the wedge sizing never goes negative. */
+/** Map baseline-API rows to SunburstHolder shape (#768 PR4). Uses
+ *  the shared ``isBaselineHoldingRow`` predicate so the holders set,
+ *  the L2 ``buildFilerRows`` table writer, and the L2 freshness
+ *  chip's ``as_of_date`` derivation cannot drift. The ``baseline:``
+ *  key prefix prevents collisions with same-CIK Form 4 leaves. */
 function baselineToInsiderHolders(
   baseline: InsiderBaselineList | null,
 ): readonly SunburstHolder[] {
   if (baseline === null || baseline.rows.length === 0) return [];
   const out: SunburstHolder[] = [];
   for (const row of baseline.rows) {
-    const shares = parseShareCount(row.shares);
-    if (shares === null || shares <= 0) continue;
+    if (!isBaselineHoldingRow(row)) continue;
+    // Predicate guarantees parseShareCount > 0.
+    const shares = parseShareCount(row.shares)!;
     out.push({
       key: `baseline:${row.filer_cik}:${row.is_derivative ? "d" : "n"}`,
       label: row.filer_name,
@@ -753,8 +760,9 @@ function buildFilerRows(
   // wedge click on the L1 ring lands on the right L2 row.
   if (baseline !== null) {
     for (const row of baseline.rows) {
-      const shares = parseShareCount(row.shares);
-      if (shares === null || shares <= 0) continue;
+      if (!isBaselineHoldingRow(row)) continue;
+      // Predicate guarantees parseShareCount > 0.
+      const shares = parseShareCount(row.shares)!;
       rows.push({
         key: `baseline:${row.filer_cik}:${row.is_derivative ? "d" : "n"}`,
         label: row.filer_name,

@@ -58,6 +58,7 @@ import {
 } from "@/components/instrument/ownershipMetrics";
 import {
   type InsiderRowShape,
+  isBaselineHoldingRow,
   isInsiderHoldingRow,
 } from "@/components/instrument/ownershipInsiders";
 import {
@@ -299,16 +300,18 @@ export function extractData(
 
 /** Map baseline-API rows into the SunburstHolder shape so the
  *  ownership ring renders Form-3-only insiders alongside Form 4
- *  cumulative balances (#768 PR4). Filters rows with null/zero
- *  shares so the wedge sizing never goes negative. */
+ *  cumulative balances (#768 PR4). Uses the shared
+ *  ``isBaselineHoldingRow`` predicate so the holders set and the
+ *  freshness chip's ``as_of_date`` derivation can never drift. */
 function baselineToHolders(
   baseline: InsiderBaselineList | null,
 ): readonly SunburstHolder[] {
   if (baseline === null || baseline.rows.length === 0) return [];
   const out: SunburstHolder[] = [];
   for (const row of baseline.rows) {
-    const shares = parseShareCount(row.shares);
-    if (shares === null || shares <= 0) continue;
+    if (!isBaselineHoldingRow(row)) continue;
+    // Predicate guarantees parseShareCount > 0.
+    const shares = parseShareCount(row.shares)!;
     // Disambiguate against any same-CIK Form 4 leaf (the backend
     // gate excludes them but defensively suffix the key — render
     // collisions on a flat ring would silently swap wedges).
@@ -323,12 +326,15 @@ function baselineToHolders(
   return out;
 }
 
-/** Latest ``as_of_date`` across the baseline rows, or null when no
- *  baseline holdings on file. */
+/** Latest ``as_of_date`` across the baseline rows that actually
+ *  render. Uses the same eligibility predicate as
+ *  ``baselineToHolders`` so the chip never advances past a wedge
+ *  that doesn't render. */
 function latestBaselineDate(baseline: InsiderBaselineList | null): string | null {
   if (baseline === null || baseline.rows.length === 0) return null;
   let latest: string | null = null;
   for (const row of baseline.rows) {
+    if (!isBaselineHoldingRow(row)) continue;
     if (latest === null || row.as_of_date > latest) latest = row.as_of_date;
   }
   return latest;
