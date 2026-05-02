@@ -106,6 +106,10 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # cascade), but listing them explicitly keeps teardown
     # deterministic when a test populates filer / holding rows
     # without touching the instruments row in the same case.
+    # #781 — unresolved 13F CUSIPs tracking. No FK to instruments
+    # (PK is the CUSIP) so it's safe in any order, but listed
+    # alongside the institutional set for cohesion.
+    "unresolved_13f_cusips",
     "institutional_holdings_ingest_log",
     "institutional_holdings",
     "institutional_filers",
