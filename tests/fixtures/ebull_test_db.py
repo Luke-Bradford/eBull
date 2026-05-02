@@ -111,6 +111,16 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "institutional_filers",
     "institutional_filer_seeds",
     "etf_filer_cik_seeds",
+    # #766 — 13D/G blockholders. Child-to-parent: blockholder_filings
+    # FKs into blockholder_filers AND instruments. The instrument row
+    # truncation further down would cascade, but listing them
+    # explicitly keeps teardown deterministic when a test populates
+    # filer / filing rows without touching the instruments row in the
+    # same case.
+    "blockholder_filings_ingest_log",
+    "blockholder_filings",
+    "blockholder_filers",
+    "blockholder_filer_seeds",
     "filing_events",
     "decision_audit",  # #315 Phase 3 alerts
     "trade_recommendations",  # #315 Phase 3 alerts (FK parent of decision_audit)
