@@ -408,6 +408,16 @@ def _record_unresolved_cusip(
     the same CUSIP bumps ``observation_count`` + refreshes the
     latest filer-supplied issuer name. Resolver service (#781)
     consumes this table.
+
+    ``resolution_status`` is intentionally NOT reset on conflict.
+    A tombstoned CUSIP (``unresolvable`` / ``ambiguous`` /
+    ``conflict``) that re-appears in a new filing gets its
+    observation_count and last-seen name updated for audit, but
+    the resolver still skips it on the next pass. The operator
+    clears ``resolution_status`` to force a retry once the
+    underlying issue (missing instrument seed, share-class
+    disambiguation, mapping correction) is fixed. Bot review of
+    #781 caught the absence of this note.
     """
     conn.execute(
         """

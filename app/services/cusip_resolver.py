@@ -205,7 +205,8 @@ def _normalise_name(raw: str) -> str:
       2. Drop bracketed / parenthesised qualifiers ("(NEW)").
       3. Strip share-class suffixes via :data:`_SHARE_CLASS_PATTERNS`.
       4. Drop punctuation per :data:`_PUNCTUATION_RE`.
-      5. Strip a trailing corporate-form suffix.
+      5. Strip every trailing corporate-form suffix token in turn
+         (``"Vanguard Group Holdings Trust"`` -> ``"VANGUARD"``).
       6. Collapse whitespace.
 
     Returns the empty string when nothing is left after stripping —
