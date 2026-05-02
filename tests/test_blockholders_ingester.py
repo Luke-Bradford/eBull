@@ -321,6 +321,30 @@ class TestParseSubmissionsIndex:
         assert len(refs) == 4
         assert {r.filing_type for r in refs} == {"SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A"}
 
+    def test_accepts_long_form_schedule_labels(self) -> None:
+        """Real-world SEC submissions JSON uses the long ``SCHEDULE
+        13D`` form for post-BOM-rule filings (post-2024-12-19) —
+        verified against Carl Icahn submissions. The filter must
+        accept both short and long forms or every modern filing
+        is silently skipped."""
+        payload = _submissions_json(
+            accessions=[
+                ("0000921669-25-000001", "SCHEDULE 13D", "2025-03-01"),
+                ("0000921669-25-000002", "SCHEDULE 13D/A", "2025-04-01"),
+                ("0000921669-25-000003", "SCHEDULE 13G", "2025-05-01"),
+                ("0000921669-25-000004", "SCHEDULE 13G/A", "2025-06-01"),
+            ]
+        )
+        refs = parse_submissions_index(payload)
+        assert refs is not None
+        assert len(refs) == 4
+        assert {r.filing_type for r in refs} == {
+            "SCHEDULE 13D",
+            "SCHEDULE 13D/A",
+            "SCHEDULE 13G",
+            "SCHEDULE 13G/A",
+        }
+
     def test_filed_at_is_utc_tz_aware(self) -> None:
         payload = _submissions_json(accessions=[("0001234567-25-000001", "SC 13D", "2025-11-06")])
         refs = parse_submissions_index(payload)
