@@ -468,28 +468,31 @@ def classify_filer_type(
 ) -> str:
     """Map a filer CIK to one of the constrained filer_type labels.
 
-    Cross-references the ``etf_filer_cik_seeds`` curated list. CIKs
-    on that list (and ``active=TRUE``) are tagged ``'ETF'``; every
-    other discovered 13F-HR filer defaults to ``'INV'`` (the
-    general institutional-manager bucket).
+    Delegates to :func:`app.services.ncen_classifier.compose_filer_type`,
+    which composes the priority chain:
 
-    Future enhancements (out of scope for #730 PR 3):
-      * Ingest the SEC's quarterly RIC / mutual-fund registrant
-        list to auto-populate the seed table.
-      * Distinguish ``'INS'`` (insurance) and ``'BD'`` (broker-dealer)
-        based on Form CRD data — the schema already allows those
-        labels via the CHECK constraint on
-        ``institutional_filers.filer_type``.
+      1. Curated ETF seed list (``etf_filer_cik_seeds``) -> ``ETF``.
+      2. N-CEN-derived classification (``ncen_filer_classifications``,
+         #782) -> ``INS`` / ``INV`` / ``OTHER`` per the
+         investment-company-type mapping.
+      3. Default -> ``INV``.
+
+    Indirection here keeps the 13F-HR ingester unaware of the
+    individual classification sources — adding a future Form ADV /
+    FOCUS ingest for ``BD`` classification only requires
+    ``compose_filer_type`` to grow another priority tier; this
+    function (and every call site that invokes it) stays unchanged.
+
+    Broker-dealer (``BD``) is reachable from this function's enum
+    but no source today populates it — see #782 out-of-scope notes.
     """
-    cur = conn.execute(
-        """
-        SELECT 1 FROM etf_filer_cik_seeds
-        WHERE cik = %(cik)s AND active = TRUE
-        LIMIT 1
-        """,
-        {"cik": _zero_pad_cik(cik)},
-    )
-    return "ETF" if cur.fetchone() is not None else "INV"
+    # Local import to avoid a circular dependency: ncen_classifier
+    # imports from the institutional namespace for shared helpers
+    # in a future enhancement, and the test fixtures import this
+    # module before the classifier service is initialised.
+    from app.services.ncen_classifier import compose_filer_type
+
+    return compose_filer_type(conn, cik)
 
 
 def seed_etf_filer(

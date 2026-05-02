@@ -115,6 +115,10 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "institutional_filers",
     "institutional_filer_seeds",
     "etf_filer_cik_seeds",
+    # #782 — N-CEN-derived filer-type classifications. No FK to
+    # other planner tables; PK is CIK. Listed here so each test
+    # starts with a clean classification state.
+    "ncen_filer_classifications",
     # #766 — 13D/G blockholders. Child-to-parent: blockholder_filings
     # FKs into blockholder_filers AND instruments. The instrument row
     # truncation further down would cascade, but listing them
