@@ -252,18 +252,24 @@ def _resolve_holder_match(
     if not normalised:
         return (False, None, None)
 
-    # Try Form 4 first — the cumulative running total. Per-instrument
-    # candidate count is small (typical issuer has <50 distinct
-    # insiders across history), so an in-Python filter with the
-    # canonical name normaliser is cheaper and safer than SQL gymnastics.
+    # Try Form 4 first — the cumulative running total. The
+    # ``DISTINCT ON (filer_cik, filer_name)`` cap pre-collapses
+    # multi-transaction filer histories to one row each (the
+    # latest), so the Python filter sees one row per filer
+    # regardless of an issuer's transaction volume. A
+    # COALESCE-keyed ``filer_cik`` keeps NULL-CIK rows
+    # individually addressable rather than collapsed to a single
+    # NULL bucket. Bot review caught the prior unbounded fetch.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT filer_cik, filer_name, post_transaction_shares
+            SELECT DISTINCT ON (COALESCE(filer_cik, ''), filer_name)
+                filer_cik, filer_name, post_transaction_shares
             FROM insider_transactions
             WHERE instrument_id = %(iid)s
               AND post_transaction_shares IS NOT NULL
-            ORDER BY txn_date DESC NULLS LAST, id DESC
+            ORDER BY COALESCE(filer_cik, ''), filer_name,
+                     txn_date DESC NULLS LAST, id DESC
             """,
             {"iid": instrument_id},
         )
@@ -275,16 +281,19 @@ def _resolve_holder_match(
                     row["post_transaction_shares"],
                 )
 
-    # Fall back to Form 3 baseline.
+    # Fall back to Form 3 baseline. Same DISTINCT ON cap so the
+    # Python filter never sees more than one row per filer.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT filer_cik, filer_name, shares
+            SELECT DISTINCT ON (COALESCE(filer_cik, ''), filer_name)
+                filer_cik, filer_name, shares
             FROM insider_initial_holdings
             WHERE instrument_id = %(iid)s
               AND shares IS NOT NULL
               AND is_derivative = FALSE
-            ORDER BY as_of_date DESC NULLS LAST
+            ORDER BY COALESCE(filer_cik, ''), filer_name,
+                     as_of_date DESC NULLS LAST
             """,
             {"iid": instrument_id},
         )
