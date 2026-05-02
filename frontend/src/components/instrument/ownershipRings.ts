@@ -369,6 +369,19 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
   // Apply the minimum-wedge floor only to categories that will
   // actually render (skip ``empty``-status wedges which are
   // filtered out by the renderer).
+  //
+  // Invariant: ``sum(leaf.display_shares for leaf in cat.leaves)``
+  // must equal ``cat.display_shares`` for every non-empty category,
+  // otherwise the middle and outer rings draw arcs of different
+  // widths for the same category. The pre-floor data already
+  // satisfies it (OK leaves sum to the category total via the
+  // "Other" tail; unknown leaves carry the gap allocation as a
+  // single placeholder). When the floor patches the category's
+  // display_shares, every leaf must be rescaled by the same factor
+  // so the invariant survives. Independently flooring each leaf
+  // (the original bug, PR #754 round 2) inflates the outer ring by
+  // a factor of ``leaves.length`` for any sub-floor multi-leaf
+  // category.
   const categories: SunburstCategory[] = categories_with_gap.map((cat) => {
     const renders = !(cat.status === "empty" && cat.shares <= 0);
     if (!renders) return cat;
@@ -376,11 +389,7 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
     return {
       ...cat,
       display_shares: min_display_shares,
-      leaves: cat.leaves.map((leaf) =>
-        leaf.display_shares >= min_display_shares
-          ? leaf
-          : { ...leaf, display_shares: min_display_shares },
-      ),
+      leaves: rescaleLeaves(cat.leaves, min_display_shares),
     };
   });
 
@@ -394,6 +403,35 @@ export function buildSunburstRings(input: SunburstInputs): SunburstRings | null 
     },
     categories,
   };
+}
+
+/**
+ * Rescale leaves so they sum to ``target_total`` while preserving
+ * each leaf's relative weight. Used by the minimum-wedge floor in
+ * ``buildSunburstRings`` to keep the middle and outer rings
+ * consistent for sub-floor categories.
+ *
+ * When the leaves' current display_shares total is zero (e.g. an
+ * unknown category whose single placeholder leaf carries
+ * ``display_shares=0`` because the float gap is zero), distribute
+ * the target evenly across leaves so every leaf still gets a
+ * visible arc.
+ */
+function rescaleLeaves(
+  leaves: readonly SunburstLeaf[],
+  target_total: number,
+): readonly SunburstLeaf[] {
+  if (leaves.length === 0) return leaves;
+  const current_total = leaves.reduce((sum, l) => sum + l.display_shares, 0);
+  if (current_total <= 0) {
+    const even = target_total / leaves.length;
+    return leaves.map((leaf) => ({ ...leaf, display_shares: even }));
+  }
+  const scale = target_total / current_total;
+  return leaves.map((leaf) => ({
+    ...leaf,
+    display_shares: leaf.display_shares * scale,
+  }));
 }
 
 function buildCategory(

@@ -282,6 +282,102 @@ describe("buildSunburstRings", () => {
     expect(insiders.display_shares).toBeGreaterThanOrEqual(50_000_000);
   });
 
+  it("display_shares floor preserves leaf/category sum invariant on multi-leaf sub-floor categories", () => {
+    // Insiders 0.06% of float spread across 4 officers, with two
+    // unknown categories absorbing the float gap. Floor lifts
+    // category display_shares to 5% of float; each leaf must be
+    // rescaled proportionally so the outer ring's sum still equals
+    // the middle ring's wedge size. Pre-fix: every leaf was
+    // independently floored to min_display_shares, so the outer
+    // ring projected 4×5% = 20% of float for Insiders while the
+    // middle ring drew a 5% wedge — rings disagreed by a factor
+    // of leaves.length (review: PR #754 round 2).
+    const input: SunburstInputs = {
+      ...DEFAULT_INPUT,
+      free_float: 1_000_000_000,
+      holders: [
+        holder("ceo", 200_000, "insiders"),
+        holder("cfo", 180_000, "insiders"),
+        holder("cto", 130_000, "insiders"),
+        holder("coo", 90_000, "insiders"),
+      ],
+      treasury_shares: null,
+      institutions_status: "unknown",
+      etfs_status: "unknown",
+    };
+    const r = buildSunburstRings(input);
+    const insiders = r!.categories.find((c) => c.key === "insiders")!;
+    const leaf_sum = insiders.leaves.reduce((s, l) => s + l.display_shares, 0);
+    expect(insiders.leaves).toHaveLength(4);
+    expect(leaf_sum).toBeCloseTo(insiders.display_shares);
+    // Largest officer keeps the largest arc — proportional rescale
+    // is order-preserving.
+    const sorted = [...insiders.leaves].sort((a, b) => b.display_shares - a.display_shares);
+    expect(sorted[0]!.key).toBe("ceo");
+    expect(sorted[3]!.key).toBe("coo");
+  });
+
+  it("every non-empty category satisfies sum(leaf.display_shares) === cat.display_shares", () => {
+    // Renderer-facing invariant: middle ring (sized by
+    // cat.display_shares) and outer ring (sized by sum of
+    // leaf.display_shares for that category) must draw arcs of
+    // identical width. Sweep the realistic input shapes — pure-OK,
+    // mixed unknown, sub-floor multi-leaf, micro-cap — to catch any
+    // future patching of either side that breaks the contract.
+    const cases: SunburstInputs[] = [
+      // All known, varied sizes.
+      {
+        ...DEFAULT_INPUT,
+        holders: [
+          holder("inst", 100_000_000, "institutions"),
+          holder("etf", 50_000_000, "etfs"),
+          holder("officer", 20_000_000, "insiders"),
+        ],
+        treasury_shares: 10_000_000,
+      },
+      // Mixed unknown + small-but-known multi-leaf.
+      {
+        ...DEFAULT_INPUT,
+        free_float: 1_000_000_000,
+        holders: [
+          holder("ceo", 200_000, "insiders"),
+          holder("cfo", 100_000, "insiders"),
+        ],
+        treasury_shares: null,
+        institutions_status: "unknown",
+        etfs_status: "unknown",
+      },
+      // Visible leaf + "Other" tail in the same sub-floor category.
+      // Float 10M → 0.5% threshold = 50k, 5% floor = 500k.
+      // Institutions total 330k (alice visible at 300k, bob 30k →
+      // sub-threshold "Other") falls below the floor, exercising
+      // the rescale path with a real two-leaf shape — visible
+      // leaf + Other aggregate. The earlier micro-cap fixture
+      // sat above the floor (58k vs 50k) and never reached
+      // rescaleLeaves at all (Codex review).
+      {
+        free_float: 10_000_000,
+        holders: [
+          holder("alice", 300_000, "institutions"),
+          holder("bob", 30_000, "institutions"),
+        ],
+        treasury_shares: 0,
+        institutions_status: "ok",
+        etfs_status: "ok",
+        insiders_status: "ok",
+      },
+    ];
+    for (const input of cases) {
+      const r = buildSunburstRings(input);
+      expect(r).not.toBeNull();
+      for (const cat of r!.categories) {
+        if (cat.status === "empty" && cat.shares <= 0) continue;
+        const leaf_sum = cat.leaves.reduce((s, l) => s + l.display_shares, 0);
+        expect(leaf_sum).toBeCloseTo(cat.display_shares);
+      }
+    }
+  });
+
   it("display_shares does NOT floor empty-status categories", () => {
     // Insiders has no holders → status='empty'. The renderer skips
     // empty wedges; the floor should not artificially lift them
