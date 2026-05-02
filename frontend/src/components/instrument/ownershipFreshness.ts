@@ -102,6 +102,15 @@ function parseIsoDate(text: string): Date | null {
   // Accept ``YYYY-MM-DD`` and full ISO-8601 timestamps. The reader
   // endpoints today emit plain dates, but the type is ``string`` so a
   // future change to timestamps shouldn't silently break the chip.
+  //
+  // Time-zone caveat: a bare ``YYYY-MM-DD`` is parsed as UTC midnight
+  // while ``today = new Date()`` resolves to the local clock, so
+  // ``ageInDays`` can drift ±1 day for an as_of_date observed near
+  // local midnight. Harmless at the freshness cadences used here
+  // (30-270 days) — the chip would only mis-classify within ~24h of a
+  // hard threshold boundary, which the operator-facing copy does not
+  // depend on. If we ever surface absolute hour-precision freshness,
+  // align both sides on UTC explicitly.
   const date = new Date(text);
   if (Number.isNaN(date.getTime())) return null;
   return date;
