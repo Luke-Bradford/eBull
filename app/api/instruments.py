@@ -1161,7 +1161,12 @@ class EightKFilingsResponse(BaseModel):
 # wires a single provider; per-region integration PRs add more.
 _EIGHT_K_PROVIDERS: tuple[str, ...] = ("sec_8k_events",)
 _DIVIDEND_PROVIDERS: tuple[str, ...] = ("sec_dividend_summary",)
-_INSIDER_PROVIDERS: tuple[str, ...] = ("sec_form4", "sec_form3")
+_INSIDER_PROVIDERS: tuple[str, ...] = ("sec_form4",)
+# Form 3 baseline (#768 PR 4) — separate tuple so a stray
+# ``?provider=sec_form3`` on the Form 4 endpoint fails validation
+# rather than silently passing through to a reader that doesn't
+# consume it. PR #774 review caught the cross-contamination risk.
+_INSIDER_BASELINE_PROVIDERS: tuple[str, ...] = ("sec_form3",)
 
 
 def _validate_provider(provider: str | None, allowed: tuple[str, ...]) -> None:
@@ -2064,7 +2069,7 @@ def get_instrument_insider_baseline(
     """
     from app.services.insider_form3_ingest import list_baseline_only_insider_holdings
 
-    _validate_provider(provider, _INSIDER_PROVIDERS)
+    _validate_provider(provider, _INSIDER_BASELINE_PROVIDERS)
 
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
