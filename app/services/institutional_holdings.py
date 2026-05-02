@@ -396,6 +396,38 @@ def _record_ingest_attempt(
     )
 
 
+def _record_unresolved_cusip(
+    conn: psycopg.Connection[tuple],
+    *,
+    cusip: str,
+    name_of_issuer: str,
+    accession_number: str,
+) -> None:
+    """Track a 13F-HR holding whose CUSIP didn't resolve to an
+    ``instruments`` row at ingest time. Idempotent — re-encountering
+    the same CUSIP bumps ``observation_count`` + refreshes the
+    latest filer-supplied issuer name. Resolver service (#781)
+    consumes this table.
+    """
+    conn.execute(
+        """
+        INSERT INTO unresolved_13f_cusips (
+            cusip, name_of_issuer, last_accession_number
+        ) VALUES (%(cusip)s, %(name)s, %(accession)s)
+        ON CONFLICT (cusip) DO UPDATE SET
+            name_of_issuer = EXCLUDED.name_of_issuer,
+            last_accession_number = EXCLUDED.last_accession_number,
+            observation_count = unresolved_13f_cusips.observation_count + 1,
+            last_observed_at = NOW()
+        """,
+        {
+            "cusip": cusip.strip().upper(),
+            "name": name_of_issuer,
+            "accession": accession_number,
+        },
+    )
+
+
 def _resolve_cusip_to_instrument_id(
     conn: psycopg.Connection[tuple],
     cusip: str,
@@ -925,6 +957,18 @@ def _ingest_single_accession(
         instrument_id = _resolve_cusip_to_instrument_id(conn, holding.cusip)
         if instrument_id is None:
             skipped_no_cusip += 1
+            # Track the unresolved CUSIP so the resolver service
+            # (#781) can fuzzy-match against ``instruments.
+            # company_name`` later without re-fetching the SEC
+            # archive. Idempotent — re-encountering the same CUSIP
+            # increments ``observation_count`` and refreshes the
+            # latest filer-supplied issuer name.
+            _record_unresolved_cusip(
+                conn,
+                cusip=holding.cusip,
+                name_of_issuer=holding.name_of_issuer,
+                accession_number=ref.accession_number,
+            )
             continue
         if _upsert_holding(
             conn,

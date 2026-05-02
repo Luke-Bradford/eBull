@@ -1,0 +1,613 @@
+"""CUSIP → instrument_id resolver via fuzzy issuer-name match (#781).
+
+Walks ``unresolved_13f_cusips`` (populated by the 13F-HR ingester
+on each unresolved CUSIP) and tries to promote rows into
+``external_identifiers`` by fuzzy-matching the filer-supplied
+``name_of_issuer`` against ``instruments.company_name``. Successful
+matches are removed from the unresolved table; rejections are
+tombstoned with ``resolution_status='unresolvable'`` so the next
+run skips them.
+
+This is the practical alternative to parsing the SEC's quarterly
+Official List of Section 13(f) Securities (PDF-only, no
+machine-readable feed). Every CUSIP that appears in any 13F-HR
+filing is by definition a 13F-eligible security; we already fetch
+the holdings during the #730 ingest so the unresolved-CUSIP set
+is populated naturally.
+
+Match strategy (deliberately conservative — false positives in
+``external_identifiers`` corrupt every downstream join):
+
+  1. **Normalise** both sides:
+     - Strip common corporate-form suffixes (``"INC"``, ``"CORP"``,
+       ``"CO"``, ``"LTD"``, ``"LLC"``, ``"PLC"``, ``"NV"``, ``"AG"``,
+       ``"SA"``, etc.) — proxies and 13F filers vary on inclusion.
+     - Strip share-class suffixes (``"CL A"``, ``"CL B"``,
+       ``"CLASS A"``, ``"COM"``, ``"COMMON"``, etc.) — the CUSIP
+       already encodes the share class via the last digit, so the
+       textual suffix is redundant noise.
+     - Drop punctuation; collapse whitespace; uppercase.
+  2. **Score** via a Jaro-Winkler-style similarity on the
+     normalised forms. Stdlib ``difflib.SequenceMatcher.ratio()``
+     is the no-dep choice here — accuracy is good enough for the
+     "Berkshire Hathaway" / "Berkshire Hathaway Inc" /
+     "Berkshire Hathaway Inc. Class B" trio that 13F filings
+     produce in practice.
+  3. **Promote** when ``ratio >= MATCH_THRESHOLD``. Below the
+     threshold, mark ``resolution_status='unresolvable'``.
+
+Deliberately *no* dependency added — stdlib ``difflib`` is enough
+for v1. If recall ever tightens, ``rapidfuzz`` would be the
+incremental upgrade.
+
+Idempotent: the resolver is safe to run repeatedly. Each
+successful promotion deletes the source row, so re-runs only see
+unresolved + tombstoned entries. Operator can clear tombstoned
+rows to force a retry once instrument coverage improves (e.g.
+after a new instrument is seeded).
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from collections.abc import Iterator
+from dataclasses import dataclass
+from difflib import SequenceMatcher
+from typing import Any, Final
+
+import psycopg
+import psycopg.rows
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+
+# Similarity floor. Tuned empirically: 0.92 is conservative enough
+# that "Apple Inc" doesn't match "Apple Hospitality REIT" but
+# "Berkshire Hathaway" matches "BERKSHIRE HATHAWAY INC". Increasing
+# to 0.95+ would push more CUSIPs into the unresolvable bucket;
+# decreasing below 0.90 starts seeing common-prefix false positives.
+MATCH_THRESHOLD: Final[float] = 0.92
+
+
+# Corporate-form suffix patterns stripped during normalisation.
+# Order matters: longer-prefix variants must precede shorter ones
+# so the stripper doesn't bail out on a partial substring.
+_CORPORATE_SUFFIXES: Final[tuple[str, ...]] = (
+    "INCORPORATED",
+    "CORPORATION",
+    "COMPANY",
+    "LIMITED",
+    "INC.",
+    "INC",
+    "CORP.",
+    "CORP",
+    "CO.",
+    "CO",
+    "LTD.",
+    "LTD",
+    "LLC",
+    "L.L.C.",
+    "PLC",
+    "P.L.C.",
+    "NV",
+    "N.V.",
+    "AG",
+    "A.G.",
+    "SA",
+    "S.A.",
+    "GMBH",
+    "AB",
+    "OYJ",
+    "ASA",
+    "PTE",
+    "BHD",
+    "TRUST",
+    "FUND",
+    "HOLDINGS",
+    "GROUP",
+)
+
+# Share-class / security-type suffix patterns. CUSIP already
+# encodes the share class via its last digit, so the textual
+# suffix is informational noise during name comparison.
+_SHARE_CLASS_PATTERNS: Final[re.Pattern[str]] = re.compile(
+    r"\b(?:"
+    r"CLASS\s+[A-Z]"
+    r"|CL\s+[A-Z]"
+    r"|COM(?:MON)?\s+(?:STK|STOCK|SHARES)?"
+    r"|PRF(?:D)?(?:\s+STK)?"
+    r"|PFD"
+    r"|ADR"
+    r"|ADS"
+    r"|REIT"
+    r"|UNITS?"
+    r"|WT"
+    r"|WAR(?:RANTS?)?"
+    r"|CAP(?:ITAL)?\s+STK"
+    r"|RIGHTS"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Punctuation stripped from both sides during normalisation. Hyphens
+# preserved (some legitimate company names — "PG&E", "BLOCK H&R" —
+# rely on them); commas / apostrophes / parens dropped.
+_PUNCTUATION_RE: Final[re.Pattern[str]] = re.compile(r"[.,'\"()\[\]/]")
+_WHITESPACE_RE: Final[re.Pattern[str]] = re.compile(r"\s+")
+
+
+# ---------------------------------------------------------------------------
+# Public dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ResolveReport:
+    """Per-run rollup. Drives the ops monitor's "13F coverage"
+    indicator and the operator-facing CLI summary.
+
+    Counter semantics:
+
+      * ``promotions`` — new mappings inserted into
+        ``external_identifiers``. The operator-facing chip moves
+        on this counter, not on already-resolved or conflict
+        outcomes.
+      * ``already_resolved`` — CUSIPs that were already mapped to
+        the same ``instrument_id`` (another path beat the resolver
+        to it). Source backlog row deleted; no new
+        ``external_identifiers`` row written.
+      * ``tombstoned_unresolvable`` / ``ambiguous`` / ``conflict``
+        — three distinct tombstone reasons (see
+        :data:`unresolved_13f_cusips.resolution_status`).
+    """
+
+    candidates_seen: int
+    promotions: int
+    already_resolved: int
+    tombstoned_unresolvable: int
+    tombstoned_ambiguous: int
+    tombstoned_conflict: int
+
+    @property
+    def tombstones(self) -> int:
+        """Total tombstones across all reason buckets — back-compat
+        accessor for tests / callers that don't care about the
+        breakdown."""
+        return self.tombstoned_unresolvable + self.tombstoned_ambiguous + self.tombstoned_conflict
+
+
+@dataclass(frozen=True)
+class _Match:
+    """Internal — best-match result for one unresolved CUSIP."""
+
+    instrument_id: int
+    company_name: str
+    score: float
+
+
+# ---------------------------------------------------------------------------
+# Normalisation
+# ---------------------------------------------------------------------------
+
+
+def _normalise_name(raw: str) -> str:
+    """Normalise an issuer / instrument company name for fuzzy
+    comparison.
+
+    Pipeline (order matters):
+      1. Uppercase + strip.
+      2. Drop bracketed / parenthesised qualifiers ("(NEW)").
+      3. Strip share-class suffixes via :data:`_SHARE_CLASS_PATTERNS`.
+      4. Drop punctuation per :data:`_PUNCTUATION_RE`.
+      5. Strip a trailing corporate-form suffix.
+      6. Collapse whitespace.
+
+    Returns the empty string when nothing is left after stripping —
+    the resolver treats that as "unmatchable" rather than letting
+    a degenerate result feed the similarity scorer.
+    """
+    if not raw:
+        return ""
+
+    # 1. Uppercase + trim.
+    s = raw.upper().strip()
+
+    # 2. Drop bracketed qualifiers (typical 13F / proxy footnotes:
+    # ``"BERKSHIRE HATHAWAY INC (NEW)"``, ``"AAPL [HOLDINGS]"``).
+    s = re.sub(r"[(\[][^)\]]*[)\]]", " ", s)
+
+    # 3. Strip share-class indicators (CUSIPs already encode class).
+    s = _SHARE_CLASS_PATTERNS.sub(" ", s)
+
+    # 4. Drop punctuation.
+    s = _PUNCTUATION_RE.sub(" ", s)
+
+    # 5. Strip a single trailing corporate-form suffix.
+    tokens = s.split()
+    while tokens and tokens[-1] in _CORPORATE_SUFFIXES:
+        tokens.pop()
+    s = " ".join(tokens)
+
+    # 6. Collapse whitespace.
+    return _WHITESPACE_RE.sub(" ", s).strip()
+
+
+def _similarity(a: str, b: str) -> float:
+    """Return a 0..1 similarity ratio between two normalised names.
+
+    Uses :func:`difflib.SequenceMatcher.ratio()` — a stdlib
+    no-dep choice that's good enough for the bulk of issuer-name
+    variation seen in 13F filings. ``rapidfuzz`` would be the
+    incremental upgrade if recall tightens.
+    """
+    if not a or not b:
+        return 0.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
+# ---------------------------------------------------------------------------
+# DB helpers
+# ---------------------------------------------------------------------------
+
+
+def _select_pending_unresolved(
+    conn: psycopg.Connection[tuple],
+    *,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    """Return up to ``limit`` unresolved CUSIPs that haven't been
+    tombstoned, ordered by observation count DESC so the
+    highest-leverage entries resolve first."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT cusip, name_of_issuer, observation_count
+            FROM unresolved_13f_cusips
+            WHERE resolution_status IS NULL
+            ORDER BY observation_count DESC, last_observed_at DESC
+            LIMIT %(limit)s
+            """,
+            {"limit": limit},
+        )
+        return list(cur.fetchall())
+
+
+def _select_instrument_candidates(
+    conn: psycopg.Connection[tuple],
+) -> list[tuple[int, str]]:
+    """Return ``(instrument_id, normalised_company_name)`` pairs for
+    every instrument with a non-empty company name. Normalisation
+    happens in Python so the resolver's match logic is the single
+    canonical source.
+
+    Pulling the whole instruments universe per resolver pass is
+    fine — a typical eBull deployment carries low thousands of
+    instruments, well under the row threshold where SQL-side
+    indexed search would matter.
+    """
+    pairs: list[tuple[int, str]] = []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, company_name
+            FROM instruments
+            WHERE company_name IS NOT NULL
+              AND company_name <> ''
+            """
+        )
+        for row in cur.fetchall():
+            normalised = _normalise_name(str(row[1]))
+            if normalised:
+                pairs.append((int(row[0]), normalised))
+    return pairs
+
+
+def _best_match(
+    *,
+    target: str,
+    candidates: list[tuple[int, str]],
+) -> tuple[_Match | None, bool]:
+    """Return ``(best_match, is_ambiguous)``.
+
+    ``best_match`` is the highest-similarity candidate or ``None``
+    when no candidate meets the score floor. ``is_ambiguous`` is
+    ``True`` when two or more distinct candidates tied at the top
+    score — common collision: ``"ALPHABET INC CL A"`` and
+    ``"ALPHABET INC CL C"`` both normalise to ``"ALPHABET"`` after
+    share-class strip, so an unresolved CUSIP ``"ALPHABET INC CL C"``
+    has two equally-good candidates and the resolver cannot pick one
+    unambiguously. Codex pre-push review caught the prior code's
+    arbitrary first-wins behaviour.
+
+    Linear scan is fine at the candidate counts involved (low
+    thousands × ~hundreds of unresolved CUSIPs per pass = sub-second
+    on commodity hardware).
+    """
+    if not target or not candidates:
+        return (None, False)
+
+    top_score = 0.0
+    top_matches: list[_Match] = []
+    for instrument_id, candidate in candidates:
+        score = _similarity(target, candidate)
+        if score > top_score:
+            top_score = score
+            top_matches = [_Match(instrument_id=instrument_id, company_name=candidate, score=score)]
+        elif score == top_score and score > 0.0:
+            top_matches.append(_Match(instrument_id=instrument_id, company_name=candidate, score=score))
+
+    if not top_matches:
+        return (None, False)
+
+    is_ambiguous = len({m.instrument_id for m in top_matches}) > 1
+    # Return the first top-scoring match for diagnostic logging
+    # purposes; the caller treats ``is_ambiguous=True`` as a
+    # tombstone signal regardless of which match was picked.
+    return (top_matches[0], is_ambiguous)
+
+
+def _promote_to_external_identifier(
+    conn: psycopg.Connection[tuple],
+    *,
+    cusip: str,
+    instrument_id: int,
+) -> str:
+    """Try to promote a resolved CUSIP into ``external_identifiers``.
+
+    Returns one of:
+
+      * ``"inserted"`` — a new mapping was created; the source row
+        is deleted from ``unresolved_13f_cusips``.
+      * ``"already_resolved"`` — the CUSIP was already mapped to
+        the SAME instrument_id (another path beat us to it). Source
+        row deleted; not counted as a new promotion.
+      * ``"conflict"`` — the CUSIP was already mapped to a
+        DIFFERENT instrument_id. The existing mapping is preserved
+        (we never silently overwrite), the resolver does NOT delete
+        the source row, and the caller tombstones it with
+        ``resolution_status='conflict'`` so an operator can audit.
+        Codex pre-push review caught the prior code silently
+        treating a conflicting pre-existing mapping as success.
+
+    ``is_primary`` is FALSE on the new INSERT path because the
+    curated mapping (when one exists) takes precedence; the
+    resolver only adds entries that were missing entirely.
+    """
+    cusip_norm = cusip.strip().upper()
+
+    # Two-step: probe first, write second. ON CONFLICT ... DO NOTHING
+    # would silently swallow the conflict and we couldn't distinguish
+    # "race-loss / already-mapped to same iid" from "wrong-mapping".
+    # The probe + write pair is wrapped in the same transaction.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id FROM external_identifiers
+            WHERE provider = 'sec'
+              AND identifier_type = 'cusip'
+              AND identifier_value = %s
+            """,
+            (cusip_norm,),
+        )
+        existing = cur.fetchone()
+
+    if existing is not None:
+        existing_iid = int(existing[0])
+        if existing_iid == instrument_id:
+            # Already mapped to the same instrument — source row is
+            # safely redundant.
+            conn.execute(
+                "DELETE FROM unresolved_13f_cusips WHERE cusip = %s",
+                (cusip_norm,),
+            )
+            return "already_resolved"
+        # Conflicting pre-existing mapping. Keep the existing row;
+        # leave the source row in place so the tombstone path can
+        # mark it 'conflict' for operator audit.
+        return "conflict"
+
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (
+            instrument_id, provider, identifier_type, identifier_value, is_primary
+        ) VALUES (%(iid)s, 'sec', 'cusip', %(cusip)s, FALSE)
+        """,
+        {"iid": instrument_id, "cusip": cusip_norm},
+    )
+    conn.execute(
+        "DELETE FROM unresolved_13f_cusips WHERE cusip = %s",
+        (cusip_norm,),
+    )
+    return "inserted"
+
+
+_TombstoneStatus = str  # one of 'unresolvable' | 'ambiguous' | 'conflict'
+
+
+def _tombstone(
+    conn: psycopg.Connection[tuple],
+    *,
+    cusip: str,
+    status: _TombstoneStatus,
+) -> None:
+    """Mark a CUSIP for skip on subsequent runs with a reason tag.
+
+    Statuses (must match the schema CHECK on
+    ``unresolved_13f_cusips.resolution_status``):
+
+      * ``'unresolvable'`` — no candidate met the similarity floor.
+      * ``'ambiguous'`` — multiple candidates tied at the top score
+        (e.g. Alphabet Class A vs Class C share-class collisions).
+        Operator disambiguates via the curated mapping seed.
+      * ``'conflict'`` — ``external_identifiers`` already maps this
+        CUSIP to a DIFFERENT instrument_id. Operator audits which
+        side is correct before clearing.
+
+    The row stays in the table for operator audit; clearing
+    ``resolution_status`` forces a retry on the next run.
+    """
+    conn.execute(
+        """
+        UPDATE unresolved_13f_cusips
+        SET resolution_status = %s,
+            last_observed_at = NOW()
+        WHERE cusip = %s
+        """,
+        (status, cusip.strip().upper()),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+
+def resolve_unresolved_cusips(
+    conn: psycopg.Connection[tuple],
+    *,
+    limit: int = 500,
+    threshold: float = MATCH_THRESHOLD,
+) -> ResolveReport:
+    """Run one resolver pass.
+
+    Reads up to ``limit`` pending CUSIPs from
+    ``unresolved_13f_cusips``, fuzzy-matches each against the
+    instruments universe, and promotes confident matches into
+    ``external_identifiers``. Each match decision (promote /
+    tombstone) commits in its own write — caller is responsible
+    for committing the transaction at the end.
+
+    ``threshold`` defaults to :data:`MATCH_THRESHOLD`; tests
+    override it for deterministic fuzzy-edge cases.
+    """
+    pending = _select_pending_unresolved(conn, limit=limit)
+    if not pending:
+        return ResolveReport(
+            candidates_seen=0,
+            promotions=0,
+            already_resolved=0,
+            tombstoned_unresolvable=0,
+            tombstoned_ambiguous=0,
+            tombstoned_conflict=0,
+        )
+
+    candidates = _select_instrument_candidates(conn)
+    if not candidates:
+        # Empty instruments table — every CUSIP is unresolvable
+        # by definition. Tombstone them all so the next run skips
+        # them; clearing rows is the operator path to retry once
+        # instruments are seeded.
+        for row in pending:
+            _tombstone(conn, cusip=str(row["cusip"]), status="unresolvable")
+        return ResolveReport(
+            candidates_seen=len(pending),
+            promotions=0,
+            already_resolved=0,
+            tombstoned_unresolvable=len(pending),
+            tombstoned_ambiguous=0,
+            tombstoned_conflict=0,
+        )
+
+    promotions = 0
+    already_resolved = 0
+    unresolvable = 0
+    ambiguous = 0
+    conflict = 0
+
+    for row in pending:
+        cusip = str(row["cusip"])
+        target = _normalise_name(str(row["name_of_issuer"]))
+        if not target:
+            # Issuer name normalised to empty (extreme edge — pure
+            # punctuation / suffix-only string). Tombstone.
+            _tombstone(conn, cusip=cusip, status="unresolvable")
+            unresolvable += 1
+            continue
+
+        best, is_ambiguous = _best_match(target=target, candidates=candidates)
+        if best is None or best.score < threshold:
+            _tombstone(conn, cusip=cusip, status="unresolvable")
+            unresolvable += 1
+            continue
+
+        if is_ambiguous:
+            # Two or more distinct instruments tied at the top
+            # score (typical share-class collision: Alphabet CL A
+            # vs CL C). Refuse to pick arbitrarily — operator
+            # disambiguates via the curated mapping seed.
+            _tombstone(conn, cusip=cusip, status="ambiguous")
+            ambiguous += 1
+            logger.info(
+                "13F CUSIP resolver: ambiguous %s (score=%.3f, %r); operator must disambiguate",
+                cusip,
+                best.score,
+                target,
+            )
+            continue
+
+        outcome = _promote_to_external_identifier(conn, cusip=cusip, instrument_id=best.instrument_id)
+        if outcome == "inserted":
+            promotions += 1
+            logger.info(
+                "13F CUSIP resolver: promoted %s -> instrument_id=%d (score=%.3f, %r ~ %r)",
+                cusip,
+                best.instrument_id,
+                best.score,
+                target,
+                best.company_name,
+            )
+        elif outcome == "already_resolved":
+            already_resolved += 1
+        else:  # 'conflict'
+            _tombstone(conn, cusip=cusip, status="conflict")
+            conflict += 1
+            logger.warning(
+                "13F CUSIP resolver: conflict %s — existing mapping differs from match %d",
+                cusip,
+                best.instrument_id,
+            )
+
+    return ResolveReport(
+        candidates_seen=len(pending),
+        promotions=promotions,
+        already_resolved=already_resolved,
+        tombstoned_unresolvable=unresolvable,
+        tombstoned_ambiguous=ambiguous,
+        tombstoned_conflict=conflict,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reader (exposed for ad-hoc admin queries)
+# ---------------------------------------------------------------------------
+
+
+def iter_pending_unresolved(
+    conn: psycopg.Connection[tuple],
+    *,
+    limit: int = 100,
+) -> Iterator[dict[str, Any]]:
+    """Yield unresolved CUSIPs (resolution_status IS NULL) ordered
+    by observation count DESC. Used by the operator CLI to inspect
+    the resolver backlog before triggering a manual mapping
+    upsert."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT cusip, name_of_issuer, observation_count,
+                   last_accession_number, first_observed_at, last_observed_at
+            FROM unresolved_13f_cusips
+            WHERE resolution_status IS NULL
+            ORDER BY observation_count DESC, last_observed_at DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        for row in cur.fetchall():
+            yield dict(row)
