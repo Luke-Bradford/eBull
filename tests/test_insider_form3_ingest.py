@@ -22,6 +22,7 @@ import pytest
 from app.services.insider_form3_ingest import (
     ingest_form_3_filings,
     ingest_form_3_filings_for_instrument,
+    list_baseline_only_insider_holdings,
 )
 
 pytestmark = pytest.mark.integration
@@ -600,3 +601,223 @@ class TestUrlCanonicalisation:
         ingest_form_3_filings(ebull_test_conn, fetcher)
         # Fetch hit the canonical URL, not the rendered one.
         assert fetcher.calls == [canonical]
+
+
+# ---------------------------------------------------------------------
+# #768 PR3 — baseline-only reader
+# ---------------------------------------------------------------------
+
+
+def _seed_form_4_for_filer(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+    filer_cik: str,
+    filer_name: str,
+    accession: str,
+    txn_date: str = "2026-01-20",
+) -> None:
+    """Plant a non-tombstoned Form 4 row for ``filer_cik`` so the
+    baseline-only reader excludes them. Mirrors what
+    ``ingest_insider_transactions`` would write."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO insider_filings (
+                accession_number, instrument_id, document_type,
+                primary_document_url, parser_version, is_tombstone
+            ) VALUES (%s, %s, '4', 'https://example.test/form4.xml', 1, FALSE)
+            """,
+            (accession, instrument_id),
+        )
+        cur.execute(
+            """
+            INSERT INTO insider_filers (
+                accession_number, filer_cik, filer_name, is_officer
+            ) VALUES (%s, %s, %s, TRUE)
+            """,
+            (accession, filer_cik, filer_name),
+        )
+        cur.execute(
+            """
+            INSERT INTO insider_transactions (
+                instrument_id, accession_number, txn_row_num,
+                filer_name, filer_cik, txn_date, txn_code, shares
+            ) VALUES (%s, %s, 0, %s, %s, %s, 'P', 100)
+            """,
+            (instrument_id, accession, filer_name, filer_cik, txn_date),
+        )
+    conn.commit()
+
+
+class TestBaselineOnlyReader:
+    def test_returns_form_3_holding_when_filer_has_no_form_4_activity(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        # Operationally meaningful case: officer received a Form 3
+        # initial holding and never traded after — invisible without
+        # the baseline reader.
+        iid = _seed_instrument(ebull_test_conn)
+        url = "https://example.test/form3.xml"
+        _seed_filing(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="0000000301-26-000001",
+            url=url,
+        )
+        fetcher = _StubFetcher({url: _FORM_3_RICH})
+        ingest_form_3_filings(ebull_test_conn, fetcher)
+
+        rows = list_baseline_only_insider_holdings(ebull_test_conn, instrument_id=iid)
+
+        # _FORM_3_RICH has 2 holdings: 1 non-derivative + 1 derivative.
+        # No Form 4 activity for filer 0001000001 → both surface.
+        assert len(rows) == 2
+        # Largest-first ordering by shares.
+        assert rows[0].is_derivative is False
+        assert rows[0].shares == Decimal("50000")
+        assert rows[1].is_derivative is True
+        assert rows[1].shares == Decimal("10000")
+        assert rows[0].filer_cik == "0001000001"
+        assert rows[0].filer_name == "Smith, Jane"
+
+    def test_excludes_filers_with_form_4_activity(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        # Filer who has both Form 3 baseline AND Form 4 transactions
+        # should NOT appear in the baseline-only list — their
+        # cumulative balance is derivable from the latest
+        # post_transaction_shares observation. Including them here
+        # would double-count the per-filer wedge on the ownership
+        # ring.
+        iid = _seed_instrument(ebull_test_conn)
+        url = "https://example.test/form3.xml"
+        _seed_filing(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="0000000302-26-000001",
+            url=url,
+        )
+        fetcher = _StubFetcher({url: _FORM_3_RICH})
+        ingest_form_3_filings(ebull_test_conn, fetcher)
+
+        # Plant a Form 4 row for the same filer.
+        _seed_form_4_for_filer(
+            ebull_test_conn,
+            instrument_id=iid,
+            filer_cik="0001000001",
+            filer_name="Smith, Jane",
+            accession="0000000302-26-000002",
+        )
+
+        rows = list_baseline_only_insider_holdings(ebull_test_conn, instrument_id=iid)
+        assert rows == []
+
+    def test_excludes_tombstoned_form_3_filings(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        # A tombstoned Form 3 (fetch / parse failure) should not
+        # surface its (zero) holdings via the baseline reader. The
+        # tombstone path writes the filings row but no holdings rows;
+        # this test pins the INNER JOIN exclusion contract by directly
+        # inserting a tombstoned filing + a phantom holding row.
+        iid = _seed_instrument(ebull_test_conn)
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO insider_filings (
+                    accession_number, instrument_id, document_type,
+                    primary_document_url, parser_version, is_tombstone
+                ) VALUES (%s, %s, '3', 'https://example.test/dead.xml', 1, TRUE)
+                """,
+                ("0000000303-26-000001", iid),
+            )
+            cur.execute(
+                """
+                INSERT INTO insider_initial_holdings (
+                    instrument_id, accession_number, row_num,
+                    filer_cik, filer_name, as_of_date,
+                    security_title, shares, is_derivative
+                ) VALUES (%s, %s, 0, %s, %s, %s, 'Common Stock', 999, FALSE)
+                """,
+                (iid, "0000000303-26-000001", "0009999998", "Phantom", "2026-01-15"),
+            )
+        ebull_test_conn.commit()
+
+        rows = list_baseline_only_insider_holdings(ebull_test_conn, instrument_id=iid)
+        assert rows == []
+
+    def test_3a_amendment_at_same_as_of_date_supersedes_original(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        # Codex review of #768 PR3: the realistic 3/A case keeps the
+        # same periodOfReport as the original — the tie-break must
+        # prefer the amendment via accession_number. Without the
+        # tie-break the original could win, silently surfacing stale
+        # baseline shares on the ownership ring.
+        iid = _seed_instrument(ebull_test_conn)
+        as_of = "2026-02-01"
+        with ebull_test_conn.cursor() as cur:
+            # Original Form 3 — earlier accession sequence.
+            for accn, doc_type, shares in (
+                ("0000000305-26-000001", "3", 4000),  # original
+                ("0000000305-26-000002", "3/A", 4500),  # amendment, same as_of
+            ):
+                cur.execute(
+                    """
+                    INSERT INTO insider_filings (
+                        accession_number, instrument_id, document_type,
+                        primary_document_url, parser_version, is_tombstone
+                    ) VALUES (%s, %s, %s, 'https://example.test/x.xml', 1, FALSE)
+                    """,
+                    (accn, iid, doc_type),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO insider_initial_holdings (
+                        instrument_id, accession_number, row_num,
+                        filer_cik, filer_name, as_of_date,
+                        security_title, shares, is_derivative
+                    ) VALUES (%s, %s, 0, '0001000300', 'Roe, Richard', %s, 'Common Stock', %s, FALSE)
+                    """,
+                    (iid, accn, as_of, shares),
+                )
+        ebull_test_conn.commit()
+
+        rows = list_baseline_only_insider_holdings(ebull_test_conn, instrument_id=iid)
+        # Amendment wins via accession_number DESC tie-break.
+        assert len(rows) == 1
+        assert rows[0].shares == Decimal("4500")
+        assert rows[0].as_of_date.isoformat() == as_of
+
+    def test_picks_latest_as_of_date_per_filer_security_pair(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        # If a filer has two Form 3 amendments (3 + 3/A) for the same
+        # security, the reader must surface only the latest snapshot
+        # — older amendments are superseded.
+        iid = _seed_instrument(ebull_test_conn)
+        with ebull_test_conn.cursor() as cur:
+            for accn, as_of, shares in (
+                ("0000000304-26-000001", "2026-01-10", 5000),
+                ("0000000304-26-000002", "2026-03-15", 7500),
+            ):
+                cur.execute(
+                    """
+                    INSERT INTO insider_filings (
+                        accession_number, instrument_id, document_type,
+                        primary_document_url, parser_version, is_tombstone
+                    ) VALUES (%s, %s, '3', 'https://example.test/x.xml', 1, FALSE)
+                    """,
+                    (accn, iid),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO insider_initial_holdings (
+                        instrument_id, accession_number, row_num,
+                        filer_cik, filer_name, as_of_date,
+                        security_title, shares, is_derivative
+                    ) VALUES (%s, %s, 0, '0001000099', 'Doe, John', %s, 'Common Stock', %s, FALSE)
+                    """,
+                    (iid, accn, as_of, shares),
+                )
+        ebull_test_conn.commit()
+
+        rows = list_baseline_only_insider_holdings(ebull_test_conn, instrument_id=iid)
+        assert len(rows) == 1
+        assert rows[0].shares == Decimal("7500")
+        assert rows[0].as_of_date.isoformat() == "2026-03-15"
