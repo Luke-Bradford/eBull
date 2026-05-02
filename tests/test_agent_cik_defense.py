@@ -192,7 +192,14 @@ def test_audit_excludes_secondary_by_default(
     # Secondary (is_primary=FALSE) agent CIK doesn't drive routing —
     # excluded from default report so operators don't get false
     # alarms on benign historical CIK aliases.
-    _seed(ebull_test_conn, 992_001, "ACD_SEC", "0001493152", is_primary=False)
+    #
+    # Use a *different* agent CIK from the sibling test
+    # ``test_audit_finds_primary_agent_cik_contamination`` so the
+    # ``ON CONFLICT (provider, identifier_type, identifier_value) DO
+    # NOTHING`` partial unique index doesn't silently skip this seed
+    # if test ordering leaves the prior test's row alive (PR #765
+    # review BLOCKING).
+    _seed(ebull_test_conn, 992_001, "ACD_SEC", "0001213900", is_primary=False)
     rows = find_contaminated(ebull_test_conn, include_secondary=False)
     assert 992_001 not in {r[0] for r in rows}
 
