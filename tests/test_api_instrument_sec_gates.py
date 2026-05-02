@@ -80,6 +80,33 @@ def _clear() -> None:
     app.dependency_overrides.pop(get_conn, None)
 
 
+def test_insider_transactions_rejects_sec_form3_provider(client: TestClient) -> None:
+    """PR #774 review (BLOCKING): _INSIDER_PROVIDERS was originally
+    shared between Form 4 and Form 3 endpoints; adding 'sec_form3'
+    silently passed validation against a Form-4-only reader. Pin the
+    split so a regression that re-merges the tuples is caught.
+    """
+    conn = _conn_for_handler(has_cik=True)
+    _install(conn)
+    try:
+        resp = client.get("/instruments/AAPL/insider_transactions?provider=sec_form3")
+    finally:
+        _clear()
+    assert resp.status_code == 400
+
+
+def test_insider_baseline_rejects_sec_form4_provider(client: TestClient) -> None:
+    """Symmetric to the test above — Form 3 baseline endpoint must
+    reject ``?provider=sec_form4``."""
+    conn = _conn_for_handler(has_cik=True)
+    _install(conn)
+    try:
+        resp = client.get("/instruments/AAPL/insider_baseline?provider=sec_form4")
+    finally:
+        _clear()
+    assert resp.status_code == 400
+
+
 @pytest.mark.parametrize(
     "endpoint",
     [
@@ -87,6 +114,7 @@ def _clear() -> None:
         "/instruments/AAPL/dividends",
         "/instruments/AAPL/insider_summary",
         "/instruments/AAPL/insider_transactions",
+        "/instruments/AAPL/insider_baseline",
     ],
 )
 def test_no_sec_cik_returns_404_no_sec_coverage(client: TestClient, endpoint: str) -> None:
@@ -111,6 +139,7 @@ def test_no_sec_cik_returns_404_no_sec_coverage(client: TestClient, endpoint: st
         "/instruments/AAPL/dividends",
         "/instruments/AAPL/insider_summary",
         "/instruments/AAPL/insider_transactions",
+        "/instruments/AAPL/insider_baseline",
     ],
 )
 def test_with_sec_cik_does_not_404_with_no_sec_coverage(client: TestClient, endpoint: str) -> None:

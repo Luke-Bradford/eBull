@@ -34,10 +34,14 @@ import type {
   InstitutionalHoldingsResponse,
 } from "@/api/institutionalHoldings";
 import {
+  fetchInsiderBaseline,
   fetchInsiderTransactions,
   fetchInstrumentFinancials,
 } from "@/api/instruments";
-import type { InsiderTransactionsList } from "@/api/instruments";
+import type {
+  InsiderBaselineList,
+  InsiderTransactionsList,
+} from "@/api/instruments";
 import type { InstrumentFinancials } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { OwnershipFreshnessChips } from "@/components/instrument/OwnershipFreshnessChips";
@@ -54,6 +58,7 @@ import {
 } from "@/components/instrument/ownershipMetrics";
 import {
   type InsiderRowShape,
+  isBaselineHoldingRow,
   isInsiderHoldingRow,
 } from "@/components/instrument/ownershipInsiders";
 import {
@@ -121,6 +126,11 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
     [symbol],
   );
 
+  const baselineState = useAsync<InsiderBaselineList>(
+    useCallback(() => fetchInsiderBaseline(symbol), [symbol]),
+    [symbol],
+  );
+
   const navigate = useNavigate();
   const handleWedgeClick = useCallback(
     (target: WedgeClick) => {
@@ -140,14 +150,16 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
   const isLoading =
     balanceState.loading ||
     institutionalState.loading ||
-    insidersState.loading;
+    insidersState.loading ||
+    baselineState.loading;
   const allErrored =
     balanceState.error !== null &&
     institutionalState.error !== null &&
-    insidersState.error !== null;
+    insidersState.error !== null &&
+    baselineState.error !== null;
 
   return (
-    <Pane title="Ownership" source={{ providers: ["sec_13f", "sec_form4", "sec_xbrl"] }}>
+    <Pane title="Ownership" source={{ providers: ["sec_13f", "sec_form3", "sec_form4", "sec_xbrl"] }}>
       {isLoading ? (
         <SectionSkeleton rows={4} />
       ) : allErrored ? (
@@ -156,6 +168,7 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
             balanceState.refetch();
             institutionalState.refetch();
             insidersState.refetch();
+            baselineState.refetch();
           }}
         />
       ) : (
@@ -163,6 +176,7 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
           balance={balanceState.data}
           institutional={institutionalState.data}
           insiders={insidersState.data}
+          baseline={baselineState.data}
           onWedgeClick={handleWedgeClick}
         />
       )}
@@ -174,6 +188,7 @@ interface PanelBodyProps {
   readonly balance: InstrumentFinancials | null;
   readonly institutional: InstitutionalHoldingsResponse | null;
   readonly insiders: InsiderTransactionsList | null;
+  readonly baseline: InsiderBaselineList | null;
   readonly onWedgeClick: (target: WedgeClick) => void;
 }
 
@@ -186,16 +201,22 @@ function PanelBody({
   balance,
   institutional,
   insiders,
+  baseline,
   onWedgeClick,
 }: PanelBodyProps): JSX.Element {
   const today = useMemo(() => new Date(), []);
-  return renderBody(extractData(balance, institutional, insiders), onWedgeClick, today);
+  return renderBody(
+    extractData(balance, institutional, insiders, baseline),
+    onWedgeClick,
+    today,
+  );
 }
 
 export function extractData(
   balance: InstrumentFinancials | null,
   institutional: InstitutionalHoldingsResponse | null,
   insiders: InsiderTransactionsList | null,
+  baseline: InsiderBaselineList | null,
 ): OwnershipData {
   const outstanding =
     balance !== null ? pickLatestBalance(balance, "shares_outstanding") : null;
@@ -213,7 +234,18 @@ export function extractData(
   const etf_holders: SunburstHolder[] = equity_filers
     .filter((f) => f.filer_type === "ETF")
     .map(filerToHolder("etfs"));
-  const insider_holders = aggregateInsiderHoldersForSunburst(insiders);
+
+  // Insider holders = Form 4 cumulative (latest post_transaction_shares
+  // per filer) + Form 3 baseline-only filers (#768 PR4) so officers
+  // who never traded after appointment surface on the per-officer
+  // ring. The backend NOT EXISTS gate guarantees no overlap between
+  // the two sets.
+  const form4_insider_holders = aggregateInsiderHoldersForSunburst(insiders);
+  const baseline_insider_holders = baselineToHolders(baseline);
+  const insider_holders: SunburstHolder[] = [
+    ...form4_insider_holders,
+    ...baseline_insider_holders,
+  ];
 
   const institutions_total = parseShareCount(inst_totals?.institutions_shares ?? null);
   const etfs_total = parseShareCount(inst_totals?.etfs_shares ?? null);
@@ -237,10 +269,17 @@ export function extractData(
   //     value — already the latest non-null treasury_shares row from
   //     pickLatestBalance.
   const thirteen_f_as_of = inst_totals?.period_of_report ?? null;
-  const insiders_as_of =
+  // Insider freshness factors in BOTH sources: latest Form 4 txn_date
+  // AND latest Form 3 baseline as_of_date. An issuer where every
+  // observed insider holds via a Form 3 grant and never trades would
+  // have no Form 4 rows at all but should still surface the latest
+  // baseline date as the Insiders chip's "as of".
+  const form4_latest =
     insiders === null || insiders.rows.length === 0
       ? null
       : latestTxnDate(insiders.rows as readonly InsiderRowShape[]);
+  const baseline_latest = latestBaselineDate(baseline);
+  const insiders_as_of = maxIsoDate(form4_latest, baseline_latest);
   const treasury_as_of =
     treasury !== null && balance !== null ? findRowDateFor(balance, "treasury_shares") : null;
 
@@ -257,6 +296,56 @@ export function extractData(
     insiders_as_of,
     treasury_as_of,
   };
+}
+
+/** Map baseline-API rows into the SunburstHolder shape so the
+ *  ownership ring renders Form-3-only insiders alongside Form 4
+ *  cumulative balances (#768 PR4). Uses the shared
+ *  ``isBaselineHoldingRow`` predicate so the holders set and the
+ *  freshness chip's ``as_of_date`` derivation can never drift. */
+function baselineToHolders(
+  baseline: InsiderBaselineList | null,
+): readonly SunburstHolder[] {
+  if (baseline === null || baseline.rows.length === 0) return [];
+  const out: SunburstHolder[] = [];
+  for (const row of baseline.rows) {
+    if (!isBaselineHoldingRow(row)) continue;
+    // Predicate guarantees parseShareCount > 0.
+    const shares = parseShareCount(row.shares)!;
+    // Disambiguate against any same-CIK Form 4 leaf (the backend
+    // gate excludes them but defensively suffix the key — render
+    // collisions on a flat ring would silently swap wedges).
+    const key = `baseline:${row.filer_cik}:${row.is_derivative ? "d" : "n"}`;
+    out.push({
+      key,
+      label: row.filer_name,
+      shares,
+      category: "insiders",
+    });
+  }
+  return out;
+}
+
+/** Latest ``as_of_date`` across the baseline rows that actually
+ *  render. Uses the same eligibility predicate as
+ *  ``baselineToHolders`` so the chip never advances past a wedge
+ *  that doesn't render. */
+function latestBaselineDate(baseline: InsiderBaselineList | null): string | null {
+  if (baseline === null || baseline.rows.length === 0) return null;
+  let latest: string | null = null;
+  for (const row of baseline.rows) {
+    if (!isBaselineHoldingRow(row)) continue;
+    if (latest === null || row.as_of_date > latest) latest = row.as_of_date;
+  }
+  return latest;
+}
+
+/** Max of two ISO ``YYYY-MM-DD`` strings (lex-sortable so string
+ *  compare is correct). Returns null when both are null. */
+function maxIsoDate(a: string | null, b: string | null): string | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return a >= b ? a : b;
 }
 
 function latestTxnDate(rows: readonly InsiderRowShape[]): string | null {
