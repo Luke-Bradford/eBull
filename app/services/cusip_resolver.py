@@ -228,7 +228,12 @@ def _normalise_name(raw: str) -> str:
     # 4. Drop punctuation.
     s = _PUNCTUATION_RE.sub(" ", s)
 
-    # 5. Strip a single trailing corporate-form suffix.
+    # 5. Strip every trailing corporate-form suffix token. The
+    #    while loop handles names like ``"Vanguard Group Holdings
+    #    Trust"`` where the operator-facing label stacks several
+    #    structural words; stripping just one would leave residual
+    #    noise that hurts comparison. Bot review caught the prior
+    #    "single trailing" comment.
     tokens = s.split()
     while tokens and tokens[-1] in _CORPORATE_SUFFIXES:
         tokens.pop()
