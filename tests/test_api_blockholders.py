@@ -246,7 +246,11 @@ class TestBlockholdersEndpoint:
         # total_filers counts distinct blocks (accessions), not rows.
         assert Decimal(body["totals"]["blockholders_shares"]) == Decimal("1500000")
         assert body["totals"]["total_filers"] == 1
+        # Each per-reporter row carries the same 1.5M aggregate — the
+        # SEC instructions require joint filers to claim the same
+        # beneficial ownership.
         assert Decimal(body["blockholders"][0]["aggregate_amount_owned"]) == Decimal("1500000")
+        assert Decimal(body["blockholders"][1]["aggregate_amount_owned"]) == Decimal("1500000")
         assert Decimal(body["blockholders"][0]["aggregate_amount_owned"]) == Decimal("1500000")
 
     def test_amendment_chain_supersession(

@@ -393,7 +393,10 @@ function OwnershipBody({
     () => parseShareCount(blockholders?.totals?.blockholders_shares ?? null),
     [blockholders?.totals?.blockholders_shares],
   );
-  const blockholders_as_of = blockholders?.totals?.as_of_date ?? null;
+  const blockholders_as_of = useMemo(
+    () => blockholders?.totals?.as_of_date ?? null,
+    [blockholders?.totals?.as_of_date],
+  );
 
   const inputs: SunburstInputs = useMemo(
     () => ({
