@@ -36,9 +36,11 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         #   insider_transactions — Form 4 XML (#429)
         #   eight_k_events      — 8-K full structure (#450)
         #   institutional_holdings — 13F-HR primary_doc + infotable XML (#730)
+        #   insider_form3_ingest    — Form 3 initial-holdings XML (#768)
         "app/services/business_summary.py",
         "app/services/dividend_calendar.py",
         "app/services/insider_transactions.py",
+        "app/services/insider_form3_ingest.py",
         "app/services/eight_k_events.py",
         "app/services/institutional_holdings.py",
         # Provider implementation owns the method itself.
@@ -58,6 +60,7 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "tests/test_business_summary_ingest.py",
         "tests/test_dividend_calendar_ingest.py",
         "tests/test_insider_transactions_ingest.py",
+        "tests/test_insider_form3_ingest.py",
         "tests/test_eight_k_events_ingest.py",
         "tests/test_concurrent_fetch.py",
         "tests/test_institutional_holdings_ingester.py",
