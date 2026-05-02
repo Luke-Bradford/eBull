@@ -121,6 +121,11 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "blockholder_filings",
     "blockholder_filers",
     "blockholder_filer_seeds",
+    # #769 — DEF 14A beneficial ownership cross-check. FK → instruments
+    # (nullable). Listing explicitly keeps teardown deterministic when
+    # a test populates DEF 14A rows without touching instruments.
+    "def14a_ingest_log",
+    "def14a_beneficial_holdings",
     "filing_events",
     "decision_audit",  # #315 Phase 3 alerts
     "trade_recommendations",  # #315 Phase 3 alerts (FK parent of decision_audit)
