@@ -82,22 +82,43 @@ logger = logging.getLogger(__name__)
 # Top 10 institutional managers by AUM. Covers ~80% of US equity
 # institutional ownership across the curated cohort. Each entry is
 # (CIK, label) -- the CIK is the SEC's filer ID, padded to 10 digits.
+# Top institutional managers by AUM. Each CIK is verified against
+# SEC submissions.json — the ``label`` matches the canonical entity
+# name. Migration 106 (operator-found 2026-05-03) corrected the
+# prior list which had FOUR mis-labelled CIKs:
+#
+#   * 0000200217 was labelled "Northern Trust Corp." but is
+#     actually DODGE & COX
+#   * 0000354204 was labelled "T. Rowe Price Associates" but is
+#     actually DIMENSIONAL FUND ADVISORS LP
+#   * 0000895421 was labelled "Capital World Investors" but is
+#     actually MORGAN STANLEY
+#   * 0000866787 was labelled "Wellington Management Group LLP"
+#     but is actually AUTOZONE INC (not a 13F filer at all —
+#     hallucinated row, dropped by migration 106)
+#
+# Plus the Soros/Geode disambig from migration 104 (Batch 2 of
+# #788).
 _INSTITUTIONAL_SEEDS: list[tuple[str, str]] = [
     ("0000102909", "Vanguard Group, Inc."),
     ("0001364742", "BlackRock Inc."),
     ("0000093751", "State Street Corporation"),
     ("0000315066", "FMR LLC (Fidelity)"),
     ("0001067983", "Berkshire Hathaway Inc."),
-    ("0000354204", "T. Rowe Price Associates"),
-    ("0000895421", "Capital World Investors"),
-    # Soros / Geode disambig (#790 P2 — migration 104). CIK
-    # 0001029160 is SOROS FUND MANAGEMENT LLC (verified via SEC
-    # submissions.json), NOT Geode. Real Geode Capital Management
-    # LLC is CIK 0001214717.
+    # CIK-verified relabels (migration 106).
+    ("0000200217", "Dodge & Cox"),
+    ("0000354204", "Dimensional Fund Advisors LP"),
+    ("0000895421", "Morgan Stanley"),
+    # Soros / Geode disambig (#790 P2 — migration 104).
     ("0001029160", "Soros Fund Management LLC"),
     ("0001214717", "Geode Capital Management LLC"),
-    ("0000200217", "Northern Trust Corp."),
-    ("0000866787", "Wellington Management Group LLP"),
+    # Intended top managers added by migration 106 with correct
+    # CIKs. The prior list had the LABELS for these but the wrong
+    # CIKs.
+    ("0000073124", "Northern Trust Corp."),
+    ("0000080255", "T. Rowe Price Associates Inc."),
+    ("0001422849", "Capital World Investors"),
+    ("0000902219", "Wellington Management Group LLP"),
 ]
 
 # CIKs from above to also tag as ETFs. Two issuers are clearly
