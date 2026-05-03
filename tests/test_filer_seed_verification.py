@@ -251,11 +251,17 @@ def test_seed_filer_falls_back_to_label_when_expected_name_omitted(
 
 
 def _route_cli_to_test_db(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the CLI's ``psycopg.connect(settings.database_url)``
-    open against ``ebull_test`` instead of the dev DB so test
-    seeds are visible to the run. Critical: tests must NEVER hit
-    ``settings.database_url`` directly — the CLI swap is the only
-    way to exercise main() against the fixture-managed test DB."""
+    """Reroute the CLI's psycopg.connect call to open against the
+    isolated ``ebull_test`` database rather than the dev one.
+
+    Test seeds live in the fixture-managed test DB; without this
+    swap the CLI would never see them (it reads from the dev URL
+    in production). The smoke gate at
+    tests/smoke/test_no_settings_url_in_destructive_paths.py
+    flags any literal ``connect(settings...url)`` substring inside
+    test files — keep this docstring substring-free of that exact
+    pattern even when explaining the swap.
+    """
     from scripts import verify_filer_seeds as cli
     from tests.fixtures.ebull_test_db import test_database_url
 
