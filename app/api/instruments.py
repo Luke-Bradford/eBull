@@ -3994,3 +3994,57 @@ def get_instrument_ownership_rollup(
             instrument_id=int(inst_row["instrument_id"]),  # type: ignore[arg-type]
         )
     return _rollup_to_response(rollup)
+
+
+@router.get(
+    "/{symbol}/ownership-rollup/export.csv",
+    response_class=PlainTextResponse,
+)
+def get_instrument_ownership_rollup_csv(
+    symbol: str,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> PlainTextResponse:
+    """CSV export of the canonical deduped ownership rollup
+    (Chain 2.8 of #788).
+
+    Same data shape the operator sees in the L2 ownership card,
+    flattened to one row per surviving holder + treasury memo +
+    residual memo. ``Content-Disposition: attachment`` so the
+    browser saves rather than rendering. Header always emitted so
+    an automation pipe is branchless on empty rollups.
+
+    Reads run inside ``snapshot_read`` so the per-slice totals,
+    treasury, and residual all reconcile against one REPEATABLE
+    READ snapshot. Same isolation contract as the JSON rollup
+    endpoint."""
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with snapshot_read(conn):
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT instrument_id, symbol FROM instruments
+                WHERE UPPER(symbol) = %(s)s
+                ORDER BY is_primary_listing DESC, instrument_id ASC
+                LIMIT 1
+                """,
+                {"s": symbol_clean},
+            )
+            inst_row = cur.fetchone()
+        if inst_row is None:
+            raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+        rollup = ownership_rollup.get_ownership_rollup(
+            conn,
+            symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+            instrument_id=int(inst_row["instrument_id"]),  # type: ignore[arg-type]
+        )
+
+    return PlainTextResponse(
+        content=ownership_rollup.build_rollup_csv(rollup),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{symbol_clean}_ownership_rollup.csv"',
+        },
+    )
