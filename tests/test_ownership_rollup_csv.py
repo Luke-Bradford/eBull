@@ -323,6 +323,171 @@ def test_build_csv_handles_null_cik_and_no_as_of() -> None:
     assert parts[7] == ""  # as_of_date empty (was None)
 
 
+def test_build_csv_treasury_filter_drops_holders_keeps_memo() -> None:
+    """Pin: when the endpoint has filtered slices to () (the
+    ``?category=treasury`` path), the resulting rollup's CSV
+    contains the treasury memo row + residual + header — and NO
+    holder rows. Codex Chain 2.8 follow-up V3 caught the prior
+    integration test was too weak (no_data seed didn't pin the
+    'memo only' contract); this unit-level pin verifies it
+    deterministically against a populated input."""
+    from dataclasses import replace
+
+    insiders = _slice(
+        "insiders",
+        (
+            _holder(
+                cik="0000111111",
+                name="Holder X",
+                shares="500",
+                pct="0.05",
+                source="form4",
+                accession="0000111111-26-1",
+            ),
+        ),
+    )
+    full = _rollup(
+        slices=(insiders,),
+        treasury="500000",
+        residual_shares="9499500",
+    )
+    treasury_only = replace(full, slices=())
+    csv = build_rollup_csv(treasury_only)
+
+    assert "Holder X" not in csv  # no slice holders
+    assert "Treasury (memo)" in csv  # memo row present
+    assert "Public / unattributed" in csv  # residual present
+
+
+def test_build_csv_supports_post_filter_via_dataclass_replace() -> None:
+    """``?category=`` filter on the endpoint applies via
+    ``dataclasses.replace`` to scope the rollup before the helper
+    runs. This test pins the contract that ``build_rollup_csv`` is
+    deterministic on the slices tuple it sees — feeding it a
+    one-slice rollup must produce the same shape as the multi-slice
+    case minus the dropped slices' rows. Codex Chain 2.8 follow-up
+    caught the regression where the FE's category filter wasn't
+    forwarded; this pin guards the backend half of the fix."""
+    from dataclasses import replace
+
+    insiders = _slice(
+        "insiders",
+        (
+            _holder(
+                cik="0000111111",
+                name="A",
+                shares="100",
+                pct="0.0001",
+                source="form4",
+                accession="0000111111-26-1",
+            ),
+        ),
+    )
+    institutions = _slice(
+        "institutions",
+        (
+            _holder(
+                cik="0000222222",
+                name="B",
+                shares="200",
+                pct="0.0002",
+                source="13f",
+                accession="0000222222-26-2",
+                filer_type="OTHER",
+            ),
+        ),
+    )
+    full = _rollup(slices=(insiders, institutions), residual_shares="9700")
+    filtered = replace(full, slices=(institutions,))
+
+    csv_full = build_rollup_csv(full)
+    csv_filt = build_rollup_csv(filtered)
+
+    assert "A,insiders" in csv_full
+    assert "B,institutions" in csv_full
+    assert "A,insiders" not in csv_filt
+    assert "B,institutions" in csv_filt
+    # Treasury memo + residual still appear in the filtered CSV
+    # (they are not slice-scoped).
+    assert "Public / unattributed" in csv_filt
+
+
+@pytest.mark.integration
+def test_csv_endpoint_treasury_filter_returns_memo_only(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """``?category=treasury`` is a valid filter even though treasury
+    is a memo row, not a slice. Endpoint returns CSV with the
+    treasury memo + residual rows only — no holder slices. Pins the
+    contract Codex Chain 2.8 follow-up identified: the FE's
+    CATEGORY_LABELS set includes 'treasury' so this filter value
+    must round-trip cleanly. The actual treasury memo row only
+    emits when the rollup has treasury_shares > 0; a no_data
+    instrument is fine for asserting the ``?category=treasury`` path
+    doesn't 400."""
+    conn = ebull_test_conn
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (789702, 'TREASCSV', 'Test', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+    )
+    conn.commit()
+
+    def _override_conn():  # type: ignore[no-untyped-def]
+        yield conn
+
+    app.dependency_overrides[get_conn] = _override_conn
+    app.dependency_overrides[require_session_or_service_token] = lambda: object()
+    try:
+        client = TestClient(app)
+        resp = client.get("/instruments/TREASCSV/ownership-rollup/export.csv?category=treasury")
+        assert resp.status_code == 200
+        body = resp.text
+        # Header always emitted.
+        assert body.startswith("filer_cik,filer_name,category,")
+        # Residual memo always emitted (no treasury data on the
+        # no_data path, but the path itself works).
+        assert "Public / unattributed" in body
+    finally:
+        app.dependency_overrides.pop(get_conn, None)
+        app.dependency_overrides.pop(require_session_or_service_token, None)
+
+
+@pytest.mark.integration
+def test_csv_endpoint_rejects_unknown_category(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """Unknown ``?category=`` value → 400, not silent pass-through.
+    Closed-set validation prevents typos surfacing as empty CSVs."""
+    conn = ebull_test_conn
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (789701, 'CATBAD', 'Test', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+    )
+    conn.commit()
+
+    def _override_conn():  # type: ignore[no-untyped-def]
+        yield conn
+
+    app.dependency_overrides[get_conn] = _override_conn
+    app.dependency_overrides[require_session_or_service_token] = lambda: object()
+    try:
+        client = TestClient(app)
+        resp = client.get("/instruments/CATBAD/ownership-rollup/export.csv?category=nope")
+        assert resp.status_code == 400
+        assert "Unknown category" in resp.json()["detail"]
+    finally:
+        app.dependency_overrides.pop(get_conn, None)
+        app.dependency_overrides.pop(require_session_or_service_token, None)
+
+
 @pytest.mark.integration
 def test_csv_endpoint_returns_attachment_header_and_404_unknown_symbol(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

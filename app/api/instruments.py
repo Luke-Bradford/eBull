@@ -3996,12 +3996,33 @@ def get_instrument_ownership_rollup(
     return _rollup_to_response(rollup)
 
 
+# Slice categories present on ``OwnershipSlice.category``. The
+# frontend's ``CATEGORY_LABELS`` set also includes ``treasury`` —
+# treasury is a memo row in the CSV (additive wedge on the chart),
+# not a holders slice. Treated as a valid filter value below: it
+# scopes the CSV to the treasury memo + residual rows only.
+_ROLLUP_CSV_SLICE_CATEGORIES: frozenset[str] = frozenset(
+    {"insiders", "blockholders", "institutions", "etfs", "def14a_unmatched"},
+)
+_ROLLUP_CSV_CATEGORIES: frozenset[str] = _ROLLUP_CSV_SLICE_CATEGORIES | {"treasury"}
+
+
 @router.get(
     "/{symbol}/ownership-rollup/export.csv",
     response_class=PlainTextResponse,
 )
 def get_instrument_ownership_rollup_csv(
     symbol: str,
+    category: str | None = Query(
+        default=None,
+        description=(
+            "Optional category filter: insiders | blockholders | institutions "
+            "| etfs | def14a_unmatched | treasury. Slice categories scope the "
+            "export to that slice's holders; ``treasury`` drops all slice "
+            "holders and emits only the treasury + residual memo rows. "
+            "Without ``category``, every slice is exported."
+        ),
+    ),
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> PlainTextResponse:
     """CSV export of the canonical deduped ownership rollup
@@ -4013,6 +4034,10 @@ def get_instrument_ownership_rollup_csv(
     browser saves rather than rendering. Header always emitted so
     an automation pipe is branchless on empty rollups.
 
+    ``?category=`` scopes the export to one slice — drives the L2
+    page's "download CSV" button when the operator has drilled into
+    a single category. Without it, every slice is exported.
+
     Reads run inside ``snapshot_read`` so the per-slice totals,
     treasury, and residual all reconcile against one REPEATABLE
     READ snapshot. Same isolation contract as the JSON rollup
@@ -4020,6 +4045,11 @@ def get_instrument_ownership_rollup_csv(
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
         raise HTTPException(status_code=400, detail="symbol is required")
+    if category is not None and category not in _ROLLUP_CSV_CATEGORIES:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Unknown category {category!r}; expected one of {sorted(_ROLLUP_CSV_CATEGORIES)}"),
+        )
 
     with snapshot_read(conn):
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -4040,6 +4070,28 @@ def get_instrument_ownership_rollup_csv(
             symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
             instrument_id=int(inst_row["instrument_id"]),  # type: ignore[arg-type]
         )
+
+    if category is not None:
+        # Server-side slice filter so the FE's L2 ``?category=`` filter
+        # state can flow into the CSV without a client-side build.
+        # ``dataclasses.replace`` keeps every other field
+        # (residual, treasury, banner, computed_at) intact — the
+        # operator still sees the canonical residual + treasury memo
+        # rows even when the slice list is filtered.
+        #
+        # ``category=treasury`` is a valid filter even though treasury
+        # is a memo row (not a slice). Drop ALL slices and keep the
+        # treasury + residual memo rows — preserves the prior
+        # ``buildCsv(filteredRows)`` behavior where ``?category=treasury``
+        # only emitted the treasury row. Codex Chain 2.8 follow-up
+        # caught the prior version 400ing on ``treasury``.
+        from dataclasses import replace
+
+        if category == "treasury":
+            filtered_slices: tuple[ownership_rollup.OwnershipSlice, ...] = ()
+        else:
+            filtered_slices = tuple(s for s in rollup.slices if s.category == category)
+        rollup = replace(rollup, slices=filtered_slices)
 
     return PlainTextResponse(
         content=ownership_rollup.build_rollup_csv(rollup),

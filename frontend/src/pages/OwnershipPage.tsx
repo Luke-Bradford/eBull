@@ -450,21 +450,46 @@ function OwnershipBody({
   const filerRowRef = useRef<HTMLTableRowElement | null>(null);
 
   if (viewMode === "raw") {
-    const csv = buildCsv(filteredRows);
+    // Server-side CSV export (Chain 2.8 of #788). The CSV is now
+    // built from the canonical deduped rollup at
+    // ``/instruments/{symbol}/ownership-rollup/export.csv`` so the
+    // operator's spreadsheet matches the L1/L2 chart 1:1 — the prior
+    // client-side ``buildCsv`` reconstructed shares from raw 13F /
+    // Form 4 / 13D fetches and could over-count joint filings or
+    // miss the cross-channel dedup that the backend rollup applies.
+    //
+    // ``categoryFilter`` flows through to the backend's ``?category=``
+    // filter so a drilled view (e.g. ``?category=institutions&view=raw``)
+    // exports only that slice — preserves the prior buildCsv behavior
+    // that scoped the CSV to ``filteredRows``. Codex pre-push review
+    // (Chain 2.8 follow-up) caught the regression when the filter
+    // wasn't forwarded.
+    const exportPath = `/api/instruments/${encodeURIComponent(symbol)}/ownership-rollup/export.csv`;
+    const exportHref =
+      categoryFilter !== null
+        ? `${exportPath}?category=${encodeURIComponent(categoryFilter)}`
+        : exportPath;
     return (
       <div className="space-y-3">
         <p className="text-xs text-slate-500 dark:text-slate-400">
-          Raw view: {filteredRows.length} rows
+          Canonical deduped CSV — one row per surviving holder across
+          insiders, blockholders, institutions, ETFs, plus treasury
+          memo + residual rows. Server-built from the same dedup
+          priority (form4 &gt; form3 &gt; 13D/G &gt; def14a &gt; 13f)
+          the L1/L2 chart uses.
           {categoryFilter !== null && (
-            <> · filtered to <strong>{labelFor(categoryFilter)}</strong></>
+            <> · scoped to <strong>{labelFor(categoryFilter)}</strong></>
           )}
         </p>
-        <pre className="overflow-x-auto rounded border border-slate-200 bg-slate-50 p-3 text-xs dark:border-slate-700 dark:bg-slate-950">
-{csv}
-        </pre>
         <a
-          href={`data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`}
-          download={`${symbol}-ownership.csv`}
+          href={exportHref}
+          // Explicit filename — bare ``download`` collapses to the
+          // URL's last path segment (``export.csv``) for every symbol
+          // in browsers that don't honor the server's
+          // ``Content-Disposition`` header. Match the backend's
+          // ``${symbol}_ownership_rollup.csv`` pattern. Claude PR
+          // review (#835 round 1) flagged the regression.
+          download={`${symbol}_ownership_rollup.csv`}
           className="inline-block rounded border border-slate-300 px-3 py-1.5 text-xs hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
         >
           Download CSV
@@ -916,41 +941,3 @@ function buildFilerRows(
   return rows;
 }
 
-export function buildCsv(rows: readonly FilerRow[]): string {
-  const header = [
-    "filer_key",
-    "filer_label",
-    "category",
-    "shares",
-    "value_usd",
-    "voting_authority",
-    "put_call",
-    "accession",
-    "period_of_report",
-  ].join(",");
-  const lines = rows.map((r) =>
-    [
-      csvEscape(r.key),
-      csvEscape(r.label),
-      csvEscape(r.category),
-      r.shares.toString(),
-      r.value_usd === null ? "" : r.value_usd.toString(),
-      csvEscape(r.voting ?? ""),
-      csvEscape(r.is_put_call ?? ""),
-      csvEscape(r.accession ?? ""),
-      csvEscape(r.period_of_report ?? ""),
-    ].join(","),
-  );
-  return [header, ...lines].join("\n");
-}
-
-function csvEscape(value: string): string {
-  // RFC 4180 escaping + formula-injection guard (mirrors
-  // app.api.instruments).
-  let v = value;
-  if (v !== "" && /^[=+\-@]/.test(v)) v = `'${v}`;
-  if (/[",\n]/.test(v)) {
-    return `"${v.replace(/"/g, '""')}"`;
-  }
-  return v;
-}

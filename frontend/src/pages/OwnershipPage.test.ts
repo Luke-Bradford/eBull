@@ -1,84 +1,28 @@
+/**
+ * The CSV export contract used to live in this file as ``buildCsv``
+ * unit tests. As of Chain 2.8 of #788, the CSV is built server-side
+ * from the canonical deduped rollup at
+ * ``/instruments/{symbol}/ownership-rollup/export.csv`` and the
+ * client-side builder has been removed.
+ *
+ * The header / row-shape / formula-injection / RFC-4180 contracts
+ * are now pinned in ``tests/test_ownership_rollup_csv.py`` against
+ * the ``build_rollup_csv`` helper. The L2 ``?view=raw`` link is
+ * exercised at the page level by ``OwnershipPage`` integration
+ * tests where present.
+ *
+ * Vitest treats an empty file as a "no test" failure, so we keep
+ * one trivial smoke check here as a placeholder until a page-level
+ * integration test for the new download link lands.
+ */
+
 import { describe, expect, it } from "vitest";
 
-import { buildCsv } from "./OwnershipPage";
-import type { FilerRow } from "./OwnershipPage";
-
-function row(overrides: Partial<FilerRow> = {}): FilerRow {
-  return {
-    key: "0000102909",
-    label: "VANGUARD GROUP",
-    category: "etfs",
-    category_label: "ETFs",
-    shares: 1_234_567,
-    value_usd: 230_000_000,
-    voting: "SOLE",
-    is_put_call: null,
-    accession: "0000102909-25-000001",
-    period_of_report: "2024-12-31",
-    ...overrides,
-  };
-}
-
-describe("buildCsv", () => {
-  it("emits a header line matching the column order", () => {
-    const csv = buildCsv([]);
-    const [header] = csv.split("\n");
-    expect(header).toBe(
-      "filer_key,filer_label,category,shares,value_usd,voting_authority,put_call,accession,period_of_report",
-    );
-  });
-
-  it("renders typical rows without quoting safe values", () => {
-    const csv = buildCsv([row()]);
-    const [, dataLine] = csv.split("\n");
-    expect(dataLine).toContain("0000102909,VANGUARD GROUP,etfs,1234567,230000000,SOLE,,0000102909-25-000001,2024-12-31");
-  });
-
-  it("escapes commas, quotes, and newlines via RFC 4180 quoting", () => {
-    const csv = buildCsv([
-      row({ label: 'Vanguard "Group", LLC' }),
-      row({ label: "Two\nLine\nName" }),
-    ]);
-    expect(csv).toContain('"Vanguard ""Group"", LLC"');
-    expect(csv).toContain('"Two\nLine\nName"');
-  });
-
-  it("formula-injection guard prefixes leading =/+/-/@ with a single quote", () => {
-    // Excel / Sheets / Numbers interpret =CMD() as a formula on
-    // import, which is a known CSV smuggling vector. Mirrors the
-    // backend guard in app/api/instruments insider transactions.
-    const csv = buildCsv([
-      row({ label: "=cmd|' /C calc'!A0" }),
-      row({ label: "+SUM(A:A)" }),
-      row({ label: "-1234" }),
-      row({ label: "@user" }),
-    ]);
-    expect(csv).toContain("'=cmd");
-    expect(csv).toContain("'+SUM(A:A)");
-    expect(csv).toContain("'-1234");
-    expect(csv).toContain("'@user");
-  });
-
-  it("renders null value_usd as empty string, not 'null'", () => {
-    const csv = buildCsv([row({ value_usd: null })]);
-    expect(csv).not.toContain("null");
-    // Empty token between two commas in the value_usd position.
-    expect(csv).toMatch(/,1234567,,SOLE,/);
-  });
-
-  it("escapes voting + period_of_report through csvEscape (PR review pin)", () => {
-    // PR #749 review caught these two columns silently bypassing
-    // csvEscape. Pin the contract so a future schema change can't
-    // re-introduce the gap.
-    const csv = buildCsv([
-      row({
-        voting: "=cmd",
-        period_of_report: "2024,12,31",
-      }),
-    ]);
-    // voting prefixed with a single quote (formula-injection guard).
-    expect(csv).toContain("'=cmd");
-    // period_of_report with embedded commas wrapped in quotes.
-    expect(csv).toContain('"2024,12,31"');
+describe("OwnershipPage", () => {
+  it("module imports without throwing", async () => {
+    // A bare import smoke — picks up syntax errors / missing exports
+    // a stricter test would otherwise miss in this slim file.
+    const mod = await import("./OwnershipPage");
+    expect(typeof mod.OwnershipPage).toBe("function");
   });
 });
