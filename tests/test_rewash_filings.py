@@ -1172,3 +1172,725 @@ def test_blockholders_apply_raises_on_empty_reporting_persons(
         result_row = cur.fetchone()
     assert result_row is not None
     assert result_row[0] == 1  # original reporter still on file
+
+
+def test_13f_infotable_apply_raises_on_empty_parse(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """13F infotable rewash must raise on empty parse against a
+    previously-populated accession (regression vs prior parser)."""
+    conn = ebull_test_conn
+    instrument_id = 950_070
+    accession = "0001234567-26-13f-empty"
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, '13F', '13F Empty', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (instrument_id,),
+    )
+    conn.execute(
+        "INSERT INTO institutional_filers (cik, name) VALUES ('0000111000', 'Test Filer') ON CONFLICT (cik) DO NOTHING",
+    )
+    with conn.cursor() as cur:
+        cur.execute("SELECT filer_id FROM institutional_filers WHERE cik = '0000111000'")
+        result = cur.fetchone()
+    assert result is not None
+    filer_id = result[0]
+    conn.execute(
+        """
+        INSERT INTO institutional_holdings (
+            filer_id, instrument_id, accession_number, period_of_report,
+            shares, market_value_usd, voting_authority, filed_at
+        ) VALUES (%s, %s, %s, '2025-09-30', 100, 1000, 'SOLE', '2025-11-01')
+        """,
+        (filer_id, instrument_id, accession),
+    )
+    _seed_raw(conn, accession=accession, kind="infotable_13f", parser_version="13f-infotable-v0")
+    conn.commit()
+
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_13f.parse_infotable",
+        lambda _xml: [],  # empty parse — regression
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="infotable_13f",
+            current_version="13f-infotable-v1",
+            apply_fn=rewash_filings._apply_13f_infotable,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="infotable_13f")
+    assert result.rows_failed == 1
+    assert result.rows_skipped == 0
+
+
+def test_13f_infotable_apply_replaces_holdings_with_re_resolved_instrument(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """Rewash replaces all holdings for the accession and
+    re-resolves each holding's instrument_id from the freshly-
+    parsed CUSIP (not reused from prior typed rows)."""
+    from app.providers.implementations.sec_13f import ThirteenFHolding
+
+    conn = ebull_test_conn
+    old_iid = 950_080
+    new_iid = 950_081
+    accession = "0001234567-26-13f-cusip"
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, 'OLD13F', 'Old', '4', 'USD', TRUE),
+                 (%s, 'NEW13F', 'New', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (old_iid, new_iid),
+    )
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (
+            instrument_id, provider, identifier_type, identifier_value, is_primary
+        ) VALUES
+            (%s, 'sec', 'cusip', 'OLD13FCSP', FALSE),
+            (%s, 'sec', 'cusip', 'NEW13FCSP', FALSE)
+        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        """,
+        (old_iid, new_iid),
+    )
+    conn.execute(
+        "INSERT INTO institutional_filers (cik, name) VALUES ('0000111000', 'Test') ON CONFLICT (cik) DO NOTHING",
+    )
+    with conn.cursor() as cur:
+        cur.execute("SELECT filer_id FROM institutional_filers WHERE cik = '0000111000'")
+        result = cur.fetchone()
+    assert result is not None
+    filer_id = result[0]
+    # Seed holding under OLD instrument
+    conn.execute(
+        """
+        INSERT INTO institutional_holdings (
+            filer_id, instrument_id, accession_number, period_of_report,
+            shares, market_value_usd, voting_authority, filed_at
+        ) VALUES (%s, %s, %s, '2025-09-30', 100, 1000, 'SOLE', '2025-11-01')
+        """,
+        (filer_id, old_iid, accession),
+    )
+    _seed_raw(conn, accession=accession, kind="infotable_13f", parser_version="13f-infotable-v0")
+    conn.commit()
+
+    fake_holdings = [
+        ThirteenFHolding(
+            cusip="NEW13FCSP",
+            name_of_issuer="New Issuer",
+            title_of_class="COM",
+            value_usd=Decimal("2000"),
+            shares_or_principal=Decimal("200"),
+            shares_or_principal_type="SH",
+            put_call=None,
+            investment_discretion=None,
+            voting_sole=Decimal("200"),
+            voting_shared=Decimal("0"),
+            voting_none=Decimal("0"),
+        ),
+    ]
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_13f.parse_infotable",
+        lambda _xml: fake_holdings,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="infotable_13f",
+            current_version="13f-infotable-v1",
+            apply_fn=rewash_filings._apply_13f_infotable,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="infotable_13f")
+    assert result.rows_reparsed == 1
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_id FROM institutional_holdings WHERE accession_number = %s",
+            (accession,),
+        )
+        rows = cur.fetchall()
+    assert [r[0] for r in rows] == [new_iid]
+
+
+def test_13f_infotable_apply_returns_false_when_cusip_unresolved(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """When the new parser emits a CUSIP not yet in
+    external_identifiers, _apply_13f_infotable returns False so
+    parser_version doesn't bump — the accession stays eligible
+    for the next sweep once the CUSIP backfill (#740) closes the
+    gap. Regression for the high-severity Codex finding (silent
+    shrink of accession holdings)."""
+    from app.providers.implementations.sec_13f import ThirteenFHolding
+
+    conn = ebull_test_conn
+    iid = 950_090
+    accession = "0001234567-26-13f-unresolved"
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, '13FU', '13F Unresolved', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (iid,),
+    )
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (
+            instrument_id, provider, identifier_type, identifier_value, is_primary
+        ) VALUES (%s, 'sec', 'cusip', 'KNOWNCSP', FALSE)
+        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        """,
+        (iid,),
+    )
+    conn.execute(
+        "INSERT INTO institutional_filers (cik, name) VALUES ('0000111000', 'F') ON CONFLICT (cik) DO NOTHING",
+    )
+    with conn.cursor() as cur:
+        cur.execute("SELECT filer_id FROM institutional_filers WHERE cik = '0000111000'")
+        result = cur.fetchone()
+    assert result is not None
+    filer_id = result[0]
+    conn.execute(
+        """
+        INSERT INTO institutional_holdings (
+            filer_id, instrument_id, accession_number, period_of_report,
+            shares, market_value_usd, voting_authority, filed_at
+        ) VALUES (%s, %s, %s, '2025-09-30', 100, 1000, 'SOLE', '2025-11-01')
+        """,
+        (filer_id, iid, accession),
+    )
+    _seed_raw(
+        conn,
+        accession=accession,
+        kind="infotable_13f",
+        parser_version="13f-infotable-v0",
+    )
+    conn.commit()
+
+    fake_holdings = [
+        ThirteenFHolding(
+            cusip="UNRESOLVED",  # not in external_identifiers
+            name_of_issuer="X",
+            title_of_class="COM",
+            value_usd=Decimal("1000"),
+            shares_or_principal=Decimal("100"),
+            shares_or_principal_type="SH",
+            put_call=None,
+            investment_discretion=None,
+            voting_sole=Decimal("100"),
+            voting_shared=Decimal("0"),
+            voting_none=Decimal("0"),
+        ),
+    ]
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_13f.parse_infotable",
+        lambda _xml: fake_holdings,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="infotable_13f",
+            current_version="13f-infotable-v1",
+            apply_fn=rewash_filings._apply_13f_infotable,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="infotable_13f")
+
+    assert result.rows_skipped == 1  # not failed — pending CUSIP backfill
+    assert result.rows_reparsed == 0
+
+    # parser_version NOT bumped — sweep retries next time.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT parser_version FROM filing_raw_documents WHERE accession_number = %s",
+            (accession,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "13f-infotable-v0"
+
+    # ingest_log records the partial state.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, holdings_skipped FROM institutional_holdings_ingest_log WHERE accession_number = %s",
+            (accession,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    status, holdings_skipped = row
+    assert status == "partial"
+    assert holdings_skipped == 1
+
+
+def test_13f_infotable_apply_rescues_tombstoned_accession(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """Rescue cohort: original ingest tombstoned with zero typed
+    holdings (e.g. all CUSIPs unresolved or legal-empty 13F-HR)
+    and only an institutional_holdings_ingest_log row exists.
+    A new sweep with resolvable CUSIPs must rescue the accession.
+    Regression for the medium-severity Codex finding."""
+    from app.providers.implementations.sec_13f import ThirteenFHolding
+
+    conn = ebull_test_conn
+    iid = 950_100
+    accession = "0001234567-26-13f-rescue"
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, '13FX', '13F Rescue', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (iid,),
+    )
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (
+            instrument_id, provider, identifier_type, identifier_value, is_primary
+        ) VALUES (%s, 'sec', 'cusip', 'RESCUECSP', FALSE)
+        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        """,
+        (iid,),
+    )
+    conn.execute(
+        "INSERT INTO institutional_filers (cik, name) VALUES ('0000111000', 'F') ON CONFLICT (cik) DO NOTHING",
+    )
+    # Tombstoned ingest_log only — no holdings.
+    conn.execute(
+        """
+        INSERT INTO institutional_holdings_ingest_log (
+            accession_number, filer_cik, period_of_report, status,
+            holdings_inserted, holdings_skipped
+        ) VALUES (%s, '0000111000', '2025-09-30', 'partial', 0, 5)
+        """,
+        (accession,),
+    )
+    # filing_events row carries the SEC-canonical filing_date that the
+    # rescued holdings.filed_at must reflect (NOT log.fetched_at).
+    # Claude PR #827 round 2 review caught the prior version sourcing
+    # filed_at from log.fetched_at, which is days/weeks after the
+    # actual SEC filing.
+    sec_filing_date = "2025-11-15"
+    conn.execute(
+        """
+        INSERT INTO filing_events (
+            instrument_id, provider, provider_filing_id, filing_type,
+            filing_date, primary_document_url, source_url
+        ) VALUES (%s, 'sec', %s, '13F-HR', %s, 'http://x', 'http://y')
+        ON CONFLICT (provider, provider_filing_id) DO NOTHING
+        """,
+        (iid, accession, sec_filing_date),
+    )
+    _seed_raw(
+        conn,
+        accession=accession,
+        kind="infotable_13f",
+        parser_version="13f-infotable-v0",
+    )
+    conn.commit()
+
+    fake_holdings = [
+        ThirteenFHolding(
+            cusip="RESCUECSP",
+            name_of_issuer="Rescued",
+            title_of_class="COM",
+            value_usd=Decimal("5000"),
+            shares_or_principal=Decimal("500"),
+            shares_or_principal_type="SH",
+            put_call=None,
+            investment_discretion=None,
+            voting_sole=Decimal("500"),
+            voting_shared=Decimal("0"),
+            voting_none=Decimal("0"),
+        ),
+    ]
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_13f.parse_infotable",
+        lambda _xml: fake_holdings,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="infotable_13f",
+            current_version="13f-infotable-v1",
+            apply_fn=rewash_filings._apply_13f_infotable,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="infotable_13f")
+
+    assert result.rows_reparsed == 1  # rescued
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_id, filed_at FROM institutional_holdings WHERE accession_number = %s",
+            (accession,),
+        )
+        rows = cur.fetchall()
+    assert [r[0] for r in rows] == [iid]
+    # filed_at MUST come from filing_events.filing_date, not
+    # log.fetched_at. Claude PR #827 round 2 review.
+    assert rows[0][1].date().isoformat() == sec_filing_date
+
+
+def test_13f_infotable_apply_handles_legal_empty_filing(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """Legal-empty 13F-HR (filer reported exempt list or cancellation):
+    ingest_log status='success' with 0 holdings, no
+    institutional_holdings rows. Re-parse correctly returns []. Must
+    NOT raise — bump parser_version and keep ingest_log row clean.
+    Regression for the medium-severity Codex finding."""
+    conn = ebull_test_conn
+    accession = "0001234567-26-13f-empty-legal"
+    conn.execute(
+        "INSERT INTO institutional_filers (cik, name) VALUES ('0000111000', 'F') ON CONFLICT (cik) DO NOTHING",
+    )
+    conn.execute(
+        """
+        INSERT INTO institutional_holdings_ingest_log (
+            accession_number, filer_cik, period_of_report, status,
+            holdings_inserted, holdings_skipped
+        ) VALUES (%s, '0000111000', '2025-09-30', 'success', 0, 0)
+        """,
+        (accession,),
+    )
+    _seed_raw(
+        conn,
+        accession=accession,
+        kind="infotable_13f",
+        parser_version="13f-infotable-v0",
+    )
+    conn.commit()
+
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_13f.parse_infotable",
+        lambda _xml: [],
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="infotable_13f",
+            current_version="13f-infotable-v1",
+            apply_fn=rewash_filings._apply_13f_infotable,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="infotable_13f")
+
+    assert result.rows_reparsed == 1
+    assert result.rows_failed == 0  # legal-empty isn't a failure
+
+    # parser_version bumped — re-running is a no-op now.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT parser_version FROM filing_raw_documents WHERE accession_number = %s",
+            (accession,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "13f-infotable-v1"
+
+
+def test_13f_infotable_apply_preserves_existing_when_all_cusips_unresolved(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """When EVERY CUSIP in the new parse is unresolvable, the
+    existing institutional_holdings rows MUST stay in place. The
+    DELETE must be deferred until at least one resolution
+    succeeds. Regression for the BLOCKING finding from PR #827
+    review (silent destruction of existing rows when all CUSIPs
+    fail to resolve)."""
+    from app.providers.implementations.sec_13f import ThirteenFHolding
+
+    conn = ebull_test_conn
+    iid = 950_120
+    accession = "0001234567-26-13f-all-unresolved"
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, '13FX', 'Existing', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (iid,),
+    )
+    conn.execute(
+        "INSERT INTO institutional_filers (cik, name) VALUES ('0000111000', 'F') ON CONFLICT (cik) DO NOTHING",
+    )
+    with conn.cursor() as cur:
+        cur.execute("SELECT filer_id FROM institutional_filers WHERE cik = '0000111000'")
+        result = cur.fetchone()
+    assert result is not None
+    filer_id = result[0]
+    conn.execute(
+        """
+        INSERT INTO institutional_holdings (
+            filer_id, instrument_id, accession_number, period_of_report,
+            shares, market_value_usd, voting_authority, filed_at
+        ) VALUES (%s, %s, %s, '2025-09-30', 999, 9999, 'SOLE', '2025-11-01')
+        """,
+        (filer_id, iid, accession),
+    )
+    _seed_raw(
+        conn,
+        accession=accession,
+        kind="infotable_13f",
+        parser_version="13f-infotable-v0",
+    )
+    conn.commit()
+
+    fake_holdings = [
+        ThirteenFHolding(
+            cusip="UNRESOLVED1",
+            name_of_issuer="X",
+            title_of_class="COM",
+            value_usd=Decimal("1000"),
+            shares_or_principal=Decimal("100"),
+            shares_or_principal_type="SH",
+            put_call=None,
+            investment_discretion=None,
+            voting_sole=Decimal("100"),
+            voting_shared=Decimal("0"),
+            voting_none=Decimal("0"),
+        ),
+        ThirteenFHolding(
+            cusip="UNRESOLVED2",
+            name_of_issuer="Y",
+            title_of_class="COM",
+            value_usd=Decimal("2000"),
+            shares_or_principal=Decimal("200"),
+            shares_or_principal_type="SH",
+            put_call=None,
+            investment_discretion=None,
+            voting_sole=Decimal("200"),
+            voting_shared=Decimal("0"),
+            voting_none=Decimal("0"),
+        ),
+    ]
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_13f.parse_infotable",
+        lambda _xml: fake_holdings,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="infotable_13f",
+            current_version="13f-infotable-v1",
+            apply_fn=rewash_filings._apply_13f_infotable,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="infotable_13f")
+
+    assert result.rows_skipped == 1
+    assert result.rows_failed == 0
+
+    # Existing row MUST still be on file — the DELETE was deferred.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT shares FROM institutional_holdings WHERE accession_number = %s",
+            (accession,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == 999  # original holding preserved
+
+    # parser_version still on the old version — next sweep retries.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT parser_version FROM filing_raw_documents WHERE accession_number = %s",
+            (accession,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "13f-infotable-v0"
+
+
+def test_13f_infotable_apply_preserves_existing_when_some_cusips_unresolved(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """When the new parse PARTIALLY resolves (some CUSIPs land,
+    others don't), the typed-table DELETE must be deferred. Without
+    this guard a parser change that emits one resolvable + one
+    unresolvable CUSIP silently destroys the unresolvable holding's
+    original row, with no path to repair on subsequent sweeps.
+
+    Claude PR #827 round 2 review caught the silent shrink as
+    BLOCKING. Pin: full-replace path runs ONLY when every CUSIP
+    in the new parse resolves; any unresolved CUSIP routes to the
+    same defer-and-retry branch as the all-unresolved case.
+    """
+    from app.providers.implementations.sec_13f import ThirteenFHolding
+
+    conn = ebull_test_conn
+    iid_existing_a = 950_130
+    iid_existing_b = 950_131
+    accession = "0001234567-26-13f-partial"
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, '13FPA', 'A', '4', 'USD', TRUE),
+                 (%s, '13FPB', 'B', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (iid_existing_a, iid_existing_b),
+    )
+    # Map CUSIP RESOLVED1 → iid_existing_a so the new parse gets one
+    # half-success (mirrors the BLOCKING scenario: partial resolve).
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (
+            instrument_id, provider, identifier_type, identifier_value, is_primary
+        ) VALUES (%s, 'sec', 'cusip', 'RESOLVED1', TRUE)
+        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        """,
+        (iid_existing_a,),
+    )
+    conn.execute(
+        "INSERT INTO institutional_filers (cik, name) VALUES ('0000111111', 'F') ON CONFLICT (cik) DO NOTHING",
+    )
+    with conn.cursor() as cur:
+        cur.execute("SELECT filer_id FROM institutional_filers WHERE cik = '0000111111'")
+        result = cur.fetchone()
+    assert result is not None
+    filer_id = result[0]
+    # Two existing typed rows — the original full set the rewash
+    # is being asked to refresh. Both must survive the partial parse.
+    conn.execute(
+        """
+        INSERT INTO institutional_holdings (
+            filer_id, instrument_id, accession_number, period_of_report,
+            shares, market_value_usd, voting_authority, filed_at
+        ) VALUES (%s, %s, %s, '2025-09-30', 1000, 9999, 'SOLE', '2025-11-01'),
+                 (%s, %s, %s, '2025-09-30', 2000, 19999, 'SOLE', '2025-11-01')
+        """,
+        (filer_id, iid_existing_a, accession, filer_id, iid_existing_b, accession),
+    )
+    _seed_raw(
+        conn,
+        accession=accession,
+        kind="infotable_13f",
+        parser_version="13f-infotable-v0",
+    )
+    conn.commit()
+
+    fake_holdings = [
+        ThirteenFHolding(
+            cusip="RESOLVED1",
+            name_of_issuer="A",
+            title_of_class="COM",
+            value_usd=Decimal("100"),
+            shares_or_principal=Decimal("50"),
+            shares_or_principal_type="SH",
+            put_call=None,
+            investment_discretion=None,
+            voting_sole=Decimal("50"),
+            voting_shared=Decimal("0"),
+            voting_none=Decimal("0"),
+        ),
+        ThirteenFHolding(
+            cusip="UNRESOLVED9",
+            name_of_issuer="Z",
+            title_of_class="COM",
+            value_usd=Decimal("200"),
+            shares_or_principal=Decimal("150"),
+            shares_or_principal_type="SH",
+            put_call=None,
+            investment_discretion=None,
+            voting_sole=Decimal("150"),
+            voting_shared=Decimal("0"),
+            voting_none=Decimal("0"),
+        ),
+    ]
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_13f.parse_infotable",
+        lambda _xml: fake_holdings,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="infotable_13f",
+            current_version="13f-infotable-v1",
+            apply_fn=rewash_filings._apply_13f_infotable,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="infotable_13f")
+    assert result.rows_skipped == 1
+    assert result.rows_failed == 0
+
+    # Both original holdings MUST still be on file — the DELETE was
+    # deferred because at least one CUSIP was unresolvable.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT shares FROM institutional_holdings WHERE accession_number = %s ORDER BY shares",
+            (accession,),
+        )
+        rows = cur.fetchall()
+    assert [r[0] for r in rows] == [1000, 2000]
+
+    # parser_version not bumped — eligible for a follow-up sweep
+    # once #740 backfill closes the CUSIP gap.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT parser_version FROM filing_raw_documents WHERE accession_number = %s",
+            (accession,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "13f-infotable-v0"
+
+    # Ingest log records the partial state so the operator can see
+    # the gap.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT status, holdings_inserted, holdings_skipped
+            FROM institutional_holdings_ingest_log
+            WHERE accession_number = %s
+            """,
+            (accession,),
+        )
+        log = cur.fetchone()
+    assert log is not None
+    assert log[0] == "partial"
+    assert log[1] == 0
+    assert log[2] == 1
