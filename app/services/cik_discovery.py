@@ -1,4 +1,4 @@
-"""CIK discovery from SEC's curated ticker→CIK map.
+"""CIK discovery from SEC's curated ticker→CIK maps.
 
 Operator audit 2026-05-03 found 7,281 of 12,379 instruments (59%)
 have no SEC CIK row in ``external_identifiers``. Without a CIK
@@ -7,21 +7,43 @@ they're invisible to every SEC ingester (13F, 13D/G, Form 4, Form
 those instruments.
 
 This module's contract: walk every no-CIK instrument, look up the
-ticker in SEC's ``company_tickers.json`` (a curated map maintained
-by SEC, ~10k entries), write the ``external_identifiers`` row when a
-match is found.
+ticker in SEC's published ticker→CIK maps, write the
+``external_identifiers`` row when a match is found.
 
-Source: ``https://www.sec.gov/files/company_tickers.json``. Updated
-roughly daily by SEC. Single fetch is sufficient — a periodic
-re-fetch (weekly) catches new IPOs and issuer renames.
+Sources (SEC-published bulk exports — no inventive crawlers; the
+operator audit framing is "data in forms and exports"):
+
+  * ``https://www.sec.gov/files/company_tickers.json`` — ~10k
+    entries, common stocks. **CANONICAL** — required for any
+    sweep to proceed. If this fetch fails the sweep aborts (a
+    healthy partial mapping is preferable to a divergent
+    persisted-bad-mapping that the next sweep can't repair).
+  * ``https://www.sec.gov/files/company_tickers_exchange.json`` —
+    ~10k entries with ``cik / name / ticker / exchange``. ETFs
+    and NYSE Arca listings live here that don't appear in the
+    bare ``company_tickers.json``. Best-effort supplement; a
+    fetch failure here only reduces coverage on subsequent runs.
+
+Merge priority on collision: common-stocks > exchange. First
+source wins.
+
+``company_tickers_mf.json`` (~28k mutual-fund share-class rows) is
+DELIBERATELY NOT consumed in this module today: SEC publishes one
+TRUST CIK across many share-class symbols (LACAX / LIACX / ACRNX
+all share CIK 2110), but ``external_identifiers`` enforces a
+one-instrument-per-CIK unique constraint, so binding the trust
+CIK to a single share class would silently no-op every other
+sibling. The fund map needs the canonical-instrument-redirect
+mechanism tracked in #819 before it can land cleanly.
 
 Misses (no SEC ticker entry for the instrument's symbol) are
 expected for:
 
-  * Foreign issuers without ADRs.
+  * Foreign issuers without ADRs (covered by a future ADR resolver).
   * Defunct / delisted tickers.
   * Synthetic / duplicate listings (e.g. ``.RTH`` suffixes used as
-    operational duplicates of an underlying ticker).
+    operational duplicates of an underlying ticker — handled via
+    suffix-stripping fallback).
   * Bonds / preferreds / warrants (separate ticker from common
     stock).
 
@@ -30,11 +52,7 @@ best-effort and operators triage the long tail manually.
 
 Idempotent: ``ON CONFLICT DO NOTHING`` on the
 ``external_identifiers`` upsert means re-running won't duplicate
-rows or stomp on operator-curated overrides. A re-fetch after a
-ticker change would not over-write the prior CIK row — it just
-no-ops because the prior row is still on file. Removing the prior
-CIK after a ticker reassignment is operator territory (manual
-DELETE + audit trail).
+rows or stomp on operator-curated overrides.
 """
 
 from __future__ import annotations
@@ -54,6 +72,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+_TICKERS_EXCHANGE_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
 
 
 @dataclass(frozen=True)
@@ -61,6 +80,10 @@ class TickerMapEntry:
     cik_padded: str  # 10-digit zero-padded
     ticker: str  # uppercase
     title: str  # SEC entity name
+    # Which SEC export this entry came from. Useful for operator
+    # triage when a ticker resolves to an unexpected entity ("why
+    # did MFGAX map to a Vanguard CIK? — because mf.json").
+    source: str = "company_tickers"
 
 
 @dataclass(frozen=True)
@@ -71,24 +94,23 @@ class DiscoveryResult:
     misses: int
 
 
-def fetch_ticker_map() -> dict[str, TickerMapEntry]:
-    """Fetch SEC's curated ticker→CIK map. Returns dict keyed on
-    UPPERCASE ticker so callers can ``.get(symbol.upper())``.
-
-    Raises ``urllib.error.URLError`` on network failure — caller
-    decides whether that's transient (retry) or terminal (skip
-    this run).
-    """
+def _fetch_sec_json(url: str) -> Any:
+    """Fetch + decode a SEC bulk export. Raises on network /
+    decode failure — callers wrap or let it bubble."""
     req = urllib.request.Request(
-        _TICKERS_URL,
+        url,
         headers={"User-Agent": settings.sec_user_agent},
     )
     with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 — fixed SEC URL
-        payload = json.load(resp)
+        return json.load(resp)
 
-    out: dict[str, TickerMapEntry] = {}
+
+def _parse_company_tickers(payload: Any) -> Iterator[TickerMapEntry]:
+    """Parse ``company_tickers.json``. Shape: dict keyed by
+    arbitrary numeric string with each value carrying
+    ``{cik_str, ticker, title}``."""
     if not isinstance(payload, dict):
-        return out
+        return
     for entry in payload.values():
         if not isinstance(entry, dict):
             continue
@@ -101,19 +123,124 @@ def fetch_ticker_map() -> dict[str, TickerMapEntry]:
             cik_int = int(cik_raw)
         except TypeError, ValueError:
             continue
-        cik_padded = f"{cik_int:010d}"
         ticker_upper = str(ticker).upper().strip()
         if not ticker_upper:
             continue
-        # SEC's map can have multiple entries for the same ticker
-        # (rare; share class amendments). Keep the first match —
-        # callers can override manually if needed.
-        if ticker_upper not in out:
-            out[ticker_upper] = TickerMapEntry(
-                cik_padded=cik_padded,
-                ticker=ticker_upper,
-                title=str(title),
-            )
+        yield TickerMapEntry(
+            cik_padded=f"{cik_int:010d}",
+            ticker=ticker_upper,
+            title=str(title),
+            source="company_tickers",
+        )
+
+
+def _parse_fields_data(
+    payload: Any,
+    *,
+    cik_field: str,
+    ticker_field: str,
+    title_field: str | None,
+    source: str,
+) -> Iterator[TickerMapEntry]:
+    """Parse the ``{fields: [...], data: [[...], ...]}`` shape used
+    by ``company_tickers_exchange.json`` and
+    ``company_tickers_mf.json``. Generic over which column holds
+    the ticker / CIK / title because the two files use different
+    column names."""
+    if not isinstance(payload, dict):
+        return
+    fields = payload.get("fields")
+    data = payload.get("data")
+    if not isinstance(fields, list) or not isinstance(data, list):
+        return
+    try:
+        cik_idx = fields.index(cik_field)
+        ticker_idx = fields.index(ticker_field)
+    except ValueError:
+        return
+    title_idx = fields.index(title_field) if title_field and title_field in fields else None
+    for row in data:
+        if not isinstance(row, list) or len(row) <= max(cik_idx, ticker_idx):
+            continue
+        cik_raw = row[cik_idx]
+        ticker = row[ticker_idx]
+        try:
+            cik_int = int(cik_raw)
+        except TypeError, ValueError:
+            continue
+        if not ticker:
+            continue
+        ticker_upper = str(ticker).upper().strip()
+        if not ticker_upper:
+            continue
+        title = ""
+        if title_idx is not None and len(row) > title_idx:
+            title = str(row[title_idx] or "")
+        yield TickerMapEntry(
+            cik_padded=f"{cik_int:010d}",
+            ticker=ticker_upper,
+            title=title,
+            source=source,
+        )
+
+
+def _parse_company_tickers_exchange(payload: Any) -> Iterator[TickerMapEntry]:
+    """Parse ``company_tickers_exchange.json``. Fields:
+    ``cik / name / ticker / exchange``. ETFs and NYSE Arca-listed
+    securities live here that don't appear in the bare
+    ``company_tickers.json``."""
+    yield from _parse_fields_data(
+        payload,
+        cik_field="cik",
+        ticker_field="ticker",
+        title_field="name",
+        source="company_tickers_exchange",
+    )
+
+
+def fetch_ticker_map() -> dict[str, TickerMapEntry]:
+    """Fetch + merge SEC's published ticker→CIK exports into a
+    single dict keyed on UPPERCASE ticker.
+
+    Priority on collision: ``company_tickers.json`` >
+    ``company_tickers_exchange.json``. The first source seen for a
+    given ticker wins; later sources skip the existing key.
+
+    Failure semantics — fail-CLOSED on the canonical source:
+
+      * If ``company_tickers.json`` (canonical) fetch fails, the
+        ENTIRE sweep aborts (raises). Rationale: a partial sweep
+        with only ``exchange.json`` data could persist a wrong
+        CIK for a ticker whose canonical entry exists but is
+        currently unfetchable; later healthy sweeps can't repair
+        the row because ``upsert_cik`` no-ops on existing primary.
+        Better to skip the run than to lock in bad data.
+      * If ``company_tickers_exchange.json`` (supplement) fetch
+        fails, the sweep proceeds with canonical-only coverage —
+        a missed ETF resolution today is recoverable; a wrong
+        persisted CIK is not.
+    """
+    out: dict[str, TickerMapEntry] = {}
+
+    # Canonical — required.
+    canonical_payload = _fetch_sec_json(_TICKERS_URL)
+    for entry in _parse_company_tickers(canonical_payload):
+        if entry.ticker not in out:
+            out[entry.ticker] = entry
+
+    # Supplement — best-effort. A failure here only reduces
+    # coverage on the current sweep; the next sweep retries.
+    try:
+        exchange_payload = _fetch_sec_json(_TICKERS_EXCHANGE_URL)
+    except Exception:  # noqa: BLE001 — supplement failure is non-fatal
+        logger.exception(
+            "cik_discovery: failed to fetch %s; proceeding with canonical-only",
+            _TICKERS_EXCHANGE_URL,
+        )
+        return out
+    for entry in _parse_company_tickers_exchange(exchange_payload):
+        if entry.ticker not in out:
+            out[entry.ticker] = entry
     return out
 
 
