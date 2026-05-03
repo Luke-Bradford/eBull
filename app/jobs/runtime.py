@@ -75,6 +75,7 @@ from app.workers.scheduler import (
     JOB_SEC_8K_EVENTS_INGEST,
     JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP,
     JOB_SEC_BUSINESS_SUMMARY_INGEST,
+    JOB_SEC_DEF14A_INGEST,
     JOB_SEC_DIVIDEND_CALENDAR_INGEST,
     JOB_SEC_FILING_DOCUMENTS_INGEST,
     JOB_SEC_FORM3_INGEST,
@@ -107,6 +108,7 @@ from app.workers.scheduler import (
     sec_8k_events_ingest,
     sec_business_summary_bootstrap,
     sec_business_summary_ingest,
+    sec_def14a_ingest,
     sec_dividend_calendar_ingest,
     sec_filing_documents_ingest,
     sec_form3_ingest,
@@ -166,6 +168,7 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_SEC_INSIDER_TRANSACTIONS_INGEST: sec_insider_transactions_ingest,
     JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL: sec_insider_transactions_backfill,
     JOB_SEC_FORM3_INGEST: sec_form3_ingest,
+    JOB_SEC_DEF14A_INGEST: sec_def14a_ingest,
     JOB_SEC_8K_EVENTS_INGEST: sec_8k_events_ingest,
     JOB_SEC_FILING_DOCUMENTS_INGEST: sec_filing_documents_ingest,
 }
