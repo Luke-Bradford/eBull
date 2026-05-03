@@ -650,3 +650,249 @@ register_parser(
         apply_fn=_apply_blockholders,
     )
 )
+
+# ---------------------------------------------------------------------------
+# 13F-HR infotable.xml wiring
+# ---------------------------------------------------------------------------
+
+
+def _apply_13f_infotable(
+    conn: psycopg.Connection[Any],
+    raw_doc: RawFilingDocument,
+) -> bool:
+    """Re-parse the 13F-HR infotable.xml body and re-apply the
+    holdings upsert.
+
+    Replace-then-insert pattern (same as 13D/G + DEF 14A):
+    existing per-holding upsert uses ON CONFLICT DO NOTHING via
+    the partial UNIQUE INDEX, so re-wash needs to DELETE all
+    holdings for the accession before INSERT.
+
+    Each holding's instrument_id is RE-RESOLVED from the parsed
+    CUSIP via _resolve_cusip_to_instrument_id — same path the
+    first-time ingester uses. A new parser fix that emits
+    different CUSIPs gets the right instrument linkage on rewash.
+
+    Returns ``False`` when no existing institutional_holdings row
+    is found (re-wash isn't a first-time ingester). Raises
+    ``RewashParseError`` on parser failure."""
+    from app.providers.implementations.sec_13f import parse_infotable
+    from app.services.institutional_holdings import (
+        _resolve_cusip_to_instrument_id,
+        _upsert_holding,
+    )
+
+    # Resolution priority:
+    #   1. Existing typed rows in institutional_holdings — happy path
+    #      (first ingest produced rows for at least some holdings).
+    #   2. Fallback to institutional_holdings_ingest_log JOIN
+    #      institutional_filers — covers the rescue cohort: legal-
+    #      empty 13F-HRs and all-CUSIPs-unresolved accessions write
+    #      zero holdings rows but DO record a row in the ingest log.
+    #      Codex pre-push review caught the gap.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT filer_id, period_of_report, filed_at
+            FROM institutional_holdings
+            WHERE accession_number = %s
+            LIMIT 1
+            """,
+            (raw_doc.accession_number,),
+        )
+        row = cur.fetchone()
+    had_existing_holdings = row is not None
+    if row is None:
+        # Rescue cohort. ``filed_at`` is sourced from
+        # ``filing_events.filing_date`` so the typed-table row gets
+        # the SEC-canonical filing date — NOT ``log.fetched_at``,
+        # which is the moment the ingest worker scanned the row and
+        # is days/weeks later than the actual filing date. Claude
+        # PR #827 round 2 review caught this as WARNING:
+        # ingest-time leaking into ``institutional_holdings.filed_at``
+        # poisons every downstream "as of" calculation that joins
+        # on it (rollup tie-breaks, freshness chips, etc.). LEFT
+        # JOIN with COALESCE to ``log.fetched_at`` so the rescue
+        # still works on the rare path where filing_events has no
+        # row for the accession (legacy cohort).
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT f.filer_id,
+                       log.period_of_report,
+                       COALESCE(fe.filing_date::timestamptz, log.fetched_at) AS filed_at
+                FROM institutional_holdings_ingest_log log
+                JOIN institutional_filers f ON f.cik = log.filer_cik
+                LEFT JOIN filing_events fe
+                  ON fe.provider_filing_id = log.accession_number
+                 AND fe.provider = 'sec'
+                WHERE log.accession_number = %s
+                LIMIT 1
+                """,
+                (raw_doc.accession_number,),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return False
+    filer_id, period_of_report, filed_at = row
+
+    try:
+        holdings = parse_infotable(raw_doc.payload)
+    except Exception as exc:
+        raise RewashParseError(f"parse_infotable failed for accession={raw_doc.accession_number}: {exc}") from exc
+
+    if not holdings:
+        if had_existing_holdings:
+            # Populated accession lost all holdings on re-parse —
+            # parser regression. Raise so it surfaces in
+            # rows_failed instead of silently zeroing out the
+            # typed table.
+            raise RewashParseError(
+                f"13F infotable re-parse produced zero holdings for "
+                f"accession={raw_doc.accession_number}; parser regression"
+            )
+        # Rescue cohort with empty parse — could be a legal-empty
+        # 13F-HR (filer reported "exempt list" or cancellation) or
+        # all-CUSIPs-unresolved that the new parser also can't
+        # solve. Record success to ingest_log + return True so
+        # parser_version bumps; the accession is on file as a
+        # zero-holdings filing. ``ON CONFLICT DO UPDATE`` updates
+        # the existing log row in place.
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO institutional_holdings_ingest_log (
+                    accession_number, filer_cik, period_of_report,
+                    status, holdings_inserted, holdings_skipped, error
+                )
+                SELECT %s, f.cik, %s, 'success', 0, 0, NULL
+                FROM institutional_filers f WHERE f.filer_id = %s
+                ON CONFLICT (accession_number) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    holdings_inserted = EXCLUDED.holdings_inserted,
+                    holdings_skipped = EXCLUDED.holdings_skipped,
+                    error = EXCLUDED.error,
+                    fetched_at = NOW()
+                """,
+                (raw_doc.accession_number, period_of_report, int(filer_id)),
+            )
+        return True
+
+    # Resolve every CUSIP BEFORE the DELETE so we never destroy
+    # existing holdings without confirmed replacements. Codex
+    # pre-push review caught the prior version which DELETEd
+    # first, then iterated; if every CUSIP turned out unresolvable
+    # the existing rows were silently destroyed with no replacement
+    # and no path to repair (return False prevented the bump but
+    # the typed table was already empty).
+    resolved: list[tuple[int, Any]] = []  # (instrument_id, holding)
+    skipped_no_cusip = 0
+    for holding in holdings:
+        instrument_id = _resolve_cusip_to_instrument_id(conn, holding.cusip)
+        if instrument_id is None:
+            skipped_no_cusip += 1
+            continue
+        resolved.append((instrument_id, holding))
+
+    # ANY unresolved CUSIP defers the rewash — neither full replace
+    # nor partial replace is safe:
+    #
+    #   * Full replace + partial set: original holdings whose new
+    #     CUSIPs no longer resolve are silently destroyed. Next sweep
+    #     repeats the same delete/insert cycle; the lost holdings
+    #     never come back. Claude PR #827 review caught this as
+    #     BLOCKING — the prior version went down this path when
+    #     ``resolved`` was non-empty AND ``skipped_no_cusip > 0``.
+    #   * Skip the rewash entirely + return False: typed table stays
+    #     intact, parser_version doesn't bump, the accession stays
+    #     eligible for the next sweep. Once #740 backfill closes the
+    #     CUSIP gap, all holdings resolve on a follow-up pass and the
+    #     full replace runs cleanly.
+    #
+    # The all-unresolved case (resolved is empty) and the partial
+    # case (resolved is non-empty + skipped > 0) collapse to the
+    # same branch: log partial, leave typed table alone, return
+    # False.
+    if skipped_no_cusip > 0:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO institutional_holdings_ingest_log (
+                    accession_number, filer_cik, period_of_report,
+                    status, holdings_inserted, holdings_skipped, error
+                )
+                SELECT %s, f.cik, %s, 'partial', 0, %s, %s
+                FROM institutional_filers f WHERE f.filer_id = %s
+                ON CONFLICT (accession_number) DO UPDATE SET
+                    period_of_report = EXCLUDED.period_of_report,
+                    status = EXCLUDED.status,
+                    holdings_inserted = EXCLUDED.holdings_inserted,
+                    holdings_skipped = EXCLUDED.holdings_skipped,
+                    error = EXCLUDED.error,
+                    fetched_at = NOW()
+                """,
+                (
+                    raw_doc.accession_number,
+                    period_of_report,
+                    skipped_no_cusip,
+                    f"{skipped_no_cusip} unresolved CUSIPs (gated by #740 backfill)",
+                    int(filer_id),
+                ),
+            )
+        return False
+
+    # All CUSIPs resolved — safe to replace-then-insert.
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM institutional_holdings WHERE accession_number = %s",
+            (raw_doc.accession_number,),
+        )
+
+    inserted = 0
+    for instrument_id, holding in resolved:
+        _upsert_holding(
+            conn,
+            filer_id=int(filer_id),
+            instrument_id=instrument_id,
+            accession_number=raw_doc.accession_number,
+            period_of_report=period_of_report,
+            filed_at=filed_at,
+            holding=holding,
+        )
+        inserted += 1
+
+    # Log full success.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO institutional_holdings_ingest_log (
+                accession_number, filer_cik, period_of_report,
+                status, holdings_inserted, holdings_skipped, error
+            )
+            SELECT %s, f.cik, %s, 'success', %s, 0, NULL
+            FROM institutional_filers f WHERE f.filer_id = %s
+            ON CONFLICT (accession_number) DO UPDATE SET
+                period_of_report = EXCLUDED.period_of_report,
+                status = EXCLUDED.status,
+                holdings_inserted = EXCLUDED.holdings_inserted,
+                holdings_skipped = EXCLUDED.holdings_skipped,
+                error = EXCLUDED.error,
+                fetched_at = NOW()
+            """,
+            (
+                raw_doc.accession_number,
+                period_of_report,
+                inserted,
+                int(filer_id),
+            ),
+        )
+    return True
+
+
+register_parser(
+    ParserSpec(
+        document_kind="infotable_13f",
+        current_version="13f-infotable-v1",
+        apply_fn=_apply_13f_infotable,
+    )
+)
