@@ -138,6 +138,43 @@ def test_form3_state_counts_initial_holdings_not_headers(
     assert form3.typed_row_count == 3
 
 
+def test_form4_body_count_excludes_tombstoned_filings(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """Body-count JOIN must filter ``is_tombstone = FALSE`` so the
+    rewash-candidate note doesn't fire when every body belongs to a
+    tombstoned filing. Codex pre-push review (round 2) flagged this:
+    inconsistent filters on typed-row vs body-count queries produced
+    misleading "tombstoned + rewash candidate" pairs."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, 970_010, "TMB")
+    conn.execute(
+        """
+        INSERT INTO insider_filings (
+            accession_number, instrument_id, document_type,
+            primary_document_url, parser_version, is_tombstone,
+            period_of_report
+        ) VALUES ('a-26-tmb', %s, '4', 'u', 1, TRUE, '2025-03-15')
+        """,
+        (970_010,),
+    )
+    conn.execute(
+        """
+        INSERT INTO filing_raw_documents (
+            accession_number, document_kind, payload
+        ) VALUES ('a-26-tmb', 'form4_xml', '<x/>')
+        """,
+    )
+    conn.commit()
+
+    result = get_instrument_drillthrough(conn, instrument_id=970_010)
+    assert result is not None
+    form4 = next(p for p in result.pipelines if p.key == "insider_transactions")
+    assert form4.tombstone_count == 1
+    assert form4.raw_body_count == 0  # tombstoned body excluded
+    assert not any("rewash candidate" in n for n in form4.notes)
+
+
 def test_blockholder_state_counts_partials_with_null_instrument(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:
@@ -242,20 +279,19 @@ def test_institutional_body_count_does_not_fanout_on_dense_13f(
 def test_form4_raw_body_without_typed_row_surfaces_rewash_note(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:
-    """When raw bodies exist but typed rows are missing the note
-    surfaces 'rewash candidate' so the operator knows the gap is
-    parser-side, not fetch-side."""
+    """When raw bodies exist on a LIVE (non-tombstoned) filing but
+    zero typed rows, the note surfaces 'rewash candidate' so the
+    operator knows the gap is parser-side, not fetch-side. Body
+    count and typed-row count both filter ``is_tombstone = FALSE``
+    so the two semantics stay consistent (Codex round-2 fix)."""
     conn = ebull_test_conn
     _seed_instrument(conn, 970_003, "F4R")
-    # Tombstoned row → typed_row_count==0 but the JOIN to
-    # filing_raw_documents needs a row in insider_filings to
-    # link the body.
     conn.execute(
         """
         INSERT INTO insider_filings (
             accession_number, instrument_id, document_type,
             primary_document_url, parser_version, is_tombstone
-        ) VALUES ('a-26-3', %s, '4', 'u', 1, TRUE)
+        ) VALUES ('a-26-3', %s, '4', 'u', 1, FALSE)
         """,
         (970_003,),
     )

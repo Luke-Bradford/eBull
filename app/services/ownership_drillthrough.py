@@ -314,7 +314,9 @@ def _form4_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
             SELECT COUNT(DISTINCT r.accession_number) AS body_count
             FROM filing_raw_documents r
             JOIN insider_filings i ON i.accession_number = r.accession_number
-            WHERE r.document_kind = 'form4_xml' AND i.instrument_id = %s
+            WHERE r.document_kind = 'form4_xml'
+              AND i.instrument_id = %s
+              AND i.is_tombstone = FALSE
             """,
             (instrument_id,),
         )
@@ -373,7 +375,9 @@ def _form3_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
             SELECT COUNT(DISTINCT r.accession_number) AS body_count
             FROM filing_raw_documents r
             JOIN insider_filings i ON i.accession_number = r.accession_number
-            WHERE r.document_kind = 'form3_xml' AND i.instrument_id = %s
+            WHERE r.document_kind = 'form3_xml'
+              AND i.instrument_id = %s
+              AND i.is_tombstone = FALSE
             """,
             (instrument_id,),
         )
