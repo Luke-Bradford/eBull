@@ -606,9 +606,14 @@ def _apply_blockholders(
 
     # Resolve canonical filer name + filer_id (preserved across
     # re-wash via ON CONFLICT (cik) DO UPDATE in _upsert_filer).
+    # ``reporting_persons`` is non-empty here — the empty-list guard
+    # above raises before this point — so the ``next()`` default
+    # falls back to the first reporter's name without needing the
+    # ``CIK {primary_filer_cik}`` branch the prior version had.
+    # Claude PR #825 review (round 2) caught the unreachable else.
     filer_name = next(
         (p.name for p in filing.reporting_persons if p.cik == filing.primary_filer_cik),
-        filing.reporting_persons[0].name if filing.reporting_persons else f"CIK {filing.primary_filer_cik}",
+        filing.reporting_persons[0].name,
     )
     filer_id = _upsert_filer(conn, cik=filing.primary_filer_cik, name=filer_name)
 
