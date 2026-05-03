@@ -6,6 +6,8 @@ no-CIK instruments only, miss-counter accurate.
 
 from __future__ import annotations
 
+from typing import Any
+
 import psycopg
 import pytest
 
@@ -276,6 +278,161 @@ def test_discover_does_not_fold_warrant_suffixes(
 
     assert result.matches_found == 0
     assert result.rows_inserted == 0
+
+
+def test_parse_company_tickers_exchange_yields_etf_entries() -> None:
+    """The exchange.json export carries the full set including
+    ETFs / NYSE Arca listings that company_tickers.json misses.
+    Parser yields TickerMapEntry per row."""
+    from app.services.cik_discovery import _parse_company_tickers_exchange
+
+    payload = {
+        "fields": ["cik", "name", "ticker", "exchange"],
+        "data": [
+            [1100663, "ISHARES TR", "IVV", "NYSE Arca"],
+            [884394, "INVESCO QQQ TRUST", "QQQ", "Nasdaq"],
+        ],
+    }
+
+    entries = list(_parse_company_tickers_exchange(payload))
+    assert len(entries) == 2
+    by_ticker = {e.ticker: e for e in entries}
+    assert by_ticker["IVV"].cik_padded == "0001100663"
+    assert by_ticker["IVV"].title == "ISHARES TR"
+    assert by_ticker["IVV"].source == "company_tickers_exchange"
+    assert by_ticker["QQQ"].cik_padded == "0000884394"
+
+
+def test_parse_company_tickers_exchange_skips_malformed_rows() -> None:
+    """Defensive parser: missing fields, non-list rows, non-int
+    CIKs, empty tickers all skipped without raising."""
+    from app.services.cik_discovery import _parse_company_tickers_exchange
+
+    payload = {
+        "fields": ["cik", "name", "ticker", "exchange"],
+        "data": [
+            [320193, "Apple Inc.", "AAPL", "Nasdaq"],
+            "not a row",
+            [None, "X Corp", "XCORP", "NYSE"],
+            [123, "Y Corp", "", "NYSE"],
+            [123, "Z Corp", "ZCORP", "NYSE"],
+        ],
+    }
+
+    entries = list(_parse_company_tickers_exchange(payload))
+    tickers = {e.ticker for e in entries}
+    assert tickers == {"AAPL", "ZCORP"}
+
+
+def test_fetch_ticker_map_merges_canonical_and_exchange_with_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """fetch_ticker_map merges the canonical company_tickers.json
+    with the company_tickers_exchange.json supplement. On ticker
+    collision, canonical wins; otherwise exchange.json fills gaps
+    (ETFs, NYSE Arca listings)."""
+    from app.services import cik_discovery
+
+    payloads: dict[str, Any] = {
+        cik_discovery._TICKERS_URL: {
+            "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+        },
+        cik_discovery._TICKERS_EXCHANGE_URL: {
+            "fields": ["cik", "name", "ticker", "exchange"],
+            "data": [
+                # Collision — canonical wins, this row should NOT overwrite.
+                [9999999, "Spoof", "AAPL", "NYSE"],
+                # New entry — should win on the exchange-only path.
+                [1100663, "ISHARES TR", "IVV", "NYSE Arca"],
+            ],
+        },
+    }
+
+    monkeypatch.setattr(cik_discovery, "_fetch_sec_json", lambda url: payloads[url])
+
+    out = cik_discovery.fetch_ticker_map()
+
+    assert out["AAPL"].cik_padded == "0000320193"
+    assert out["AAPL"].source == "company_tickers"
+    assert out["IVV"].cik_padded == "0001100663"
+    assert out["IVV"].source == "company_tickers_exchange"
+
+
+def test_fetch_ticker_map_aborts_when_canonical_source_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail-closed on canonical: if company_tickers.json is
+    unfetchable, the sweep MUST raise rather than proceeding with
+    only the supplement. Otherwise a ticker whose canonical entry
+    is currently unreachable could get a wrong CIK persisted from
+    the supplement that later healthy sweeps can't repair (the
+    one-instrument-per-CIK constraint plus upsert_cik's no-op on
+    existing primary)."""
+    from app.services import cik_discovery
+
+    def _fetch(url: str) -> Any:
+        if url == cik_discovery._TICKERS_URL:
+            raise RuntimeError("simulated canonical outage")
+        return {
+            "fields": ["cik", "name", "ticker", "exchange"],
+            "data": [[1100663, "ISHARES TR", "IVV", "NYSE Arca"]],
+        }
+
+    monkeypatch.setattr(cik_discovery, "_fetch_sec_json", _fetch)
+
+    with pytest.raises(RuntimeError, match="simulated canonical outage"):
+        cik_discovery.fetch_ticker_map()
+
+
+def test_fetch_ticker_map_continues_on_supplement_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Best-effort on supplement: if exchange.json fails, sweep
+    proceeds with canonical-only coverage. Missed ETF resolution
+    today is recoverable; aborting on a supplement failure would
+    block all common-stock discovery."""
+    from app.services import cik_discovery
+
+    def _fetch(url: str) -> Any:
+        if url == cik_discovery._TICKERS_URL:
+            return {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}}
+        raise RuntimeError("simulated supplement outage")
+
+    monkeypatch.setattr(cik_discovery, "_fetch_sec_json", _fetch)
+
+    out = cik_discovery.fetch_ticker_map()
+    assert "AAPL" in out
+
+
+def test_discover_resolves_etf_ticker_via_exchange_export(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """End-to-end: an instrument with an ETF ticker that's NOT in
+    company_tickers.json gets resolved via the exchange supplement."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, iid=900_030, symbol="IVV")
+    conn.commit()
+    fake_map = {
+        "IVV": TickerMapEntry(
+            cik_padded="0001100663",
+            ticker="IVV",
+            title="ISHARES TR",
+            source="company_tickers_exchange",
+        ),
+    }
+
+    result = discover_ciks(conn, ticker_map=fake_map)
+
+    assert result.matches_found == 1
+    assert result.rows_inserted == 1
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT identifier_value FROM external_identifiers WHERE instrument_id = %s",
+            (900_030,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "0001100663"
 
 
 def test_discover_handles_case_insensitive_ticker_lookup(
