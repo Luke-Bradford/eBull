@@ -154,6 +154,7 @@ class SharesOutstandingSource:
     accession_number: str | None
     concept: str | None
     form_type: str | None
+    edgar_url: str | None  # Pre-computed archive index URL, NULL when accession is null
 
 
 @dataclass(frozen=True)
@@ -192,7 +193,7 @@ class OwnershipRollup:
             instrument_id=instrument_id,
             shares_outstanding=None,
             shares_outstanding_as_of=None,
-            shares_outstanding_source=SharesOutstandingSource(None, None, None),
+            shares_outstanding_source=SharesOutstandingSource(None, None, None, None),
             treasury_shares=None,
             treasury_as_of=None,
             slices=(),
@@ -789,7 +790,7 @@ def _read_shares_outstanding(
         )
         row = cur.fetchone()
     if row is None or row.get("latest_shares") is None:
-        return None, None, SharesOutstandingSource(None, None, None)
+        return None, None, SharesOutstandingSource(None, None, None, None)
     taxonomy = str(row["source_taxonomy"])
     concept = "EntityCommonStockSharesOutstanding" if taxonomy == "dei" else "CommonStockSharesOutstanding"
     as_of_date = row.get("as_of_date")
@@ -812,13 +813,20 @@ def _read_shares_outstanding(
             (instrument_id, concept, as_of_date),
         )
         prov_row = cur.fetchone()
+    accession = str(prov_row["accession_number"]) if prov_row is not None else None
     return (
         Decimal(row["latest_shares"]),  # type: ignore[arg-type]
         as_of_date,  # type: ignore[arg-type]
         SharesOutstandingSource(
-            accession_number=(str(prov_row["accession_number"]) if prov_row is not None else None),
+            accession_number=accession,
             concept=concept,
             form_type=(str(prov_row["form_type"]) if prov_row is not None else None),
+            # Backend computes the archive URL once so the frontend can't
+            # roll its own with the wrong EDGAR endpoint shape. Claude PR
+            # 800 review caught the prior frontend ``filenum=`` URL —
+            # ``filenum`` expects a SEC file number (e.g. 001-12345),
+            # not an accession.
+            edgar_url=edgar_archive_url(accession),
         ),
     )
 

@@ -139,6 +139,10 @@ export interface OwnershipSharesOutstandingSource {
   readonly accession_number: string | null;
   readonly concept: string | null;
   readonly form_type: string | null;
+  /** Pre-computed SEC archive index URL — null when the accession is
+   *  null. Backend-computed (Batch 3 of #788) so the frontend can't
+   *  drift to the wrong EDGAR endpoint. */
+  readonly edgar_url: string | null;
 }
 
 export interface OwnershipRollupResponse {

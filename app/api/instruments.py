@@ -3216,6 +3216,7 @@ class _SharesOutstandingSourceModel(BaseModel):
     accession_number: str | None
     concept: str | None
     form_type: str | None
+    edgar_url: str | None
 
 
 class OwnershipRollupResponse(BaseModel):
@@ -3257,6 +3258,7 @@ def _rollup_to_response(
             accession_number=rollup.shares_outstanding_source.accession_number,
             concept=rollup.shares_outstanding_source.concept,
             form_type=rollup.shares_outstanding_source.form_type,
+            edgar_url=rollup.shares_outstanding_source.edgar_url,
         ),
         treasury_shares=rollup.treasury_shares,
         treasury_as_of=rollup.treasury_as_of,

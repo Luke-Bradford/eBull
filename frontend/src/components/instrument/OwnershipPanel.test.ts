@@ -37,6 +37,7 @@ function _baseRollup(
       accession_number: null,
       concept: "EntityCommonStockSharesOutstanding",
       form_type: null,
+      edgar_url: null,
     },
     treasury_shares: null,
     treasury_as_of: null,

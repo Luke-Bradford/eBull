@@ -927,6 +927,20 @@ class TestProvenance:
         assert "OUTSTANDING-792001" in rollup.shares_outstanding_source.accession_number
         assert rollup.shares_outstanding_source.form_type == "10-Q"
 
+    def test_shares_outstanding_source_edgar_url_backend_computed(self, _setup: psycopg.Connection[tuple]) -> None:
+        """Claude PR 800 review caught the prior frontend ``filenum=``
+        URL — ``filenum`` expects a SEC file number (e.g. 001-12345),
+        not an accession. The backend now ships the pre-computed
+        archive URL so the frontend cannot drift to a wrong endpoint.
+
+        The seeded synthetic accession (``OUTSTANDING-792001-...``)
+        does not follow SEC's ``cik-yy-seq`` shape, so URL derivation
+        returns None gracefully. The real-format path is exercised by
+        :py:meth:`test_edgar_archive_url_derivation`."""
+        conn = _setup
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="PROV", instrument_id=792_001)
+        assert rollup.shares_outstanding_source.edgar_url is None
+
 
 class TestEmptyStates:
     def test_empty_cohort_residual_equals_outstanding(
