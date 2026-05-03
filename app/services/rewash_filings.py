@@ -528,3 +528,120 @@ register_parser(
         apply_fn=_apply_def14a,
     )
 )
+
+
+# ---------------------------------------------------------------------------
+# 13D/G blockholder primary_doc.xml wiring
+# ---------------------------------------------------------------------------
+
+
+def _apply_blockholders(
+    conn: psycopg.Connection[Any],
+    raw_doc: RawFilingDocument,
+) -> bool:
+    """Re-parse the 13D/G primary_doc.xml body and re-apply the
+    typed-table upsert.
+
+    Unlike Form 3 / Form 4, the existing ingester's per-reporter
+    upsert uses ``ON CONFLICT DO NOTHING`` (one accession × one
+    reporter == one row, immutable on first ingest). For re-wash
+    we DELETE all rows for the accession then re-INSERT under the
+    new parser — equivalent to the "replace-then-insert" pattern
+    Codex caught in the Form 3 / Form 4 ingesters when a new
+    parser version stops emitting a stale joint-filer.
+
+    Returns ``False`` when no existing row is found (re-wash isn't
+    a first-time ingester). Raises ``RewashParseError`` on parser
+    regression so failures surface in ``rows_failed``."""
+    from app.providers.implementations.sec_13dg import parse_primary_doc
+    from app.services.blockholders import (
+        _resolve_cusip_to_instrument_id,
+        _upsert_filer,
+        _upsert_filing_row,
+    )
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT filed_at
+            FROM blockholder_filings
+            WHERE accession_number = %s
+            LIMIT 1
+            """,
+            (raw_doc.accession_number,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return False
+    (filed_at,) = row
+
+    try:
+        filing = parse_primary_doc(raw_doc.payload)
+    except Exception as exc:
+        raise RewashParseError(
+            f"parse_primary_doc(13dg) failed for accession={raw_doc.accession_number}: {exc}"
+        ) from exc
+
+    # Empty reporting_persons after re-parse means the new parser
+    # rejected every reporter on a previously-populated filing.
+    # Raise so the regression surfaces in rows_failed — without
+    # this guard, the DELETE below would silently destroy every
+    # existing reporter row with no error. Codex pre-push review
+    # caught this.
+    if not filing.reporting_persons:
+        raise RewashParseError(
+            f"13D/G re-parse produced zero reporting_persons for "
+            f"accession={raw_doc.accession_number}; previous parser "
+            f"found rows"
+        )
+
+    # CRITICAL: re-resolve instrument_id from the FRESH parsed
+    # CUSIP, not the stale value from the old typed row. The point
+    # of rewash is to pick up parser-corrected fields; re-using
+    # the prior instrument_id while the new parser emits a
+    # different issuer_cusip produces an internally-inconsistent
+    # row that silently joins to the wrong instrument. Codex
+    # pre-push review caught the prior reuse-of-stale-value bug.
+    instrument_id = _resolve_cusip_to_instrument_id(conn, filing.issuer_cusip)
+
+    # Resolve canonical filer name + filer_id (preserved across
+    # re-wash via ON CONFLICT (cik) DO UPDATE in _upsert_filer).
+    filer_name = next(
+        (p.name for p in filing.reporting_persons if p.cik == filing.primary_filer_cik),
+        filing.reporting_persons[0].name if filing.reporting_persons else f"CIK {filing.primary_filer_cik}",
+    )
+    filer_id = _upsert_filer(conn, cik=filing.primary_filer_cik, name=filer_name)
+
+    # Replace-then-insert: clear all reporter rows for the
+    # accession so the new parser's set is the only one on file.
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM blockholder_filings WHERE accession_number = %s",
+            (raw_doc.accession_number,),
+        )
+
+    for person in filing.reporting_persons:
+        _upsert_filing_row(
+            conn,
+            filer_id=filer_id,
+            accession_number=raw_doc.accession_number,
+            submission_type=filing.submission_type,
+            status=filing.status,
+            instrument_id=instrument_id,
+            issuer_cik=filing.issuer_cik,
+            issuer_cusip=filing.issuer_cusip,
+            securities_class_title=filing.securities_class_title,
+            date_of_event=filing.date_of_event,
+            filed_at=filing.filed_at or filed_at,
+            person=person,
+        )
+    return True
+
+
+register_parser(
+    ParserSpec(
+        document_kind="primary_doc_13dg",
+        current_version="13dg-primary-v1",
+        apply_fn=_apply_blockholders,
+    )
+)

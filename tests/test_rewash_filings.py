@@ -865,3 +865,310 @@ def test_def14a_apply_rescues_tombstoned_accession(
         )
         rows = cur.fetchall()
     assert [r[0] for r in rows] == ["Rescued Holder"]
+
+
+def test_blockholders_apply_raises_on_parse_failure(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """13D/G rewash spec follows the same parse-regression contract:
+    parser failure on a body with an existing typed row must raise
+    so the failure surfaces in rows_failed."""
+    conn = ebull_test_conn
+    accession = "0001234567-26-13dg-regress"
+    instrument_id = 950_030
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, '13DG', '13D/G Regression', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (instrument_id,),
+    )
+    conn.execute(
+        "INSERT INTO blockholder_filers (cik, name) VALUES ('0000111000', 'Test Filer') ON CONFLICT (cik) DO NOTHING",
+    )
+    with conn.cursor() as cur:
+        cur.execute("SELECT filer_id FROM blockholder_filers WHERE cik = '0000111000'")
+        result = cur.fetchone()
+    assert result is not None
+    filer_id = result[0]
+    conn.execute(
+        """
+        INSERT INTO blockholder_filings (
+            filer_id, accession_number, submission_type, status,
+            instrument_id, issuer_cik, issuer_cusip, securities_class_title,
+            reporter_no_cik, reporter_name, aggregate_amount_owned, percent_of_class
+        ) VALUES (%s, %s, 'SCHEDULE 13G', 'passive', %s,
+                  '0000999000', '00000099', 'Common Stock',
+                  FALSE, 'Test Reporter', 1000, 5.5)
+        """,
+        (filer_id, accession, instrument_id),
+    )
+    _seed_raw(conn, accession=accession, kind="primary_doc_13dg", parser_version="13dg-primary-v0")
+    conn.commit()
+
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_13dg.parse_primary_doc",
+        lambda _xml: (_ for _ in ()).throw(ValueError("synthetic parse error")),
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="primary_doc_13dg",
+            current_version="13dg-primary-v1",
+            apply_fn=rewash_filings._apply_blockholders,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="primary_doc_13dg")
+
+    assert result.rows_scanned == 1
+    assert result.rows_failed == 1
+    assert result.rows_skipped == 0
+
+
+def test_blockholders_apply_returns_false_when_no_existing_row(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    isolated_registry: None,
+) -> None:
+    """Re-wash isn't a first-time ingester. If there's no existing
+    blockholder_filings row for the accession, _apply_blockholders
+    returns False (skipped, not failed)."""
+    conn = ebull_test_conn
+    _seed_raw(
+        conn,
+        accession="0001234567-26-13dg-orphan",
+        kind="primary_doc_13dg",
+        parser_version="13dg-primary-v0",
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="primary_doc_13dg",
+            current_version="13dg-primary-v1",
+            apply_fn=rewash_filings._apply_blockholders,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="primary_doc_13dg")
+
+    assert result.rows_scanned == 1
+    assert result.rows_skipped == 1
+    assert result.rows_failed == 0
+
+
+def test_blockholders_apply_re_resolves_instrument_from_fresh_cusip(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """If the new parser emits a corrected issuer_cusip, rewash
+    must re-resolve the instrument_id from that CUSIP — not reuse
+    the stale typed-row value. Otherwise the row ends up internally
+    inconsistent (issuer_cusip from the new parse, instrument_id
+    pointing at the old issuer). Regression for the high-severity
+    Codex finding."""
+    from app.providers.implementations.sec_13dg import (
+        BlockholderFiling,
+        BlockholderReportingPerson,
+    )
+
+    conn = ebull_test_conn
+    old_iid = 950_040
+    new_iid = 950_041
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, 'OLD', 'Old Issuer', '4', 'USD', TRUE),
+                 (%s, 'NEW', 'New Issuer', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (old_iid, new_iid),
+    )
+    # external_identifiers maps CUSIPs to the right instruments.
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (
+            instrument_id, provider, identifier_type, identifier_value, is_primary
+        ) VALUES
+            (%s, 'sec', 'cusip', 'OLDCUSIP', FALSE),
+            (%s, 'sec', 'cusip', 'NEWCUSIP', FALSE)
+        ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+        """,
+        (old_iid, new_iid),
+    )
+    conn.execute(
+        "INSERT INTO blockholder_filers (cik, name) VALUES ('0000111000', 'Test Filer') ON CONFLICT (cik) DO NOTHING",
+    )
+    with conn.cursor() as cur:
+        cur.execute("SELECT filer_id FROM blockholder_filers WHERE cik = '0000111000'")
+        result = cur.fetchone()
+    assert result is not None
+    filer_id = result[0]
+
+    accession = "0001234567-26-13dg-cusip-fix"
+    # Seed a typed row with the OLD cusip + OLD instrument_id.
+    conn.execute(
+        """
+        INSERT INTO blockholder_filings (
+            filer_id, accession_number, submission_type, status,
+            instrument_id, issuer_cik, issuer_cusip, securities_class_title,
+            reporter_no_cik, reporter_name, aggregate_amount_owned, percent_of_class
+        ) VALUES (%s, %s, 'SCHEDULE 13G', 'passive', %s,
+                  '0000999000', 'OLDCUSIP', 'Common',
+                  FALSE, 'Test Reporter', 1000, 5.5)
+        """,
+        (filer_id, accession, old_iid),
+    )
+    _seed_raw(conn, accession=accession, kind="primary_doc_13dg", parser_version="13dg-primary-v0")
+    conn.commit()
+
+    # Stub the parser to return the NEW cusip (simulating the bug fix).
+    fake_filing = BlockholderFiling(
+        submission_type="SCHEDULE 13G",
+        status="passive",
+        primary_filer_cik="0000111000",
+        issuer_cik="0000999000",
+        issuer_cusip="NEWCUSIP",  # parser fix
+        issuer_name="New Issuer",
+        securities_class_title="Common",
+        date_of_event=None,
+        filed_at=None,
+        reporting_persons=[
+            BlockholderReportingPerson(
+                cik="0000111000",
+                no_cik=False,
+                name="Test Filer",
+                member_of_group=None,
+                type_of_reporting_person=None,
+                citizenship=None,
+                sole_voting_power=None,
+                shared_voting_power=None,
+                sole_dispositive_power=None,
+                shared_dispositive_power=None,
+                aggregate_amount_owned=None,
+                percent_of_class=None,
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_13dg.parse_primary_doc",
+        lambda _xml: fake_filing,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="primary_doc_13dg",
+            current_version="13dg-primary-v1",
+            apply_fn=rewash_filings._apply_blockholders,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="primary_doc_13dg")
+    assert result.rows_reparsed == 1
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_id, issuer_cusip FROM blockholder_filings WHERE accession_number = %s",
+            (accession,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    instrument_id, issuer_cusip = row
+    assert issuer_cusip == "NEWCUSIP"
+    assert instrument_id == new_iid  # re-resolved, not reused stale value
+
+
+def test_blockholders_apply_raises_on_empty_reporting_persons(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """If the new parser returns zero reporting_persons on a
+    previously-populated 13D/G accession, the apply must RAISE —
+    without the guard, DELETE would silently destroy every existing
+    reporter row with no failure signal. Regression for the BLOCKING
+    finding from PR #825 review."""
+    from app.providers.implementations.sec_13dg import BlockholderFiling
+
+    conn = ebull_test_conn
+    accession = "0001234567-26-13dg-empty-persons"
+    instrument_id = 950_110
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, '13DGE', '13D/G Empty', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (instrument_id,),
+    )
+    conn.execute(
+        "INSERT INTO blockholder_filers (cik, name) VALUES ('0000111000', 'Test') ON CONFLICT (cik) DO NOTHING",
+    )
+    with conn.cursor() as cur:
+        cur.execute("SELECT filer_id FROM blockholder_filers WHERE cik = '0000111000'")
+        result = cur.fetchone()
+    assert result is not None
+    filer_id = result[0]
+    conn.execute(
+        """
+        INSERT INTO blockholder_filings (
+            filer_id, accession_number, submission_type, status,
+            instrument_id, issuer_cik, issuer_cusip, securities_class_title,
+            reporter_no_cik, reporter_name, aggregate_amount_owned, percent_of_class
+        ) VALUES (%s, %s, 'SCHEDULE 13G', 'passive', %s,
+                  '0000999000', 'CSP1', 'Common',
+                  FALSE, 'Existing', 1000, 5.0)
+        """,
+        (filer_id, accession, instrument_id),
+    )
+    _seed_raw(conn, accession=accession, kind="primary_doc_13dg", parser_version="13dg-primary-v0")
+    conn.commit()
+
+    fake_filing = BlockholderFiling(
+        submission_type="SCHEDULE 13G",
+        status="passive",
+        primary_filer_cik="0000111000",
+        issuer_cik="0000999000",
+        issuer_cusip="CSP1",
+        issuer_name="Issuer",
+        securities_class_title="Common",
+        date_of_event=None,
+        filed_at=None,
+        reporting_persons=[],  # parser regression: lost all reporters
+    )
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_13dg.parse_primary_doc",
+        lambda _xml: fake_filing,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="primary_doc_13dg",
+            current_version="13dg-primary-v1",
+            apply_fn=rewash_filings._apply_blockholders,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="primary_doc_13dg")
+    assert result.rows_failed == 1
+    assert result.rows_skipped == 0
+
+    # Existing rows must NOT have been deleted by the failed pass.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM blockholder_filings WHERE accession_number = %s",
+            (accession,),
+        )
+        result_row = cur.fetchone()
+    assert result_row is not None
+    assert result_row[0] == 1  # original reporter still on file
