@@ -398,14 +398,18 @@ def test_drill_tombstone_query_is_filing_distinct(
     counted, not collapsed). Codex PR #833 review.
     """
     conn = ebull_test_conn
-    _seed_instrument_with_cik(conn, iid=972_020, symbol="TOMB14", cik="0000111110")
+    # Unique CIK (0000111120) — distinct from STALE's 0000111110
+    # so the external_identifiers row actually inserts. Claude PR
+    # #833 round 3 review caught the prior collision (silent DO
+    # NOTHING + 404 on _has_sec_cik).
+    _seed_instrument_with_cik(conn, iid=972_020, symbol="TOMB14", cik="0000111120")
     # Two distinct tombstoned filings.
     for accn, status in [("tomb-26-1", "failed"), ("tomb-26-2", "partial")]:
         conn.execute(
             """
             INSERT INTO def14a_ingest_log (
                 accession_number, issuer_cik, status, error, fetched_at
-            ) VALUES (%s, '0000111110', %s, 'simulated', NOW())
+            ) VALUES (%s, '0000111120', %s, 'simulated', NOW())
             """,
             (accn, status),
         )
