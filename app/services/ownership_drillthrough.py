@@ -427,6 +427,10 @@ def _def14a_state(conn: psycopg.Connection[Any], instrument_id: int) -> Pipeline
         )
         tomb = cur.fetchone() or {"tombstone_count": 0}
 
+        # Filter by filing_type = 'DEF 14A' so DEFA14A amendments
+        # whose provider_filing_id collides with a def14a_body raw
+        # document don't inflate the body count. Codex pre-push
+        # review caught the gap.
         cur.execute(
             """
             SELECT COUNT(DISTINCT r.accession_number) AS body_count
@@ -434,6 +438,7 @@ def _def14a_state(conn: psycopg.Connection[Any], instrument_id: int) -> Pipeline
             JOIN filing_events fe ON fe.provider_filing_id = r.accession_number
             WHERE r.document_kind = 'def14a_body'
               AND fe.provider = 'sec'
+              AND fe.filing_type = 'DEF 14A'
               AND fe.instrument_id = %s
             """,
             (instrument_id,),
