@@ -405,3 +405,126 @@ register_parser(
         apply_fn=_apply_form3,
     )
 )
+
+
+# ---------------------------------------------------------------------------
+# DEF 14A proxy beneficial-ownership table wiring
+# ---------------------------------------------------------------------------
+
+
+def _apply_def14a(
+    conn: psycopg.Connection[Any],
+    raw_doc: RawFilingDocument,
+) -> bool:
+    """Re-parse the DEF 14A HTML body and re-apply the beneficial-
+    ownership-holdings upsert.
+
+    Replace-then-insert: clear all rows for the accession, then
+    INSERT each parsed holder. The unique key on the typed table
+    is ``(accession_number, holder_name)`` — without a clear, a
+    new parser version that DROPS a stale holder would leave the
+    old row pinned forever.
+
+    Returns ``False`` when no existing typed row is found (re-wash
+    isn't a first-time ingester). Raises ``RewashParseError`` on
+    parser regression so the failure surfaces in ``rows_failed``.
+    Note: a no-table-found (parsed.rows empty) is also a regression
+    here — under the existing ingester it would tombstone status=
+    partial, but in re-wash context it means the new parser is
+    weaker than the prior one against the same body."""
+    from app.providers.implementations.sec_def14a import parse_beneficial_ownership_table
+    from app.services.def14a_ingest import _upsert_holding
+
+    # Resolution priority:
+    #   1. Existing typed rows in def14a_beneficial_holdings —
+    #      happy path (first ingest produced rows, parser bump
+    #      now updating them).
+    #   2. Fallback to def14a_ingest_log + filing_events when no
+    #      typed rows exist. Covers the rescue cohort: original
+    #      ingest tombstoned status='failed' or 'partial' with
+    #      zero typed rows; the new parser now wants to fill them
+    #      in. Codex pre-push review caught this gap — without
+    #      the fallback, the cohort rewash should rescue stays on
+    #      the old parser_version forever.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT issuer_cik, instrument_id
+            FROM def14a_beneficial_holdings
+            WHERE accession_number = %s
+            LIMIT 1
+            """,
+            (raw_doc.accession_number,),
+        )
+        row = cur.fetchone()
+    had_existing_rows = row is not None
+    if row is None:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT log.issuer_cik, fe.instrument_id
+                FROM def14a_ingest_log log
+                JOIN filing_events fe
+                  ON fe.provider_filing_id = log.accession_number
+                 AND fe.provider = 'sec'
+                WHERE log.accession_number = %s
+                LIMIT 1
+                """,
+                (raw_doc.accession_number,),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return False
+    issuer_cik, instrument_id = row
+
+    try:
+        parsed = parse_beneficial_ownership_table(raw_doc.payload)
+    except Exception as exc:
+        raise RewashParseError(
+            f"parse_beneficial_ownership_table failed for accession={raw_doc.accession_number}: {exc}"
+        ) from exc
+
+    if not parsed.rows:
+        if had_existing_rows:
+            # Parser regression on a populated accession — raise
+            # so the operator sees the gap in rows_failed rather
+            # than silently zeroing out typed rows.
+            raise RewashParseError(
+                f"DEF 14A re-parse produced zero holders for accession="
+                f"{raw_doc.accession_number} (best_score={parsed.raw_table_score}); "
+                f"previous parser found rows"
+            )
+        # Rescue cohort with still-empty parse. Don't raise —
+        # parser hasn't improved enough yet. Skip without bumping
+        # parser_version so a future sweep with a better parser
+        # re-tries.
+        return False
+
+    # Replace-then-insert: clear all existing holders for the
+    # accession so a holder dropped by the new parser cannot
+    # linger.
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM def14a_beneficial_holdings WHERE accession_number = %s",
+            (raw_doc.accession_number,),
+        )
+
+    for holder in parsed.rows:
+        _upsert_holding(
+            conn,
+            accession_number=raw_doc.accession_number,
+            issuer_cik=str(issuer_cik),
+            instrument_id=int(instrument_id),
+            as_of_date=parsed.as_of_date,
+            holder=holder,
+        )
+    return True
+
+
+register_parser(
+    ParserSpec(
+        document_kind="def14a_body",
+        current_version="def14a-v1",
+        apply_fn=_apply_def14a,
+    )
+)
