@@ -156,6 +156,33 @@ _FORM_3_RICH = """<?xml version="1.0"?>
 
 
 class TestRichHappyPath:
+    def test_raw_payload_persisted_for_form3_xml(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Form 3 ingester must persist the XML body to
+        ``filing_raw_documents`` before parsing — operator audit
+        2026-05-03 + PR #808 contract."""
+        from app.services import raw_filings
+
+        iid = _seed_instrument(ebull_test_conn)
+        url = "https://www.sec.gov/Archives/edgar/data/320193/000119312526RAW001/form3.xml"
+        _seed_filing(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="RAW-FORM3-26-000001",
+            url=url,
+        )
+        fetcher = _StubFetcher({url: _FORM_3_RICH})
+        ingest_form_3_filings(ebull_test_conn, fetcher)
+
+        doc = raw_filings.read_raw(
+            ebull_test_conn,
+            accession_number="RAW-FORM3-26-000001",
+            document_kind="form3_xml",
+        )
+        assert doc is not None
+        assert "<ownershipDocument>" in doc.payload
+        assert doc.parser_version == "form3-v1"
+        assert doc.source_url == url
+
     def test_full_filing_lands_across_four_tables(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument(ebull_test_conn)
         url = "https://www.sec.gov/Archives/edgar/data/320193/000119312526001000/form3.xml"

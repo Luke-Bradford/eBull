@@ -326,6 +326,40 @@ class TestIngestDef14a:
         assert log["status"] == "success"
         assert log["rows_inserted"] == 3
 
+    def test_raw_payload_persisted_for_def14a_body(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """DEF 14A ingester must persist the proxy body to
+        ``filing_raw_documents`` before parsing — operator audit
+        2026-05-03 + PR #808 contract."""
+        from app.services import raw_filings
+
+        conn = _setup
+        url = "https://www.sec.gov/test/proxy_raw.htm"
+        accession = "0001234567-25-RAW001"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession=accession,
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+        fetcher = _InMemoryFetcher({url: _proxy_html_with_table()})
+        ingest_def14a(conn, fetcher)
+        conn.commit()
+
+        doc = raw_filings.read_raw(
+            conn,
+            accession_number=accession,
+            document_kind="def14a_body",
+        )
+        assert doc is not None
+        assert doc.parser_version == "def14a-v1"
+        assert doc.source_url == url
+        assert len(doc.payload) > 0
+
     def test_re_ingest_promotes_via_upsert_not_insert(
         self,
         _setup: psycopg.Connection[tuple],

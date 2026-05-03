@@ -297,6 +297,39 @@ _FORM_4A_AMENDMENT = """<?xml version="1.0"?>
 
 
 class TestIngestInsiderTransactions:
+    def test_raw_payload_persisted_for_form4_xml(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Form 4 ingester must persist the XML body to
+        ``filing_raw_documents`` before parsing — operator audit
+        2026-05-03 + PR #808 contract."""
+        from app.services import raw_filings
+
+        iid = _seed_instrument(ebull_test_conn)
+        _seed_form_4(
+            ebull_test_conn,
+            instrument_id=iid,
+            accession="RAW-FORM4-26-000001",
+            url="https://www.sec.gov/Archives/form4-raw.xml",
+            filing_date=date.today().isoformat(),
+        )
+        fetcher = _StubFetcher(
+            {
+                "https://www.sec.gov/Archives/form4-raw.xml": _FORM_4_RICH_BUY.replace(
+                    "2024-06-15", date.today().isoformat()
+                )
+            }
+        )
+        ingest_insider_transactions(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        doc = raw_filings.read_raw(
+            ebull_test_conn,
+            accession_number="RAW-FORM4-26-000001",
+            document_kind="form4_xml",
+        )
+        assert doc is not None
+        assert "<ownershipDocument>" in doc.payload
+        assert doc.parser_version == "form4-v1"
+        assert doc.source_url == "https://www.sec.gov/Archives/form4-raw.xml"
+
     def test_rich_happy_path_populates_every_field(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         iid = _seed_instrument(ebull_test_conn)
         _seed_form_4(

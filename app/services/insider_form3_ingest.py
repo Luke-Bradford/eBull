@@ -41,6 +41,7 @@ from typing import Any, Protocol
 import psycopg
 
 from app.providers.concurrent_fetch import fetch_document_texts
+from app.services import raw_filings
 from app.services.insider_transactions import (
     ParsedForm3,
     _canonical_form_4_url,
@@ -515,6 +516,19 @@ def _process_form_3_candidates(
             )
             conn.commit()
             continue
+
+        # Persist raw body BEFORE parsing — re-wash workflows depend
+        # on this row even if parsing fails. Operator audit
+        # 2026-05-03 + PR #808 contract.
+        raw_filings.store_raw(
+            conn,
+            accession_number=accession,
+            document_kind="form3_xml",
+            payload=xml,
+            parser_version=f"form3-v{_FORM3_PARSER_VERSION}",
+            source_url=url,
+        )
+        conn.commit()
 
         parsed = parse_form_3_xml(xml)
         if parsed is None:

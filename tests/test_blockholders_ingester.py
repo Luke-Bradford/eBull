@@ -437,6 +437,33 @@ class TestIngestFilerBlockholders:
         assert row["symbol"] == "AAPL"
         assert row["filer_name"] == "Test Activist Fund LP"
 
+    def test_raw_payload_persisted_for_primary_doc_13dg(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """13D/G ingester must persist primary_doc.xml body to
+        ``filing_raw_documents`` before parsing — operator audit
+        2026-05-03 + PR #808 contract."""
+        from app.services import raw_filings
+
+        conn = _setup
+        accession = "0001234567-25-000099"
+        fetcher = self._build_fetcher(
+            accessions=[(accession, "SC 13D", "2025-11-06")],
+            xml_by_accession={accession: _13d_xml()},
+        )
+        ingest_filer_blockholders(conn, fetcher, filer_cik="0001234567")
+        conn.commit()
+
+        doc = raw_filings.read_raw(
+            conn,
+            accession_number=accession,
+            document_kind="primary_doc_13dg",
+        )
+        assert doc is not None
+        assert "<edgarSubmission" in doc.payload or "<schedule13D" in doc.payload.lower()
+        assert doc.parser_version == "13dg-primary-v1"
+
     def test_multi_reporter_writes_n_rows(
         self,
         _setup: psycopg.Connection[tuple],
