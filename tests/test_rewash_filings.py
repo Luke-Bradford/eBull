@@ -494,3 +494,150 @@ def test_form4_rewash_preserves_original_fetched_at(
         row = cur.fetchone()
     assert row is not None
     assert row[0] == backdate  # preserved across rewash upsert
+
+
+def test_form3_apply_raises_on_parse_regression(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """Form 3 rewash spec uses the same parse-regression contract
+    as Form 4: parser returning None on a body that has an existing
+    typed row must RAISE so the failure surfaces in rows_failed,
+    not silently in rows_skipped."""
+    conn = ebull_test_conn
+    accession = "0001234567-26-form3-regress"
+    instrument_id = 950_020
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, 'F3', 'Form 3 Regression', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (instrument_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO insider_filings (
+            accession_number, instrument_id, document_type,
+            primary_document_url, parser_version, is_tombstone
+        ) VALUES (%s, %s, '3', 'https://example.com/x', 1, FALSE)
+        """,
+        (accession, instrument_id),
+    )
+    _seed_raw(conn, accession=accession, kind="form3_xml", parser_version="form3-v0")
+
+    monkeypatch.setattr(
+        "app.services.insider_transactions.parse_form_3_xml",
+        lambda _xml: None,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="form3_xml",
+            current_version="form3-v1",
+            apply_fn=rewash_filings._apply_form3,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="form3_xml")
+
+    assert result.rows_scanned == 1
+    assert result.rows_failed == 1
+    assert result.rows_skipped == 0
+
+
+def test_form3_rewash_preserves_original_fetched_at(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    isolated_registry: None,
+) -> None:
+    """Form 3 rewash must NOT bump insider_filings.fetched_at —
+    same audit contract as Form 4 (PR #818)."""
+    from app.services.insider_form3_ingest import upsert_form_3_filing
+    from app.services.insider_transactions import ParsedFiler
+    from app.services.insider_transactions import (
+        ParsedForm3 as ParsedForm3Data,
+    )
+
+    conn = ebull_test_conn
+    accession = "0001234567-26-form3-rewash"
+    instrument_id = 950_021
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, 'F3R', 'Form 3 Rewash', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (instrument_id,),
+    )
+    conn.commit()
+
+    parsed = ParsedForm3Data(
+        document_type="3",
+        period_of_report=None,
+        date_of_original_submission=None,
+        issuer_cik="0000111000",
+        issuer_name="Form 3 Rewash Inc",
+        issuer_trading_symbol="F3R",
+        remarks=None,
+        signature_name=None,
+        signature_date=None,
+        filers=(
+            ParsedFiler(
+                filer_cik="0000222000",
+                filer_name="Test Filer",
+                street1=None,
+                street2=None,
+                city=None,
+                state=None,
+                zip_code=None,
+                state_description=None,
+                is_director=False,
+                is_officer=False,
+                officer_title=None,
+                is_ten_percent_owner=False,
+                is_other=False,
+                other_text=None,
+            ),
+        ),
+        holdings=(),
+        footnotes=(),
+        no_securities_owned=False,
+    )
+    upsert_form_3_filing(
+        conn,
+        instrument_id=instrument_id,
+        accession_number=accession,
+        primary_document_url="https://example.com/x",
+        parsed=parsed,
+    )
+    conn.commit()
+
+    backdate = datetime(2024, 6, 1, tzinfo=UTC)
+    conn.execute(
+        "UPDATE insider_filings SET fetched_at = %s WHERE accession_number = %s",
+        (backdate, accession),
+    )
+    conn.commit()
+
+    upsert_form_3_filing(
+        conn,
+        instrument_id=instrument_id,
+        accession_number=accession,
+        primary_document_url="https://example.com/x",
+        parsed=parsed,
+        is_rewash=True,
+    )
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT fetched_at FROM insider_filings WHERE accession_number = %s",
+            (accession,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == backdate
