@@ -249,6 +249,50 @@ class TestIngestStatus:
         other = next(g for g in report.groups if g.key == "other")
         assert other.sources[0].source == "my_custom_pipeline"
 
+    def test_queue_total_includes_pending_running_and_failed(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Claude PR 801 review caught this: ``queue_total`` previously
+        returned only the pending count, silently undercounting
+        running + failed rows. Pin the new contract: total == all
+        non-complete statuses."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=793_100, symbol="QT1")
+        _seed_instrument(conn, iid=793_101, symbol="QT2")
+        _seed_instrument(conn, iid=793_102, symbol="QT3")
+        _seed_instrument(conn, iid=793_103, symbol="QT4")
+        _seed_queue_row(
+            conn,
+            instrument_id=793_100,
+            pipeline_name="sec_edgar_form3",
+            status="pending",
+        )
+        _seed_queue_row(
+            conn,
+            instrument_id=793_101,
+            pipeline_name="sec_edgar_form3",
+            status="running",
+        )
+        _seed_queue_row(
+            conn,
+            instrument_id=793_102,
+            pipeline_name="sec_edgar_form3",
+            status="failed",
+        )
+        _seed_queue_row(
+            conn,
+            instrument_id=793_103,
+            pipeline_name="sec_edgar_form3",
+            status="complete",
+        )
+        conn.commit()
+        report = ingest_status.get_ingest_status(conn)
+        # complete excluded; pending + running + failed = 3.
+        assert report.queue_total == 3
+        assert report.queue_running == 1
+        assert report.queue_failed == 1
+
     def test_queue_backlog_counts_fold_into_groups(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
@@ -273,7 +317,9 @@ class TestIngestStatus:
         assert ownership.backlog_pending == 1
         assert ownership.backlog_failed == 1
         assert ownership.state == "red"  # queue has failed rows
-        assert report.queue_total == 1
+        # queue_total counts pending + running + failed (1 + 0 + 1 = 2);
+        # complete rows are excluded. The PR 801 review fix.
+        assert report.queue_total == 2
         assert report.queue_failed == 1
 
 

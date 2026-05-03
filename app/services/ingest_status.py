@@ -174,9 +174,14 @@ def get_ingest_status(
     sources = _read_source_summaries(conn)
     queue_counts = _read_queue_counts(conn)
     groups = _build_groups(sources, queue_counts)
-    total = sum(queue_counts.get(s, {}).get("pending", 0) for s in queue_counts)
+    pending = sum(queue_counts.get(s, {}).get("pending", 0) for s in queue_counts)
     running = sum(queue_counts.get(s, {}).get("running", 0) for s in queue_counts)
     failed = sum(queue_counts.get(s, {}).get("failed", 0) for s in queue_counts)
+    # ``queue_total`` is the full active-queue depth — anything not
+    # ``complete``. Claude PR 801 review caught the prior version
+    # that returned only the pending count, leaving the operator UI
+    # to silently undercount running + failed rows.
+    total = pending + running + failed
     computed_at = now if now is not None else datetime.now(tz=_UTC)
     return IngestStatusReport(
         groups=tuple(groups),
