@@ -483,7 +483,13 @@ function OwnershipBody({
         </p>
         <a
           href={exportHref}
-          download
+          // Explicit filename — bare ``download`` collapses to the
+          // URL's last path segment (``export.csv``) for every symbol
+          // in browsers that don't honor the server's
+          // ``Content-Disposition`` header. Match the backend's
+          // ``${symbol}_ownership_rollup.csv`` pattern. Claude PR
+          // review (#835 round 1) flagged the regression.
+          download={`${symbol}_ownership_rollup.csv`}
           className="inline-block rounded border border-slate-300 px-3 py-1.5 text-xs hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
         >
           Download CSV
