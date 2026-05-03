@@ -135,6 +135,22 @@ export interface OwnershipBanner {
   readonly body: string;
 }
 
+/** One row of ``instrument_symbol_history``, oldest-first. Frontend
+ *  renders a "Filed as X" callout when the chain includes any symbol
+ *  other than the current one (Batch 7 of #788). */
+export interface OwnershipHistoricalSymbol {
+  readonly symbol: string;
+  /** ISO ``YYYY-MM-DD`` — when this symbol started representing the
+   *  instrument. */
+  readonly effective_from: string;
+  /** ISO ``YYYY-MM-DD`` — when this symbol stopped representing the
+   *  instrument. ``null`` marks the current symbol row. */
+  readonly effective_to: string | null;
+  /** ``imported`` | ``rebrand`` | ``delisting`` | ``relisting`` |
+   *  ``manual`` — see migration 103. */
+  readonly source_event: string;
+}
+
 export interface OwnershipSharesOutstandingSource {
   readonly accession_number: string | null;
   readonly concept: string | null;
@@ -160,6 +176,7 @@ export interface OwnershipRollupResponse {
   readonly concentration: OwnershipConcentration;
   readonly coverage: OwnershipCoverage;
   readonly banner: OwnershipBanner;
+  readonly historical_symbols: readonly OwnershipHistoricalSymbol[];
   readonly computed_at: string;
 }
 
