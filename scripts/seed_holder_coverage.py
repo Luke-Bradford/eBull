@@ -99,26 +99,41 @@ logger = logging.getLogger(__name__)
 #
 # Plus the Soros/Geode disambig from migration 104 (Batch 2 of
 # #788).
-_INSTITUTIONAL_SEEDS: list[tuple[str, str]] = [
-    ("0000102909", "Vanguard Group, Inc."),
-    ("0001364742", "BlackRock Inc."),
-    ("0000093751", "State Street Corporation"),
-    ("0000315066", "FMR LLC (Fidelity)"),
-    ("0001067983", "Berkshire Hathaway Inc."),
+# (cik, display_label, expected_name). expected_name is the form
+# SEC's submissions.json publishes for that CIK — used by the
+# verification gate. Display label is what operators see in the UI
+# and may carry our preferred punctuation. Migration 111 normalised
+# the 4 drifted rows to SEC's canonical names; this seed list must
+# match so a fresh _seed_all() run doesn't silently revert
+# expected_name back to the display label.
+_INSTITUTIONAL_SEEDS: list[tuple[str, str, str]] = [
+    ("0000102909", "Vanguard Group, Inc.", "Vanguard Group Inc."),
+    # CIK 0001086364 is the canonical BlackRock 13F filer
+    # (BLACKROCK ADVISORS LLC, 48 recent 13F-HRs as of 2026-05-03).
+    # The prior 0001364742 was BlackRock Finance Inc., a financing
+    # sub with only 3 recent 13F-HRs — replaced by migration 111
+    # after the PR #821 verification gate flagged it.
+    ("0001086364", "BlackRock Advisors LLC", "BLACKROCK ADVISORS LLC"),
+    ("0000093751", "State Street Corp", "STATE STREET CORP"),
+    ("0000315066", "FMR LLC", "FMR LLC"),
+    ("0001067983", "Berkshire Hathaway Inc.", "Berkshire Hathaway Inc."),
     # CIK-verified relabels (migration 106).
-    ("0000200217", "Dodge & Cox"),
-    ("0000354204", "Dimensional Fund Advisors LP"),
-    ("0000895421", "Morgan Stanley"),
+    ("0000200217", "Dodge & Cox", "Dodge & Cox"),
+    ("0000354204", "Dimensional Fund Advisors LP", "Dimensional Fund Advisors LP"),
+    ("0000895421", "Morgan Stanley", "Morgan Stanley"),
     # Soros / Geode disambig (#790 P2 — migration 104).
-    ("0001029160", "Soros Fund Management LLC"),
-    ("0001214717", "Geode Capital Management LLC"),
+    ("0001029160", "Soros Fund Management LLC", "Soros Fund Management LLC"),
+    ("0001214717", "Geode Capital Management LLC", "Geode Capital Management LLC"),
     # Intended top managers added by migration 106 with correct
     # CIKs. The prior list had the LABELS for these but the wrong
     # CIKs.
-    ("0000073124", "Northern Trust Corp."),
-    ("0000080255", "T. Rowe Price Associates Inc."),
-    ("0001422849", "Capital World Investors"),
-    ("0000902219", "Wellington Management Group LLP"),
+    ("0000073124", "Northern Trust Corp.", "Northern Trust Corp"),
+    # T. Rowe Price's SEC name is the registered-investment-adviser
+    # form with the state-of-formation suffix. Verified via PR #821
+    # gate against live submissions.json.
+    ("0000080255", "T. Rowe Price Associates Inc.", "PRICE T ROWE ASSOCIATES INC /MD/"),
+    ("0001422849", "Capital World Investors", "Capital World Investors"),
+    ("0000902219", "Wellington Management Group LLP", "Wellington Management Group LLP"),
 ]
 
 # CIKs from above to also tag as ETFs. Two issuers are clearly
@@ -137,7 +152,9 @@ _INSTITUTIONAL_SEEDS: list[tuple[str, str]] = [
 # follow-up curation pass.
 _ETF_OVERRIDES: list[tuple[str, str]] = [
     ("0000102909", "Vanguard ETF franchise"),
-    ("0001364742", "iShares (BlackRock) ETF franchise"),
+    # See _INSTITUTIONAL_SEEDS comment — BlackRock canonical CIK
+    # corrected from 0001364742 to 0001086364 by migration 111.
+    ("0001086364", "iShares (BlackRock) ETF franchise"),
     # Soros / Geode disambig (#790 P2 — migration 104). The real
     # Geode Capital Management LLC is CIK 0001214717. Soros (CIK
     # 0001029160) is intentionally NOT in the ETF override list.
@@ -259,8 +276,13 @@ def _parse_args() -> argparse.Namespace:
 def _seed_all(conn: psycopg.Connection[tuple]) -> None:
     """Idempotent seed-row inserts."""
     print("Seeding institutional_filer_seeds...")
-    for cik, label in _INSTITUTIONAL_SEEDS:
-        seed_institutional_filer(conn, cik=cik, label=label)
+    for cik, label, expected_name in _INSTITUTIONAL_SEEDS:
+        seed_institutional_filer(
+            conn,
+            cik=cik,
+            label=label,
+            expected_name=expected_name,
+        )
     print(f"  {len(_INSTITUTIONAL_SEEDS)} institutional seeds upserted.")
 
     # Stale-row reconciliation for the Soros/Geode disambig (#790 P2,
