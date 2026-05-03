@@ -126,6 +126,65 @@ _BLOCKHOLDER_SEEDS: list[tuple[str, str]] = [
     ("0001603466", "Engaged Capital LLC"),
     ("0001345471", "Trian Fund Management LP"),
     ("0001540531", "Starboard Value LP"),
+    # GameStop / Bed Bath activist — verified via SEC EDGAR
+    # full-text search 13D filings on GME / BBBY.
+    ("0001822844", "RC Ventures LLC (Ryan Cohen)"),
+]
+
+
+# Curated (instrument_symbol, CUSIP) seed list. Without these in
+# ``external_identifiers``, every 13F-HR holding for the named
+# tickers stays unresolved and the institutions/ETFs wedge stays
+# zero on the ownership card. The CUSIP resolver (#781) is the
+# long-tail path; this curation gives the top-25 mega-caps an
+# instant working state without waiting for the resolver to
+# fuzzy-match through tens of thousands of holdings.
+#
+# CUSIPs sourced from SEC EDGAR primary_doc filings; revised when
+# an issuer renames or undergoes a corporate action. Operator
+# can extend at runtime via the ``external_identifiers`` upsert
+# helper.
+_CURATED_CUSIPS: list[tuple[str, str]] = [
+    ("AAPL", "037833100"),
+    ("MSFT", "594918104"),
+    ("GOOGL", "02079K305"),
+    ("GOOG", "02079K107"),
+    ("META", "30303M102"),
+    ("AMZN", "023135106"),
+    ("NVDA", "67066G104"),
+    ("TSLA", "88160R101"),
+    ("BRK.B", "084670702"),
+    ("GME", "36467W109"),
+    ("BBY", "086516101"),
+    ("PYPL", "70450Y103"),
+    ("NFLX", "64110L106"),
+    ("AMD", "007903107"),
+    ("INTC", "458140100"),
+    ("ORCL", "68389X105"),
+    ("CRM", "79466L302"),
+    ("ADBE", "00724F101"),
+    ("WMT", "931142103"),
+    ("JPM", "46625H100"),
+    ("V", "92826C839"),
+    ("MA", "57636Q104"),
+    ("DIS", "254687106"),
+    ("KO", "191216100"),
+    ("PEP", "713448108"),
+    ("COST", "22160K105"),
+    ("HD", "437076102"),
+    ("PG", "742718109"),
+    ("BAC", "060505104"),
+    ("CVX", "166764100"),
+    ("XOM", "30231G102"),
+    ("T", "00206R102"),
+    ("VZ", "92343V104"),
+    ("MRK", "58933Y105"),
+    ("PFE", "717081103"),
+    ("JNJ", "478160104"),
+    ("UNH", "91324P102"),
+    ("ABBV", "00287Y109"),
+    ("LLY", "532457108"),
+    ("AVGO", "11135F101"),
 ]
 
 
@@ -189,6 +248,38 @@ def _seed_all(conn: psycopg.Connection[tuple]) -> None:
         seed_blockholder_filer(conn, cik=cik, label=label)
         seen.add(cik)
     print(f"  {len(seen)} blockholder seeds upserted.")
+
+    print("Seeding curated CUSIPs into external_identifiers...")
+    cusip_inserts = 0
+    cusip_missing_instrument = 0
+    for symbol, cusip in _CURATED_CUSIPS:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT instrument_id FROM instruments WHERE symbol = %s LIMIT 1",
+                (symbol,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            cusip_missing_instrument += 1
+            continue
+        instrument_id = int(row[0])
+        # is_primary=TRUE because these are curated mappings
+        # (operator-verified). Resolver-derived CUSIPs (#781) are
+        # is_primary=FALSE so the curated mapping wins on conflict.
+        conn.execute(
+            """
+            INSERT INTO external_identifiers (
+                instrument_id, provider, identifier_type, identifier_value, is_primary
+            ) VALUES (%s, 'sec', 'cusip', %s, TRUE)
+            ON CONFLICT (provider, identifier_type, identifier_value) DO NOTHING
+            """,
+            (instrument_id, cusip),
+        )
+        cusip_inserts += 1
+    print(
+        f"  {cusip_inserts} CUSIPs upserted into external_identifiers; "
+        f"{cusip_missing_instrument} skipped (symbol not in instruments)."
+    )
     conn.commit()
 
 
