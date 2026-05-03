@@ -142,6 +142,10 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # row without touching the instruments row clears deterministically.
     "instrument_cik_history",
     "instrument_symbol_history",
+    # #793 + #790 P4 (Batch 4 of #788). FK → instruments. Keeps
+    # teardown deterministic when a test populates a queue row
+    # without touching the instruments row.
+    "ingest_backfill_queue",
     "decision_audit",  # #315 Phase 3 alerts
     "trade_recommendations",  # #315 Phase 3 alerts (FK parent of decision_audit)
     "operators",  # #315 Phase 3 alerts (cursor column)
