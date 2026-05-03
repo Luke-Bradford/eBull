@@ -25,7 +25,7 @@
  * inserting a duplicate.
  */
 
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import {
   fetchBackfillQueue,
@@ -72,19 +72,30 @@ export function IngestHealthPage(): JSX.Element {
     [],
   );
 
-  // Auto-refresh every 30s. Direct setInterval on the three refetch
-  // functions — the prior tick-based pattern (state increment ->
-  // re-effect) was a no-op because the refetch effect's dep array
-  // was empty, so the callbacks ran once on mount and never again.
-  // Codex pre-push review (Batch 4 of #788) caught this.
+  // Auto-refresh every 30s. Use a ref to capture the latest refetch
+  // callbacks so the interval handler always calls the freshest set
+  // without re-creating the timer on every render. The earlier
+  // versions:
+  //   * tick-state pattern with [] deps — refetch never ran (Codex
+  //     pre-push review caught it)
+  //   * direct setInterval with [statusState, failuresState,
+  //     queueState] deps — useAsync returns fresh references on
+  //     each render, so the timer would re-create every render and
+  //     either flicker or leak. Claude PR 801 review caught it.
+  // Ref pattern is the canonical fix: stable timer + always-fresh
+  // callbacks.
+  const refetchAllRef = useRef<() => void>(() => undefined);
   useEffect(() => {
-    const id = window.setInterval(() => {
+    refetchAllRef.current = () => {
       statusState.refetch();
       failuresState.refetch();
       queueState.refetch();
-    }, 30_000);
+    };
+  });
+  useEffect(() => {
+    const id = window.setInterval(() => refetchAllRef.current(), 30_000);
     return () => window.clearInterval(id);
-  }, [statusState, failuresState, queueState]);
+  }, []);
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-6">

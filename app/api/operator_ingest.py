@@ -269,25 +269,31 @@ def enqueue_backfill_endpoint(
 ) -> EnqueueBackfillResponse:
     """Enqueue an operator-triggered backfill. Idempotent — re-clicking
     the button on the same (instrument, pipeline) refreshes the row
-    instead of inserting a duplicate."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT 1 FROM instruments WHERE instrument_id = %s",
-            (request.instrument_id,),
+    instead of inserting a duplicate.
+
+    No pre-check SELECT for the instrument; the FK on
+    ``ingest_backfill_queue.instrument_id`` is the canonical guard.
+    A pre-check + insert in separate steps would race against a
+    concurrent DELETE on ``instruments`` and surface a 500 on the
+    FK-violation path. Catching the violation here gives the operator
+    a clean 404 even under that race. Claude PR 801 review caught
+    the prior pattern.
+    """
+    try:
+        ingest_status.enqueue_backfill(
+            conn,
+            instrument_id=request.instrument_id,
+            pipeline_name=request.pipeline_name,
+            priority=request.priority,
+            triggered_by=request.triggered_by,
         )
-        if cur.fetchone() is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Instrument {request.instrument_id} not found",
-            )
-    ingest_status.enqueue_backfill(
-        conn,
-        instrument_id=request.instrument_id,
-        pipeline_name=request.pipeline_name,
-        priority=request.priority,
-        triggered_by=request.triggered_by,
-    )
-    conn.commit()
+        conn.commit()
+    except psycopg.errors.ForeignKeyViolation as e:
+        conn.rollback()
+        raise HTTPException(
+            status_code=404,
+            detail=f"Instrument {request.instrument_id} not found",
+        ) from e
     return EnqueueBackfillResponse(
         instrument_id=request.instrument_id,
         pipeline_name=request.pipeline_name,
