@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import psycopg
 import pytest
@@ -641,3 +642,226 @@ def test_form3_rewash_preserves_original_fetched_at(
         row = cur.fetchone()
     assert row is not None
     assert row[0] == backdate
+
+
+def test_def14a_apply_raises_on_parse_failure(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """DEF 14A parser failure on a body with an existing typed row
+    must raise so the failure surfaces in rows_failed."""
+    conn = ebull_test_conn
+    accession = "0001234567-26-def14a-regress"
+    instrument_id = 950_050
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, 'D14', 'DEF 14A Regression', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (instrument_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO def14a_beneficial_holdings (
+            instrument_id, accession_number, issuer_cik,
+            holder_name, holder_role, shares, percent_of_class, as_of_date
+        ) VALUES (%s, %s, '0000999000', 'Test Holder', 'officer', 100, 5.0, '2025-01-01')
+        """,
+        (instrument_id, accession),
+    )
+    _seed_raw(conn, accession=accession, kind="def14a_body", parser_version="def14a-v0")
+    conn.commit()
+
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_def14a.parse_beneficial_ownership_table",
+        lambda _html: (_ for _ in ()).throw(ValueError("synthetic parse error")),
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="def14a_body",
+            current_version="def14a-v1",
+            apply_fn=rewash_filings._apply_def14a,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+
+    assert result.rows_scanned == 1
+    assert result.rows_failed == 1
+    assert result.rows_skipped == 0
+
+
+def test_def14a_apply_replaces_holders_on_rewash(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """DEF 14A rewash replaces all holders for the accession. A
+    holder dropped by the new parser must not linger from the
+    previous parse."""
+    from app.providers.implementations.sec_def14a import (
+        Def14ABeneficialHolder,
+        Def14ABeneficialOwnershipTable,
+    )
+
+    conn = ebull_test_conn
+    instrument_id = 950_051
+    accession = "0001234567-26-def14a-replace"
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, 'D14R', 'DEF 14A Replace', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (instrument_id,),
+    )
+    # Two pre-existing holders.
+    for holder in ("Holder A", "Holder B"):
+        conn.execute(
+            """
+            INSERT INTO def14a_beneficial_holdings (
+                instrument_id, accession_number, issuer_cik,
+                holder_name, holder_role, shares, percent_of_class, as_of_date
+            ) VALUES (%s, %s, '0000999000', %s, 'officer', 100, 5.0, '2025-01-01')
+            """,
+            (instrument_id, accession, holder),
+        )
+    _seed_raw(conn, accession=accession, kind="def14a_body", parser_version="def14a-v0")
+    conn.commit()
+
+    # New parse drops Holder B and adds Holder C.
+    fake_table = Def14ABeneficialOwnershipTable(
+        as_of_date=None,
+        rows=[
+            Def14ABeneficialHolder(
+                holder_name="Holder A",
+                holder_role="officer",
+                shares=Decimal("100"),
+                percent_of_class=Decimal("5.0"),
+            ),
+            Def14ABeneficialHolder(
+                holder_name="Holder C",
+                holder_role="director",
+                shares=Decimal("200"),
+                percent_of_class=Decimal("8.0"),
+            ),
+        ],
+        raw_table_score=10,
+    )
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_def14a.parse_beneficial_ownership_table",
+        lambda _html: fake_table,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="def14a_body",
+            current_version="def14a-v1",
+            apply_fn=rewash_filings._apply_def14a,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    assert result.rows_reparsed == 1
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT holder_name FROM def14a_beneficial_holdings WHERE accession_number = %s ORDER BY holder_name",
+            (accession,),
+        )
+        rows = cur.fetchall()
+    holders = [r[0] for r in rows]
+    assert holders == ["Holder A", "Holder C"]
+
+
+def test_def14a_apply_rescues_tombstoned_accession(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """Rescue cohort: original ingest tombstoned with zero typed
+    rows (parser couldn't find table). New parser DOES find a
+    table. Re-wash must populate the typed rows — not skip
+    forever. Regression for the medium-severity Codex finding."""
+    from app.providers.implementations.sec_def14a import (
+        Def14ABeneficialHolder,
+        Def14ABeneficialOwnershipTable,
+    )
+
+    conn = ebull_test_conn
+    instrument_id = 950_060
+    accession = "0001234567-26-def14a-rescue"
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, 'D14X', 'DEF 14A Rescue', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (instrument_id,),
+    )
+    # Tombstoned ingest_log row, zero typed rows.
+    conn.execute(
+        """
+        INSERT INTO def14a_ingest_log (accession_number, issuer_cik, status)
+        VALUES (%s, '0000999000', 'partial')
+        """,
+        (accession,),
+    )
+    # filing_events row carries instrument_id resolution.
+    conn.execute(
+        """
+        INSERT INTO filing_events (
+            instrument_id, filing_date, filing_type, source_url,
+            provider, provider_filing_id, primary_document_url
+        ) VALUES (%s, '2025-03-01', 'DEF 14A', 'https://example.com/x',
+                  'sec', %s, 'https://example.com/x')
+        """,
+        (instrument_id, accession),
+    )
+    _seed_raw(conn, accession=accession, kind="def14a_body", parser_version="def14a-v0")
+    conn.commit()
+
+    fake_table = Def14ABeneficialOwnershipTable(
+        as_of_date=None,
+        rows=[
+            Def14ABeneficialHolder(
+                holder_name="Rescued Holder",
+                holder_role="director",
+                shares=Decimal("500"),
+                percent_of_class=Decimal("3.0"),
+            ),
+        ],
+        raw_table_score=15,
+    )
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_def14a.parse_beneficial_ownership_table",
+        lambda _html: fake_table,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="def14a_body",
+            current_version="def14a-v1",
+            apply_fn=rewash_filings._apply_def14a,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    assert result.rows_reparsed == 1  # rescued, not skipped
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT holder_name FROM def14a_beneficial_holdings WHERE accession_number = %s",
+            (accession,),
+        )
+        rows = cur.fetchall()
+    assert [r[0] for r in rows] == ["Rescued Holder"]
