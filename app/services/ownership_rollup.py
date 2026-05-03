@@ -952,6 +952,124 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
 
 
 # ---------------------------------------------------------------------------
+# CSV export of the canonical rollup (Chain 2.8 of #788)
+# ---------------------------------------------------------------------------
+
+
+_CSV_HEADER: tuple[str, ...] = (
+    "filer_cik",
+    "filer_name",
+    "category",
+    "shares",
+    "pct_outstanding",
+    "winning_source",
+    "winning_accession",
+    "as_of_date",
+    "filer_type",
+    "edgar_url",
+)
+
+
+def build_rollup_csv(rollup: OwnershipRollup) -> str:
+    """Flatten a deduped :class:`OwnershipRollup` into a CSV string.
+
+    One row per surviving holder across all slices, plus two memo
+    rows at the end:
+
+      * ``__treasury__`` — issuer treasury share count (additive
+        wedge on the chart, not a deduped holder).
+      * ``__residual__`` — ``Public / unattributed`` block (clamped
+        to 0 when oversubscribed).
+
+    The two memo rows let an operator sum the ``shares`` column and
+    verify it equals ``shares_outstanding`` without round-tripping
+    to a separate endpoint.
+
+    Header always emitted so an automation pipe can be branchless on
+    empty rollups (no_data state, pre-ingest instruments).
+
+    Formula-injection guard: any cell value beginning with
+    ``=``, ``+``, ``-``, ``@``, ``\\t``, or ``\\r`` is prefixed with a
+    single quote. Mirrors the FE ``csvEscape`` rule and the existing
+    insider-baseline CSV export.
+    """
+    import csv
+    import io
+
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(_CSV_HEADER)
+
+    for slc in rollup.slices:
+        for holder in slc.holders:
+            writer.writerow(
+                [
+                    _csv_safe(holder.filer_cik or ""),
+                    _csv_safe(holder.filer_name),
+                    slc.category,
+                    str(holder.shares),
+                    f"{holder.pct_outstanding}",
+                    holder.winning_source,
+                    _csv_safe(holder.winning_accession),
+                    holder.as_of_date.isoformat() if holder.as_of_date is not None else "",
+                    _csv_safe(holder.filer_type or ""),
+                    _csv_safe(holder.winning_edgar_url or ""),
+                ]
+            )
+
+    if rollup.treasury_shares is not None and rollup.treasury_shares > 0:
+        treasury_pct = (
+            f"{rollup.treasury_shares / rollup.shares_outstanding}"
+            if rollup.shares_outstanding is not None and rollup.shares_outstanding > 0
+            else ""
+        )
+        writer.writerow(
+            [
+                "",
+                "Treasury (memo)",
+                "__treasury__",
+                str(rollup.treasury_shares),
+                treasury_pct,
+                "",
+                "",
+                rollup.treasury_as_of.isoformat() if rollup.treasury_as_of is not None else "",
+                "",
+                "",
+            ]
+        )
+
+    writer.writerow(
+        [
+            "",
+            "Public / unattributed",
+            "__residual__",
+            str(rollup.residual.shares),
+            f"{rollup.residual.pct_outstanding}",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ]
+    )
+    return buf.getvalue()
+
+
+def _csv_safe(value: str) -> str:
+    """Formula-injection guard. ``csv.writer`` already handles RFC
+    4180 quoting; this function only guards against spreadsheet
+    formula triggers.
+
+    Mirrors the frontend ``csvEscape`` rule + the existing
+    insider-baseline CSV. Codex pre-push review caught the prior
+    implementation which forgot ``\\t`` / ``\\r`` (Excel treats both
+    as formula triggers in addition to ``=+-@``)."""
+    if value and value[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
+
+
+# ---------------------------------------------------------------------------
 # SQL: canonical-holder union (Form 4 + Form 3 + 13D/G + 13F)
 # ---------------------------------------------------------------------------
 #
