@@ -468,6 +468,45 @@ class TestDedupPriority:
         names = sorted(h.filer_name for h in insiders.holders)
         assert names == ["Jones Jane", "Smith John"]
 
+    def test_joint_filer_13d_no_fanout_in_canonical_union(self, _setup: psycopg.Connection[tuple]) -> None:
+        """Claude PR review round 2 (PR 798) PREVENTION: assert no
+        fan-out when a single 13D accession carries multiple
+        ``filing_id`` rows (joint reporters). The ``blocks`` CTE in
+        ``_CANONICAL_UNION_SQL`` picks one ``filing_id`` per
+        accession and the JOIN back to ``blockholder_filings`` is on
+        the PK — exactly one survivor per accession enters the
+        canonical-holder set, so the per-block aggregate is NOT
+        summed across joint reporters."""
+        conn = _setup
+        # Two reporters under one accession claiming the same
+        # aggregate_amount (SEC Rule 13d-1 requires joint reporters
+        # to claim the same beneficial ownership).
+        for reporter_name, reporter_cik in [
+            ("Joint Reporter A", "0009990001"),
+            ("Joint Reporter B", "0009990002"),
+        ]:
+            _seed_block(
+                conn,
+                accession="13D-JOINT-001",
+                instrument_id=789_001,
+                filer_cik="0009990000",
+                filer_name="Joint Filer Group",
+                submission_type="SCHEDULE 13D",
+                aggregate_shares="5000000",
+                filed_at=datetime(2025, 12, 1, tzinfo=UTC),
+                reporter_cik=reporter_cik,
+                reporter_name=reporter_name,
+            )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="GME", instrument_id=789_001)
+        block_slices = [s for s in rollup.slices if s.category == "blockholders"]
+        assert len(block_slices) == 1
+        # Exactly one block, carrying the per-accession aggregate
+        # (5M). Doubled-up to 10M would mean the JOIN re-fanned.
+        assert block_slices[0].total_shares == Decimal("5000000")
+        assert block_slices[0].filer_count == 1
+
 
 # ---------------------------------------------------------------------------
 # DEF 14A enrichment

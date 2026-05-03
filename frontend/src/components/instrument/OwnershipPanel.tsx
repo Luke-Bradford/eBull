@@ -104,10 +104,15 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
     >
       {rollupState.loading ? (
         <SectionSkeleton rows={4} />
-      ) : rollupState.error !== null ? (
+      ) : rollupState.error !== null || rollupState.data === null ? (
+        // ``data === null`` should only be reachable as a defense-
+        // in-depth path: the rollup endpoint always returns at least
+        // the ``no_data`` payload shape (200 OK + empty slices), so a
+        // null body would only arise from a future middleware that
+        // unwraps the response. Surface it as an error rather than
+        // hanging on a perma-skeleton. Claude PR review (PR 798)
+        // round 2 caught the prior skeleton fallback.
         <SectionError onRetry={rollupState.refetch} />
-      ) : rollupState.data === null ? (
-        <SectionSkeleton rows={4} />
       ) : (
         <PanelBody rollup={rollupState.data} onWedgeClick={handleWedgeClick} />
       )}
@@ -176,16 +181,16 @@ export function rollupToSunburstInputs(
     insiders_slice_total === null && def14a_unmatched_total === null
       ? null
       : (insiders_slice_total ?? 0) + (def14a_unmatched_total ?? 0);
-  const insiders_as_of = sliceAsOf("insiders");
-  const def14a_as_of = sliceAsOf("def14a_unmatched");
+  // Latest as_of across {insiders, def14a_unmatched}. Sort surfaces
+  // the most recent date last; ``at(-1)`` returns it; ``?? null``
+  // handles the both-empty case. Claude PR review (PR 798) round 2
+  // pinned this idiom over nested ternaries — extends cleanly when a
+  // third source enters the fold.
   const combined_insiders_as_of =
-    insiders_as_of === null
-      ? def14a_as_of
-      : def14a_as_of === null
-      ? insiders_as_of
-      : insiders_as_of >= def14a_as_of
-      ? insiders_as_of
-      : def14a_as_of;
+    [sliceAsOf("insiders"), sliceAsOf("def14a_unmatched")]
+      .filter((d): d is string => d !== null)
+      .sort()
+      .at(-1) ?? null;
 
   return {
     // Canonical denominator: shares_outstanding only. Treasury is

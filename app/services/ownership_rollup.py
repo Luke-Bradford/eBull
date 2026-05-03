@@ -895,6 +895,23 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
 # blockholders reader. Per-reporter visibility lands in Batch 3's
 # provenance footer (``additional_reporters`` count + the dropped
 # accessions in the holder's ``dropped_sources``).
+#
+# ``_CANONICAL_UNION_SQL``: the union template that builds the
+# canonical-holder candidate set per instrument. The Python pass
+# deduplicates across sources (Form 4 > Form 3 > 13D/G > 13F) using
+# the ``CIK-or-name`` identity and the pinned tie-break sequence. The
+# SQL only collapses *within* each source so the Python pass sees one
+# row per filer per source. DEF 14A rows are unioned in Python after
+# the holder-name resolver runs.
+#
+# Note: the JOIN ``blockholder_filings bf ON bf.filing_id =
+# blocks.filing_id`` is on the PK of ``blockholder_filings`` and
+# therefore one-to-one — no fan-out is possible regardless of how many
+# joint reporters share an accession. Claude PR review (PR 798) round
+# 2 flagged this as a potential re-fan; REBUTTED because filing_id is
+# the BIGSERIAL PRIMARY KEY (migration 095). The `blocks` CTE
+# deliberately picks ONE filing_id per accession (the
+# largest-aggregate row) and the join returns that one row.
 
 
 _CANONICAL_UNION_SQL = """
@@ -1001,13 +1018,4 @@ JOIN institutional_filers f USING (filer_id)
 WHERE h.instrument_id = %(iid)s
   AND h.is_put_call IS NULL
   AND h.period_of_report = (SELECT period_of_report FROM latest_13f_period)
-"""
-"""SQL building the canonical-holder candidate set per instrument.
-
-The Python pass deduplicates across sources (Form 4 > Form 3 > 13D/G >
-13F) using the ``CIK-or-name`` identity and the pinned tie-break
-sequence. The SQL only collapses *within* each source so the Python
-pass sees one row per filer per source.
-
-DEF 14A rows are unioned in Python after the holder-name resolver runs.
 """
