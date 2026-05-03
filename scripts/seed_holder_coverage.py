@@ -90,7 +90,12 @@ _INSTITUTIONAL_SEEDS: list[tuple[str, str]] = [
     ("0001067983", "Berkshire Hathaway Inc."),
     ("0000354204", "T. Rowe Price Associates"),
     ("0000895421", "Capital World Investors"),
-    ("0001029160", "Geode Capital Management LLC"),
+    # Soros / Geode disambig (#790 P2 — migration 104). CIK
+    # 0001029160 is SOROS FUND MANAGEMENT LLC (verified via SEC
+    # submissions.json), NOT Geode. Real Geode Capital Management
+    # LLC is CIK 0001214717.
+    ("0001029160", "Soros Fund Management LLC"),
+    ("0001214717", "Geode Capital Management LLC"),
     ("0000200217", "Northern Trust Corp."),
     ("0000866787", "Wellington Management Group LLP"),
 ]
@@ -112,7 +117,10 @@ _INSTITUTIONAL_SEEDS: list[tuple[str, str]] = [
 _ETF_OVERRIDES: list[tuple[str, str]] = [
     ("0000102909", "Vanguard ETF franchise"),
     ("0001364742", "iShares (BlackRock) ETF franchise"),
-    ("0001029160", "Geode Capital (Fidelity index-fund engine)"),
+    # Soros / Geode disambig (#790 P2 — migration 104). The real
+    # Geode Capital Management LLC is CIK 0001214717. Soros (CIK
+    # 0001029160) is intentionally NOT in the ETF override list.
+    ("0001214717", "Geode Capital (Fidelity index-fund engine)"),
 ]
 
 # Activist hedge funds + founder-family holdcos that file 13D/G
@@ -233,6 +241,25 @@ def _seed_all(conn: psycopg.Connection[tuple]) -> None:
     for cik, label in _INSTITUTIONAL_SEEDS:
         seed_institutional_filer(conn, cik=cik, label=label)
     print(f"  {len(_INSTITUTIONAL_SEEDS)} institutional seeds upserted.")
+
+    # Stale-row reconciliation for the Soros/Geode disambig (#790 P2,
+    # migration 104). The script is upsert-only by design, but a DB
+    # that ran the pre-migration version still carries
+    # ``cik='0001029160'`` (Soros) tagged as an ETF override —
+    # re-running this script after the source change wouldn't
+    # converge without an explicit DELETE. Codex pre-push review
+    # caught this. Listed inline rather than in a generic "removed
+    # CIKs" constant because the migration is the canonical record;
+    # this DELETE is a script-level convergence guarantee, not a
+    # source-of-truth list.
+    _STALE_ETF_CIKS: tuple[str, ...] = ("0001029160",)
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM etf_filer_cik_seeds WHERE cik = ANY(%s)",
+            (list(_STALE_ETF_CIKS),),
+        )
+        if cur.rowcount and cur.rowcount > 0:
+            print(f"  removed {cur.rowcount} stale ETF override(s): {list(_STALE_ETF_CIKS)} (Soros mis-seed cleanup)")
 
     print("Seeding etf_filer_cik_seeds...")
     for cik, label in _ETF_OVERRIDES:
