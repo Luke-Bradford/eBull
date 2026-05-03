@@ -29,7 +29,7 @@ _REAL_GEODE_CIK = "0001214717"
 
 def test_soros_cik_in_seed_list_labelled_soros() -> None:
     """The CIK that SEC says is Soros must be labelled Soros, not Geode."""
-    by_cik = dict(_INSTITUTIONAL_SEEDS)
+    by_cik = {cik: label for cik, label, _expected in _INSTITUTIONAL_SEEDS}
     label = by_cik.get(_REAL_SOROS_CIK)
     assert label is not None, (
         f"CIK {_REAL_SOROS_CIK} missing from _INSTITUTIONAL_SEEDS — "
@@ -54,7 +54,7 @@ def test_soros_cik_not_in_etf_override_list() -> None:
 
 
 def test_real_geode_cik_in_seed_list() -> None:
-    by_cik = dict(_INSTITUTIONAL_SEEDS)
+    by_cik = {cik: label for cik, label, _expected in _INSTITUTIONAL_SEEDS}
     label = by_cik.get(_REAL_GEODE_CIK)
     assert label is not None, f"Real Geode CIK {_REAL_GEODE_CIK} missing from _INSTITUTIONAL_SEEDS."
     assert "Geode" in label
