@@ -156,6 +156,10 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # so the truncation order respects the FK tree.
     "data_reconciliation_findings",
     "data_reconciliation_runs",
+    # Per-CIK raw-document store (sibling of filing_raw_documents).
+    # No FK to other planner tables — keyed on (cik, document_kind).
+    # Listed for deterministic per-test cleanup.
+    "cik_raw_documents",
     "decision_audit",  # #315 Phase 3 alerts
     "trade_recommendations",  # #315 Phase 3 alerts (FK parent of decision_audit)
     "operators",  # #315 Phase 3 alerts (cursor column)
