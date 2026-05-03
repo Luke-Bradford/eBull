@@ -79,13 +79,39 @@ class _FakeProvider:
 
 
 def _seed_instrument(conn: psycopg.Connection[tuple], instrument_id: int, symbol: str, cik: str) -> None:
+    # Capabilities must match the us_equity contract from migration
+    # 071/072 — ``test_us_equity_seed_includes_sec_edgar_for_filings``
+    # asserts every us_equity row has ``capabilities -> 'filings' =
+    # ['sec_edgar']``. Without it the test cross-pollinates and fails
+    # in shared pytest sessions where this fixture's rows leak. #797
+    # B6 prevention.
+    # Full us_equity capability shape (11 keys) per migration 072.
+    # ``test_us_equity_seed_full_shape`` asserts every us_equity row
+    # has all 11 keys including the empty-list ones; partial seeds
+    # drift the test in shared pytest sessions where this fixture's
+    # rows leak. #797 B6 prevention.
     conn.execute(
         """
-        INSERT INTO exchanges (exchange_id, description, country, asset_class)
-        VALUES (%s, %s, 'US', 'us_equity')
-        ON CONFLICT (exchange_id) DO NOTHING
+        INSERT INTO exchanges (exchange_id, description, country, asset_class, capabilities)
+        VALUES (%s, %s, 'US', 'us_equity', %s::jsonb)
+        ON CONFLICT (exchange_id) DO UPDATE SET
+            capabilities = EXCLUDED.capabilities
         """,
-        (f"rfp_{instrument_id}", f"Test {instrument_id}"),
+        (
+            f"rfp_{instrument_id}",
+            f"Test {instrument_id}",
+            (
+                '{"filings": ["sec_edgar"], '
+                '"fundamentals": ["sec_xbrl"], '
+                '"dividends": ["sec_dividend_summary"], '
+                '"insider": ["sec_form4"], '
+                '"analyst": [], "ratings": [], "esg": [], '
+                '"ownership": ["sec_13f", "sec_13d_13g"], '
+                '"corporate_events": ["sec_8k_events"], '
+                '"business_summary": ["sec_10k_item1"], '
+                '"officers": []}'
+            ),
+        ),
     )
     conn.execute(
         """
