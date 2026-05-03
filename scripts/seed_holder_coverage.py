@@ -252,6 +252,7 @@ def _seed_all(conn: psycopg.Connection[tuple]) -> None:
     print("Seeding curated CUSIPs into external_identifiers...")
     cusip_inserts = 0
     cusip_missing_instrument = 0
+    cusip_corrected = 0
     for symbol, cusip in _CURATED_CUSIPS:
         with conn.cursor() as cur:
             cur.execute(
@@ -263,8 +264,42 @@ def _seed_all(conn: psycopg.Connection[tuple]) -> None:
             cusip_missing_instrument += 1
             continue
         instrument_id = int(row[0])
-        # is_primary=TRUE because these are curated mappings
-        # (operator-verified). Resolver-derived CUSIPs (#781) are
+        # Probe the existing row first so a corrected re-run can
+        # overwrite a previously-stored wrong instrument_id with a
+        # diagnostic line. Bot review of an earlier draft caught
+        # the silent ON-CONFLICT-DO-NOTHING path that would leave
+        # a wrong mapping in place across script edits.
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT instrument_id FROM external_identifiers
+                WHERE provider = 'sec'
+                  AND identifier_type = 'cusip'
+                  AND identifier_value = %s
+                """,
+                (cusip,),
+            )
+            existing = cur.fetchone()
+        if existing is not None and int(existing[0]) != instrument_id:
+            print(
+                f"  CORRECT {symbol} CUSIP {cusip}: "
+                f"instrument_id {existing[0]} -> {instrument_id} "
+                f"(curated re-run overwriting stale mapping)"
+            )
+            conn.execute(
+                """
+                UPDATE external_identifiers
+                SET instrument_id = %s, is_primary = TRUE
+                WHERE provider = 'sec'
+                  AND identifier_type = 'cusip'
+                  AND identifier_value = %s
+                """,
+                (instrument_id, cusip),
+            )
+            cusip_corrected += 1
+            continue
+        # is_primary=TRUE because curated mappings are operator-
+        # verified. Resolver-derived CUSIPs (#781) are
         # is_primary=FALSE so the curated mapping wins on conflict.
         conn.execute(
             """
@@ -278,6 +313,7 @@ def _seed_all(conn: psycopg.Connection[tuple]) -> None:
         cusip_inserts += 1
     print(
         f"  {cusip_inserts} CUSIPs upserted into external_identifiers; "
+        f"{cusip_corrected} stale mappings corrected; "
         f"{cusip_missing_instrument} skipped (symbol not in instruments)."
     )
     conn.commit()
