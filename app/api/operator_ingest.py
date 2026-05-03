@@ -18,7 +18,7 @@ Three GETs + one POST surface the data feeding the
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 import psycopg
@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.db.snapshot import snapshot_read
-from app.services import ingest_status
+from app.services import ingest_status, ownership_drillthrough
 
 router = APIRouter(
     prefix="/operator",
@@ -298,4 +298,76 @@ def enqueue_backfill_endpoint(
         instrument_id=request.instrument_id,
         pipeline_name=request.pipeline_name,
         status="queued",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-instrument ownership drillthrough (#788 Chain 2.5)
+# ---------------------------------------------------------------------------
+
+
+class _PipelineStateModel(BaseModel):
+    key: Literal[
+        "institutional_holdings",
+        "blockholder_filings",
+        "insider_transactions",
+        "insider_initial_holdings",
+        "def14a_beneficial_holdings",
+    ]
+    typed_row_count: int
+    # Pipelines store either a ``date`` (period_of_report,
+    # as_of_date) or ``datetime`` (filed_at) — surface both shapes.
+    latest_event_at: datetime | date | None
+    raw_body_count: int
+    tombstone_count: int
+    notes: list[str]
+
+
+class OwnershipDrillthroughResponse(BaseModel):
+    instrument_id: int
+    symbol: str
+    pipelines: list[_PipelineStateModel]
+
+
+@router.get(
+    "/ownership-drillthrough/{instrument_id}",
+    response_model=OwnershipDrillthroughResponse,
+)
+def get_ownership_drillthrough_endpoint(
+    instrument_id: int,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> OwnershipDrillthroughResponse:
+    """Per-instrument ownership-pipeline state.
+
+    Codex Chain 2.5 substrate: when the ownership card is sparse,
+    surface ONE place that says why — typed row counts, raw body
+    presence, tombstones, unresolved-CUSIP gaps — across all five
+    ownership pipelines (13F, 13D/G, Form 4, Form 3, DEF 14A).
+
+    Snapshot-read so all five per-pipeline subqueries reconcile
+    against one REPEATABLE READ snapshot — otherwise a concurrent
+    rewash sweep mid-rollup could leave the pipelines visibly
+    inconsistent on the page.
+    """
+    with snapshot_read(conn):
+        result = ownership_drillthrough.get_instrument_drillthrough(conn, instrument_id=instrument_id)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Instrument {instrument_id} not found",
+        )
+    return OwnershipDrillthroughResponse(
+        instrument_id=result.instrument_id,
+        symbol=result.symbol,
+        pipelines=[
+            _PipelineStateModel(
+                key=p.key,
+                typed_row_count=p.typed_row_count,
+                latest_event_at=p.latest_event_at,
+                raw_body_count=p.raw_body_count,
+                tombstone_count=p.tombstone_count,
+                notes=list(p.notes),
+            )
+            for p in result.pipelines
+        ],
     )
