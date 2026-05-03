@@ -132,6 +132,17 @@ _ALLOWED: dict[str, str] = {
     "test_jobs_heartbeat.py": "scoped writes to job_runtime_heartbeat with per-test cleanup",
     "test_jobs_queue_recovery.py": "scoped writes to pending_job_requests + linked-run rows with per-test cleanup",
     "test_jobs_queue_boot_drain.py": "scoped writes to pending_job_requests with per-test cleanup",
+    # Read-only schema introspection. ``test_schema_drift.py`` (B5
+    # of #797 pulled forward into Batch 1 of #788) parses
+    # ``CREATE TABLE`` blocks from sql/*.sql and compares declared
+    # columns against ``information_schema.columns`` on the live dev
+    # DB to catch the migration-093 class of bug (CREATE TABLE IF
+    # NOT EXISTS no-op'd onto a pre-existing table with a different
+    # shape). The whole point of the gate is to validate against the
+    # DB the running app actually uses, so it MUST connect to
+    # ``settings.database_url``. No writes anywhere — only
+    # ``SELECT column_name FROM information_schema.columns``.
+    "smoke/test_schema_drift.py": "read-only information_schema introspection of the live dev DB schema",
 }
 
 _TESTS_DIR = Path(__file__).resolve().parents[1]

@@ -1,52 +1,48 @@
 /**
- * Ownership reporting card (#729).
+ * Ownership card (#789, parent #788).
  *
- * Three-ring sunburst keyed on ``shares_outstanding`` as the
- * denominator. Treasury is one of the categories — the denominator
- * includes it, not free float.
+ * Cross-channel deduped ownership snapshot rendered as a three-ring
+ * sunburst against the canonical ``shares_outstanding`` denominator
+ * (XBRL DEI). Treasury renders as an additive top wedge — NOT in the
+ * denominator. Treasury-in-denominator math (the prior version's
+ * ``shares_outstanding + treasury_shares``) systematically wedged
+ * every other category down by the treasury fraction; codex audit
+ * 2026-05-03 flagged this as a ship-blocker.
  *
- *   ring 1 (inner)  — total shares outstanding (label in center hole)
- *   ring 2 (middle) — Institutions / ETFs / Insiders / Treasury,
- *                     plus a transparent residual for the unaccounted
- *                     portion.
- *   ring 3 (outer)  — per-filer / per-officer wedges, plus a
- *                     transparent within-category gap when the filer
- *                     detail is incomplete (e.g. Institutions reports
- *                     a 50% aggregate but the #740 CUSIP backfill
- *                     hasn't resolved every filer to an instrument).
+ * The panel issues exactly one fetch (``fetchOwnershipRollup``) so
+ * every slice, the residual, and the coverage banner all reconcile
+ * against a single server-side ``snapshot_read`` snapshot. The five-
+ * fetch race in the prior version is gone.
  *
- * Effective coverage depends on:
- *   * #731 — shares_outstanding + treasury_shares from financial_periods (merged)
- *   * #730 — institutional_holdings via the new reader endpoint (merged)
- *   * #740 — CUSIP backfill so the ingester resolves holdings to instrument_ids (open)
- *   * #735 — DEI projection so XBRL ownership columns (treasury, public float) flow (open)
+ * Banner state machine (server-driven):
  *
- * Click on any colored wedge → drill to the L2 ownership page with
- * the corresponding filter pre-applied.
+ *   * ``no_data`` — XBRL ``shares_outstanding`` not on file. Red
+ *     banner with a "trigger fundamentals sync" CTA copy.
+ *   * ``unknown_universe`` — outstanding present but per-category
+ *     universe estimates aren't yet seeded (Tier 0 default until
+ *     #790 lands per-instrument 13F filer counts). Yellow banner
+ *     with explicit "estimate not available" copy.
+ *   * ``red`` / ``amber`` / ``green`` — universe coverage thresholds.
+ *     Red ranks worst, then ``unknown_universe``, then amber, then
+ *     green; the worst-of fold across the four tracked categories
+ *     decides the banner. Codex v2 review pinned this ordering.
+ *
+ * Concentration (sum of slices / outstanding) ships as a separate
+ * info chip — Codex v2 review caught the prior conflation that
+ * would have permanently red-banned retail-heavy names.
  */
 
 import { useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { fetchBlockholders } from "@/api/blockholders";
-import type { BlockholdersResponse } from "@/api/blockholders";
-import { fetchInstitutionalHoldings } from "@/api/institutionalHoldings";
+import { fetchOwnershipRollup } from "@/api/ownership";
 import type {
-  InstitutionalFilerHolding,
-  InstitutionalHoldingsResponse,
-} from "@/api/institutionalHoldings";
-import {
-  fetchInsiderBaseline,
-  fetchInsiderTransactions,
-  fetchInstrumentFinancials,
-} from "@/api/instruments";
-import type {
-  InsiderBaselineList,
-  InsiderTransactionsList,
-} from "@/api/instruments";
-import type { InstrumentFinancials } from "@/api/types";
+  OwnershipBannerVariant,
+  OwnershipCoverageState,
+  OwnershipRollupResponse,
+  OwnershipSliceCategory,
+} from "@/api/ownership";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
-import { OwnershipFreshnessChips } from "@/components/instrument/OwnershipFreshnessChips";
 import {
   OwnershipLegend,
   OwnershipSunburst,
@@ -58,16 +54,11 @@ import {
   formatShares,
   parseShareCount,
 } from "@/components/instrument/ownershipMetrics";
-import {
-  type InsiderRowShape,
-  isBaselineHoldingRow,
-  isInsiderHoldingRow,
-} from "@/components/instrument/ownershipInsiders";
-import {
-  type SunburstHolder,
-  type SunburstInputs,
-  buildSunburstRings,
+import type {
+  SunburstHolder,
+  SunburstInputs,
 } from "@/components/instrument/ownershipRings";
+import { buildSunburstRings } from "@/components/instrument/ownershipRings";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 
@@ -75,70 +66,9 @@ export interface OwnershipPanelProps {
   readonly symbol: string;
 }
 
-interface OwnershipData {
-  readonly outstanding: number | null;
-  readonly treasury: number | null;
-  readonly institutions_total: number | null;
-  readonly etfs_total: number | null;
-  readonly insiders_total: number | null;
-  readonly blockholders_total: number | null;
-  readonly institutional_holders: readonly SunburstHolder[];
-  readonly etf_holders: readonly SunburstHolder[];
-  readonly insider_holders: readonly SunburstHolder[];
-  readonly blockholder_holders: readonly SunburstHolder[];
-  /** 13F snapshot date — applies to both Institutions and ETFs (same
-   *  ``period_of_report`` cohort across filer types). */
-  readonly thirteen_f_as_of: string | null;
-  /** Latest Form 4 transaction date for any insider on this issuer. */
-  readonly insiders_as_of: string | null;
-  /** XBRL period_end of the row that produced ``treasury``. */
-  readonly treasury_as_of: string | null;
-  /** Latest 13D/G filed_at across the blocks on this issuer (#766). */
-  readonly blockholders_as_of: string | null;
-}
-
-function pickLatestBalance(
-  financials: InstrumentFinancials,
-  column: string,
-): number | null {
-  for (const row of financials.rows) {
-    const raw = row.values[column];
-    const parsed = parseShareCount(raw ?? null);
-    if (parsed !== null) return parsed;
-  }
-  return null;
-}
-
 export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
-  const balanceState = useAsync<InstrumentFinancials>(
-    useCallback(
-      () =>
-        fetchInstrumentFinancials(symbol, {
-          statement: "balance",
-          period: "quarterly",
-        }),
-      [symbol],
-    ),
-    [symbol],
-  );
-
-  const institutionalState = useAsync<InstitutionalHoldingsResponse>(
-    useCallback(() => fetchInstitutionalHoldings(symbol, 500), [symbol]),
-    [symbol],
-  );
-
-  const insidersState = useAsync<InsiderTransactionsList>(
-    useCallback(() => fetchInsiderTransactions(symbol, 200), [symbol]),
-    [symbol],
-  );
-
-  const baselineState = useAsync<InsiderBaselineList>(
-    useCallback(() => fetchInsiderBaseline(symbol), [symbol]),
-    [symbol],
-  );
-
-  const blockholdersState = useAsync<BlockholdersResponse>(
-    useCallback(() => fetchBlockholders(symbol, 200), [symbol]),
+  const rollupState = useAsync<OwnershipRollupResponse>(
+    useCallback(() => fetchOwnershipRollup(symbol), [symbol]),
     [symbol],
   );
 
@@ -158,462 +88,335 @@ export function OwnershipPanel({ symbol }: OwnershipPanelProps): JSX.Element {
     [navigate, symbol],
   );
 
-  const isLoading =
-    balanceState.loading ||
-    institutionalState.loading ||
-    insidersState.loading ||
-    baselineState.loading ||
-    blockholdersState.loading;
-  const allErrored =
-    balanceState.error !== null &&
-    institutionalState.error !== null &&
-    insidersState.error !== null &&
-    baselineState.error !== null &&
-    blockholdersState.error !== null;
-
   return (
     <Pane
       title="Ownership"
-      source={{ providers: ["sec_13f", "sec_form3", "sec_form4", "sec_13dg", "sec_xbrl"] }}
+      source={{
+        providers: [
+          "sec_13f",
+          "sec_form3",
+          "sec_form4",
+          "sec_13dg",
+          "sec_def14a",
+          "sec_xbrl",
+        ],
+      }}
     >
-      {isLoading ? (
+      {rollupState.loading ? (
         <SectionSkeleton rows={4} />
-      ) : allErrored ? (
-        <SectionError
-          onRetry={() => {
-            balanceState.refetch();
-            institutionalState.refetch();
-            insidersState.refetch();
-            baselineState.refetch();
-            blockholdersState.refetch();
-          }}
-        />
+      ) : rollupState.error !== null || rollupState.data === null ? (
+        // ``data === null`` should only be reachable as a defense-
+        // in-depth path: the rollup endpoint always returns at least
+        // the ``no_data`` payload shape (200 OK + empty slices), so a
+        // null body would only arise from a future middleware that
+        // unwraps the response. Surface it as an error rather than
+        // hanging on a perma-skeleton. Claude PR review (PR 798)
+        // round 2 caught the prior skeleton fallback.
+        <SectionError onRetry={rollupState.refetch} />
       ) : (
-        <PanelBody
-          balance={balanceState.data}
-          institutional={institutionalState.data}
-          insiders={insidersState.data}
-          baseline={baselineState.data}
-          blockholders={blockholdersState.data}
-          onWedgeClick={handleWedgeClick}
-        />
+        <PanelBody rollup={rollupState.data} onWedgeClick={handleWedgeClick} />
       )}
     </Pane>
   );
 }
 
+/**
+ * Map the rollup response to the existing ``SunburstInputs`` shape so
+ * the chart code can render unchanged. ``shares_outstanding`` is the
+ * denominator (treasury-on-top model); per-slice totals come from
+ * the deduped rollup; per-filer holders feed the outer ring.
+ *
+ * ``def14a_unmatched`` rows fold into the ``insiders`` chart category
+ * (they are by definition named officers in the proxy with no Form 4
+ * filing on record). The slice table keeps them as a separate
+ * category for transparency, but the chart treats them as insiders so
+ * the sunburst doesn't need a fifth named category and the chart-vs-
+ * table totals stay reconciled. Codex pre-push review (Batch 1 of
+ * #788) caught the prior version that dropped them from the chart.
+ */
+export function rollupToSunburstInputs(
+  rollup: OwnershipRollupResponse,
+): SunburstInputs | null {
+  const outstanding = parseShareCount(rollup.shares_outstanding);
+  if (outstanding === null || outstanding <= 0) return null;
+  const sliceTotal = (cat: OwnershipSliceCategory): number | null => {
+    const found = rollup.slices.find((s) => s.category === cat);
+    return found === undefined ? null : parseShareCount(found.total_shares);
+  };
+  const sliceAsOf = (cat: OwnershipSliceCategory): string | null => {
+    const found = rollup.slices.find((s) => s.category === cat);
+    if (found === undefined || found.holders.length === 0) return null;
+    let latest: string | null = null;
+    for (const h of found.holders) {
+      if (h.as_of_date === null) continue;
+      if (latest === null || h.as_of_date > latest) latest = h.as_of_date;
+    }
+    return latest;
+  };
+  const flattenHolders = (
+    cat: OwnershipSliceCategory,
+    target: SunburstHolder["category"],
+  ): SunburstHolder[] => {
+    const found = rollup.slices.find((s) => s.category === cat);
+    if (found === undefined) return [];
+    const out: SunburstHolder[] = [];
+    for (const h of found.holders) {
+      const shares = parseShareCount(h.shares);
+      if (shares === null || shares <= 0) continue;
+      const key = h.filer_cik ?? `name:${h.filer_name}`;
+      out.push({ key, label: h.filer_name, shares, category: target });
+    }
+    return out;
+  };
+
+  const treasury = parseShareCount(rollup.treasury_shares);
+
+  // Insiders bucket folds in def14a_unmatched holders. Both totals
+  // and as_of dates take the max across the two slices so the chart
+  // category sums match the slice table's insiders + def14a_unmatched
+  // rows.
+  const insiders_slice_total = sliceTotal("insiders");
+  const def14a_unmatched_total = sliceTotal("def14a_unmatched");
+  const combined_insiders_total =
+    insiders_slice_total === null && def14a_unmatched_total === null
+      ? null
+      : (insiders_slice_total ?? 0) + (def14a_unmatched_total ?? 0);
+  // Latest as_of across {insiders, def14a_unmatched}. Sort surfaces
+  // the most recent date last; ``at(-1)`` returns it; ``?? null``
+  // handles the both-empty case. Claude PR review (PR 798) round 2
+  // pinned this idiom over nested ternaries — extends cleanly when a
+  // third source enters the fold.
+  const combined_insiders_as_of =
+    [sliceAsOf("insiders"), sliceAsOf("def14a_unmatched")]
+      .filter((d): d is string => d !== null)
+      .sort()
+      .at(-1) ?? null;
+
+  return {
+    // Canonical denominator: shares_outstanding only. Treasury is
+    // additive on top, NOT part of the denominator.
+    total_shares: outstanding,
+    holders: [
+      ...flattenHolders("institutions", "institutions"),
+      ...flattenHolders("etfs", "etfs"),
+      ...flattenHolders("insiders", "insiders"),
+      ...flattenHolders("def14a_unmatched", "insiders"),
+      ...flattenHolders("blockholders", "blockholders"),
+    ],
+    institutions_total: sliceTotal("institutions"),
+    etfs_total: sliceTotal("etfs"),
+    insiders_total: combined_insiders_total,
+    blockholders_total: sliceTotal("blockholders"),
+    treasury_shares: treasury,
+    institutions_as_of: sliceAsOf("institutions"),
+    etfs_as_of: sliceAsOf("etfs"),
+    insiders_as_of: combined_insiders_as_of,
+    treasury_as_of: rollup.treasury_as_of,
+    blockholders_as_of: sliceAsOf("blockholders"),
+  };
+}
+
+const _BANNER_VARIANT_CLASS: Record<OwnershipBannerVariant, string> = {
+  error:
+    "border-red-200 bg-red-50 text-red-900 dark:border-red-900/60 dark:bg-red-900/20 dark:text-red-200",
+  warning:
+    "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/60 dark:bg-amber-900/20 dark:text-amber-200",
+  info: "border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200",
+  success:
+    "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-900/20 dark:text-emerald-200",
+};
+
 interface PanelBodyProps {
-  readonly balance: InstrumentFinancials | null;
-  readonly institutional: InstitutionalHoldingsResponse | null;
-  readonly insiders: InsiderTransactionsList | null;
-  readonly baseline: InsiderBaselineList | null;
-  readonly blockholders: BlockholdersResponse | null;
+  readonly rollup: OwnershipRollupResponse;
   readonly onWedgeClick: (target: WedgeClick) => void;
 }
 
-/** Wraps ``renderBody`` so the freshness chip's ``today`` reference can
- *  be a stable ``useMemo`` value. Pre-fix the panel passed
- *  ``new Date()`` inline on every render, which the chip strip then
- *  treated as a new prop and re-rendered against. Captured once per
- *  mount so the chips memoise cleanly across parent re-renders. */
-function PanelBody({
-  balance,
-  institutional,
-  insiders,
-  baseline,
-  blockholders,
-  onWedgeClick,
-}: PanelBodyProps): JSX.Element {
-  const today = useMemo(() => new Date(), []);
-  return renderBody(
-    extractData(balance, institutional, insiders, baseline, blockholders),
-    onWedgeClick,
-    today,
-  );
-}
-
-export function extractData(
-  balance: InstrumentFinancials | null,
-  institutional: InstitutionalHoldingsResponse | null,
-  insiders: InsiderTransactionsList | null,
-  baseline: InsiderBaselineList | null,
-  blockholders: BlockholdersResponse | null,
-): OwnershipData {
-  const outstanding =
-    balance !== null ? pickLatestBalance(balance, "shares_outstanding") : null;
-  const treasury =
-    balance !== null ? pickLatestBalance(balance, "treasury_shares") : null;
-
-  const inst_totals = institutional?.totals ?? null;
-  const filers = institutional?.filers ?? [];
-  // Equity-only — option exposure double-counts the underlying.
-  const equity_filers = filers.filter((f) => f.is_put_call === null);
-
-  const institutional_holders: SunburstHolder[] = equity_filers
-    .filter((f) => f.filer_type !== "ETF")
-    .map(filerToHolder("institutions"));
-  const etf_holders: SunburstHolder[] = equity_filers
-    .filter((f) => f.filer_type === "ETF")
-    .map(filerToHolder("etfs"));
-
-  // Insider holders = Form 4 cumulative (latest post_transaction_shares
-  // per filer) + Form 3 baseline-only filers (#768 PR4) so officers
-  // who never traded after appointment surface on the per-officer
-  // ring. The backend NOT EXISTS gate guarantees no overlap between
-  // the two sets.
-  const form4_insider_holders = aggregateInsiderHoldersForSunburst(insiders);
-  const baseline_insider_holders = baselineToHolders(baseline);
-  const insider_holders: SunburstHolder[] = [
-    ...form4_insider_holders,
-    ...baseline_insider_holders,
-  ];
-
-  const institutions_total = parseShareCount(inst_totals?.institutions_shares ?? null);
-  const etfs_total = parseShareCount(inst_totals?.etfs_shares ?? null);
-
-  // Blockholders (#766): one wedge per ≥5% block. The reader
-  // returns per-reporter chain rows (matching the issue spec); the
-  // frontend dedupes by accession so joint-filing reporters
-  // collapse to a single wedge whose ``shares`` matches the
-  // backend's per-accession ``MAX(aggregate_amount_owned)`` rollup.
-  // Without this dedupe, two joint reporters claiming the same 1.5M
-  // block would surface as 2 wedges summing to 3M, which then
-  // triggers the snapshot-lag leaf-sum bump in ``buildSunburstRings``
-  // and double-counts the block in the category total. Codex
-  // pre-push review caught this.
-  const blockholder_holders: readonly SunburstHolder[] = blockholdersToHolders(blockholders);
-  const blockholders_total = parseShareCount(blockholders?.totals?.blockholders_shares ?? null);
-  const blockholders_as_of = blockholders?.totals?.as_of_date ?? null;
-  // Form 4 has no aggregate-total endpoint — sum the per-officer
-  // post-transaction balances. When no officer rows are on file the
-  // total is null (category does not render).
-  const insiders_total =
-    insider_holders.length === 0
-      ? null
-      : insider_holders.reduce((s, h) => s + h.shares, 0);
-
-  // Per-category freshness sources (#767):
-  //   * 13F (Institutions + ETFs): one shared period_of_report from
-  //     the totals row — both filer-type buckets are computed from
-  //     the same ``MAX(period_of_report)`` cohort backend-side.
-  //   * Insiders: latest txn_date observed across non-derivative
-  //     post-transaction rows. The reader endpoint exposes a
-  //     summary.latest_txn_date but the panel hits the per-row list;
-  //     derive locally so we don't add a second round trip.
-  //   * Treasury: balance-sheet row period_end that produced the
-  //     value — already the latest non-null treasury_shares row from
-  //     pickLatestBalance.
-  const thirteen_f_as_of = inst_totals?.period_of_report ?? null;
-  // Insider freshness factors in BOTH sources: latest Form 4 txn_date
-  // AND latest Form 3 baseline as_of_date. An issuer where every
-  // observed insider holds via a Form 3 grant and never trades would
-  // have no Form 4 rows at all but should still surface the latest
-  // baseline date as the Insiders chip's "as of".
-  const form4_latest =
-    insiders === null || insiders.rows.length === 0
-      ? null
-      : latestTxnDate(insiders.rows as readonly InsiderRowShape[]);
-  const baseline_latest = latestBaselineDate(baseline);
-  const insiders_as_of = maxIsoDate(form4_latest, baseline_latest);
-  const treasury_as_of =
-    treasury !== null && balance !== null ? findRowDateFor(balance, "treasury_shares") : null;
-
-  return {
-    outstanding,
-    treasury,
-    institutions_total,
-    etfs_total,
-    insiders_total,
-    blockholders_total,
-    institutional_holders,
-    etf_holders,
-    insider_holders,
-    blockholder_holders,
-    thirteen_f_as_of,
-    insiders_as_of,
-    treasury_as_of,
-    blockholders_as_of,
-  };
-}
-
-/** Map blockholder API rows into SunburstHolder wedges, deduping
- *  by accession_number so joint-filing reporters collapse to one
- *  wedge per block. The backend orders rows by
- *  ``aggregate_amount_owned DESC`` per accession, so the first
- *  occurrence of each accession is the largest-aggregate
- *  representative — keep that one and drop the rest.
- *
- *  Wedge identity uses reporter_cik (or name fallback) rather than
- *  filer_cik because two distinct beneficial owners can share one
- *  EDGAR submitter; keying on filer_cik would collide their
- *  wedges. Codex pre-push review caught this. */
-function blockholdersToHolders(
-  blockholders: BlockholdersResponse | null,
-): readonly SunburstHolder[] {
-  if (blockholders === null) return [];
-  const seen_accessions = new Set<string>();
-  const out: SunburstHolder[] = [];
-  for (const row of blockholders.blockholders) {
-    if (seen_accessions.has(row.accession_number)) continue;
-    seen_accessions.add(row.accession_number);
-    const shares = parseShareCount(row.aggregate_amount_owned);
-    if (shares === null || shares <= 0) continue;
-    const reporter_identity = row.reporter_cik ?? `name:${row.reporter_name}`;
-    out.push({
-      key: `block:${reporter_identity}`,
-      label: row.filer_name,
-      shares,
-      category: "blockholders",
-    });
-  }
-  return out;
-}
-
-/** Map baseline-API rows into the SunburstHolder shape so the
- *  ownership ring renders Form-3-only insiders alongside Form 4
- *  cumulative balances (#768 PR4). Uses the shared
- *  ``isBaselineHoldingRow`` predicate so the holders set and the
- *  freshness chip's ``as_of_date`` derivation can never drift. */
-function baselineToHolders(
-  baseline: InsiderBaselineList | null,
-): readonly SunburstHolder[] {
-  if (baseline === null || baseline.rows.length === 0) return [];
-  const out: SunburstHolder[] = [];
-  for (const row of baseline.rows) {
-    if (!isBaselineHoldingRow(row)) continue;
-    // Predicate guarantees parseShareCount > 0.
-    const shares = parseShareCount(row.shares)!;
-    // Disambiguate against any same-CIK Form 4 leaf (the backend
-    // gate excludes them but defensively suffix the key — render
-    // collisions on a flat ring would silently swap wedges).
-    const key = `baseline:${row.filer_cik}:${row.is_derivative ? "d" : "n"}`;
-    out.push({
-      key,
-      label: row.filer_name,
-      shares,
-      category: "insiders",
-    });
-  }
-  return out;
-}
-
-/** Latest ``as_of_date`` across the baseline rows that actually
- *  render. Uses the same eligibility predicate as
- *  ``baselineToHolders`` so the chip never advances past a wedge
- *  that doesn't render. */
-function latestBaselineDate(baseline: InsiderBaselineList | null): string | null {
-  if (baseline === null || baseline.rows.length === 0) return null;
-  let latest: string | null = null;
-  for (const row of baseline.rows) {
-    if (!isBaselineHoldingRow(row)) continue;
-    if (latest === null || row.as_of_date > latest) latest = row.as_of_date;
-  }
-  return latest;
-}
-
-/** Max of two ISO ``YYYY-MM-DD`` strings (lex-sortable so string
- *  compare is correct). Returns null when both are null. */
-function maxIsoDate(a: string | null, b: string | null): string | null {
-  if (a === null) return b;
-  if (b === null) return a;
-  return a >= b ? a : b;
-}
-
-function latestTxnDate(rows: readonly InsiderRowShape[]): string | null {
-  let latest: string | null = null;
-  for (const row of rows) {
-    if (!isInsiderHoldingRow(row)) continue;
-    if (latest === null || row.txn_date > latest) latest = row.txn_date;
-  }
-  return latest;
-}
-
-/** Find the period_end of the first balance-sheet row that has a
- *  non-null value for ``column``. Mirrors the iteration in
- *  ``pickLatestBalance`` so the date and value stay paired. */
-function findRowDateFor(financials: InstrumentFinancials, column: string): string | null {
-  for (const row of financials.rows) {
-    const raw = row.values[column];
-    const parsed = parseShareCount(raw ?? null);
-    if (parsed !== null) return row.period_end;
-  }
-  return null;
-}
-
-function filerToHolder(
-  category: SunburstHolder["category"],
-): (f: InstitutionalFilerHolding) => SunburstHolder {
-  return (f) => ({
-    key: f.filer_cik,
-    label: f.filer_name,
-    shares: parseShareCount(f.shares) ?? 0,
-    category,
-  });
-}
-
-function aggregateInsiderHoldersForSunburst(
-  insiders: InsiderTransactionsList | null,
-): readonly SunburstHolder[] {
-  if (insiders === null) return [];
-  const latestByFiler = new Map<
-    string,
-    { txn_date: string; shares: number; label: string }
-  >();
-  for (const row of insiders.rows as readonly InsiderRowShape[]) {
-    if (!isInsiderHoldingRow(row)) continue;
-    // Predicate above guarantees parseShareCount is non-null.
-    const shares = parseShareCount(row.post_transaction_shares)!;
-    const key = row.filer_cik ?? `name:${row.filer_name}`;
-    const existing = latestByFiler.get(key);
-    if (existing === undefined || row.txn_date > existing.txn_date) {
-      latestByFiler.set(key, {
-        txn_date: row.txn_date,
-        shares,
-        label: row.filer_name,
-      });
-    }
-  }
-  const holders: SunburstHolder[] = [];
-  for (const [key, entry] of latestByFiler.entries()) {
-    holders.push({
-      key,
-      label: entry.label,
-      shares: entry.shares,
-      category: "insiders",
-    });
-  }
-  return holders;
-}
-
-function renderBody(
-  data: OwnershipData,
-  onWedgeClick: (target: WedgeClick) => void,
-  today: Date,
-): JSX.Element {
-  if (data.outstanding === null || data.outstanding <= 0) {
+function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
+  const inputs = useMemo(() => rollupToSunburstInputs(rollup), [rollup]);
+  if (rollup.banner.state === "no_data" || inputs === null) {
     return (
-      <EmptyState
-        title="No ownership data"
-        description="Shares outstanding is not on file for this instrument yet — the ownership breakdown needs SEC XBRL coverage to compute the denominator."
-      />
+      <div className="flex flex-col gap-3">
+        <Banner banner={rollup.banner} />
+        <EmptyState
+          title="No ownership data"
+          description="XBRL shares-outstanding not yet on file for this instrument. Trigger a fundamentals sync, or wait for the next scheduled run."
+        />
+      </div>
     );
   }
-
-  // Denominator = outstanding + treasury. Operator's mental model:
-  // "100% of issued / allotted shares — some held in market, some
-  // held back in vault." Treasury renders as a category wedge.
-  const total_shares = data.outstanding + (data.treasury ?? 0);
-  const inputs: SunburstInputs = {
-    total_shares,
-    holders: [
-      ...data.institutional_holders,
-      ...data.etf_holders,
-      ...data.insider_holders,
-      ...data.blockholder_holders,
-    ],
-    institutions_total: data.institutions_total,
-    etfs_total: data.etfs_total,
-    insiders_total: data.insiders_total,
-    blockholders_total: data.blockholders_total,
-    treasury_shares: data.treasury,
-    institutions_as_of: data.thirteen_f_as_of,
-    etfs_as_of: data.thirteen_f_as_of,
-    insiders_as_of: data.insiders_as_of,
-    treasury_as_of: data.treasury_as_of,
-    blockholders_as_of: data.blockholders_as_of,
-  };
   const rings = buildSunburstRings(inputs);
   if (rings === null) {
     return (
-      <EmptyState
-        title="No ownership data"
-        description="Sunburst rings could not be derived — shares outstanding resolved to zero or the input snapshot is malformed."
-      />
+      <div className="flex flex-col gap-3">
+        <Banner banner={rollup.banner} />
+        <EmptyState
+          title="No ownership data"
+          description="Sunburst rings could not be derived — shares outstanding resolved to zero or the input snapshot is malformed."
+        />
+      </div>
     );
   }
 
-  const denom = rings.total_shares;
-  const accountedFor = rings.categories.reduce((s, c) => s + c.shares, 0);
-  const accountedPct = accountedFor / denom;
-  const oversubscribed = rings.total_shares > rings.reported_total;
-
   return (
-    <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
-      <div className="flex flex-col items-center gap-3">
-        <OwnershipSunburst inputs={inputs} onWedgeClick={onWedgeClick} />
-        <OwnershipLegend rings={rings} />
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="mb-2">
-          <OwnershipFreshnessChips rings={rings} today={today} />
+    <div className="flex flex-col gap-3">
+      <Banner banner={rollup.banner} />
+      <ConcentrationChip rollup={rollup} />
+      {rollup.residual.oversubscribed && <OversubscribedWarning />}
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
+        <div className="flex flex-col items-center gap-3">
+          <OwnershipSunburst inputs={inputs} onWedgeClick={onWedgeClick} />
+          <OwnershipLegend rings={rings} />
         </div>
-        <p className="mb-1 text-xs text-slate-500 dark:text-slate-400">
-          {formatShares(data.outstanding)} outstanding
-          {data.treasury !== null && data.treasury > 0 && (
-            <> + {formatShares(data.treasury)} treasury</>
-          )}
-          .
-        </p>
-        <p className="mb-2 text-xs">
-          <span className="font-medium text-slate-700 dark:text-slate-200">
-            {formatPct(accountedPct)} accounted for
-          </span>
-          {accountedPct < 0.999 && (
-            <span className="ml-1.5 text-slate-500 dark:text-slate-400">
-              · remainder is unallocated public float (gated on
-              {" "}
-              <span className="font-mono">#740</span> CUSIP backfill +{" "}
-              <span className="font-mono">#735</span> DEI projection).
-            </span>
-          )}
-          {oversubscribed && (
-            <span className="ml-1.5 text-amber-700 dark:text-amber-400">
-              · category totals exceed reported total shares by{" "}
-              {formatShares(rings.total_shares - rings.reported_total)} (snapshot lag).
-            </span>
-          )}
-        </p>
-        <table className="w-full text-sm">
-          <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-            <tr>
-              <th className="pb-1 text-left">Category</th>
-              <th className="pb-1 text-right">Shares</th>
-              <th className="pb-1 text-right">% of total</th>
-              <th className="pb-1 text-right">Resolved filers</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rings.categories.map((cat) => {
-              const resolvedPct =
-                cat.shares > 0 ? cat.resolved_leaf_shares / cat.shares : 0;
-              return (
-                <tr
-                  key={cat.key}
-                  className="border-t border-t-slate-100 dark:border-t-slate-800"
-                >
-                  <td className="py-1.5 text-slate-700 dark:text-slate-200">
-                    {cat.label}
-                  </td>
-                  <td className="py-1.5 text-right font-mono text-slate-700 dark:text-slate-200">
-                    {formatShares(cat.shares)}
-                  </td>
-                  <td className="py-1.5 text-right font-mono text-slate-900 dark:text-slate-100">
-                    {formatPct(cat.shares / denom)}
-                  </td>
-                  <td className="py-1.5 text-right font-mono text-slate-500 dark:text-slate-400">
-                    {cat.leaves.length === 0 && cat.shares > 0
-                      ? "—"
-                      : formatPct(resolvedPct)}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
-          Click any colored wedge for the per-filer drilldown.
-        </p>
+        <div className="min-w-0 flex-1">
+          <p className="mb-1 text-xs text-slate-500 dark:text-slate-400">
+            {rollup.shares_outstanding !== null
+              ? `${formatShares(parseShareCount(rollup.shares_outstanding) ?? 0)} outstanding`
+              : "outstanding unknown"}
+            {rollup.treasury_shares !== null
+              && parseShareCount(rollup.treasury_shares) !== null
+              && (parseShareCount(rollup.treasury_shares) ?? 0) > 0 && (
+                <> + {formatShares(parseShareCount(rollup.treasury_shares) ?? 0)} treasury</>
+              )}
+            .
+          </p>
+          <SliceTable rollup={rollup} />
+          <ResidualLine rollup={rollup} />
+          <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
+            Click any colored wedge for the per-filer drilldown.
+          </p>
+        </div>
       </div>
     </div>
   );
 }
+
+interface BannerProps {
+  readonly banner: OwnershipRollupResponse["banner"];
+}
+
+function Banner({ banner }: BannerProps): JSX.Element | null {
+  if (banner.state === "green") {
+    return (
+      <div
+        className={`rounded-md border px-3 py-2 text-xs ${_BANNER_VARIANT_CLASS.success}`}
+        role="status"
+        data-banner-state={banner.state}
+      >
+        <span className="font-medium">{banner.headline}</span>
+        <span className="ml-1.5">{banner.body}</span>
+      </div>
+    );
+  }
+  return (
+    <div
+      className={`rounded-md border px-3 py-2 text-xs ${_BANNER_VARIANT_CLASS[banner.variant]}`}
+      role="status"
+      data-banner-state={banner.state}
+    >
+      <p className="font-medium">{banner.headline}</p>
+      <p className="mt-0.5">{banner.body}</p>
+    </div>
+  );
+}
+
+interface ConcentrationChipProps {
+  readonly rollup: OwnershipRollupResponse;
+}
+
+function ConcentrationChip({ rollup }: ConcentrationChipProps): JSX.Element {
+  return (
+    <p className="text-xs text-slate-500 dark:text-slate-400" data-test="concentration-chip">
+      {rollup.concentration.info_chip}
+    </p>
+  );
+}
+
+function OversubscribedWarning(): JSX.Element {
+  // The server clamped the residual to 0; surface the diagnostic so
+  // the operator knows a stale 13F + fresh Form 4/13D mix is in play.
+  return (
+    <div
+      className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-900/20 dark:text-amber-200"
+      role="status"
+      data-test="oversubscribed-warning"
+    >
+      Category totals exceed shares outstanding (likely cause: stale 13F
+      quarter combined with fresh Form 4 / 13D filings). Awaiting next
+      13F cycle for the snapshots to align.
+    </div>
+  );
+}
+
+function ResidualLine({ rollup }: { rollup: OwnershipRollupResponse }): JSX.Element {
+  const pct = parseShareCount(rollup.residual.pct_outstanding) ?? 0;
+  return (
+    <p className="mt-2 text-xs text-slate-500 dark:text-slate-400" data-test="residual-line">
+      {rollup.residual.label}: {formatPct(pct)}
+    </p>
+  );
+}
+
+interface SliceTableProps {
+  readonly rollup: OwnershipRollupResponse;
+}
+
+const _CATEGORY_ORDER_TABLE: readonly OwnershipSliceCategory[] = [
+  "insiders",
+  "blockholders",
+  "institutions",
+  "etfs",
+  "def14a_unmatched",
+];
+
+function SliceTable({ rollup }: SliceTableProps): JSX.Element {
+  const slicesByCategory = new Map(rollup.slices.map((s) => [s.category, s]));
+  const visible = _CATEGORY_ORDER_TABLE.filter((cat) => slicesByCategory.has(cat));
+  if (visible.length === 0) {
+    return (
+      <p className="text-xs text-slate-500 dark:text-slate-400">
+        No filings ingested yet.
+      </p>
+    );
+  }
+  return (
+    <table className="w-full text-sm">
+      <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+        <tr>
+          <th className="pb-1 text-left">Category</th>
+          <th className="pb-1 text-right">Shares</th>
+          <th className="pb-1 text-right">% of outstanding</th>
+          <th className="pb-1 text-right">Filers</th>
+        </tr>
+      </thead>
+      <tbody>
+        {visible.map((cat) => {
+          const slc = slicesByCategory.get(cat)!;
+          const shares = parseShareCount(slc.total_shares) ?? 0;
+          const pct = parseShareCount(slc.pct_outstanding) ?? 0;
+          return (
+            <tr key={cat} className="border-t border-t-slate-100 dark:border-t-slate-800">
+              <td className="py-1.5 text-slate-700 dark:text-slate-200">
+                {slc.label}
+              </td>
+              <td className="py-1.5 text-right font-mono text-slate-700 dark:text-slate-200">
+                {formatShares(shares)}
+              </td>
+              <td className="py-1.5 text-right font-mono text-slate-900 dark:text-slate-100">
+                {formatPct(pct)}
+              </td>
+              <td className="py-1.5 text-right font-mono text-slate-500 dark:text-slate-400">
+                {slc.filer_count}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+// Internal banner-state union exported solely so the test file can
+// drive snapshot fixtures without re-importing from the api module
+// (keeps the test imports tight). Codex caught a similar pattern on
+// #767's freshness chip extraction.
+export type _BannerStateForTest = OwnershipCoverageState;

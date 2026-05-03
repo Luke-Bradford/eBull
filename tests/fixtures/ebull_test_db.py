@@ -136,6 +136,12 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "def14a_ingest_log",
     "def14a_beneficial_holdings",
     "filing_events",
+    # #794 — instrument CIK and symbol history (Batch 1 of #788). FK →
+    # instruments (cascade on delete). Listed before the instruments
+    # row truncation further down so a test that populates a history
+    # row without touching the instruments row clears deterministically.
+    "instrument_cik_history",
+    "instrument_symbol_history",
     "decision_audit",  # #315 Phase 3 alerts
     "trade_recommendations",  # #315 Phase 3 alerts (FK parent of decision_audit)
     "operators",  # #315 Phase 3 alerts (cursor column)

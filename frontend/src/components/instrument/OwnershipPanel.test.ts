@@ -1,485 +1,330 @@
 /**
- * Unit tests for the ownership panel's data extraction.
+ * Unit tests for the ownership panel's rollup-mapping helper
+ * (``rollupToSunburstInputs``) — the pure function that converts the
+ * deduped server payload into the chart's ``SunburstInputs`` shape.
  *
- * Focused on the Form 3 baseline merging behaviour added in #768 PR4.
- * The full panel is React+ResponsiveContainer-heavy and not amenable
- * to a fast unit test; we test the pure ``extractData`` helper that
- * decides which insider holders surface on the per-officer ring.
+ * The full panel rendering is React+ResponsiveContainer-heavy and
+ * not amenable to a fast unit test; we focus on the data
+ * transformation invariants that matter for correctness:
+ *
+ *   * Denominator stays at ``shares_outstanding`` even when treasury
+ *     > 0 (codex audit 2026-05-03 ship-blocker).
+ *   * Empty / pre-ingest payloads return ``null`` so the panel
+ *     renders the empty state.
+ *   * Per-category totals + holder lists round-trip from the rollup
+ *     into the SunburstInputs shape with no double-counting.
+ *
+ * The banner state machine + oversubscription warning are tested
+ * against the response shape directly (they are simple enum-keyed
+ * renders) — see the per-state assertions below.
  */
 
 import { describe, expect, it } from "vitest";
 
-import type { BlockholdersResponse } from "@/api/blockholders";
-import type {
-  InsiderBaselineList,
-  InsiderTransactionsList,
-} from "@/api/instruments";
-import type { InstitutionalHoldingsResponse } from "@/api/institutionalHoldings";
-import type { InstrumentFinancials } from "@/api/types";
+import type { OwnershipRollupResponse } from "@/api/ownership";
 
-import { extractData } from "./OwnershipPanel";
+import { rollupToSunburstInputs } from "./OwnershipPanel";
 
-const _BALANCE: InstrumentFinancials = {
-  symbol: "AAPL",
-  statement: "balance",
-  period: "quarterly",
-  currency: "USD",
-  source: "sec_xbrl",
-  rows: [
-    {
-      period_end: "2026-03-28",
-      values: {
-        shares_outstanding: "14000000000",
-        treasury_shares: "100000000",
-      },
+function _baseRollup(
+  overrides: Partial<OwnershipRollupResponse> = {},
+): OwnershipRollupResponse {
+  return {
+    symbol: "TEST",
+    instrument_id: 1,
+    shares_outstanding: "1000000000",
+    shares_outstanding_as_of: "2026-03-31",
+    shares_outstanding_source: {
+      accession_number: null,
+      concept: "EntityCommonStockSharesOutstanding",
+      form_type: null,
     },
-  ],
-} as unknown as InstrumentFinancials;
+    treasury_shares: null,
+    treasury_as_of: null,
+    slices: [],
+    residual: {
+      shares: "1000000000",
+      pct_outstanding: "1",
+      label: "Public / unattributed",
+      tooltip: "tooltip",
+      oversubscribed: false,
+    },
+    concentration: {
+      pct_outstanding_known: "0",
+      info_chip: "Known filers hold 0% of float.",
+    },
+    coverage: {
+      state: "unknown_universe",
+      categories: {},
+    },
+    banner: {
+      state: "unknown_universe",
+      variant: "warning",
+      headline: "Coverage estimate not available",
+      body: "Treat as best-effort.",
+    },
+    computed_at: "2026-05-03T00:00:00Z",
+    ...overrides,
+  };
+}
 
-const _EMPTY_INSTITUTIONAL: InstitutionalHoldingsResponse = {
-  symbol: "AAPL",
-  totals: null,
-  filers: [],
-};
-
-const _EMPTY_INSIDERS: InsiderTransactionsList = {
-  symbol: "AAPL",
-  rows: [],
-};
-
-const _EMPTY_BASELINE: InsiderBaselineList = {
-  symbol: "AAPL",
-  rows: [],
-};
-
-const _EMPTY_BLOCKHOLDERS: BlockholdersResponse = {
-  symbol: "AAPL",
-  totals: null,
-  blockholders: [],
-};
-
-describe("extractData — Form 3 baseline merging (#768 PR4)", () => {
-  it("returns no insider holders when both Form 4 and baseline are empty", () => {
-    const data = extractData(_BALANCE, _EMPTY_INSTITUTIONAL, _EMPTY_INSIDERS, _EMPTY_BASELINE, _EMPTY_BLOCKHOLDERS);
-    expect(data.insider_holders).toHaveLength(0);
-    expect(data.insiders_total).toBeNull();
+describe("rollupToSunburstInputs — denominator stays on shares_outstanding", () => {
+  it("returns null when shares_outstanding is null", () => {
+    const inputs = rollupToSunburstInputs(
+      _baseRollup({ shares_outstanding: null }),
+    );
+    expect(inputs).toBeNull();
   });
 
-  it("surfaces baseline-only filers on the insider holders list", () => {
-    const baseline: InsiderBaselineList = {
-      symbol: "AAPL",
-      rows: [
-        {
-          filer_cik: "0001000099",
-          filer_name: "Doe, Jane",
-          filer_role: "officer:CFO",
-          security_title: "Common Stock",
-          is_derivative: false,
-          direct_indirect: "D",
-          shares: "12500",
-          value_owned: null,
-          as_of_date: "2026-01-15",
-        },
-      ],
-    };
-    const data = extractData(_BALANCE, _EMPTY_INSTITUTIONAL, _EMPTY_INSIDERS, baseline, _EMPTY_BLOCKHOLDERS);
-    expect(data.insider_holders).toHaveLength(1);
-    expect(data.insider_holders[0]!.label).toBe("Doe, Jane");
-    expect(data.insider_holders[0]!.shares).toBe(12500);
-    expect(data.insiders_total).toBe(12500);
+  it("returns null when shares_outstanding is zero", () => {
+    const inputs = rollupToSunburstInputs(
+      _baseRollup({ shares_outstanding: "0" }),
+    );
+    expect(inputs).toBeNull();
   });
 
-  it("merges Form 4 holders with baseline filers without overlap", () => {
-    // Backend's NOT EXISTS gate guarantees no CIK overlap between
-    // the two sets, but the frontend must additionally key the
-    // baseline rows under a distinct ``baseline:`` prefix so a
-    // future bug in the gate doesn't cause two same-CIK rows to
-    // collide on the same SunburstHolder.key (Recharts would
-    // silently drop one).
-    const insiders: InsiderTransactionsList = {
-      symbol: "AAPL",
-      rows: [
-        {
-          filer_cik: "0001000001",
-          filer_name: "Smith, John",
-          txn_date: "2026-04-15",
-          post_transaction_shares: "50000",
-          is_derivative: false,
-        },
-      ] as InsiderTransactionsList["rows"],
-    };
-    const baseline: InsiderBaselineList = {
-      symbol: "AAPL",
-      rows: [
-        {
-          filer_cik: "0001000099",
-          filer_name: "Doe, Jane",
-          filer_role: "officer:CFO",
-          security_title: "Common Stock",
-          is_derivative: false,
-          direct_indirect: "D",
-          shares: "12500",
-          value_owned: null,
-          as_of_date: "2026-01-15",
-        },
-      ],
-    };
-    const data = extractData(_BALANCE, _EMPTY_INSTITUTIONAL, insiders, baseline, _EMPTY_BLOCKHOLDERS);
-    expect(data.insider_holders).toHaveLength(2);
-    const keys = data.insider_holders.map((h) => h.key);
-    expect(new Set(keys).size).toBe(2); // no key collision
-    expect(keys.some((k) => k.startsWith("baseline:"))).toBe(true);
-    // Total sums Form 4 + baseline.
-    expect(data.insiders_total).toBe(62500);
-  });
-
-  it("drops baseline rows with null or non-positive shares", () => {
-    // A baseline row with a null share count (e.g. value-branch
-    // holding without a share count, or a malformed ingest) must
-    // not produce a phantom wedge.
-    const baseline: InsiderBaselineList = {
-      symbol: "AAPL",
-      rows: [
-        {
-          filer_cik: "0001000099",
-          filer_name: "Null Filer",
-          filer_role: null,
-          security_title: "Series A Units",
-          is_derivative: false,
-          direct_indirect: "D",
-          shares: null,
-          value_owned: "250000",
-          as_of_date: "2026-01-15",
-        },
-        {
-          filer_cik: "0001000100",
-          filer_name: "Zero Filer",
-          filer_role: null,
-          security_title: "Common Stock",
-          is_derivative: false,
-          direct_indirect: "D",
-          shares: "0",
-          value_owned: null,
-          as_of_date: "2026-01-15",
-        },
-      ],
-    };
-    const data = extractData(_BALANCE, _EMPTY_INSTITUTIONAL, _EMPTY_INSIDERS, baseline, _EMPTY_BLOCKHOLDERS);
-    expect(data.insider_holders).toHaveLength(0);
-    // Codex / bot review of #768 PR4: the freshness chip's
-    // ``insiders_as_of`` must use the same eligibility predicate as
-    // the holders builder. A null/zero-shares baseline row that
-    // never renders must not advance the chip past the actual ring.
-    expect(data.insiders_as_of).toBeNull();
-  });
-
-  it("insiders_as_of takes the max of latest Form 4 txn_date and baseline as_of_date", () => {
-    // Issuer with one Form 4 row from 2026-02-10 and one baseline
-    // row from 2026-04-01 — the baseline date is more recent so
-    // the chip's "as of" reflects the baseline.
-    const insiders: InsiderTransactionsList = {
-      symbol: "AAPL",
-      rows: [
-        {
-          filer_cik: "0001000001",
-          filer_name: "Smith, John",
-          txn_date: "2026-02-10",
-          post_transaction_shares: "100",
-          is_derivative: false,
-        },
-      ] as InsiderTransactionsList["rows"],
-    };
-    const baseline: InsiderBaselineList = {
-      symbol: "AAPL",
-      rows: [
-        {
-          filer_cik: "0001000099",
-          filer_name: "Doe, Jane",
-          filer_role: null,
-          security_title: "Common Stock",
-          is_derivative: false,
-          direct_indirect: "D",
-          shares: "5000",
-          value_owned: null,
-          as_of_date: "2026-04-01",
-        },
-      ],
-    };
-    const data = extractData(_BALANCE, _EMPTY_INSTITUTIONAL, insiders, baseline, _EMPTY_BLOCKHOLDERS);
-    expect(data.insiders_as_of).toBe("2026-04-01");
-  });
-
-  it("when Form 4 is newer than baseline, insiders_as_of takes the Form 4 date (Codex coverage gap)", () => {
-    const insiders: InsiderTransactionsList = {
-      symbol: "AAPL",
-      rows: [
-        {
-          filer_cik: "0001000001",
-          filer_name: "Smith, John",
-          txn_date: "2026-04-15",
-          post_transaction_shares: "50000",
-          is_derivative: false,
-        },
-      ] as InsiderTransactionsList["rows"],
-    };
-    const baseline: InsiderBaselineList = {
-      symbol: "AAPL",
-      rows: [
-        {
-          filer_cik: "0001000099",
-          filer_name: "Doe, Jane",
-          filer_role: null,
-          security_title: "Common Stock",
-          is_derivative: false,
-          direct_indirect: "D",
-          shares: "5000",
-          value_owned: null,
-          as_of_date: "2025-11-30",
-        },
-      ],
-    };
-    const data = extractData(_BALANCE, _EMPTY_INSTITUTIONAL, insiders, baseline, _EMPTY_BLOCKHOLDERS);
-    // Form 4 (2026-04-15) is newer than baseline (2025-11-30) — chip
-    // takes the Form 4 date so the chip stays in lockstep with the
-    // most recent insider activity. An older baseline never silently
-    // overrides a newer trade.
-    expect(data.insiders_as_of).toBe("2026-04-15");
-  });
-
-  it("baseline-only issuer (no Form 4 rows) still produces an Insiders as_of_date", () => {
-    const baseline: InsiderBaselineList = {
-      symbol: "AAPL",
-      rows: [
-        {
-          filer_cik: "0001000099",
-          filer_name: "Doe, Jane",
-          filer_role: null,
-          security_title: "Common Stock",
-          is_derivative: false,
-          direct_indirect: "D",
-          shares: "5000",
-          value_owned: null,
-          as_of_date: "2026-03-10",
-        },
-      ],
-    };
-    const data = extractData(_BALANCE, _EMPTY_INSTITUTIONAL, _EMPTY_INSIDERS, baseline, _EMPTY_BLOCKHOLDERS);
-    expect(data.insiders_as_of).toBe("2026-03-10");
+  it("does NOT add treasury into total_shares (corrects #789 ship-blocker)", () => {
+    const inputs = rollupToSunburstInputs(
+      _baseRollup({
+        shares_outstanding: "1000000000",
+        treasury_shares: "200000000",
+      }),
+    );
+    expect(inputs).not.toBeNull();
+    expect(inputs!.total_shares).toBe(1_000_000_000);
+    expect(inputs!.treasury_shares).toBe(200_000_000);
   });
 });
 
-describe("extractData — blockholders 5th category (#766 PR3)", () => {
-  it("returns no blockholder holders when response totals are null", () => {
-    const data = extractData(_BALANCE, _EMPTY_INSTITUTIONAL, _EMPTY_INSIDERS, _EMPTY_BASELINE, _EMPTY_BLOCKHOLDERS);
-    expect(data.blockholder_holders).toHaveLength(0);
-    expect(data.blockholders_total).toBeNull();
-    expect(data.blockholders_as_of).toBeNull();
+describe("rollupToSunburstInputs — slice totals round-trip", () => {
+  it("flattens insiders + blockholders + institutions + etfs into the holders list", () => {
+    const inputs = rollupToSunburstInputs(
+      _baseRollup({
+        shares_outstanding: "1000000000",
+        slices: [
+          {
+            category: "insiders",
+            label: "Insiders",
+            total_shares: "30000000",
+            pct_outstanding: "0.03",
+            filer_count: 1,
+            dominant_source: "form4",
+            holders: [
+              {
+                filer_cik: "0001000001",
+                filer_name: "Cook Tim",
+                shares: "30000000",
+                pct_outstanding: "0.03",
+                winning_source: "form4",
+                winning_accession: "F4-001",
+                as_of_date: "2026-03-15",
+                filer_type: null,
+                dropped_sources: [],
+              },
+            ],
+          },
+          {
+            category: "institutions",
+            label: "Institutions",
+            total_shares: "200000000",
+            pct_outstanding: "0.20",
+            filer_count: 2,
+            dominant_source: "13f",
+            holders: [
+              {
+                filer_cik: "0001000010",
+                filer_name: "BlackRock",
+                shares: "120000000",
+                pct_outstanding: "0.12",
+                winning_source: "13f",
+                winning_accession: "13F-010",
+                as_of_date: "2025-12-31",
+                filer_type: "INV",
+                dropped_sources: [],
+              },
+              {
+                filer_cik: "0001000011",
+                filer_name: "State Street",
+                shares: "80000000",
+                pct_outstanding: "0.08",
+                winning_source: "13f",
+                winning_accession: "13F-011",
+                as_of_date: "2025-12-31",
+                filer_type: "INV",
+                dropped_sources: [],
+              },
+            ],
+          },
+          {
+            category: "etfs",
+            label: "ETFs",
+            total_shares: "50000000",
+            pct_outstanding: "0.05",
+            filer_count: 1,
+            dominant_source: "13f",
+            holders: [
+              {
+                filer_cik: "0001000020",
+                filer_name: "Vanguard",
+                shares: "50000000",
+                pct_outstanding: "0.05",
+                winning_source: "13f",
+                winning_accession: "13F-020",
+                as_of_date: "2025-12-31",
+                filer_type: "ETF",
+                dropped_sources: [],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(inputs).not.toBeNull();
+    expect(inputs!.institutions_total).toBe(200_000_000);
+    expect(inputs!.etfs_total).toBe(50_000_000);
+    expect(inputs!.insiders_total).toBe(30_000_000);
+    expect(inputs!.holders).toHaveLength(4);
+    const blackrock = inputs!.holders.find((h) => h.label === "BlackRock");
+    expect(blackrock?.category).toBe("institutions");
+    expect(blackrock?.shares).toBe(120_000_000);
+    const vanguard = inputs!.holders.find((h) => h.label === "Vanguard");
+    expect(vanguard?.category).toBe("etfs");
   });
 
-  it("maps each block to one holder keyed on filer_cik", () => {
-    const blockholders: BlockholdersResponse = {
-      symbol: "AAPL",
-      totals: {
-        blockholders_shares: "4500000",
-        active_shares: "1500000",
-        passive_shares: "3000000",
-        total_filers: 2,
-        as_of_date: "2025-11-06",
-      },
-      blockholders: [
-        {
-          filer_cik: "0001234567",
-          filer_name: "Test Activist Fund LP",
-          reporter_cik: "0001234567",
-          reporter_name: "Test Activist Fund LP",
-          submission_type: "SCHEDULE 13D",
-          status: "active",
-          accession_number: "0001234567-25-000001",
-          aggregate_amount_owned: "1500000",
-          percent_of_class: "5.5",
-          additional_reporters: 0,
-          date_of_event: "2025-11-03",
-          filed_at: "2025-11-06T00:00:00Z",
-        },
-        {
-          filer_cik: "0007654321",
-          filer_name: "Index Fund",
-          reporter_cik: "0007654321",
-          reporter_name: "Index Fund",
-          submission_type: "SCHEDULE 13G",
-          status: "passive",
-          accession_number: "0007654321-25-000001",
-          aggregate_amount_owned: "3000000",
-          percent_of_class: "11.0",
-          additional_reporters: 0,
-          date_of_event: "2025-09-30",
-          filed_at: "2025-10-01T00:00:00Z",
-        },
-      ],
-    };
-    const data = extractData(_BALANCE, _EMPTY_INSTITUTIONAL, _EMPTY_INSIDERS, _EMPTY_BASELINE, blockholders);
-    expect(data.blockholder_holders).toHaveLength(2);
-    expect(data.blockholder_holders.map((h) => h.key)).toEqual([
-      "block:0001234567",
-      "block:0007654321",
+  it("derives per-category as_of_date from the latest holder date in the slice", () => {
+    const inputs = rollupToSunburstInputs(
+      _baseRollup({
+        shares_outstanding: "100000000",
+        slices: [
+          {
+            category: "insiders",
+            label: "Insiders",
+            total_shares: "30000",
+            pct_outstanding: "0.0003",
+            filer_count: 2,
+            dominant_source: "form4",
+            holders: [
+              {
+                filer_cik: "0001",
+                filer_name: "Older Holder",
+                shares: "10000",
+                pct_outstanding: "0.0001",
+                winning_source: "form4",
+                winning_accession: "F4-OLD",
+                as_of_date: "2024-01-01",
+                filer_type: null,
+                dropped_sources: [],
+              },
+              {
+                filer_cik: "0002",
+                filer_name: "Newer Holder",
+                shares: "20000",
+                pct_outstanding: "0.0002",
+                winning_source: "form4",
+                winning_accession: "F4-NEW",
+                as_of_date: "2026-04-01",
+                filer_type: null,
+                dropped_sources: [],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(inputs!.insiders_as_of).toBe("2026-04-01");
+  });
+});
+
+describe("rollupToSunburstInputs — empty / no-data cases", () => {
+  it("returns inputs with null per-category totals when no slices are present", () => {
+    const inputs = rollupToSunburstInputs(_baseRollup({ slices: [] }));
+    expect(inputs).not.toBeNull();
+    expect(inputs!.institutions_total).toBeNull();
+    expect(inputs!.etfs_total).toBeNull();
+    expect(inputs!.insiders_total).toBeNull();
+    expect(inputs!.blockholders_total).toBeNull();
+    expect(inputs!.holders).toEqual([]);
+  });
+});
+
+describe("rollupToSunburstInputs — def14a_unmatched fold (Codex review fix)", () => {
+  /**
+   * Codex pre-push review (Batch 1 of #788) caught this: the prior
+   * version dropped ``def14a_unmatched`` slices from the chart
+   * entirely. Folding into the insiders bucket keeps the chart
+   * totals reconciled with the slice table.
+   */
+  it("folds def14a_unmatched holders into the insiders bucket", () => {
+    const inputs = rollupToSunburstInputs(
+      _baseRollup({
+        shares_outstanding: "100000000",
+        slices: [
+          {
+            category: "insiders",
+            label: "Insiders",
+            total_shares: "1000000",
+            pct_outstanding: "0.01",
+            filer_count: 1,
+            dominant_source: "form4",
+            holders: [
+              {
+                filer_cik: "0001",
+                filer_name: "Officer A",
+                shares: "1000000",
+                pct_outstanding: "0.01",
+                winning_source: "form4",
+                winning_accession: "F4-A",
+                as_of_date: "2026-01-01",
+                filer_type: null,
+                dropped_sources: [],
+              },
+            ],
+          },
+          {
+            category: "def14a_unmatched",
+            label: "Proxy-only (DEF 14A)",
+            total_shares: "500000",
+            pct_outstanding: "0.005",
+            filer_count: 1,
+            dominant_source: "def14a",
+            holders: [
+              {
+                filer_cik: null,
+                filer_name: "Officer B (proxy-only)",
+                shares: "500000",
+                pct_outstanding: "0.005",
+                winning_source: "def14a",
+                winning_accession: "DEF-B",
+                as_of_date: "2026-03-01",
+                filer_type: null,
+                dropped_sources: [],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(inputs).not.toBeNull();
+    // Combined insiders total = 1M + 500k.
+    expect(inputs!.insiders_total).toBe(1_500_000);
+    // Both holders surface in the holders list under the insiders
+    // category.
+    const insiderHolders = inputs!.holders.filter((h) => h.category === "insiders");
+    expect(insiderHolders).toHaveLength(2);
+    expect(insiderHolders.map((h) => h.label).sort()).toEqual([
+      "Officer A",
+      "Officer B (proxy-only)",
     ]);
-    expect(data.blockholder_holders[0]!.shares).toBe(1500000);
-    expect(data.blockholder_holders[0]!.category).toBe("blockholders");
-    expect(data.blockholders_total).toBe(4500000);
-    expect(data.blockholders_as_of).toBe("2025-11-06");
+    // Combined as_of takes the latest of the two.
+    expect(inputs!.insiders_as_of).toBe("2026-03-01");
   });
 
-  it("collapses joint-filing reporters to one wedge per accession", () => {
-    // A joint 13D filing surfaces as 2 per-reporter rows from the
-    // backend, both pointing at the same accession with the same
-    // 1.5M-share aggregate. The frontend must dedupe by accession
-    // so the wedge count matches the backend's per-accession-block
-    // count — without this dedupe, the snapshot-lag leaf-sum bump
-    // in buildSunburstRings would inflate the category total to 3M.
-    const blockholders: BlockholdersResponse = {
-      symbol: "AAPL",
-      totals: {
-        blockholders_shares: "1500000",
-        active_shares: "1500000",
-        passive_shares: "0",
-        total_filers: 1,
-        as_of_date: "2025-11-06",
-      },
-      blockholders: [
-        {
-          filer_cik: "0001234567",
-          filer_name: "Test Activist Fund LP",
-          reporter_cik: "0001234567",
-          reporter_name: "Test Activist Fund LP",
-          submission_type: "SCHEDULE 13D",
-          status: "active",
-          accession_number: "0001234567-25-000010",
-          aggregate_amount_owned: "1500000",
-          percent_of_class: "5.5",
-          additional_reporters: 1,
-          date_of_event: "2025-11-03",
-          filed_at: "2025-11-06T00:00:00Z",
-        },
-        {
-          filer_cik: "0001234567",
-          filer_name: "Test Activist Fund LP",
-          reporter_cik: null,
-          reporter_name: "Jane Doe (managing member)",
-          submission_type: "SCHEDULE 13D",
-          status: "active",
-          accession_number: "0001234567-25-000010", // same accession!
-          aggregate_amount_owned: "1500000",
-          percent_of_class: "5.5",
-          additional_reporters: 1,
-          date_of_event: "2025-11-03",
-          filed_at: "2025-11-06T00:00:00Z",
-        },
-      ],
-    };
-    const data = extractData(_BALANCE, _EMPTY_INSTITUTIONAL, _EMPTY_INSIDERS, _EMPTY_BASELINE, blockholders);
-    expect(data.blockholder_holders).toHaveLength(1);
-    expect(data.blockholder_holders[0]!.shares).toBe(1500000);
-  });
-
-  it("does not collide wedge keys when one submitter has two distinct holders", () => {
-    // One EDGAR submitter (same filer_cik) files for two different
-    // beneficial owners (different reporter_cik). The wedge keys
-    // must be distinct so Recharts does not silently drop one.
-    const blockholders: BlockholdersResponse = {
-      symbol: "AAPL",
-      totals: {
-        blockholders_shares: "3000000",
-        active_shares: "3000000",
-        passive_shares: "0",
-        total_filers: 2,
-        as_of_date: "2025-11-06",
-      },
-      blockholders: [
-        {
-          filer_cik: "0003333333", // shared submitter
-          filer_name: "Shared Adviser LLC",
-          reporter_cik: "0008000001",
-          reporter_name: "Beneficial Owner A",
-          submission_type: "SCHEDULE 13D",
-          status: "active",
-          accession_number: "0003333333-25-000001",
-          aggregate_amount_owned: "1000000",
-          percent_of_class: "3.5",
-          additional_reporters: 0,
-          date_of_event: "2025-11-01",
-          filed_at: "2025-11-01T00:00:00Z",
-        },
-        {
-          filer_cik: "0003333333", // shared submitter
-          filer_name: "Shared Adviser LLC",
-          reporter_cik: "0008000002",
-          reporter_name: "Beneficial Owner B",
-          submission_type: "SCHEDULE 13D",
-          status: "active",
-          accession_number: "0003333333-25-000002",
-          aggregate_amount_owned: "2000000",
-          percent_of_class: "7.0",
-          additional_reporters: 0,
-          date_of_event: "2025-11-06",
-          filed_at: "2025-11-06T00:00:00Z",
-        },
-      ],
-    };
-    const data = extractData(_BALANCE, _EMPTY_INSTITUTIONAL, _EMPTY_INSIDERS, _EMPTY_BASELINE, blockholders);
-    expect(data.blockholder_holders).toHaveLength(2);
-    const keys = data.blockholder_holders.map((h) => h.key);
-    expect(new Set(keys).size).toBe(2);
-    expect(keys).toContain("block:0008000001");
-    expect(keys).toContain("block:0008000002");
-  });
-
-  it("drops blockholder rows with null or non-positive aggregate_amount_owned", () => {
-    // A defer-to-prior-cover-page filing carries null aggregate
-    // numbers — those rows surface in the drilldown table but
-    // cannot size a wedge. Blockholders_total still reflects the
-    // backend totals (sum across blocks with real numbers).
-    const blockholders: BlockholdersResponse = {
-      symbol: "AAPL",
-      totals: {
-        blockholders_shares: "1500000",
-        active_shares: "1500000",
-        passive_shares: "0",
-        total_filers: 1,
-        as_of_date: "2025-11-06",
-      },
-      blockholders: [
-        {
-          filer_cik: "0001234567",
-          filer_name: "Real Block",
-          reporter_cik: "0001234567",
-          reporter_name: "Real Block",
-          submission_type: "SCHEDULE 13D",
-          status: "active",
-          accession_number: "0001234567-25-000001",
-          aggregate_amount_owned: "1500000",
-          percent_of_class: "5.5",
-          additional_reporters: 0,
-          date_of_event: "2025-11-03",
-          filed_at: "2025-11-06T00:00:00Z",
-        },
-        {
-          filer_cik: "0009999999",
-          filer_name: "Defer-to-Prior Block",
-          reporter_cik: null,
-          reporter_name: "Defer-to-Prior Block",
-          submission_type: "SCHEDULE 13D/A",
-          status: "active",
-          accession_number: "0009999999-25-000001",
-          aggregate_amount_owned: null,
-          percent_of_class: null,
-          additional_reporters: 0,
-          date_of_event: "2025-11-03",
-          filed_at: "2025-11-06T00:00:00Z",
-        },
-      ],
-    };
-    const data = extractData(_BALANCE, _EMPTY_INSTITUTIONAL, _EMPTY_INSIDERS, _EMPTY_BASELINE, blockholders);
-    expect(data.blockholder_holders).toHaveLength(1);
-    expect(data.blockholder_holders[0]!.label).toBe("Real Block");
+  it("returns null insiders_total when both insiders and def14a_unmatched are absent", () => {
+    const inputs = rollupToSunburstInputs(
+      _baseRollup({
+        shares_outstanding: "100000000",
+        slices: [],
+      }),
+    );
+    expect(inputs!.insiders_total).toBeNull();
   });
 });
