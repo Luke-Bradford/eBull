@@ -216,3 +216,36 @@ def test_app_lifespan_boots_and_state_is_coherent() -> None:
                     delattr(app.state, flag)
             else:
                 setattr(app.state, flag, value)
+
+
+def test_insider_initial_holdings_value_owned_column_exists() -> None:
+    """Recovery gate for migration 093 schema drift (#789).
+
+    Migration 093 created ``insider_initial_holdings`` with a
+    ``value_owned`` column, but on a DB that already had the table
+    from a parallel experiment ``CREATE TABLE IF NOT EXISTS`` was a
+    no-op and the column never landed. Migration 101 explicitly
+    ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS value_owned`` to
+    repair the drift. This smoke test pins the column's existence so
+    a regression on the recovery path fails loud at boot rather than
+    silently breaking the Form 3 baseline reader.
+    """
+    import psycopg
+
+    from app.config import settings
+
+    with psycopg.connect(settings.database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_name = 'insider_initial_holdings'
+                  AND column_name = 'value_owned'
+                """,
+            )
+            row = cur.fetchone()
+    assert row is not None, (
+        "insider_initial_holdings.value_owned column missing — migration 101 did not apply or was no-op'd."
+    )
+    assert row[1] == "numeric", f"value_owned has unexpected type {row[1]!r}; expected NUMERIC."

@@ -35,8 +35,10 @@ from pydantic import BaseModel
 from app.api.auth import require_session_or_service_token
 from app.config import settings
 from app.db import get_conn
+from app.db.snapshot import snapshot_read
 from app.providers.implementations.etoro import EtoroMarketDataProvider
 from app.providers.market_data import IntradayInterval
+from app.services import ownership_rollup
 from app.services.broker_credentials import (
     CredentialNotFound,
     load_credential_for_provider_use,
@@ -3140,3 +3142,231 @@ def get_instrument_blockholders(
         totals=totals,
         blockholders=blockholders,
     )
+
+
+# ---------------------------------------------------------------------------
+# Cross-channel deduped ownership rollup — Tier 0 (#789, parent #788)
+# ---------------------------------------------------------------------------
+
+
+class _DroppedSourceModel(BaseModel):
+    source: Literal["form4", "form3", "13d", "13g", "def14a", "13f"]
+    accession_number: str
+    shares: Decimal
+    as_of_date: date | None
+
+
+class _HolderModel(BaseModel):
+    filer_cik: str | None
+    filer_name: str
+    shares: Decimal
+    pct_outstanding: Decimal
+    winning_source: Literal["form4", "form3", "13d", "13g", "def14a", "13f"]
+    winning_accession: str
+    as_of_date: date | None
+    filer_type: str | None
+    dropped_sources: list[_DroppedSourceModel]
+
+
+class _SliceModel(BaseModel):
+    category: Literal["insiders", "blockholders", "institutions", "etfs", "def14a_unmatched"]
+    label: str
+    total_shares: Decimal
+    pct_outstanding: Decimal
+    filer_count: int
+    dominant_source: Literal["form4", "form3", "13d", "13g", "def14a", "13f"] | None
+    holders: list[_HolderModel]
+
+
+class _ResidualModel(BaseModel):
+    shares: Decimal
+    pct_outstanding: Decimal
+    label: str
+    tooltip: str
+    oversubscribed: bool
+
+
+class _CategoryCoverageModel(BaseModel):
+    known_filers: int
+    estimated_universe: int | None
+    pct_universe: Decimal | None
+    state: Literal["no_data", "red", "unknown_universe", "amber", "green"]
+
+
+class _CoverageModel(BaseModel):
+    state: Literal["no_data", "red", "unknown_universe", "amber", "green"]
+    categories: dict[str, _CategoryCoverageModel]
+
+
+class _ConcentrationModel(BaseModel):
+    pct_outstanding_known: Decimal
+    info_chip: str
+
+
+class _BannerModel(BaseModel):
+    state: Literal["no_data", "red", "unknown_universe", "amber", "green"]
+    variant: Literal["error", "warning", "info", "success"]
+    headline: str
+    body: str
+
+
+class _SharesOutstandingSourceModel(BaseModel):
+    accession_number: str | None
+    concept: str | None
+    form_type: str | None
+
+
+class OwnershipRollupResponse(BaseModel):
+    """Cross-channel deduped ownership snapshot (#789).
+
+    The single denominator is ``shares_outstanding`` (XBRL DEI).
+    Treasury renders as an additive top wedge — not part of the
+    denominator, not deduped against. The ``residual`` is the
+    explicit ``Public / unattributed`` block; ``coverage`` drives the
+    banner state machine via universe coverage (NOT float
+    concentration); ``concentration`` is shown separately as an info
+    chip. See ``docs/superpowers/specs/2026-05-03-ownership-tier0-and-cik-history-design.md``
+    for the contract."""
+
+    symbol: str
+    instrument_id: int
+    shares_outstanding: Decimal | None
+    shares_outstanding_as_of: date | None
+    shares_outstanding_source: _SharesOutstandingSourceModel
+    treasury_shares: Decimal | None
+    treasury_as_of: date | None
+    slices: list[_SliceModel]
+    residual: _ResidualModel
+    concentration: _ConcentrationModel
+    coverage: _CoverageModel
+    banner: _BannerModel
+    computed_at: datetime
+
+
+def _rollup_to_response(
+    rollup: ownership_rollup.OwnershipRollup,
+) -> OwnershipRollupResponse:
+    return OwnershipRollupResponse(
+        symbol=rollup.symbol,
+        instrument_id=rollup.instrument_id,
+        shares_outstanding=rollup.shares_outstanding,
+        shares_outstanding_as_of=rollup.shares_outstanding_as_of,
+        shares_outstanding_source=_SharesOutstandingSourceModel(
+            accession_number=rollup.shares_outstanding_source.accession_number,
+            concept=rollup.shares_outstanding_source.concept,
+            form_type=rollup.shares_outstanding_source.form_type,
+        ),
+        treasury_shares=rollup.treasury_shares,
+        treasury_as_of=rollup.treasury_as_of,
+        slices=[
+            _SliceModel(
+                category=s.category,
+                label=s.label,
+                total_shares=s.total_shares,
+                pct_outstanding=s.pct_outstanding,
+                filer_count=s.filer_count,
+                dominant_source=s.dominant_source,
+                holders=[
+                    _HolderModel(
+                        filer_cik=h.filer_cik,
+                        filer_name=h.filer_name,
+                        shares=h.shares,
+                        pct_outstanding=h.pct_outstanding,
+                        winning_source=h.winning_source,
+                        winning_accession=h.winning_accession,
+                        as_of_date=h.as_of_date,
+                        filer_type=h.filer_type,
+                        dropped_sources=[
+                            _DroppedSourceModel(
+                                source=d.source,
+                                accession_number=d.accession_number,
+                                shares=d.shares,
+                                as_of_date=d.as_of_date,
+                            )
+                            for d in h.dropped_sources
+                        ],
+                    )
+                    for h in s.holders
+                ],
+            )
+            for s in rollup.slices
+        ],
+        residual=_ResidualModel(
+            shares=rollup.residual.shares,
+            pct_outstanding=rollup.residual.pct_outstanding,
+            label=rollup.residual.label,
+            tooltip=rollup.residual.tooltip,
+            oversubscribed=rollup.residual.oversubscribed,
+        ),
+        concentration=_ConcentrationModel(
+            pct_outstanding_known=rollup.concentration.pct_outstanding_known,
+            info_chip=rollup.concentration.info_chip,
+        ),
+        coverage=_CoverageModel(
+            state=rollup.coverage.state,
+            categories={
+                k: _CategoryCoverageModel(
+                    known_filers=c.known_filers,
+                    estimated_universe=c.estimated_universe,
+                    pct_universe=c.pct_universe,
+                    state=c.state,
+                )
+                for k, c in rollup.coverage.categories.items()
+            },
+        ),
+        banner=_BannerModel(
+            state=rollup.banner.state,
+            variant=rollup.banner.variant,
+            headline=rollup.banner.headline,
+            body=rollup.banner.body,
+        ),
+        computed_at=rollup.computed_at,
+    )
+
+
+@router.get(
+    "/{symbol}/ownership-rollup",
+    response_model=OwnershipRollupResponse,
+)
+def get_instrument_ownership_rollup(
+    symbol: str,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> OwnershipRollupResponse:
+    """Cross-channel deduped ownership rollup. Tier 0 of #788.
+
+    Reads run inside one ``snapshot_read`` block so the per-slice
+    totals, residual, and coverage banner all reconcile against a
+    single REPEATABLE READ snapshot. Codex spec review caught a
+    prior anti-pattern that would have produced a SAVEPOINT instead
+    of a fresh snapshot on the pooled connection.
+
+    Empty / pre-ingest state: ``slices=[]``, banner state = either
+    ``no_data`` (no XBRL outstanding) or ``unknown_universe``
+    (outstanding present but no per-category universe estimates yet).
+    Both render 200 OK with the appropriate banner. 404 is reserved
+    for unknown symbols.
+    """
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with snapshot_read(conn):
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT instrument_id, symbol FROM instruments
+                WHERE UPPER(symbol) = %(s)s
+                ORDER BY is_primary_listing DESC, instrument_id ASC
+                LIMIT 1
+                """,
+                {"s": symbol_clean},
+            )
+            inst_row = cur.fetchone()
+        if inst_row is None:
+            raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+        rollup = ownership_rollup.get_ownership_rollup(
+            conn,
+            symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+            instrument_id=int(inst_row["instrument_id"]),  # type: ignore[arg-type]
+        )
+    return _rollup_to_response(rollup)

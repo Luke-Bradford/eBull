@@ -328,13 +328,13 @@ function OwnershipBody({
     [insider_holders],
   );
 
-  // Denominator = outstanding + treasury (issued/allotted). Treasury
-  // renders as a category wedge so the operator sees the issuer's
-  // held-back portion in proportion.
-  const total_shares = useMemo(
-    () => outstanding + (treasury ?? 0),
-    [outstanding, treasury],
-  );
+  // Denominator = ``shares_outstanding`` (XBRL DEI) only. Treasury is
+  // an additive category wedge on top of the chart, NOT part of the
+  // denominator. Codex audit 2026-05-03 caught the prior
+  // ``outstanding + treasury`` math as a ship-blocker — treasury > 0
+  // wedged every other category down by the treasury fraction. Spec:
+  // docs/superpowers/specs/2026-05-03-ownership-tier0-and-cik-history-design.md
+  const total_shares = useMemo(() => outstanding, [outstanding]);
 
   // Per-category freshness sources (#767).
   const thirteen_f_as_of = inst_totals?.period_of_report ?? null;

@@ -1,12 +1,21 @@
 /**
- * Ownership sunburst data model (#729).
+ * Ownership sunburst data model (#729, denominator corrected by
+ * #789).
  *
  * Three concentric rings keyed on a single denominator:
- * ``total_shares`` (= ``shares_outstanding + treasury_shares``).
- * Treasury counts toward the denominator because the operator's
- * mental model is "100% of issued / allotted shares — some held in
- * the market, some held back in the company's vault". Treasury
- * appears as one of the categories.
+ * ``total_shares = shares_outstanding`` (XBRL DEI). Treasury is NOT
+ * part of the denominator — it renders as an additive top wedge on
+ * top of the chart. Codex audit (2026-05-03) caught the prior
+ * ``shares_outstanding + treasury_shares`` math as a ship-blocker
+ * because any treasury > 0 systematically wedged every other
+ * category down by the treasury fraction. Backend contract
+ * (``/ownership-rollup`` endpoint) and the canonical XBRL view
+ * (``instrument_share_count_latest``) both divide by
+ * ``shares_outstanding`` only; the chart now matches.
+ *
+ * Treasury appears as one of the categories — the wedge sits on
+ * top of the deduped slices and the residual ``Public /
+ * unattributed`` block fills the remainder of the ring.
  *
  *   ring 1 (inner)  : center hole shows ``total_shares``.
  *   ring 2 (middle) : per-category wedges sized faithfully against
