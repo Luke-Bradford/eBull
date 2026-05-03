@@ -251,6 +251,7 @@ def _seed_all(conn: psycopg.Connection[tuple]) -> None:
 
     print("Seeding curated CUSIPs into external_identifiers...")
     cusip_inserts = 0
+    cusip_already_correct = 0
     cusip_missing_instrument = 0
     cusip_corrected = 0
     for symbol, cusip in _CURATED_CUSIPS:
@@ -280,27 +281,32 @@ def _seed_all(conn: psycopg.Connection[tuple]) -> None:
                 (cusip,),
             )
             existing = cur.fetchone()
-        if existing is not None and int(existing[0]) != instrument_id:
-            print(
-                f"  CORRECT {symbol} CUSIP {cusip}: "
-                f"instrument_id {existing[0]} -> {instrument_id} "
-                f"(curated re-run overwriting stale mapping)"
-            )
-            conn.execute(
-                """
-                UPDATE external_identifiers
-                SET instrument_id = %s, is_primary = TRUE
-                WHERE provider = 'sec'
-                  AND identifier_type = 'cusip'
-                  AND identifier_value = %s
-                """,
-                (instrument_id, cusip),
-            )
-            cusip_corrected += 1
+        if existing is not None:
+            if int(existing[0]) != instrument_id:
+                print(
+                    f"  CORRECT {symbol} CUSIP {cusip}: "
+                    f"instrument_id {existing[0]} -> {instrument_id} "
+                    f"(curated re-run overwriting stale mapping)"
+                )
+                conn.execute(
+                    """
+                    UPDATE external_identifiers
+                    SET instrument_id = %s, is_primary = TRUE
+                    WHERE provider = 'sec'
+                      AND identifier_type = 'cusip'
+                      AND identifier_value = %s
+                    """,
+                    (instrument_id, cusip),
+                )
+                cusip_corrected += 1
+            else:
+                cusip_already_correct += 1
             continue
         # is_primary=TRUE because curated mappings are operator-
         # verified. Resolver-derived CUSIPs (#781) are
         # is_primary=FALSE so the curated mapping wins on conflict.
+        # ON CONFLICT DO NOTHING remains as a race-guard for
+        # concurrent re-runs; the probe above is the primary dedup.
         conn.execute(
             """
             INSERT INTO external_identifiers (
@@ -312,8 +318,9 @@ def _seed_all(conn: psycopg.Connection[tuple]) -> None:
         )
         cusip_inserts += 1
     print(
-        f"  {cusip_inserts} CUSIPs upserted into external_identifiers; "
+        f"  {cusip_inserts} CUSIPs inserted; "
         f"{cusip_corrected} stale mappings corrected; "
+        f"{cusip_already_correct} already correct (no-op); "
         f"{cusip_missing_instrument} skipped (symbol not in instruments)."
     )
     conn.commit()
