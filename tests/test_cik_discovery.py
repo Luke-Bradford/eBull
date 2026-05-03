@@ -166,6 +166,118 @@ def test_upsert_cik_does_not_clobber_existing_row(
     assert [r[0] for r in rows] == ["0000111111"]
 
 
+def test_discover_strips_rth_suffix_and_matches_underlying(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """eToro's ``.RTH`` (regular trading hours) listing is an
+    operational duplicate of the underlying common stock — same
+    issuer, same SEC CIK. Strip the suffix and re-try the lookup so
+    the no-CIK cohort folds these in without a separate seed."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, iid=900_010, symbol="AAPL.RTH")
+    conn.commit()
+    fake_map = {
+        "AAPL": TickerMapEntry(cik_padded="0000320193", ticker="AAPL", title="Apple Inc."),
+    }
+
+    result = discover_ciks(conn, ticker_map=fake_map)
+
+    assert result.matches_found == 1
+    assert result.rows_inserted == 1
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT identifier_value FROM external_identifiers
+            WHERE instrument_id = %s AND provider = 'sec' AND identifier_type = 'cik'
+            """,
+            (900_010,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "0000320193"
+
+
+def test_discover_prefers_original_symbol_over_stripped(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """When the original symbol IS in the SEC map (rare hypothetical
+    where SEC adds a ``.RTH`` ticker), the original must win over
+    the stripped fallback. Order is original-first."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, iid=900_011, symbol="X.RTH")
+    conn.commit()
+    fake_map = {
+        "X.RTH": TickerMapEntry(cik_padded="9999999999", ticker="X.RTH", title="Hypothetical"),
+        "X": TickerMapEntry(cik_padded="0000000001", ticker="X", title="X Corp"),
+    }
+
+    result = discover_ciks(conn, ticker_map=fake_map)
+
+    assert result.rows_inserted == 1
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT identifier_value FROM external_identifiers WHERE instrument_id = %s",
+            (900_011,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "9999999999"  # original ticker won, not the stripped fallback
+
+
+def test_discover_underlying_wins_over_suffix_duplicate_in_same_cohort(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """When BOTH the operational-duplicate (``.RTH``) and the
+    underlying are in the no-CIK cohort, the underlying must claim
+    the SEC CIK row — not the suffix-stripped fallback. Two-pass
+    ordering: direct matches first, suffix fallbacks second.
+    Regression for the high-severity Codex finding."""
+    conn = ebull_test_conn
+    # Seed the .RTH duplicate FIRST (lower instrument_id) so a
+    # naive single-pass loop ordered by instrument_id would let it
+    # win. The underlying must still claim the CIK.
+    _seed_instrument(conn, iid=900_020, symbol="AAPL.RTH")
+    _seed_instrument(conn, iid=900_021, symbol="AAPL")
+    conn.commit()
+    fake_map = {
+        "AAPL": TickerMapEntry(cik_padded="0000320193", ticker="AAPL", title="Apple Inc."),
+    }
+
+    result = discover_ciks(conn, ticker_map=fake_map)
+
+    assert result.rows_inserted == 1
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id FROM external_identifiers
+            WHERE provider = 'sec' AND identifier_type = 'cik'
+              AND identifier_value = '0000320193'
+            """,
+        )
+        rows = cur.fetchall()
+    assert [r[0] for r in rows] == [900_021]  # underlying won, not the .RTH duplicate
+
+
+def test_discover_does_not_fold_warrant_suffixes(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """Warrants (``-W``, ``-WT``) and preferreds (``-PA`` etc.) are
+    SEPARATE securities — folding them onto the common-stock CIK
+    would mis-attribute filings on the ownership pie chart. The
+    suffix list deliberately excludes them; they should miss."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, iid=900_012, symbol="WARRANT-W")
+    conn.commit()
+    fake_map = {
+        "WARRANT": TickerMapEntry(cik_padded="0000111111", ticker="WARRANT", title="Should not fold"),
+    }
+
+    result = discover_ciks(conn, ticker_map=fake_map)
+
+    assert result.matches_found == 0
+    assert result.rows_inserted == 0
+
+
 def test_discover_handles_case_insensitive_ticker_lookup(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:

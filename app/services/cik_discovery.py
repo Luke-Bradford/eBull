@@ -211,6 +211,44 @@ def upsert_cik(
     return affected > 0
 
 
+# eToro-side operational suffixes that wrap the underlying common
+# stock ticker (no separate SEC entry — the RTH listing is the same
+# issuer as the underlying). Stripping the suffix and re-trying the
+# lookup catches ~560 no-CIK instruments on the dev cohort without
+# any false positives, because each suffix maps deterministically to
+# a single underlying.
+#
+# Add new suffixes ONLY when:
+#   1. The suffix is a deterministic operational duplicate of the
+#      underlying (not a separate security like a warrant or pref).
+#   2. The match rate is non-trivial against the operator audit
+#      cohort.
+#
+# Warrants (``-W``, ``-WT``) and preferreds (``-PA``, ``-PB``) are
+# DELIBERATELY not in this list — they are separate securities with
+# their own filings, and folding them onto the common-stock CIK
+# would mis-attribute filings on the pie chart.
+_OPERATIONAL_SUFFIXES: tuple[str, ...] = (
+    ".RTH",  # eToro "regular trading hours" duplicate
+)
+
+
+def _normalise_for_lookup(symbol: str) -> tuple[str, ...]:
+    """Return candidate forms of ``symbol`` to try against the SEC
+    map, in priority order. The original form always comes first so
+    a genuine ``.RTH``-like SEC ticker (none known today, but the
+    map is operator-curated and could change) wins over the
+    stripped fallback."""
+    upper = symbol.upper().strip()
+    candidates: list[str] = [upper]
+    for suffix in _OPERATIONAL_SUFFIXES:
+        if upper.endswith(suffix):
+            stripped = upper[: -len(suffix)]
+            if stripped and stripped not in candidates:
+                candidates.append(stripped)
+    return tuple(candidates)
+
+
 def discover_ciks(
     conn: psycopg.Connection[Any],
     *,
@@ -219,18 +257,64 @@ def discover_ciks(
     """Walk every no-CIK instrument and attempt SEC ticker→CIK
     resolution. Idempotent.
 
+    Two-pass strategy:
+
+      1. **Direct match** — try the original symbol against the SEC
+         map. The canonical underlying (e.g. ``AAPL``) gets the CIK
+         row.
+      2. **Suffix-stripped fallback** — try the suffix-stripped form
+         (e.g. ``AAPL.RTH`` → ``AAPL``) only after pass 1 has
+         finished. ``upsert_cik``'s ON CONFLICT means the underlying
+         mapping (already inserted in pass 1) wins; the
+         operational duplicate's row no-ops.
+
+    Pass-ordering matters: a single-pass loop ordered by
+    ``instrument_id`` would let an early-sorting ``.RTH`` row claim
+    the only SEC CIK row, leaving the underlying unmapped. Two
+    passes guarantee the underlying always wins. Codex pre-push
+    review caught the single-pass version of this bug.
+
     ``ticker_map`` is injectable for tests; production callers pass
     ``None`` and the function fetches from SEC.
     """
     if ticker_map is None:
         ticker_map = fetch_ticker_map()
-    scanned = 0
+
+    cohort = list(iter_no_cik_instruments(conn))
+    scanned = len(cohort)
     matches = 0
     inserts = 0
+
+    # Pass 1: direct symbol match. Underlying tickers get first crack
+    # at any shared CIK row.
+    deferred: list[tuple[int, str]] = []
+    for instrument_id, symbol in cohort:
+        entry = ticker_map.get(symbol.upper().strip())
+        if entry is not None:
+            matches += 1
+            if upsert_cik(
+                conn,
+                instrument_id=instrument_id,
+                cik_padded=entry.cik_padded,
+                ticker=entry.ticker,
+            ):
+                inserts += 1
+            conn.commit()
+        else:
+            deferred.append((instrument_id, symbol))
+
+    # Pass 2: suffix-stripped fallback. Pass-1 inserts already
+    # committed, so ON CONFLICT here correctly leaves the underlying
+    # as the canonical owner of the CIK.
     misses = 0
-    for instrument_id, symbol in iter_no_cik_instruments(conn):
-        scanned += 1
-        entry = ticker_map.get(symbol.upper())
+    for instrument_id, symbol in deferred:
+        entry = None
+        for candidate in _normalise_for_lookup(symbol):
+            if candidate == symbol.upper().strip():
+                continue  # already tried in pass 1
+            entry = ticker_map.get(candidate)
+            if entry is not None:
+                break
         if entry is None:
             misses += 1
             continue
@@ -242,9 +326,8 @@ def discover_ciks(
             ticker=entry.ticker,
         ):
             inserts += 1
-        # Commit per-instrument so a downstream failure doesn't
-        # discard the entire batch's discoveries.
         conn.commit()
+
     return DiscoveryResult(
         instruments_scanned=scanned,
         matches_found=matches,
