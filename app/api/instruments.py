@@ -3154,6 +3154,7 @@ class _DroppedSourceModel(BaseModel):
     accession_number: str
     shares: Decimal
     as_of_date: date | None
+    edgar_url: str | None
 
 
 class _HolderModel(BaseModel):
@@ -3163,6 +3164,7 @@ class _HolderModel(BaseModel):
     pct_outstanding: Decimal
     winning_source: Literal["form4", "form3", "13d", "13g", "def14a", "13f"]
     winning_accession: str
+    winning_edgar_url: str | None
     as_of_date: date | None
     filer_type: str | None
     dropped_sources: list[_DroppedSourceModel]
@@ -3214,6 +3216,7 @@ class _SharesOutstandingSourceModel(BaseModel):
     accession_number: str | None
     concept: str | None
     form_type: str | None
+    edgar_url: str | None
 
 
 class OwnershipRollupResponse(BaseModel):
@@ -3255,6 +3258,7 @@ def _rollup_to_response(
             accession_number=rollup.shares_outstanding_source.accession_number,
             concept=rollup.shares_outstanding_source.concept,
             form_type=rollup.shares_outstanding_source.form_type,
+            edgar_url=rollup.shares_outstanding_source.edgar_url,
         ),
         treasury_shares=rollup.treasury_shares,
         treasury_as_of=rollup.treasury_as_of,
@@ -3274,6 +3278,7 @@ def _rollup_to_response(
                         pct_outstanding=h.pct_outstanding,
                         winning_source=h.winning_source,
                         winning_accession=h.winning_accession,
+                        winning_edgar_url=h.winning_edgar_url,
                         as_of_date=h.as_of_date,
                         filer_type=h.filer_type,
                         dropped_sources=[
@@ -3282,6 +3287,7 @@ def _rollup_to_response(
                                 accession_number=d.accession_number,
                                 shares=d.shares,
                                 as_of_date=d.as_of_date,
+                                edgar_url=d.edgar_url,
                             )
                             for d in h.dropped_sources
                         ],
