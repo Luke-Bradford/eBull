@@ -26,14 +26,55 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
+from urllib.parse import urlparse, urlunparse
 
 import psycopg
 import psycopg.rows
+
+from app.config import settings
 
 CikDocumentKind = Literal[
     "submissions_json",
     "companyfacts_json",
 ]
+
+
+def cache_database_url(conn: psycopg.Connection[Any]) -> str:
+    """Build a URL that opens a fresh connection to the SAME
+    cluster + database the caller's ``conn`` is on.
+
+    Used by callers that need to write the cik_raw_documents cache
+    on a separate short-lived connection — keeps cache durability
+    independent of the caller's transaction lifecycle (a rollback
+    on the caller's connection cannot discard a cache write made
+    on a separate connection).
+
+    Strategy: take host / port / user / dbname from the live
+    connection (authoritative for "where this conn is talking to")
+    but pull the password from ``settings.database_url`` — psycopg
+    deliberately strips passwords from ``conn.info.dsn`` so we
+    can't recover it from the connection alone.
+
+    ``info.host`` / ``info.port`` are ``None`` for Unix-socket
+    connections — guard with explicit ``or`` fallbacks so the
+    resulting URL never contains a literal ``"None:5432"`` netloc.
+    Prevention log entry: "Interpolating conn.info.host into URLs
+    without a None guard" (PR #816).
+    """
+    settings_parsed = urlparse(settings.database_url)
+    info = conn.info
+    netloc_user = info.user or settings_parsed.username or ""
+    password = settings_parsed.password or ""
+    host = info.host or settings_parsed.hostname or "localhost"
+    port = info.port or settings_parsed.port or 5432
+    auth = f"{netloc_user}:{password}" if password else netloc_user
+    netloc = f"{auth}@{host}:{port}" if auth else f"{host}:{port}"
+    return urlunparse(
+        settings_parsed._replace(
+            netloc=netloc,
+            path=f"/{info.dbname}",
+        )
+    )
 
 
 @dataclass(frozen=True)

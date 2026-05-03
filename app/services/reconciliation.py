@@ -34,13 +34,12 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
-from urllib.parse import urlparse, urlunparse
 
 import psycopg
 import psycopg.rows
 
 from app.config import settings
-from app.services.cik_raw_filings import read_cik_raw, store_cik_raw
+from app.services.cik_raw_filings import cache_database_url, read_cik_raw, store_cik_raw
 
 logger = logging.getLogger(__name__)
 
@@ -271,41 +270,6 @@ def _companyfacts_url(cik_padded: str) -> str:
 _COMPANYFACTS_CACHE_TTL = timedelta(hours=24)
 
 
-def _cache_database_url(conn: psycopg.Connection[Any]) -> str:
-    """Return a database URL that opens a NEW connection to the
-    SAME cluster + database the caller's ``conn`` is on. Critical
-    so a test against ``ebull_test`` doesn't accidentally write the
-    cache to the dev DB via ``settings.database_url``.
-
-    Strategy: take host / port / user / dbname from the live
-    connection (authoritative for "where this conn is talking to")
-    but pull the password from ``settings.database_url`` — psycopg
-    deliberately strips passwords from ``conn.info.dsn`` so we
-    can't recover it from the connection alone. If ``conn`` was
-    opened against a cluster other than the one in settings, the
-    password copy is the only mismatch the operator can hit.
-    """
-    settings_parsed = urlparse(settings.database_url)
-    info = conn.info
-    netloc_user = info.user or settings_parsed.username or ""
-    password = settings_parsed.password or ""
-    # ``info.host`` is ``None`` for Unix-socket connections;
-    # ``info.port`` can be 0/None on the same. Fall back to settings
-    # values, then localhost — interpolating ``None`` straight into
-    # the URL produces a literal ``None:5432`` netloc and a
-    # connection error at runtime.
-    host = info.host or settings_parsed.hostname or "localhost"
-    port = info.port or settings_parsed.port or 5432
-    auth = f"{netloc_user}:{password}" if password else netloc_user
-    netloc = f"{auth}@{host}:{port}" if auth else f"{host}:{port}"
-    return urlunparse(
-        settings_parsed._replace(
-            netloc=netloc,
-            path=f"/{info.dbname}",
-        )
-    )
-
-
 def _fetch_companyfacts_payload(
     conn: psycopg.Connection[Any],
     cik_padded: str,
@@ -339,7 +303,7 @@ def _fetch_companyfacts_payload(
     and continues so a transient DB hiccup doesn't take the
     reconciliation sweep down.
     """
-    dsn = _cache_database_url(conn)
+    dsn = cache_database_url(conn)
     cached = _read_cache(dsn, cik_padded)
     if cached is not None:
         return cached
