@@ -332,12 +332,76 @@ def _apply_form4(
 
 # Registered eagerly so the registry is populated at import time —
 # matches the pattern in app.services.reconciliation. The version
-# string mirrors the constant in insider_transactions; if either
-# changes, both must change so re-wash actually re-walks.
+# strings mirror the constants in each ingester; if either changes,
+# both must change so re-wash actually re-walks.
 register_parser(
     ParserSpec(
         document_kind="form4_xml",
         current_version="form4-v1",
         apply_fn=_apply_form4,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Form 3 wiring
+# ---------------------------------------------------------------------------
+
+
+def _apply_form3(
+    conn: psycopg.Connection[Any],
+    raw_doc: RawFilingDocument,
+) -> bool:
+    """Re-parse the Form 3 XML body and re-apply the typed-table
+    upsert. Same shape as Form 4 — Form 3 is the
+    initial-holdings-baseline cousin of Form 4's transactions.
+
+    Returns ``False`` when no existing ``insider_filings`` row is
+    found (re-wash is not a first-time ingester). Raises
+    ``RewashParseError`` on parser regression so the failure
+    surfaces in ``rows_failed``, not silently in ``rows_skipped``."""
+    from app.services.insider_form3_ingest import upsert_form_3_filing
+    from app.services.insider_transactions import parse_form_3_xml
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, primary_document_url
+            FROM insider_filings
+            WHERE accession_number = %s
+            """,
+            (raw_doc.accession_number,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return False
+    instrument_id, primary_document_url = row
+
+    parsed = parse_form_3_xml(raw_doc.payload)
+    if parsed is None:
+        raise RewashParseError(
+            f"parse_form_3_xml returned None for accession={raw_doc.accession_number} body_size={len(raw_doc.payload)}"
+        )
+
+    upsert_form_3_filing(
+        conn,
+        instrument_id=int(instrument_id),
+        accession_number=raw_doc.accession_number,
+        primary_document_url=str(primary_document_url) if primary_document_url else "",
+        parsed=parsed,
+        is_rewash=True,
+    )
+    return True
+
+
+# Form 3 parser version is "form3-v{N}" — see _FORM3_PARSER_VERSION
+# in insider_form3_ingest.py. Bump both constants in lockstep when
+# the parser semantics change in a way that affects what lands in
+# typed tables.
+register_parser(
+    ParserSpec(
+        document_kind="form3_xml",
+        current_version="form3-v1",
+        apply_fn=_apply_form3,
     )
 )

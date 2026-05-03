@@ -78,6 +78,7 @@ def upsert_form_3_filing(
     accession_number: str,
     primary_document_url: str,
     parsed: ParsedForm3,
+    is_rewash: bool = False,
 ) -> None:
     """Insert / refresh the Form 3 filing header + filer dim + footnote
     bodies + holding rows for one accession.
@@ -87,6 +88,10 @@ def upsert_form_3_filing(
     after a parser bump) refreshes every field in place. Tombstones
     are flipped back to live via the ``is_tombstone = FALSE`` reset on
     the filings UPDATE branch.
+
+    ``is_rewash``: when True, the conflict branch preserves the
+    original ``fetched_at`` (re-parsing a stored body isn't a fresh
+    SEC fetch). Same flag pattern as Form 4 (PR #818).
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -124,7 +129,9 @@ def upsert_form_3_filing(
                 primary_document_url         = EXCLUDED.primary_document_url,
                 parser_version               = EXCLUDED.parser_version,
                 is_tombstone                 = FALSE,
-                fetched_at                   = NOW()
+                fetched_at                   = CASE WHEN %s
+                                                    THEN insider_filings.fetched_at
+                                                    ELSE NOW() END
             """,
             (
                 accession_number,
@@ -147,6 +154,7 @@ def upsert_form_3_filing(
                 parsed.signature_date,
                 primary_document_url,
                 _FORM3_PARSER_VERSION,
+                is_rewash,
             ),
         )
 
