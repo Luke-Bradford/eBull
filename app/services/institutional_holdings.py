@@ -246,11 +246,18 @@ def parse_archive_index(payload: str) -> tuple[str | None, str | None]:
       * ``infotable.xml`` (most issuers).
       * ``form13fInfoTable.xml`` (some larger filers — pre-2018).
       * ``{accession_no_dashes}_infotable.xml`` (rare, agent-built).
+      * ``13F_{cik}_{period_end}.xml`` (Vanguard, BlackRock, and
+        other large filers using the SEC EDGAR Online filing
+        client — caught when the curated seed list pulled live
+        data and Vanguard's infotable was named
+        ``13F_0000102909_20251231.xml``).
 
-    Heuristic: any ``.xml`` whose lowercase basename contains
-    ``infotable`` or ``information_table`` (with separators
-    stripped). Returns ``None`` for either component if no match;
-    the caller treats that as a parse failure for the accession.
+    Heuristic: prefer any ``.xml`` whose lowercase basename
+    contains ``infotable``, ``information_table``, or starts with
+    ``13f`` / ``form13f``. As a last-resort fallback, when there's
+    exactly one non-primary_doc XML in the listing, treat it as
+    the infotable — every 13F-HR submission has at most two XML
+    attachments by SEC convention.
     """
     try:
         data: dict[str, Any] = json.loads(payload)
@@ -262,6 +269,7 @@ def parse_archive_index(payload: str) -> tuple[str | None, str | None]:
 
     primary: str | None = None
     infotable: str | None = None
+    other_xmls: list[str] = []
     for item in items:
         name = str(item.get("name", "")).strip()
         if not name:
@@ -273,8 +281,24 @@ def parse_archive_index(payload: str) -> tuple[str | None, str | None]:
         if not lower.endswith(".xml"):
             continue
         canonical = lower.replace("-", "").replace("_", "").replace(" ", "")
-        if "infotable" in canonical or "informationtable" in canonical:
+        if (
+            "infotable" in canonical
+            or "informationtable" in canonical
+            or canonical.startswith("13f")
+            or canonical.startswith("form13f")
+        ):
             infotable = name
+        else:
+            other_xmls.append(name)
+
+    # Fallback: if no name-pattern match fired but exactly one
+    # non-primary_doc XML exists, treat it as the infotable. SEC
+    # 13F-HR submissions have at most two XML attachments
+    # (primary_doc + infotable); ambiguity is impossible at the
+    # one-extra-XML scale.
+    if infotable is None and len(other_xmls) == 1:
+        infotable = other_xmls[0]
+
     return primary, infotable
 
 

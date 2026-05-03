@@ -229,6 +229,46 @@ class TestParseArchiveIndex:
         assert primary == "primary_doc.xml"
         assert infotable is None
 
+    def test_vanguard_13f_prefixed_naming(self) -> None:
+        """Live data showed Vanguard's infotable named
+        ``13F_<cik>_<period_end>.xml`` — caught when the curated
+        seed ingest landed zero holdings on every Vanguard
+        accession. Parser must accept the ``13F`` prefix."""
+        primary, infotable = parse_archive_index(_archive_index_json(infotable="13F_0000102909_20251231.xml"))
+        assert primary == "primary_doc.xml"
+        assert infotable == "13F_0000102909_20251231.xml"
+
+    def test_form13f_prefix_naming(self) -> None:
+        """``form13f`` prefix variant (BlackRock and similar)."""
+        primary, infotable = parse_archive_index(_archive_index_json(infotable="form13fInformationTable_2025Q4.xml"))
+        assert infotable == "form13fInformationTable_2025Q4.xml"
+
+    def test_unrecognised_single_xml_falls_back(self) -> None:
+        """When neither name pattern matches but exactly one
+        non-primary_doc XML exists, it must be picked as the
+        infotable. SEC convention caps a 13F-HR submission at two
+        XML attachments so single-extra-XML is unambiguous."""
+        primary, infotable = parse_archive_index(_archive_index_json(infotable="something_unusual.xml"))
+        assert primary == "primary_doc.xml"
+        assert infotable == "something_unusual.xml"
+
+    def test_multiple_unrecognised_xmls_returns_none(self) -> None:
+        """Two non-primary_doc XMLs neither matching the name
+        patterns is genuinely ambiguous — fallback must NOT pick
+        one arbitrarily."""
+        # Build a payload with primary_doc + two unmarked XMLs.
+        import json as _json
+
+        items: list[dict[str, str]] = [
+            {"name": "primary_doc.xml", "type": "text.gif", "size": "100"},
+            {"name": "weird_a.xml", "type": "text.gif", "size": "100"},
+            {"name": "weird_b.xml", "type": "text.gif", "size": "100"},
+        ]
+        payload = _json.dumps({"directory": {"name": "/Archives/...", "item": items}})
+        primary, infotable = parse_archive_index(payload)
+        assert primary == "primary_doc.xml"
+        assert infotable is None
+
 
 # ---------------------------------------------------------------------------
 # Integration: end-to-end ingest
