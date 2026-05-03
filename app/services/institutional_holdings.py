@@ -668,6 +668,7 @@ def seed_filer(
     *,
     cik: str | int,
     label: str,
+    expected_name: str | None = None,
     notes: str | None = None,
     active: bool = True,
 ) -> None:
@@ -675,19 +676,41 @@ def seed_filer(
 
     Used by tests + an operator-side script. The admin UI in PR 4
     will call the same helper via an API endpoint.
+
+    ``expected_name`` records the operator-recorded SEC entity name
+    so the verification sweep
+    (``app.services.filer_seed_verification``) can flag drift
+    between the recorded name and SEC's live submissions.json. When
+    omitted, ``label`` is used — labels with disambiguation suffixes
+    (e.g. ``"FMR LLC (Fidelity)"``) will trip the verification
+    sweep until the operator fills in a clean ``expected_name``.
     """
     conn.execute(
         """
-        INSERT INTO institutional_filer_seeds (cik, label, active, notes)
-        VALUES (%(cik)s, %(label)s, %(active)s, %(notes)s)
+        INSERT INTO institutional_filer_seeds (
+            cik, label, expected_name, active, notes
+        )
+        VALUES (
+            %(cik)s, %(label)s, COALESCE(%(expected_name)s, %(label)s),
+            %(active)s, %(notes)s
+        )
         ON CONFLICT (cik) DO UPDATE SET
             label = EXCLUDED.label,
+            -- Use the RAW parameter (not EXCLUDED) so that a caller
+            -- omitting expected_name on an update preserves the
+            -- operator's prior value. EXCLUDED.expected_name is
+            -- always non-null because the VALUES clause coalesces
+            -- it to label — using EXCLUDED would silently clobber
+            -- prior operator-set values with display text. Codex
+            -- pre-push review caught this.
+            expected_name = COALESCE(%(expected_name)s, institutional_filer_seeds.expected_name),
             active = EXCLUDED.active,
             notes = COALESCE(EXCLUDED.notes, institutional_filer_seeds.notes)
         """,
         {
             "cik": _zero_pad_cik(cik),
             "label": label,
+            "expected_name": expected_name,
             "active": active,
             "notes": notes,
         },
