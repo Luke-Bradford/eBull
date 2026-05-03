@@ -19,6 +19,7 @@ import { ReportsPage } from "@/pages/ReportsPage";
 import { RecommendationsPage } from "@/pages/RecommendationsPage";
 import { AdminPage } from "@/pages/AdminPage";
 import { AdminJobDetailPage } from "@/pages/AdminJobDetailPage";
+import { IngestHealthPage } from "@/pages/IngestHealthPage";
 import { CoverageInsufficientPage } from "@/pages/CoverageInsufficientPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
@@ -100,6 +101,7 @@ export function App() {
           <Route path="reports" element={<ReportsPage />} />
           <Route path="admin" element={<AdminPage />} />
           <Route path="admin/jobs/:name" element={<AdminJobDetailPage />} />
+          <Route path="admin/ingest-health" element={<IngestHealthPage />} />
           <Route
             path="admin/coverage/insufficient"
             element={<CoverageInsufficientPage />}
