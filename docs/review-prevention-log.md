@@ -1111,6 +1111,33 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Prevention: every `ConnectionPool(...)` call in the codebase must pass: (a) `kwargs={"keepalives": 1, "keepalives_idle": 30, "keepalives_interval": 10, "keepalives_count": 3}` for libpq-level dead-peer detection; (b) `check=ConnectionPool.check_connection` for SELECT 1 validation on every checkout (~1ms overhead, catches conns the OS hasn't yet flagged); (c) `max_idle=600.0` and `max_lifetime=1800.0` to proactively recycle conns so a single bad conn cannot wedge the pool for the rest of uptime; (d) `timeout=15.0` so a saturated/wedged pool surfaces as a 503 instead of an indefinite event-loop block. Use the `_open_pool` helper in `app/main.py` rather than calling `ConnectionPool(...)` directly — adding a third pool with raw constructor args is the regression shape this entry exists to catch.
 - Enforced in: this prevention log; `app/main.py::_open_pool` centralises the config; `tests/test_main_pool_hardening.py` pins it. Companion: `uvicorn --reload-dir app` (in `.vscode/tasks.json`, `Makefile`, `stack-restart.ps1`, `README.md`) so test/doc edits don't churn the worker through reload races, which is one path that turns flaky pooled conns into observed wedges.
 
+### Correlated scalar subquery inside a UNION-of-sources CTE
+
+- First seen in: PR #798 review (Batch 1 of #788, ownership rollup
+  service).
+- Symptom: `_CANONICAL_UNION_SQL` used
+  `WHERE h.period_of_report = (SELECT MAX(period_of_report) FROM
+  institutional_holdings WHERE instrument_id = %(iid)s)` inline on the
+  13F branch of a five-source UNION ALL. The subquery is correlated on
+  `instrument_id` and Postgres re-evaluates it for every candidate
+  `institutional_holdings` row scanned — for high-13F-filer instruments
+  (>300 13F-HR rows for the latest quarter) that's hundreds of MAX
+  scans per request inside the rollup endpoint's hot path. The pattern
+  is especially attractive in multi-source UNIONs because each branch
+  feels self-contained and the CTE-promotion isn't visually obvious.
+- Prevention: when a UNION ALL branch needs a scalar bound (latest
+  period, max date, etc.) and the bound is keyed on the same instrument
+  / entity that the outer query is already filtered by, hoist the
+  bound into a leading CTE that runs once per request:
+  `WITH latest_X AS (SELECT MAX(...) ... WHERE entity = %(eid)s)`,
+  then reference `(SELECT col FROM latest_X)` from inside the UNION
+  branch. Self-review prompt: grep new SQL changes for `SELECT MAX(`
+  / `SELECT MIN(` inside a UNION branch's WHERE clause and flag for
+  CTE promotion.
+- Enforced in: this prevention log; `app/services/ownership_rollup.py`
+  promotes `latest_13f_period` to a leading CTE in the v3 spec
+  implementation.
+
 ### Column-side casts in WHERE clauses defeat indexes
 
 - First seen in: #669 review (PR #679).

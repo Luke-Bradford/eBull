@@ -227,7 +227,6 @@ interface PanelBodyProps {
 }
 
 function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
-  const today = useMemo(() => new Date(), []);
   const inputs = useMemo(() => rollupToSunburstInputs(rollup), [rollup]);
   if (rollup.banner.state === "no_data" || inputs === null) {
     return (
@@ -253,15 +252,11 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
     );
   }
 
-  // Use today only when the chart code passes it through; the
-  // legend/freshness chip placement follows the prior layout.
-  void today;
-
   return (
     <div className="flex flex-col gap-3">
       <Banner banner={rollup.banner} />
       <ConcentrationChip rollup={rollup} />
-      {rollup.residual.oversubscribed && <OversubscribedWarning rollup={rollup} />}
+      {rollup.residual.oversubscribed && <OversubscribedWarning />}
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
         <div className="flex flex-col items-center gap-3">
           <OwnershipSunburst inputs={inputs} onWedgeClick={onWedgeClick} />
@@ -331,10 +326,9 @@ function ConcentrationChip({ rollup }: ConcentrationChipProps): JSX.Element {
   );
 }
 
-function OversubscribedWarning({ rollup }: { rollup: OwnershipRollupResponse }): JSX.Element {
+function OversubscribedWarning(): JSX.Element {
   // The server clamped the residual to 0; surface the diagnostic so
   // the operator knows a stale 13F + fresh Form 4/13D mix is in play.
-  void rollup;
   return (
     <div
       className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-900/20 dark:text-amber-200"

@@ -600,6 +600,14 @@ def _compute_coverage(
 def _per_category_state(known: int, estimate: int | None, pct_universe: Decimal | None) -> CoverageState:
     if estimate is None:
         return "unknown_universe"
+    # ``estimate=0`` is a real seeded value distinct from NULL — it
+    # means "we know the SEC universe for this category on this
+    # instrument is empty" (e.g. an issuer with no expected 13F
+    # filers). Treat as vacuously green: 0 known of 0 expected =
+    # complete coverage. Claude PR review (PR 798) caught the prior
+    # collapse to ``unknown_universe`` that lost this distinction.
+    if estimate == 0:
+        return "green"
     if pct_universe is None:
         return "unknown_universe"
     if pct_universe < Decimal("0.50"):
@@ -890,7 +898,16 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
 
 
 _CANONICAL_UNION_SQL = """
-WITH form4_latest AS (
+WITH latest_13f_period AS (
+    -- Single MAX scan instead of a correlated subquery on every
+    -- 13F candidate row. Claude PR review (PR 798) caught the prior
+    -- correlated form as a latent O(N-subqueries) perf regression for
+    -- high-13F-filer instruments.
+    SELECT MAX(period_of_report) AS period_of_report
+    FROM institutional_holdings
+    WHERE instrument_id = %(iid)s
+),
+form4_latest AS (
     SELECT DISTINCT ON (
         CASE WHEN filer_cik IS NOT NULL
              THEN 'CIK:' || filer_cik
@@ -983,10 +1000,7 @@ FROM institutional_holdings h
 JOIN institutional_filers f USING (filer_id)
 WHERE h.instrument_id = %(iid)s
   AND h.is_put_call IS NULL
-  AND h.period_of_report = (
-      SELECT MAX(period_of_report) FROM institutional_holdings
-      WHERE instrument_id = %(iid)s
-  )
+  AND h.period_of_report = (SELECT period_of_report FROM latest_13f_period)
 """
 """SQL building the canonical-holder candidate set per instrument.
 
