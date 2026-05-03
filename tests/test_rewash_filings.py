@@ -338,6 +338,63 @@ def test_run_rewash_since_filters_by_fetched_at(
     assert result.rows_skipped == 1
 
 
+def test_form4_apply_raises_on_parse_regression(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """``_apply_form4`` must RAISE (not return False) when the
+    parser returns None on a body that has an existing typed-row.
+    A returned False means "no typed row to update, legitimately
+    skip", which is invisible in the operator's failure counter.
+    Parser regressions must surface as rows_failed.
+
+    Regression for the WARNING from PR #818 review."""
+    conn = ebull_test_conn
+    accession = "0001234567-26-parse-regress"
+    instrument_id = 950_010
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, 'PR', 'Parse Regression', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (instrument_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO insider_filings (
+            accession_number, instrument_id, document_type,
+            primary_document_url, parser_version, is_tombstone
+        ) VALUES (%s, %s, '4', 'https://example.com/x', 1, FALSE)
+        """,
+        (accession, instrument_id),
+    )
+    _seed_raw(conn, accession=accession, kind="form4_xml", parser_version="v1")
+
+    monkeypatch.setattr(
+        "app.services.insider_transactions.parse_form_4_xml",
+        lambda _xml: None,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="form4_xml",
+            current_version="form4-v1",
+            apply_fn=rewash_filings._apply_form4,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="form4_xml")
+
+    assert result.rows_scanned == 1
+    assert result.rows_failed == 1
+    assert result.rows_skipped == 0
+    assert result.rows_reparsed == 0
+
+
 def test_form4_rewash_preserves_original_fetched_at(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     isolated_registry: None,

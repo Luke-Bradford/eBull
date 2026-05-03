@@ -54,6 +54,15 @@ from app.services.raw_filings import DocumentKind, RawFilingDocument
 logger = logging.getLogger(__name__)
 
 
+class RewashParseError(Exception):
+    """A parser returned ``None`` (or otherwise rejected) a body
+    that a prior parser version produced typed-table output for.
+
+    Distinguishes a parser REGRESSION (must surface in
+    ``rows_failed``) from a legitimate "no typed row to update"
+    skip (``apply_fn`` returns ``False`` → ``rows_skipped``)."""
+
+
 @dataclass(frozen=True)
 class ParserSpec:
     """Per-kind parser binding for re-wash.
@@ -299,11 +308,16 @@ def _apply_form4(
 
     parsed = parse_form_4_xml(raw_doc.payload)
     if parsed is None:
-        # Parser miss on a body that the previous parser version
-        # presumably handled. Don't crash the sweep; treat as a
-        # skipped row so the operator can spot the regression in
-        # the result counters.
-        return False
+        # Parser regression — the previous parser presumably
+        # produced a typed-table row for this body, but the current
+        # parser returns None. RAISE rather than return False:
+        # ``apply_fn`` returning False means "no typed row to
+        # update, legitimately skip", which is operator-invisible
+        # in the failure counter. A parser regression is a real
+        # failure that must surface in ``rows_failed``.
+        raise RewashParseError(
+            f"parse_form_4_xml returned None for accession={raw_doc.accession_number} body_size={len(raw_doc.payload)}"
+        )
 
     upsert_filing(
         conn,
