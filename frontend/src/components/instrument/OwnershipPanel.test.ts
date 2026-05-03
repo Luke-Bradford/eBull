@@ -63,6 +63,7 @@ function _baseRollup(
       headline: "Coverage estimate not available",
       body: "Treat as best-effort.",
     },
+    historical_symbols: [],
     computed_at: "2026-05-03T00:00:00Z",
     ...overrides,
   };

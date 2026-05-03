@@ -942,6 +942,101 @@ class TestProvenance:
         assert rollup.shares_outstanding_source.edgar_url is None
 
 
+class TestHistoricalSymbols:
+    """Symbol-history payload threading (#794 frontend finish, Batch 7
+    of #788)."""
+
+    def test_rollup_includes_historical_symbols_from_history_table(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=794_001, symbol="BBBYQ")
+        _seed_outstanding(conn, instrument_id=794_001, shares="100000000")
+        # Seed a BBBY → BBBYQ chain manually (the real ticker-change
+        # ingester is a future epic; here we exercise the read path).
+        conn.execute(
+            """
+            INSERT INTO instrument_symbol_history (
+                instrument_id, symbol, effective_from, effective_to,
+                source_event
+            ) VALUES (%s, %s, %s, %s, %s)
+            """,
+            (794_001, "BBBY", date(2000, 6, 1), date(2023, 4, 1), "delisting"),
+        )
+        conn.execute(
+            """
+            INSERT INTO instrument_symbol_history (
+                instrument_id, symbol, effective_from, effective_to,
+                source_event
+            ) VALUES (%s, %s, %s, %s, %s)
+            """,
+            (794_001, "BBBYQ", date(2023, 4, 1), None, "relisting"),
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="BBBYQ", instrument_id=794_001)
+        symbols = [h.symbol for h in rollup.historical_symbols]
+        assert symbols == ["BBBY", "BBBYQ"]
+        # Effective ranges round-trip cleanly.
+        bbby_entry = next(h for h in rollup.historical_symbols if h.symbol == "BBBY")
+        assert bbby_entry.effective_to == date(2023, 4, 1)
+        assert bbby_entry.source_event == "delisting"
+
+    def test_rollup_historical_symbols_empty_when_no_history(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=794_002, symbol="NOHIST")
+        _seed_outstanding(conn, instrument_id=794_002, shares="100000000")
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="NOHIST", instrument_id=794_002)
+        assert rollup.historical_symbols == ()
+
+    def test_historical_symbols_present_on_no_data_path(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Codex pre-push review (Batch 7 of #788) caught this: an
+        instrument missing ``shares_outstanding`` returns
+        ``OwnershipRollup.no_data(...)`` — but it must still carry
+        ``historical_symbols`` because the BBBY-style ticker-change
+        case is exactly when the operator wants the callout."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=794_003, symbol="NODATA")
+        # Skip _seed_outstanding intentionally — exercise the no_data
+        # path.
+        conn.execute(
+            """
+            INSERT INTO instrument_symbol_history (
+                instrument_id, symbol, effective_from, effective_to,
+                source_event
+            ) VALUES (%s, %s, %s, %s, %s)
+            """,
+            (794_003, "OLDSYM", date(2010, 1, 1), date(2024, 1, 1), "rebrand"),
+        )
+        conn.execute(
+            """
+            INSERT INTO instrument_symbol_history (
+                instrument_id, symbol, effective_from, effective_to,
+                source_event
+            ) VALUES (%s, %s, %s, %s, %s)
+            """,
+            (794_003, "NODATA", date(2024, 1, 1), None, "imported"),
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="NODATA", instrument_id=794_003)
+        # no_data state — outstanding missing.
+        assert rollup.banner.state == "no_data"
+        assert rollup.shares_outstanding is None
+        # Historical symbols still surface so the callout renders.
+        symbols = [h.symbol for h in rollup.historical_symbols]
+        assert symbols == ["OLDSYM", "NODATA"]
+
+
 class TestEmptyStates:
     def test_empty_cohort_residual_equals_outstanding(
         self,

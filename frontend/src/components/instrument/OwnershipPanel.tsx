@@ -43,6 +43,7 @@ import type {
   OwnershipSliceCategory,
 } from "@/api/ownership";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
+import { HistoricalSymbolCallout } from "@/components/instrument/HistoricalSymbolCallout";
 import {
   OwnershipLegend,
   OwnershipSunburst,
@@ -237,6 +238,10 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
     return (
       <div className="flex flex-col gap-3">
         <Banner banner={rollup.banner} />
+        <HistoricalSymbolCallout
+          currentSymbol={rollup.symbol}
+          historicalSymbols={rollup.historical_symbols}
+        />
         <EmptyState
           title="No ownership data"
           description="XBRL shares-outstanding not yet on file for this instrument. Trigger a fundamentals sync, or wait for the next scheduled run."
@@ -249,6 +254,10 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
     return (
       <div className="flex flex-col gap-3">
         <Banner banner={rollup.banner} />
+        <HistoricalSymbolCallout
+          currentSymbol={rollup.symbol}
+          historicalSymbols={rollup.historical_symbols}
+        />
         <EmptyState
           title="No ownership data"
           description="Sunburst rings could not be derived — shares outstanding resolved to zero or the input snapshot is malformed."
@@ -260,6 +269,10 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
   return (
     <div className="flex flex-col gap-3">
       <Banner banner={rollup.banner} />
+      <HistoricalSymbolCallout
+        currentSymbol={rollup.symbol}
+        historicalSymbols={rollup.historical_symbols}
+      />
       <ConcentrationChip rollup={rollup} />
       {rollup.residual.oversubscribed && <OversubscribedWarning />}
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start">

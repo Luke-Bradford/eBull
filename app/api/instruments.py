@@ -3212,6 +3212,13 @@ class _BannerModel(BaseModel):
     body: str
 
 
+class _HistoricalSymbolModel(BaseModel):
+    symbol: str
+    effective_from: date
+    effective_to: date | None
+    source_event: str
+
+
 class _SharesOutstandingSourceModel(BaseModel):
     accession_number: str | None
     concept: str | None
@@ -3243,6 +3250,11 @@ class OwnershipRollupResponse(BaseModel):
     concentration: _ConcentrationModel
     coverage: _CoverageModel
     banner: _BannerModel
+    # Symbol chain from instrument_symbol_history (Batch 7 of #788).
+    # Empty for instruments without a backfilled chain. Frontend
+    # renders a "Filed as X" callout when the chain has any symbol
+    # other than the current one.
+    historical_symbols: list[_HistoricalSymbolModel]
     computed_at: datetime
 
 
@@ -3326,6 +3338,15 @@ def _rollup_to_response(
             headline=rollup.banner.headline,
             body=rollup.banner.body,
         ),
+        historical_symbols=[
+            _HistoricalSymbolModel(
+                symbol=h.symbol,
+                effective_from=h.effective_from,
+                effective_to=h.effective_to,
+                source_event=h.source_event,
+            )
+            for h in rollup.historical_symbols
+        ],
         computed_at=rollup.computed_at,
     )
 

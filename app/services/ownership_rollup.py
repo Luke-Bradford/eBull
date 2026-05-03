@@ -42,6 +42,10 @@ import psycopg
 import psycopg.rows
 
 from app.services.holder_name_resolver import resolve_holder_to_filer
+from app.services.instrument_history import (
+    SymbolHistoryEntry,
+    historical_symbols_for,
+)
 
 # ---------------------------------------------------------------------------
 # Public dataclasses (mirrored to Pydantic models in the API layer)
@@ -171,14 +175,34 @@ class OwnershipRollup:
     concentration: ConcentrationInfo
     coverage: CoverageReport
     banner: BannerCopy
+    # Historical symbols from ``instrument_symbol_history`` (#794
+    # frontend finish, Batch 7 of #788). Empty for instruments
+    # without a backfilled chain. Frontend renders a "Filed as X"
+    # callout when the chain includes any symbol other than the
+    # current one — useful for BBBY → BBBYQ ticker-change cases
+    # where filings under the prior symbol still belong to this
+    # instrument.
+    historical_symbols: tuple[SymbolHistoryEntry, ...]
     computed_at: datetime
 
     @classmethod
-    def no_data(cls, symbol: str, instrument_id: int) -> OwnershipRollup:
+    def no_data(
+        cls,
+        symbol: str,
+        instrument_id: int,
+        historical_symbols: tuple[SymbolHistoryEntry, ...] = (),
+    ) -> OwnershipRollup:
         """Empty payload for the ``no_data`` state (no XBRL outstanding
         on file). 200 OK with the red banner, not 503 — that way the
         frontend renders a uniform empty state and a sync-trigger
-        CTA rather than crashing on a non-2xx response."""
+        CTA rather than crashing on a non-2xx response.
+
+        ``historical_symbols`` is threaded through so the BBBY-style
+        callout still renders on instruments missing
+        ``shares_outstanding`` — that case is exactly when the
+        operator wants the "filings before symbol change still belong
+        here" hint. Codex pre-push review (Batch 7 of #788) caught
+        the prior version dropping the chain on this path."""
         residual = ResidualBlock(
             shares=Decimal(0),
             pct_outstanding=Decimal(0),
@@ -204,6 +228,7 @@ class OwnershipRollup:
             ),
             coverage=coverage,
             banner=banner,
+            historical_symbols=historical_symbols,
             computed_at=datetime.now(tz=UTC),
         )
 
@@ -891,8 +916,13 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     anti-pattern.
     """
     outstanding, outstanding_as_of, outstanding_source = _read_shares_outstanding(conn, instrument_id)
+    historical_symbols = tuple(historical_symbols_for(conn, instrument_id))
     if outstanding is None or outstanding <= 0:
-        return OwnershipRollup.no_data(symbol=symbol, instrument_id=instrument_id)
+        return OwnershipRollup.no_data(
+            symbol=symbol,
+            instrument_id=instrument_id,
+            historical_symbols=historical_symbols,
+        )
     treasury, treasury_as_of = _read_treasury(conn, instrument_id)
     sql_candidates = _collect_canonical_holders_sql(conn, instrument_id)
     matched, unmatched_def14a = _enrich_and_union_def14a(conn, instrument_id, sql_candidates)
@@ -916,6 +946,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         concentration=concentration,
         coverage=coverage,
         banner=banner,
+        historical_symbols=historical_symbols,
         computed_at=datetime.now(tz=UTC),
     )
 

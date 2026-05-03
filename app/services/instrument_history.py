@@ -35,9 +35,56 @@ ingest fail loud rather than silently produce two current chains.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date
 
 import psycopg
 import psycopg.rows
+
+
+@dataclass(frozen=True)
+class SymbolHistoryEntry:
+    """One row from ``instrument_symbol_history`` shaped for the
+    ownership-rollup payload (#794 frontend finish, Batch 7 of #788).
+
+    The frontend renders a "Filed as X" callout when the historical
+    chain includes a symbol other than the current one. Empty
+    ``effective_to`` marks the current row."""
+
+    symbol: str
+    effective_from: date
+    effective_to: date | None
+    source_event: str
+
+
+def historical_symbols_for(conn: psycopg.Connection[tuple], instrument_id: int) -> Sequence[SymbolHistoryEntry]:
+    """Every symbol ever associated with this instrument, oldest-first.
+
+    Returns ``[]`` for an instrument with no
+    ``instrument_symbol_history`` row (pre-backfill stub). Callers
+    can treat ``len(entries) > 1`` OR ``any(e.effective_to is not None)``
+    as the trigger for the historical-symbol callout — both conditions
+    imply the chain has more than just the imported current row.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT symbol, effective_from, effective_to, source_event
+            FROM instrument_symbol_history
+            WHERE instrument_id = %s
+            ORDER BY effective_from ASC
+            """,
+            (instrument_id,),
+        )
+        return [
+            SymbolHistoryEntry(
+                symbol=str(row[0]),
+                effective_from=row[1],
+                effective_to=row[2],
+                source_event=str(row[3]),
+            )
+            for row in cur.fetchall()
+        ]
 
 
 def historical_ciks_for(conn: psycopg.Connection[tuple], instrument_id: int) -> Sequence[str]:
