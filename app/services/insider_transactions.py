@@ -897,6 +897,7 @@ def upsert_filing(
     accession_number: str,
     primary_document_url: str,
     parsed: ParsedFiling,
+    is_rewash: bool = False,
 ) -> None:
     """Insert/refresh the filing header + filer dim + footnote bodies +
     transaction rows for one accession.
@@ -906,7 +907,13 @@ def upsert_filing(
     accession (e.g. after a parser bump) refreshes every field in
     place. The prior 056-era ``ON CONFLICT DO NOTHING`` policy would
     have frozen pre-expansion rows forever; the new parser version
-    deliberately overwrites them."""
+    deliberately overwrites them.
+
+    ``is_rewash``: when True, the conflict branch preserves the
+    original ``fetched_at`` (re-parsing a stored body isn't a fresh
+    SEC fetch and shouldn't claim to be — operator audit / recency
+    logic using ``fetched_at`` would otherwise read every re-walked
+    filing as "fetched today")."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -943,7 +950,9 @@ def upsert_filing(
                 primary_document_url         = EXCLUDED.primary_document_url,
                 parser_version               = EXCLUDED.parser_version,
                 is_tombstone                 = FALSE,
-                fetched_at                   = NOW()
+                fetched_at                   = CASE WHEN %s
+                                                    THEN insider_filings.fetched_at
+                                                    ELSE NOW() END
             """,
             (
                 accession_number,
@@ -962,6 +971,7 @@ def upsert_filing(
                 parsed.signature_date,
                 primary_document_url,
                 _PARSER_VERSION,
+                is_rewash,
             ),
         )
 
