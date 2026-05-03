@@ -21,6 +21,8 @@ DB-only.
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -1170,6 +1172,7 @@ _INSIDER_PROVIDERS: tuple[str, ...] = ("sec_form4",)
 # rather than silently passing through to a reader that doesn't
 # consume it. PR #774 review caught the cross-contamination risk.
 _INSIDER_BASELINE_PROVIDERS: tuple[str, ...] = ("sec_form3",)
+_DEF14A_PROVIDERS: tuple[str, ...] = ("sec_def14a",)
 
 
 def _validate_provider(provider: str | None, allowed: tuple[str, ...]) -> None:
@@ -2318,9 +2321,6 @@ def get_insider_baseline_csv(
     # Build CSV via csv.writer to a StringIO so we get the
     # canonical quoting + line terminator. Plain str-join would
     # mishandle commas / quotes inside filer names.
-    import csv
-    import io
-
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerow(
@@ -2355,6 +2355,361 @@ def get_insider_baseline_csv(
         media_type="text/csv",
         headers={
             "Content-Disposition": f'attachment; filename="{symbol_clean}_insider_baseline.csv"',
+        },
+    )
+
+
+# ---------------------------------------------------------------------
+# DEF 14A beneficial-ownership drillthrough + CSV export (#788 Chain 2.7)
+# ---------------------------------------------------------------------
+
+
+class Def14AHolderModel(BaseModel):
+    holder_name: str
+    holder_role: str | None
+    shares: Decimal | None
+    percent_of_class: Decimal | None
+    as_of_date: date | None
+    accession_number: str
+    issuer_cik: str
+
+
+class Def14ADrillModel(BaseModel):
+    """Holders + Form 14A pipeline state.
+
+    ``holders`` are from the latest TYPED-ROW filing
+    (def14a_beneficial_holdings → latest as_of_date). When a
+    newer filing exists in filing_events but didn't produce
+    typed rows (parser failed / not yet ingested),
+    ``pipeline_notes`` surfaces the gap so the operator doesn't
+    silently see stale holders. Codex pre-push review caught
+    the prior version which served stale holders without
+    surfacing the newer filing's existence.
+    """
+
+    symbol: str
+    instrument_id: int
+    holders: list[Def14AHolderModel]
+    pipeline_typed_row_count: int
+    pipeline_raw_body_count: int
+    pipeline_tombstone_count: int
+    pipeline_notes: list[str]
+    # Newest DEF 14A filing date observed in filing_events, regardless
+    # of whether typed rows exist for it. Lets the operator see at a
+    # glance whether the holders shown are from the latest known
+    # filing or an older one.
+    latest_known_filing_date: date | None
+    # Date of the filing the holders are from (the typed-row
+    # filing). NULL when no typed rows exist.
+    holders_as_of_date: date | None
+
+
+@router.get(
+    "/{symbol}/def14a_holdings/drill",
+    response_model=Def14ADrillModel,
+)
+def get_def14a_drill(
+    symbol: str,
+    provider: str | None = Query(
+        default=None,
+        description="Capability provider tag. Today only 'sec_def14a'.",
+    ),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> Def14ADrillModel:
+    """Latest-filing DEF 14A beneficial-ownership holders + Form
+    14A pipeline state (typed row count, raw body count,
+    tombstones, notes). Same gates as /insider_baseline."""
+    _validate_provider(provider, _DEF14A_PROVIDERS)
+
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    if not _has_sec_cik(conn, instrument_id):
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} has no SEC coverage")
+
+    # Latest filing's holders. ``ORDER BY as_of_date DESC NULLS
+    # LAST, accession_number DESC`` so a tie-breaks on accession
+    # rather than picking arbitrarily; NULLS LAST so a non-null
+    # ``as_of_date`` always beats a null one.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            WITH latest AS (
+                SELECT accession_number, as_of_date AS holders_as_of
+                FROM def14a_beneficial_holdings
+                WHERE instrument_id = %s
+                ORDER BY as_of_date DESC NULLS LAST, accession_number DESC
+                LIMIT 1
+            )
+            SELECT holder_name, holder_role, shares, percent_of_class,
+                   h.as_of_date, h.accession_number, issuer_cik,
+                   latest.holders_as_of
+            FROM def14a_beneficial_holdings h
+            JOIN latest USING (accession_number)
+            WHERE instrument_id = %s
+            ORDER BY shares DESC NULLS LAST, holder_name
+            """,
+            (instrument_id, instrument_id),
+        )
+        holder_rows = cur.fetchall()
+        holders_as_of_date = holder_rows[0].get("holders_as_of") if holder_rows else None
+
+        # Newest DEF 14A filing observed in filing_events
+        # (regardless of whether typed rows exist for it). Track
+        # ``provider_filing_id`` (= accession_number) so the
+        # stale check below can compare like-for-like against the
+        # holders' accession. ``filing_date`` and the holders'
+        # ``as_of_date`` are different business dates for the same
+        # filing — Codex pre-push review caught a prior version
+        # that compared them and false-positived.
+        cur.execute(
+            """
+            SELECT provider_filing_id AS accession, filing_date
+            FROM filing_events
+            WHERE provider = 'sec'
+              AND filing_type = 'DEF 14A'
+              AND instrument_id = %s
+            -- Tie-break on accession (provider_filing_id), not
+            -- filing_event_id, so the choice is deterministic
+            -- regardless of insert order. Codex pre-push review
+            -- caught a same-day false-stale where event-id tie-
+            -- break picked acc-2 over acc-1.
+            ORDER BY filing_date DESC, provider_filing_id DESC
+            LIMIT 1
+            """,
+            (instrument_id,),
+        )
+        latest_event_row = cur.fetchone()
+        latest_known_filing_date = latest_event_row.get("filing_date") if latest_event_row else None
+        latest_known_accession = latest_event_row.get("accession") if latest_event_row else None
+        holders_accession = holder_rows[0].get("accession_number") if holder_rows else None
+
+        # Pipeline state (mirrors ownership_drillthrough's def14a
+        # query — inlined to keep this PR independent of #830's
+        # merge order).
+        cur.execute(
+            "SELECT COUNT(*) AS row_count FROM def14a_beneficial_holdings WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        typed = cur.fetchone() or {"row_count": 0}
+        # COUNT(DISTINCT log.accession_number): a single filing
+        # retried multiple times produces multiple log rows, so a
+        # bare COUNT(*) inflates tombstone_count and misleads
+        # operator triage. Claude PR #833 review caught this as
+        # WARNING — filing-level counts are the canonical operator
+        # signal, not row-level.
+        cur.execute(
+            """
+            SELECT COUNT(DISTINCT log.accession_number) AS tombstone_count
+            FROM def14a_ingest_log log
+            WHERE log.status IN ('partial', 'failed')
+              AND log.accession_number IN (
+                  SELECT accession_number FROM def14a_beneficial_holdings
+                  WHERE instrument_id = %s
+                  UNION
+                  SELECT fe.provider_filing_id FROM filing_events fe
+                  WHERE fe.provider = 'sec' AND fe.instrument_id = %s
+                    AND fe.filing_type = 'DEF 14A'
+              )
+            """,
+            (instrument_id, instrument_id),
+        )
+        tomb = cur.fetchone() or {"tombstone_count": 0}
+        cur.execute(
+            """
+            SELECT COUNT(DISTINCT r.accession_number) AS body_count
+            FROM filing_raw_documents r
+            JOIN filing_events fe ON fe.provider_filing_id = r.accession_number
+            WHERE r.document_kind = 'def14a_body'
+              AND fe.provider = 'sec'
+              AND fe.filing_type = 'DEF 14A'
+              AND fe.instrument_id = %s
+            """,
+            (instrument_id,),
+        )
+        body = cur.fetchone() or {"body_count": 0}
+
+    typed_count = int(typed["row_count"])
+    tombstone_count = int(tomb["tombstone_count"])
+    raw_body_count = int(body["body_count"])
+
+    # Discovered-but-unparsed: filings exist in filing_events but
+    # haven't produced typed rows / raw bodies / tombstones. The
+    # ingest queue should pick them up; surface as info so the
+    # operator knows the gap is queue-side, not pipeline-side.
+    discovered_unparsed_count = 0
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM filing_events fe
+            WHERE fe.provider = 'sec'
+              AND fe.filing_type = 'DEF 14A'
+              AND fe.instrument_id = %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM def14a_ingest_log log
+                  WHERE log.accession_number = fe.provider_filing_id
+              )
+            """,
+            (instrument_id,),
+        )
+        d_row = cur.fetchone()
+        if d_row is not None:
+            discovered_unparsed_count = int(d_row["c"])
+
+    notes: list[str] = []
+    if typed_count == 0 and tombstone_count == 0 and raw_body_count == 0 and discovered_unparsed_count == 0:
+        notes.append("no DEF 14A holders")
+    if tombstone_count:
+        notes.append(f"{tombstone_count} tombstoned proxy filing(s)")
+    if raw_body_count and not typed_count:
+        notes.append("raw bodies on file but zero typed rows — rewash candidate")
+    if discovered_unparsed_count:
+        notes.append(f"{discovered_unparsed_count} filing(s) discovered but not yet ingested")
+    # Stale-holders surface: the latest filing in filing_events is
+    # a DIFFERENT accession than the one the holders came from.
+    # Compare by accession (not date) — filing_date and as_of_date
+    # are different business dates of the same filing, so a date
+    # comparison would false-positive on a healthy single-filing
+    # case. Codex pre-push review caught.
+    if (
+        latest_known_accession is not None
+        and holders_accession is not None
+        and latest_known_accession != holders_accession
+    ):
+        date_str = latest_known_filing_date.isoformat() if latest_known_filing_date is not None else "unknown"
+        notes.append(
+            f"holders shown are from accession {holders_accession}; "
+            f"newer DEF 14A {latest_known_accession} (filed {date_str}) "
+            f"is missing typed rows"
+        )
+
+    return Def14ADrillModel(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        instrument_id=instrument_id,
+        holders=[
+            Def14AHolderModel(
+                holder_name=str(r["holder_name"]),  # type: ignore[arg-type]
+                holder_role=(str(r["holder_role"]) if r.get("holder_role") else None),
+                shares=r.get("shares"),  # type: ignore[arg-type]
+                percent_of_class=r.get("percent_of_class"),  # type: ignore[arg-type]
+                as_of_date=r.get("as_of_date"),  # type: ignore[arg-type]
+                accession_number=str(r["accession_number"]),  # type: ignore[arg-type]
+                issuer_cik=str(r["issuer_cik"]),  # type: ignore[arg-type]
+            )
+            for r in holder_rows
+        ],
+        pipeline_typed_row_count=typed_count,
+        pipeline_raw_body_count=raw_body_count,
+        pipeline_tombstone_count=tombstone_count,
+        pipeline_notes=notes,
+        latest_known_filing_date=latest_known_filing_date,
+        holders_as_of_date=holders_as_of_date,
+    )
+
+
+@router.get(
+    "/{symbol}/def14a_holdings/export.csv",
+    response_class=PlainTextResponse,
+)
+def get_def14a_csv(
+    symbol: str,
+    provider: str | None = Query(
+        default=None,
+        description="Capability provider tag. Today only 'sec_def14a'.",
+    ),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> PlainTextResponse:
+    """CSV export of all DEF 14A holders across all on-file
+    accessions for the instrument. Operator-friendly: header
+    always emitted; downloaded file uses
+    ``Content-Disposition: attachment``."""
+    _validate_provider(provider, _DEF14A_PROVIDERS)
+
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    if not _has_sec_cik(conn, instrument_id):
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} has no SEC coverage")
+
+    # Export ALL holdings (every accession) — the CSV is for
+    # historical analysis, not the latest snapshot. Ordered so a
+    # spreadsheet groups by filing year naturally.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT accession_number, issuer_cik, holder_name, holder_role,
+                   shares, percent_of_class, as_of_date
+            FROM def14a_beneficial_holdings
+            WHERE instrument_id = %s
+            ORDER BY as_of_date DESC NULLS LAST, accession_number DESC,
+                     shares DESC NULLS LAST, holder_name
+            """,
+            (instrument_id,),
+        )
+        rows = cur.fetchall()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(
+        [
+            "accession_number",
+            "issuer_cik",
+            "holder_name",
+            "holder_role",
+            "shares",
+            "percent_of_class",
+            "as_of_date",
+        ]
+    )
+    for r in rows:
+        writer.writerow(
+            [
+                str(r["accession_number"]),
+                str(r["issuer_cik"]),
+                str(r["holder_name"]),
+                str(r["holder_role"] or ""),
+                str(r["shares"]) if r.get("shares") is not None else "",
+                str(r["percent_of_class"]) if r.get("percent_of_class") is not None else "",
+                r["as_of_date"].isoformat() if r.get("as_of_date") else "",
+            ]
+        )
+    return PlainTextResponse(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{symbol_clean}_def14a_holdings.csv"',
         },
     )
 
