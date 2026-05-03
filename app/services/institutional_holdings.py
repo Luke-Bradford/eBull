@@ -696,7 +696,14 @@ def seed_filer(
         )
         ON CONFLICT (cik) DO UPDATE SET
             label = EXCLUDED.label,
-            expected_name = COALESCE(EXCLUDED.expected_name, institutional_filer_seeds.expected_name),
+            -- Use the RAW parameter (not EXCLUDED) so that a caller
+            -- omitting expected_name on an update preserves the
+            -- operator's prior value. EXCLUDED.expected_name is
+            -- always non-null because the VALUES clause coalesces
+            -- it to label — using EXCLUDED would silently clobber
+            -- prior operator-set values with display text. Codex
+            -- pre-push review caught this.
+            expected_name = COALESCE(%(expected_name)s, institutional_filer_seeds.expected_name),
             active = EXCLUDED.active,
             notes = COALESCE(EXCLUDED.notes, institutional_filer_seeds.notes)
         """,

@@ -250,6 +250,47 @@ def test_seed_filer_falls_back_to_label_when_expected_name_omitted(
     assert row[0] == "Some Filer"
 
 
+def test_seed_filer_preserves_prior_expected_name_on_reseed(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """First call sets expected_name explicitly; second call (e.g.
+    periodic re-seed updating only label/active) must NOT clobber
+    the operator-set value. Regression for the BLOCKING finding
+    from PR #821 review — the prior ``EXCLUDED.expected_name``
+    branch was always non-null (label-coalesced in VALUES), so
+    operator-set values silently reverted to display text on every
+    re-seed."""
+    from app.services.institutional_holdings import seed_filer
+
+    conn = ebull_test_conn
+    seed_filer(
+        conn,
+        cik="0000999100",
+        label="ACME Display Label",
+        expected_name="ACME CAPITAL MANAGEMENT LLC",
+    )
+    conn.commit()
+
+    seed_filer(
+        conn,
+        cik="0000999100",
+        label="ACME Display Label v2",
+        # expected_name omitted on the re-seed
+    )
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT label, expected_name FROM institutional_filer_seeds WHERE cik = %s",
+            ("0000999100",),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    label, expected_name = row
+    assert label == "ACME Display Label v2"  # label updated
+    assert expected_name == "ACME CAPITAL MANAGEMENT LLC"  # operator value preserved
+
+
 def _route_cli_to_test_db(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reroute the CLI's psycopg.connect call to open against the
     isolated ``ebull_test`` database rather than the dev one.
