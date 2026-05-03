@@ -289,8 +289,15 @@ def _cache_database_url(conn: psycopg.Connection[Any]) -> str:
     info = conn.info
     netloc_user = info.user or settings_parsed.username or ""
     password = settings_parsed.password or ""
+    # ``info.host`` is ``None`` for Unix-socket connections;
+    # ``info.port`` can be 0/None on the same. Fall back to settings
+    # values, then localhost — interpolating ``None`` straight into
+    # the URL produces a literal ``None:5432`` netloc and a
+    # connection error at runtime.
+    host = info.host or settings_parsed.hostname or "localhost"
+    port = info.port or settings_parsed.port or 5432
     auth = f"{netloc_user}:{password}" if password else netloc_user
-    netloc = f"{auth}@{info.host}:{info.port}" if auth else f"{info.host}:{info.port}"
+    netloc = f"{auth}@{host}:{port}" if auth else f"{host}:{port}"
     return urlunparse(
         settings_parsed._replace(
             netloc=netloc,
