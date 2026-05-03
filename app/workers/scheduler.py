@@ -242,6 +242,7 @@ JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP = "sec_business_summary_bootstrap"
 JOB_SEC_INSIDER_TRANSACTIONS_INGEST = "sec_insider_transactions_ingest"
 JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
 JOB_SEC_FORM3_INGEST = "sec_form3_ingest"
+JOB_SEC_DEF14A_INGEST = "sec_def14a_ingest"
 JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
 JOB_SEC_FILING_DOCUMENTS_INGEST = "sec_filing_documents_ingest"
 JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
@@ -594,6 +595,26 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "were invisible to the per-filer ring."
         ),
         cadence=Cadence.daily(hour=4, minute=20),
+        catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_DEF14A_INGEST,
+        description=(
+            "Parse SEC DEF 14A proxy statements into "
+            "``def14a_beneficial_holdings`` (#769 / #805). DEF 14A is "
+            "the canonical annual reconciliation point for both insiders "
+            "(officers + directors with proxy-disclosed beneficial "
+            "ownership) and 5%+ blockholders. Without this ingest, the "
+            "ownership rollup's def14a_unmatched slice is always empty "
+            "and the DEF 14A drift detector has nothing to reconcile "
+            "against — surfacing 0 rows in dev DB on operator audit "
+            "2026-05-03. Cadence: daily — proxy filings appear "
+            "~quarterly per issuer so daily catches them within a day "
+            "of EDGAR availability without burning bandwidth. Idempotent "
+            "via the (accession, holder_name) UNIQUE on the holdings "
+            "table + the def14a_ingest_log tombstone."
+        ),
+        cadence=Cadence.daily(hour=4, minute=35),
         catch_up_on_boot=False,
     ),
     ScheduledJob(
@@ -3252,6 +3273,43 @@ def sec_form3_ingest() -> None:
             result.rows_inserted,
             result.fetch_errors,
             result.parse_misses,
+        )
+
+
+def sec_def14a_ingest() -> None:
+    """Parse SEC DEF 14A proxy statements into
+    ``def14a_beneficial_holdings`` (#769 / #805).
+
+    Operator audit 2026-05-03 found this ingester was authored under
+    #769 (PRs #771-#774) but never had a periodic invocation wired up,
+    leaving ``def14a_beneficial_holdings`` empty in dev DB. The DEF
+    14A drift detector and the ownership rollup's
+    ``def14a_unmatched`` slice both depend on this data.
+
+    Daily cadence is plenty — proxy filings are quarterly-ish per
+    issuer; daily catches new ones within a cycle. Idempotent via
+    the ``(accession, holder_name)`` UNIQUE key + the
+    ``def14a_ingest_log`` tombstone.
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.def14a_ingest import ingest_def14a
+
+    with _tracked_job(JOB_SEC_DEF14A_INGEST) as tracker:
+        with (
+            psycopg.connect(settings.database_url) as conn,
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+        ):
+            result = ingest_def14a(conn, provider)
+
+        tracker.row_count = result.rows_inserted
+        logger.info(
+            "sec_def14a_ingest: scanned=%d succeeded=%d partial=%d failed=%d rows_inserted=%d rows_updated=%d",
+            result.accessions_seen,
+            result.accessions_succeeded,
+            result.accessions_partial,
+            result.accessions_failed,
+            result.rows_inserted,
+            result.rows_updated,
         )
 
 
