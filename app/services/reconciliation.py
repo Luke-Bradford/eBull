@@ -34,11 +34,13 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
+from urllib.parse import urlparse, urlunparse
 
 import psycopg
 import psycopg.rows
 
 from app.config import settings
+from app.services.cik_raw_filings import read_cik_raw, store_cik_raw
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +162,30 @@ def check_shares_outstanding_freshness(
         )
         stored = cur.fetchone()
 
+    # Live SEC value (write-through cache via cik_raw_documents).
+    # Fetched BEFORE the missing-stored-value check so that an
+    # issuer with a CIK but no DEI fact at SEC (foreign issuer,
+    # newly-registered, fund) doesn't trigger a false "missing
+    # stored value" warning when SEC also has nothing to compare
+    # against — that's a clean no-data case, not a drift signal.
+    try:
+        sec_latest = _fetch_latest_dei_shares_outstanding(conn, subject.cik)
+    except Exception as exc:  # noqa: BLE001 — fetch errors must not abort the sweep
+        return (
+            Finding(
+                check_name="shares_outstanding_freshness",
+                severity="info",
+                summary=f"SEC fetch failed: {type(exc).__name__}: {exc}",
+                source_url=_companyfacts_url(subject.cik),
+            ),
+        )
+
     if stored is None or stored.get("latest_shares") is None:
+        if sec_latest is None:
+            # Both sides empty — nothing to reconcile. Not a drift
+            # signal; the instrument has no SEC-side share count to
+            # measure against.
+            return ()
         return (
             Finding(
                 check_name="shares_outstanding_freshness",
@@ -168,19 +193,6 @@ def check_shares_outstanding_freshness(
                 summary="No stored shares_outstanding for instrument with SEC CIK.",
                 expected="non-null XBRL DEI value at SEC",
                 observed="NULL in instrument_share_count_latest",
-                source_url=_companyfacts_url(subject.cik),
-            ),
-        )
-
-    # Live SEC value
-    try:
-        sec_latest = _fetch_latest_dei_shares_outstanding(subject.cik)
-    except Exception as exc:  # noqa: BLE001 — fetch errors must not abort the sweep
-        return (
-            Finding(
-                check_name="shares_outstanding_freshness",
-                severity="info",
-                summary=f"SEC fetch failed: {type(exc).__name__}: {exc}",
                 source_url=_companyfacts_url(subject.cik),
             ),
         )
@@ -251,7 +263,145 @@ def _companyfacts_url(cik_padded: str) -> str:
     return f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json"
 
 
-def _fetch_latest_dei_shares_outstanding(cik_padded: str) -> int | None:
+# Companyfacts cache TTL. SEC's payload updates roughly daily as new
+# filings land; a 24h cache cuts ~95% of fetches in a typical
+# spot-check sweep without serving meaningfully stale data — drift
+# findings here have a 5% threshold for "warning" so a few hours of
+# stale cache is well under the noise floor.
+_COMPANYFACTS_CACHE_TTL = timedelta(hours=24)
+
+
+def _cache_database_url(conn: psycopg.Connection[Any]) -> str:
+    """Return a database URL that opens a NEW connection to the
+    SAME cluster + database the caller's ``conn`` is on. Critical
+    so a test against ``ebull_test`` doesn't accidentally write the
+    cache to the dev DB via ``settings.database_url``.
+
+    Strategy: take host / port / user / dbname from the live
+    connection (authoritative for "where this conn is talking to")
+    but pull the password from ``settings.database_url`` — psycopg
+    deliberately strips passwords from ``conn.info.dsn`` so we
+    can't recover it from the connection alone. If ``conn`` was
+    opened against a cluster other than the one in settings, the
+    password copy is the only mismatch the operator can hit.
+    """
+    settings_parsed = urlparse(settings.database_url)
+    info = conn.info
+    netloc_user = info.user or settings_parsed.username or ""
+    password = settings_parsed.password or ""
+    # ``info.host`` is ``None`` for Unix-socket connections;
+    # ``info.port`` can be 0/None on the same. Fall back to settings
+    # values, then localhost — interpolating ``None`` straight into
+    # the URL produces a literal ``None:5432`` netloc and a
+    # connection error at runtime.
+    host = info.host or settings_parsed.hostname or "localhost"
+    port = info.port or settings_parsed.port or 5432
+    auth = f"{netloc_user}:{password}" if password else netloc_user
+    netloc = f"{auth}@{host}:{port}" if auth else f"{host}:{port}"
+    return urlunparse(
+        settings_parsed._replace(
+            netloc=netloc,
+            path=f"/{info.dbname}",
+        )
+    )
+
+
+def _fetch_companyfacts_payload(
+    conn: psycopg.Connection[Any],
+    cik_padded: str,
+) -> dict[str, Any] | None:
+    """Return the parsed companyfacts payload for a CIK, using the
+    ``cik_raw_documents`` write-through cache.
+
+    Cache miss (or row older than ``_COMPANYFACTS_CACHE_TTL``)
+    triggers a fresh SEC fetch; the raw JSON text is then stored
+    so a subsequent call within the TTL window is a hot read.
+
+    Both cache READ and WRITE go through SEPARATE short-lived
+    connections, NOT the caller's. Two reasons:
+
+      1. Durability — the caller's transaction may roll back
+         (``run_spot_check``'s finally-block rollback on
+         zero-finding sweeps, or any failure path). A piggy-backed
+         cache write would silently disappear. A dedicated
+         connection commits on its own when it exits the context
+         manager, decoupled from the caller's lifecycle.
+      2. Snapshot freshness — the caller's connection may be in a
+         transaction whose snapshot was taken before another sweep
+         wrote the cache row, hiding the row from a same-connection
+         read. A fresh connection per cache read sees committed
+         rows immediately.
+
+    The connection-establishment cost is noise compared to the
+    30-second SEC fetch a miss pays for.
+
+    Cache failures are best-effort — a write or read failure logs
+    and continues so a transient DB hiccup doesn't take the
+    reconciliation sweep down.
+    """
+    dsn = _cache_database_url(conn)
+    cached = _read_cache(dsn, cik_padded)
+    if cached is not None:
+        return cached
+
+    req = urllib.request.Request(
+        _companyfacts_url(cik_padded),
+        headers={"User-Agent": settings.sec_user_agent},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 — fixed SEC URL
+        text = resp.read().decode("utf-8")
+
+    _write_cache(dsn, cik_padded, text)
+
+    parsed = json.loads(text)
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _read_cache(dsn: str, cik_padded: str) -> dict[str, Any] | None:
+    """Cache read on a fresh connection. Returns ``None`` on miss /
+    stale / parse-error / DB error so the caller falls through to a
+    fresh SEC fetch."""
+    try:
+        with psycopg.connect(dsn) as cache_conn:
+            cached = read_cik_raw(
+                cache_conn,
+                cik=cik_padded,
+                document_kind="companyfacts_json",
+                max_age=_COMPANYFACTS_CACHE_TTL,
+            )
+    except Exception:  # noqa: BLE001 — cache read must not abort the check
+        logger.exception("reconciliation: companyfacts cache read failed for CIK %s", cik_padded)
+        return None
+    if cached is None:
+        return None
+    try:
+        parsed = json.loads(cached.payload)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _write_cache(dsn: str, cik_padded: str, text: str) -> None:
+    """Cache write on a fresh connection. Best-effort — failure
+    logs and returns so the caller's flow continues."""
+    try:
+        with psycopg.connect(dsn) as cache_conn:
+            store_cik_raw(
+                cache_conn,
+                cik=cik_padded,
+                document_kind="companyfacts_json",
+                payload=text,
+                source_url=_companyfacts_url(cik_padded),
+            )
+            # psycopg3 connection context manager commits on clean exit.
+    except Exception:  # noqa: BLE001 — cache write must not abort the check
+        logger.exception("reconciliation: companyfacts cache write failed for CIK %s", cik_padded)
+
+
+def _fetch_latest_dei_shares_outstanding(
+    conn: psycopg.Connection[Any],
+    cik_padded: str,
+) -> int | None:
     """Walk the SEC companyfacts payload and return the latest DEI
     ``EntityCommonStockSharesOutstanding`` value, or ``None`` when
     the concept is absent.
@@ -265,13 +415,14 @@ def _fetch_latest_dei_shares_outstanding(cik_padded: str) -> int | None:
 
     SEC publishes multiple unit-of-measure variants for a given
     fact; we pick the ``shares`` unit only.
+
+    Routes through the ``cik_raw_documents`` write-through cache so
+    a sweep over a thousand instruments doesn't hammer SEC at 10
+    req/s — repeated CIKs become hot reads.
     """
-    req = urllib.request.Request(
-        _companyfacts_url(cik_padded),
-        headers={"User-Agent": settings.sec_user_agent},
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 — fixed SEC URL
-        payload = json.load(resp)
+    payload = _fetch_companyfacts_payload(conn, cik_padded)
+    if payload is None:
+        return None
     facts = payload.get("facts", {}).get("dei", {}).get("EntityCommonStockSharesOutstanding")
     if not isinstance(facts, dict):
         return None

@@ -149,17 +149,18 @@ def test_check_no_stored_value_emits_warning(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Instrument has CIK but no XBRL row → can't compare; warn the
-    operator that the SEC ingester didn't reach this instrument."""
+    """Instrument has CIK + SEC has DEI value but our store is empty
+    → warn that the SEC fundamentals ingester didn't reach this
+    instrument. Note: SEC must have a DEI value for the warning to
+    fire — both sides empty is a clean no-data case, not drift."""
     conn = ebull_test_conn
     _seed_instrument(conn, iid=910_001, symbol="NOFACTS", cik="0000111222")
     conn.commit()
 
-    # Network must not be touched — early return path.
     monkeypatch.setattr(
         reconciliation,
         "_fetch_latest_dei_shares_outstanding",
-        lambda _cik: pytest.fail("SEC fetch must not run when stored value is missing"),
+        lambda _conn, _cik: 50_000_000,  # SEC has a value; we don't
     )
 
     findings = check_shares_outstanding_freshness(
@@ -169,6 +170,30 @@ def test_check_no_stored_value_emits_warning(
     assert len(findings) == 1
     assert findings[0].severity == "warning"
     assert "No stored shares_outstanding" in findings[0].summary
+
+
+def test_check_clean_when_both_sides_empty(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Foreign issuer / fund / recently-registered: CIK exists, SEC
+    publishes no DEI EntityCommonStockSharesOutstanding. Nothing to
+    reconcile on either side — must NOT emit a false warning."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, iid=910_009, symbol="FOREIGN", cik="0000111230")
+    conn.commit()
+
+    monkeypatch.setattr(
+        reconciliation,
+        "_fetch_latest_dei_shares_outstanding",
+        lambda _conn, _cik: None,
+    )
+
+    findings = check_shares_outstanding_freshness(
+        conn,
+        InstrumentSubject(instrument_id=910_009, symbol="FOREIGN", cik="0000111230"),
+    )
+    assert findings == ()
 
 
 def test_check_clean_when_stored_matches_sec(
@@ -183,7 +208,7 @@ def test_check_clean_when_stored_matches_sec(
     monkeypatch.setattr(
         reconciliation,
         "_fetch_latest_dei_shares_outstanding",
-        lambda _cik: 100_000_000,
+        lambda _conn, _cik: 100_000_000,
     )
 
     findings = check_shares_outstanding_freshness(
@@ -207,7 +232,7 @@ def test_check_below_threshold_drift_treated_as_clean(
     monkeypatch.setattr(
         reconciliation,
         "_fetch_latest_dei_shares_outstanding",
-        lambda _cik: 100_050_000,
+        lambda _conn, _cik: 100_050_000,
     )
 
     findings = check_shares_outstanding_freshness(
@@ -230,7 +255,7 @@ def test_check_classifies_warning_drift(
     monkeypatch.setattr(
         reconciliation,
         "_fetch_latest_dei_shares_outstanding",
-        lambda _cik: 101_000_000,
+        lambda _conn, _cik: 101_000_000,
     )
 
     findings = check_shares_outstanding_freshness(
@@ -256,7 +281,7 @@ def test_check_classifies_critical_drift(
     monkeypatch.setattr(
         reconciliation,
         "_fetch_latest_dei_shares_outstanding",
-        lambda _cik: 110_000_000,
+        lambda _conn, _cik: 110_000_000,
     )
 
     findings = check_shares_outstanding_freshness(
@@ -278,7 +303,7 @@ def test_check_fetch_failure_emits_info_finding(
     _seed_share_count(conn, iid=910_006, shares=100_000_000)
     conn.commit()
 
-    def _boom(_cik: str) -> int | None:
+    def _boom(_conn: object, _cik: str) -> int | None:
         raise RuntimeError("SEC unreachable")
 
     monkeypatch.setattr(reconciliation, "_fetch_latest_dei_shares_outstanding", _boom)
@@ -306,7 +331,7 @@ def test_check_clean_when_sec_has_no_dei_value(
     monkeypatch.setattr(
         reconciliation,
         "_fetch_latest_dei_shares_outstanding",
-        lambda _cik: None,
+        lambda _conn, _cik: None,
     )
 
     findings = check_shares_outstanding_freshness(
@@ -340,7 +365,7 @@ def test_check_emits_freshness_warning_when_value_clean_but_stale(
     monkeypatch.setattr(
         reconciliation,
         "_fetch_latest_dei_shares_outstanding",
-        lambda _cik: 100_000_000,  # value matches; only freshness should fire
+        lambda _conn, _cik: 100_000_000,  # value matches; only freshness should fire
     )
 
     findings = check_shares_outstanding_freshness(
@@ -353,6 +378,7 @@ def test_check_emits_freshness_warning_when_value_clean_but_stale(
 
 
 def test_fetch_latest_picks_amended_filing_for_same_period(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """SEC's companyfacts payload publishes the original filing
@@ -360,7 +386,7 @@ def test_fetch_latest_picks_amended_filing_for_same_period(
     Without a ``filed`` tie-break, payload order decides the winner —
     creating spurious drift findings when the amendment restates
     the share count. The tie-break must pick the latest ``filed``."""
-    fake_payload = {
+    fake_payload: dict[str, Any] = {
         "facts": {
             "dei": {
                 "EntityCommonStockSharesOutstanding": {
@@ -375,10 +401,36 @@ def test_fetch_latest_picks_amended_filing_for_same_period(
         }
     }
 
-    class _Resp:
-        def __init__(self, payload: dict[str, Any]) -> None:
-            self._payload = payload
+    # Stub the payload-fetcher rather than urllib so the test
+    # focuses on the parsing tie-break logic. Cache wiring is
+    # exercised by test_fetch_uses_cik_raw_cache below.
+    monkeypatch.setattr(
+        reconciliation,
+        "_fetch_companyfacts_payload",
+        lambda _conn, _cik: fake_payload,
+    )
 
+    val = reconciliation._fetch_latest_dei_shares_outstanding(ebull_test_conn, "0000999999")
+
+    assert val == 200  # amendment wins on filed-desc tie-break
+
+
+def test_fetch_uses_cik_raw_cache(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First call hits SEC and writes cik_raw_documents; second
+    call within the cache TTL serves from the cached row without
+    re-fetching."""
+    conn = ebull_test_conn
+
+    fetched_payload = (
+        '{"facts": {"dei": {"EntityCommonStockSharesOutstanding": '
+        '{"units": {"shares": [{"end": "2026-03-31", "filed": "2026-04-15", "val": 12345}]}}}}}'
+    )
+    fetch_count = 0
+
+    class _Resp:
         def __enter__(self) -> _Resp:
             return self
 
@@ -386,21 +438,86 @@ def test_fetch_latest_picks_amended_filing_for_same_period(
             return None
 
         def read(self) -> bytes:
-            import json as _json
+            nonlocal fetch_count
+            fetch_count += 1
+            return fetched_payload.encode("utf-8")
 
-            return _json.dumps(self._payload).encode()
+    monkeypatch.setattr(
+        reconciliation.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Resp(),
+    )
 
-    def _fake_open(_req: object, timeout: int = 30) -> _Resp:  # noqa: ARG001
-        return _Resp(fake_payload)
+    val_first = reconciliation._fetch_latest_dei_shares_outstanding(conn, "0000999998")
+    assert val_first == 12345
+    assert fetch_count == 1
 
-    monkeypatch.setattr(reconciliation.urllib.request, "urlopen", _fake_open)
-    # ``json.load`` reads from the response stream; route it through
-    # the same stub.
-    monkeypatch.setattr(reconciliation.json, "load", lambda r: fake_payload)
+    # Second call within TTL must NOT re-fetch.
+    val_second = reconciliation._fetch_latest_dei_shares_outstanding(conn, "0000999998")
+    assert val_second == 12345
+    assert fetch_count == 1  # still only one network call
 
-    val = reconciliation._fetch_latest_dei_shares_outstanding("0000999999")
+    # Cache row was persisted with the right kind + source URL.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT document_kind, source_url FROM cik_raw_documents WHERE cik = %s",
+            ("0000999998",),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    kind, src = row
+    assert kind == "companyfacts_json"
+    assert src is not None and src.endswith("/CIK0000999998.json")
 
-    assert val == 200  # amendment wins on filed-desc tie-break
+
+def test_fetch_cache_write_failure_does_not_break_outer_transaction(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed cache write must NOT corrupt the caller's
+    transaction state — the savepoint isolates the failure so the
+    next statement on the same connection still works."""
+    conn = ebull_test_conn
+    fetched_payload = (
+        '{"facts": {"dei": {"EntityCommonStockSharesOutstanding": '
+        '{"units": {"shares": [{"end": "2026-03-31", "filed": "2026-04-15", "val": 999}]}}}}}'
+    )
+
+    class _Resp:
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return fetched_payload.encode("utf-8")
+
+    monkeypatch.setattr(
+        reconciliation.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Resp(),
+    )
+
+    # Force store_cik_raw to raise — simulates DB hiccup mid cache
+    # write. The SEC value should still be returned (cache write is
+    # best-effort) and the connection must be usable for subsequent
+    # reads.
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("simulated DB hiccup")
+
+    monkeypatch.setattr(reconciliation, "store_cik_raw", _boom)
+
+    val = reconciliation._fetch_latest_dei_shares_outstanding(conn, "0000999997")
+    assert val == 999
+
+    # Caller's connection still usable — cache writes go through a
+    # SEPARATE short-lived connection, so a failure there can't
+    # taint the caller's transaction state at all.
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1")
+        row = cur.fetchone()
+    assert row == (1,)
 
 
 def test_run_spot_check_findings_count_matches_persisted_rows(
