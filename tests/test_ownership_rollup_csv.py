@@ -40,12 +40,12 @@ from app.services.ownership_rollup import (
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401
 
-# The TestClient case below seeds against ``ebull_test``. Pytest
-# ``integration`` mark gates DB-touching tests so the unit-only run
-# can skip them. Codex pre-push review (Chain 2.8) flagged the
-# missing mark — without it this file leaks DB-dependent coverage
-# into the unit bucket.
-pytestmark = pytest.mark.integration
+# Only the TestClient case below touches the DB — it seeds against
+# ``ebull_test`` and exercises the FastAPI app. The ``build_rollup_csv``
+# unit tests are pure and must NOT carry the integration mark, so
+# the unit-only run still picks them up. Claude PR #834 round 1
+# review caught the prior module-level mark that silently gated all
+# 7 unit tests behind the integration bucket.
 
 
 def _holder(
@@ -323,6 +323,7 @@ def test_build_csv_handles_null_cik_and_no_as_of() -> None:
     assert parts[7] == ""  # as_of_date empty (was None)
 
 
+@pytest.mark.integration
 def test_csv_endpoint_returns_attachment_header_and_404_unknown_symbol(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:
