@@ -55,6 +55,9 @@ export interface OwnershipDroppedSource {
   /** Decimal-as-string. */
   readonly shares: string;
   readonly as_of_date: string | null;
+  /** SEC archive index URL for the accession. ``null`` only when the
+   *  accession is malformed (defensive). */
+  readonly edgar_url: string | null;
 }
 
 export interface OwnershipHolder {
@@ -66,14 +69,17 @@ export interface OwnershipHolder {
   readonly pct_outstanding: string;
   readonly winning_source: OwnershipSourceTag;
   readonly winning_accession: string;
+  /** SEC archive index URL for the winning accession — surfaces in
+   *  the L2 holder table as a click-through to the source filing. */
+  readonly winning_edgar_url: string | null;
   readonly as_of_date: string | null;
   /** 13F filer-type tag — only populated for 13F survivors. */
   readonly filer_type: string | null;
   /**
    * One row per losing source for this canonical holder. Surfaces
-   * in the Batch 3 provenance footer so the operator can see the
-   * full set of accessions that referred to this holder, even
-   * though only one supplied the share count used.
+   * in the provenance footer so the operator can see the full set
+   * of accessions that referred to this holder, even though only
+   * one supplied the share count used.
    */
   readonly dropped_sources: readonly OwnershipDroppedSource[];
 }

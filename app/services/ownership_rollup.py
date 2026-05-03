@@ -56,14 +56,15 @@ CoverageState = Literal["no_data", "red", "unknown_universe", "amber", "green"]
 @dataclass(frozen=True)
 class DroppedSource:
     """Provenance for a losing source in the dedup race. Surfaces in
-    the Batch 3 provenance footer so the operator can see "Form 4
-    won; the 13D/A you'd expect to see also reports 36.85M for the
-    same filer". One row per losing source per holder."""
+    the provenance footer so the operator can see "Form 4 won; the
+    13D/A you'd expect to see also reports 36.85M for the same
+    filer". One row per losing source per holder."""
 
     source: SourceTag
     accession_number: str
     shares: Decimal
     as_of_date: date | None
+    edgar_url: str | None  # Provenance link to the SEC archive index
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ class Holder:
     pct_outstanding: Decimal
     winning_source: SourceTag
     winning_accession: str
+    winning_edgar_url: str | None  # Direct link to the SEC archive index
     as_of_date: date | None
     filer_type: str | None  # 13F filer-type tag; None for non-13F survivors
     dropped_sources: tuple[DroppedSource, ...]
@@ -225,6 +227,29 @@ class _Candidate:
     as_of_date: date | None
     accession_number: str
     source_row_id: int
+
+
+def edgar_archive_url(accession_number: str | None) -> str | None:
+    """Return the SEC EDGAR archive index URL for an accession.
+
+    Format: ``https://www.sec.gov/Archives/edgar/data/{cik}/{acc_no_dashes}/{accession}-index.htm``
+
+    The filer CIK is derived from the accession's first segment (SEC
+    accession format is ``{cik_padded}-{yy}-{seq}``). Returns
+    ``None`` for malformed or missing accessions so callers can ship
+    the field as a nullable provenance link.
+    """
+    if not accession_number:
+        return None
+    parts = accession_number.split("-", 1)
+    if len(parts) != 2 or not parts[0]:
+        return None
+    try:
+        cik_int = int(parts[0].lstrip("0") or "0")
+    except ValueError:
+        return None
+    acc_no_dashes = accession_number.replace("-", "")
+    return f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_no_dashes}/{accession_number}-index.htm"
 
 
 def _identity_key(filer_cik: str | None, filer_name: str) -> str:
@@ -398,6 +423,7 @@ def _dedup_by_priority(candidates: Iterable[_Candidate]) -> list[Holder]:
                 pct_outstanding=Decimal(0),  # filled by _build_slice once denom known
                 winning_source=winner.source,
                 winning_accession=winner.accession_number,
+                winning_edgar_url=edgar_archive_url(winner.accession_number),
                 as_of_date=winner.as_of_date,
                 filer_type=winner.filer_type,
                 dropped_sources=tuple(
@@ -406,6 +432,7 @@ def _dedup_by_priority(candidates: Iterable[_Candidate]) -> list[Holder]:
                         accession_number=loser.accession_number,
                         shares=loser.shares,
                         as_of_date=loser.as_of_date,
+                        edgar_url=edgar_archive_url(loser.accession_number),
                     )
                     for loser in losers
                 ),
@@ -469,6 +496,7 @@ def _bucket_into_slices(
                 pct_outstanding=Decimal(0),
                 winning_source="def14a",
                 winning_accession=c.accession_number,
+                winning_edgar_url=edgar_archive_url(c.accession_number),
                 as_of_date=c.as_of_date,
                 filer_type=None,
                 dropped_sources=(),
@@ -501,6 +529,7 @@ def _build_slice(
             pct_outstanding=(h.shares / outstanding) if outstanding > 0 else Decimal(0),
             winning_source=h.winning_source,
             winning_accession=h.winning_accession,
+            winning_edgar_url=h.winning_edgar_url,
             as_of_date=h.as_of_date,
             filer_type=h.filer_type,
             dropped_sources=h.dropped_sources,
@@ -739,12 +768,15 @@ def _worst_named_category(coverage: CoverageReport) -> _WorstNamed:
 def _read_shares_outstanding(
     conn: psycopg.Connection[Any], instrument_id: int
 ) -> tuple[Decimal | None, date | None, SharesOutstandingSource]:
-    """Latest XBRL DEI / us-gaap shares-outstanding figure.
+    """Latest XBRL DEI / us-gaap shares-outstanding figure with full
+    provenance.
 
-    Reuses the ``instrument_share_count_latest`` view (migration 052)
-    which already prefers DEI > us-gaap for the canonical
-    point-in-time count. Provenance fields (accession, form_type)
-    land in Batch 3 — Tier 0 ships them as ``None``.
+    The view ``instrument_share_count_latest`` (migration 052) gives
+    the canonical latest value + DEI/us-gaap source taxonomy + period
+    end. Batch 3 of #788 (#792) extends the payload with the source
+    accession + form_type by re-querying ``financial_facts_raw`` for
+    the row that produced the value. The view does the
+    DEI > us-gaap precedence work; this function just enriches.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -758,17 +790,35 @@ def _read_shares_outstanding(
         row = cur.fetchone()
     if row is None or row.get("latest_shares") is None:
         return None, None, SharesOutstandingSource(None, None, None)
+    taxonomy = str(row["source_taxonomy"])
+    concept = "EntityCommonStockSharesOutstanding" if taxonomy == "dei" else "CommonStockSharesOutstanding"
+    as_of_date = row.get("as_of_date")
+    # Pull the producing accession + form_type from
+    # ``financial_facts_raw``. The view DISTINCT-ON's by
+    # ``filed_date DESC, accession_number DESC``, so we pick the same
+    # row by mirroring that ORDER BY here. The concept-name selection
+    # is keyed by the view's ``source_taxonomy`` output.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT accession_number, form_type, filed_date
+            FROM financial_facts_raw
+            WHERE instrument_id = %s
+              AND concept = %s
+              AND period_end = %s
+            ORDER BY filed_date DESC, accession_number DESC
+            LIMIT 1
+            """,
+            (instrument_id, concept, as_of_date),
+        )
+        prov_row = cur.fetchone()
     return (
         Decimal(row["latest_shares"]),  # type: ignore[arg-type]
-        row.get("as_of_date"),  # type: ignore[arg-type]
+        as_of_date,  # type: ignore[arg-type]
         SharesOutstandingSource(
-            accession_number=None,
-            concept=(
-                "EntityCommonStockSharesOutstanding"
-                if str(row["source_taxonomy"]) == "dei"
-                else "CommonStockSharesOutstanding"
-            ),
-            form_type=None,
+            accession_number=(str(prov_row["accession_number"]) if prov_row is not None else None),
+            concept=concept,
+            form_type=(str(prov_row["form_type"]) if prov_row is not None else None),
         ),
     )
 

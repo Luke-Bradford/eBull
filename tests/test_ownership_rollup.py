@@ -871,6 +871,63 @@ class TestSnapshotIsolation:
 # ---------------------------------------------------------------------------
 
 
+class TestProvenance:
+    """Per-holder ``edgar_url`` derivation + shares-outstanding source
+    accession threading (#792, Batch 3 of #788)."""
+
+    @pytest.fixture
+    def _setup(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> psycopg.Connection[tuple]:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=792_001, symbol="PROV")
+        _seed_outstanding(conn, instrument_id=792_001, shares="100000000")
+        conn.commit()
+        return conn
+
+    def test_edgar_archive_url_derivation(self) -> None:
+        from app.services.ownership_rollup import edgar_archive_url
+
+        url = edgar_archive_url("0001767470-26-000003")
+        assert url == (
+            "https://www.sec.gov/Archives/edgar/data/1767470/000176747026000003/0001767470-26-000003-index.htm"
+        )
+        assert edgar_archive_url(None) is None
+        assert edgar_archive_url("") is None
+        assert edgar_archive_url("malformed") is None
+
+    def test_holder_carries_winning_edgar_url(self, _setup: psycopg.Connection[tuple]) -> None:
+        conn = _setup
+        _seed_form4(
+            conn,
+            accession="0001234567-26-000001",
+            instrument_id=792_001,
+            filer_cik="0001234567",
+            filer_name="Provenance Holder",
+            txn_date=date(2026, 4, 1),
+            post_transaction_shares="500000",
+        )
+        conn.commit()
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="PROV", instrument_id=792_001)
+        insiders = [s for s in rollup.slices if s.category == "insiders"][0]
+        holder = insiders.holders[0]
+        assert holder.winning_edgar_url is not None
+        assert "0001234567-26-000001" in holder.winning_edgar_url
+        assert holder.winning_edgar_url.startswith("https://www.sec.gov/Archives/edgar/data/")
+
+    def test_shares_outstanding_source_accession_threaded(self, _setup: psycopg.Connection[tuple]) -> None:
+        """The shares_outstanding_source payload should carry the
+        accession + form_type from financial_facts_raw, not just the
+        view's source taxonomy."""
+        conn = _setup
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="PROV", instrument_id=792_001)
+        assert rollup.shares_outstanding_source.accession_number is not None
+        # Seeded fixture uses 'OUTSTANDING-{iid}-{period_end}' format.
+        assert "OUTSTANDING-792001" in rollup.shares_outstanding_source.accession_number
+        assert rollup.shares_outstanding_source.form_type == "10-Q"
+
+
 class TestEmptyStates:
     def test_empty_cohort_residual_equals_outstanding(
         self,

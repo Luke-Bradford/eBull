@@ -277,6 +277,23 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
               && (parseShareCount(rollup.treasury_shares) ?? 0) > 0 && (
                 <> + {formatShares(parseShareCount(rollup.treasury_shares) ?? 0)} treasury</>
               )}
+            {rollup.shares_outstanding_as_of !== null && (
+              <> · as of {rollup.shares_outstanding_as_of}</>
+            )}
+            {rollup.shares_outstanding_source.accession_number !== null && (
+              <>
+                {" · "}
+                <a
+                  className="underline decoration-dotted hover:text-slate-700 dark:hover:text-slate-300"
+                  href={`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&filenum=${encodeURIComponent(rollup.shares_outstanding_source.accession_number)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  data-test="shares-outstanding-source"
+                >
+                  {rollup.shares_outstanding_source.form_type ?? "SEC filing"}
+                </a>
+              </>
+            )}
             .
           </p>
           <SliceTable rollup={rollup} />
