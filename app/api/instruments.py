@@ -30,6 +30,7 @@ import httpx
 import psycopg
 import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from app.api.auth import require_session_or_service_token
@@ -2114,6 +2115,247 @@ def get_instrument_insider_baseline(
             )
             for h in holdings
         ],
+    )
+
+
+# ---------------------------------------------------------------------
+# Form 3 baseline drillthrough + CSV export (#788 Chain 2.6)
+# ---------------------------------------------------------------------
+
+
+class InsiderBaselineDrillModel(BaseModel):
+    """Drillthrough payload pairing the baseline holdings list with
+    the Form 3 pipeline state from ownership_drillthrough.
+
+    Lets the operator distinguish "no baseline rows because the
+    issuer has no Form 3 filings" from "no baseline rows because
+    the parser missed / tombstoned them" without flipping between
+    pages.
+    """
+
+    symbol: str
+    instrument_id: int
+    rows: list[InsiderBaselineHoldingModel]
+    pipeline_typed_row_count: int
+    pipeline_raw_body_count: int
+    pipeline_tombstone_count: int
+    pipeline_notes: list[str]
+
+
+@router.get(
+    "/{symbol}/insider_baseline/drill",
+    response_model=InsiderBaselineDrillModel,
+)
+def get_insider_baseline_drill(
+    symbol: str,
+    provider: str | None = Query(
+        default=None,
+        description="Capability provider tag. Today only 'sec_form3'.",
+    ),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> InsiderBaselineDrillModel:
+    """Form 3 baseline list + per-instrument pipeline state.
+
+    Empty-state contract matches ``/insider_baseline``: unknown
+    symbol → 404, no SEC coverage → 404, ingest-not-yet-run →
+    200 with empty rows + pipeline notes saying "no Form 3
+    baseline filings"."""
+    from app.services.insider_form3_ingest import list_baseline_only_insider_holdings
+
+    _validate_provider(provider, _INSIDER_BASELINE_PROVIDERS)
+
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    if not _has_sec_cik(conn, instrument_id):
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} has no SEC coverage")
+
+    holdings = list_baseline_only_insider_holdings(conn, instrument_id=instrument_id)
+
+    # Inline Form 3 pipeline state — typed-row count, raw bodies,
+    # tombstones, informational notes. Same shape as the
+    # ownership_drillthrough service (Chain 2.5, PR #830);
+    # inlined here so this PR is independent of #830's merge order.
+    notes: list[str] = []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*) AS row_count
+            FROM insider_initial_holdings h
+            JOIN insider_filings f ON f.accession_number = h.accession_number
+            WHERE h.instrument_id = %s
+              AND f.document_type LIKE '3%%'
+              AND f.is_tombstone = FALSE
+            """,
+            (instrument_id,),
+        )
+        typed = cur.fetchone() or {"row_count": 0}
+        cur.execute(
+            """
+            SELECT COUNT(*) AS tombstone_count
+            FROM insider_filings
+            WHERE instrument_id = %s
+              AND document_type LIKE '3%%'
+              AND is_tombstone = TRUE
+            """,
+            (instrument_id,),
+        )
+        tomb = cur.fetchone() or {"tombstone_count": 0}
+        cur.execute(
+            """
+            SELECT COUNT(DISTINCT r.accession_number) AS body_count
+            FROM filing_raw_documents r
+            JOIN insider_filings i ON i.accession_number = r.accession_number
+            WHERE r.document_kind = 'form3_xml' AND i.instrument_id = %s
+            """,
+            (instrument_id,),
+        )
+        body = cur.fetchone() or {"body_count": 0}
+
+    typed_row_count = int(typed["row_count"])
+    tombstone_count = int(tomb["tombstone_count"])
+    raw_body_count = int(body["body_count"])
+    # "No filings" is the LITERAL no-coverage case: zero typed
+    # rows, zero tombstones, zero raw bodies. The other zero-typed
+    # cases (rewash candidate / tombstoned-only) get more specific
+    # notes below — Codex pre-push review caught the prior
+    # mislabelling.
+    if typed_row_count == 0 and tombstone_count == 0 and raw_body_count == 0:
+        notes.append("no Form 3 baseline filings")
+    if tombstone_count:
+        notes.append(f"{tombstone_count} tombstoned filing(s)")
+    if raw_body_count and not typed_row_count:
+        notes.append("raw bodies on file but zero typed rows — rewash candidate")
+
+    return InsiderBaselineDrillModel(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        instrument_id=instrument_id,
+        rows=[
+            InsiderBaselineHoldingModel(
+                filer_cik=h.filer_cik,
+                filer_name=h.filer_name,
+                filer_role=h.filer_role,
+                security_title=h.security_title,
+                is_derivative=h.is_derivative,
+                direct_indirect=h.direct_indirect,
+                shares=h.shares,
+                value_owned=h.value_owned,
+                as_of_date=h.as_of_date,
+            )
+            for h in holdings
+        ],
+        pipeline_typed_row_count=typed_row_count,
+        pipeline_raw_body_count=raw_body_count,
+        pipeline_tombstone_count=tombstone_count,
+        pipeline_notes=notes,
+    )
+
+
+@router.get(
+    "/{symbol}/insider_baseline/export.csv",
+    response_class=PlainTextResponse,
+)
+def get_insider_baseline_csv(
+    symbol: str,
+    provider: str | None = Query(
+        default=None,
+        description="Capability provider tag. Today only 'sec_form3'.",
+    ),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> PlainTextResponse:
+    """Operator-friendly CSV export of the same baseline list.
+
+    Always 200 (with a single header row when no data) so an
+    automation script can pipe this into a spreadsheet without
+    branch-on-status. Intentionally streams as text/csv with
+    ``Content-Disposition: attachment`` so the browser saves the
+    file rather than rendering the raw text."""
+    from app.services.insider_form3_ingest import list_baseline_only_insider_holdings
+
+    _validate_provider(provider, _INSIDER_BASELINE_PROVIDERS)
+
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, symbol FROM instruments
+            WHERE UPPER(symbol) = %(s)s
+            ORDER BY is_primary_listing DESC, instrument_id ASC
+            LIMIT 1
+            """,
+            {"s": symbol_clean},
+        )
+        inst_row = cur.fetchone()
+
+    if inst_row is None:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id = int(inst_row["instrument_id"])  # type: ignore[arg-type]
+    if not _has_sec_cik(conn, instrument_id):
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} has no SEC coverage")
+
+    holdings = list_baseline_only_insider_holdings(conn, instrument_id=instrument_id)
+
+    # Build CSV via csv.writer to a StringIO so we get the
+    # canonical quoting + line terminator. Plain str-join would
+    # mishandle commas / quotes inside filer names.
+    import csv
+    import io
+
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(
+        [
+            "filer_cik",
+            "filer_name",
+            "filer_role",
+            "security_title",
+            "is_derivative",
+            "direct_indirect",
+            "shares",
+            "value_owned",
+            "as_of_date",
+        ]
+    )
+    for h in holdings:
+        writer.writerow(
+            [
+                h.filer_cik,
+                h.filer_name,
+                h.filer_role or "",
+                h.security_title or "",
+                "true" if h.is_derivative else "false",
+                h.direct_indirect or "",
+                str(h.shares) if h.shares is not None else "",
+                str(h.value_owned) if h.value_owned is not None else "",
+                h.as_of_date.isoformat(),
+            ]
+        )
+    return PlainTextResponse(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{symbol_clean}_insider_baseline.csv"',
+        },
     )
 
 
