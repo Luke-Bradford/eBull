@@ -212,6 +212,37 @@ def test_storage_summary_groups_by_kind(
     assert by_kind["def14a_body"].total_bytes == 5000
 
 
+def test_iter_raw_concurrent_calls_use_unique_cursor_names(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """Server-side cursor names are session-scoped in psycopg v3.
+    Two concurrent ``iter_raw`` calls on the same connection must
+    not collide. Claude PR 808 review (BLOCKING) caught the prior
+    literal cursor name. Pin the dynamic-name behaviour by opening
+    two iterators side-by-side and walking both."""
+    conn = ebull_test_conn
+    for i in range(3):
+        raw_filings.store_raw(
+            conn,
+            accession_number=f"0000000999-26-{i:06d}",
+            document_kind="form4_xml",
+            payload=f"<doc-{i}/>",
+        )
+    conn.commit()
+    iter_a = raw_filings.iter_raw(conn, document_kind="form4_xml", batch_size=1)
+    iter_b = raw_filings.iter_raw(conn, document_kind="form4_xml", batch_size=1)
+    # Side-by-side advance — would have raised
+    # ``ProgrammingError: cursor "iter_raw" already exists`` under
+    # the prior static-name implementation.
+    a1 = next(iter_a)
+    b1 = next(iter_b)
+    assert a1.payload.startswith("<doc-")
+    assert b1.payload.startswith("<doc-")
+    # Drain both so the server-side cursors close cleanly.
+    list(iter_a)
+    list(iter_b)
+
+
 def test_byte_count_generated_from_octet_length(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:

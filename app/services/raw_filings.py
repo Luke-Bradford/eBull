@@ -46,6 +46,7 @@ amended).
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -61,9 +62,12 @@ DocumentKind = Literal[
     "form4_xml",
     "form3_xml",
     "def14a_body",
-    "submissions_json",
-    "companyfacts_json",
 ]
+# submissions.json / companyfacts.json are keyed by CIK, not by SEC
+# accession number — they belong in their own per-CIK store, not in
+# this per-filing table. Claude PR 808 review (BLOCKING) caught the
+# prior overload that smuggled CIKs into the accession_number column.
+# Future PR adds a sibling ``cik_raw_documents`` table for those.
 
 
 @dataclass(frozen=True)
@@ -179,7 +183,12 @@ def iter_raw(
         WHERE {where_sql}
         ORDER BY fetched_at DESC, accession_number
     """  # noqa: S608 — where_sql built from hardcoded enum + placeholders
-    with conn.cursor(row_factory=psycopg.rows.dict_row, name="iter_raw") as cur:
+    # Server-side cursor names are session-scoped in psycopg v3, so
+    # a hardcoded name would collide between concurrent ``iter_raw``
+    # calls on the same connection. Generate a unique name per call.
+    # Claude PR 808 review (BLOCKING) caught the prior literal name.
+    cursor_name = f"iter_raw_{uuid.uuid4().hex}"
+    with conn.cursor(row_factory=psycopg.rows.dict_row, name=cursor_name) as cur:
         cur.itersize = batch_size
         cur.execute(sql, params)  # type: ignore[arg-type]  # f-string composed from closed enum
         for row in cur:

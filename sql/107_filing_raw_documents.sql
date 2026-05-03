@@ -56,10 +56,14 @@ CREATE TABLE IF NOT EXISTS filing_raw_documents (
             'primary_doc_13dg',     -- 13D/G primary_doc.xml
             'form4_xml',            -- Form 4 ownership XML
             'form3_xml',            -- Form 3 initial-holdings XML
-            'def14a_body',          -- DEF 14A proxy statement body (HTML / text)
-            'submissions_json',     -- SEC submissions.json (per CIK)
-            'companyfacts_json'     -- SEC companyfacts.json (per CIK)
+            'def14a_body'           -- DEF 14A proxy statement body (HTML / text)
         )),
+    -- Note: SEC submissions.json + companyfacts.json are keyed by
+    -- CIK, not by accession number. They belong in their own
+    -- per-CIK store, not this per-filing table. Claude PR 808 review
+    -- (BLOCKING) caught the prior overload that smuggled CIKs into
+    -- this column. A future PR adds a sibling ``cik_raw_documents``
+    -- table.
     payload            TEXT NOT NULL,
     byte_count         INTEGER GENERATED ALWAYS AS (octet_length(payload)) STORED,
     parser_version     TEXT,
