@@ -350,6 +350,93 @@ class TestIngestFiler13F:
         assert rows[0]["market_value_usd"] == Decimal("69900000")
         assert rows[0]["voting_authority"] == "SOLE"
 
+    def test_raw_payload_persisted_for_primary_doc_and_infotable(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """13F ingester must persist BOTH the primary_doc.xml and
+        the infotable.xml bodies to ``filing_raw_documents`` before
+        parsing — operator audit 2026-05-03 + PR #808 contract.
+        Re-wash workflows depend on these rows."""
+        from app.services import raw_filings
+
+        conn = _setup
+        fetcher = self._build_fetcher(
+            holdings=[
+                {"cusip": "037833100", "name": "APPLE INC", "value": "1", "shares": "1"},
+            ]
+        )
+        ingest_filer_13f(conn, fetcher, filer_cik="0001067983")
+        conn.commit()
+
+        primary = raw_filings.read_raw(
+            conn,
+            accession_number="0001067983-25-000001",
+            document_kind="primary_doc",
+        )
+        assert primary is not None
+        assert "BERKSHIRE" in primary.payload.upper() or "<edgarSubmission" in primary.payload
+        assert primary.parser_version == "13f-primary-v1"
+        assert primary.source_url is not None
+        assert primary.source_url.endswith("primary_doc.xml")
+
+        infotable = raw_filings.read_raw(
+            conn,
+            accession_number="0001067983-25-000001",
+            document_kind="infotable_13f",
+        )
+        assert infotable is not None
+        assert "037833100" in infotable.payload  # the seeded CUSIP
+        assert infotable.parser_version == "13f-infotable-v1"
+        assert infotable.source_url is not None
+        assert infotable.source_url.endswith("infotable.xml")
+
+    def test_raw_payload_survives_parse_failure(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Codex pre-push review (PR follow-up to #808): if
+        primary_doc.xml or infotable.xml is malformed and the parser
+        raises ET.ParseError, the previously-stored raw body must
+        survive — the whole point of raw retention is debugging
+        parser failures without re-fetching SEC."""
+        from app.services import raw_filings
+
+        conn = _setup
+        # Corrupt the infotable so parse_infotable raises ParseError
+        # while primary_doc.xml is still valid.
+        cik_int = 1067983
+        accession = "0001067983-25-000099"
+        accn_no_dashes = accession.replace("-", "")
+        archive_base = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accn_no_dashes}/"
+        payloads: dict[str, str | None] = {
+            "https://data.sec.gov/submissions/CIK0001067983.json": _submissions_json(
+                accessions=[(accession, "13F-HR", "2025-02-14", "2024-12-31")]
+            ),
+            archive_base + "index.json": _archive_index_json(),
+            archive_base + "primary_doc.xml": _PRIMARY_DOC_XML,
+            archive_base + "infotable.xml": "<not-valid-xml<<<",  # malformed
+        }
+        fetcher = _InMemoryFetcher(payloads)
+
+        ingest_filer_13f(conn, fetcher, filer_cik="0001067983")
+        conn.commit()
+
+        # Both raw rows persisted despite the parse failure.
+        primary = raw_filings.read_raw(
+            conn,
+            accession_number=accession,
+            document_kind="primary_doc",
+        )
+        assert primary is not None
+        infotable = raw_filings.read_raw(
+            conn,
+            accession_number=accession,
+            document_kind="infotable_13f",
+        )
+        assert infotable is not None
+        assert infotable.payload == "<not-valid-xml<<<"
+
     def test_unknown_cusip_is_skipped_with_counter(
         self,
         _setup: psycopg.Connection[tuple],

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import xml.etree.ElementTree as ET  # noqa: S405 — only used to catch ET.ParseError on parse failure
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -48,7 +49,16 @@ from app.providers.implementations.sec_13f import (
     parse_infotable,
     parse_primary_doc,
 )
+from app.services import raw_filings
 from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
+
+# Parser-version tags written alongside the raw bodies. Re-wash
+# workflows compare against these constants and skip rows already
+# on the latest parser. Bump when ``parse_primary_doc`` /
+# ``parse_infotable`` semantics change in a way that affects what
+# lands in the typed tables.
+_PARSER_VERSION_13F_PRIMARY = "13f-primary-v1"
+_PARSER_VERSION_13F_INFOTABLE = "13f-infotable-v1"
 
 logger = logging.getLogger(__name__)
 
@@ -906,17 +916,19 @@ def _ingest_single_accession(
     primary_url = _archive_file_url(filer_cik, ref.accession_number, primary_name)
     infotable_url = _archive_file_url(filer_cik, ref.accession_number, infotable_name)
 
-    # Raw-payload-persistence contract (#448 / #453):
-    # the fetched body is consumed directly by parse_primary_doc
-    # and parse_infotable below; every structured field they emit
-    # lands in SQL via _upsert_filer / _upsert_holding. Matches the
-    # pattern in app/services/insider_transactions.py,
-    # app/services/business_summary.py, app/services/eight_k_events.py
-    # — none of which persist the fetched body to a separate raw
-    # column before parsing. SEC EDGAR's fetch_document_text owns
-    # the host-side audit; the service-layer contract is "every
-    # structured field from the upstream document lands in SQL",
-    # which the upserts below satisfy.
+    # Raw-payload retention (operator audit 2026-05-03 + PR #808):
+    # both fetched bodies are persisted to ``filing_raw_documents``
+    # IMMEDIATELY after successful fetch, BEFORE parsing. That way:
+    #
+    #   * A parser bug discovered later can re-wash from the stored
+    #     body without re-fetching SEC at 10 req/sec.
+    #   * If parsing raises, we still have the body for diagnostic.
+    #   * Re-fetches (amended filings) overwrite via ON CONFLICT —
+    #     the new body is always authoritative.
+    #
+    # Prior contract was "every structured field from the upstream
+    # document lands in SQL" via the upserts below — that holds, but
+    # is no longer the only re-wash path.
     primary_xml = sec.fetch_document_text(primary_url)
     if primary_xml is None:
         logger.warning(
@@ -930,10 +942,25 @@ def _ingest_single_accession(
             holdings_skipped_no_cusip=0,
             error="primary_doc.xml fetch failed",
         )
+    raw_filings.store_raw(
+        conn,
+        accession_number=ref.accession_number,
+        document_kind="primary_doc",
+        payload=primary_xml,
+        parser_version=_PARSER_VERSION_13F_PRIMARY,
+        source_url=primary_url,
+    )
+    # Commit the raw row immediately so a later parse failure that
+    # propagates up to the outer filer loop's rollback can't take
+    # the just-stored body down with it. Codex pre-push review caught
+    # this — without the commit, the rollback at the per-filer
+    # exception handler discards the raw row exactly when we need it
+    # most (parse failed → re-wash needs the body).
+    conn.commit()
 
     try:
         info = parse_primary_doc(primary_xml)
-    except ValueError as exc:
+    except (ValueError, ET.ParseError) as exc:
         logger.exception(
             "13F ingest: primary_doc.xml parse failed for cik=%s accession=%s",
             filer_cik,
@@ -959,8 +986,30 @@ def _ingest_single_accession(
             holdings_skipped_no_cusip=0,
             error="infotable.xml fetch failed",
         )
+    raw_filings.store_raw(
+        conn,
+        accession_number=ref.accession_number,
+        document_kind="infotable_13f",
+        payload=infotable_xml,
+        parser_version=_PARSER_VERSION_13F_INFOTABLE,
+        source_url=infotable_url,
+    )
+    conn.commit()
 
-    holdings = parse_infotable(infotable_xml)
+    try:
+        holdings = parse_infotable(infotable_xml)
+    except (ValueError, ET.ParseError) as exc:
+        logger.exception(
+            "13F ingest: infotable.xml parse failed for cik=%s accession=%s",
+            filer_cik,
+            ref.accession_number,
+        )
+        return _AccessionOutcome(
+            status="failed",
+            holdings_inserted=0,
+            holdings_skipped_no_cusip=0,
+            error=f"infotable.xml parse failed: {exc}",
+        )
     filer_id = _upsert_filer(conn, info)
 
     if not holdings:

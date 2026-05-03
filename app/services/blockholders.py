@@ -64,7 +64,10 @@ from app.providers.implementations.sec_13dg import (
     BlockholderReportingPerson,
     parse_primary_doc,
 )
+from app.services import raw_filings
 from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
+
+_PARSER_VERSION_13DG = "13dg-primary-v1"
 
 logger = logging.getLogger(__name__)
 
@@ -600,6 +603,20 @@ def _ingest_single_accession(
             error="primary_doc.xml fetch failed",
             submission_type=None,
         )
+    # Persist raw body BEFORE parsing — re-wash workflows depend on
+    # this row even if parsing fails. Operator audit 2026-05-03 +
+    # PR #808 contract. Commit immediately so a later per-filer
+    # exception that triggers ``conn.rollback()`` upstream cannot
+    # take this row down with it (Codex pre-push review).
+    raw_filings.store_raw(
+        conn,
+        accession_number=ref.accession_number,
+        document_kind="primary_doc_13dg",
+        payload=primary_xml,
+        parser_version=_PARSER_VERSION_13DG,
+        source_url=primary_url,
+    )
+    conn.commit()
 
     try:
         filing: BlockholderFiling = parse_primary_doc(primary_xml)

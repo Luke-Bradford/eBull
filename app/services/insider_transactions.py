@@ -49,6 +49,9 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from app.providers.concurrent_fetch import fetch_document_texts
+from app.services import raw_filings
+
+_PARSER_VERSION_FORM4 = "form4-v1"
 
 logger = logging.getLogger(__name__)
 
@@ -1419,6 +1422,19 @@ def _process_candidates(
             )
             conn.commit()
             continue
+
+        # Persist raw body BEFORE parsing — re-wash workflows depend
+        # on this row even if parsing fails. Operator audit
+        # 2026-05-03 + PR #808 contract.
+        raw_filings.store_raw(
+            conn,
+            accession_number=accession,
+            document_kind="form4_xml",
+            payload=xml,
+            parser_version=_PARSER_VERSION_FORM4,
+            source_url=url,
+        )
+        conn.commit()
 
         parsed = parse_form_4_xml(xml)
         if parsed is None:

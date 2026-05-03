@@ -44,7 +44,10 @@ from app.providers.implementations.sec_def14a import (
     Def14ABeneficialOwnershipTable,
     parse_beneficial_ownership_table,
 )
+from app.services import raw_filings
 from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
+
+_PARSER_VERSION_DEF14A = "def14a-v1"
 
 logger = logging.getLogger(__name__)
 
@@ -381,6 +384,20 @@ def _ingest_single_accession(
             error="primary doc fetch failed",
             issuer_cik=issuer_cik,
         )
+    # Persist raw body BEFORE parsing — re-wash workflows depend on
+    # this row even if parsing fails. Operator audit 2026-05-03 +
+    # PR #808 contract. Commit immediately so a later per-accession
+    # exception that triggers the outer ``conn.rollback()`` cannot
+    # take this row down with it (Codex pre-push review).
+    raw_filings.store_raw(
+        conn,
+        accession_number=ref.accession_number,
+        document_kind="def14a_body",
+        payload=body,
+        parser_version=_PARSER_VERSION_DEF14A,
+        source_url=ref.primary_document_url,
+    )
+    conn.commit()
 
     try:
         parsed: Def14ABeneficialOwnershipTable = parse_beneficial_ownership_table(body)
