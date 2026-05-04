@@ -584,7 +584,7 @@ def _ingest_single_accession(
     *,
     filer_cik: str,
     ref: AccessionRef,
-    batch_run_id: Any | None = None,
+    batch_run_id: Any,
 ) -> _AccessionOutcome:
     """Per-accession driver. Never raises — every fetch / parse
     failure resolves to an ``_AccessionOutcome`` with status='failed'
@@ -719,7 +719,7 @@ def _ingest_single_accession(
         filing=filing,
         filer_name=filer_name,
         ref=ref,
-        run_id=batch_run_id if batch_run_id is not None else uuid4(),
+        run_id=batch_run_id,
     )
     refresh_blockholders_current(conn, instrument_id=instrument_id)
 
