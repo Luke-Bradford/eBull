@@ -51,11 +51,20 @@ jobs:
           fi
 
   pytest:
-    # #247: run backend test suite. Postgres service is required; the
-    # smoke test (tests/smoke/test_app_boots.py) drives the FastAPI
-    # lifespan against a live DB and is the canonical gate against
-    # broken migrations / lifespan-only failures. Without a real
-    # Postgres, the integration tests skip and merge gates regress.
+    # Operator decision 2026-05-04: pytest runs PRE-PUSH on the
+    # developer's box (.githooks/pre-push), not on every PR. Each
+    # PR's CI pytest was costing 13-20 min and stacking with
+    # bot-review iterations — wall-clock 30-60 min for a 2-line
+    # fix. Local pytest with warm caches runs the same suite in
+    # <2 min on the dev DB.
+    #
+    # CI keeps pytest as a safety net on PUSH-TO-MAIN only — catches
+    # the rare case where someone bypassed the pre-push hook with
+    # --no-verify (or pushed from a clone that hadn't wired
+    # ``git config core.hooksPath .githooks``). Per-PR runs are
+    # skipped to free CI minutes for the lint + review-bot loop
+    # that's actually catching issues.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
 
     services:

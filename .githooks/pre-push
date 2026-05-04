@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 #
-# Pre-push gate. Runs lint + format-check + typecheck before any push
-# leaves the machine, so a CI ruff/pyright failure that triggers a
-# fix-and-repush cycle (which re-spends Anthropic API credits on the
-# review bot) cannot happen by default.
+# Pre-push gate. Runs lint + format-check + typecheck + FULL pytest
+# suite before any push leaves the machine. We OWN the heavy testing
+# locally; CI runs only the cheap sanity checks (lint, format,
+# pyright, supply-chain) + the review bot. Operator decision
+# 2026-05-04 after the #840 sub-PR cycle showed each PR's CI pytest
+# costing 13-20 min and stacking with bot-review iterations
+# (PR + follow-up = 30-60 min wall-clock).
 #
-# Pytest is intentionally excluded — at ~110s it dominates the gate
-# wall-clock and CI runs it anyway. Lint + format + pyright each run
-# in <5s and have caught every recent CI failure on this repo.
+# This shifts the pytest cost to push-time on the developer's box,
+# where it runs with warm caches + per-PR scope filtering and the
+# operator can iterate without burning shared CI minutes.
 #
 # Wire once per clone:
 #   git config core.hooksPath .githooks
@@ -27,6 +30,9 @@ uv run ruff format --check .
 
 echo "==> Pre-push gate: pyright"
 uv run pyright
+
+echo "==> Pre-push gate: pytest (full suite — we own this, not CI)"
+uv run pytest --tb=short -q
 
 # Frontend dark-mode class hygiene (#708). Skipped if frontend/ is
 # absent (e.g. backend-only worktrees) or if `pnpm` is not on PATH —
