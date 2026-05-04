@@ -55,6 +55,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
+from uuid import uuid4
 
 import psycopg
 import psycopg.rows
@@ -66,6 +67,10 @@ from app.providers.implementations.sec_13dg import (
 )
 from app.services import raw_filings
 from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
+from app.services.ownership_observations import (
+    record_blockholder_observation,
+    refresh_blockholders_current,
+)
 
 _PARSER_VERSION_13DG = "13dg-primary-v1"
 
@@ -579,6 +584,7 @@ def _ingest_single_accession(
     *,
     filer_cik: str,
     ref: AccessionRef,
+    batch_run_id: Any,
 ) -> _AccessionOutcome:
     """Per-accession driver. Never raises — every fetch / parse
     failure resolves to an ``_AccessionOutcome`` with status='failed'
@@ -687,6 +693,9 @@ def _ingest_single_accession(
         # ``instrument_id IS NULL``. Mark the accession ``partial`` so
         # the operator sees the gap on the ops monitor and the audit
         # trail tracks why the rows are unjoinable to ``instruments``.
+        # Skip observation write-through: ownership_blockholders_observations
+        # requires a non-null instrument_id (CHECK constraint on
+        # ``subject_type='issuer'``-equivalent for this table).
         return _AccessionOutcome(
             status="partial",
             rows_inserted=inserted,
@@ -695,12 +704,100 @@ def _ingest_single_accession(
             submission_type=filing.submission_type,
         )
 
+    # Write-through observation + refresh _current (#890 / spec
+    # §"Eliminate periodic re-scan jobs"). Replaces the legacy nightly
+    # ownership_observations_sync.sync_blockholders read-from-typed-
+    # tables path. One observation per (accession, primary filer) per
+    # the SEC convention that joint reporters claim the same beneficial
+    # figure; pick the row with the highest aggregate_amount_owned to
+    # match the legacy DISTINCT ON ... ORDER BY ... DESC NULLS LAST.
+    _record_13dg_observation_for_filing(
+        conn,
+        instrument_id=instrument_id,
+        accession_number=ref.accession_number,
+        primary_document_url=primary_url,
+        filing=filing,
+        filer_name=filer_name,
+        ref=ref,
+        run_id=batch_run_id,
+    )
+    refresh_blockholders_current(conn, instrument_id=instrument_id)
+
     return _AccessionOutcome(
         status="success",
         rows_inserted=inserted,
         rows_skipped_no_cusip=0,
         error=None,
         submission_type=filing.submission_type,
+    )
+
+
+def _record_13dg_observation_for_filing(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    accession_number: str,
+    primary_document_url: str,
+    filing: BlockholderFiling,
+    filer_name: str,
+    ref: AccessionRef,
+    run_id: Any,
+) -> None:
+    """Record one ``ownership_blockholders_observations`` row for one
+    13D/G accession.
+
+    Mirrors the legacy batch-sync rule in
+    ``ownership_observations_sync.sync_blockholders``:
+
+      - Identity: PRIMARY filer's CIK (``filing.primary_filer_cik``),
+        NEVER the per-row reporter_cik. Joint reporters on the same
+        accession collapse to one observation per the SEC convention
+        that joint filers claim the same beneficial figure on the
+        cover page (#837 lesson).
+      - Picks the reporting_persons row with the highest
+        ``aggregate_amount_owned`` (DESC NULLS LAST) — matches the
+        legacy ``DISTINCT ON (accession, filer_id) ORDER BY ...``.
+      - Source enum: ``'13d'`` for SCHEDULE 13D family, ``'13g'`` for
+        SCHEDULE 13G.
+      - Filter: ``aggregate_amount_owned IS NOT NULL`` AND
+        ``filed_at IS NOT NULL`` — both required by the observation
+        contract.
+    """
+    if not filing.reporting_persons:
+        return
+    filed_at = filing.filed_at or ref.filed_at
+    if filed_at is None:
+        return
+    # Match legacy DISTINCT ON ... ORDER BY aggregate_amount_owned
+    # DESC NULLS LAST. ``key=lambda`` with ``-Decimal`` would crash on
+    # NULL; use a sentinel that floats NULLs to the bottom.
+    chosen = max(
+        filing.reporting_persons,
+        key=lambda p: (p.aggregate_amount_owned is not None, p.aggregate_amount_owned or Decimal(0)),
+    )
+    if chosen.aggregate_amount_owned is None:
+        return
+    stype = filing.submission_type
+    source = "13d" if stype.startswith("SCHEDULE 13D") else "13g"
+    record_blockholder_observation(
+        conn,
+        instrument_id=instrument_id,
+        reporter_cik=filing.primary_filer_cik,
+        reporter_name=filer_name,
+        ownership_nature="beneficial",
+        submission_type=stype,
+        status_flag=filing.status,
+        source=source,  # type: ignore[arg-type]
+        source_document_id=accession_number,
+        source_accession=accession_number,
+        source_field=None,
+        source_url=primary_document_url or None,
+        filed_at=filed_at,
+        period_start=None,
+        period_end=filed_at.date(),
+        ingest_run_id=run_id,
+        aggregate_amount_owned=chosen.aggregate_amount_owned,
+        percent_of_class=chosen.percent_of_class,
     )
 
 
@@ -718,6 +815,10 @@ def ingest_filer_blockholders(
     """
     cik = _zero_pad_cik(filer_cik)
     summary = _MutableSummary(cik=cik)
+    # Per-filer-batch run_id for observation audit trail (#890 bot
+    # review BLOCKING). Mirrors legacy sync_blockholders semantics —
+    # one ingest_run_id per logical batch run rather than per-row.
+    batch_run_id = uuid4()
 
     submissions_payload = sec.fetch_document_text(_submissions_url(cik))
     if submissions_payload is None:
@@ -742,7 +843,7 @@ def ingest_filer_blockholders(
     for ref in pending_accessions:
         if ref.accession_number in already_ingested:
             continue
-        outcome = _ingest_single_accession(conn, sec, filer_cik=cik, ref=ref)
+        outcome = _ingest_single_accession(conn, sec, filer_cik=cik, ref=ref, batch_run_id=batch_run_id)
         _record_ingest_attempt(
             conn,
             filer_cik=cik,
