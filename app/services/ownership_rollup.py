@@ -481,16 +481,72 @@ _SLICE_LABELS: dict[SliceCategory, str] = {
 }
 
 
+def _dedup_within_source(candidates: Iterable[_Candidate]) -> list[Holder]:
+    """Per-CIK (or per-name fallback) dedup *within* a single source —
+    used by the blockholders pipeline post-#837 so 13D/G filings are
+    not eliminated by the cross-source ``form4 > 13d/g`` priority chain.
+
+    Same identity-key + tie-break sequence as
+    :func:`_dedup_by_priority` but no cross-source priority race —
+    every input row is the same source, so the winner is just the
+    latest amendment for that CIK / name. Cohen's 13D/A latest
+    amendment wins over his 13D original; both Cohen Form 4 (direct)
+    and Cohen 13D/A (beneficial) survive elsewhere because they no
+    longer compete in the same dedup pool."""
+    groups: dict[str, list[_Candidate]] = {}
+    for c in candidates:
+        groups.setdefault(_identity_key(c.filer_cik, c.filer_name), []).append(c)
+
+    survivors: list[Holder] = []
+    for cands in groups.values():
+        cands.sort(key=lambda c: c.source_row_id, reverse=True)
+        cands.sort(key=lambda c: c.accession_number, reverse=True)
+        cands.sort(key=lambda c: c.as_of_date or date.min, reverse=True)
+        # Same-source: priority_rank ties (13d == 13g == 3); the prior
+        # sorts decide.
+        winner = cands[0]
+        losers = cands[1:]
+        survivors.append(
+            Holder(
+                filer_cik=winner.filer_cik,
+                filer_name=winner.filer_name,
+                shares=winner.shares,
+                pct_outstanding=Decimal(0),
+                winning_source=winner.source,  # type: ignore[arg-type]
+                winning_accession=winner.accession_number,
+                winning_edgar_url=edgar_archive_url(winner.accession_number),
+                as_of_date=winner.as_of_date,
+                filer_type=winner.filer_type,
+                dropped_sources=tuple(
+                    DroppedSource(
+                        source=loser.source,  # type: ignore[arg-type]
+                        accession_number=loser.accession_number,
+                        shares=loser.shares,
+                        as_of_date=loser.as_of_date,
+                        edgar_url=edgar_archive_url(loser.accession_number),
+                    )
+                    for loser in losers
+                ),
+            )
+        )
+    return survivors
+
+
 def _bucket_into_slices(
     survivors: list[Holder],
+    blockholders: list[Holder],
     unmatched_def14a: list[_Candidate],
     outstanding: Decimal,
 ) -> list[OwnershipSlice]:
     """Split deduped survivors into slices by ``winning_source``
-    (and ``filer_type`` for 13F)."""
+    (and ``filer_type`` for 13F).
+
+    ``blockholders`` arrives pre-deduped from the parallel 13D/G
+    pipeline (#837 split). Insiders / institutions / ETFs still come
+    from cross-source priority dedup."""
     by_category: dict[SliceCategory, list[Holder]] = {
         "insiders": [],
-        "blockholders": [],
+        "blockholders": list(blockholders),
         "institutions": [],
         "etfs": [],
     }
@@ -498,6 +554,10 @@ def _bucket_into_slices(
         if h.winning_source in ("form4", "form3", "def14a"):
             by_category["insiders"].append(h)
         elif h.winning_source in ("13d", "13g"):
+            # Defensive: 13d/13g should now be partitioned out before
+            # cross-source dedup. If one slips through, it still
+            # surfaces in the blockholders slice rather than a
+            # ValueError below.
             by_category["blockholders"].append(h)
         elif h.winning_source == "13f":
             if (h.filer_type or "").upper() == "ETF":
@@ -926,8 +986,25 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     treasury, treasury_as_of = _read_treasury(conn, instrument_id)
     sql_candidates = _collect_canonical_holders_sql(conn, instrument_id)
     matched, unmatched_def14a = _enrich_and_union_def14a(conn, instrument_id, sql_candidates)
-    survivors = _dedup_by_priority(matched)
-    slices = _bucket_into_slices(survivors, unmatched_def14a, outstanding)
+
+    # Split 13D/G out of the cross-source priority dedup (#837 / #788
+    # P0b). 13D/G reports BENEFICIAL ownership per Rule 13d-3
+    # (direct + indirect via family trusts, control entities, funds),
+    # while Form 4 reports DIRECT only. They are different facts; the
+    # legacy single-chain dedup ``form4 > 13d/g`` discards the
+    # beneficial figure entirely whenever the same CIK has any Form 4
+    # — Cohen-on-GME is the canonical case (38M direct vs 75M
+    # beneficial; only the 38M renders today). The full two-axis
+    # ``source × ownership_nature`` dedup model lands in Phase 1
+    # (#840); this PR is the immediate rollup-query patch so 13D/G
+    # filings always surface in the blockholders slice with their
+    # reported beneficial figure, regardless of any same-CIK Form 4.
+    block_candidates = [c for c in matched if c.source in ("13d", "13g")]
+    other_candidates = [c for c in matched if c.source not in ("13d", "13g")]
+
+    survivors = _dedup_by_priority(other_candidates)
+    blockholders = _dedup_within_source(block_candidates)
+    slices = _bucket_into_slices(survivors, blockholders, unmatched_def14a, outstanding)
     residual = _compute_residual(outstanding, slices, treasury)
     concentration = _compute_concentration(outstanding, slices)
     estimates = _read_universe_estimates(conn, instrument_id)
@@ -1200,8 +1277,18 @@ SELECT
     CASE WHEN bf.submission_type LIKE 'SCHEDULE 13D%%' THEN '13d'
          ELSE '13g' END AS source,
     3 AS priority_rank,
-    COALESCE(bf.reporter_cik, f.cik) AS filer_cik,
-    COALESCE(bf.reporter_name, f.name) AS filer_name,
+    -- Identity is the PRIMARY filer (filer_id → blockholder_filers.cik),
+    -- never a joint reporter. The ``blocks`` CTE arbitrarily picks one
+    -- representative row per accession via DISTINCT ON, so different
+    -- amendments in a chain can land on different ``reporter_cik``
+    -- values for the same beneficial block. Codex pre-push review for
+    -- #837 caught the prior ``COALESCE(bf.reporter_cik, f.cik)`` —
+    -- amendment-chain double-count if successive filings picked
+    -- different joint reporters as their representative. Keying on
+    -- ``f.cik`` keeps identity stable across the chain so
+    -- ``_dedup_within_source`` collapses amendments correctly.
+    f.cik AS filer_cik,
+    f.name AS filer_name,
     NULL::text AS filer_type,
     blocks.aggregate_amount_owned::numeric AS shares,
     blocks.filed_at::date AS as_of_date,

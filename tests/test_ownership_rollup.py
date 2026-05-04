@@ -291,11 +291,15 @@ class TestDedupPriority:
         conn.commit()
         return conn
 
-    def test_form4_beats_13d_for_same_cik(self, _setup: psycopg.Connection[tuple]) -> None:
-        """Cohen-on-GME shape: Form 4 cumulative + 13D/A reporting the
-        same beneficial owner. Expect a single insiders-slice row of
-        the Form 4 share count, with the 13D accession in
-        ``dropped_sources``."""
+    def test_form4_and_13d_both_render_for_same_cik(self, _setup: psycopg.Connection[tuple]) -> None:
+        """Cohen-on-GME shape: Form 4 (direct) + 13D/A (beneficial)
+        reporting the SAME CIK. Per #837 / #788 P0b, BOTH render —
+        Form 4 in insiders (38M direct), 13D/A in blockholders
+        (beneficial via family trusts / control entities). Form 4 and
+        13D/G describe different facts (Rule 13d-3 beneficial vs
+        physical record-name) and must not be deduped against each
+        other. The full two-axis ``source × ownership_nature`` model
+        lands in Phase 1 (#840); this test pins the immediate fix."""
         conn = _setup
         cik = "0001767470"
         _seed_form4(
@@ -323,19 +327,27 @@ class TestDedupPriority:
 
         insider_slices = [s for s in rollup.slices if s.category == "insiders"]
         assert len(insider_slices) == 1
-        cohen = insider_slices[0].holders[0]
-        assert cohen.filer_cik == cik
-        assert cohen.shares == Decimal("38347842")
-        assert cohen.winning_source == "form4"
-        assert len(cohen.dropped_sources) == 1
-        assert cohen.dropped_sources[0].source == "13d"
-        assert cohen.dropped_sources[0].accession_number == "13D-RC-2025-001"
-        # Blockholders slice should be empty — Cohen lost there.
-        assert not any(s.category == "blockholders" for s in rollup.slices)
+        cohen_insider = insider_slices[0].holders[0]
+        assert cohen_insider.filer_cik == cik
+        assert cohen_insider.shares == Decimal("38347842")
+        assert cohen_insider.winning_source == "form4"
+        # 13D no longer drops as a Form 4 ``dropped_source``.
+        assert all(d.source != "13d" for d in cohen_insider.dropped_sources)
 
-    def test_13g_beats_13f_for_same_cik(self, _setup: psycopg.Connection[tuple]) -> None:
+        # Blockholders slice now carries the 13D/A independently.
+        block_slices = [s for s in rollup.slices if s.category == "blockholders"]
+        assert len(block_slices) == 1
+        cohen_block = block_slices[0].holders[0]
+        assert cohen_block.filer_cik == cik
+        assert cohen_block.shares == Decimal("36847842")
+        assert cohen_block.winning_source == "13d"
+
+    def test_13g_and_13f_both_render_for_same_cik(self, _setup: psycopg.Connection[tuple]) -> None:
         """A large institution that crossed 5% files 13G AND a 13F.
-        Expect 13G winner; the 13F's accession ships as dropped."""
+        Per #837, both surface — 13G in blockholders (beneficial
+        threshold cross), 13F in institutions/ETFs (quarterly economic
+        position). The full two-axis dedup lands in Phase 1; for now,
+        13D/G never competes against 13F."""
         conn = _setup
         cik = "0000102909"
         _seed_block(
@@ -364,14 +376,19 @@ class TestDedupPriority:
 
         block_slices = [s for s in rollup.slices if s.category == "blockholders"]
         assert len(block_slices) == 1
-        vg = block_slices[0].holders[0]
-        assert vg.filer_cik == cik
-        assert vg.winning_source == "13g"
-        assert vg.shares == Decimal("22000000")
-        # 13F lost — should be in dropped_sources.
-        assert any(d.source == "13f" for d in vg.dropped_sources)
-        # ETFs slice empty: 13F ETF row lost.
-        assert not any(s.category == "etfs" for s in rollup.slices)
+        vg_block = block_slices[0].holders[0]
+        assert vg_block.filer_cik == cik
+        assert vg_block.winning_source == "13g"
+        assert vg_block.shares == Decimal("22000000")
+
+        # 13F ETF row now also surfaces in its own slice instead of
+        # being dropped under the 13G winner.
+        etf_slices = [s for s in rollup.slices if s.category == "etfs"]
+        assert len(etf_slices) == 1
+        vg_etf = etf_slices[0].holders[0]
+        assert vg_etf.filer_cik == cik
+        assert vg_etf.winning_source == "13f"
+        assert vg_etf.shares == Decimal("21800000")
 
     def test_form3_baseline_wins_when_no_form4(self, _setup: psycopg.Connection[tuple]) -> None:
         """Officer with Form 3 baseline + no Form 4 — Form 3 supplies
@@ -505,6 +522,167 @@ class TestDedupPriority:
         # Exactly one block, carrying the per-accession aggregate
         # (5M). Doubled-up to 10M would mean the JOIN re-fanned.
         assert block_slices[0].total_shares == Decimal("5000000")
+
+    def test_837_repro_gme_blockholder_surfaces_without_form4(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Repro of #837: with TWO 13D rows in ``blockholder_filings``
+        for an instrument and NO Form 4 same-CIK competitor, the
+        rollup must surface a blockholders slice. Prior to the fix
+        the slice was always populated for this case (the bug was
+        cross-source dedup with same-CIK Form 4); this test pins the
+        baseline so any future regression that breaks the
+        non-competing case trips."""
+        conn = _setup
+        # Cohen's 13D + RC Ventures 13D, joint filers on one accession.
+        # SEC Rule 13d-1 requires both to claim the same beneficial
+        # figure on the cover page — DISTINCT ON in the SQL collapses
+        # to one row per accession.
+        accession = "0000921895-25-000190"
+        _seed_block(
+            conn,
+            accession=accession,
+            instrument_id=789_001,
+            filer_cik="0001767470",
+            filer_name="Cohen Ryan",
+            submission_type="SCHEDULE 13D/A",
+            aggregate_shares="36847842",
+            filed_at=datetime(2025, 1, 29, tzinfo=UTC),
+            reporter_cik="0001767470",
+            reporter_name="Cohen Ryan",
+        )
+        _seed_block(
+            conn,
+            accession=accession,
+            instrument_id=789_001,
+            filer_cik="0001767470",  # primary filer same
+            filer_name="Cohen Ryan",
+            submission_type="SCHEDULE 13D/A",
+            aggregate_shares="36847842",
+            filed_at=datetime(2025, 1, 29, tzinfo=UTC),
+            reporter_cik="0001650235",  # joint reporter — RC Ventures
+            reporter_name="RC Ventures LLC",
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="GME", instrument_id=789_001)
+
+        block_slices = [s for s in rollup.slices if s.category == "blockholders"]
+        assert len(block_slices) == 1
+        assert block_slices[0].filer_count == 1  # joint filers collapse
+        assert block_slices[0].total_shares == Decimal("36847842")
+
+    def test_837_amendment_chain_with_different_joint_reporters_does_not_double_count(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Codex pre-push review for #837: an amendment chain where
+        successive filings pick different joint reporters as the
+        ``DISTINCT ON`` representative could double-count if identity
+        keyed on ``COALESCE(reporter_cik, primary_cik)``. Pin identity
+        to the primary filer (``blockholder_filers.cik``) so amendments
+        collapse correctly.
+
+        Setup: two accessions, both joint Cohen + RC Ventures, primary
+        filer Cohen on both. Equal aggregate shares. Should yield ONE
+        blockholder row (latest amendment), not two."""
+        conn = _setup
+        primary_cik = "0001767470"
+        # Amendment 1 — earlier filing.
+        for reporter_cik, reporter_name in [
+            ("0001767470", "Cohen Ryan"),
+            ("0001650235", "RC Ventures LLC"),
+        ]:
+            _seed_block(
+                conn,
+                accession="13D-RC-2024-001",
+                instrument_id=789_001,
+                filer_cik=primary_cik,
+                filer_name="Cohen Ryan",
+                submission_type="SCHEDULE 13D/A",
+                aggregate_shares="36847842",
+                filed_at=datetime(2024, 8, 15, tzinfo=UTC),
+                reporter_cik=reporter_cik,
+                reporter_name=reporter_name,
+            )
+        # Amendment 2 — later filing, same primary filer + joint set.
+        for reporter_cik, reporter_name in [
+            ("0001767470", "Cohen Ryan"),
+            ("0001650235", "RC Ventures LLC"),
+        ]:
+            _seed_block(
+                conn,
+                accession="13D-RC-2025-001",
+                instrument_id=789_001,
+                filer_cik=primary_cik,
+                filer_name="Cohen Ryan",
+                submission_type="SCHEDULE 13D/A",
+                aggregate_shares="36847842",
+                filed_at=datetime(2025, 1, 29, tzinfo=UTC),
+                reporter_cik=reporter_cik,
+                reporter_name=reporter_name,
+            )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="GME", instrument_id=789_001)
+        block_slices = [s for s in rollup.slices if s.category == "blockholders"]
+        assert len(block_slices) == 1
+        assert block_slices[0].filer_count == 1
+        # Both rows share aggregate 36,847,842 — collapsed (latest
+        # amendment wins). Doubled to 73,695,684 = double-count bug.
+        assert block_slices[0].total_shares == Decimal("36847842")
+        # Latest amendment's accession is the survivor.
+        assert block_slices[0].holders[0].winning_accession == "13D-RC-2025-001"
+        # Earlier amendment ships as a dropped_source for provenance.
+        assert any(d.accession_number == "13D-RC-2024-001" for d in block_slices[0].holders[0].dropped_sources)
+
+    def test_837_regression_other_instrument_blockholder_surfaces(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Regression coverage for a DIFFERENT instrument with a
+        13D/G + same-CIK Form 4. Prevents a future patch from
+        accidentally re-introducing the cross-source dedup that
+        dropped 13D/G whenever a Form 4 shared the CIK."""
+        conn = ebull_test_conn
+        iid = 837_900
+        cik = "0007770001"
+        _seed_instrument(conn, iid=iid, symbol="OTHER")
+        _seed_outstanding(conn, instrument_id=iid, shares="100000000")
+        _seed_form4(
+            conn,
+            accession="F4-OTHER-2026-001",
+            instrument_id=iid,
+            filer_cik=cik,
+            filer_name="Other Insider",
+            txn_date=date(2026, 2, 14),
+            post_transaction_shares="2000000",
+        )
+        _seed_block(
+            conn,
+            accession="13G-OTHER-2026-001",
+            instrument_id=iid,
+            filer_cik=cik,
+            filer_name="Other Insider",
+            submission_type="SCHEDULE 13G",
+            aggregate_shares="6000000",
+            filed_at=datetime(2026, 2, 1, tzinfo=UTC),
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="OTHER", instrument_id=iid)
+
+        # Both slices present, both keyed on the same CIK with their
+        # respective figures.
+        insider_slices = [s for s in rollup.slices if s.category == "insiders"]
+        block_slices = [s for s in rollup.slices if s.category == "blockholders"]
+        assert len(insider_slices) == 1
+        assert len(block_slices) == 1
+        assert insider_slices[0].holders[0].shares == Decimal("2000000")
+        assert insider_slices[0].holders[0].winning_source == "form4"
+        assert block_slices[0].holders[0].shares == Decimal("6000000")
+        assert block_slices[0].holders[0].winning_source == "13g"
         assert block_slices[0].filer_count == 1
 
 
