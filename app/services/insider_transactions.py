@@ -1,4 +1,4 @@
-"""Form 4 insider-transactions parser + ingester (#429).
+"""Form 4 insider-transactions parser + ingester (#429, #888).
 
 SEC Form 4 is filed by directors, officers, and ≥10% holders within
 two business days of any trade in their company's stock. Free,
@@ -41,15 +41,20 @@ import logging
 import re
 import xml.etree.ElementTree as ET  # noqa: S405 — Form 4 source is SEC EDGAR, trusted.
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
+from uuid import uuid4
 
 import psycopg
 from psycopg.types.json import Jsonb
 
 from app.providers.concurrent_fetch import fetch_document_texts
 from app.services import raw_filings
+from app.services.ownership_observations import (
+    record_insider_observation,
+    refresh_insiders_current,
+)
 
 _PARSER_VERSION_FORM4 = "form4-v1"
 
@@ -1128,6 +1133,98 @@ def upsert_filing(
                     footnote_refs_json,
                 ),
             )
+
+    # Write-through observations + refresh _current (#888 / spec §"Eliminate
+    # periodic re-scan jobs"). Replaces the legacy nightly
+    # ownership_observations_sync read-from-typed-tables path with an
+    # inline call so the operator-visible rollup reflects the new filing
+    # without waiting for the next sync cycle.
+    _record_form4_observations_for_filing(
+        conn,
+        instrument_id=instrument_id,
+        accession_number=accession_number,
+        primary_document_url=primary_document_url,
+        parsed=parsed,
+    )
+    refresh_insiders_current(conn, instrument_id=instrument_id)
+
+
+def _record_form4_observations_for_filing(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    accession_number: str,
+    primary_document_url: str,
+    parsed: ParsedFiling,
+) -> None:
+    """Derive one ``ownership_insiders_observations`` row per
+    ``(filer_cik, direct_indirect)`` from the parsed transactions and
+    record it.
+
+    Mirrors the existing batch-sync rule in
+    ``ownership_observations_sync.sync_insiders``:
+
+      - Filter: ``post_transaction_shares IS NOT NULL`` AND
+        ``is_derivative = FALSE`` (derivative-side rows aren't a
+        share-balance signal).
+      - Group key: ``(filer_cik, direct_indirect)``. Latest txn per
+        group wins (``txn_date DESC, txn_row_num DESC``).
+      - ``ownership_nature``: ``'indirect'`` when direct_indirect='I',
+        else ``'direct'``.
+
+    The two-axis identity is preserved at the observations table — a
+    filer's direct + indirect splits produce SEPARATE observation
+    rows.
+    """
+    # Build the latest-per-group map
+    LatestKey = tuple[str | None, str | None]  # (filer_cik, direct_indirect)
+    latest: dict[LatestKey, ParsedTransaction] = {}
+    for txn in parsed.transactions:
+        if txn.is_derivative:
+            continue
+        if txn.post_transaction_shares is None:
+            continue
+        if txn.txn_date is None:
+            continue
+        key: LatestKey = (txn.filer_cik, txn.direct_indirect)
+        prior = latest.get(key)
+        if prior is None:
+            latest[key] = txn
+            continue
+        # Pick later txn_date; tie-break on txn_row_num
+        if (txn.txn_date, txn.txn_row_num) > ((prior.txn_date or date.min), prior.txn_row_num):
+            latest[key] = txn
+
+    if not latest:
+        return
+
+    run_id = uuid4()
+    for (filer_cik, direct_indirect), txn in latest.items():
+        if txn.txn_date is None or txn.post_transaction_shares is None:
+            # Belt-and-braces — the filter above already excludes these.
+            continue
+        holder_name = _primary_filer_name(parsed, filer_cik)
+        if not holder_name and not filer_cik:
+            # Skip rows with no identity at all.
+            continue
+        nature = "indirect" if direct_indirect == "I" else "direct"
+        record_insider_observation(
+            conn,
+            instrument_id=instrument_id,
+            holder_cik=filer_cik,
+            holder_name=holder_name or (filer_cik or "UNKNOWN"),
+            ownership_nature=nature,  # type: ignore[arg-type]
+            source="form4",
+            source_document_id=accession_number,
+            source_accession=accession_number,
+            source_field=None,
+            source_url=primary_document_url or None,
+            filed_at=datetime.combine(txn.txn_date, datetime.min.time(), tzinfo=UTC),
+            period_start=None,
+            period_end=txn.txn_date,
+            ingest_run_id=run_id,
+            shares=Decimal(txn.post_transaction_shares),
+        )
 
 
 def filer_role_string(filer: ParsedFiler) -> str | None:

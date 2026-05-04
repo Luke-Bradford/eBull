@@ -34,9 +34,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
+from uuid import uuid4
 
 import psycopg
 
@@ -46,6 +47,10 @@ from app.services.insider_transactions import (
     ParsedForm3,
     _canonical_form_4_url,
     parse_form_3_xml,
+)
+from app.services.ownership_observations import (
+    record_insider_observation,
+    refresh_insiders_current,
 )
 
 logger = logging.getLogger(__name__)
@@ -307,6 +312,82 @@ def upsert_form_3_filing(
                     holding.underlying_value,
                 ),
             )
+
+    # Write-through observations + refresh _current (#888 / spec §"Eliminate
+    # periodic re-scan jobs"). Mirrors the Form 4 path —
+    # one observation per (filer_cik, direct_indirect), shares = the
+    # holding's reported share count, period_end = period_of_report.
+    _record_form3_observations_for_filing(
+        conn,
+        instrument_id=instrument_id,
+        accession_number=accession_number,
+        primary_document_url=primary_document_url,
+        parsed=parsed,
+    )
+    refresh_insiders_current(conn, instrument_id=instrument_id)
+
+
+def _record_form3_observations_for_filing(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    accession_number: str,
+    primary_document_url: str,
+    parsed: ParsedForm3,
+) -> None:
+    """Derive one ``ownership_insiders_observations`` row per
+    ``(filer_cik, direct_indirect)`` from the parsed Form 3 holdings.
+
+    Mirrors the legacy batch-sync rule in
+    ``ownership_observations_sync.sync_insiders``:
+
+      - Filter: ``shares IS NOT NULL`` AND ``is_derivative = FALSE``.
+      - Group key: ``(filer_cik, direct_indirect)``. Sum shares per
+        group when joint filers list the same security under the same
+        nature (rare; the legacy batch path also folds these).
+      - ``ownership_nature``: ``'indirect'`` when direct_indirect='I',
+        else ``'direct'``.
+    """
+    as_of: date | None = parsed.period_of_report or parsed.signature_date
+    if as_of is None:
+        return
+
+    LatestKey = tuple[str | None, str | None]
+    grouped_shares: dict[LatestKey, Decimal] = {}
+    for holding in parsed.holdings:
+        if holding.is_derivative:
+            continue
+        if holding.shares is None:
+            continue
+        key: LatestKey = (holding.filer_cik, holding.direct_indirect)
+        grouped_shares[key] = grouped_shares.get(key, Decimal(0)) + Decimal(holding.shares)
+
+    if not grouped_shares:
+        return
+
+    run_id = uuid4()
+    for (filer_cik, direct_indirect), shares in grouped_shares.items():
+        holder_name = _filer_name_for(parsed, filer_cik)
+        if not holder_name and not filer_cik:
+            continue
+        nature = "indirect" if direct_indirect == "I" else "direct"
+        record_insider_observation(
+            conn,
+            instrument_id=instrument_id,
+            holder_cik=filer_cik,
+            holder_name=holder_name or (filer_cik or "UNKNOWN"),
+            ownership_nature=nature,  # type: ignore[arg-type]
+            source="form3",
+            source_document_id=accession_number,
+            source_accession=accession_number,
+            source_field=None,
+            source_url=primary_document_url or None,
+            filed_at=datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
+            period_start=None,
+            period_end=as_of,
+            ingest_run_id=run_id,
+            shares=shares,
+        )
 
 
 def _filer_name_for(parsed: ParsedForm3, filer_cik: str | None) -> str:
