@@ -584,6 +584,7 @@ def _ingest_single_accession(
     *,
     filer_cik: str,
     ref: AccessionRef,
+    batch_run_id: Any | None = None,
 ) -> _AccessionOutcome:
     """Per-accession driver. Never raises — every fetch / parse
     failure resolves to an ``_AccessionOutcome`` with status='failed'
@@ -718,6 +719,7 @@ def _ingest_single_accession(
         filing=filing,
         filer_name=filer_name,
         ref=ref,
+        run_id=batch_run_id if batch_run_id is not None else uuid4(),
     )
     refresh_blockholders_current(conn, instrument_id=instrument_id)
 
@@ -739,6 +741,7 @@ def _record_13dg_observation_for_filing(
     filing: BlockholderFiling,
     filer_name: str,
     ref: AccessionRef,
+    run_id: Any,
 ) -> None:
     """Record one ``ownership_blockholders_observations`` row for one
     13D/G accession.
@@ -792,7 +795,7 @@ def _record_13dg_observation_for_filing(
         filed_at=filed_at,
         period_start=None,
         period_end=filed_at.date(),
-        ingest_run_id=uuid4(),
+        ingest_run_id=run_id,
         aggregate_amount_owned=chosen.aggregate_amount_owned,
         percent_of_class=chosen.percent_of_class,
     )
@@ -812,6 +815,10 @@ def ingest_filer_blockholders(
     """
     cik = _zero_pad_cik(filer_cik)
     summary = _MutableSummary(cik=cik)
+    # Per-filer-batch run_id for observation audit trail (#890 bot
+    # review BLOCKING). Mirrors legacy sync_blockholders semantics —
+    # one ingest_run_id per logical batch run rather than per-row.
+    batch_run_id = uuid4()
 
     submissions_payload = sec.fetch_document_text(_submissions_url(cik))
     if submissions_payload is None:
@@ -836,7 +843,7 @@ def ingest_filer_blockholders(
     for ref in pending_accessions:
         if ref.accession_number in already_ingested:
             continue
-        outcome = _ingest_single_accession(conn, sec, filer_cik=cik, ref=ref)
+        outcome = _ingest_single_accession(conn, sec, filer_cik=cik, ref=ref, batch_run_id=batch_run_id)
         _record_ingest_attempt(
             conn,
             filer_cik=cik,
