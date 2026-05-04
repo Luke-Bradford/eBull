@@ -3441,11 +3441,24 @@ def ownership_observations_sync() -> None:
     tables) and the new ``_current`` consumed by the rollup endpoint
     after #840.E flips reads.
     """
+    from datetime import timedelta as _td
+
     from app.services.ownership_observations_sync import sync_all
+
+    # Bot review for #840.E-prep PR #856: cap the daily scan to a
+    # rolling 90-day window. Without ``since``, sync_all rescans the
+    # full lifetime of every legacy table on each run, which won't
+    # scale as the typed tables grow. 90 days covers the longest SEC
+    # filing-publish lag we've seen (Form 4 amendments 30-60 days,
+    # 13F-HR 45 days, DEF 14A annual-cycle ~12 months but those land
+    # via the catch-up-on-boot path on initial deploy and through
+    # the daily window thereafter). Operator can drop the window via
+    # an env var if needed; default 90d covers steady-state.
+    cutoff = (datetime.now(tz=UTC) - _td(days=90)).date()
 
     with _tracked_job(JOB_OWNERSHIP_OBSERVATIONS_SYNC) as tracker:
         with psycopg.connect(settings.database_url) as conn:
-            result = sync_all(conn)
+            result = sync_all(conn, since=cutoff)
 
         tracker.row_count = result.total_observations_recorded
         logger.info(

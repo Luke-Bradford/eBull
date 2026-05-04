@@ -570,7 +570,14 @@ def sync_def14a(
     instruments_touched: set[int] = set()
     run_id = uuid4()
 
-    where = "WHERE d14.shares IS NOT NULL AND d14.instrument_id IS NOT NULL"
+    # Bot review for #840.E-prep: defensive guard against a NULL
+    # fetched_at falling through to .date() below. Schema declares
+    # fetched_at NOT NULL so this should never be reachable, but
+    # query-level filter is the cheapest belt-and-braces.
+    where = (
+        "WHERE d14.shares IS NOT NULL AND d14.instrument_id IS NOT NULL "
+        "AND (d14.as_of_date IS NOT NULL OR d14.fetched_at IS NOT NULL)"
+    )
     params: dict[str, Any] = {}
     if since is not None:
         where += " AND d14.as_of_date >= %(since)s"
