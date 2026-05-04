@@ -50,6 +50,28 @@ Work is not done until all of the following are true:
 6. No warning or nitpick is left hanging silently.
 7. Any recurring review finding is extracted into the prevention log or a relevant skill before merge.
 
+### ETL / parser / schema-migration additional clauses
+
+Any change that touches filings ETL, parsers, ingest pipelines, or schema migrations affecting ownership / fundamentals / observations data is **not done** until ALL of the following are also true:
+
+8. **Smoke-tested against 3-5 known instruments** in dev DB. Default panel: `AAPL`, `GME`, `MSFT`, `JPM`, `HD`. The PR description records which instruments were exercised and the operator-visible figure observed.
+9. **Cross-source verified for at least one fixture** against an independent reputable source (e.g. gurufocus, marketbeat, EdgarTools golden file, SEC EDGAR direct). PR description records the source + the figure compared.
+10. **Backfill executed** — not "queued for nightly", not "will run next cron". For schema/parser changes affecting ownership or observations: run `POST /jobs/sec_rebuild/run` with the appropriate scope (instrument, filer, or source) on dev DB. PR description records the job invocation + outcome.
+11. **Operator-visible figure verified on the live chart / endpoint** after backfill. Concretely: hit the relevant rollup endpoint (e.g. `/instruments/{symbol}/ownership-rollup`) and confirm the figure renders correctly with the new data path.
+12. **PR description records the verification step + commit SHA** for each of clauses 8-11. Reviewers should be able to read the PR and know exactly which instruments + sources + figures were checked, and at which commit.
+
+### Operator runbook — after schema / parser change
+
+When a PR lands that changes how ownership, insider, institutional, blockholder, treasury, or DEF 14A data is parsed or stored, the operator follow-up is:
+
+1. **Identify scope:** which `(subject, source)` triples need re-ingest? If parser-version bumped on Form 4, scope = `{ "source": "sec_form4" }`. If a single CIK had a tombstone-resolution fix, scope = `{ "instrument_id": <id>, "source": "<src>" }`.
+2. **Trigger rebuild:** `POST /jobs/sec_rebuild/run` with the appropriate JSON body. The job resets the relevant scheduler rows + manifest rows to `pending` and lets the manifest worker drain them.
+3. **Wait for drain:** the worker is rate-limited at 10 req/s shared. Monitor via `/jobs/sec_manifest_worker/status` (or equivalent) until pending count for the scope reaches zero.
+4. **Verify operator-visible figure:** hit the relevant rollup endpoint and confirm the figure renders. For ownership changes specifically, smoke `/instruments/<symbol>/ownership-rollup` for the panel of 3-5 known instruments.
+5. **Cross-source confirm:** spot-check at least one figure against an independent source.
+
+If any step fails, do NOT consider the PR fully landed even after merge — open a follow-up ticket and reference the merge SHA.
+
 ## Working order for every task
 
 Follow this order unless the user explicitly says otherwise:
