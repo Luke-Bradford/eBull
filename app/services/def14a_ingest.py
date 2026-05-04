@@ -482,7 +482,7 @@ def _record_def14a_observations_for_filing(
     instrument_id: int,
     accession_number: str,
     as_of_date: date | None,
-    holders: tuple[Def14ABeneficialHolder, ...],
+    holders: list[Def14ABeneficialHolder],
 ) -> None:
     """Record one ``ownership_def14a_observations`` row per holder
     on this DEF 14A accession.
