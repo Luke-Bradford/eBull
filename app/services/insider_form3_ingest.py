@@ -364,9 +364,15 @@ def _record_form3_observations_for_filing(
             continue
         if holding.shares is None:
             continue
+        # Defensive: bot review flagged a None-comparison crash risk
+        # on row_num. Schema declares row_num NOT NULL but parser
+        # paths can in principle emit a None on malformed XML — guard
+        # explicitly rather than relying on the schema.
+        if holding.row_num is None:
+            continue
         key = (holding.filer_cik, holding.direct_indirect)
         prior = latest.get(key)
-        if prior is None or holding.row_num > prior.row_num:
+        if prior is None or (prior.row_num is not None and holding.row_num > prior.row_num):
             latest[key] = holding
 
     if not latest:
