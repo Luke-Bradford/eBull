@@ -273,6 +273,196 @@ def refresh_insiders_current(
         return int(row[0]) if row else 0
 
 
+# ---------------------------------------------------------------------------
+# Institutions — record + refresh (#840.B)
+# ---------------------------------------------------------------------------
+
+
+def record_institution_observation(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    filer_cik: str,
+    filer_name: str,
+    filer_type: str | None,
+    ownership_nature: OwnershipNature,
+    source: OwnershipSource,
+    source_document_id: str,
+    source_accession: str | None,
+    source_field: str | None,
+    source_url: str | None,
+    filed_at: datetime,
+    period_start: date | None,
+    period_end: date,
+    ingest_run_id: UUID,
+    shares: Decimal | None,
+    market_value_usd: Decimal | None,
+    voting_authority: str | None,
+    exposure_kind: Literal["EQUITY", "PUT", "CALL"] = "EQUITY",
+) -> None:
+    """Append one institution observation. Idempotent on
+    ``(instrument_id, filer_cik, ownership_nature, period_end, source_document_id, exposure_kind)``.
+
+    ``exposure_kind`` (Codex review for #840.B): 13F-HR can carry up
+    to three legal rows per ``(accession, instrument)`` — equity, PUT,
+    CALL. Pass ``'EQUITY'`` (default) for the standard equity position;
+    ``'PUT'`` / ``'CALL'`` for option exposure rows. Without this axis,
+    ON CONFLICT would collapse the three legal rows into one.
+
+    Identity contract (Codex plan-review finding #2): the legacy
+    ``institutional_holdings`` table joins to ``institutional_filers``
+    via ``filer_id``. Backfill (#840.E-prep) MUST resolve filer_id →
+    cik before calling this helper. ``filer_cik`` is the canonical
+    identity in the new model — orphans (filer_id with no
+    institutional_filers row) must be rejected at the call site, not
+    silently dropped here.
+
+    ``ownership_nature`` for 13F-HR: pass ``'economic'`` for the
+    full reported position. ``'voting'`` is reserved for an explicit
+    voting-authority overlay row that operator UI gains in a future
+    phase. Mapping pinned here so the per-source default is
+    consistent across the codebase."""
+    if filer_cik is None or not filer_cik.strip():
+        raise ValueError("record_institution_observation: filer_cik is required")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ownership_institutions_observations (
+                instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
+                source, source_document_id, source_accession, source_field, source_url,
+                filed_at, period_start, period_end, ingest_run_id,
+                shares, market_value_usd, voting_authority, exposure_kind
+            ) VALUES (
+                %(iid)s, %(cik)s, %(name)s, %(ftype)s, %(nature)s,
+                %(source)s, %(doc_id)s, %(accession)s, %(field)s, %(url)s,
+                %(filed_at)s, %(period_start)s, %(period_end)s, %(run_id)s,
+                %(shares)s, %(mv)s, %(voting)s, %(exp)s
+            )
+            ON CONFLICT (instrument_id, filer_cik, ownership_nature, period_end, source_document_id, exposure_kind)
+            DO UPDATE SET
+                filer_name = EXCLUDED.filer_name,
+                filer_type = EXCLUDED.filer_type,
+                source_accession = EXCLUDED.source_accession,
+                source_field = EXCLUDED.source_field,
+                source_url = EXCLUDED.source_url,
+                filed_at = EXCLUDED.filed_at,
+                period_start = EXCLUDED.period_start,
+                shares = EXCLUDED.shares,
+                market_value_usd = EXCLUDED.market_value_usd,
+                voting_authority = EXCLUDED.voting_authority,
+                ingest_run_id = EXCLUDED.ingest_run_id
+            """,
+            {
+                "iid": instrument_id,
+                "cik": filer_cik.strip(),
+                "name": filer_name,
+                "ftype": filer_type,
+                "nature": ownership_nature,
+                "source": source,
+                "doc_id": source_document_id,
+                "accession": source_accession,
+                "field": source_field,
+                "url": source_url,
+                "filed_at": filed_at,
+                "period_start": period_start,
+                "period_end": period_end,
+                "run_id": str(ingest_run_id),
+                "shares": shares,
+                "mv": market_value_usd,
+                "voting": voting_authority,
+                "exp": exposure_kind,
+            },
+        )
+
+
+def refresh_institutions_current(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+) -> int:
+    """Deterministically rebuild ``ownership_institutions_current``
+    rows for one instrument.
+
+    Same atomicity contract as ``refresh_insiders_current``: explicit
+    transaction + per-instrument advisory lock. Dedup picks the latest
+    ``period_end`` per ``(filer_cik, ownership_nature)`` — within 13F
+    there's no cross-source priority chain to apply (13F is the only
+    source today; nport/ncsr in Phase 3 will need the chain). Final
+    deterministic tie-breakers: ``filed_at DESC, source_document_id ASC``."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT pg_advisory_xact_lock(
+                (hashtextextended('refresh_institutions_current', 0) # %s::bigint)
+            )
+            """,
+            (instrument_id,),
+        )
+        cur.execute(
+            "DELETE FROM ownership_institutions_current WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        cur.execute(
+            """
+            INSERT INTO ownership_institutions_current (
+                instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, market_value_usd, voting_authority, exposure_kind
+            )
+            SELECT DISTINCT ON (filer_cik, ownership_nature, exposure_kind)
+                instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, market_value_usd, voting_authority, exposure_kind
+            FROM ownership_institutions_observations
+            WHERE instrument_id = %s
+              AND known_to IS NULL
+            ORDER BY
+                filer_cik,
+                ownership_nature,
+                exposure_kind,
+                period_end DESC,
+                filed_at DESC,
+                source_document_id ASC
+            """,
+            (instrument_id,),
+        )
+        cur.execute(
+            "SELECT COUNT(*) FROM ownership_institutions_current WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+def resolve_filer_cik_or_raise(
+    conn: psycopg.Connection[Any],
+    *,
+    filer_id: int,
+) -> tuple[str, str, str | None]:
+    """Resolve a legacy ``institutional_holdings.filer_id`` to
+    ``(cik, name, filer_type)`` for the new observations API.
+
+    Codex plan-review finding #2: backfill MUST validate parent rows
+    exist before recording observations. Raises ``ValueError`` on an
+    orphan filer_id so the operator sees a loud failure rather than a
+    silent drop. Use this as the single resolution path so behaviour
+    is consistent across backfill + live ingester write-through."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT cik, name, filer_type FROM institutional_filers WHERE filer_id = %s",
+            (filer_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"institutional_filers row missing for filer_id={filer_id}; refusing to drop holding silently")
+    cik = str(row[0])
+    if not cik.strip():
+        raise ValueError(f"institutional_filers.cik is empty for filer_id={filer_id}")
+    return cik, str(row[1]), (str(row[2]) if row[2] is not None else None)
+
+
 def iter_insider_observations(
     conn: psycopg.Connection[Any],
     *,

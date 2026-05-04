@@ -20,7 +20,10 @@ import pytest
 
 from app.services.ownership_observations import (
     record_insider_observation,
+    record_institution_observation,
     refresh_insiders_current,
+    refresh_institutions_current,
+    resolve_filer_cik_or_raise,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
 
@@ -404,3 +407,264 @@ class TestInsiderObservations:
             row = cur.fetchone()
         assert row is not None
         assert row[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# Institution observations + _current (#840.B)
+# ---------------------------------------------------------------------------
+
+
+def _seed_institutional_filer(
+    conn: psycopg.Connection[tuple],
+    *,
+    cik: str,
+    name: str,
+    filer_type: str | None = None,
+) -> int:
+    """Returns filer_id for the legacy join path."""
+    conn.execute(
+        """
+        INSERT INTO institutional_filers (cik, name, filer_type)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (cik) DO UPDATE SET filer_type = EXCLUDED.filer_type
+        """,
+        (cik, name, filer_type),
+    )
+    with conn.cursor() as cur:
+        cur.execute("SELECT filer_id FROM institutional_filers WHERE cik = %s", (cik,))
+        row = cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+class TestInstitutionObservations:
+    @pytest.fixture
+    def _setup(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> psycopg.Connection[tuple]:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=840_100, symbol="AAPL")
+        conn.commit()
+        return conn
+
+    def test_record_then_refresh_round_trip(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        conn = _setup
+        record_institution_observation(
+            conn,
+            instrument_id=840_100,
+            filer_cik="0000102909",
+            filer_name="Vanguard Group Inc",
+            filer_type="ETF",
+            ownership_nature="economic",
+            source="13f",
+            source_document_id="0001234567-26-VG-Q1",
+            source_accession="0001234567-26-VG-Q1",
+            source_field=None,
+            source_url=None,
+            filed_at=datetime(2026, 4, 15, tzinfo=UTC),
+            period_start=date(2026, 1, 1),
+            period_end=date(2026, 3, 31),
+            ingest_run_id=uuid4(),
+            shares=Decimal("1500000000"),
+            market_value_usd=Decimal("250000000000"),
+            voting_authority="SOLE",
+        )
+        conn.commit()
+
+        n = refresh_institutions_current(conn, instrument_id=840_100)
+        conn.commit()
+        assert n == 1
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT filer_cik, shares, voting_authority
+                FROM ownership_institutions_current WHERE instrument_id = %s
+                """,
+                (840_100,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0]["filer_cik"] == "0000102909"
+        assert rows[0]["shares"] == Decimal("1500000000")
+        assert rows[0]["voting_authority"] == "SOLE"
+
+    def test_dedup_picks_latest_period_end(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Same filer, two consecutive quarters — _current carries the
+        Q1 2026 row; Q4 2025 stays in observations as history."""
+        conn = _setup
+        cik = "0000102909"
+        run_id = uuid4()
+        for q_end, accession, shares in [
+            (date(2025, 12, 31), "ACC-Q4", Decimal("1400000000")),
+            (date(2026, 3, 31), "ACC-Q1", Decimal("1500000000")),
+        ]:
+            record_institution_observation(
+                conn,
+                instrument_id=840_100,
+                filer_cik=cik,
+                filer_name="Vanguard Group Inc",
+                filer_type="ETF",
+                ownership_nature="economic",
+                source="13f",
+                source_document_id=accession,
+                source_accession=accession,
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(q_end.year, q_end.month, 28, tzinfo=UTC),
+                period_start=None,
+                period_end=q_end,
+                ingest_run_id=run_id,
+                shares=shares,
+                market_value_usd=None,
+                voting_authority=None,
+            )
+        conn.commit()
+
+        refresh_institutions_current(conn, instrument_id=840_100)
+        conn.commit()
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT period_end, shares FROM ownership_institutions_current WHERE filer_cik = %s",
+                (cik,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0]["period_end"] == date(2026, 3, 31)
+        assert rows[0]["shares"] == Decimal("1500000000")
+
+        # Both observations preserved (history).
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM ownership_institutions_observations WHERE filer_cik = %s",
+                (cik,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 2
+
+    def test_equity_put_call_coexist_per_accession(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Codex review for #840.B: 13F-HR can carry up to three legal
+        rows per (accession, instrument): equity, PUT, CALL. They MUST
+        coexist in observations and in _current — collapsing on
+        ON CONFLICT loses the option exposures."""
+        conn = _setup
+        cik = "0000102909"
+        run_id = uuid4()
+        accession = "ACC-3-EXPOSURE"
+        period_end = date(2026, 3, 31)
+        for kind, shares in [("EQUITY", Decimal("1000000")), ("PUT", Decimal("50000")), ("CALL", Decimal("75000"))]:
+            record_institution_observation(
+                conn,
+                instrument_id=840_100,
+                filer_cik=cik,
+                filer_name="Vanguard Group Inc",
+                filer_type="ETF",
+                ownership_nature="economic",
+                source="13f",
+                source_document_id=accession,
+                source_accession=accession,
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(2026, 4, 15, tzinfo=UTC),
+                period_start=None,
+                period_end=period_end,
+                ingest_run_id=run_id,
+                shares=shares,
+                market_value_usd=None,
+                voting_authority=None,
+                exposure_kind=kind,  # type: ignore[arg-type]
+            )
+        conn.commit()
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM ownership_institutions_observations WHERE instrument_id = %s",
+                (840_100,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 3
+
+        refresh_institutions_current(conn, instrument_id=840_100)
+        conn.commit()
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT exposure_kind, shares FROM ownership_institutions_current
+                WHERE instrument_id = %s ORDER BY exposure_kind
+                """,
+                (840_100,),
+            )
+            rows = cur.fetchall()
+        kinds = {r["exposure_kind"]: r["shares"] for r in rows}
+        assert kinds == {
+            "CALL": Decimal("75000"),
+            "EQUITY": Decimal("1000000"),
+            "PUT": Decimal("50000"),
+        }
+
+    def test_record_rejects_blank_filer_cik(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Codex plan-review finding #2: orphan filer_cik must fail
+        loud, not silently drop. The new model's identity is filer_cik;
+        a blank value is unrecoverable."""
+        with pytest.raises(ValueError, match="filer_cik is required"):
+            record_institution_observation(
+                _setup,
+                instrument_id=840_100,
+                filer_cik="   ",
+                filer_name="Blank",
+                filer_type=None,
+                ownership_nature="economic",
+                source="13f",
+                source_document_id="ACC-X",
+                source_accession="ACC-X",
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(2026, 4, 15, tzinfo=UTC),
+                period_start=None,
+                period_end=date(2026, 3, 31),
+                ingest_run_id=uuid4(),
+                shares=Decimal("1"),
+                market_value_usd=None,
+                voting_authority=None,
+            )
+
+
+class TestResolveFilerCikOrRaise:
+    """Codex plan-review finding #2: backfill must resolve filer_id →
+    cik via institutional_filers and fail loud on orphans."""
+
+    def test_resolves_known_filer(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        filer_id = _seed_institutional_filer(conn, cik="0000102909", name="Vanguard", filer_type="ETF")
+        conn.commit()
+        cik, name, ftype = resolve_filer_cik_or_raise(conn, filer_id=filer_id)
+        assert cik == "0000102909"
+        assert name == "Vanguard"
+        assert ftype == "ETF"
+
+    def test_raises_on_orphan_filer_id(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        with pytest.raises(ValueError, match="filer_id=999999"):
+            resolve_filer_cik_or_raise(ebull_test_conn, filer_id=999_999)
