@@ -564,6 +564,32 @@ class TestFormMapping:
         assert is_amendment_form("4") is False
         assert is_amendment_form("DEF 14A") is False
 
+    def test_is_amendment_form_recognises_non_suffix_amendments(self) -> None:
+        # Claude bot review on PR #878 (PREVENTION): DEFA14A and DEFR14A
+        # are amendment forms that don't carry the ``/A`` suffix.
+        # Without explicit handling, discovery callers would leave
+        # those rows with ``is_amendment=False`` + null amends_accession,
+        # silently breaking the amendment chain.
+        assert is_amendment_form("DEFA14A") is True
+        assert is_amendment_form("DEFR14A") is True
+        # And both still map to sec_def14a (the parent source).
+        assert map_form_to_source("DEFA14A") == "sec_def14a"
+
+    def test_self_transition_explicit(self) -> None:
+        # Bot review WARNING: ``failed -> failed`` should be EXPLICITLY
+        # legal (re-fail records new error), not silently no-op'd by
+        # a same-status short-circuit. Same for pending -> pending
+        # (re-discovery). parsed/tombstoned have NO self-loop — those
+        # must go through ``pending`` for the rebuild gate.
+        from app.services.sec_manifest import _ALLOWED_TRANSITIONS
+
+        assert "failed" in _ALLOWED_TRANSITIONS["failed"]
+        assert "pending" in _ALLOWED_TRANSITIONS["pending"]
+        assert "parsed" not in _ALLOWED_TRANSITIONS["parsed"]
+        assert "tombstoned" not in _ALLOWED_TRANSITIONS["tombstoned"]
+        # fetched is transient — no self-loop
+        assert "fetched" not in _ALLOWED_TRANSITIONS["fetched"]
+
 
 # ---------------------------------------------------------------------------
 # ingested_at on observations (migration 119)
@@ -618,23 +644,27 @@ class TestIngestedAtOnObservations:
     ) -> None:
         _seed_instrument(ebull_test_conn, iid=1, symbol="X")
         run_id = uuid4()
-        kwargs = dict(
-            instrument_id=1,
-            holder_cik="0000000001",
-            holder_name="Alice",
-            ownership_nature="direct",
-            source="form4",
-            source_document_id="DOC-1",
-            source_accession="ACC-1",
-            source_field=None,
-            source_url=None,
-            filed_at=datetime(2026, 1, 1, tzinfo=UTC),
-            period_start=None,
-            period_end=date(2026, 1, 1),
-            ingest_run_id=run_id,
-            shares=Decimal("100"),
-        )
-        record_insider_observation(ebull_test_conn, **kwargs)
+
+        def _record() -> None:
+            record_insider_observation(
+                ebull_test_conn,
+                instrument_id=1,
+                holder_cik="0000000001",
+                holder_name="Alice",
+                ownership_nature="direct",
+                source="form4",
+                source_document_id="DOC-1",
+                source_accession="ACC-1",
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(2026, 1, 1, tzinfo=UTC),
+                period_start=None,
+                period_end=date(2026, 1, 1),
+                ingest_run_id=run_id,
+                shares=Decimal("100"),
+            )
+
+        _record()
 
         with ebull_test_conn.cursor() as cur:
             cur.execute(
@@ -646,7 +676,7 @@ class TestIngestedAtOnObservations:
             t1 = row[0]
 
         time.sleep(0.05)
-        record_insider_observation(ebull_test_conn, **kwargs)
+        _record()
 
         with ebull_test_conn.cursor() as cur:
             cur.execute(
@@ -664,26 +694,31 @@ class TestIngestedAtOnObservations:
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
         _seed_instrument(ebull_test_conn, iid=1, symbol="X")
-        kwargs = dict(
-            instrument_id=1,
-            filer_cik="0001364742",
-            filer_name="BlackRock",
-            filer_type="INV",
-            ownership_nature="economic",
-            source="13f",
-            source_document_id="DOC-13F",
-            source_accession="ACC-13F",
-            source_field=None,
-            source_url=None,
-            filed_at=datetime(2026, 2, 14, tzinfo=UTC),
-            period_start=None,
-            period_end=date(2026, 3, 31),
-            ingest_run_id=uuid4(),
-            shares=Decimal("1000000"),
-            market_value_usd=Decimal("123456789"),
-            voting_authority="SOLE",
-        )
-        record_institution_observation(ebull_test_conn, **kwargs)
+        run_id = uuid4()
+
+        def _record() -> None:
+            record_institution_observation(
+                ebull_test_conn,
+                instrument_id=1,
+                filer_cik="0001364742",
+                filer_name="BlackRock",
+                filer_type="INV",
+                ownership_nature="economic",
+                source="13f",
+                source_document_id="DOC-13F",
+                source_accession="ACC-13F",
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(2026, 2, 14, tzinfo=UTC),
+                period_start=None,
+                period_end=date(2026, 3, 31),
+                ingest_run_id=run_id,
+                shares=Decimal("1000000"),
+                market_value_usd=Decimal("123456789"),
+                voting_authority="SOLE",
+            )
+
+        _record()
 
         with ebull_test_conn.cursor() as cur:
             cur.execute(
@@ -695,7 +730,7 @@ class TestIngestedAtOnObservations:
             t1 = row[0]
 
         time.sleep(0.05)
-        record_institution_observation(ebull_test_conn, **kwargs)
+        _record()
 
         with ebull_test_conn.cursor() as cur:
             cur.execute(
@@ -713,26 +748,31 @@ class TestIngestedAtOnObservations:
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
         _seed_instrument(ebull_test_conn, iid=1, symbol="X")
-        kwargs = dict(
-            instrument_id=1,
-            reporter_cik="0001234567",
-            reporter_name="Cohen",
-            ownership_nature="beneficial",
-            submission_type="SCHEDULE 13D",
-            status_flag="active",
-            source="13d",
-            source_document_id="DOC-13D",
-            source_accession="ACC-13D",
-            source_field=None,
-            source_url=None,
-            filed_at=datetime(2026, 3, 1, tzinfo=UTC),
-            period_start=None,
-            period_end=date(2026, 3, 1),
-            ingest_run_id=uuid4(),
-            aggregate_amount_owned=Decimal("75000000"),
-            percent_of_class=Decimal("12.5"),
-        )
-        record_blockholder_observation(ebull_test_conn, **kwargs)
+        run_id = uuid4()
+
+        def _record() -> None:
+            record_blockholder_observation(
+                ebull_test_conn,
+                instrument_id=1,
+                reporter_cik="0001234567",
+                reporter_name="Cohen",
+                ownership_nature="beneficial",
+                submission_type="SCHEDULE 13D",
+                status_flag="active",
+                source="13d",
+                source_document_id="DOC-13D",
+                source_accession="ACC-13D",
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(2026, 3, 1, tzinfo=UTC),
+                period_start=None,
+                period_end=date(2026, 3, 1),
+                ingest_run_id=run_id,
+                aggregate_amount_owned=Decimal("75000000"),
+                percent_of_class=Decimal("12.5"),
+            )
+
+        _record()
 
         with ebull_test_conn.cursor() as cur:
             cur.execute(
@@ -744,7 +784,7 @@ class TestIngestedAtOnObservations:
             t1 = row[0]
 
         time.sleep(0.05)
-        record_blockholder_observation(ebull_test_conn, **kwargs)
+        _record()
 
         with ebull_test_conn.cursor() as cur:
             cur.execute(
@@ -762,20 +802,25 @@ class TestIngestedAtOnObservations:
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
         _seed_instrument(ebull_test_conn, iid=1, symbol="X")
-        kwargs = dict(
-            instrument_id=1,
-            source="xbrl_dei",
-            source_document_id="DOC-XBRL",
-            source_accession="ACC-XBRL",
-            source_field=None,
-            source_url=None,
-            filed_at=datetime(2026, 1, 1, tzinfo=UTC),
-            period_start=None,
-            period_end=date(2025, 12, 31),
-            ingest_run_id=uuid4(),
-            treasury_shares=Decimal("100000000"),
-        )
-        record_treasury_observation(ebull_test_conn, **kwargs)
+        run_id = uuid4()
+
+        def _record() -> None:
+            record_treasury_observation(
+                ebull_test_conn,
+                instrument_id=1,
+                source="xbrl_dei",
+                source_document_id="DOC-XBRL",
+                source_accession="ACC-XBRL",
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(2026, 1, 1, tzinfo=UTC),
+                period_start=None,
+                period_end=date(2025, 12, 31),
+                ingest_run_id=run_id,
+                treasury_shares=Decimal("100000000"),
+            )
+
+        _record()
 
         with ebull_test_conn.cursor() as cur:
             cur.execute(
@@ -787,7 +832,7 @@ class TestIngestedAtOnObservations:
             t1 = row[0]
 
         time.sleep(0.05)
-        record_treasury_observation(ebull_test_conn, **kwargs)
+        _record()
 
         with ebull_test_conn.cursor() as cur:
             cur.execute(
@@ -805,24 +850,29 @@ class TestIngestedAtOnObservations:
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
         _seed_instrument(ebull_test_conn, iid=1, symbol="X")
-        kwargs = dict(
-            instrument_id=1,
-            holder_name="Vanguard",
-            holder_role=None,
-            ownership_nature="beneficial",
-            source="def14a",
-            source_document_id="DOC-DEF14A",
-            source_accession="ACC-DEF14A",
-            source_field=None,
-            source_url=None,
-            filed_at=datetime(2026, 4, 1, tzinfo=UTC),
-            period_start=None,
-            period_end=date(2026, 3, 31),
-            ingest_run_id=uuid4(),
-            shares=Decimal("20000000"),
-            percent_of_class=Decimal("8.5"),
-        )
-        record_def14a_observation(ebull_test_conn, **kwargs)
+        run_id = uuid4()
+
+        def _record() -> None:
+            record_def14a_observation(
+                ebull_test_conn,
+                instrument_id=1,
+                holder_name="Vanguard",
+                holder_role=None,
+                ownership_nature="beneficial",
+                source="def14a",
+                source_document_id="DOC-DEF14A",
+                source_accession="ACC-DEF14A",
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(2026, 4, 1, tzinfo=UTC),
+                period_start=None,
+                period_end=date(2026, 3, 31),
+                ingest_run_id=run_id,
+                shares=Decimal("20000000"),
+                percent_of_class=Decimal("8.5"),
+            )
+
+        _record()
 
         with ebull_test_conn.cursor() as cur:
             cur.execute(
@@ -834,7 +884,7 @@ class TestIngestedAtOnObservations:
             t1 = row[0]
 
         time.sleep(0.05)
-        record_def14a_observation(ebull_test_conn, **kwargs)
+        _record()
 
         with ebull_test_conn.cursor() as cur:
             cur.execute(

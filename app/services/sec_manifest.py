@@ -42,6 +42,7 @@ from typing import Any, Literal
 
 import psycopg
 import psycopg.rows
+from psycopg import sql
 
 logger = logging.getLogger(__name__)
 
@@ -80,24 +81,27 @@ RawStatus = Literal["absent", "stored", "compacted"]
 # variant) trips a ValueError instead of leaving the manifest in an
 # undefined state.
 _ALLOWED_TRANSITIONS: dict[IngestStatus, frozenset[IngestStatus]] = {
-    # ``pending`` -> ``parsed`` is allowed for the backfill + write-
-    # through paths where we record an UPSERT into the typed table
-    # without a separate "fetched" hop (the body either lives in
-    # filing_raw_documents already or was never separately stored).
-    # Steady-state worker flow is ``pending`` -> ``fetched`` -> ``parsed``.
-    "pending": frozenset({"fetched", "parsed", "failed", "tombstoned"}),
+    # ``pending`` self-loop: re-discovery (Atom + daily-index converge)
+    # bumps last_attempted_at without state change. Other transitions
+    # cover both the steady-state worker flow (pending -> fetched ->
+    # parsed) and the backfill / write-through path (pending -> parsed
+    # direct, when the body either lives in filing_raw_documents already
+    # or was never separately stored).
+    "pending": frozenset({"pending", "fetched", "parsed", "failed", "tombstoned"}),
+    # ``fetched`` is transient — must transition out, no self-loop.
     "fetched": frozenset({"parsed", "tombstoned", "failed"}),
-    # ``failed`` -> ``pending`` is the retry-after-backoff path the
-    # worker uses; ``failed`` -> ``tombstoned`` is the "give up after
-    # N retries" path; ``failed`` -> ``parsed`` covers the case where
-    # a worker re-fetches and parses in one step after a transient
-    # error.
-    "failed": frozenset({"pending", "fetched", "parsed", "tombstoned"}),
-    # ``parsed`` -> ``pending`` is the rebuild path (#872). We keep the
-    # accession history; the worker picks the row up again next pass.
+    # ``failed`` self-loop: a worker re-fetch that fails again should
+    # update the error/retry without raising. Without the self-loop
+    # in the allowed set, the second call would silently no-op (Claude
+    # bot review #879 WARNING).
+    "failed": frozenset({"pending", "fetched", "parsed", "tombstoned", "failed"}),
+    # ``parsed`` -> ``pending`` is the only legal exit (rebuild path
+    # in #872). No self-loop — re-parses must go through ``pending``
+    # so the rewash gate is explicit.
     "parsed": frozenset({"pending"}),
-    # Tombstoned is terminal under normal flow; rebuild can resurrect
-    # it back to pending for an explicit operator-driven retry.
+    # ``tombstoned`` is terminal under normal flow; rebuild can
+    # resurrect it back to pending for an explicit operator retry.
+    # No self-loop.
     "tombstoned": frozenset({"pending"}),
 }
 
@@ -265,7 +269,13 @@ def transition_status(
             raise ValueError(f"transition_status: manifest row missing for accession={accession_number}")
         current_status: IngestStatus = row[0]
         allowed = _ALLOWED_TRANSITIONS[current_status]
-        if ingest_status != current_status and ingest_status not in allowed:
+        # Claude bot review on PR #879 (WARNING): same-status no-op
+        # was previously short-circuited unconditionally; that masked
+        # double-error writes (e.g. worker calls failed->failed twice
+        # by accident, second call silently succeeds without going
+        # through the validation path). Treat self-transition as a
+        # legal-only-when-explicitly-allowed case.
+        if ingest_status not in allowed:
             raise ValueError(
                 f"transition_status: illegal transition {current_status!r} -> {ingest_status!r} "
                 f"(accession={accession_number})"
@@ -273,7 +283,14 @@ def transition_status(
 
         # Build SET clause dynamically so we only touch fields the
         # caller asked about, plus the always-bump ``last_attempted_at``.
-        set_clauses = ["ingest_status = %(status)s", "last_attempted_at = COALESCE(%(attempt)s, NOW())"]
+        # Use ``psycopg.sql.SQL`` composition for the dynamic UPDATE so
+        # static analysis (pyright LiteralString) passes; the clause
+        # tokens are module-local constants — never user input — but
+        # composing through ``sql.SQL`` keeps the type safety habit.
+        set_clauses: list[sql.Composable] = [
+            sql.SQL("ingest_status = %(status)s"),
+            sql.SQL("last_attempted_at = COALESCE(%(attempt)s, NOW())"),
+        ]
         params: dict[str, Any] = {
             "accession": accession_number,
             "status": ingest_status,
@@ -282,40 +299,40 @@ def transition_status(
 
         if ingest_status == "parsed":
             # Clear error on success; stamp parser_version when given.
-            set_clauses.append("error = NULL")
+            set_clauses.append(sql.SQL("error = NULL"))
             if parser_version is not None:
-                set_clauses.append("parser_version = %(parser_version)s")
+                set_clauses.append(sql.SQL("parser_version = %(parser_version)s"))
                 params["parser_version"] = parser_version
             # parsed implies the body has been fetched + stored
             if raw_status is not None:
-                set_clauses.append("raw_status = %(raw_status)s")
+                set_clauses.append(sql.SQL("raw_status = %(raw_status)s"))
                 params["raw_status"] = raw_status
-            set_clauses.append("next_retry_at = NULL")
+            set_clauses.append(sql.SQL("next_retry_at = NULL"))
         elif ingest_status == "fetched":
             if raw_status is not None:
-                set_clauses.append("raw_status = %(raw_status)s")
+                set_clauses.append(sql.SQL("raw_status = %(raw_status)s"))
                 params["raw_status"] = raw_status
-            set_clauses.append("error = NULL")
-            set_clauses.append("next_retry_at = NULL")
+            set_clauses.append(sql.SQL("error = NULL"))
+            set_clauses.append(sql.SQL("next_retry_at = NULL"))
         elif ingest_status == "failed":
-            set_clauses.append("error = %(error)s")
+            set_clauses.append(sql.SQL("error = %(error)s"))
             params["error"] = error
-            set_clauses.append("next_retry_at = %(next_retry)s")
+            set_clauses.append(sql.SQL("next_retry_at = %(next_retry)s"))
             params["next_retry"] = next_retry_at
         elif ingest_status == "tombstoned":
-            set_clauses.append("error = %(error)s")
+            set_clauses.append(sql.SQL("error = %(error)s"))
             params["error"] = error
-            set_clauses.append("next_retry_at = NULL")
+            set_clauses.append(sql.SQL("next_retry_at = NULL"))
         elif ingest_status == "pending":
             # Rebuild path: clear retry state; keep parser_version so
             # the rewash detector can compare against current.
-            set_clauses.append("error = NULL")
-            set_clauses.append("next_retry_at = NULL")
+            set_clauses.append(sql.SQL("error = NULL"))
+            set_clauses.append(sql.SQL("next_retry_at = NULL"))
 
-        cur.execute(
-            f"UPDATE sec_filing_manifest SET {', '.join(set_clauses)} WHERE accession_number = %(accession)s",
-            params,
-        )
+        update_query = sql.SQL(
+            "UPDATE sec_filing_manifest SET {set_clause} WHERE accession_number = %(accession)s"
+        ).format(set_clause=sql.SQL(", ").join(set_clauses))
+        cur.execute(update_query, params)
 
 
 def get_manifest_row(
@@ -356,29 +373,39 @@ def iter_pending(
     ordering across runs. ``source=None`` returns rows for every
     source (useful for the manifest worker that dispatches per-source
     internally)."""
-    where = "ingest_status = 'pending'"
-    params: list[Any] = []
-    if source is not None:
-        where += " AND source = %s"
-        params.append(source)
-    params.append(limit)
-
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            f"""
-            SELECT accession_number, cik, form, source,
-                   subject_type, subject_id, instrument_id,
-                   filed_at, accepted_at, primary_document_url,
-                   is_amendment, amends_accession,
-                   ingest_status, parser_version, raw_status,
-                   last_attempted_at, next_retry_at, error
-            FROM sec_filing_manifest
-            WHERE {where}
-            ORDER BY filed_at ASC
-            LIMIT %s
-            """,
-            params,
-        )
+        if source is None:
+            cur.execute(
+                """
+                SELECT accession_number, cik, form, source,
+                       subject_type, subject_id, instrument_id,
+                       filed_at, accepted_at, primary_document_url,
+                       is_amendment, amends_accession,
+                       ingest_status, parser_version, raw_status,
+                       last_attempted_at, next_retry_at, error
+                FROM sec_filing_manifest
+                WHERE ingest_status = 'pending'
+                ORDER BY filed_at ASC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT accession_number, cik, form, source,
+                       subject_type, subject_id, instrument_id,
+                       filed_at, accepted_at, primary_document_url,
+                       is_amendment, amends_accession,
+                       ingest_status, parser_version, raw_status,
+                       last_attempted_at, next_retry_at, error
+                FROM sec_filing_manifest
+                WHERE ingest_status = 'pending' AND source = %s
+                ORDER BY filed_at ASC
+                LIMIT %s
+                """,
+                (source, limit),
+            )
         for row in cur.fetchall():
             yield ManifestRow(**row)
 
@@ -395,29 +422,42 @@ def iter_retryable(
     next_retry_at <= NOW())``. ``NULL`` retry time means no backoff
     set — eligible immediately. Worker should still respect a per-tick
     rate budget."""
-    where = "ingest_status = 'failed' AND (next_retry_at IS NULL OR next_retry_at <= NOW())"
-    params: list[Any] = []
-    if source is not None:
-        where += " AND source = %s"
-        params.append(source)
-    params.append(limit)
-
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            f"""
-            SELECT accession_number, cik, form, source,
-                   subject_type, subject_id, instrument_id,
-                   filed_at, accepted_at, primary_document_url,
-                   is_amendment, amends_accession,
-                   ingest_status, parser_version, raw_status,
-                   last_attempted_at, next_retry_at, error
-            FROM sec_filing_manifest
-            WHERE {where}
-            ORDER BY COALESCE(next_retry_at, last_attempted_at, filed_at) ASC
-            LIMIT %s
-            """,
-            params,
-        )
+        if source is None:
+            cur.execute(
+                """
+                SELECT accession_number, cik, form, source,
+                       subject_type, subject_id, instrument_id,
+                       filed_at, accepted_at, primary_document_url,
+                       is_amendment, amends_accession,
+                       ingest_status, parser_version, raw_status,
+                       last_attempted_at, next_retry_at, error
+                FROM sec_filing_manifest
+                WHERE ingest_status = 'failed'
+                  AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+                ORDER BY COALESCE(next_retry_at, last_attempted_at, filed_at) ASC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT accession_number, cik, form, source,
+                       subject_type, subject_id, instrument_id,
+                       filed_at, accepted_at, primary_document_url,
+                       is_amendment, amends_accession,
+                       ingest_status, parser_version, raw_status,
+                       last_attempted_at, next_retry_at, error
+                FROM sec_filing_manifest
+                WHERE ingest_status = 'failed'
+                  AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+                  AND source = %s
+                ORDER BY COALESCE(next_retry_at, last_attempted_at, filed_at) ASC
+                LIMIT %s
+                """,
+                (source, limit),
+            )
         for row in cur.fetchall():
             yield ManifestRow(**row)
 
@@ -478,6 +518,29 @@ def map_form_to_source(form: str) -> ManifestSource | None:
     return _FORM_TO_SOURCE.get(form.strip())
 
 
+# SEC amendment forms that DON'T carry the standard ``/A`` suffix.
+# DEFA14A is the additional-proxy amendment of DEF 14A; DEFR14A is
+# the proxy revision. Claude bot review on PR #878 caught this gap —
+# discovery callers that derive ``is_amendment`` from
+# ``is_amendment_form(form)`` would have left these rows with
+# ``is_amendment=False`` and an empty amendment chain.
+_NON_SUFFIX_AMENDMENT_FORMS: frozenset[str] = frozenset(
+    {
+        "DEFA14A",  # additional definitive proxy
+        "DEFR14A",  # revised definitive proxy
+    }
+)
+
+
 def is_amendment_form(form: str) -> bool:
-    """True when the form code carries the ``/A`` amendment suffix."""
-    return form.strip().endswith("/A")
+    """True when the form code is an amendment of an earlier filing.
+
+    Most SEC amendments are signalled by the ``/A`` suffix
+    (``13F-HR/A``, ``SC 13D/A``, ``4/A``, ``DEF 14A/A``). A handful of
+    proxy variants — ``DEFA14A`` / ``DEFR14A`` — encode the amendment
+    semantics in the form code itself without a suffix; we explicitly
+    list those."""
+    canonical = form.strip()
+    if canonical.endswith("/A"):
+        return True
+    return canonical in _NON_SUFFIX_AMENDMENT_FORMS

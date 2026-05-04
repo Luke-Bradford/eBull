@@ -60,12 +60,19 @@ CREATE TABLE sec_filing_manifest (
         -- For ``institutional_filer``/``blockholder_filer``: filer's CIK.
         -- For ``fund_series``: series_id (Phase 3).
         -- For ``finra_universe``: 'FINRA_SI' singleton.
-    instrument_id           BIGINT REFERENCES instruments(instrument_id) ON DELETE SET NULL,
+    instrument_id           BIGINT REFERENCES instruments(instrument_id) ON DELETE CASCADE,
         -- Non-null when the manifest row is issuer-scoped (Form 3/4/5,
         -- 13D/G, DEF 14A, XBRL facts). Null for 13F-HR rows where the
         -- subject is the filer and the issuer dimension is per-holding
-        -- inside the body. ON DELETE SET NULL so a deleted instrument
-        -- doesn't orphan history.
+        -- inside the body.
+        --
+        -- ON DELETE CASCADE (Claude bot review BLOCKING on PR #878):
+        -- ``SET NULL`` would violate ``chk_manifest_issuer_has_instrument``
+        -- on issuer-scoped rows (the CHECK requires non-null
+        -- instrument_id when subject_type='issuer'); the DELETE FROM
+        -- instruments would abort. CASCADE is semantically correct —
+        -- if the instrument is deleted, the manifest entry is no longer
+        -- reachable from operator UI.
     filed_at                TIMESTAMPTZ NOT NULL,
     accepted_at             TIMESTAMPTZ,
         -- Precise SEC accept timestamp from getcurrent feed when known;
