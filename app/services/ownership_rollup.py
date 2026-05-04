@@ -453,7 +453,15 @@ def _read_treasury_from_current(
 ) -> tuple[Decimal | None, date | None]:
     """Read latest treasury from ``ownership_treasury_current`` instead
     of walking ``financial_periods``. Used when the rollup
-    feature-flag selects the new read path (#840.E)."""
+    feature-flag selects the new read path (#840.E).
+
+    ``ownership_treasury_current`` PK is ``(instrument_id)`` so there
+    is at most one row per instrument by construction. The explicit
+    ``ORDER BY period_end DESC LIMIT 1`` is defence in depth — bot
+    review for #840.E PR #861 caught the prior version trusting
+    ``fetchone()`` without an ORDER BY clause; that path would have
+    returned an arbitrary row if the PK was ever weakened in a future
+    migration."""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -461,6 +469,8 @@ def _read_treasury_from_current(
             FROM ownership_treasury_current
             WHERE instrument_id = %s
               AND treasury_shares IS NOT NULL
+            ORDER BY period_end DESC
+            LIMIT 1
             """,
             (instrument_id,),
         )
@@ -476,10 +486,18 @@ def _read_def14a_unmatched_from_current(conn: psycopg.Connection[Any], instrumen
     SELECT — so the existing ``_enrich_and_union_def14a`` enrichment
     can run against either source unchanged."""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # Bot review for #840.E PR #861: ``row_number() OVER ()`` with
+        # no ORDER BY inside the window frame is non-deterministic
+        # across executions. ``holder_id`` here is a synthetic id that
+        # ``_enrich_and_union_def14a`` carries through to the
+        # ``_Candidate.source_row_id`` field and the dedup tie-breaker
+        # touches it on equal-priority/equal-date pairs. Pin the
+        # ordering to ``holder_name_key`` (deterministic identity) so
+        # the synthetic id is stable across runs.
         cur.execute(
             """
             SELECT
-                row_number() OVER () AS holding_id,
+                row_number() OVER (ORDER BY holder_name_key) AS holding_id,
                 holder_name,
                 shares,
                 period_end AS as_of_date,
