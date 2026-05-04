@@ -566,3 +566,49 @@ class TestPartnershipDistributionAliasing:
 
         col, _ = _TAG_TO_COLUMN["DistributionMadeToMemberOrLimitedPartnerCashDistributionsPaidPerUnit"]
         assert col == "dps_cash_paid"
+
+
+# ---------------------------------------------------------------------------
+# Treasury stock shares concept aliasing (#838 / #788 P0c)
+# ---------------------------------------------------------------------------
+
+
+class TestTreasuryStockSharesAliasing:
+    """Pin the ``treasury_shares`` concept aliases. Operator audit
+    2026-05-03 found ownership rollup banner reporting NULL for every
+    instrument — root cause traced to extraction + normalization being
+    correct but sparse SEC reporting (AAPL retires buybacks instead of
+    holding treasury). Tests guard against accidental removal of the
+    canonical concepts so issuers who DO report (JPM, HD, MCD, etc.)
+    keep flowing through to the chart."""
+
+    def test_treasury_stock_shares_in_tracked_concepts(self) -> None:
+        from app.providers.implementations.sec_fundamentals import TRACKED_CONCEPTS
+
+        assert "treasury_shares" in TRACKED_CONCEPTS
+        tags = TRACKED_CONCEPTS["treasury_shares"]
+        # Both the legacy ``TreasuryStockShares`` and the modern
+        # ``TreasuryStockCommonShares`` must be present. Removing
+        # either silently halves coverage (issuers vary by accounting
+        # vintage / standard).
+        assert "TreasuryStockShares" in tags
+        assert "TreasuryStockCommonShares" in tags
+
+    def test_treasury_stock_shares_aliased_to_canonical_column(self) -> None:
+        from app.services.fundamentals import _TAG_TO_COLUMN
+
+        col_a, _ = _TAG_TO_COLUMN["TreasuryStockShares"]
+        col_b, _ = _TAG_TO_COLUMN["TreasuryStockCommonShares"]
+        assert col_a == "treasury_shares"
+        assert col_b == "treasury_shares"
+
+    def test_treasury_priority_legacy_outranks_common(self) -> None:
+        """``TreasuryStockShares`` (legacy) is priority 0;
+        ``TreasuryStockCommonShares`` (modern) is fallback. Pinning
+        order guards against an accidental swap that would silently
+        flip the value-source for filers that emit both."""
+        from app.services.fundamentals import _TAG_TO_COLUMN
+
+        _, prio_legacy = _TAG_TO_COLUMN["TreasuryStockShares"]
+        _, prio_modern = _TAG_TO_COLUMN["TreasuryStockCommonShares"]
+        assert prio_legacy < prio_modern
