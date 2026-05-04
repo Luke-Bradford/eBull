@@ -1162,6 +1162,11 @@ def _ingest_single_accession(
             inserted += 1
         # Dedupe key matches the DB unique key:
         # (instrument_id, COALESCE(is_put_call, 'EQUITY')).
+        # Bot review: the ``instrument_id is None`` branch above always
+        # ``continue``s, so by this point instrument_id is non-None.
+        # Assert for static-analysis clarity + belt-and-braces against
+        # a future control-flow refactor that drops the continue.
+        assert instrument_id is not None  # noqa: S101
         exposure_key = holding.put_call if holding.put_call in ("PUT", "CALL") else "EQUITY"
         resolved_by_key.setdefault((instrument_id, exposure_key), (instrument_id, holding))
 
