@@ -160,6 +160,10 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # No FK to other planner tables — keyed on (cik, document_kind).
     # Listed for deterministic per-test cleanup.
     "cik_raw_documents",
+    # #864 — accession-level manifest. Self-referential FK on
+    # ``amends_accession`` is ON DELETE SET NULL so CASCADE truncation
+    # handles the chain cleanly.
+    "sec_filing_manifest",
     "decision_audit",  # #315 Phase 3 alerts
     "trade_recommendations",  # #315 Phase 3 alerts (FK parent of decision_audit)
     "operators",  # #315 Phase 3 alerts (cursor column)

@@ -146,7 +146,8 @@ def record_insider_observation(
                 filed_at = EXCLUDED.filed_at,
                 period_start = EXCLUDED.period_start,
                 shares = EXCLUDED.shares,
-                ingest_run_id = EXCLUDED.ingest_run_id
+                ingest_run_id = EXCLUDED.ingest_run_id,
+                ingested_at = clock_timestamp()
             """,
             {
                 "iid": instrument_id,
@@ -350,7 +351,8 @@ def record_institution_observation(
                 shares = EXCLUDED.shares,
                 market_value_usd = EXCLUDED.market_value_usd,
                 voting_authority = EXCLUDED.voting_authority,
-                ingest_run_id = EXCLUDED.ingest_run_id
+                ingest_run_id = EXCLUDED.ingest_run_id,
+                ingested_at = clock_timestamp()
             """,
             {
                 "iid": instrument_id,
@@ -528,7 +530,8 @@ def record_blockholder_observation(
                 period_start = EXCLUDED.period_start,
                 aggregate_amount_owned = EXCLUDED.aggregate_amount_owned,
                 percent_of_class = EXCLUDED.percent_of_class,
-                ingest_run_id = EXCLUDED.ingest_run_id
+                ingest_run_id = EXCLUDED.ingest_run_id,
+                ingested_at = clock_timestamp()
             """,
             {
                 "iid": instrument_id,
@@ -654,7 +657,8 @@ def record_treasury_observation(
                 filed_at = EXCLUDED.filed_at,
                 period_start = EXCLUDED.period_start,
                 treasury_shares = EXCLUDED.treasury_shares,
-                ingest_run_id = EXCLUDED.ingest_run_id
+                ingest_run_id = EXCLUDED.ingest_run_id,
+                ingested_at = clock_timestamp()
             """,
             {
                 "iid": instrument_id,
@@ -781,7 +785,8 @@ def record_def14a_observation(
                 period_start = EXCLUDED.period_start,
                 shares = EXCLUDED.shares,
                 percent_of_class = EXCLUDED.percent_of_class,
-                ingest_run_id = EXCLUDED.ingest_run_id
+                ingest_run_id = EXCLUDED.ingest_run_id,
+                ingested_at = clock_timestamp()
             """,
             {
                 "iid": instrument_id,
