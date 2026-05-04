@@ -3375,8 +3375,12 @@ def sec_def14a_bootstrap() -> None:
     backlog in one bounded session.
 
     Manual-trigger only via ``POST /jobs/sec_def14a_bootstrap/run``;
-    auto-fires weekly Sunday 04:30 UTC as a safety net to catch
-    anything the daily cron's bounded limit can't keep up with.
+    auto-fires weekly Sunday 02:30 UTC as a safety net to catch
+    anything the daily cron's bounded limit can't keep up with. The
+    cadence leaves a 2-hour buffer before ``sec_def14a_ingest`` fires
+    at 04:35 UTC so the bootstrap's 1-hour deadline cannot overlap
+    the daily run (Claude review for #839 caught the prior 04:30
+    cadence sharing the daily ingester's window).
     Mirrors :func:`sec_business_summary_bootstrap` design (#535).
     """
     from app.providers.implementations.sec_edgar import SecFilingsProvider

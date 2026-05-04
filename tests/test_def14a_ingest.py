@@ -707,3 +707,36 @@ class TestBootstrapDef14a:
         second = bootstrap_def14a(conn, fetcher, chunk_limit=10, max_runtime_seconds=5)  # type: ignore[arg-type]
         assert second.accessions_seen == 0
         assert fetcher.calls == prior_calls  # no SEC re-fetches
+
+    def test_accounting_invariant_holds_under_crash(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Bot review for #839 PR #850: the bootstrap summary must
+        satisfy ``seen == succeeded + partial + failed`` even when the
+        per-accession crash path fires. Operator-facing run audit
+        relies on this invariant to reconcile what was attempted vs
+        accounted."""
+        from typing import NoReturn
+
+        conn = _setup
+        url = "https://www.sec.gov/Archives/edgar/data/839001/INV/d.htm"
+        _seed_filing_event(
+            conn,
+            instrument_id=839_001,
+            accession="0000839001-25-000200",
+            filing_date=date(2026, 4, 1),
+            primary_document_url=url,
+        )
+        conn.commit()
+
+        class _CrashingFetcher:
+            def fetch_document_text(self, _absolute_url: str) -> NoReturn:
+                raise RuntimeError("synthetic crash for invariant test")
+
+        summary = bootstrap_def14a(conn, _CrashingFetcher(), chunk_limit=5, max_runtime_seconds=5)  # type: ignore[arg-type]
+        assert (
+            summary.accessions_seen
+            == summary.accessions_succeeded + summary.accessions_partial + summary.accessions_failed
+        )
+        assert summary.accessions_failed >= 1

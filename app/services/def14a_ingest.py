@@ -542,6 +542,17 @@ def ingest_def14a(
                 # bootstrap mode that wasted SEC calls + clock for
                 # nothing. Use 'failed' status so an operator can clear
                 # the row to retry once the underlying bug is fixed.
+                # Always count the failure FIRST so the
+                # ``seen == succeeded + partial + failed`` invariant
+                # holds even on double-fault (crash + tombstone write
+                # also fails). Bot review for #839 PR #850 caught the
+                # prior version which only counted on successful
+                # tombstone — a double-fault silently dropped the
+                # accession from accounting and the bootstrap audit
+                # trail couldn't be reconciled.
+                accessions_failed += 1
+                if first_error is None:
+                    first_error = f"{ref.accession_number} (crash): {exc}"
                 try:
                     _record_ingest_attempt(
                         conn,
@@ -553,15 +564,15 @@ def ingest_def14a(
                         error=f"crash: {type(exc).__name__}: {exc}",
                     )
                     conn.commit()
-                    accessions_failed += 1
-                    if first_error is None:
-                        first_error = f"{ref.accession_number} (crash): {exc}"
                 except Exception:  # noqa: BLE001 — tombstone failure shouldn't abort batch
                     logger.exception(
                         "DEF 14A ingest: failed to tombstone crash for %s; row stays pending",
                         ref.accession_number,
                     )
                     conn.rollback()
+                    # Still counted as failed above; the audit log
+                    # just doesn't carry the row. Operator drains via
+                    # log inspection + manual re-trigger.
                 continue
 
             if outcome.status == "success":
@@ -681,6 +692,23 @@ def bootstrap_def14a(
             first_error = chunk.first_error
         if chunk.accessions_seen == 0:
             break
+
+    # Bot review for #839 PR #850: enforce the accounting invariant
+    # so a future regression that drops accessions from one of the
+    # outcome buckets trips here rather than silently undercounting.
+    # Soft-assert via logger.warning rather than raise — a partial
+    # accounting result is still useful operator output, but we want
+    # the discrepancy to be visible in the run audit.
+    accounted = total_succeeded + total_partial + total_failed
+    if accounted != total_seen:
+        logger.warning(
+            "bootstrap_def14a accounting drift: seen=%d != succeeded(%d)+partial(%d)+failed(%d)=%d",
+            total_seen,
+            total_succeeded,
+            total_partial,
+            total_failed,
+            accounted,
+        )
 
     logger.info(
         "bootstrap_def14a complete: seen=%d succeeded=%d partial=%d failed=%d inserted=%d updated=%d",
