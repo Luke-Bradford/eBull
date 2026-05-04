@@ -19,8 +19,10 @@ import psycopg.rows
 import pytest
 
 from app.services.ownership_observations import (
+    record_blockholder_observation,
     record_insider_observation,
     record_institution_observation,
+    refresh_blockholders_current,
     refresh_insiders_current,
     refresh_institutions_current,
     resolve_filer_cik_or_raise,
@@ -668,3 +670,189 @@ class TestResolveFilerCikOrRaise:
     ) -> None:
         with pytest.raises(ValueError, match="filer_id=999999"):
             resolve_filer_cik_or_raise(ebull_test_conn, filer_id=999_999)
+
+
+# ---------------------------------------------------------------------------
+# Blockholder observations + _current (#840.C)
+# ---------------------------------------------------------------------------
+
+
+class TestBlockholderObservations:
+    @pytest.fixture
+    def _setup(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> psycopg.Connection[tuple]:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=840_200, symbol="GME")
+        conn.commit()
+        return conn
+
+    def test_record_then_refresh_round_trip(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        conn = _setup
+        record_blockholder_observation(
+            conn,
+            instrument_id=840_200,
+            reporter_cik="0001767470",
+            reporter_name="Cohen Ryan",
+            ownership_nature="beneficial",
+            submission_type="SCHEDULE 13D/A",
+            status_flag="active",
+            source="13d",
+            source_document_id="0000921895-25-000190",
+            source_accession="0000921895-25-000190",
+            source_field=None,
+            source_url=None,
+            filed_at=datetime(2025, 1, 29, tzinfo=UTC),
+            period_start=None,
+            period_end=date(2025, 1, 29),
+            ingest_run_id=uuid4(),
+            aggregate_amount_owned=Decimal("75000000"),
+            percent_of_class=Decimal("16.77"),
+        )
+        conn.commit()
+
+        n = refresh_blockholders_current(conn, instrument_id=840_200)
+        conn.commit()
+        assert n == 1
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT reporter_cik, ownership_nature, source, aggregate_amount_owned
+                FROM ownership_blockholders_current WHERE instrument_id = %s
+                """,
+                (840_200,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0]["reporter_cik"] == "0001767470"
+        assert rows[0]["ownership_nature"] == "beneficial"
+        assert rows[0]["source"] == "13d"
+        assert rows[0]["aggregate_amount_owned"] == Decimal("75000000")
+
+    def test_amendment_chain_picks_latest_filed_at(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Two amendments, same primary filer + nature. Latest
+        ``filed_at`` wins. Earlier amendments stay in observations
+        for history."""
+        conn = _setup
+        cik = "0001767470"
+        run_id = uuid4()
+        for filed_year, accession, amount in [
+            (2024, "13D-RC-2024-001", Decimal("60000000")),
+            (2025, "13D-RC-2025-001", Decimal("75000000")),
+        ]:
+            record_blockholder_observation(
+                conn,
+                instrument_id=840_200,
+                reporter_cik=cik,
+                reporter_name="Cohen Ryan",
+                ownership_nature="beneficial",
+                submission_type="SCHEDULE 13D/A",
+                status_flag="active",
+                source="13d",
+                source_document_id=accession,
+                source_accession=accession,
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(filed_year, 1, 29, tzinfo=UTC),
+                period_start=None,
+                period_end=date(filed_year, 1, 29),
+                ingest_run_id=run_id,
+                aggregate_amount_owned=amount,
+                percent_of_class=None,
+            )
+        conn.commit()
+
+        refresh_blockholders_current(conn, instrument_id=840_200)
+        conn.commit()
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT source_accession, aggregate_amount_owned
+                FROM ownership_blockholders_current
+                WHERE reporter_cik = %s
+                """,
+                (cik,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0]["source_accession"] == "13D-RC-2025-001"
+        assert rows[0]["aggregate_amount_owned"] == Decimal("75000000")
+
+        # History preserved.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM ownership_blockholders_observations WHERE reporter_cik = %s",
+                (cik,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 2
+
+    def test_invariant_13d_must_be_active_13g_must_be_passive(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Codex review for #840.C: cross-column invariant from
+        legacy ``blockholder_filings`` (sql/095) must be preserved.
+        13D / 13D/A are active; 13G / 13G/A are passive. Two
+        independent enum CHECKs would let a misclassified row
+        through (e.g., 13D + passive). Compound CHECK guards both
+        observations and current tables."""
+        from psycopg.errors import CheckViolation
+
+        with pytest.raises(CheckViolation):
+            record_blockholder_observation(
+                _setup,
+                instrument_id=840_200,
+                reporter_cik="0001234567",
+                reporter_name="Bad Mix",
+                ownership_nature="beneficial",
+                submission_type="SCHEDULE 13D",
+                status_flag="passive",  # invalid: 13D must be active
+                source="13d",
+                source_document_id="ACC-BAD",
+                source_accession="ACC-BAD",
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(2026, 1, 1, tzinfo=UTC),
+                period_start=None,
+                period_end=date(2026, 1, 1),
+                ingest_run_id=uuid4(),
+                aggregate_amount_owned=Decimal("1"),
+                percent_of_class=None,
+            )
+
+    def test_record_rejects_blank_reporter_cik(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        with pytest.raises(ValueError, match="reporter_cik is required"):
+            record_blockholder_observation(
+                _setup,
+                instrument_id=840_200,
+                reporter_cik="",
+                reporter_name="Blank",
+                ownership_nature="beneficial",
+                submission_type="SCHEDULE 13D",
+                status_flag=None,
+                source="13d",
+                source_document_id="ACC",
+                source_accession="ACC",
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(2026, 1, 1, tzinfo=UTC),
+                period_start=None,
+                period_end=date(2026, 1, 1),
+                ingest_run_id=uuid4(),
+                aggregate_amount_owned=Decimal("1"),
+                percent_of_class=None,
+            )
