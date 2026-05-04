@@ -770,11 +770,10 @@ def record_def14a_observation(
                 %(filed_at)s, %(period_start)s, %(period_end)s, %(run_id)s,
                 %(shares)s, %(pct)s
             )
-            ON CONFLICT (instrument_id, holder_name_key, period_end, source_document_id)
+            ON CONFLICT (instrument_id, holder_name_key, ownership_nature, period_end, source_document_id)
             DO UPDATE SET
                 holder_name = EXCLUDED.holder_name,
                 holder_role = EXCLUDED.holder_role,
-                ownership_nature = EXCLUDED.ownership_nature,
                 source_accession = EXCLUDED.source_accession,
                 source_field = EXCLUDED.source_field,
                 source_url = EXCLUDED.source_url,
