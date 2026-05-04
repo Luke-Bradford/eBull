@@ -489,9 +489,12 @@ _FORM_TO_SOURCE: dict[str, ManifestSource] = {
     # Institutional manager
     "13F-HR": "sec_13f_hr",
     "13F-HR/A": "sec_13f_hr",
-    # Proxy
+    # Proxy. ``DEFM14A`` is the merger-related proxy variant; the
+    # existing ``app/services/def14a_ingest.py`` treats it as ingestible
+    # so the manifest must too (Codex pre-push review #866).
     "DEF 14A": "sec_def14a",
     "DEFA14A": "sec_def14a",
+    "DEFM14A": "sec_def14a",
     "PRE 14A": "sec_def14a",
     # Fund (Phase 3)
     "N-PORT": "sec_n_port",
