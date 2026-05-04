@@ -3445,19 +3445,45 @@ def ownership_observations_sync() -> None:
 
     from app.services.ownership_observations_sync import sync_all
 
-    # Bot review for #840.E-prep PR #856: cap the daily scan to a
-    # rolling 90-day window. Without ``since``, sync_all rescans the
-    # full lifetime of every legacy table on each run, which won't
-    # scale as the typed tables grow. 90 days covers the longest SEC
-    # filing-publish lag we've seen (Form 4 amendments 30-60 days,
-    # 13F-HR 45 days, DEF 14A annual-cycle ~12 months but those land
-    # via the catch-up-on-boot path on initial deploy and through
-    # the daily window thereafter). Operator can drop the window via
-    # an env var if needed; default 90d covers steady-state.
-    cutoff = (datetime.now(tz=UTC) - _td(days=90)).date()
+    # Bot review for #840.E-prep PR #857: distinguish the bootstrap
+    # path from the steady-state path so DEF 14A history (annual cycle,
+    # ~12 months between filings) doesn't sit permanently outside the
+    # 90-day window.
+    #
+    # Detection: if every ownership_*_current table is empty, this is
+    # the first run on this database — execute with ``since=None`` so
+    # the full legacy lifetime mirrors over. Once at least one table
+    # has rows, switch to the rolling 90-day window for steady-state
+    # cost. The 90-day window covers Form 4 amendments (30-60d) +
+    # 13F-HR (45d) + treasury XBRL (quarterly); DEF 14A's annual
+    # cycle relies on the bootstrap pass to land all historical
+    # proxies.
 
     with _tracked_job(JOB_OWNERSHIP_OBSERVATIONS_SYNC) as tracker:
         with psycopg.connect(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        (SELECT COUNT(*) FROM ownership_insiders_current)
+                      + (SELECT COUNT(*) FROM ownership_institutions_current)
+                      + (SELECT COUNT(*) FROM ownership_blockholders_current)
+                      + (SELECT COUNT(*) FROM ownership_treasury_current)
+                      + (SELECT COUNT(*) FROM ownership_def14a_current)
+                    """
+                )
+                row = cur.fetchone()
+            existing_current_rows = int(row[0]) if row else 0
+
+            if existing_current_rows == 0:
+                logger.info("ownership_observations_sync: bootstrap (no _current rows yet) — running full-history sync")
+                cutoff: date | None = None
+            else:
+                cutoff = (datetime.now(tz=UTC) - _td(days=90)).date()
+                logger.info(
+                    "ownership_observations_sync: steady-state — capping at since=%s",
+                    cutoff,
+                )
             result = sync_all(conn, since=cutoff)
 
         tracker.row_count = result.total_observations_recorded
