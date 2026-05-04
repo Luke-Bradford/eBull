@@ -610,6 +610,253 @@ def refresh_blockholders_current(
         return int(row[0]) if row else 0
 
 
+# ---------------------------------------------------------------------------
+# Treasury — record + refresh (#840.D)
+# ---------------------------------------------------------------------------
+
+
+def record_treasury_observation(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    source: OwnershipSource,
+    source_document_id: str,
+    source_accession: str | None,
+    source_field: str | None,
+    source_url: str | None,
+    filed_at: datetime,
+    period_start: date | None,
+    period_end: date,
+    ingest_run_id: UUID,
+    treasury_shares: Decimal | None,
+) -> None:
+    """Append one treasury observation. ``ownership_nature`` is fixed
+    to ``'economic'`` (issuer-held shares — not Rule 13d-3 beneficial).
+    Source is typically ``'xbrl_dei'`` (TreasuryStockShares /
+    TreasuryStockCommonShares); ``'10k_note'`` for narrative
+    fallbacks."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ownership_treasury_observations (
+                instrument_id, source, source_document_id, source_accession, source_field, source_url,
+                filed_at, period_start, period_end, ingest_run_id, treasury_shares
+            ) VALUES (
+                %(iid)s, %(source)s, %(doc_id)s, %(accession)s, %(field)s, %(url)s,
+                %(filed_at)s, %(period_start)s, %(period_end)s, %(run_id)s, %(shares)s
+            )
+            ON CONFLICT (instrument_id, period_end, source_document_id)
+            DO UPDATE SET
+                source = EXCLUDED.source,
+                source_accession = EXCLUDED.source_accession,
+                source_field = EXCLUDED.source_field,
+                source_url = EXCLUDED.source_url,
+                filed_at = EXCLUDED.filed_at,
+                period_start = EXCLUDED.period_start,
+                treasury_shares = EXCLUDED.treasury_shares,
+                ingest_run_id = EXCLUDED.ingest_run_id
+            """,
+            {
+                "iid": instrument_id,
+                "source": source,
+                "doc_id": source_document_id,
+                "accession": source_accession,
+                "field": source_field,
+                "url": source_url,
+                "filed_at": filed_at,
+                "period_start": period_start,
+                "period_end": period_end,
+                "run_id": str(ingest_run_id),
+                "shares": treasury_shares,
+            },
+        )
+
+
+def refresh_treasury_current(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+) -> int:
+    """Latest non-null ``treasury_shares`` per instrument wins.
+    ``WHERE treasury_shares IS NOT NULL`` so a NULL observation
+    doesn't displace an earlier non-null value (e.g. a re-parse
+    that lost the concept shouldn't blank out the column)."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT pg_advisory_xact_lock(
+                (hashtextextended('refresh_treasury_current', 0) # %s::bigint)
+            )
+            """,
+            (instrument_id,),
+        )
+        cur.execute(
+            "DELETE FROM ownership_treasury_current WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        cur.execute(
+            """
+            INSERT INTO ownership_treasury_current (
+                instrument_id, ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end, treasury_shares
+            )
+            SELECT DISTINCT ON (instrument_id)
+                instrument_id, ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end, treasury_shares
+            FROM ownership_treasury_observations
+            WHERE instrument_id = %s
+              AND known_to IS NULL
+              AND treasury_shares IS NOT NULL
+            ORDER BY
+                instrument_id,
+                period_end DESC,
+                filed_at DESC,
+                source_document_id ASC
+            """,
+            (instrument_id,),
+        )
+        cur.execute(
+            "SELECT COUNT(*) FROM ownership_treasury_current WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+# ---------------------------------------------------------------------------
+# DEF 14A — record + refresh (#840.D)
+# ---------------------------------------------------------------------------
+
+
+def record_def14a_observation(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    holder_name: str,
+    holder_role: str | None,
+    ownership_nature: OwnershipNature,
+    source: OwnershipSource,
+    source_document_id: str,
+    source_accession: str | None,
+    source_field: str | None,
+    source_url: str | None,
+    filed_at: datetime,
+    period_start: date | None,
+    period_end: date,
+    ingest_run_id: UUID,
+    shares: Decimal | None,
+    percent_of_class: Decimal | None,
+) -> None:
+    """Append one DEF 14A bene-table observation. Identity is the
+    normalised holder name (generated column ``holder_name_key`` =
+    lower(trim(holder_name))) — DEF 14A doesn't carry CIK on the
+    proxy so the resolver-to-CIK match happens at rollup-read time
+    instead of here."""
+    if not holder_name or not holder_name.strip():
+        raise ValueError("record_def14a_observation: holder_name is required")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ownership_def14a_observations (
+                instrument_id, holder_name, holder_role, ownership_nature,
+                source, source_document_id, source_accession, source_field, source_url,
+                filed_at, period_start, period_end, ingest_run_id,
+                shares, percent_of_class
+            ) VALUES (
+                %(iid)s, %(name)s, %(role)s, %(nature)s,
+                %(source)s, %(doc_id)s, %(accession)s, %(field)s, %(url)s,
+                %(filed_at)s, %(period_start)s, %(period_end)s, %(run_id)s,
+                %(shares)s, %(pct)s
+            )
+            ON CONFLICT (instrument_id, holder_name_key, period_end, source_document_id)
+            DO UPDATE SET
+                holder_name = EXCLUDED.holder_name,
+                holder_role = EXCLUDED.holder_role,
+                ownership_nature = EXCLUDED.ownership_nature,
+                source_accession = EXCLUDED.source_accession,
+                source_field = EXCLUDED.source_field,
+                source_url = EXCLUDED.source_url,
+                filed_at = EXCLUDED.filed_at,
+                period_start = EXCLUDED.period_start,
+                shares = EXCLUDED.shares,
+                percent_of_class = EXCLUDED.percent_of_class,
+                ingest_run_id = EXCLUDED.ingest_run_id
+            """,
+            {
+                "iid": instrument_id,
+                "name": holder_name,
+                "role": holder_role,
+                "nature": ownership_nature,
+                "source": source,
+                "doc_id": source_document_id,
+                "accession": source_accession,
+                "field": source_field,
+                "url": source_url,
+                "filed_at": filed_at,
+                "period_start": period_start,
+                "period_end": period_end,
+                "run_id": str(ingest_run_id),
+                "shares": shares,
+                "pct": percent_of_class,
+            },
+        )
+
+
+def refresh_def14a_current(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+) -> int:
+    """Latest proxy per (instrument, normalised holder name) wins."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT pg_advisory_xact_lock(
+                (hashtextextended('refresh_def14a_current', 0) # %s::bigint)
+            )
+            """,
+            (instrument_id,),
+        )
+        cur.execute(
+            "DELETE FROM ownership_def14a_current WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        cur.execute(
+            """
+            INSERT INTO ownership_def14a_current (
+                instrument_id, holder_name, holder_name_key, holder_role, ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, percent_of_class
+            )
+            SELECT DISTINCT ON (holder_name_key, ownership_nature)
+                instrument_id, holder_name, holder_name_key, holder_role, ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, percent_of_class
+            FROM ownership_def14a_observations
+            WHERE instrument_id = %s
+              AND known_to IS NULL
+              AND shares IS NOT NULL  -- prevent NULL re-parse displacing prior good value
+            ORDER BY
+                holder_name_key,
+                ownership_nature,
+                period_end DESC,
+                filed_at DESC,
+                source_document_id ASC
+            """,
+            (instrument_id,),
+        )
+        cur.execute(
+            "SELECT COUNT(*) FROM ownership_def14a_current WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
 def iter_insider_observations(
     conn: psycopg.Connection[Any],
     *,

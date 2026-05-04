@@ -173,6 +173,10 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "ownership_institutions_observations",
     "ownership_blockholders_current",
     "ownership_blockholders_observations",
+    "ownership_treasury_current",
+    "ownership_treasury_observations",
+    "ownership_def14a_current",
+    "ownership_def14a_observations",
 )
 
 
