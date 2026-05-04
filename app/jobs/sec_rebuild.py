@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
+from psycopg import sql
 
 from app.providers.implementations.sec_submissions import HttpGet, check_freshness
 from app.services.sec_manifest import ManifestSource, record_manifest_entry
@@ -74,30 +75,27 @@ def _resolve_scope(conn: psycopg.Connection[Any], scope: RebuildScope) -> list[t
     if scope.instrument_id is None and scope.filer_cik is None and scope.source is None:
         raise ValueError("RebuildScope: at least one of instrument_id / filer_cik / source must be set")
 
-    where_clauses: list[str] = []
+    where_clauses: list[sql.Composable] = []
     params: list[Any] = []
     if scope.instrument_id is not None:
-        where_clauses.append("instrument_id = %s")
+        where_clauses.append(sql.SQL("instrument_id = %s"))
         params.append(scope.instrument_id)
     if scope.filer_cik is not None:
-        where_clauses.append("(subject_type IN ('institutional_filer', 'blockholder_filer') AND subject_id = %s)")
+        where_clauses.append(
+            sql.SQL("(subject_type IN ('institutional_filer', 'blockholder_filer') AND subject_id = %s)")
+        )
         params.append(scope.filer_cik)
     if scope.source is not None:
-        where_clauses.append("source = %s")
+        where_clauses.append(sql.SQL("source = %s"))
         params.append(scope.source)
 
-    where_sql = " AND ".join(where_clauses)
+    query = sql.SQL(
+        "SELECT subject_type, subject_id, source FROM data_freshness_index"
+        " WHERE {where} ORDER BY subject_type, subject_id, source"
+    ).format(where=sql.SQL(" AND ").join(where_clauses))
 
     with conn.cursor() as cur:
-        cur.execute(
-            f"""
-            SELECT subject_type, subject_id, source
-            FROM data_freshness_index
-            WHERE {where_sql}
-            ORDER BY subject_type, subject_id, source
-            """,  # noqa: S608 — clauses are module-local literals
-            params,
-        )
+        cur.execute(query, params)
         return [(str(t), str(s), src) for t, s, src in cur.fetchall()]  # type: ignore[misc]
 
 
