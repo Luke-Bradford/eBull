@@ -21,6 +21,7 @@ import psycopg.rows
 import pytest
 
 from app.services.def14a_ingest import (
+    bootstrap_def14a,
     discover_pending_def14a,
     ingest_def14a,
 )
@@ -542,3 +543,167 @@ class TestIngestDef14a:
         summary = ingest_def14a(conn, fetcher)
         assert summary.accessions_seen == 0
         assert summary.rows_inserted == 0
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap drain (#839 — operator audit found table empty)
+# ---------------------------------------------------------------------------
+
+
+class TestBootstrapDef14a:
+    """Mirror of the :func:`bootstrap_business_summaries` test surface
+    — the bootstrap helper loops the standard ingester until the
+    candidate query empties or the deadline elapses, summing per-chunk
+    counts. Idempotent: a second invocation is a fast no-op because
+    every accession lands in ``def14a_ingest_log`` after the first
+    pass."""
+
+    @pytest.fixture
+    def _setup(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> psycopg.Connection[tuple]:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=839_001, symbol="BOOT")
+        _seed_sec_profile(conn, instrument_id=839_001, cik="0000839001")
+        return conn
+
+    def test_drains_multiple_accessions_in_one_call(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Three pending accessions, chunk_limit=2 → two chunks
+        consumed by one bootstrap call (the deadline doesn't fire,
+        the empty-chunk break does)."""
+        conn = _setup
+        urls: dict[str, str | None] = {}
+        for i in range(3):
+            url = f"https://www.sec.gov/Archives/edgar/data/839001/000083900125-00000{i}/d.htm"
+            urls[url] = _proxy_html_with_table()
+            _seed_filing_event(
+                conn,
+                instrument_id=839_001,
+                accession=f"0000839001-25-00000{i}",
+                filing_date=date(2026, 1, 15 + i),
+                primary_document_url=url,
+            )
+        conn.commit()
+        fetcher = _InMemoryFetcher(urls)
+
+        summary = bootstrap_def14a(conn, fetcher, chunk_limit=2, max_runtime_seconds=60)
+        assert summary.accessions_seen == 3
+        assert summary.accessions_succeeded == 3
+        assert summary.rows_inserted == 9  # 3 holders × 3 accessions
+
+    def test_idempotent_second_run_is_noop(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Acceptance #5: re-running the bootstrap after every
+        accession is logged is zero-work (no duplicate rows, no SEC
+        re-fetch). Mirrors the
+        ``app.services.business_summary.bootstrap_business_summaries``
+        idempotency contract."""
+        conn = _setup
+        url = "https://www.sec.gov/Archives/edgar/data/839001/000083900125-000010/d.htm"
+        _seed_filing_event(
+            conn,
+            instrument_id=839_001,
+            accession="0000839001-25-000010",
+            filing_date=date(2026, 2, 1),
+            primary_document_url=url,
+        )
+        conn.commit()
+        fetcher = _InMemoryFetcher({url: _proxy_html_with_table()})
+
+        first = bootstrap_def14a(conn, fetcher, chunk_limit=10, max_runtime_seconds=30)
+        assert first.accessions_succeeded == 1
+        first_calls = len(fetcher.calls)
+
+        second = bootstrap_def14a(conn, fetcher, chunk_limit=10, max_runtime_seconds=30)
+        assert second.accessions_seen == 0
+        assert second.rows_inserted == 0
+        # No additional SEC fetches — the discovery selector excluded
+        # the already-logged accession.
+        assert len(fetcher.calls) == first_calls
+
+        # Holdings table has exactly 3 rows (one accession × 3 holders).
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM def14a_beneficial_holdings WHERE instrument_id = %s",
+                (839_001,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 3
+
+    def test_empty_pending_returns_empty_summary(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        conn = _setup
+        fetcher = _InMemoryFetcher({})
+        summary = bootstrap_def14a(conn, fetcher, chunk_limit=100, max_runtime_seconds=10)
+        assert summary.accessions_seen == 0
+        assert summary.rows_inserted == 0
+        assert fetcher.calls == []
+
+    def test_crash_path_tombstones_failed_so_bootstrap_doesnt_redrive(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Codex pre-push review for #839 (#2): a per-accession crash
+        used to roll back without writing a log row, so the next chunk's
+        discovery query rediscovered the same accession and re-crashed
+        on it. In bootstrap mode that wasted SEC calls + clock for the
+        entire 1-hour deadline. Now the crash path writes a 'failed'
+        tombstone in a fresh transaction so the loop progresses.
+
+        Repro: a fetcher whose ``fetch_document_text`` raises. After
+        bootstrap completes, the accession must be in
+        ``def14a_ingest_log`` with status='failed', and a second
+        bootstrap call must see zero pending."""
+        from typing import NoReturn
+
+        conn = _setup
+        url = "https://www.sec.gov/Archives/edgar/data/839001/CRASH/d.htm"
+        _seed_filing_event(
+            conn,
+            instrument_id=839_001,
+            accession="0000839001-25-000099",
+            filing_date=date(2026, 3, 1),
+            primary_document_url=url,
+        )
+        conn.commit()
+
+        class _CrashingFetcher:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def fetch_document_text(self, _absolute_url: str) -> NoReturn:
+                self.calls += 1
+                raise RuntimeError("synthetic SEC fetch crash")
+
+        fetcher = _CrashingFetcher()
+        summary = bootstrap_def14a(conn, fetcher, chunk_limit=10, max_runtime_seconds=10)  # type: ignore[arg-type]
+        assert summary.accessions_seen == 1
+        assert summary.accessions_failed == 1
+        assert summary.rows_inserted == 0
+
+        # Tombstone landed.
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT status, error FROM def14a_ingest_log WHERE accession_number = %s",
+                ("0000839001-25-000099",),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row["status"] == "failed"
+        assert "synthetic SEC fetch crash" in (row["error"] or "")
+
+        # Second bootstrap call sees zero pending — the discovery
+        # query excludes already-tombstoned accessions.
+        prior_calls = fetcher.calls
+        second = bootstrap_def14a(conn, fetcher, chunk_limit=10, max_runtime_seconds=5)  # type: ignore[arg-type]
+        assert second.accessions_seen == 0
+        assert fetcher.calls == prior_calls  # no SEC re-fetches
