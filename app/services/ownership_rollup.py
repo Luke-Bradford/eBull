@@ -242,7 +242,18 @@ class OwnershipRollup:
 class _Candidate:
     """One row in the canonical-holder union before dedup. Mutable so
     the DEF 14A enrichment step can append rows in Python after the
-    SQL-side union has run."""
+    SQL-side union has run.
+
+    ``ownership_nature`` (#840.E): when reading from the new
+    ``ownership_*_current`` tables, candidates carry the
+    direct/indirect/beneficial/voting/economic axis explicitly. The
+    legacy SQL path leaves this ``None`` (it implicitly only reads
+    ``direct`` Form 4s + ``beneficial`` 13D/Gs). Codex pre-push
+    review for #840.E caught a cross-nature collapse bug under the
+    flag-ON path: identity-key-only dedup folded a holder's
+    direct + indirect rows into one and lost the indirect side. The
+    dedup identity key now includes ``ownership_nature`` whenever
+    it's set."""
 
     source: SourceTag
     priority_rank: int
@@ -253,6 +264,7 @@ class _Candidate:
     as_of_date: date | None
     accession_number: str
     source_row_id: int
+    ownership_nature: str | None = None
 
 
 def edgar_archive_url(accession_number: str | None) -> str | None:
@@ -309,6 +321,197 @@ _RESIDUAL_TOOLTIP = (
 )
 
 
+def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instrument_id: int) -> list[_Candidate]:
+    """Build the canonical-holder candidate set from the new
+    ``ownership_*_current`` tables (#840.E). Mirrors the shape of
+    :func:`_collect_canonical_holders_sql` so the rest of the rollup
+    pipeline (dedup, bucket, residual, coverage) is unchanged.
+
+    Maps:
+      - ``ownership_insiders_current`` (form4, form3 + nature axis)
+        → insiders candidates.
+      - ``ownership_blockholders_current`` (13d, 13g, beneficial)
+        → blockholders candidates.
+      - ``ownership_institutions_current`` (13f, economic, EQUITY only;
+        PUT / CALL exposures are option overlays, NOT pie wedges)
+        → institutions / etfs candidates (filer_type drives bucket).
+      - ``ownership_def14a_current`` (def14a, beneficial) → def14a
+        candidates that go through the existing
+        ``_enrich_and_union_def14a`` path for CIK-resolution → matched
+        vs unmatched routing.
+
+    Treasury is read separately via the existing ``_read_treasury``
+    callsite (now optionally falling through to
+    ``ownership_treasury_current`` — see :func:`_read_treasury_from_current`).
+
+    The candidate set returned here covers insiders + blockholders +
+    institutions only. DEF 14A rows are fetched separately via
+    ``_read_def14a_unmatched_from_current`` and injected into
+    ``_enrich_and_union_def14a`` through its ``def14a_rows`` kwarg —
+    that keeps the DEF 14A unmatched-slice logic unchanged across both
+    read paths, so dual-read parity is testable on a single fixture."""
+    rows: list[_Candidate] = []
+    next_row_id = iter(range(1, 1_000_000))
+
+    # Insiders.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT holder_cik, holder_name, ownership_nature,
+                   source, source_accession, shares, period_end
+            FROM ownership_insiders_current
+            WHERE instrument_id = %s
+              AND shares IS NOT NULL
+            """,
+            (instrument_id,),
+        )
+        for row in cur.fetchall():
+            source = str(row["source"])
+            if source not in ("form4", "form3"):
+                continue
+            rows.append(
+                _Candidate(
+                    source=source,  # type: ignore[arg-type]
+                    priority_rank=_PRIORITY_RANK[source],  # type: ignore[index]
+                    filer_cik=str(row["holder_cik"]) if row["holder_cik"] else None,
+                    filer_name=str(row["holder_name"]),
+                    filer_type=None,
+                    shares=Decimal(row["shares"]),
+                    as_of_date=row.get("period_end"),  # type: ignore[arg-type]
+                    accession_number=str(row.get("source_accession") or ""),
+                    source_row_id=next(next_row_id),
+                    ownership_nature=str(row["ownership_nature"]),
+                )
+            )
+
+    # Blockholders (13D/G).
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT reporter_cik, reporter_name, ownership_nature,
+                   source, source_accession, aggregate_amount_owned, period_end
+            FROM ownership_blockholders_current
+            WHERE instrument_id = %s
+              AND aggregate_amount_owned IS NOT NULL
+            """,
+            (instrument_id,),
+        )
+        for row in cur.fetchall():
+            source = str(row["source"])
+            if source not in ("13d", "13g"):
+                continue
+            rows.append(
+                _Candidate(
+                    source=source,  # type: ignore[arg-type]
+                    priority_rank=_PRIORITY_RANK[source],  # type: ignore[index]
+                    filer_cik=str(row["reporter_cik"]) if row["reporter_cik"] else None,
+                    filer_name=str(row["reporter_name"]),
+                    filer_type=None,
+                    shares=Decimal(row["aggregate_amount_owned"]),
+                    as_of_date=row.get("period_end"),  # type: ignore[arg-type]
+                    accession_number=str(row.get("source_accession") or ""),
+                    source_row_id=next(next_row_id),
+                    ownership_nature=str(row["ownership_nature"]),
+                )
+            )
+
+    # Institutions (13F-HR equity only — PUT / CALL exposures are
+    # option overlays, not pie wedges; matches the legacy SQL's
+    # ``is_put_call IS NULL`` filter).
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT filer_cik, filer_name, filer_type, ownership_nature,
+                   source, source_accession, shares, period_end
+            FROM ownership_institutions_current
+            WHERE instrument_id = %s
+              AND shares IS NOT NULL
+              AND exposure_kind = 'EQUITY'
+            """,
+            (instrument_id,),
+        )
+        for row in cur.fetchall():
+            rows.append(
+                _Candidate(
+                    source="13f",
+                    priority_rank=_PRIORITY_RANK["13f"],
+                    filer_cik=str(row["filer_cik"]) if row["filer_cik"] else None,
+                    filer_name=str(row["filer_name"]),
+                    filer_type=(str(row["filer_type"]) if row["filer_type"] else None),
+                    shares=Decimal(row["shares"]),
+                    as_of_date=row.get("period_end"),  # type: ignore[arg-type]
+                    accession_number=str(row.get("source_accession") or ""),
+                    source_row_id=next(next_row_id),
+                    ownership_nature=str(row["ownership_nature"]),
+                )
+            )
+
+    return rows
+
+
+def _read_treasury_from_current(
+    conn: psycopg.Connection[Any], instrument_id: int
+) -> tuple[Decimal | None, date | None]:
+    """Read latest treasury from ``ownership_treasury_current`` instead
+    of walking ``financial_periods``. Used when the rollup
+    feature-flag selects the new read path (#840.E).
+
+    ``ownership_treasury_current`` PK is ``(instrument_id)`` so there
+    is at most one row per instrument by construction. The explicit
+    ``ORDER BY period_end DESC LIMIT 1`` is defence in depth — bot
+    review for #840.E PR #861 caught the prior version trusting
+    ``fetchone()`` without an ORDER BY clause; that path would have
+    returned an arbitrary row if the PK was ever weakened in a future
+    migration."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT treasury_shares, period_end
+            FROM ownership_treasury_current
+            WHERE instrument_id = %s
+              AND treasury_shares IS NOT NULL
+            ORDER BY period_end DESC
+            LIMIT 1
+            """,
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None, None
+    return Decimal(row["treasury_shares"]), row.get("period_end")  # type: ignore[arg-type]
+
+
+def _read_def14a_unmatched_from_current(conn: psycopg.Connection[Any], instrument_id: int) -> list[dict[str, Any]]:
+    """Return DEF 14A holdings from ``ownership_def14a_current`` in
+    the same dict shape as the legacy ``def14a_beneficial_holdings``
+    SELECT — so the existing ``_enrich_and_union_def14a`` enrichment
+    can run against either source unchanged."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # Bot review for #840.E PR #861: ``row_number() OVER ()`` with
+        # no ORDER BY inside the window frame is non-deterministic
+        # across executions. ``holder_id`` here is a synthetic id that
+        # ``_enrich_and_union_def14a`` carries through to the
+        # ``_Candidate.source_row_id`` field and the dedup tie-breaker
+        # touches it on equal-priority/equal-date pairs. Pin the
+        # ordering to ``holder_name_key`` (deterministic identity) so
+        # the synthetic id is stable across runs.
+        cur.execute(
+            """
+            SELECT
+                row_number() OVER (ORDER BY holder_name_key) AS holding_id,
+                holder_name,
+                shares,
+                period_end AS as_of_date,
+                source_accession AS accession_number
+            FROM ownership_def14a_current
+            WHERE instrument_id = %s
+              AND shares IS NOT NULL
+            """,
+            (instrument_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
 def _collect_canonical_holders_sql(conn: psycopg.Connection[Any], instrument_id: int) -> list[_Candidate]:
     """Union Form 4 + Form 3 + 13D/G + 13F into one candidate list.
 
@@ -348,6 +551,8 @@ def _enrich_and_union_def14a(
     conn: psycopg.Connection[Any],
     instrument_id: int,
     sql_candidates: list[_Candidate],
+    *,
+    def14a_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[list[_Candidate], list[_Candidate]]:
     """Resolve each DEF 14A holder to a filer_cik and union into the
     candidate set. Returns ``(matched_candidates, unmatched_candidates)``.
@@ -361,19 +566,27 @@ def _enrich_and_union_def14a(
     slice keyed on the holder name — no CIK is available to dedup
     against. These are mostly named officers in the proxy who never
     filed a Form 4 / Form 3.
+
+    ``def14a_rows`` (#840.E): when None, reads from the legacy
+    ``def14a_beneficial_holdings`` table — preserves the prior
+    behaviour. When supplied (e.g., by the new read-from-current
+    path), the enrichment runs against those rows instead. Same dict
+    shape either way: ``{holding_id, holder_name, shares, as_of_date,
+    accession_number}``.
     """
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT holding_id, holder_name, shares, as_of_date,
-                   accession_number
-            FROM def14a_beneficial_holdings
-            WHERE instrument_id = %s
-              AND shares IS NOT NULL
-            """,
-            (instrument_id,),
-        )
-        def14a_rows = cur.fetchall()
+    if def14a_rows is None:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT holding_id, holder_name, shares, as_of_date,
+                       accession_number
+                FROM def14a_beneficial_holdings
+                WHERE instrument_id = %s
+                  AND shares IS NOT NULL
+                """,
+                (instrument_id,),
+            )
+            def14a_rows = [dict(r) for r in cur.fetchall()]
 
     matched: list[_Candidate] = list(sql_candidates)
     unmatched: list[_Candidate] = []
@@ -427,9 +640,16 @@ def _dedup_by_priority(candidates: Iterable[_Candidate]) -> list[Holder]:
     :data:`_CANONICAL_UNION_SQL` and the pinned spec sequence Codex
     reviewed.
     """
+    # Codex pre-push review for #840.E: include ``ownership_nature``
+    # in the dedup identity key whenever it's set (always under the
+    # flag-ON path, never under legacy). Without this, a holder's
+    # direct + indirect rows from ``ownership_*_current`` collapse
+    # into one and the second nature is silently dropped.
     groups: dict[str, list[_Candidate]] = {}
     for c in candidates:
-        groups.setdefault(_identity_key(c.filer_cik, c.filer_name), []).append(c)
+        base_key = _identity_key(c.filer_cik, c.filer_name)
+        key = f"{base_key}|{c.ownership_nature}" if c.ownership_nature else base_key
+        groups.setdefault(key, []).append(c)
 
     survivors: list[Holder] = []
     for cands in groups.values():
@@ -493,9 +713,16 @@ def _dedup_within_source(candidates: Iterable[_Candidate]) -> list[Holder]:
     amendment wins over his 13D original; both Cohen Form 4 (direct)
     and Cohen 13D/A (beneficial) survive elsewhere because they no
     longer compete in the same dedup pool."""
+    # Codex pre-push review for #840.E: include ``ownership_nature``
+    # in the dedup identity key whenever it's set (always under the
+    # flag-ON path, never under legacy). Without this, a holder's
+    # direct + indirect rows from ``ownership_*_current`` collapse
+    # into one and the second nature is silently dropped.
     groups: dict[str, list[_Candidate]] = {}
     for c in candidates:
-        groups.setdefault(_identity_key(c.filer_cik, c.filer_name), []).append(c)
+        base_key = _identity_key(c.filer_cik, c.filer_name)
+        key = f"{base_key}|{c.ownership_nature}" if c.ownership_nature else base_key
+        groups.setdefault(key, []).append(c)
 
     survivors: list[Holder] = []
     for cands in groups.values():
@@ -963,6 +1190,25 @@ def _read_universe_estimates(conn: psycopg.Connection[Any], instrument_id: int) 
 # ---------------------------------------------------------------------------
 
 
+def _read_from_current_enabled() -> bool:
+    """Feature-flag toggle for the new ``ownership_*_current`` read
+    path (#840.E). Defaults OFF so the prod rollback is a single env
+    var flip — no schema or DB rebuild.
+
+    Operator flow per Codex plan-review #5:
+      1. Sub-PRs A-D land write-side; observations + _current
+         populate via the daily sync.
+      2. Operator runs the dual-read parity test in dev to confirm
+         the new path produces identical OwnershipRollup output for
+         AAPL / GME / known fixtures.
+      3. Operator flips ``EBULL_OWNERSHIP_ROLLUP_FROM_CURRENT=1``.
+      4. If anything regresses, flip back — old read paths still
+         live for 1 release cycle minimum."""
+    import os
+
+    return os.environ.get("EBULL_OWNERSHIP_ROLLUP_FROM_CURRENT", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_id: int) -> OwnershipRollup:
     """Build the rollup payload for one instrument.
 
@@ -974,6 +1220,13 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     snapshot, with the isolation change silently ignored. Codex spec
     review caught the v1 spec attempting the inner-transaction
     anti-pattern.
+
+    Read-path selection (#840.E): when
+    ``EBULL_OWNERSHIP_ROLLUP_FROM_CURRENT=1``, reads from the new
+    ``ownership_*_current`` tables. Otherwise reads the legacy typed
+    tables. Both paths produce identical ``OwnershipRollup`` shapes;
+    operator dual-read parity test guards against drift before flipping
+    the flag.
     """
     outstanding, outstanding_as_of, outstanding_source = _read_shares_outstanding(conn, instrument_id)
     historical_symbols = tuple(historical_symbols_for(conn, instrument_id))
@@ -983,9 +1236,18 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
             instrument_id=instrument_id,
             historical_symbols=historical_symbols,
         )
-    treasury, treasury_as_of = _read_treasury(conn, instrument_id)
-    sql_candidates = _collect_canonical_holders_sql(conn, instrument_id)
-    matched, unmatched_def14a = _enrich_and_union_def14a(conn, instrument_id, sql_candidates)
+    use_current = _read_from_current_enabled()
+    if use_current:
+        treasury, treasury_as_of = _read_treasury_from_current(conn, instrument_id)
+        sql_candidates = _collect_canonical_holders_from_current(conn, instrument_id)
+        def14a_rows = _read_def14a_unmatched_from_current(conn, instrument_id)
+        matched, unmatched_def14a = _enrich_and_union_def14a(
+            conn, instrument_id, sql_candidates, def14a_rows=def14a_rows
+        )
+    else:
+        treasury, treasury_as_of = _read_treasury(conn, instrument_id)
+        sql_candidates = _collect_canonical_holders_sql(conn, instrument_id)
+        matched, unmatched_def14a = _enrich_and_union_def14a(conn, instrument_id, sql_candidates)
 
     # Split 13D/G out of the cross-source priority dedup (#837 / #788
     # P0b). 13D/G reports BENEFICIAL ownership per Rule 13d-3
