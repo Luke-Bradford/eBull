@@ -1073,13 +1073,78 @@ class TestDef14aObservations:
         assert len(rows) == 1
         assert rows[0]["shares"] == Decimal("3300000")
 
+    def test_dual_nature_for_same_holder_same_accession(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Bot review for #840.D PR #854: a real proxy filing carries
+        BOTH beneficial and voting rows for the same holder under the
+        SAME accession. The observations PK must include
+        ``ownership_nature`` so the two rows coexist; otherwise the
+        second INSERT collapses the first via ON CONFLICT before
+        refresh ever runs. Migration 117 fixes this."""
+        conn = _setup
+        run_id = uuid4()
+        accession = "ACC-PROXY-2026"  # SAME accession for both natures
+        for nature, shares in [
+            ("beneficial", Decimal("3300000")),
+            ("voting", Decimal("3000000")),
+        ]:
+            record_def14a_observation(
+                conn,
+                instrument_id=840_400,
+                holder_name="Tim Cook",
+                holder_role="CEO",
+                ownership_nature=nature,  # type: ignore[arg-type]
+                source="def14a",
+                source_document_id=accession,
+                source_accession=accession,
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(2026, 1, 15, tzinfo=UTC),
+                period_start=None,
+                period_end=date(2025, 12, 31),
+                ingest_run_id=run_id,
+                shares=shares,
+                percent_of_class=None,
+            )
+        conn.commit()
+
+        # Both observations preserved (no PK collision).
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM ownership_def14a_observations
+                WHERE instrument_id = %s AND source_document_id = %s
+                """,
+                (840_400, accession),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 2
+
+        refresh_def14a_current(conn, instrument_id=840_400)
+        conn.commit()
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT ownership_nature, shares FROM ownership_def14a_current
+                WHERE instrument_id = %s ORDER BY ownership_nature
+                """,
+                (840_400,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 2
+        natures = {r["ownership_nature"]: r["shares"] for r in rows}
+        assert natures == {"beneficial": Decimal("3300000"), "voting": Decimal("3000000")}
+
     def test_dual_nature_for_same_holder(
         self,
         _setup: psycopg.Connection[tuple],
     ) -> None:
-        """Codex review for #840.D: a DEF 14A holder reporting BOTH
-        beneficial and voting splits must retain BOTH rows in
-        _current. Earlier shape collapsed on holder_name_key."""
+        """Earlier dual-nature test using DIFFERENT accessions per
+        nature. Kept for coverage of the cross-proxy case."""
         conn = _setup
         run_id = uuid4()
         for nature, accession, shares in [
