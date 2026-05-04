@@ -245,6 +245,7 @@ JOB_SEC_FORM3_INGEST = "sec_form3_ingest"
 JOB_SEC_DEF14A_INGEST = "sec_def14a_ingest"
 JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
 JOB_SEC_FILING_DOCUMENTS_INGEST = "sec_filing_documents_ingest"
+JOB_CUSIP_EXTID_SWEEP = "cusip_extid_sweep"
 JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
 JOB_ETORO_LOOKUPS_REFRESH = "etoro_lookups_refresh"
 
@@ -616,6 +617,28 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.daily(hour=4, minute=35),
         catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_CUSIP_EXTID_SWEEP,
+        description=(
+            "Sweep ``unresolved_13f_cusips`` for rows whose CUSIP "
+            "already has a matching ``external_identifiers`` row, mark "
+            "them ``resolved_via_extid``, and rewash the source 13F-HR "
+            "accession so the previously-stranded holdings land in "
+            "``institutional_holdings`` (#836). Closes the race-loss "
+            "path between 13F ingest and the CUSIP backfill — operator "
+            "audit 2026-05-03 found 119 Fortune-100 names stranded by "
+            "this race. Cheap (one indexed JOIN, bounded to 1000 "
+            "rows/pass); daily 04:50 UTC schedules ~15min after the "
+            "DEF 14A ingest finishes."
+        ),
+        cadence=Cadence.daily(hour=4, minute=50),
+        # Catch up on boot so a fresh deployment promotes any backlog
+        # without waiting for the next 04:50 UTC. Cost is bounded —
+        # the sweep is one indexed JOIN; even with the full ~119-row
+        # backlog the rewash work is per-accession and the LIMIT 1000
+        # cap holds.
+        catch_up_on_boot=True,
     ),
     ScheduledJob(
         name=JOB_RAW_DATA_RETENTION_SWEEP,
@@ -3310,6 +3333,50 @@ def sec_def14a_ingest() -> None:
             result.accessions_failed,
             result.rows_inserted,
             result.rows_updated,
+        )
+
+
+def cusip_extid_sweep() -> None:
+    """Sweep ``unresolved_13f_cusips`` for rows whose CUSIP already
+    matches an ``external_identifiers`` row, mark them
+    ``resolved_via_extid``, and trigger 13F rewash so the previously
+    stranded holdings land in ``institutional_holdings`` (#788 / #836).
+
+    Closes the race-loss path between 13F-HR ingest (#730) and the
+    CUSIP backfill (#740): when a 13F filing parses BEFORE the CUSIP
+    backfill populates the issuer's ``external_identifiers`` row, the
+    holding is tombstoned in ``unresolved_13f_cusips`` and never
+    rejoins ``institutional_holdings`` even after the mapping later
+    lands. Operator audit 2026-05-03 found 119 Fortune-100 names in
+    that state — every blue-chip rollup is materially under-counted
+    until this sweep runs.
+
+    Cadence: daily 04:50 UTC, ~15 min after sec_def14a_ingest finishes
+    so any extids that proxy ingest just published are visible. The
+    sweep is cheap (one indexed JOIN; bounded to 1000 rows per pass)
+    so daily is plenty — the backlog drains on the first run and
+    subsequent passes only see new race-loss arrivals.
+    """
+    from app.services.cusip_resolver import sweep_resolvable_unresolved_cusips
+
+    with _tracked_job(JOB_CUSIP_EXTID_SWEEP) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            report = sweep_resolvable_unresolved_cusips(conn)
+            conn.commit()
+
+        # ``promoted`` is the headline rowcount: how many backlog rows
+        # we transitioned. The rewash counters are derivative — bookkept
+        # in the log line so an operator can spot a regression where
+        # rewash mass-defers, but tracker.row_count uses ``promoted``
+        # for ops_monitor's spike detection.
+        tracker.row_count = report.promoted
+        logger.info(
+            "cusip_extid_sweep: candidates=%d promoted=%d rewashed=%d rewash_deferred=%d rewash_failed=%d",
+            report.candidates_seen,
+            report.promoted,
+            report.rewashed,
+            report.rewash_deferred,
+            report.rewash_failed,
         )
 
 

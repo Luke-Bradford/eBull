@@ -59,6 +59,8 @@ from typing import Any, Final
 import psycopg
 import psycopg.rows
 
+from app.services import rewash_filings
+
 logger = logging.getLogger(__name__)
 
 
@@ -586,6 +588,217 @@ def resolve_unresolved_cusips(
         tombstoned_unresolvable=unresolvable,
         tombstoned_ambiguous=ambiguous,
         tombstoned_conflict=conflict,
+    )
+
+
+# ---------------------------------------------------------------------------
+# extid sweep — recover unresolved CUSIPs that already have a curated mapping
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SweepReport:
+    """Per-run rollup for :func:`sweep_resolvable_unresolved_cusips`.
+
+    Counter semantics:
+
+      * ``candidates_seen`` — rows whose CUSIP joined a row in
+        ``external_identifiers`` (provider='sec', identifier_type='cusip')
+        and were still pending (``resolution_status IS NULL``).
+      * ``promoted`` — rows transitioned to
+        ``resolution_status='resolved_via_extid'`` by this sweep.
+      * ``rewashed`` — rewash of ``last_accession_number`` returned
+        ``True`` (typed-table upsert ran or rescue-cohort log entry
+        recorded).
+      * ``rewash_deferred`` — rewash returned ``False`` (raw body
+        absent, no existing typed row / ingest log row, or the
+        any-CUSIP-still-unresolved partial path in
+        ``_apply_13f_infotable`` deferred the replace). The extid
+        promotion stays — a subsequent bulk ``run_rewash`` will pick
+        the accession up once #740 closes the remaining CUSIP gap.
+      * ``rewash_failed`` — rewash raised an exception (parser
+        regression or DB error). The extid promotion stays; the
+        accession is logged for operator audit.
+    """
+
+    candidates_seen: int
+    promoted: int
+    rewashed: int
+    rewash_deferred: int
+    rewash_failed: int
+
+
+def _select_resolvable_via_extid(
+    conn: psycopg.Connection[tuple],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Return up to ``limit`` pending unresolved CUSIPs whose CUSIP
+    already has a row in ``external_identifiers``. Ordered by
+    observation_count DESC so the highest-leverage entries (Fortune-100
+    names with hundreds of stranded observations) resolve first."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT u.cusip,
+                   u.last_accession_number,
+                   ei.instrument_id
+            FROM unresolved_13f_cusips u
+            JOIN external_identifiers ei
+              ON ei.identifier_value = u.cusip
+             AND ei.provider = 'sec'
+             AND ei.identifier_type = 'cusip'
+            WHERE u.resolution_status IS NULL
+            ORDER BY u.observation_count DESC, u.last_observed_at DESC
+            LIMIT %(limit)s
+            """,
+            {"limit": limit},
+        )
+        return list(cur.fetchall())
+
+
+def sweep_resolvable_unresolved_cusips(
+    conn: psycopg.Connection[tuple],
+    *,
+    limit: int = 1000,
+) -> SweepReport:
+    """Sweep ``unresolved_13f_cusips`` for rows whose CUSIP already
+    matches an ``external_identifiers`` mapping (#788 / #836).
+
+    Recovers the race-loss path: 13F-HR holdings ingested *before*
+    the CUSIP backfill landed end up tombstoned in
+    ``unresolved_13f_cusips`` with no link to ``institutional_holdings``.
+    Once the backfill (or a curated mapping) populates the
+    corresponding ``external_identifiers`` row, those tombstones are
+    immediately resolvable — but nothing re-triggers the typed-table
+    upsert because the original ingest run is long done. This sweep
+    closes the loop:
+
+      1. Find every pending unresolved row whose CUSIP already exists
+         in ``external_identifiers`` (provider='sec',
+         identifier_type='cusip').
+      2. Mark the row ``resolution_status='resolved_via_extid'`` so a
+         second pass is a no-op.
+      3. Trigger ``rewash_filings._rewash_13f_accession`` against the
+         row's ``last_accession_number`` so the now-resolvable holding
+         lands in ``institutional_holdings``.
+
+    Idempotent: a second invocation finds zero pending rows because
+    every match was tombstoned on the first pass. The caller is
+    responsible for committing the outer transaction at the end —
+    matches the contract of :func:`resolve_unresolved_cusips`.
+
+    The mark and the rewash run inside per-row savepoints so a single
+    bad accession (parser regression, raw body absent, etc.) doesn't
+    abort the rest of the sweep. The mark always lands on the outer
+    transaction; the rewash side-effect is rolled back to its
+    savepoint on exception. The extid promotion is recorded
+    independent of the rewash outcome — the mapping in
+    ``external_identifiers`` is authoritative regardless of whether
+    the typed-table upsert ran.
+
+    ``limit`` caps the per-pass workload. Default 1000 is
+    deliberately higher than the resolver's 500 because the sweep is
+    cheap (no fuzzy scoring; one indexed JOIN) and the operator
+    audit found ~119 stranded names today — even a single full pass
+    drains the backlog. Subsequent runs only see new race-loss
+    arrivals.
+    """
+    pending = _select_resolvable_via_extid(conn, limit=limit)
+    if not pending:
+        return SweepReport(
+            candidates_seen=0,
+            promoted=0,
+            rewashed=0,
+            rewash_deferred=0,
+            rewash_failed=0,
+        )
+
+    promoted = 0
+    rewashed = 0
+    rewash_deferred = 0
+    rewash_failed = 0
+
+    for row in pending:
+        cusip = str(row["cusip"]).strip().upper()
+        accession = str(row["last_accession_number"])
+
+        # Mark first inside its own savepoint so the extid promotion
+        # lands even if the rewash blows up below. The conditional
+        # ``resolution_status IS NULL`` guards against a concurrent
+        # writer that already tombstoned the row — keeps the sweep
+        # idempotent under concurrency.
+        #
+        # Codex pre-push review caught the prior version which
+        # incremented ``promoted`` and triggered rewash regardless of
+        # the rowcount: a concurrent sweep that already promoted the
+        # same row would race-lose here, but the loser still claimed
+        # work it didn't do AND re-ran the rewash. Gate on rowcount
+        # so the loser cleanly skips.
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE unresolved_13f_cusips
+                    SET resolution_status = 'resolved_via_extid',
+                        last_observed_at = NOW()
+                    WHERE cusip = %s
+                      AND resolution_status IS NULL
+                    """,
+                    (cusip,),
+                )
+                rowcount = cur.rowcount
+        if rowcount == 0:
+            # Concurrent winner already promoted (or operator manually
+            # tombstoned between our SELECT and UPDATE). Skip both the
+            # counter bump and the rewash trigger — repeating someone
+            # else's work would distort the report and (more importantly)
+            # let two sweeps clobber each other in
+            # ``_apply_13f_infotable``.
+            continue
+        promoted += 1
+
+        # Rewash in its own savepoint. A parser regression on one
+        # accession must not poison the outer sweep; isolate via
+        # nested transaction. Note: rewash_filings._rewash_13f_accession
+        # may itself raise RewashParseError on parser regression —
+        # we count those as failures and continue.
+        try:
+            with conn.transaction():
+                applied = rewash_filings._rewash_13f_accession(
+                    conn,
+                    accession_number=accession,
+                )
+            if applied:
+                rewashed += 1
+                logger.info(
+                    "cusip extid sweep: rewashed accession=%s for cusip=%s -> instrument_id=%s",
+                    accession,
+                    cusip,
+                    row["instrument_id"],
+                )
+            else:
+                rewash_deferred += 1
+                logger.info(
+                    "cusip extid sweep: rewash deferred accession=%s for cusip=%s "
+                    "(raw body missing OR partial CUSIP gap)",
+                    accession,
+                    cusip,
+                )
+        except Exception:  # noqa: BLE001 — single-accession failure must not abort the sweep
+            logger.exception(
+                "cusip extid sweep: rewash failed accession=%s cusip=%s",
+                accession,
+                cusip,
+            )
+            rewash_failed += 1
+
+    return SweepReport(
+        candidates_seen=len(pending),
+        promoted=promoted,
+        rewashed=rewashed,
+        rewash_deferred=rewash_deferred,
+        rewash_failed=rewash_failed,
     )
 
 
