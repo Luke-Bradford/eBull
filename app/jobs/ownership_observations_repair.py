@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
+from psycopg import sql
 
 from app.services.ownership_observations import (
     refresh_blockholders_current,
@@ -106,19 +107,21 @@ def _drifted_instruments(conn: psycopg.Connection[Any], current_table: str, obse
     """Return instrument_ids whose _current is staler than the observations
     max(ingested_at) for that instrument. Empty on a healthy install."""
     # Both table names are module-local literals — never user input.
+    # Compose via psycopg.sql.Identifier so static analysis sees a
+    # safe parameterised query.
+    query = sql.SQL(
+        "SELECT c.instrument_id FROM {current_t} c"
+        " WHERE c.refreshed_at < ("
+        "    SELECT MAX(o.ingested_at) FROM {obs_t} o"
+        "    WHERE o.instrument_id = c.instrument_id"
+        " )"
+        " GROUP BY c.instrument_id"
+    ).format(
+        current_t=sql.Identifier(current_table),
+        obs_t=sql.Identifier(observations_table),
+    )
     with conn.cursor() as cur:
-        cur.execute(
-            f"""
-            SELECT c.instrument_id
-            FROM {current_table} c
-            WHERE c.refreshed_at < (
-                SELECT MAX(o.ingested_at)
-                FROM {observations_table} o
-                WHERE o.instrument_id = c.instrument_id
-            )
-            GROUP BY c.instrument_id
-            """  # noqa: S608 — table names are literals
-        )
+        cur.execute(query)
         return [int(row[0]) for row in cur.fetchall()]
 
 
