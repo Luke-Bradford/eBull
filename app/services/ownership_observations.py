@@ -463,6 +463,153 @@ def resolve_filer_cik_or_raise(
     return cik, str(row[1]), (str(row[2]) if row[2] is not None else None)
 
 
+# ---------------------------------------------------------------------------
+# Blockholders — record + refresh (#840.C)
+# ---------------------------------------------------------------------------
+
+
+def record_blockholder_observation(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    reporter_cik: str,
+    reporter_name: str,
+    ownership_nature: OwnershipNature,
+    submission_type: str,
+    status_flag: str | None,
+    source: OwnershipSource,
+    source_document_id: str,
+    source_accession: str | None,
+    source_field: str | None,
+    source_url: str | None,
+    filed_at: datetime,
+    period_start: date | None,
+    period_end: date,
+    ingest_run_id: UUID,
+    aggregate_amount_owned: Decimal | None,
+    percent_of_class: Decimal | None,
+) -> None:
+    """Append one 13D/G blockholder observation. Idempotent on the
+    natural key.
+
+    Identity (per #837 lesson): ``reporter_cik`` here is the PRIMARY
+    filer (``blockholder_filers.cik``), NOT the per-row joint
+    reporter. Backfill / write-through MUST resolve the primary
+    filer first; joint reporters on the same accession collapse to
+    one observation row per the SEC convention that joint filers
+    claim the same beneficial ownership."""
+    if reporter_cik is None or not reporter_cik.strip():
+        raise ValueError("record_blockholder_observation: reporter_cik is required")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ownership_blockholders_observations (
+                instrument_id, reporter_cik, reporter_name, ownership_nature,
+                submission_type, status_flag,
+                source, source_document_id, source_accession, source_field, source_url,
+                filed_at, period_start, period_end, ingest_run_id,
+                aggregate_amount_owned, percent_of_class
+            ) VALUES (
+                %(iid)s, %(cik)s, %(name)s, %(nature)s,
+                %(stype)s, %(sflag)s,
+                %(source)s, %(doc_id)s, %(accession)s, %(field)s, %(url)s,
+                %(filed_at)s, %(period_start)s, %(period_end)s, %(run_id)s,
+                %(amount)s, %(pct)s
+            )
+            ON CONFLICT (instrument_id, reporter_cik, ownership_nature, source, source_document_id, period_end)
+            DO UPDATE SET
+                reporter_name = EXCLUDED.reporter_name,
+                submission_type = EXCLUDED.submission_type,
+                status_flag = EXCLUDED.status_flag,
+                source_accession = EXCLUDED.source_accession,
+                source_field = EXCLUDED.source_field,
+                source_url = EXCLUDED.source_url,
+                filed_at = EXCLUDED.filed_at,
+                period_start = EXCLUDED.period_start,
+                aggregate_amount_owned = EXCLUDED.aggregate_amount_owned,
+                percent_of_class = EXCLUDED.percent_of_class,
+                ingest_run_id = EXCLUDED.ingest_run_id
+            """,
+            {
+                "iid": instrument_id,
+                "cik": reporter_cik.strip(),
+                "name": reporter_name,
+                "nature": ownership_nature,
+                "stype": submission_type,
+                "sflag": status_flag,
+                "source": source,
+                "doc_id": source_document_id,
+                "accession": source_accession,
+                "field": source_field,
+                "url": source_url,
+                "filed_at": filed_at,
+                "period_start": period_start,
+                "period_end": period_end,
+                "run_id": str(ingest_run_id),
+                "amount": aggregate_amount_owned,
+                "pct": percent_of_class,
+            },
+        )
+
+
+def refresh_blockholders_current(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+) -> int:
+    """Deterministically rebuild ``ownership_blockholders_current``.
+
+    Picks latest amendment per ``(reporter_cik, ownership_nature)``
+    by ``filed_at DESC, period_end DESC``. Same atomicity contract as
+    the other refresh helpers."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT pg_advisory_xact_lock(
+                (hashtextextended('refresh_blockholders_current', 0) # %s::bigint)
+            )
+            """,
+            (instrument_id,),
+        )
+        cur.execute(
+            "DELETE FROM ownership_blockholders_current WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        cur.execute(
+            """
+            INSERT INTO ownership_blockholders_current (
+                instrument_id, reporter_cik, reporter_name, ownership_nature,
+                submission_type, status_flag,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                aggregate_amount_owned, percent_of_class
+            )
+            SELECT DISTINCT ON (reporter_cik, ownership_nature)
+                instrument_id, reporter_cik, reporter_name, ownership_nature,
+                submission_type, status_flag,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                aggregate_amount_owned, percent_of_class
+            FROM ownership_blockholders_observations
+            WHERE instrument_id = %s
+              AND known_to IS NULL
+            ORDER BY
+                reporter_cik,
+                ownership_nature,
+                filed_at DESC,
+                period_end DESC,
+                source_document_id ASC
+            """,
+            (instrument_id,),
+        )
+        cur.execute(
+            "SELECT COUNT(*) FROM ownership_blockholders_current WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
 def iter_insider_observations(
     conn: psycopg.Connection[Any],
     *,

@@ -171,6 +171,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "ownership_insiders_observations",
     "ownership_institutions_current",
     "ownership_institutions_observations",
+    "ownership_blockholders_current",
+    "ownership_blockholders_observations",
 )
 
 
