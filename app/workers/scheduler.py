@@ -247,6 +247,7 @@ JOB_SEC_DEF14A_BOOTSTRAP = "sec_def14a_bootstrap"
 JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
 JOB_SEC_FILING_DOCUMENTS_INGEST = "sec_filing_documents_ingest"
 JOB_CUSIP_EXTID_SWEEP = "cusip_extid_sweep"
+JOB_OWNERSHIP_OBSERVATIONS_SYNC = "ownership_observations_sync"
 JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
 JOB_ETORO_LOOKUPS_REFRESH = "etoro_lookups_refresh"
 
@@ -618,6 +619,23 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.daily(hour=4, minute=35),
         catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_OWNERSHIP_OBSERVATIONS_SYNC,
+        description=(
+            "Sync legacy ingest tables (insider_transactions, "
+            "insider_initial_holdings, blockholder_filings, "
+            "institutional_holdings, def14a_beneficial_holdings, "
+            "financial_periods.treasury_shares) into the new "
+            "ownership_*_observations + _current tables (#840 P1). "
+            "Idempotent — ON CONFLICT DO UPDATE on natural keys. "
+            "Cadence: daily 03:30 UTC after the overnight ingest "
+            "completes. Per Codex plan-review finding #7, this keeps "
+            "_current fresh between live ingests and the rollup "
+            "read-switch in #840.E."
+        ),
+        cadence=Cadence.daily(hour=3, minute=30),
+        catch_up_on_boot=True,
     ),
     ScheduledJob(
         name=JOB_CUSIP_EXTID_SWEEP,
@@ -3402,6 +3420,54 @@ def sec_def14a_bootstrap() -> None:
             result.accessions_failed,
             result.rows_inserted,
             result.rows_updated,
+        )
+
+
+def ownership_observations_sync() -> None:
+    """Sync legacy typed-table rows into the observations + _current
+    shape (#840.E-prep).
+
+    Re-reads recent rows from insider_transactions, insider_initial_holdings,
+    blockholder_filings, institutional_holdings, def14a_beneficial_holdings,
+    and financial_periods.treasury_shares; mirrors them into
+    ``ownership_*_observations`` via the ``record_*_observation`` API;
+    refreshes ``ownership_*_current`` for every touched instrument.
+
+    Idempotent — every record uses ON CONFLICT DO UPDATE on the
+    natural key, so re-running is cheap. Cadence is daily 03:30 UTC,
+    after the bulk of overnight ingest jobs but before the
+    fundamentals_sync at 02:30 has stabilised. The sync is the bridge
+    between the legacy ingesters (still authoritative on the typed
+    tables) and the new ``_current`` consumed by the rollup endpoint
+    after #840.E flips reads.
+    """
+    from app.services.ownership_observations_sync import sync_all
+
+    with _tracked_job(JOB_OWNERSHIP_OBSERVATIONS_SYNC) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            result = sync_all(conn)
+
+        tracker.row_count = result.total_observations_recorded
+        logger.info(
+            "ownership_observations_sync: total_observations=%d "
+            "insiders=%d institutions=%d blockholders=%d treasury=%d def14a=%d "
+            "orphans=%d",
+            result.total_observations_recorded,
+            result.insiders.observations_recorded,
+            result.institutions.observations_recorded,
+            result.blockholders.observations_recorded,
+            result.treasury.observations_recorded,
+            result.def14a.observations_recorded,
+            sum(
+                len(s.orphans)
+                for s in (
+                    result.insiders,
+                    result.institutions,
+                    result.blockholders,
+                    result.treasury,
+                    result.def14a,
+                )
+            ),
         )
 
 
