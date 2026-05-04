@@ -15,7 +15,6 @@ fixtures we ship, the operator can flip the flag with confidence.
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import uuid4
@@ -561,9 +560,12 @@ class TestDualReadParity:
 
 
 class TestFeatureFlagDefaults:
-    def test_default_is_off(self) -> None:
-        # No env var → False.
-        os.environ.pop("EBULL_OWNERSHIP_ROLLUP_FROM_CURRENT", None)
+    def test_default_is_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # No env var → False. Use monkeypatch.delenv so the real
+        # process environment is restored after the test (bot review
+        # caught the prior os.environ.pop which permanently mutated
+        # CI env across test ordering).
+        monkeypatch.delenv("EBULL_OWNERSHIP_ROLLUP_FROM_CURRENT", raising=False)
         assert ownership_rollup._read_from_current_enabled() is False
 
     @pytest.mark.parametrize("val", ["1", "true", "TRUE", "Yes", "on"])
