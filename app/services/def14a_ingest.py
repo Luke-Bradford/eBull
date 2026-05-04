@@ -33,8 +33,10 @@ import logging
 import xml.etree.ElementTree as ET  # noqa: S405 — only used to catch ET.ParseError; no untrusted input parsed here.
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any, Protocol
+from uuid import uuid4
 
 import psycopg
 import psycopg.rows
@@ -46,6 +48,10 @@ from app.providers.implementations.sec_def14a import (
 )
 from app.services import raw_filings
 from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
+from app.services.ownership_observations import (
+    record_def14a_observation,
+    refresh_def14a_current,
+)
 
 _PARSER_VERSION_DEF14A = "def14a-v1"
 
@@ -445,6 +451,23 @@ def _ingest_single_accession(
         else:
             updated += 1
 
+    # Write-through observations + refresh _current (#891 / spec
+    # §"Eliminate periodic re-scan jobs"). Replaces nightly
+    # ownership_observations_sync.sync_def14a read-from-typed-tables
+    # path. record_def14a_observation is itself UPSERT so re-ingest
+    # of the same accession (parser bump) refreshes existing rows
+    # in place.
+    if parsed.rows:
+        _record_def14a_observations_for_filing(
+            conn,
+            instrument_id=ref.instrument_id,
+            accession_number=ref.accession_number,
+            as_of_date=parsed.as_of_date,
+            filing_date=ref.filing_date,
+            holders=parsed.rows,
+        )
+        refresh_def14a_current(conn, instrument_id=ref.instrument_id)
+
     return _AccessionOutcome(
         status="success",
         rows_inserted=inserted,
@@ -452,6 +475,67 @@ def _ingest_single_accession(
         error=None,
         issuer_cik=issuer_cik,
     )
+
+
+def _record_def14a_observations_for_filing(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    accession_number: str,
+    as_of_date: date | None,
+    filing_date: date,
+    holders: tuple[Def14ABeneficialHolder, ...],
+) -> None:
+    """Record one ``ownership_def14a_observations`` row per holder
+    on this DEF 14A accession.
+
+    Mirrors the legacy batch-sync rule in
+    ``ownership_observations_sync.sync_def14a``:
+
+      - Filter: ``shares IS NOT NULL`` (the typed table requires it
+        and the legacy batch query enforces).
+      - ``ownership_nature``: pinned to ``'beneficial'`` (DEF 14A's
+        canonical table reports beneficial ownership per Rule 13d-3).
+      - ``period_end``: ``as_of_date`` when present, else falls back
+        to ``filing_date`` (matches the legacy
+        ``as_of_date OR fetched_at.date()`` shape).
+      - ``filed_at``: ``filing_date`` anchored to UTC midnight; the
+        legacy batch path used ``fetched_at`` (when we wrote the
+        typed row), but the inline path doesn't have that yet — use
+        ``filing_date`` as the closest equivalent. The next steady-
+        state poll won't change this; the rollup endpoint's
+        period_end key advances the same way.
+      - Identity: ``holder_name`` (normalised by the observations
+        layer via ``holder_name_key`` GENERATED column). DEF 14A
+        rows don't carry holder CIK; CIK match happens at rollup-read
+        time.
+    """
+    period_end: date = as_of_date or filing_date
+    filed_at = datetime.combine(filing_date, datetime.min.time(), tzinfo=UTC)
+    run_id = uuid4()
+    for holder in holders:
+        if holder.shares is None:
+            continue
+        if not holder.holder_name or not holder.holder_name.strip():
+            continue
+        record_def14a_observation(
+            conn,
+            instrument_id=instrument_id,
+            holder_name=holder.holder_name,
+            holder_role=holder.holder_role,
+            ownership_nature="beneficial",
+            source="def14a",
+            source_document_id=accession_number,
+            source_accession=accession_number,
+            source_field=None,
+            source_url=None,
+            filed_at=filed_at,
+            period_start=None,
+            period_end=period_end,
+            ingest_run_id=run_id,
+            shares=Decimal(holder.shares),
+            percent_of_class=Decimal(holder.percent_of_class) if holder.percent_of_class is not None else None,
+        )
 
 
 # ---------------------------------------------------------------------------
