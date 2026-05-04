@@ -366,9 +366,7 @@ def backfill_blockholder_filings(conn: psycopg.Connection[Any], *, dry_run: bool
         inserted += 1
 
     if skipped:
-        logger.info(
-            "blockholder_filings backfill: %d accessions skipped (unmapped form / null filer_cik)", skipped
-        )
+        logger.info("blockholder_filings backfill: %d accessions skipped (unmapped form / null filer_cik)", skipped)
     return inserted
 
 
