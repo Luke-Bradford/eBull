@@ -63,9 +63,7 @@ def run_per_cik_poll(
             continue
         subjects_polled += 1
 
-        sources_to_check: set[ManifestSource] | None = (
-            {subject.source} if subject.source else None
-        )
+        sources_to_check: set[ManifestSource] | None = {subject.source} if subject.source else None
         try:
             delta = check_freshness(
                 http_get,
