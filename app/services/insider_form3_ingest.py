@@ -34,9 +34,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
+from uuid import uuid4
 
 import psycopg
 
@@ -44,8 +45,13 @@ from app.providers.concurrent_fetch import fetch_document_texts
 from app.services import raw_filings
 from app.services.insider_transactions import (
     ParsedForm3,
+    ParsedHolding,
     _canonical_form_4_url,
     parse_form_3_xml,
+)
+from app.services.ownership_observations import (
+    record_insider_observation,
+    refresh_insiders_current,
 )
 
 logger = logging.getLogger(__name__)
@@ -307,6 +313,97 @@ def upsert_form_3_filing(
                     holding.underlying_value,
                 ),
             )
+
+    # Write-through observations + refresh _current (#888 / spec §"Eliminate
+    # periodic re-scan jobs"). Mirrors the Form 4 path —
+    # one observation per (filer_cik, direct_indirect), shares = the
+    # holding's reported share count, period_end = period_of_report.
+    _record_form3_observations_for_filing(
+        conn,
+        instrument_id=instrument_id,
+        accession_number=accession_number,
+        primary_document_url=primary_document_url,
+        parsed=parsed,
+    )
+    refresh_insiders_current(conn, instrument_id=instrument_id)
+
+
+def _record_form3_observations_for_filing(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    accession_number: str,
+    primary_document_url: str,
+    parsed: ParsedForm3,
+) -> None:
+    """Derive one ``ownership_insiders_observations`` row per
+    ``(filer_cik, direct_indirect)`` from the parsed Form 3 holdings.
+
+    Mirrors the legacy batch-sync rule in
+    ``ownership_observations_sync.sync_insiders``:
+
+      - Filter: ``shares IS NOT NULL`` AND ``is_derivative = FALSE``.
+      - Group key: ``(filer_cik, direct_indirect)``. Last row per group
+        wins by ``row_num`` ordering — matches the legacy batch sync
+        in ownership_observations_sync.sync_insiders, where iterating
+        every insider_initial_holdings row sequentially with the same
+        observation natural key produced a "last write wins" effect.
+        Codex review: summing instead would change observed-shares
+        semantics for filings with multi-class common stock listed
+        under one filer/nature.
+      - ``ownership_nature``: ``'indirect'`` when direct_indirect='I',
+        else ``'direct'``.
+    """
+    as_of: date | None = parsed.period_of_report or parsed.signature_date
+    if as_of is None:
+        return
+
+    latest: dict[tuple[str | None, str | None], ParsedHolding] = {}
+    for holding in parsed.holdings:
+        if holding.is_derivative:
+            continue
+        if holding.shares is None:
+            continue
+        # Defensive: bot review flagged a None-comparison crash risk
+        # on row_num. Schema declares row_num NOT NULL but parser
+        # paths can in principle emit a None on malformed XML — guard
+        # explicitly rather than relying on the schema.
+        if holding.row_num is None:
+            continue
+        key = (holding.filer_cik, holding.direct_indirect)
+        prior = latest.get(key)
+        if prior is None or (prior.row_num is not None and holding.row_num > prior.row_num):
+            latest[key] = holding
+
+    if not latest:
+        return
+
+    run_id = uuid4()
+    for (filer_cik, direct_indirect), holding in latest.items():
+        shares = holding.shares
+        if shares is None:
+            continue
+        holder_name = _filer_name_for(parsed, filer_cik)
+        if not holder_name and not filer_cik:
+            continue
+        nature = "indirect" if direct_indirect == "I" else "direct"
+        record_insider_observation(
+            conn,
+            instrument_id=instrument_id,
+            holder_cik=filer_cik,
+            holder_name=holder_name or (filer_cik or "UNKNOWN"),
+            ownership_nature=nature,  # type: ignore[arg-type]
+            source="form3",
+            source_document_id=accession_number,
+            source_accession=accession_number,
+            source_field=None,
+            source_url=primary_document_url or None,
+            filed_at=datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
+            period_start=None,
+            period_end=as_of,
+            ingest_run_id=run_id,
+            shares=shares,
+        )
 
 
 def _filer_name_for(parsed: ParsedForm3, filer_cik: str | None) -> str:
