@@ -37,7 +37,9 @@ import xml.etree.ElementTree as ET  # noqa: S405 — only used to catch ET.Parse
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any, Protocol
+from uuid import uuid4
 
 import psycopg
 import psycopg.rows
@@ -51,6 +53,11 @@ from app.providers.implementations.sec_13f import (
 )
 from app.services import raw_filings
 from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
+from app.services.ownership_observations import (
+    record_institution_observation,
+    refresh_institutions_current,
+    resolve_filer_cik_or_raise,
+)
 
 # Parser-version tags written alongside the raw bodies. Re-wash
 # workflows compare against these constants and skip rows already
@@ -600,6 +607,62 @@ def _upsert_filer(
     return int(row[0])
 
 
+def _record_13f_observations_for_filing(
+    conn: psycopg.Connection[Any],
+    *,
+    filer_id: int,
+    accession_number: str,
+    period_of_report: date,
+    filed_at: datetime,
+    resolved_holdings: list[tuple[int, ThirteenFHolding]],
+) -> None:
+    """Record one ``ownership_institutions_observations`` row per
+    (instrument, exposure_kind) within a single 13F accession.
+
+    Mirrors the legacy batch-sync rule in
+    ``ownership_observations_sync.sync_institutions``:
+
+      - Identity per holding: ``(instrument_id, filer_cik, period_end,
+        source_document_id, exposure_kind)``. PUT/CALL options on the
+        same security as the equity position produce SEPARATE rows.
+      - ``ownership_nature``: pinned to ``'economic'`` (13F-HR is a
+        full-position report).
+      - ``filer_cik`` resolved via ``resolve_filer_cik_or_raise`` so
+        an orphan filer_id surfaces loudly rather than silently
+        dropping observations (Codex plan-review finding #2).
+
+    Refresh of ``ownership_institutions_current`` is the caller's
+    responsibility — keeps this function pure-write.
+    """
+    cik, filer_name, filer_type = resolve_filer_cik_or_raise(conn, filer_id=filer_id)
+    run_id = uuid4()
+    for instrument_id, holding in resolved_holdings:
+        exposure: Any = "EQUITY"
+        if holding.put_call in ("PUT", "CALL"):
+            exposure = holding.put_call
+        record_institution_observation(
+            conn,
+            instrument_id=instrument_id,
+            filer_cik=cik,
+            filer_name=filer_name,
+            filer_type=filer_type,
+            ownership_nature="economic",
+            source="13f",
+            source_document_id=accession_number,
+            source_accession=accession_number,
+            source_field=None,
+            source_url=None,
+            filed_at=filed_at,
+            period_start=None,
+            period_end=period_of_report,
+            ingest_run_id=run_id,
+            shares=Decimal(holding.shares_or_principal),
+            market_value_usd=Decimal(holding.value_usd) if holding.value_usd is not None else None,
+            voting_authority=dominant_voting_authority(holding),
+            exposure_kind=exposure,
+        )
+
+
 def _upsert_holding(
     conn: psycopg.Connection[tuple],
     *,
@@ -1062,6 +1125,7 @@ def _ingest_single_accession(
         # write.
         filed_at = ref.filed_at or datetime(period.year, period.month, period.day, tzinfo=UTC)
 
+    resolved_holdings: list[tuple[int, ThirteenFHolding]] = []
     for holding in holdings:
         instrument_id = _resolve_cusip_to_instrument_id(conn, holding.cusip)
         if instrument_id is None:
@@ -1089,6 +1153,30 @@ def _ingest_single_accession(
             holding=holding,
         ):
             inserted += 1
+        resolved_holdings.append((instrument_id, holding))
+
+    # Write-through observations + refresh _current (#889 / spec
+    # §"Eliminate periodic re-scan jobs"). Replaces the legacy nightly
+    # ownership_observations_sync.sync_institutions read-from-typed-
+    # tables path. record_institution_observation is itself UPSERT so
+    # re-ingest of the same accession (parser bump, manifest rebuild)
+    # refreshes existing rows in place — no need to gate on
+    # ``inserted``.
+    if resolved_holdings:
+        _record_13f_observations_for_filing(
+            conn,
+            filer_id=filer_id,
+            accession_number=ref.accession_number,
+            period_of_report=period,
+            filed_at=filed_at,
+            resolved_holdings=resolved_holdings,
+        )
+        # Dedupe touched instruments → one refresh per unique
+        # instrument. A single 13F can carry 1000+ holdings; refreshing
+        # per-row would be O(N²). The set collapses to the count of
+        # distinct issuers held.
+        for unique_instrument_id in {iid for iid, _ in resolved_holdings}:
+            refresh_institutions_current(conn, instrument_id=unique_instrument_id)
 
     # Promote to 'partial' when at least one holding was dropped due
     # to an unresolved CUSIP. The accession itself is recorded so
