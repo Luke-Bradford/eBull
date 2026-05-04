@@ -203,6 +203,7 @@ Both must pass.
 Read and apply these before pushing:
 
 - `.claude/skills/engineering/pre-flight-review.md`
+- `.claude/skills/engineering/pre-pr-fresh-agent-review.md` ← MANDATORY before push for filings ETL / schema migrations / identity resolution / observations work. Loads financial-plumbing + data-engineer + data-scientist + adversarial lenses up front so Codex catches what the bot would otherwise find post-merge.
 - `.claude/skills/engineering/pr-authoring.md`
 - `.claude/skills/engineering/review-resolution.md`
 - `.claude/skills/engineering/python-hygiene.md`
