@@ -533,6 +533,46 @@ def ingest_def14a(
                 logger.exception("DEF 14A ingest: accession %s raised; continuing batch", ref.accession_number)
                 crash_error = f"{ref.accession_number}: {exc}"
                 conn.rollback()
+                # Tombstone the accession in a fresh transaction so
+                # the bootstrap drain doesn't rediscover and re-crash
+                # on the same row every chunk for the entire deadline.
+                # Codex pre-push review for #839 caught the prior gap:
+                # rolled-back accessions stayed PENDING (no log row),
+                # so the next discovery query returned them again. In
+                # bootstrap mode that wasted SEC calls + clock for
+                # nothing. Use 'failed' status so an operator can clear
+                # the row to retry once the underlying bug is fixed.
+                # Always count the failure FIRST so the
+                # ``seen == succeeded + partial + failed`` invariant
+                # holds even on double-fault (crash + tombstone write
+                # also fails). Bot review for #839 PR #850 caught the
+                # prior version which only counted on successful
+                # tombstone — a double-fault silently dropped the
+                # accession from accounting and the bootstrap audit
+                # trail couldn't be reconciled.
+                accessions_failed += 1
+                if first_error is None:
+                    first_error = f"{ref.accession_number} (crash): {exc}"
+                try:
+                    _record_ingest_attempt(
+                        conn,
+                        accession_number=ref.accession_number,
+                        issuer_cik="CIK-CRASH",  # canonical sentinel — no CIK lookup possible after rollback
+                        status="failed",
+                        rows_inserted=0,
+                        rows_skipped=0,
+                        error=f"crash: {type(exc).__name__}: {exc}",
+                    )
+                    conn.commit()
+                except Exception:  # noqa: BLE001 — tombstone failure shouldn't abort batch
+                    logger.exception(
+                        "DEF 14A ingest: failed to tombstone crash for %s; row stays pending",
+                        ref.accession_number,
+                    )
+                    conn.rollback()
+                    # Still counted as failed above; the audit log
+                    # just doesn't carry the row. Operator drains via
+                    # log inspection + manual re-trigger.
                 continue
 
             if outcome.status == "success":
@@ -591,6 +631,102 @@ def ingest_def14a(
         accessions_failed=accessions_failed,
         rows_inserted=rows_inserted,
         rows_updated=rows_updated,
+        first_error=first_error,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap drain (#839 — operator audit found def14a_beneficial_holdings empty)
+# ---------------------------------------------------------------------------
+
+
+def bootstrap_def14a(
+    conn: psycopg.Connection[tuple],
+    fetcher: SecDocFetcher,
+    *,
+    chunk_limit: int = 500,
+    max_runtime_seconds: int = 3600,
+) -> IngestSummary:
+    """One-shot drain of the entire DEF 14A candidate set.
+
+    Calls :func:`ingest_def14a` repeatedly with a chunked limit until
+    either the candidate query returns zero rows or the runtime
+    deadline elapses. Mirrors the
+    :func:`app.services.business_summary.bootstrap_business_summaries`
+    pattern: idempotent — safe to re-run; subsequent invocations
+    no-op fast once every accession has a row in ``def14a_ingest_log``.
+
+    Designed for first-time backfill of the SEC DEF 14A universe
+    (#839). Operator audit 2026-05-03 found
+    ``def14a_beneficial_holdings`` empty across the dev DB despite
+    44k+ DEF 14A filings on file in ``filing_events`` — the daily
+    cron's ``limit=100`` is too slow to drain the historical backlog.
+    This bootstrap processes the entire backlog in one bounded
+    session under the SEC fair-use rate-limit budget.
+
+    Returns aggregate :class:`IngestSummary` summing every chunk's
+    counts. Tombstoned accessions stay tombstoned (the standard
+    discovery filter excludes anything already in
+    ``def14a_ingest_log``); operator clears log rows to force retry.
+    """
+    import time
+
+    deadline = time.monotonic() + max_runtime_seconds
+    total_seen = 0
+    total_succeeded = 0
+    total_partial = 0
+    total_failed = 0
+    total_inserted = 0
+    total_updated = 0
+    first_error: str | None = None
+
+    while time.monotonic() < deadline:
+        chunk = ingest_def14a(conn, fetcher, limit=chunk_limit)
+        total_seen += chunk.accessions_seen
+        total_succeeded += chunk.accessions_succeeded
+        total_partial += chunk.accessions_partial
+        total_failed += chunk.accessions_failed
+        total_inserted += chunk.rows_inserted
+        total_updated += chunk.rows_updated
+        if first_error is None and chunk.first_error is not None:
+            first_error = chunk.first_error
+        if chunk.accessions_seen == 0:
+            break
+
+    # Bot review for #839 PR #850: enforce the accounting invariant
+    # so a future regression that drops accessions from one of the
+    # outcome buckets trips here rather than silently undercounting.
+    # Soft-assert via logger.warning rather than raise — a partial
+    # accounting result is still useful operator output, but we want
+    # the discrepancy to be visible in the run audit.
+    accounted = total_succeeded + total_partial + total_failed
+    if accounted != total_seen:
+        logger.warning(
+            "bootstrap_def14a accounting drift: seen=%d != succeeded(%d)+partial(%d)+failed(%d)=%d",
+            total_seen,
+            total_succeeded,
+            total_partial,
+            total_failed,
+            accounted,
+        )
+
+    logger.info(
+        "bootstrap_def14a complete: seen=%d succeeded=%d partial=%d failed=%d inserted=%d updated=%d",
+        total_seen,
+        total_succeeded,
+        total_partial,
+        total_failed,
+        total_inserted,
+        total_updated,
+    )
+
+    return IngestSummary(
+        accessions_seen=total_seen,
+        accessions_succeeded=total_succeeded,
+        accessions_partial=total_partial,
+        accessions_failed=total_failed,
+        rows_inserted=total_inserted,
+        rows_updated=total_updated,
         first_error=first_error,
     )
 

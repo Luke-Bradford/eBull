@@ -243,6 +243,7 @@ JOB_SEC_INSIDER_TRANSACTIONS_INGEST = "sec_insider_transactions_ingest"
 JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
 JOB_SEC_FORM3_INGEST = "sec_form3_ingest"
 JOB_SEC_DEF14A_INGEST = "sec_def14a_ingest"
+JOB_SEC_DEF14A_BOOTSTRAP = "sec_def14a_bootstrap"
 JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
 JOB_SEC_FILING_DOCUMENTS_INGEST = "sec_filing_documents_ingest"
 JOB_CUSIP_EXTID_SWEEP = "cusip_extid_sweep"
@@ -639,6 +640,27 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # backlog the rewash work is per-accession and the LIMIT 1000
         # cap holds.
         catch_up_on_boot=True,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_DEF14A_BOOTSTRAP,
+        description=(
+            "One-shot drain of the DEF 14A candidate set (#839). "
+            "Loops ``ingest_def14a`` at chunk_limit=500 until the "
+            "candidate query empties or the per-run deadline (1 hour) "
+            "elapses. Operator audit 2026-05-03 found "
+            "``def14a_beneficial_holdings`` empty despite 44k+ DEF 14A "
+            "filings on file — daily limit=100 is too slow to drain "
+            "historical backlog. Manual trigger via "
+            "POST /jobs/sec_def14a_bootstrap/run; auto-fires Sunday "
+            "02:30 UTC as a safety net. Cadence leaves a 2-hour "
+            "buffer before the daily ``sec_def14a_ingest`` fires at "
+            "04:35 UTC so the two jobs cannot overlap and "
+            "double-fetch from SEC (Codex pre-push review for #839 "
+            "caught the prior 04:30 cadence sharing the same window "
+            "as the daily ingester)."
+        ),
+        cadence=Cadence.weekly(weekday=6, hour=2, minute=30),
+        catch_up_on_boot=False,
     ),
     ScheduledJob(
         name=JOB_RAW_DATA_RETENTION_SWEEP,
@@ -3327,6 +3349,53 @@ def sec_def14a_ingest() -> None:
         tracker.row_count = result.rows_inserted
         logger.info(
             "sec_def14a_ingest: scanned=%d succeeded=%d partial=%d failed=%d rows_inserted=%d rows_updated=%d",
+            result.accessions_seen,
+            result.accessions_succeeded,
+            result.accessions_partial,
+            result.accessions_failed,
+            result.rows_inserted,
+            result.rows_updated,
+        )
+
+
+def sec_def14a_bootstrap() -> None:
+    """One-shot drain of the DEF 14A candidate set (#839).
+
+    Calls :func:`bootstrap_def14a`, which loops the standard ingester
+    at a higher chunk limit until the queue empties or the per-run
+    deadline (1 hour) elapses. Bounded by the SEC fair-use rate-limit
+    budget and the discovery selector's tombstone filter (already-
+    attempted rows stay excluded).
+
+    Designed for first-time backfill of the SEC DEF 14A universe:
+    operator audit 2026-05-03 found ``def14a_beneficial_holdings``
+    empty across the dev DB despite 44k+ DEF 14A filings on file in
+    ``filing_events``. The daily cron's ``limit=100`` is too slow to
+    drain the historical backlog; this bootstrap processes the
+    backlog in one bounded session.
+
+    Manual-trigger only via ``POST /jobs/sec_def14a_bootstrap/run``;
+    auto-fires weekly Sunday 02:30 UTC as a safety net to catch
+    anything the daily cron's bounded limit can't keep up with. The
+    cadence leaves a 2-hour buffer before ``sec_def14a_ingest`` fires
+    at 04:35 UTC so the bootstrap's 1-hour deadline cannot overlap
+    the daily run (Claude review for #839 caught the prior 04:30
+    cadence sharing the daily ingester's window).
+    Mirrors :func:`sec_business_summary_bootstrap` design (#535).
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.def14a_ingest import bootstrap_def14a
+
+    with _tracked_job(JOB_SEC_DEF14A_BOOTSTRAP) as tracker:
+        with (
+            psycopg.connect(settings.database_url) as conn,
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+        ):
+            result = bootstrap_def14a(conn, provider)
+
+        tracker.row_count = result.rows_inserted + result.rows_updated
+        logger.info(
+            "sec_def14a_bootstrap: seen=%d succeeded=%d partial=%d failed=%d rows_inserted=%d rows_updated=%d",
             result.accessions_seen,
             result.accessions_succeeded,
             result.accessions_partial,
