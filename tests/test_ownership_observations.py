@@ -20,11 +20,15 @@ import pytest
 
 from app.services.ownership_observations import (
     record_blockholder_observation,
+    record_def14a_observation,
     record_insider_observation,
     record_institution_observation,
+    record_treasury_observation,
     refresh_blockholders_current,
+    refresh_def14a_current,
     refresh_insiders_current,
     refresh_institutions_current,
+    refresh_treasury_current,
     resolve_filer_cik_or_raise,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
@@ -854,5 +858,349 @@ class TestBlockholderObservations:
                 period_end=date(2026, 1, 1),
                 ingest_run_id=uuid4(),
                 aggregate_amount_owned=Decimal("1"),
+                percent_of_class=None,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Treasury observations + _current (#840.D)
+# ---------------------------------------------------------------------------
+
+
+class TestTreasuryObservations:
+    @pytest.fixture
+    def _setup(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> psycopg.Connection[tuple]:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=840_300, symbol="JPM")
+        conn.commit()
+        return conn
+
+    def test_round_trip_picks_latest_period(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        conn = _setup
+        run_id = uuid4()
+        for q_end, accession, shares in [
+            (date(2025, 12, 31), "ACC-Q4", Decimal("1408661319")),
+            (date(2026, 3, 31), "ACC-Q1", Decimal("1425422477")),
+        ]:
+            record_treasury_observation(
+                conn,
+                instrument_id=840_300,
+                source="xbrl_dei",
+                source_document_id=accession,
+                source_accession=accession,
+                source_field="TreasuryStockShares",
+                source_url=None,
+                filed_at=datetime(q_end.year, q_end.month, 28, tzinfo=UTC),
+                period_start=None,
+                period_end=q_end,
+                ingest_run_id=run_id,
+                treasury_shares=shares,
+            )
+        conn.commit()
+
+        n = refresh_treasury_current(conn, instrument_id=840_300)
+        conn.commit()
+        assert n == 1
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT period_end, treasury_shares FROM ownership_treasury_current WHERE instrument_id = %s",
+                (840_300,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0]["period_end"] == date(2026, 3, 31)
+        assert rows[0]["treasury_shares"] == Decimal("1425422477")
+
+    def test_null_observation_does_not_displace_non_null(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """A re-parse that lost the concept (NULL value) must NOT
+        blank out the prior good value in _current."""
+        conn = _setup
+        run_id = uuid4()
+        record_treasury_observation(
+            conn,
+            instrument_id=840_300,
+            source="xbrl_dei",
+            source_document_id="ACC-OLD",
+            source_accession="ACC-OLD",
+            source_field=None,
+            source_url=None,
+            filed_at=datetime(2025, 6, 30, tzinfo=UTC),
+            period_start=None,
+            period_end=date(2025, 6, 30),
+            ingest_run_id=run_id,
+            treasury_shares=Decimal("1300000000"),
+        )
+        record_treasury_observation(
+            conn,
+            instrument_id=840_300,
+            source="xbrl_dei",
+            source_document_id="ACC-NEW",
+            source_accession="ACC-NEW",
+            source_field=None,
+            source_url=None,
+            filed_at=datetime(2026, 3, 31, tzinfo=UTC),
+            period_start=None,
+            period_end=date(2026, 3, 31),
+            ingest_run_id=run_id,
+            treasury_shares=None,
+        )
+        conn.commit()
+
+        refresh_treasury_current(conn, instrument_id=840_300)
+        conn.commit()
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT treasury_shares FROM ownership_treasury_current WHERE instrument_id = %s",
+                (840_300,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row["treasury_shares"] == Decimal("1300000000")
+
+
+# ---------------------------------------------------------------------------
+# DEF 14A observations + _current (#840.D)
+# ---------------------------------------------------------------------------
+
+
+class TestDef14aObservations:
+    @pytest.fixture
+    def _setup(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> psycopg.Connection[tuple]:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=840_400, symbol="AAPL")
+        conn.commit()
+        return conn
+
+    def test_round_trip(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        conn = _setup
+        record_def14a_observation(
+            conn,
+            instrument_id=840_400,
+            holder_name="Tim Cook",
+            holder_role="CEO",
+            ownership_nature="beneficial",
+            source="def14a",
+            source_document_id="ACC-PROXY-2026",
+            source_accession="ACC-PROXY-2026",
+            source_field=None,
+            source_url=None,
+            filed_at=datetime(2026, 1, 15, tzinfo=UTC),
+            period_start=None,
+            period_end=date(2025, 12, 31),
+            ingest_run_id=uuid4(),
+            shares=Decimal("3300000"),
+            percent_of_class=Decimal("0.02"),
+        )
+        conn.commit()
+
+        n = refresh_def14a_current(conn, instrument_id=840_400)
+        conn.commit()
+        assert n == 1
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT holder_name, holder_name_key, shares
+                FROM ownership_def14a_current WHERE instrument_id = %s
+                """,
+                (840_400,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0]["holder_name"] == "Tim Cook"
+        assert rows[0]["holder_name_key"] == "tim cook"
+        assert rows[0]["shares"] == Decimal("3300000")
+
+    def test_holder_name_normalised_to_key(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Two proxies, same officer with whitespace / case variation
+        in the name: dedup collapses to one ``_current`` row keyed on
+        the normalised name."""
+        conn = _setup
+        run_id = uuid4()
+        for q_end, accession, name, shares in [
+            (date(2024, 12, 31), "ACC-2024", "  Tim Cook  ", Decimal("3000000")),
+            (date(2025, 12, 31), "ACC-2025", "TIM COOK", Decimal("3300000")),
+        ]:
+            record_def14a_observation(
+                conn,
+                instrument_id=840_400,
+                holder_name=name,
+                holder_role=None,
+                ownership_nature="beneficial",
+                source="def14a",
+                source_document_id=accession,
+                source_accession=accession,
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(q_end.year, q_end.month, 31, tzinfo=UTC),
+                period_start=None,
+                period_end=q_end,
+                ingest_run_id=run_id,
+                shares=shares,
+                percent_of_class=None,
+            )
+        conn.commit()
+
+        refresh_def14a_current(conn, instrument_id=840_400)
+        conn.commit()
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT shares FROM ownership_def14a_current WHERE instrument_id = %s",
+                (840_400,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0]["shares"] == Decimal("3300000")
+
+    def test_dual_nature_for_same_holder(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Codex review for #840.D: a DEF 14A holder reporting BOTH
+        beneficial and voting splits must retain BOTH rows in
+        _current. Earlier shape collapsed on holder_name_key."""
+        conn = _setup
+        run_id = uuid4()
+        for nature, accession, shares in [
+            ("beneficial", "ACC-BEN", Decimal("3300000")),
+            ("voting", "ACC-VOTE", Decimal("3000000")),
+        ]:
+            record_def14a_observation(
+                conn,
+                instrument_id=840_400,
+                holder_name="Tim Cook",
+                holder_role="CEO",
+                ownership_nature=nature,  # type: ignore[arg-type]
+                source="def14a",
+                source_document_id=accession,
+                source_accession=accession,
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(2026, 1, 15, tzinfo=UTC),
+                period_start=None,
+                period_end=date(2025, 12, 31),
+                ingest_run_id=run_id,
+                shares=shares,
+                percent_of_class=None,
+            )
+        conn.commit()
+
+        refresh_def14a_current(conn, instrument_id=840_400)
+        conn.commit()
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT ownership_nature, shares FROM ownership_def14a_current
+                WHERE instrument_id = %s ORDER BY ownership_nature
+                """,
+                (840_400,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 2
+        natures = {r["ownership_nature"]: r["shares"] for r in rows}
+        assert natures == {"beneficial": Decimal("3300000"), "voting": Decimal("3000000")}
+
+    def test_null_shares_does_not_displace_prior_good_value(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Codex review for #840.D: a re-parse of a later proxy that
+        loses the shares concept must NOT blank out the prior good
+        value in _current. Refresh filters NULL shares."""
+        conn = _setup
+        run_id = uuid4()
+        record_def14a_observation(
+            conn,
+            instrument_id=840_400,
+            holder_name="Tim Cook",
+            holder_role=None,
+            ownership_nature="beneficial",
+            source="def14a",
+            source_document_id="ACC-OLD",
+            source_accession="ACC-OLD",
+            source_field=None,
+            source_url=None,
+            filed_at=datetime(2024, 1, 15, tzinfo=UTC),
+            period_start=None,
+            period_end=date(2023, 12, 31),
+            ingest_run_id=run_id,
+            shares=Decimal("3000000"),
+            percent_of_class=None,
+        )
+        record_def14a_observation(
+            conn,
+            instrument_id=840_400,
+            holder_name="Tim Cook",
+            holder_role=None,
+            ownership_nature="beneficial",
+            source="def14a",
+            source_document_id="ACC-NEW",
+            source_accession="ACC-NEW",
+            source_field=None,
+            source_url=None,
+            filed_at=datetime(2026, 1, 15, tzinfo=UTC),
+            period_start=None,
+            period_end=date(2025, 12, 31),
+            ingest_run_id=run_id,
+            shares=None,
+            percent_of_class=None,
+        )
+        conn.commit()
+
+        refresh_def14a_current(conn, instrument_id=840_400)
+        conn.commit()
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT shares FROM ownership_def14a_current WHERE instrument_id = %s",
+                (840_400,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row["shares"] == Decimal("3000000")
+
+    def test_record_rejects_blank_holder_name(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        with pytest.raises(ValueError, match="holder_name is required"):
+            record_def14a_observation(
+                _setup,
+                instrument_id=840_400,
+                holder_name="   ",
+                holder_role=None,
+                ownership_nature="beneficial",
+                source="def14a",
+                source_document_id="ACC-X",
+                source_accession="ACC-X",
+                source_field=None,
+                source_url=None,
+                filed_at=datetime(2026, 1, 1, tzinfo=UTC),
+                period_start=None,
+                period_end=date(2026, 1, 1),
+                ingest_run_id=uuid4(),
+                shares=Decimal("1"),
                 percent_of_class=None,
             )
