@@ -1894,3 +1894,65 @@ def test_13f_infotable_apply_preserves_existing_when_some_cusips_unresolved(
     assert log[0] == "partial"
     assert log[1] == 0
     assert log[2] == 1
+
+
+# ---------------------------------------------------------------------------
+# _rewash_13f_accession — single-accession rewash helper (#836)
+# ---------------------------------------------------------------------------
+
+
+def test_rewash_13f_accession_returns_false_when_raw_missing(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """A caller (e.g. the CUSIP extid sweep) targeting an accession
+    whose raw body is absent must get ``False`` back so it can count
+    the deferral and continue. Pre-#810 13F ingests didn't store
+    raw bodies, so this branch is reachable in production."""
+    conn = ebull_test_conn
+    result = rewash_filings._rewash_13f_accession(conn, accession_number="0000000000-00-MISSING")
+    assert result is False
+
+
+def test_rewash_13f_accession_dispatches_to_registered_apply_fn(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    isolated_registry: None,
+) -> None:
+    """The helper looks up the ``infotable_13f`` ParserSpec and
+    invokes its ``apply_fn`` with the raw body. Verified by stubbing
+    ``apply_fn`` and asserting the helper returns its boolean."""
+    accession = "0000000000-26-9999"
+    conn = ebull_test_conn
+    _seed_raw(conn, accession=accession, kind="infotable_13f", payload="<x/>")
+
+    invocations: list[str] = []
+
+    def _stub_apply(_conn: psycopg.Connection[object], doc: RawFilingDocument) -> bool:
+        invocations.append(doc.accession_number)
+        return True
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="infotable_13f",
+            current_version="13f-infotable-v1",
+            apply_fn=_stub_apply,  # type: ignore[arg-type]
+        )
+    )
+
+    result = rewash_filings._rewash_13f_accession(conn, accession_number=accession)
+    assert result is True
+    assert invocations == [accession]
+
+
+def test_rewash_13f_accession_raises_when_spec_unregistered(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    isolated_registry: None,
+) -> None:
+    """Defensive: if the infotable_13f spec isn't registered (import
+    ordering accident), the helper raises rather than silently
+    returning False — silent failure here would mask a deployment
+    bug."""
+    conn = ebull_test_conn
+    rewash_filings._REGISTRY.clear()  # drop the eagerly-registered spec
+    with pytest.raises(RuntimeError, match="13F-HR infotable parser not registered"):
+        rewash_filings._rewash_13f_accession(conn, accession_number="0000000000-00-XXX")

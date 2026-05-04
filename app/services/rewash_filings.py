@@ -896,3 +896,50 @@ register_parser(
         apply_fn=_apply_13f_infotable,
     )
 )
+
+
+def _rewash_13f_accession(
+    conn: psycopg.Connection[Any],
+    *,
+    accession_number: str,
+) -> bool:
+    """Re-apply the registered 13F-HR infotable parser to a single
+    accession's stored raw body.
+
+    Used by the CUSIP extid sweep (#836): when an ``unresolved_13f_cusips``
+    row's CUSIP turns out to already exist in ``external_identifiers``,
+    the sweep needs to re-process the original filing so the now-resolvable
+    holdings land in ``institutional_holdings``. ``run_rewash`` is the
+    bulk API and walks every parser_version-stale row of the kind; this
+    helper is the single-accession variant the sweep loops over.
+
+    Returns the underlying ``apply_fn`` outcome:
+      * ``True`` — typed-table upsert ran (or rescue-cohort log entry
+        was recorded). Caller may bump parser_version separately if it
+        cares; the sweep does not, since the rewash trigger is incidental
+        to the extid promotion.
+      * ``False`` — raw body absent, no existing typed row / ingest log
+        row found, OR the rewash deferred (any-CUSIP-still-unresolved
+        partial path in ``_apply_13f_infotable``). The caller treats
+        ``False`` as "rewash deferred — extid promotion remains valid;
+        the next bulk ``run_rewash`` will pick this accession up once
+        every CUSIP in the filing resolves".
+
+    Raises :class:`RewashParseError` on parser regression, mirroring
+    ``run_rewash`` semantics."""
+    spec = _REGISTRY.get("infotable_13f")
+    if spec is None:
+        # Defensive: the spec is registered eagerly above; only an
+        # import-order accident could leave it unregistered. Surface
+        # that as a hard error rather than silently succeeding.
+        raise RuntimeError("13F-HR infotable parser not registered in rewash_filings")
+
+    raw_doc = raw_filings.read_raw(
+        conn,
+        accession_number=accession_number,
+        document_kind="infotable_13f",
+    )
+    if raw_doc is None:
+        return False
+
+    return spec.apply_fn(conn, raw_doc)

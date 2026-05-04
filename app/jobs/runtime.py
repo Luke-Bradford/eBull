@@ -55,6 +55,7 @@ from app.jobs.locks import JobAlreadyRunning, JobLock
 from app.services.ops_monitor import fetch_latest_successful_runs, record_job_skip
 from app.workers.scheduler import (
     JOB_ATTRIBUTION_SUMMARY,
+    JOB_CUSIP_EXTID_SWEEP,
     JOB_DAILY_CANDLE_REFRESH,
     JOB_DAILY_PORTFOLIO_SYNC,
     JOB_DAILY_RESEARCH_REFRESH,
@@ -88,6 +89,7 @@ from app.workers.scheduler import (
     ScheduledJob,
     attribution_summary_job,
     compute_next_run,
+    cusip_extid_sweep,
     daily_candle_refresh,
     daily_portfolio_sync,
     daily_research_refresh,
@@ -171,6 +173,7 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_SEC_DEF14A_INGEST: sec_def14a_ingest,
     JOB_SEC_8K_EVENTS_INGEST: sec_8k_events_ingest,
     JOB_SEC_FILING_DOCUMENTS_INGEST: sec_filing_documents_ingest,
+    JOB_CUSIP_EXTID_SWEEP: cusip_extid_sweep,
 }
 
 
