@@ -41,7 +41,7 @@ from app.db import get_conn
 from app.db.snapshot import snapshot_read
 from app.providers.implementations.etoro import EtoroMarketDataProvider
 from app.providers.market_data import IntradayInterval
-from app.services import ownership_rollup
+from app.services import ownership_history, ownership_rollup
 from app.services.broker_credentials import (
     CredentialNotFound,
     load_credential_for_provider_use,
@@ -3945,6 +3945,117 @@ def _rollup_to_response(
             for h in rollup.historical_symbols
         ],
         computed_at=rollup.computed_at,
+    )
+
+
+class OwnershipHistoryPointResponse(BaseModel):
+    """One point on a holder's history series (#840.F)."""
+
+    period_end: date
+    ownership_nature: str
+    shares: Decimal | None
+    source: str
+    source_accession: str | None
+    filed_at: datetime | None
+
+
+class OwnershipHistoryResponse(BaseModel):
+    """Time-bucketed deduped ownership history (#840.F).
+
+    Per Codex plan-review #6: each point is the dedup winner for
+    ``(period_end, ownership_nature)`` — NOT raw observations. The
+    chart consumer renders one line per nature, with provenance
+    fields driving click-through to the source filing."""
+
+    symbol: str
+    instrument_id: int
+    category: str
+    holder_id: str | None
+    points: list[OwnershipHistoryPointResponse]
+
+
+@router.get(
+    "/{symbol}/ownership-history",
+    response_model=OwnershipHistoryResponse,
+)
+def get_instrument_ownership_history(
+    symbol: str,
+    category: str,
+    holder_id: str | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> OwnershipHistoryResponse:
+    """Time-bucketed deduped ownership history for one instrument ×
+    category × optional holder.
+
+    Operator question this answers: *"how has Vanguard's AAPL
+    position shifted over the last 8 quarters?"* — call with
+    ``category=institutions, holder_id=0000102909``.
+
+    Categories: ``insiders``, ``blockholders``, ``institutions``,
+    ``treasury``, ``def14a``. ``holder_id`` semantics depend on
+    category (see :func:`ownership_history.get_ownership_history`).
+
+    Date filters are inclusive valid-time bounds on ``period_end``.
+    Reads run inside ``snapshot_read`` so the timeseries reconciles
+    against one consistent snapshot."""
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    if category not in ("insiders", "blockholders", "institutions", "treasury", "def14a"):
+        raise HTTPException(status_code=400, detail=f"unknown category {category!r}")
+    # Codex pre-push review for #840.F: holder-scoped categories
+    # MUST be called with a holder_id. Without one, DISTINCT ON
+    # ``(period_end, ownership_nature)`` returns one arbitrary
+    # winning holder per period and silently drops the rest — that
+    # would mislead the chart consumer. Treasury is issuer-level so
+    # holder_id is ignored there.
+    holder_scoped = ("insiders", "blockholders", "institutions", "def14a")
+    if category in holder_scoped and (holder_id is None or not holder_id.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail=f"holder_id is required for category {category!r}",
+        )
+
+    with snapshot_read(conn):
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT instrument_id, symbol FROM instruments
+                WHERE UPPER(symbol) = %(s)s
+                ORDER BY is_primary_listing DESC, instrument_id ASC
+                LIMIT 1
+                """,
+                {"s": symbol_clean},
+            )
+            inst_row = cur.fetchone()
+        if inst_row is None:
+            raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+        points = ownership_history.get_ownership_history(
+            conn,
+            instrument_id=int(inst_row["instrument_id"]),  # type: ignore[arg-type]
+            category=category,  # type: ignore[arg-type]
+            holder_id=holder_id,
+            from_date=from_date,
+            to_date=to_date,
+        )
+    return OwnershipHistoryResponse(
+        symbol=str(inst_row["symbol"]),  # type: ignore[arg-type]
+        instrument_id=int(inst_row["instrument_id"]),  # type: ignore[arg-type]
+        category=category,
+        holder_id=holder_id,
+        points=[
+            OwnershipHistoryPointResponse(
+                period_end=p.period_end,
+                ownership_nature=p.ownership_nature,
+                shares=p.shares,
+                source=p.source,
+                source_accession=p.source_accession,
+                filed_at=p.filed_at,
+            )
+            for p in points
+        ],
     )
 
 
