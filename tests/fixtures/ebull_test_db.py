@@ -164,6 +164,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # ``amends_accession`` is ON DELETE SET NULL so CASCADE truncation
     # handles the chain cleanly.
     "sec_filing_manifest",
+    # #865 — poll scheduler. No FK to other planner tables (PK is
+    # composite). Listed for deterministic per-test cleanup.
+    "data_freshness_index",
     "decision_audit",  # #315 Phase 3 alerts
     "trade_recommendations",  # #315 Phase 3 alerts (FK parent of decision_audit)
     "operators",  # #315 Phase 3 alerts (cursor column)
