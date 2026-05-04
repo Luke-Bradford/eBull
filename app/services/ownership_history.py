@@ -349,6 +349,21 @@ def _def14a_history(
 # ---------------------------------------------------------------------------
 
 
+def _normalise_holder_id(holder_id: str | None) -> str | None:
+    """Bot review for #840.F: blank / whitespace-only ``holder_id``
+    used to fall through to a SQL ``= NULL`` predicate (because
+    ``holder_id.strip() else None``) which silently returns an empty
+    series. The API layer guards against this for holder-scoped
+    categories, but direct service callers (tests, future internal
+    paths) hit the silent-empty trap. Normalise here so an empty
+    string maps to ``None`` (full series) and a meaningful value
+    becomes a stripped form ready for parameterised lookup."""
+    if holder_id is None:
+        return None
+    stripped = holder_id.strip()
+    return stripped or None
+
+
 def get_ownership_history(
     conn: psycopg.Connection[Any],
     *,
@@ -372,11 +387,12 @@ def get_ownership_history(
     observations — one point per ``(period_end, ownership_nature)``
     after applying the source-priority chain + deterministic
     tie-breakers."""
+    holder = _normalise_holder_id(holder_id)
     if category == "insiders":
         return _insiders_history(
             conn,
             instrument_id=instrument_id,
-            holder_cik=holder_id,
+            holder_cik=holder,
             from_date=from_date,
             to_date=to_date,
         )
@@ -384,7 +400,7 @@ def get_ownership_history(
         return _blockholders_history(
             conn,
             instrument_id=instrument_id,
-            reporter_cik=holder_id,
+            reporter_cik=holder,
             from_date=from_date,
             to_date=to_date,
         )
@@ -392,7 +408,7 @@ def get_ownership_history(
         return _institutions_history(
             conn,
             instrument_id=instrument_id,
-            filer_cik=holder_id,
+            filer_cik=holder,
             from_date=from_date,
             to_date=to_date,
         )
@@ -407,7 +423,7 @@ def get_ownership_history(
         return _def14a_history(
             conn,
             instrument_id=instrument_id,
-            holder_name=holder_id,
+            holder_name=holder,
             from_date=from_date,
             to_date=to_date,
         )

@@ -449,6 +449,27 @@ class TestUnknownCategory:
                 category="bogus",  # type: ignore[arg-type]
             )
 
+    def test_blank_holder_id_normalised_to_full_series(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Bot review for #840.F PR #861: an empty / whitespace-only
+        ``holder_id`` used to fall through to ``= NULL`` SQL and
+        silently return zero rows. Now normalised to ``None`` =
+        full-series scan."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=843_600, symbol="BLANKID")
+        conn.commit()
+        # Empty string and whitespace both map to None internally.
+        for blank in ("", "   "):
+            points = get_ownership_history(
+                conn,
+                instrument_id=843_600,
+                category="insiders",
+                holder_id=blank,
+            )
+            assert points == []  # No data seeded — but no SILENT-NULL trap.
+
     def test_iter_categories_covers_every_path(self) -> None:
         cats = list(iter_categories())
         assert set(cats) == {"insiders", "blockholders", "institutions", "treasury", "def14a"}
