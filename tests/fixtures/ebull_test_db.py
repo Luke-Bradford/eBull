@@ -163,6 +163,12 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "decision_audit",  # #315 Phase 3 alerts
     "trade_recommendations",  # #315 Phase 3 alerts (FK parent of decision_audit)
     "operators",  # #315 Phase 3 alerts (cursor column)
+    # #840 P1 Phase 1 schema unification — observations + _current per
+    # category. Truncate before each test so observation/refresh data
+    # doesn't leak across cases. _current must come before _observations
+    # in the truncate list (no FK either way; ordered for clarity).
+    "ownership_insiders_current",
+    "ownership_insiders_observations",
 )
 
 
