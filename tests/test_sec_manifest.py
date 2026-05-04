@@ -603,10 +603,14 @@ class TestIngestedAtOnObservations:
                 row = cur.fetchone()
             assert row is not None, f"{table} missing ingested_at column"
             assert row["is_nullable"] == "NO", f"{table}.ingested_at must be NOT NULL"
-            # Default ``now()`` (Postgres canonical form) — accept either
-            # ``now()`` or ``NOW()`` rendering.
+            # Default ``clock_timestamp()`` per Codex pre-push finding —
+            # ``NOW()`` (= transaction_timestamp) would lock all rows in
+            # a batch INSERT to the transaction-start time, defeating
+            # the per-row repair sweep watermark.
             default = (row["column_default"] or "").lower()
-            assert "now()" in default, f"{table}.ingested_at must default to NOW(), got {row['column_default']!r}"
+            assert "clock_timestamp()" in default, (
+                f"{table}.ingested_at must default to clock_timestamp(), got {row['column_default']!r}"
+            )
 
     def test_insider_upsert_bumps_ingested_at(
         self,

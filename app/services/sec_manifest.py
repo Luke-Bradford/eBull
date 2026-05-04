@@ -434,11 +434,18 @@ _FORM_TO_SOURCE: dict[str, ManifestSource] = {
     "4/A": "sec_form4",
     "5": "sec_form5",
     "5/A": "sec_form5",
-    # Beneficial owner
+    # Beneficial owner — SEC publishes both ``SC 13D`` (filer-facing
+    # short form) and ``SCHEDULE 13D`` (DB normalised form used by the
+    # legacy ``blockholder_filings`` table). Map both so the backfill
+    # path doesn't drop real rows.
     "SC 13D": "sec_13d",
     "SC 13D/A": "sec_13d",
     "SC 13G": "sec_13g",
     "SC 13G/A": "sec_13g",
+    "SCHEDULE 13D": "sec_13d",
+    "SCHEDULE 13D/A": "sec_13d",
+    "SCHEDULE 13G": "sec_13g",
+    "SCHEDULE 13G/A": "sec_13g",
     # Institutional manager
     "13F-HR": "sec_13f_hr",
     "13F-HR/A": "sec_13f_hr",

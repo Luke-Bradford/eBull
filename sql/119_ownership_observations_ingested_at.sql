@@ -18,8 +18,16 @@
 -- DO-UPDATE on conflict), which ``created_at`` doesn't give us.
 --
 -- ``record_*_observation`` is updated in the same PR to bump
--- ``ingested_at`` on both INSERT and DO UPDATE so every UPSERT
--- advances the watermark.
+-- ``ingested_at`` to ``clock_timestamp()`` on DO UPDATE so every
+-- UPSERT advances the watermark.
+--
+-- Codex pre-push finding #3: column DEFAULT is ``clock_timestamp()``
+-- (not ``NOW()`` / ``transaction_timestamp()``) so an INSERT inside
+-- a long batch transaction stamps each row at the moment of INSERT
+-- rather than at transaction start. Without this, a batch rewash that
+-- INSERTs 1000 rows in one tx would assign all 1000 the same
+-- timestamp, breaking the repair sweep's ability to identify the
+-- newest contribution within the batch.
 --
 -- Partitioned-table note: ALTER TABLE on the partitioned parent
 -- propagates to every existing partition (Postgres 14+). All five
@@ -29,19 +37,19 @@
 BEGIN;
 
 ALTER TABLE ownership_insiders_observations
-    ADD COLUMN ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    ADD COLUMN ingested_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp();
 
 ALTER TABLE ownership_institutions_observations
-    ADD COLUMN ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    ADD COLUMN ingested_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp();
 
 ALTER TABLE ownership_blockholders_observations
-    ADD COLUMN ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    ADD COLUMN ingested_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp();
 
 ALTER TABLE ownership_treasury_observations
-    ADD COLUMN ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    ADD COLUMN ingested_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp();
 
 ALTER TABLE ownership_def14a_observations
-    ADD COLUMN ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    ADD COLUMN ingested_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp();
 
 -- Repair-sweep predicate index: per-instrument max(ingested_at) lookup.
 -- The sweep query is

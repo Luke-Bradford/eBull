@@ -166,7 +166,7 @@ def backfill_institutional_holdings(conn: psycopg.Connection[Any], *, dry_run: b
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT accession_number, filer_cik, period_of_report, status, error, fetched_at
+            SELECT accession_number, filer_cik, status, error, fetched_at
             FROM institutional_holdings_ingest_log
             ORDER BY fetched_at ASC
             """
@@ -174,11 +174,21 @@ def backfill_institutional_holdings(conn: psycopg.Connection[Any], *, dry_run: b
         rows = cur.fetchall()
     logger.info("13F backfill: %d source rows", len(rows))
 
-    for accession, filer_cik, period_of_report, status, error, fetched_at in rows:
+    for accession, filer_cik, status, error, fetched_at in rows:
         if dry_run:
             inserted += 1
             continue
 
+        # Codex review: 13F ``filed_at`` is NOT ``period_of_report``
+        # (which is the quarter-end, ~45 days before the actual filing).
+        # Steady-state schedulers compute ``expected_next_at`` off
+        # ``filed_at``; using period_of_report would skew the cadence
+        # by ~45 days. ``fetched_at`` is the closest proxy in
+        # ``institutional_holdings_ingest_log`` for when the filing
+        # actually existed at SEC; the next steady-state poll cycle
+        # (Atom + submissions.json) will UPSERT the precise filed_at.
+        # ``period_of_report`` is preserved separately on the typed
+        # ``institutional_holdings`` rows; not lost.
         record_manifest_entry(
             conn,
             accession,
@@ -188,7 +198,7 @@ def backfill_institutional_holdings(conn: psycopg.Connection[Any], *, dry_run: b
             subject_type="institutional_filer",
             subject_id=filer_cik,
             instrument_id=None,
-            filed_at=_to_dt(period_of_report) or fetched_at,
+            filed_at=fetched_at,
         )
         target_status = "parsed" if status == "success" else ("tombstoned" if status == "partial" else "failed")
         transition_status(
@@ -399,15 +409,6 @@ def backfill_raw_documents(conn: psycopg.Connection[Any], *, dry_run: bool) -> i
             [r[0] for r in orphans[:5]],
         )
     return promoted
-
-
-def _to_dt(d: Any) -> datetime | None:
-    """Coerce a date or datetime to a tz-aware datetime in UTC."""
-    if d is None:
-        return None
-    if isinstance(d, datetime):
-        return d if d.tzinfo else d.replace(tzinfo=UTC)
-    return datetime(d.year, d.month, d.day, tzinfo=UTC)
 
 
 def main() -> int:
