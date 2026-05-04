@@ -115,6 +115,12 @@ def backfill_def14a(conn: psycopg.Connection[Any], *, dry_run: bool) -> int:
     logger.info("def14a backfill: %d source rows", len(rows))
 
     for accession, issuer_cik, status, error, fetched_at in rows:
+        # Bot review #878 PREVENTION: guard nullable CIK before the
+        # service call so a single bad row doesn't abort the entire
+        # backfill mid-batch with ValueError.
+        if not issuer_cik:
+            skipped_no_instrument += 1
+            continue
         with conn.cursor() as cur:
             instrument_id = _resolve_instrument_id_by_cik(cur, issuer_cik)
         if instrument_id is None:
@@ -174,7 +180,12 @@ def backfill_institutional_holdings(conn: psycopg.Connection[Any], *, dry_run: b
         rows = cur.fetchall()
     logger.info("13F backfill: %d source rows", len(rows))
 
+    skipped_null_cik = 0
     for accession, filer_cik, status, error, fetched_at in rows:
+        # Bot review #878 PREVENTION: guard nullable filer_cik.
+        if not filer_cik:
+            skipped_null_cik += 1
+            continue
         if dry_run:
             inserted += 1
             continue
@@ -209,6 +220,8 @@ def backfill_institutional_holdings(conn: psycopg.Connection[Any], *, dry_run: b
             last_attempted_at=fetched_at,
         )
         inserted += 1
+    if skipped_null_cik:
+        logger.info("13F backfill: %d rows skipped (null filer_cik)", skipped_null_cik)
     return inserted
 
 
@@ -251,6 +264,12 @@ def backfill_insider_filings(conn: psycopg.Connection[Any], *, dry_run: bool) ->
         if instrument_id is None:
             skipped_no_form += 1
             continue
+        # Bot review #886 BLOCKING: ``cik or ""`` would let a NULL CIK
+        # row reach record_manifest_entry's ``if not cik`` guard and
+        # abort the whole loop. Skip explicitly here.
+        if not issuer_cik:
+            skipped_no_form += 1
+            continue
         if dry_run:
             inserted += 1
             continue
@@ -258,7 +277,7 @@ def backfill_insider_filings(conn: psycopg.Connection[Any], *, dry_run: bool) ->
         record_manifest_entry(
             conn,
             accession,
-            cik=issuer_cik or "",
+            cik=issuer_cik,
             form=document_type or "",
             source=source,
             subject_type="issuer",
@@ -290,29 +309,37 @@ def backfill_blockholder_filings(conn: psycopg.Connection[Any], *, dry_run: bool
     produce multiple rows per accession). Manifest is per-accession,
     so we ``DISTINCT ON (accession_number)`` and pick the earliest
     ``filed_at`` for the manifest row.
+
+    Bot review #883 BLOCKING: subject_type for 13D/G must be
+    ``blockholder_filer`` (per spec line 80-83 — subject_id is the
+    filer's CIK, NOT the issuer's instrument_id). The prior version
+    used ``subject_type='issuer'`` which would create divergent
+    manifest rows from the same filing under different subject types
+    when live discovery (default_subject_resolver) lands on the same
+    CIK. Joining to ``blockholder_filers`` to resolve filer_id → cik.
     """
     inserted = 0
     skipped = 0
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT DISTINCT ON (accession_number)
-                accession_number, submission_type, instrument_id, issuer_cik, filed_at
-            FROM blockholder_filings
-            ORDER BY accession_number, filed_at ASC
+            SELECT DISTINCT ON (bf.accession_number)
+                bf.accession_number, bf.submission_type, bf.filed_at,
+                bk.cik AS filer_cik
+            FROM blockholder_filings bf
+            JOIN blockholder_filers bk ON bk.filer_id = bf.filer_id
+            ORDER BY bf.accession_number, bf.filed_at ASC
             """
         )
         rows = cur.fetchall()
     logger.info("blockholder_filings backfill: %d distinct accessions", len(rows))
 
-    for accession, submission_type, instrument_id, issuer_cik, filed_at in rows:
+    for accession, submission_type, filed_at, filer_cik in rows:
         source = map_form_to_source(submission_type or "")
         if source not in {"sec_13d", "sec_13g"}:
             skipped += 1
             continue
-        if instrument_id is None:
-            # Issuer scoped — drop if we can't map to instrument_id;
-            # it'll get repaired on the next universe expansion.
+        if not filer_cik:
             skipped += 1
             continue
         if dry_run:
@@ -322,12 +349,12 @@ def backfill_blockholder_filings(conn: psycopg.Connection[Any], *, dry_run: bool
         record_manifest_entry(
             conn,
             accession,
-            cik=issuer_cik or "",
+            cik=filer_cik,
             form=submission_type or "",
             source=source,
-            subject_type="issuer",
-            subject_id=str(instrument_id),
-            instrument_id=int(instrument_id),
+            subject_type="blockholder_filer",
+            subject_id=filer_cik,
+            instrument_id=None,
             filed_at=filed_at or datetime.now(tz=UTC),
         )
         transition_status(
@@ -339,7 +366,9 @@ def backfill_blockholder_filings(conn: psycopg.Connection[Any], *, dry_run: bool
         inserted += 1
 
     if skipped:
-        logger.info("blockholder_filings backfill: %d accessions skipped (unmapped form / null instrument_id)", skipped)
+        logger.info(
+            "blockholder_filings backfill: %d accessions skipped (unmapped form / null filer_cik)", skipped
+        )
     return inserted
 
 
