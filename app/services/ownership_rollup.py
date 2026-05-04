@@ -344,11 +344,12 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
     callsite (now optionally falling through to
     ``ownership_treasury_current`` — see :func:`_read_treasury_from_current`).
 
-    The candidate set returned here includes DEF 14A rows; the caller
-    still runs ``_enrich_and_union_def14a`` to bind CIKs and split
-    matched vs unmatched. That keeps the DEF 14A unmatched-slice logic
-    unchanged across both read paths, so dual-read parity is testable
-    on a single fixture."""
+    The candidate set returned here covers insiders + blockholders +
+    institutions only. DEF 14A rows are fetched separately via
+    ``_read_def14a_unmatched_from_current`` and injected into
+    ``_enrich_and_union_def14a`` through its ``def14a_rows`` kwarg —
+    that keeps the DEF 14A unmatched-slice logic unchanged across both
+    read paths, so dual-read parity is testable on a single fixture."""
     rows: list[_Candidate] = []
     next_row_id = iter(range(1, 1_000_000))
 
