@@ -1125,7 +1125,14 @@ def _ingest_single_accession(
         # write.
         filed_at = ref.filed_at or datetime(period.year, period.month, period.day, tzinfo=UTC)
 
-    resolved_holdings: list[tuple[int, ThirteenFHolding]] = []
+    # Codex review (#889): dedupe by (instrument_id, exposure) to match
+    # the DB unique-key collapse behavior. ``_upsert_holding`` does
+    # ON CONFLICT DO NOTHING on (accession, instrument, COALESCE(is_put_call,
+    # 'EQUITY')); duplicate XML rows after the first are silently dropped
+    # at the DB. Mirror that here so observations record only the first
+    # parsed row per (instrument, exposure) — the row that actually lives
+    # in the typed table.
+    resolved_by_key: dict[tuple[int, str], tuple[int, ThirteenFHolding]] = {}
     for holding in holdings:
         instrument_id = _resolve_cusip_to_instrument_id(conn, holding.cusip)
         if instrument_id is None:
@@ -1153,7 +1160,12 @@ def _ingest_single_accession(
             holding=holding,
         ):
             inserted += 1
-        resolved_holdings.append((instrument_id, holding))
+        # Dedupe key matches the DB unique key:
+        # (instrument_id, COALESCE(is_put_call, 'EQUITY')).
+        exposure_key = holding.put_call if holding.put_call in ("PUT", "CALL") else "EQUITY"
+        resolved_by_key.setdefault((instrument_id, exposure_key), (instrument_id, holding))
+
+    resolved_holdings: list[tuple[int, ThirteenFHolding]] = list(resolved_by_key.values())
 
     # Write-through observations + refresh _current (#889 / spec
     # §"Eliminate periodic re-scan jobs"). Replaces the legacy nightly
