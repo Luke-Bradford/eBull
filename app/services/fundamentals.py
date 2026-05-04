@@ -38,6 +38,10 @@ from app.providers.implementations.sec_edgar import (
     parse_master_index,
 )
 from app.providers.implementations.sec_fundamentals import TRACKED_CONCEPTS
+from app.services.ownership_observations import (
+    record_treasury_observation,
+    refresh_treasury_current,
+)
 from app.services.sec_entity_profile import parse_entity_profile, upsert_entity_profile
 from app.services.sec_filing_items import (
     apply_8k_items_to_filing_events,
@@ -1559,6 +1563,75 @@ class NormalizationSummary:
     periods_canonical_upserted: int
 
 
+def _record_treasury_observations_for_instrument(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+) -> None:
+    """Record one ``ownership_treasury_observations`` row per quarterly
+    period_end with non-null treasury_shares for one instrument, then
+    refresh ``ownership_treasury_current`` once.
+
+    Mirrors the legacy batch-sync rule in
+    ``ownership_observations_sync.sync_treasury``:
+
+      - Filter: ``treasury_shares IS NOT NULL`` AND
+        ``period_type IN ('Q1','Q2','Q3','Q4')`` (spec line: only
+        Q1-Q4 periods carry the canonical treasury count; YTD / FY
+        rollups would double-count).
+      - Synthetic ``source_document_id``: ``f'{instrument_id}|{period_end}'``
+        — the canonical financial_periods row doesn't carry an
+        accession_number, and this id is stable across re-runs so
+        re-normalize is idempotent on the observation natural key.
+      - ``filed_at``: ``filed_date`` from financial_periods when known;
+        else period_end-anchored midnight UTC.
+      - ``ownership_nature``: pinned to ``'economic'`` (issuer-held
+        shares — not Rule 13d-3 beneficial).
+    """
+    from uuid import uuid4
+
+    run_id = uuid4()
+    rows_recorded = 0
+    cur = conn.execute(
+        """
+        SELECT period_end_date, treasury_shares, filed_date
+        FROM financial_periods
+        WHERE instrument_id = %(iid)s
+          AND treasury_shares IS NOT NULL
+          AND superseded_at IS NULL
+          AND period_type IN ('Q1','Q2','Q3','Q4')
+        ORDER BY period_end_date ASC
+        """,
+        {"iid": instrument_id},
+    )
+    for row in cur.fetchall():
+        period_end, treasury_shares, filed_date = row[0], row[1], row[2]
+        synthetic_doc_id = f"{instrument_id}|{period_end.isoformat()}"
+        filed_at = (
+            datetime.combine(filed_date, datetime.min.time(), tzinfo=UTC)
+            if filed_date is not None
+            else datetime.combine(period_end, datetime.min.time(), tzinfo=UTC)
+        )
+        record_treasury_observation(
+            conn,
+            instrument_id=instrument_id,
+            source="xbrl_dei",
+            source_document_id=synthetic_doc_id,
+            source_accession=None,
+            source_field="TreasuryStockShares",
+            source_url=None,
+            filed_at=filed_at,
+            period_start=None,
+            period_end=period_end,
+            ingest_run_id=run_id,
+            treasury_shares=Decimal(treasury_shares),
+        )
+        rows_recorded += 1
+
+    if rows_recorded > 0:
+        refresh_treasury_current(conn, instrument_id=instrument_id)
+
+
 def normalize_financial_periods(
     conn: psycopg.Connection[tuple],
     instrument_ids: Sequence[int] | None = None,
@@ -1629,6 +1702,14 @@ def normalize_financial_periods(
                 # Step 4: Canonical merge
                 canonical_count = _canonical_merge_instrument(conn, iid)
                 total_canonical += canonical_count
+
+                # Step 5: Treasury write-through (#891 / spec
+                # §"Eliminate periodic re-scan jobs"). Replaces nightly
+                # ownership_observations_sync.sync_treasury read-from-
+                # canonical-table path. Records one observation per
+                # quarterly period_end with non-null treasury_shares,
+                # then refreshes ownership_treasury_current once.
+                _record_treasury_observations_for_instrument(conn, instrument_id=iid)
 
                 logger.info(
                     "Normalized instrument %d: %d raw periods, %d canonical",
