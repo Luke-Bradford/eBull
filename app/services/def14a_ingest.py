@@ -463,7 +463,6 @@ def _ingest_single_accession(
             instrument_id=ref.instrument_id,
             accession_number=ref.accession_number,
             as_of_date=parsed.as_of_date,
-            filing_date=ref.filing_date,
             holders=parsed.rows,
         )
         refresh_def14a_current(conn, instrument_id=ref.instrument_id)
@@ -483,7 +482,6 @@ def _record_def14a_observations_for_filing(
     instrument_id: int,
     accession_number: str,
     as_of_date: date | None,
-    filing_date: date,
     holders: tuple[Def14ABeneficialHolder, ...],
 ) -> None:
     """Record one ``ownership_def14a_observations`` row per holder
@@ -497,21 +495,28 @@ def _record_def14a_observations_for_filing(
       - ``ownership_nature``: pinned to ``'beneficial'`` (DEF 14A's
         canonical table reports beneficial ownership per Rule 13d-3).
       - ``period_end``: ``as_of_date`` when present, else falls back
-        to ``filing_date`` (matches the legacy
-        ``as_of_date OR fetched_at.date()`` shape).
-      - ``filed_at``: ``filing_date`` anchored to UTC midnight; the
-        legacy batch path used ``fetched_at`` (when we wrote the
-        typed row), but the inline path doesn't have that yet — use
-        ``filing_date`` as the closest equivalent. The next steady-
-        state poll won't change this; the rollup endpoint's
-        period_end key advances the same way.
+        to ``fetched_at.date()`` — matches the legacy
+        ``sync_def14a`` rule (``as_of_date OR fetched_at.date()``).
+        Codex pre-push review flagged this divergence — period_end
+        is part of the DEF 14A observation conflict key, so any
+        difference between legacy + inline produces a different
+        observation identity.
+      - ``filed_at``: ``fetched_at`` from the row we just wrote (the
+        column default is ``NOW()`` so this is current-transaction
+        wall clock). Same value the legacy batch would have read.
       - Identity: ``holder_name`` (normalised by the observations
         layer via ``holder_name_key`` GENERATED column). DEF 14A
         rows don't carry holder CIK; CIK match happens at rollup-read
         time.
     """
-    period_end: date = as_of_date or filing_date
-    filed_at = datetime.combine(filing_date, datetime.min.time(), tzinfo=UTC)
+    fetched_at = datetime.now(tz=UTC)
+    # Match legacy sync_def14a:
+    #   filed_at = row.fetched_at OR (as_of midnight UTC fallback)
+    #   period_end = as_of_date OR row.fetched_at.date()
+    # Inline path: ``fetched_at`` is current wall-clock (the typed
+    # row we just wrote has the same value via column default).
+    period_end: date = as_of_date or fetched_at.date()
+    filed_at = fetched_at
     run_id = uuid4()
     for holder in holders:
         if holder.shares is None:
