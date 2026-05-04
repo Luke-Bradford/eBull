@@ -45,6 +45,7 @@ from app.providers.concurrent_fetch import fetch_document_texts
 from app.services import raw_filings
 from app.services.insider_transactions import (
     ParsedForm3,
+    ParsedHolding,
     _canonical_form_4_url,
     parse_form_3_xml,
 )
@@ -342,9 +343,14 @@ def _record_form3_observations_for_filing(
     ``ownership_observations_sync.sync_insiders``:
 
       - Filter: ``shares IS NOT NULL`` AND ``is_derivative = FALSE``.
-      - Group key: ``(filer_cik, direct_indirect)``. Sum shares per
-        group when joint filers list the same security under the same
-        nature (rare; the legacy batch path also folds these).
+      - Group key: ``(filer_cik, direct_indirect)``. Last row per group
+        wins by ``row_num`` ordering — matches the legacy batch sync
+        in ownership_observations_sync.sync_insiders, where iterating
+        every insider_initial_holdings row sequentially with the same
+        observation natural key produced a "last write wins" effect.
+        Codex review: summing instead would change observed-shares
+        semantics for filings with multi-class common stock listed
+        under one filer/nature.
       - ``ownership_nature``: ``'indirect'`` when direct_indirect='I',
         else ``'direct'``.
     """
@@ -353,20 +359,25 @@ def _record_form3_observations_for_filing(
         return
 
     LatestKey = tuple[str | None, str | None]
-    grouped_shares: dict[LatestKey, Decimal] = {}
+    latest: dict[LatestKey, ParsedHolding] = {}
     for holding in parsed.holdings:
         if holding.is_derivative:
             continue
         if holding.shares is None:
             continue
         key: LatestKey = (holding.filer_cik, holding.direct_indirect)
-        grouped_shares[key] = grouped_shares.get(key, Decimal(0)) + Decimal(holding.shares)
+        prior = latest.get(key)
+        if prior is None or holding.row_num > prior.row_num:
+            latest[key] = holding
 
-    if not grouped_shares:
+    if not latest:
         return
 
     run_id = uuid4()
-    for (filer_cik, direct_indirect), shares in grouped_shares.items():
+    for (filer_cik, direct_indirect), holding in latest.items():
+        shares = holding.shares
+        if shares is None:
+            continue
         holder_name = _filer_name_for(parsed, filer_cik)
         if not holder_name and not filer_cik:
             continue
