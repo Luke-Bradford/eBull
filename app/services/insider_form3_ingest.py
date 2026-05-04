@@ -358,14 +358,13 @@ def _record_form3_observations_for_filing(
     if as_of is None:
         return
 
-    LatestKey = tuple[str | None, str | None]
-    latest: dict[LatestKey, ParsedHolding] = {}
+    latest: dict[tuple[str | None, str | None], ParsedHolding] = {}
     for holding in parsed.holdings:
         if holding.is_derivative:
             continue
         if holding.shares is None:
             continue
-        key: LatestKey = (holding.filer_cik, holding.direct_indirect)
+        key = (holding.filer_cik, holding.direct_indirect)
         prior = latest.get(key)
         if prior is None or holding.row_num > prior.row_num:
             latest[key] = holding

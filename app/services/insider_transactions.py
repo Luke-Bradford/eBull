@@ -1176,9 +1176,8 @@ def _record_form4_observations_for_filing(
     filer's direct + indirect splits produce SEPARATE observation
     rows.
     """
-    # Build the latest-per-group map
-    LatestKey = tuple[str | None, str | None]  # (filer_cik, direct_indirect)
-    latest: dict[LatestKey, ParsedTransaction] = {}
+    # Build the latest-per-group map. Key: (filer_cik, direct_indirect).
+    latest: dict[tuple[str | None, str | None], ParsedTransaction] = {}
     for txn in parsed.transactions:
         if txn.is_derivative:
             continue
@@ -1186,7 +1185,7 @@ def _record_form4_observations_for_filing(
             continue
         if txn.txn_date is None:
             continue
-        key: LatestKey = (txn.filer_cik, txn.direct_indirect)
+        key = (txn.filer_cik, txn.direct_indirect)
         prior = latest.get(key)
         if prior is None:
             latest[key] = txn
