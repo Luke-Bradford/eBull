@@ -3443,21 +3443,22 @@ def ownership_observations_sync() -> None:
     """
     from datetime import timedelta as _td
 
-    from app.services.ownership_observations_sync import sync_all
+    from app.services.ownership_observations_sync import (
+        SyncAllResult,
+        sync_blockholders,
+        sync_def14a,
+        sync_insiders,
+        sync_institutions,
+        sync_treasury,
+    )
 
-    # Bot review for #840.E-prep PR #857: distinguish the bootstrap
-    # path from the steady-state path so DEF 14A history (annual cycle,
-    # ~12 months between filings) doesn't sit permanently outside the
-    # 90-day window.
-    #
-    # Detection: if every ownership_*_current table is empty, this is
-    # the first run on this database — execute with ``since=None`` so
-    # the full legacy lifetime mirrors over. Once at least one table
-    # has rows, switch to the rolling 90-day window for steady-state
-    # cost. The 90-day window covers Form 4 amendments (30-60d) +
-    # 13F-HR (45d) + treasury XBRL (quarterly); DEF 14A's annual
-    # cycle relies on the bootstrap pass to land all historical
-    # proxies.
+    # Bot review for #840.E-prep PR #857 follow-up: per-category
+    # bootstrap detection. The prior aggregate-count check silently
+    # promoted to steady-state if ANY table had rows, so a
+    # partially-committed first run (e.g. insiders succeeded, def14a
+    # raised) would leave def14a under-seeded forever. Now check each
+    # table independently; an empty table runs full-history,
+    # populated tables stay capped at 90 days.
 
     with _tracked_job(JOB_OWNERSHIP_OBSERVATIONS_SYNC) as tracker:
         with psycopg.connect(settings.database_url) as conn:
@@ -3465,26 +3466,52 @@ def ownership_observations_sync() -> None:
                 cur.execute(
                     """
                     SELECT
-                        (SELECT COUNT(*) FROM ownership_insiders_current)
-                      + (SELECT COUNT(*) FROM ownership_institutions_current)
-                      + (SELECT COUNT(*) FROM ownership_blockholders_current)
-                      + (SELECT COUNT(*) FROM ownership_treasury_current)
-                      + (SELECT COUNT(*) FROM ownership_def14a_current)
+                        (SELECT COUNT(*) FROM ownership_insiders_current),
+                        (SELECT COUNT(*) FROM ownership_institutions_current),
+                        (SELECT COUNT(*) FROM ownership_blockholders_current),
+                        (SELECT COUNT(*) FROM ownership_treasury_current),
+                        (SELECT COUNT(*) FROM ownership_def14a_current)
                     """
                 )
-                row = cur.fetchone()
-            existing_current_rows = int(row[0]) if row else 0
-
-            if existing_current_rows == 0:
-                logger.info("ownership_observations_sync: bootstrap (no _current rows yet) — running full-history sync")
-                cutoff: date | None = None
-            else:
-                cutoff = (datetime.now(tz=UTC) - _td(days=90)).date()
-                logger.info(
-                    "ownership_observations_sync: steady-state — capping at since=%s",
-                    cutoff,
+                counts_row = cur.fetchone()
+            insider_n, inst_n, block_n, treas_n, def14a_n = (
+                (
+                    int(counts_row[0]),
+                    int(counts_row[1]),
+                    int(counts_row[2]),
+                    int(counts_row[3]),
+                    int(counts_row[4]),
                 )
-            result = sync_all(conn, since=cutoff)
+                if counts_row
+                else (0, 0, 0, 0, 0)
+            )
+
+            steady_cutoff = (datetime.now(tz=UTC) - _td(days=90)).date()
+
+            def _cutoff_for(rows: int, label: str) -> date | None:
+                if rows == 0:
+                    logger.info("ownership_observations_sync: %s bootstrap (full history)", label)
+                    return None
+                logger.info("ownership_observations_sync: %s steady-state since=%s", label, steady_cutoff)
+                return steady_cutoff
+
+            insiders = sync_insiders(conn, since=_cutoff_for(insider_n, "insiders"))
+            conn.commit()
+            institutions = sync_institutions(conn, since=_cutoff_for(inst_n, "institutions"))
+            conn.commit()
+            blockholders = sync_blockholders(conn, since=_cutoff_for(block_n, "blockholders"))
+            conn.commit()
+            treasury = sync_treasury(conn, since=_cutoff_for(treas_n, "treasury"))
+            conn.commit()
+            def14a = sync_def14a(conn, since=_cutoff_for(def14a_n, "def14a"))
+            conn.commit()
+            result = SyncAllResult(
+                insiders=insiders,
+                institutions=institutions,
+                blockholders=blockholders,
+                treasury=treasury,
+                def14a=def14a,
+            )
 
         tracker.row_count = result.total_observations_recorded
         logger.info(
