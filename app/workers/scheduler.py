@@ -623,16 +623,13 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_OWNERSHIP_OBSERVATIONS_SYNC,
         description=(
-            "Sync legacy ingest tables (insider_transactions, "
-            "insider_initial_holdings, blockholder_filings, "
-            "institutional_holdings, def14a_beneficial_holdings, "
-            "financial_periods.treasury_shares) into the new "
-            "ownership_*_observations + _current tables (#840 P1). "
-            "Idempotent — ON CONFLICT DO UPDATE on natural keys. "
-            "Cadence: daily 03:30 UTC after the overnight ingest "
-            "completes. Per Codex plan-review finding #7, this keeps "
-            "_current fresh between live ingests and the rollup "
-            "read-switch in #840.E."
+            "Self-healing repair sweep for ownership_*_current (#892). "
+            "Live ingesters now write observations + refresh _current "
+            "inline (#888-#891 873.A-D), so this job is a safety net: "
+            "scans for drift between _current.refreshed_at and "
+            "max(observations.ingested_at), refreshes drifted "
+            "instruments. On a healthy install: zero rows, <100ms. "
+            "Cadence: daily 03:30 UTC."
         ),
         cadence=Cadence.daily(hour=3, minute=30),
         catch_up_on_boot=True,
@@ -3424,115 +3421,40 @@ def sec_def14a_bootstrap() -> None:
 
 
 def ownership_observations_sync() -> None:
-    """Sync legacy typed-table rows into the observations + _current
-    shape (#840.E-prep).
+    """Self-healing repair sweep for ``ownership_*_current`` (#892 / #873).
 
-    Re-reads recent rows from insider_transactions, insider_initial_holdings,
-    blockholder_filings, institutional_holdings, def14a_beneficial_holdings,
-    and financial_periods.treasury_shares; mirrors them into
-    ``ownership_*_observations`` via the ``record_*_observation`` API;
-    refreshes ``ownership_*_current`` for every touched instrument.
+    Replaces the legacy nightly read-from-typed-tables sync. The live
+    ingesters (#888 insiders, #889 institutions, #890 blockholders,
+    #891 treasury+def14a) now write observations + refresh ``_current``
+    inline at parse time, so the new role of this scheduled job is a
+    self-healing safety net: scan for instruments where _current is
+    staler than max(observations.ingested_at) and refresh those that
+    drifted.
 
-    Idempotent — every record uses ON CONFLICT DO UPDATE on the
-    natural key, so re-running is cheap. Cadence is daily 03:30 UTC,
-    after the bulk of overnight ingest jobs but before the
-    fundamentals_sync at 02:30 has stabilised. The sync is the bridge
-    between the legacy ingesters (still authoritative on the typed
-    tables) and the new ``_current`` consumed by the rollup endpoint
-    after #840.E flips reads.
+    On a healthy install this finds zero rows and exits in <100ms.
+
+    The function name + ``JOB_OWNERSHIP_OBSERVATIONS_SYNC`` constant
+    are preserved so existing scheduler config keeps working without
+    a config migration. The job_runs audit row label is unchanged.
+
+    Cadence kept on the daily 03:30 UTC slot (operator can flip to
+    weekly via cadence config — repair sweeps don't need daily
+    cadence on healthy systems but daily is cheap and catches
+    drift faster).
     """
-    from datetime import timedelta as _td
-
-    from app.services.ownership_observations_sync import (
-        SyncAllResult,
-        sync_blockholders,
-        sync_def14a,
-        sync_insiders,
-        sync_institutions,
-        sync_treasury,
-    )
-
-    # Bot review for #840.E-prep PR #857 follow-up: per-category
-    # bootstrap detection. The prior aggregate-count check silently
-    # promoted to steady-state if ANY table had rows, so a
-    # partially-committed first run (e.g. insiders succeeded, def14a
-    # raised) would leave def14a under-seeded forever. Now check each
-    # table independently; an empty table runs full-history,
-    # populated tables stay capped at 90 days.
+    from app.jobs.ownership_observations_repair import run_observations_repair_sweep
 
     with _tracked_job(JOB_OWNERSHIP_OBSERVATIONS_SYNC) as tracker:
         with psycopg.connect(settings.database_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT
-                        (SELECT COUNT(*) FROM ownership_insiders_current),
-                        (SELECT COUNT(*) FROM ownership_institutions_current),
-                        (SELECT COUNT(*) FROM ownership_blockholders_current),
-                        (SELECT COUNT(*) FROM ownership_treasury_current),
-                        (SELECT COUNT(*) FROM ownership_def14a_current)
-                    """
-                )
-                counts_row = cur.fetchone()
-            insider_n, inst_n, block_n, treas_n, def14a_n = (
-                (
-                    int(counts_row[0]),
-                    int(counts_row[1]),
-                    int(counts_row[2]),
-                    int(counts_row[3]),
-                    int(counts_row[4]),
-                )
-                if counts_row
-                else (0, 0, 0, 0, 0)
-            )
+            stats = run_observations_repair_sweep(conn)
+            conn.commit()
 
-            steady_cutoff = (datetime.now(tz=UTC) - _td(days=90)).date()
-
-            def _cutoff_for(rows: int, label: str) -> date | None:
-                if rows == 0:
-                    logger.info("ownership_observations_sync: %s bootstrap (full history)", label)
-                    return None
-                logger.info("ownership_observations_sync: %s steady-state since=%s", label, steady_cutoff)
-                return steady_cutoff
-
-            insiders = sync_insiders(conn, since=_cutoff_for(insider_n, "insiders"))
-            conn.commit()
-            institutions = sync_institutions(conn, since=_cutoff_for(inst_n, "institutions"))
-            conn.commit()
-            blockholders = sync_blockholders(conn, since=_cutoff_for(block_n, "blockholders"))
-            conn.commit()
-            treasury = sync_treasury(conn, since=_cutoff_for(treas_n, "treasury"))
-            conn.commit()
-            def14a = sync_def14a(conn, since=_cutoff_for(def14a_n, "def14a"))
-            conn.commit()
-            result = SyncAllResult(
-                insiders=insiders,
-                institutions=institutions,
-                blockholders=blockholders,
-                treasury=treasury,
-                def14a=def14a,
-            )
-
-        tracker.row_count = result.total_observations_recorded
+        tracker.row_count = sum(c.refreshed_rows for c in stats.per_category)
         logger.info(
-            "ownership_observations_sync: total_observations=%d "
-            "insiders=%d institutions=%d blockholders=%d treasury=%d def14a=%d "
-            "orphans=%d",
-            result.total_observations_recorded,
-            result.insiders.observations_recorded,
-            result.institutions.observations_recorded,
-            result.blockholders.observations_recorded,
-            result.treasury.observations_recorded,
-            result.def14a.observations_recorded,
-            sum(
-                len(s.orphans)
-                for s in (
-                    result.insiders,
-                    result.institutions,
-                    result.blockholders,
-                    result.treasury,
-                    result.def14a,
-                )
+            "ownership_observations_sync (repair-sweep): total_drifted=%d %s",
+            stats.total_drifted,
+            ", ".join(
+                f"{c.category}=drifted{c.drifted_instruments}/refreshed{c.refreshed_rows}" for c in stats.per_category
             ),
         )
 
