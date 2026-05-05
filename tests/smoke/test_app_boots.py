@@ -138,15 +138,34 @@ def _dev_db_lifespan_lock() -> Iterator[None]:
     parsed = urlparse(settings.database_url)
     admin_url = urlunparse(parsed._replace(path="/postgres"))
 
-    admin = psycopg.connect(admin_url, autocommit=True)
+    try:
+        admin = psycopg.connect(admin_url, autocommit=True)
+    except Exception:
+        # postgres maintenance DB unreachable — fall back to running
+        # without cross-invocation serialisation. The within-invocation
+        # ``xdist_group("dev_db_smoke")`` pin still prevents two
+        # workers in this run racing the lifespan; only concurrent
+        # pytest invocations on the same cluster lose protection,
+        # which is no worse than pre-#893 behaviour.
+        # (review-bot 2026-05-05 WARN: avoid ERROR-instead-of-SKIP
+        # when the maintenance DB is the unreachable target.)
+        yield
+        return
+
     try:
         with admin.cursor() as cur:
             cur.execute("SELECT pg_advisory_lock(%s)", (EBULL_SMOKE_LIFESPAN_LOCK,))
         try:
             yield
         finally:
-            with admin.cursor() as cur:
-                cur.execute("SELECT pg_advisory_unlock(%s)", (EBULL_SMOKE_LIFESPAN_LOCK,))
+            try:
+                with admin.cursor() as cur:
+                    cur.execute(
+                        "SELECT pg_advisory_unlock(%s)",
+                        (EBULL_SMOKE_LIFESPAN_LOCK,),
+                    )
+            except Exception:
+                pass
     finally:
         admin.close()
 

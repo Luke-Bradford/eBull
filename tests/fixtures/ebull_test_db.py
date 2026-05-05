@@ -346,7 +346,20 @@ def build_template_if_stale() -> None:
     template exists, this is a no-op (one cheap SELECT). Called from
     the controller-only branch of ``pytest_configure`` in the project
     conftest.
+
+    **Must never be called from an xdist worker.** A worker that
+    rebuilds the template would invalidate the per-worker DBs that
+    sibling workers have already materialised via ``CREATE DATABASE
+    ... TEMPLATE``. Enforced at runtime so the contract is impossible
+    to misread (review-bot prevention follow-up).
     """
+    if "PYTEST_XDIST_WORKER" in os.environ:
+        raise RuntimeError(
+            "build_template_if_stale() must run only in the xdist "
+            "controller. A worker rebuilding the template would corrupt "
+            "sibling workers that have already CREATE-FROM-TEMPLATE'd."
+        )
+
     current = _migration_hash()
     cached = _read_stored_hash()
 
@@ -423,11 +436,25 @@ def ensure_worker_database() -> None:
             try:
                 _create_database_from_template(admin, db_name, TEMPLATE_DB_NAME)
             finally:
-                with admin.cursor() as cur:
-                    cur.execute("SELECT pg_advisory_unlock(%s)", (EBULL_TEMPLATE_LOCK,))
+                # Unlock on a connection that may be in an error
+                # state after a failed DDL; swallow secondary failures
+                # so the primary error reaches the caller. Same
+                # rationale for the outer lock_key release below.
+                # (review-bot 2026-05-05 WARN).
+                try:
+                    with admin.cursor() as cur:
+                        cur.execute(
+                            "SELECT pg_advisory_unlock(%s)",
+                            (EBULL_TEMPLATE_LOCK,),
+                        )
+                except Exception:
+                    pass
         finally:
-            with admin.cursor() as cur:
-                cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
+            try:
+                with admin.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
+            except Exception:
+                pass
 
 
 def drop_worker_database() -> None:
@@ -449,9 +476,12 @@ def drop_worker_database() -> None:
 def test_db_available() -> bool:  # noqa: D401 — `test_*` here is the legacy public name, not a pytest test
     """Probe the test DB stack.
 
-    Triggers the controller-side template build if it hasn't run yet
-    (e.g. when used outside a pytest_configure-aware test runner) and
-    materialises the per-worker DB.
+    Materialises the per-worker private DB on first call and verifies
+    the connection works. **Does not touch the template** — the
+    controller's ``pytest_configure`` is the sole template builder
+    (review-bot 2026-05-05 BLOCKING: a worker rebuilding the template
+    after sibling workers have already CREATE-FROM-TEMPLATE'd
+    invalidates their schema).
 
     Returns False on any failure so the test skips cleanly in
     environments without a Postgres at all. Logs a warning so
@@ -459,7 +489,6 @@ def test_db_available() -> bool:  # noqa: D401 — `test_*` here is the legacy p
     hide under the same skip path as "no Postgres".
     """
     try:
-        build_template_if_stale()
         ensure_worker_database()
         with psycopg.connect(test_database_url(), connect_timeout=2) as conn:
             with conn.cursor() as cur:
