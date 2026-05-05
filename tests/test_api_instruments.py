@@ -24,10 +24,22 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.db import get_conn
 from app.main import app
+
+# Pin every test in this module to a single xdist worker (#904). Tests
+# here mutate `app.dependency_overrides[get_conn]` at module scope and
+# rely on `teardown_method` to restore THIS file's fallback. Without an
+# xdist_group pin, pytest-xdist's round-robin distributor can interleave
+# tests from this file with tests from adjacent files that set their
+# own module-level override — leaving `app.dependency_overrides` in
+# whichever file's `_fallback_conn` was last in. The group name is
+# scoped to this file so unrelated test modules can keep using their
+# own workers in parallel.
+pytestmark = pytest.mark.xdist_group("test_api_instruments")
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
