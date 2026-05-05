@@ -4,6 +4,8 @@ __pycache__/
 .env
 .pytest_cache/
 .mypy_cache/
+.testmondata
+.testmondata-journal
 dist/
 build/
 .DS_Store
