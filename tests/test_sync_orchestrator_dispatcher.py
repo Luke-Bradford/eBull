@@ -1,10 +1,13 @@
 """Unit coverage for ``app.services.sync_orchestrator.dispatcher`` (#719).
 
-Drives every helper against the real dev DB so the SQL itself is
+Drives every helper against a real Postgres so the SQL itself is
 exercised: schema-mismatch bugs (column renamed, status enum drift)
 fail loudly here rather than at first operator click. The helpers are
-pure SQL with no provider I/O, so they're safe to run against the
-shared test DB.
+pure SQL with no provider I/O.
+
+Per #893, ``settings.database_url`` is monkeypatched to the worker's
+test DB so dispatcher helpers (which read the URL at call time) write
+to per-worker isolation rather than the operator's dev DB.
 """
 
 from __future__ import annotations
@@ -16,7 +19,6 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from app.config import settings
 from app.services.sync_orchestrator.dispatcher import (
     NOTIFY_CHANNEL,
     claim_oldest_pending,
@@ -30,30 +32,29 @@ from app.services.sync_orchestrator.dispatcher import (
     scope_from_json,
 )
 from app.services.sync_orchestrator.types import SyncScope
-
-
-def _db_reachable() -> bool:
-    """Skip the suite cleanly when the dev Postgres isn't running."""
-    try:
-        with psycopg.connect(settings.database_url, connect_timeout=2) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                cur.fetchone()
-        return True
-    except Exception:
-        return False
-
+from tests.fixtures.ebull_test_db import test_database_url, test_db_available
 
 pytestmark = pytest.mark.skipif(
-    not _db_reachable(),
-    reason="dev Postgres not reachable; dispatcher tests require the real DB",
+    not test_db_available(),
+    reason="ebull_test DB unavailable; dispatcher tests require a real DB",
 )
+
+
+@pytest.fixture(autouse=True)
+def _route_settings_to_test_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point dispatcher helpers at the worker's test DB."""
+    monkeypatch.setattr("app.config.settings.database_url", test_database_url())
 
 
 @pytest.fixture()
 def _dev_conn() -> Generator[psycopg.Connection[Any]]:
-    """A short-lived autocommit connection scoped to one test."""
-    conn = psycopg.connect(settings.database_url, autocommit=True)
+    """A short-lived autocommit connection scoped to one test.
+
+    Name retained for diff-locality; pre-#893 this opened
+    ``test_database_url()``. After migration it points at the
+    worker's test DB.
+    """
+    conn = psycopg.connect(test_database_url(), autocommit=True)
     try:
         yield conn
     finally:
@@ -88,7 +89,7 @@ def test_publish_sync_request_inserts_row_and_notifies(
     """
     # Open a side connection BEFORE publishing so its LISTEN catches
     # the NOTIFY. autocommit ensures the LISTEN takes effect immediately.
-    listener = psycopg.connect(settings.database_url, autocommit=True)
+    listener = psycopg.connect(test_database_url(), autocommit=True)
     try:
         with listener.cursor() as cur:
             cur.execute(f"LISTEN {NOTIFY_CHANNEL}")
@@ -190,7 +191,7 @@ def test_claim_oldest_pending_skips_locked_rows(
     _cleanup_requests.append(int(max_row[0]))
 
     # Hold rid_a in a transaction on conn A.
-    conn_a = psycopg.connect(settings.database_url)
+    conn_a = psycopg.connect(test_database_url())
     try:
         conn_a.execute(
             "SELECT request_id FROM pending_job_requests WHERE request_id=%s FOR UPDATE",

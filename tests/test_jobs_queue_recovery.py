@@ -11,6 +11,10 @@ locked in:
   (c) `sync` row whose linked sync_runs is still 'running' (mid-flight
       crash) IS replayed.
   (d) Any row whose `requested_at` is older than 24h is NOT replayed.
+
+Per #893, ``settings.database_url`` is monkeypatched to the worker's
+test DB so dispatcher helpers (``publish_manual_job_request`` etc.)
+write to per-worker isolation rather than the operator's dev DB.
 """
 
 from __future__ import annotations
@@ -21,35 +25,35 @@ from typing import Any
 import psycopg
 import pytest
 
-from app.config import settings
 from app.services.sync_orchestrator.dispatcher import (
     publish_manual_job_request,
     publish_sync_request,
     reset_stale_in_flight,
 )
 from app.services.sync_orchestrator.types import SyncScope
-
-
-def _db_reachable() -> bool:
-    try:
-        with psycopg.connect(settings.database_url, connect_timeout=2) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                cur.fetchone()
-        return True
-    except Exception:
-        return False
-
+from tests.fixtures.ebull_test_db import test_database_url, test_db_available
 
 pytestmark = pytest.mark.skipif(
-    not _db_reachable(),
-    reason="dev Postgres not reachable; queue recovery tests require the real DB",
+    not test_db_available(),
+    reason="ebull_test DB unavailable; queue recovery tests require a real DB",
 )
+
+
+@pytest.fixture(autouse=True)
+def _route_settings_to_test_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point dispatcher helpers at the worker's test DB."""
+    monkeypatch.setattr("app.config.settings.database_url", test_database_url())
 
 
 @pytest.fixture()
 def _dev_conn() -> Generator[psycopg.Connection[Any]]:
-    conn = psycopg.connect(settings.database_url, autocommit=True)
+    """Connection to the worker's test DB.
+
+    Name retained for diff-locality with the original file; pre-#893
+    this opened ``settings.database_url`` directly. After migration
+    it points at ``test_database_url()``.
+    """
+    conn = psycopg.connect(test_database_url(), autocommit=True)
     try:
         yield conn
     finally:
@@ -148,9 +152,10 @@ def test_sync_with_running_sync_run_is_replayed(
     the queue request is replayed (NOT EXISTS clause requires terminal
     status; 'running' is non-terminal).
     """
-    # Clear any stale running sync_runs left by other tests so the
-    # partial unique index doesn't reject our INSERT below. The dev DB
-    # is not test-isolated; we have to cooperate with siblings.
+    # Clear any stale running sync_runs left by earlier tests in this
+    # worker so the partial unique index doesn't reject our INSERT
+    # below. Even on the per-worker test DB, sibling tests in the same
+    # worker share state until the next TRUNCATE.
     with _dev_conn.cursor() as cur:
         cur.execute("UPDATE sync_runs SET status='cancelled' WHERE status='running'")
 

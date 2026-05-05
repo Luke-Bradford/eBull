@@ -28,10 +28,14 @@ import pytest
 
 from app.services.portfolio import _load_mirror_equity, run_portfolio_review
 from tests.fixtures.copy_mirrors import mirror_aum_fixture
-from tests.test_operator_setup_race import (
-    _assert_test_db,
-    _test_database_url,
-    _test_db_available,
+from tests.fixtures.ebull_test_db import (
+    assert_test_db as _assert_test_db,
+)
+from tests.fixtures.ebull_test_db import (
+    test_database_url as _test_database_url,
+)
+from tests.fixtures.ebull_test_db import (
+    test_db_available as _test_db_available,
 )
 
 pytestmark = pytest.mark.skipif(

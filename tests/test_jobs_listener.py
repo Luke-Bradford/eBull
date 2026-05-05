@@ -7,6 +7,12 @@ by ``test_sync_orchestrator_dispatcher.py``) but the dispatch routing
 needs a real psycopg connection and is out of scope for this unit
 test; integration coverage runs through the smoke gate in dev when
 the jobs process is up.
+
+Per #893, the test exercises the per-worker private test DB rather
+than ``settings.database_url``; helpers like
+``publish_manual_job_request`` read ``settings.database_url`` at call
+time, so an autouse monkeypatch points it at the test DB for the
+test's lifetime.
 """
 
 from __future__ import annotations
@@ -18,7 +24,6 @@ from unittest.mock import MagicMock
 import psycopg
 import pytest
 
-from app.config import settings
 from app.jobs.listener import (
     ListenerState,
     _dispatch_manual_job,
@@ -26,23 +31,23 @@ from app.jobs.listener import (
     _route_claim,
 )
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request
-
-
-def _db_reachable() -> bool:
-    try:
-        with psycopg.connect(settings.database_url, connect_timeout=2) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                cur.fetchone()
-        return True
-    except Exception:
-        return False
-
+from tests.fixtures.ebull_test_db import test_database_url, test_db_available
 
 pytestmark = pytest.mark.skipif(
-    not _db_reachable(),
-    reason="dev Postgres not reachable; listener tests require the real DB for queue claims",
+    not test_db_available(),
+    reason="ebull_test DB unavailable; listener tests require a real DB for queue claims",
 )
+
+
+@pytest.fixture(autouse=True)
+def _route_settings_to_test_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point app.config.settings.database_url at the worker's test DB.
+
+    ``publish_manual_job_request`` and friends read
+    ``settings.database_url`` at call time, so a per-test monkeypatch
+    is sufficient — no production code change needed.
+    """
+    monkeypatch.setattr("app.config.settings.database_url", test_database_url())
 
 
 @pytest.fixture()
@@ -50,7 +55,7 @@ def _cleanup_requests() -> Generator[list[int]]:
     created: list[int] = []
     yield created
     if created:
-        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        with psycopg.connect(test_database_url(), autocommit=True) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM pending_job_requests WHERE request_id = ANY(%s)",
@@ -67,7 +72,7 @@ def test_dispatch_manual_job_with_unknown_name_marks_rejected(_cleanup_requests:
     _dispatch_manual_job(runtime=runtime, request_id=request_id, job_name="definitely_not_a_real_job")
 
     runtime.submit_manual_with_request.assert_not_called()
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+    with psycopg.connect(test_database_url(), autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT status, error_msg FROM pending_job_requests WHERE request_id=%s",
@@ -91,7 +96,7 @@ def test_dispatch_sync_with_invalid_payload_marks_rejected(
 ) -> None:
     """A sync request with no scope dict must be rejected without submitting."""
     # publish a valid sync row first so the dispatcher has something to update
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+    with psycopg.connect(test_database_url(), autocommit=True) as conn:
         cur = conn.execute(
             "INSERT INTO pending_job_requests (request_kind, payload) VALUES ('sync', '{}'::jsonb) RETURNING request_id"
         )
