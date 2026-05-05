@@ -1,10 +1,12 @@
 """HeartbeatWriter unit coverage (#719).
 
-Drives ``HeartbeatWriter.beat`` against the real dev DB so the SQL
-upsert (ON CONFLICT (subsystem) DO UPDATE) is exercised. The
+Drives ``HeartbeatWriter.beat`` against the per-worker test DB so the
+SQL upsert (ON CONFLICT (subsystem) DO UPDATE) is exercised. The
 ``heartbeat_loop`` driver is exercised structurally via a stop_event
 that fires after one tick — a longer integration runs lives in the
 smoke gate against the running jobs process.
+
+Per #893, points at the worker's ``ebull_test_<run>_<worker>`` DB.
 """
 
 from __future__ import annotations
@@ -17,24 +19,12 @@ from typing import Any
 import psycopg
 import pytest
 
-from app.config import settings
 from app.jobs.heartbeat import HeartbeatWriter, heartbeat_loop
-
-
-def _db_reachable() -> bool:
-    try:
-        with psycopg.connect(settings.database_url, connect_timeout=2) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                cur.fetchone()
-        return True
-    except Exception:
-        return False
-
+from tests.fixtures.ebull_test_db import test_database_url, test_db_available
 
 pytestmark = pytest.mark.skipif(
-    not _db_reachable(),
-    reason="dev Postgres not reachable; heartbeat tests require the real DB",
+    not test_db_available(),
+    reason="ebull_test DB unavailable; heartbeat tests require a real DB",
 )
 
 
@@ -44,7 +34,7 @@ def _cleanup_subsystems() -> Generator[list[str]]:
     written: list[str] = []
     yield written
     if written:
-        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        with psycopg.connect(test_database_url(), autocommit=True) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM job_runtime_heartbeat WHERE subsystem = ANY(%s)",
@@ -55,12 +45,12 @@ def _cleanup_subsystems() -> Generator[list[str]]:
 def test_beat_inserts_then_updates_row(_cleanup_subsystems: list[str]) -> None:
     subsystem = "test_beat_subsystem"
     _cleanup_subsystems.append(subsystem)
-    writer = HeartbeatWriter(settings.database_url, pid=99999, process_started_at=datetime.now(UTC))
+    writer = HeartbeatWriter(test_database_url(), pid=99999, process_started_at=datetime.now(UTC))
 
     writer.beat(subsystem, notes={"first": True})
     writer.beat(subsystem, notes={"first": False, "second": True})
 
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+    with psycopg.connect(test_database_url(), autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT pid, notes FROM job_runtime_heartbeat WHERE subsystem=%s",
@@ -88,7 +78,7 @@ def test_heartbeat_loop_stops_on_event(_cleanup_subsystems: list[str]) -> None:
     """The loop honours stop_event and exits cleanly."""
     subsystem = "test_loop_stop"
     _cleanup_subsystems.append(subsystem)
-    writer = HeartbeatWriter(settings.database_url, pid=99999, process_started_at=datetime.now(UTC))
+    writer = HeartbeatWriter(test_database_url(), pid=99999, process_started_at=datetime.now(UTC))
     stop_event = threading.Event()
 
     def _provider() -> dict[str, Any]:
@@ -106,7 +96,7 @@ def test_heartbeat_loop_stops_on_event(_cleanup_subsystems: list[str]) -> None:
 
     # The first beat ran (notes_provider was called); after that the
     # stop_event interrupted the wait.
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+    with psycopg.connect(test_database_url(), autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT notes FROM job_runtime_heartbeat WHERE subsystem=%s",

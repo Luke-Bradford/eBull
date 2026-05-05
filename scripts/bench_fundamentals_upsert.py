@@ -61,8 +61,8 @@ import psycopg
 from app.providers.fundamentals import XbrlFact
 from app.services.fundamentals import upsert_facts_for_instrument
 from tests.fixtures.ebull_test_db import (
-    apply_migrations_to_test_db,
-    ensure_test_db_exists,
+    build_template_if_stale,
+    ensure_worker_database,
     test_database_url,
 )
 
@@ -364,8 +364,8 @@ def _time(fn: Callable[[], None]) -> float:
 
 
 def bench(facts_count: int) -> list[BenchResult]:
-    ensure_test_db_exists()
-    apply_migrations_to_test_db()
+    build_template_if_stale()
+    ensure_worker_database()
     results: list[BenchResult] = []
     facts = _generate_facts(facts_count)
 

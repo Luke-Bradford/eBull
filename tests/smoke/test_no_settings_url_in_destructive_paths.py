@@ -13,6 +13,16 @@ inside a fixture and adding a TRUNCATE next to it.
 
 This test is the structural guard.
 
+Per #893, the test fixture now provisions a per-worker private
+database (``ebull_test_<run_id>_<worker_id>``) so concurrent pytest
+invocations cannot collide. The guard's role is unchanged — it ensures
+no test reaches around the fixture and connects to the operator's
+dev DB directly. The single documented exception is
+``tests/smoke/test_app_boots.py``, which drives the FastAPI lifespan
+against the real dev DB by contract; that file is wrapped in a
+cluster-wide Postgres advisory lock so concurrent invocations
+serialise on the lifespan migrations rather than racing them.
+
 What it catches
 ---------------
 The guard greps every test file for any of the patterns in
@@ -41,10 +51,14 @@ to proceed against anything but ``ebull_test``.
 If you are a future test author hitting this guard
 ---------------------------------------------------
 * Do NOT add yourself to ``_ALLOWED`` to make the test pass.
-* Use the isolated ``ebull_test`` pattern from
-  ``tests/test_operator_setup_race.py`` instead -- copy
-  ``_swap_database`` / ``_ensure_test_db_exists`` /
-  ``_apply_migrations_to_test_db`` / ``_assert_test_db``.
+* Use the per-worker isolated DB by importing
+  ``test_database_url`` from ``tests.fixtures.ebull_test_db``.
+  If the code under test opens its own connection internally
+  via ``settings.database_url`` (e.g. dispatcher helpers), use a
+  ``monkeypatch.setattr("app.config.settings.database_url",
+  test_database_url())`` autouse fixture in the test file —
+  that points the helper at the per-worker test DB without
+  any production-code change.
 * The PREVENTION note on PR #129 round 1 explicitly asked for
   this guard. Removing or weakening it requires a written
   rebuttal in a follow-up PR.
@@ -98,40 +112,15 @@ _ALLOWED: dict[str, str] = {
     # connection. The smoke gate's *job* is "did the lifespan come
     # up against the same DB the running app uses", which is
     # unanswerable without using ``settings.database_url``.
-    "smoke/test_app_boots.py": "read-only lifespan + reachability probe",
+    "smoke/test_app_boots.py": (
+        "documented dev-DB exception (#893 SC#5): smoke gate drives "
+        "FastAPI lifespan against the real dev DB by design, wrapped in "
+        "a cross-invocation Postgres advisory lock"
+    ),
     # The guard itself contains the forbidden patterns as data
     # (the ``_FORBIDDEN_PATTERNS`` literals above). Exclude it to
     # avoid a self-match.
     "smoke/test_no_settings_url_in_destructive_paths.py": "the guard itself",
-    # Read-only reachability probe + advisory-lock semantics test for
-    # the JobLock primitive (#13 PR A). The probe runs ``SELECT 1`` to
-    # decide whether to skip (no Postgres -> clean skip) and the test
-    # bodies exercise ``pg_try_advisory_lock`` / ``pg_advisory_unlock``,
-    # both of which are session-scoped state -- they write no rows and
-    # cannot CASCADE into broker_credentials. Cannot use the
-    # ``ebull_test`` pattern here because the JobLock implementation
-    # opens its own connection internally; the test must connect to
-    # the same DB the JobLock will resolve to via ``settings.database_url``.
-    "test_jobs_locks.py": "read-only reachability probe + advisory-lock semantics; no row writes",
-    # #719 dispatcher tests open a connection against settings.database_url
-    # to exercise the durable-queue helpers against the real DB. Writes
-    # are scoped to the ``pending_job_requests`` table and a per-test
-    # cleanup fixture deletes the request_ids it created in teardown,
-    # so the dev DB's other tables are never touched. Cannot use
-    # ``ebull_test`` because the dispatcher's helpers themselves resolve
-    # the URL from ``settings.database_url`` internally.
-    "test_sync_orchestrator_dispatcher.py": "scoped writes to pending_job_requests with per-test cleanup",
-    # #719 listener / heartbeat / queue-recovery tests open connections
-    # against the dev DB to exercise queue claim + heartbeat upsert +
-    # boot-recovery branches. Writes are scoped to pending_job_requests,
-    # job_runtime_heartbeat, job_runs.linked_request_id, and
-    # sync_runs.linked_request_id, with per-test cleanup deleting only
-    # the rows the test created. Cannot use ``ebull_test`` because the
-    # helpers resolve ``settings.database_url`` internally.
-    "test_jobs_listener.py": "scoped writes via dispatcher helpers with per-test cleanup",
-    "test_jobs_heartbeat.py": "scoped writes to job_runtime_heartbeat with per-test cleanup",
-    "test_jobs_queue_recovery.py": "scoped writes to pending_job_requests + linked-run rows with per-test cleanup",
-    "test_jobs_queue_boot_drain.py": "scoped writes to pending_job_requests with per-test cleanup",
     # Read-only schema introspection. ``test_schema_drift.py`` (B5
     # of #797 pulled forward into Batch 1 of #788) parses
     # ``CREATE TABLE`` blocks from sql/*.sql and compares declared

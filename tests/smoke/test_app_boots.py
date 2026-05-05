@@ -40,8 +40,30 @@ populated) also fails this test.
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
+
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
+
+# This file is the documented exception (#893) to the "no test writes
+# the dev DB" rule (SC #5 of the pytest-perf-redesign spec). Two
+# protections in place:
+#
+#   1. ``xdist_group("dev_db_smoke")`` — every test in this module
+#      runs on the same xdist worker, so within a single pytest
+#      invocation the lifespan migrations are not driven from two
+#      processes at once.
+#   2. ``_dev_db_lifespan_lock`` — a Postgres session-scoped advisory
+#      lock on the maintenance ``postgres`` DB serialises the smoke
+#      test across **all** concurrent pytest invocations on the same
+#      Postgres cluster. Without this, two operators running ``uv run
+#      pytest`` simultaneously would race the lifespan migrations.
+#
+# Note: the full ``pytestmark`` value is set further down once
+# ``_db_reachable()`` is defined; it combines the xdist_group pin with
+# a skipif so the test cleanly skips on Postgres-less environments.
 
 # State flags the lifespan in ``app/main.py`` is contracted to write.
 # Imported here as a module-level constant so the per-test cleanup
@@ -89,10 +111,44 @@ def _db_reachable() -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not _db_reachable(),
-    reason="dev Postgres not reachable; smoke test requires the real DB",
-)
+pytestmark = [
+    pytest.mark.xdist_group("dev_db_smoke"),
+    pytest.mark.skipif(
+        not _db_reachable(),
+        reason="dev Postgres not reachable; smoke test requires the real DB",
+    ),
+]
+
+
+@contextlib.contextmanager
+def _dev_db_lifespan_lock() -> Iterator[None]:
+    """Serialise lifespan migrations across concurrent pytest invocations.
+
+    Holds ``EBULL_SMOKE_LIFESPAN_LOCK`` on the maintenance ``postgres``
+    DB for the duration of the smoke body. The advisory lock is
+    cluster-wide, so a second pytest invocation running the same smoke
+    test will block here rather than racing the lifespan's
+    ``run_migrations()`` call.
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    from app.config import settings
+    from tests.fixtures.ebull_test_db import EBULL_SMOKE_LIFESPAN_LOCK
+
+    parsed = urlparse(settings.database_url)
+    admin_url = urlunparse(parsed._replace(path="/postgres"))
+
+    admin = psycopg.connect(admin_url, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (EBULL_SMOKE_LIFESPAN_LOCK,))
+        try:
+            yield
+        finally:
+            with admin.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (EBULL_SMOKE_LIFESPAN_LOCK,))
+    finally:
+        admin.close()
 
 
 def test_app_lifespan_boots_and_state_is_coherent() -> None:
@@ -149,7 +205,7 @@ def test_app_lifespan_boots_and_state_is_coherent() -> None:
     saved_get_conn = app.dependency_overrides.pop(get_conn, None)
 
     try:
-        with TestClient(app) as client:
+        with _dev_db_lifespan_lock(), TestClient(app) as client:
             # Lifespan must have populated every flag the rest of the
             # app reads off ``app.state``. Missing attributes here
             # mean the lifespan returned early or skipped its writes
