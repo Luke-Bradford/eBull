@@ -372,6 +372,72 @@ class TestBackfillCusipCoverage:
             rows = cur.fetchall()
         assert rows == [("111111111",)]
 
+    def test_raw_payload_persisted_before_parse(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """eBull non-negotiable: raw API payloads persisted before
+        normalisation. Claude review BLOCKING #914."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=914_080, symbol="AAPL", company_name="Apple Inc.")
+        conn.commit()
+        payload = _line("037833100", "APPLE INC", "COM")
+
+        backfill_cusip_coverage(conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: payload)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT period_year, period_quarter, payload, source_url "
+                "FROM sec_reference_documents "
+                "WHERE document_kind = '13f_securities_list'"
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == 2025
+        assert rows[0][1] == 4
+        assert rows[0][2] == payload
+        assert "13flist2025q4.txt" in rows[0][3]
+
+    def test_raw_payload_upsert_idempotent(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Re-fetching the same quarter overwrites the body. The
+        Official List is mutable across quarters; the latest fetch
+        is authoritative."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=914_090, symbol="AAPL", company_name="Apple Inc.")
+        conn.commit()
+        first = _line("037833100", "APPLE INC", "COM")
+        second = _line("037833100", "APPLE INC", "COM NEW")
+
+        backfill_cusip_coverage(conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: first)
+        backfill_cusip_coverage(conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: second)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT payload FROM sec_reference_documents "
+                "WHERE document_kind = '13f_securities_list' AND period_year = 2025 AND period_quarter = 4"
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == second
+
+    def test_list_rows_reports_raw_count_not_post_filter(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """``list_rows`` is the post-fetch raw count; the operator
+        log line "X rows from the Official List" matches this. Claude
+        review WARNING #914."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=914_100, symbol="AAPL", company_name="Apple Inc.")
+        conn.commit()
+        payload = _line("037833100", "APPLE INC", "COM") + _line("999999999", "DELETED CORP", "COM", per_row_flag="D")
+        result = backfill_cusip_coverage(conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: payload)
+        # 2 raw rows, 1 after deleted-status filter; list_rows is RAW.
+        assert result.list_rows == 2
+
     def test_default_quarter_is_last_completed(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

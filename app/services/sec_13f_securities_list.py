@@ -121,6 +121,33 @@ def fetch_13f_list_txt(year: int, quarter: int) -> str:
         return resp.read().decode("latin-1")
 
 
+def _store_raw_list(
+    conn: psycopg.Connection[tuple],
+    *,
+    year: int,
+    quarter: int,
+    payload: str,
+) -> None:
+    """Persist the raw SEC TXT body to ``sec_reference_documents``
+    BEFORE the parse step runs. Implements the eBull
+    raw-payload-before-normalisation non-negotiable. Idempotent:
+    re-fetching the same quarter overwrites the body and refreshes
+    ``fetched_at``. Codex / Claude review BLOCKING for #914."""
+    url = _LIST_URL.format(year=year, quarter=quarter)
+    conn.execute(
+        """
+        INSERT INTO sec_reference_documents (
+            document_kind, period_year, period_quarter, payload, source_url
+        ) VALUES ('13f_securities_list', %(year)s, %(quarter)s, %(payload)s, %(url)s)
+        ON CONFLICT (document_kind, period_year, period_quarter) DO UPDATE SET
+            payload = EXCLUDED.payload,
+            source_url = EXCLUDED.source_url,
+            fetched_at = NOW()
+        """,
+        {"year": year, "quarter": quarter, "payload": payload, "url": url},
+    )
+
+
 def parse_13f_list(payload: str) -> Iterator[ThirteenFSecurity]:
     """Yield one :class:`ThirteenFSecurity` per parseable row.
 
@@ -380,6 +407,11 @@ def backfill_cusip_coverage(
         quarter = quarter if quarter is not None else q
 
     payload = fetch(year, quarter)
+    # Persist the raw SEC body BEFORE parsing — eBull non-negotiable
+    # (Claude review BLOCKING #914). Re-wash workflows can replay
+    # against the stored body without re-fetching from SEC; the
+    # operator gets a "what did SEC say last quarter" audit trail.
+    _store_raw_list(conn, year=year, quarter=quarter, payload=payload)
     raw_securities = list(parse_13f_list(payload))
     # Skip deleted-this-quarter rows so a new mapping doesn't anchor
     # on a CUSIP the SEC just removed from the 13(f)-eligible list.
@@ -475,7 +507,10 @@ def backfill_cusip_coverage(
     )
 
     return CusipCoverageBackfillResult(
-        list_rows=len(securities),
+        # Raw count — matches the operator-readable phrase
+        # "rows from the Official List" before any post-fetch
+        # filtering. Codex / Claude review WARNING #914.
+        list_rows=len(raw_securities),
         instruments_seen=len(instruments),
         inserted=inserted,
         skipped_already_mapped=skipped_already_mapped,
