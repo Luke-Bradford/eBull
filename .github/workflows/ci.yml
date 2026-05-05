@@ -50,75 +50,14 @@ jobs:
             exit 1
           fi
 
-  pytest:
-    # Operator decision 2026-05-04: pytest runs PRE-PUSH on the
-    # developer's box (.githooks/pre-push), not on every PR. Each
-    # PR's CI pytest was costing 13-20 min and stacking with
-    # bot-review iterations — wall-clock 30-60 min for a 2-line
-    # fix. Local pytest with warm caches runs the same suite in
-    # <2 min on the dev DB.
-    #
-    # CI keeps pytest as a safety net on PUSH-TO-MAIN only — catches
-    # the rare case where someone bypassed the pre-push hook with
-    # --no-verify (or pushed from a clone that hadn't wired
-    # ``git config core.hooksPath .githooks``). Per-PR runs are
-    # skipped to free CI minutes for the lint + review-bot loop
-    # that's actually catching issues.
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        # Match production Postgres major version. Newer plan docs
-        # (docs/superpowers/plans/2026-04-13-live-pricing-currency-
-        # conversion.md, 2026-04-14-fundamentals-enrichment.md,
-        # 2026-04-16-data-orchestrator-p1.md) target PG17; running
-        # PG16 on CI would let a PG17-only feature pass green here
-        # and fail at deploy time.
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: ebull
-        ports:
-          - 5432:5432
-        # Service must be ready before the suite starts; without
-        # health-check args the runner moves on while the server is
-        # still booting and the first connection attempt errors.
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
-    env:
-      EBULL_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ebull
-      # Deterministic 32-byte base64 key used only for CI. Real
-      # deployments derive this per-environment via ADR 0001 — never
-      # share this value with prod.
-      EBULL_SECRETS_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-      # Tests that hit the bearer-auth path require this to be set
-      # and ≥32 chars; pick a fixed-but-non-prod token.
-      EBULL_SERVICE_TOKEN: ci-service-token-0123456789abcdef
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.14"
-
-      - name: Install uv
-        # Pinned so CI / local dev / supply-chain audit see the
-        # same resolver behavior across runs.
-        run: pip install "uv==0.5.21"
-
-      - name: Install dependencies
-        run: uv sync --group dev
-
-      - name: Run backend pytest
-        run: uv run pytest
+  # Operator decision 2026-05-05: pytest removed from CI entirely.
+  # Pre-push hook (.githooks/pre-push) runs ruff/format/pyright on
+  # every push and pytest is run locally before push. Push-to-main
+  # safety-net pytest job ran for ~5 weeks but was broken by
+  # xdist + per-worker DB races introduced in #893; 8 consecutive
+  # failures, 16-17 min each, produced email noise without catching
+  # real bugs. CI now lints only; pytest is the developer's
+  # responsibility.
 
   supply-chain:
     # #598: catch yanked / phantom / advisory-laden lockfile entries
