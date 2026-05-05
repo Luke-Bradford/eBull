@@ -213,7 +213,21 @@ def sync_filer_directory(
             continue
         valid_ciks.append(cik)
 
-    filer_types = _bulk_classify_filer_type(conn, valid_ciks)
+    # Only classify CIKs that don't already exist — filer_type is
+    # preserved on UPDATE so the classifier is wasted work for the
+    # refresh path. On a populated install this avoids two
+    # 11k-row ANY-array SELECTs per idempotent re-run.
+    # Codex post-push review #912.
+    existing_ciks: set[str] = set()
+    if valid_ciks:
+        with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+            cur.execute(
+                "SELECT cik FROM institutional_filers WHERE cik = ANY(%(ciks)s)",
+                {"ciks": valid_ciks},
+            )
+            existing_ciks = {row[0] for row in cur.fetchall()}
+    new_ciks = [cik for cik in valid_ciks if cik not in existing_ciks]
+    filer_types = _bulk_classify_filer_type(conn, new_ciks)
 
     inserted = 0
     refreshed = 0
@@ -224,6 +238,10 @@ def sync_filer_directory(
         # the TIMESTAMPTZ column so GREATEST() comparisons against
         # later-arriving timestamps stay monotone.
         last_filing_ts = datetime.combine(filed_d, time(0, 0), tzinfo=UTC)
+        # ``filer_type`` is only consumed on INSERT (DO UPDATE
+        # preserves the existing value); pre-existing rows pass
+        # ``'INV'`` as a no-op placeholder.
+        filer_type = filer_types.get(cik, "INV")
         row = conn.execute(
             """
             INSERT INTO institutional_filers (cik, name, filer_type, last_filing_at)
@@ -252,7 +270,7 @@ def sync_filer_directory(
             {
                 "cik": cik,
                 "name": name,
-                "filer_type": filer_types[cik],
+                "filer_type": filer_type,
                 "last_filing_at": last_filing_ts,
             },
         ).fetchone()
