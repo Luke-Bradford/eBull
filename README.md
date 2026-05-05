@@ -57,7 +57,8 @@ In flight:
 - Short-interest overlay (#915 FINRA bimonthly + #916 RegSHO daily).
 - DEF 14A consolidated (#843), DRS / restricted disclosure (#844).
 - Chart UI polish: hatching, click-through, coverage-banner v2, history pane (#920–#923).
-- EdgarTools as 13F drop-in parser (#925).
+- EdgarTools as 13F drop-in parser (#925) — **shipped 2026-05-05**.
+- N-PORT EdgarTools rewrite (#932) — operator decision pending (Pydantic-validation-cliff trade-off).
 
 ## Prerequisites
 
@@ -171,16 +172,15 @@ hook is the test gate).
 `.github/workflows/claude-review.yml` posts an automated review on
 every PR push using Claude.
 
-## Settled decisions
+## Documentation
 
-See [`docs/settled-decisions.md`](docs/settled-decisions.md) for live
-repo-level decisions: provider strategy, identifier strategy, filing
-storage, news/sentiment, thesis semantics, scoring, portfolio manager,
-execution guard, process topology, broker-secret encryption.
-
-Per-feature design specs live under
-[`docs/superpowers/specs/`](docs/superpowers/specs/) and
-[`docs/superpowers/plans/`](docs/superpowers/plans/).
+| Audience | Read this first |
+|---|---|
+| Operator running eBull | [`docs/wiki/`](docs/wiki/) |
+| Contributor (workflow rules) | [`.claude/CLAUDE.md`](.claude/CLAUDE.md) |
+| Contributor (design decisions) | [`docs/settled-decisions.md`](docs/settled-decisions.md) |
+| Contributor (recurring mistakes) | [`docs/review-prevention-log.md`](docs/review-prevention-log.md) |
+| Contributor (epic-level designs) | [`docs/superpowers/specs/README.md`](docs/superpowers/specs/README.md) |
 
 ## Third-party software
 
