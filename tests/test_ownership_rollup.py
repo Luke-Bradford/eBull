@@ -175,24 +175,34 @@ def _seed_form4(
     # ``app/services/insider_transactions.py`` (#888); #905 cut the
     # rollup read path over to ``ownership_insiders_current`` so
     # legacy-only seeds would surface as zero rows.
-    record_insider_observation(
-        conn,
-        instrument_id=instrument_id,
-        holder_cik=filer_cik,
-        holder_name=filer_name,
-        ownership_nature="direct",
-        source="form4",
-        source_document_id=f"{accession}#{txn_row_num}",
-        source_accession=accession,
-        source_field="post_transaction_shares",
-        source_url=None,
-        filed_at=datetime.combine(txn_date, datetime.min.time(), tzinfo=UTC),
-        period_start=None,
-        period_end=txn_date,
-        ingest_run_id=uuid4(),
-        shares=Decimal(post_transaction_shares),
-    )
-    refresh_insiders_current(conn, instrument_id=instrument_id)
+    #
+    # Production ingest filters ``is_derivative = FALSE`` before
+    # calling ``record_insider_observation`` (see
+    # insider_transactions.py around line 1200) — derivative rows
+    # carry option / RSU / etc. exposures that are not part of the
+    # equity ownership rollup. Mirror that guard here so seeding a
+    # derivative Form 4 in a fixture does not falsely inflate
+    # ``ownership_insiders_current`` post-#905. Bot review caught this
+    # on PR #911 round 2.
+    if not is_derivative:
+        record_insider_observation(
+            conn,
+            instrument_id=instrument_id,
+            holder_cik=filer_cik,
+            holder_name=filer_name,
+            ownership_nature="direct",
+            source="form4",
+            source_document_id=f"{accession}#{txn_row_num}",
+            source_accession=accession,
+            source_field="post_transaction_shares",
+            source_url=None,
+            filed_at=datetime.combine(txn_date, datetime.min.time(), tzinfo=UTC),
+            period_start=None,
+            period_end=txn_date,
+            ingest_run_id=uuid4(),
+            shares=Decimal(post_transaction_shares),
+        )
+        refresh_insiders_current(conn, instrument_id=instrument_id)
 
 
 def _seed_form3(
@@ -950,8 +960,6 @@ class TestDef14aEnrichment:
         sources_present = {h.winning_source for h in insiders[0].holders}
         assert sources_present == {"form4", "def14a"}
         # DEF 14A is matched, not unmatched.
-        assert not any(s.category == "def14a_unmatched" for s in rollup.slices)
-        # def14a_unmatched slice should NOT contain this holder.
         assert not any(s.category == "def14a_unmatched" for s in rollup.slices)
 
     def test_resolver_prefers_cik_backed_row_over_legacy_null_cik(self, _setup: psycopg.Connection[tuple]) -> None:
