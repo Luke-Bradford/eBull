@@ -1,12 +1,24 @@
 #!/usr/bin/env bash
 #
-# Pre-push gate. Runs lint + format-check + typecheck + FULL pytest
-# suite before any push leaves the machine. We OWN the heavy testing
+# Pre-push gate. Runs lint + format-check + typecheck + scoped pytest
+# before any push leaves the machine. We OWN the heavy testing
 # locally; CI runs only the cheap sanity checks (lint, format,
 # pyright, supply-chain) + the review bot. Operator decision
 # 2026-05-04 after the #840 sub-PR cycle showed each PR's CI pytest
 # costing 13-20 min and stacking with bot-review iterations
 # (PR + follow-up = 30-60 min wall-clock).
+#
+# Pytest scoping (#903): pytest-testmon tracks per-test coverage in
+# `.testmondata` and re-runs only tests whose touched code paths
+# changed since the last green run. testmon does not support
+# pytest-xdist, so the scoped path runs single-process (`-n0`); the
+# scoped set is small enough that parallelism overhead would dominate.
+#
+# Broad-trigger fallback: testmon's import graph cannot see SQL
+# migrations or fixture-data changes, and conftest / pyproject /
+# dependency changes can affect every test indirectly. When the diff
+# touches any broad-trigger path we run the full suite under the
+# default xdist config.
 #
 # This shifts the pytest cost to push-time on the developer's box,
 # where it runs with warm caches + per-PR scope filtering and the
@@ -31,8 +43,69 @@ uv run ruff format --check .
 echo "==> Pre-push gate: pyright"
 uv run pyright
 
-echo "==> Pre-push gate: pytest (full suite — we own this, not CI)"
-uv run pytest --tb=short -q
+# Pytest scoping decision. If `git diff --name-only @{u}..HEAD` fails
+# (no upstream yet, e.g. brand-new branch), assume worst-case: run the
+# full suite under xdist. The first push of a brand-new branch usually
+# only diffs trivially against the remote anyway.
+if changed_files="$(git diff --name-only '@{u}..HEAD' 2>/dev/null)"; then
+  :
+else
+  echo "==> Pre-push gate: no upstream yet, will run full xdist suite"
+  changed_files=""
+fi
+
+# Three paths:
+#   prime  — .testmondata missing. Run all tests with --testmon
+#            single-process. testmon's first-run behavior naturally
+#            collects every test and writes the coverage db.
+#            (--testmon-noselect's cold-cache path crashes on Windows
+#            inside testmon's db reset due to a file-handle race;
+#            --testmon avoids that.) One-off cost per clone.
+#   broad  — diff touches paths whose effects testmon can't detect via
+#            its Python coverage graph alone (SQL migrations, fixture
+#            data) or that influence test selection itself (conftest,
+#            pyproject, uv.lock, this hook, pytest.ini). Run the full
+#            suite under default xdist for speed; testmon db is left
+#            untouched. testmon's per-file fsha index will reselect
+#            tests for any changed .py file on the next scoped run, so
+#            cross-path correctness is preserved.
+#   scoped — default. `--testmon -n0` scopes to changed code paths.
+run_mode="scoped"
+if [[ ! -f .testmondata ]]; then
+  run_mode="prime"
+  echo "==> Pre-push gate: .testmondata not found; priming full suite (single-process)"
+elif [[ -z "${changed_files}" ]]; then
+  run_mode="broad"
+else
+  while IFS= read -r f; do
+    case "$f" in
+      sql/*.sql|sql/**/*.sql|\
+      tests/conftest.py|tests/**/conftest.py|tests/fixtures/*|tests/fixtures/**/*|\
+      pyproject.toml|uv.lock|\
+      .githooks/pre-push|\
+      pytest.ini)
+        run_mode="broad"
+        echo "==> Pre-push gate: broad-trigger path changed (${f}); will run full xdist suite"
+        break
+        ;;
+    esac
+  done <<< "${changed_files}"
+fi
+
+case "${run_mode}" in
+  prime)
+    # testmon is incompatible with pytest-xdist, so -n0 is forced.
+    uv run pytest --testmon -n0 --tb=short -q
+    ;;
+  broad)
+    echo "==> Pre-push gate: pytest (full suite — we own this, not CI)"
+    uv run pytest --tb=short -q
+    ;;
+  scoped)
+    echo "==> Pre-push gate: pytest --testmon (scoped, single-process; xdist incompatible)"
+    uv run pytest --testmon -n0 --tb=short -q
+    ;;
+esac
 
 # Frontend dark-mode class hygiene (#708). Skipped if frontend/ is
 # absent (e.g. backend-only worktrees) or if `pnpm` is not on PATH —
