@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Hand-trimmed NPORT-P fixture for #917 testing.
+
+    Synthetic test fund modelled on a real Vanguard 500 Index Fund
+    NPORT-P primary doc (period 2025-12-31). Truncated to 7 holdings
+    that exercise every write-side path:
+
+      1. AAPL   — Long equity-common NS, valid CUSIP → write
+      2. MSFT   — Long equity-common NS, valid CUSIP → write
+      3. ACME-D — Long DEBT (assetCat=DBT)            → drop (non-equity)
+      4. SHRT-X — Short equity-common                  → drop (short)
+      5. ZZZZ   — Long equity-common NS, unknown CUSIP → drop (no extids)
+      6. CVBND  — Long equity-common, units=PA (conv bond) → drop (non-share-units)
+      7. ZEROS  — Long equity-common NS, balance=0    → drop (zero-shares)
+
+    Real-world NPORT-P uses the
+    ``http://www.sec.gov/edgar/nport`` namespace and an XBRL container.
+    This fixture uses a simplified flat shape that the lxml-direct
+    parser (which walks by local-name) accepts identically.
+-->
+<edgarSubmission xmlns="http://www.sec.gov/edgar/nport">
+    <headerData>
+        <submissionType>NPORT-P</submissionType>
+    </headerData>
+    <formData>
+        <genInfo>
+            <regCik>0000036405</regCik>
+            <seriesId>S000002277</seriesId>
+            <seriesName>Vanguard 500 Index Fund (TEST)</seriesName>
+            <repPdEnd>2025-12-31</repPdEnd>
+            <filedAt>2026-02-26</filedAt>
+        </genInfo>
+        <invstOrSecs>
+            <invstOrSec>
+                <name>APPLE INC</name>
+                <cusip>037833100</cusip>
+                <balance>1000000</balance>
+                <units>NS</units>
+                <valUSD>225000000.00</valUSD>
+                <pctVal>3.45</pctVal>
+                <payoffProfile>Long</payoffProfile>
+                <assetCat>EC</assetCat>
+                <issuerCat>CORP</issuerCat>
+            </invstOrSec>
+            <invstOrSec>
+                <name>MICROSOFT CORP</name>
+                <cusip>594918104</cusip>
+                <balance>500000</balance>
+                <units>NS</units>
+                <valUSD>210000000.00</valUSD>
+                <pctVal>3.21</pctVal>
+                <payoffProfile>Long</payoffProfile>
+                <assetCat>EC</assetCat>
+                <issuerCat>CORP</issuerCat>
+            </invstOrSec>
+            <invstOrSec>
+                <name>ACME CORP NOTE 5%</name>
+                <cusip>000000ACM</cusip>
+                <balance>1000000</balance>
+                <units>PA</units>
+                <valUSD>1010000.00</valUSD>
+                <payoffProfile>Long</payoffProfile>
+                <assetCat>DBT</assetCat>
+                <issuerCat>CORP</issuerCat>
+            </invstOrSec>
+            <invstOrSec>
+                <name>SHORT TARGET INC</name>
+                <cusip>000000SHX</cusip>
+                <balance>50000</balance>
+                <units>NS</units>
+                <valUSD>5000000.00</valUSD>
+                <payoffProfile>Short</payoffProfile>
+                <assetCat>EC</assetCat>
+                <issuerCat>CORP</issuerCat>
+            </invstOrSec>
+            <invstOrSec>
+                <name>UNRESOLVED CO</name>
+                <cusip>000000ZZZ</cusip>
+                <balance>10000</balance>
+                <units>NS</units>
+                <valUSD>123456.00</valUSD>
+                <payoffProfile>Long</payoffProfile>
+                <assetCat>EC</assetCat>
+                <issuerCat>CORP</issuerCat>
+            </invstOrSec>
+            <invstOrSec>
+                <name>CONVERTIBLE BOND CO</name>
+                <cusip>000000CVB</cusip>
+                <balance>5000000</balance>
+                <units>PA</units>
+                <valUSD>5500000.00</valUSD>
+                <payoffProfile>Long</payoffProfile>
+                <assetCat>EC</assetCat>
+                <issuerCat>CORP</issuerCat>
+            </invstOrSec>
+            <invstOrSec>
+                <name>ZERO BALANCE CO</name>
+                <cusip>000000ZRO</cusip>
+                <balance>0</balance>
+                <units>NS</units>
+                <valUSD>0.00</valUSD>
+                <payoffProfile>Long</payoffProfile>
+                <assetCat>EC</assetCat>
+                <issuerCat>CORP</issuerCat>
+            </invstOrSec>
+        </invstOrSecs>
+    </formData>
+</edgarSubmission>

@@ -156,6 +156,11 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "ownership_treasury_observations",
     "ownership_def14a_current",
     "ownership_def14a_observations",
+    # #917 — N-PORT mutual-fund holdings ingest (Phase 3 PR1).
+    "ownership_funds_current",
+    "ownership_funds_observations",
+    "n_port_ingest_log",
+    "sec_fund_series",
     # #893 — dev-DB writers migrated onto worker test DB; tables they
     # touched now need per-test cleanup.
     "job_runtime_heartbeat",

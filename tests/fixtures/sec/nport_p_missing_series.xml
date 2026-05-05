@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Negative-test NPORT-P fixture for #917 — no seriesId.
+
+    The ingester must tombstone this accession as failed
+    (NPortMissingSeriesError) rather than synthesising a
+    collision-prone fallback identity. Codex pre-impl review #2.
+-->
+<edgarSubmission xmlns="http://www.sec.gov/edgar/nport">
+    <headerData>
+        <submissionType>NPORT-P</submissionType>
+    </headerData>
+    <formData>
+        <genInfo>
+            <regCik>0000036405</regCik>
+            <seriesName>Mystery Fund No Series Id</seriesName>
+            <repPdEnd>2025-12-31</repPdEnd>
+        </genInfo>
+        <invstOrSecs/>
+    </formData>
+</edgarSubmission>
