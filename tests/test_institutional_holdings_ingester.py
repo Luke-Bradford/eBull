@@ -744,6 +744,177 @@ class TestIngestAllActiveFilersDataIngestionRuns:
         assert "accession" in row[1].lower()
 
 
+class TestUniverseSweep:
+    """#913 / #841 PR2: ``ingest_all_active_filers`` ingests every
+    CIK in ``institutional_filers`` (the directory populated by
+    sec_13f_filer_directory_sync #912), with optional deadline budget
+    so a long sweep stops cleanly + resumes next fire."""
+
+    def _build_filer_payloads(
+        self,
+        *,
+        cik: str,
+        accession: str,
+        period: str,
+    ) -> dict[str, str | None]:
+        cik_int = int(cik)
+        primary_doc = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<edgarSubmission xmlns="http://www.sec.gov/edgar/thirteenffiler">\n'
+            "  <headerData><filerInfo><filer><credentials>\n"
+            f"    <cik>{cik_int}</cik></credentials></filer></filerInfo></headerData>\n"
+            "  <formData>\n"
+            f"    <coverPage><reportCalendarOrQuarter>{period}</reportCalendarOrQuarter></coverPage>\n"
+            f"    <signatureBlock><signatureDate>{period}</signatureDate></signatureBlock>\n"
+            f"    <filingManager><name>FAKE FILER {cik}</name></filingManager>\n"
+            "    <summaryPage><tableValueTotal>0</tableValueTotal><tableEntryTotal>0</tableEntryTotal></summaryPage>\n"
+            "  </formData>\n"
+            "</edgarSubmission>\n"
+        )
+        infotable = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable" />\n'
+        )
+        archive_base = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession.replace('-', '')}/"
+        return {
+            f"https://data.sec.gov/submissions/CIK{cik}.json": _submissions_json(
+                accessions=[(accession, "13F-HR", period, period)],
+            ),
+            archive_base + "index.json": _archive_index_json(),
+            archive_base + "primary_doc.xml": primary_doc,
+            archive_base + "infotable.xml": infotable,
+        }
+
+    def test_list_directory_filer_ciks_orders_by_last_filing_desc_then_cik(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        from app.services.institutional_holdings import list_directory_filer_ciks
+
+        # Mix of dated + NULL ``last_filing_at`` rows; expect dated
+        # rows newest-first, then NULL rows ordered by cik.
+        conn = ebull_test_conn
+        conn.execute(
+            "INSERT INTO institutional_filers (cik, name, filer_type, last_filing_at) VALUES "
+            "('0000000300', 'C', 'INV', '2026-03-01'::timestamptz), "
+            "('0000000100', 'A', 'INV', '2026-04-01'::timestamptz), "
+            "('0000000200', 'B', 'INV', NULL), "
+            "('0000000400', 'D', 'INV', NULL)"
+        )
+        conn.commit()
+
+        result = list_directory_filer_ciks(conn)
+        assert result == ["0000000100", "0000000300", "0000000200", "0000000400"]
+
+    def test_explicit_ciks_list_overrides_seed_lookup(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Passing ``ciks=[...]`` walks exactly those CIKs and
+        ignores ``institutional_filer_seeds`` entirely. The
+        sec_13f_quarterly_sweep job uses this to walk the directory."""
+        conn = ebull_test_conn
+        # Seed-list CIK that should NOT be reached.
+        seed_filer(conn, cik="0009999991", label="SEED-ONLY")
+        # Directory CIK that should be reached.
+        _seed_instrument(conn, iid=913_001, symbol="AAPL")
+        _seed_cusip_mapping(conn, instrument_id=913_001, cusip="037833100")
+        conn.commit()
+
+        accession = "0001067983-25-000001"
+        fetcher = _InMemoryFetcher(
+            self._build_filer_payloads(cik="0001067983", accession=accession, period="2024-12-31")
+        )
+
+        summaries = ingest_all_active_filers(
+            conn,
+            fetcher,
+            ciks=["0001067983"],
+            source_label="sec_edgar_13f_directory",
+        )
+
+        # SEED-ONLY filer was NOT contacted.
+        assert not any("0009999991" in url for url in fetcher.calls)
+        # Directory filer WAS contacted.
+        assert any("0001067983" in url for url in fetcher.calls)
+        assert [s.filer_cik for s in summaries] == ["0001067983"]
+
+        # data_ingestion_runs row tagged with the directory source.
+        with conn.cursor() as cur:
+            cur.execute("SELECT source FROM data_ingestion_runs ORDER BY ingestion_run_id DESC LIMIT 1")
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "sec_edgar_13f_directory"
+
+    def test_deadline_budget_stops_loop_cleanly_and_records_partial(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A soft deadline interrupts the loop between filers; the
+        partial work commits, ``data_ingestion_runs.error`` records
+        the cut-off so the operator knows the next sweep resumes."""
+        from app.services import institutional_holdings as svc
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=913_010, symbol="AAPL")
+        _seed_cusip_mapping(conn, instrument_id=913_010, cusip="037833100")
+        conn.commit()
+
+        # Build payloads for three filers; deadline trips after the
+        # first iteration.
+        payloads: dict[str, str | None] = {}
+        ciks = ["0000000010", "0000000020", "0000000030"]
+        for c in ciks:
+            payloads.update(self._build_filer_payloads(cik=c, accession=f"{c}-25-000001", period="2024-12-31"))
+        fetcher = _InMemoryFetcher(payloads)
+
+        # Stub time.monotonic to fire the deadline immediately AFTER
+        # the first filer iteration. Sequence:
+        #   call 1: deadline_ts = 0 + 1 = 1
+        #   call 2: pre-loop check (filer 0) → 0 < 1, proceed
+        #   call 3+: pre-loop check (filer 1+) → 5 >= 1, deadline_hit
+        # The clock returns the LAST value once exhausted (rather
+        # than raising StopIteration) so any extra deadline checks
+        # added in future refactors don't make the test brittle.
+        # Codex pre-push review #913.
+        clock_ticks = [0.0, 0.0, 5.0]
+        clock_idx = [0]
+
+        def _fake_monotonic() -> float:
+            i = min(clock_idx[0], len(clock_ticks) - 1)
+            clock_idx[0] += 1
+            return clock_ticks[i]
+
+        monkeypatch.setattr(svc.time, "monotonic", _fake_monotonic)
+
+        ingest_all_active_filers(
+            conn,
+            fetcher,
+            ciks=ciks,
+            deadline_seconds=1.0,
+            source_label="sec_edgar_13f_directory",
+        )
+
+        # data_ingestion_runs.error mentions deadline.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, error FROM data_ingestion_runs "
+                "WHERE source = 'sec_edgar_13f_directory' "
+                "ORDER BY ingestion_run_id DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "partial"
+        assert row[1] is not None
+        assert "deadline" in row[1].lower()
+
+        # Only the first filer's submissions URL was fetched — the
+        # remaining two never got contacted.
+        contacted_ciks = {c for c in ciks if any(c in url for url in fetcher.calls)}
+        assert contacted_ciks == {"0000000010"}
+
+
 class TestSeedFiler:
     def test_idempotent_seed(
         self,
