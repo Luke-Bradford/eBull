@@ -1190,25 +1190,6 @@ def _read_universe_estimates(conn: psycopg.Connection[Any], instrument_id: int) 
 # ---------------------------------------------------------------------------
 
 
-def _read_from_current_enabled() -> bool:
-    """Feature-flag toggle for the new ``ownership_*_current`` read
-    path (#840.E). Defaults OFF so the prod rollback is a single env
-    var flip — no schema or DB rebuild.
-
-    Operator flow per Codex plan-review #5:
-      1. Sub-PRs A-D land write-side; observations + _current
-         populate via the daily sync.
-      2. Operator runs the dual-read parity test in dev to confirm
-         the new path produces identical OwnershipRollup output for
-         AAPL / GME / known fixtures.
-      3. Operator flips ``EBULL_OWNERSHIP_ROLLUP_FROM_CURRENT=1``.
-      4. If anything regresses, flip back — old read paths still
-         live for 1 release cycle minimum."""
-    import os
-
-    return os.environ.get("EBULL_OWNERSHIP_ROLLUP_FROM_CURRENT", "").strip().lower() in ("1", "true", "yes", "on")
-
-
 def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_id: int) -> OwnershipRollup:
     """Build the rollup payload for one instrument.
 
@@ -1221,12 +1202,13 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     review caught the v1 spec attempting the inner-transaction
     anti-pattern.
 
-    Read-path selection (#840.E): when
-    ``EBULL_OWNERSHIP_ROLLUP_FROM_CURRENT=1``, reads from the new
-    ``ownership_*_current`` tables. Otherwise reads the legacy typed
-    tables. Both paths produce identical ``OwnershipRollup`` shapes;
-    operator dual-read parity test guards against drift before flipping
-    the flag.
+    Reads from the legacy typed tables (``insider_transactions`` etc.)
+    today. The new ``ownership_*_current`` snapshot lives alongside
+    via Phase 1 (#840) write-through; the cutover to read from it
+    lands in #841 along with the legacy reader retirement. The
+    previous ``EBULL_OWNERSHIP_ROLLUP_FROM_CURRENT`` flag was removed
+    in this commit — read-path selection is internal plumbing, not
+    operator config.
     """
     outstanding, outstanding_as_of, outstanding_source = _read_shares_outstanding(conn, instrument_id)
     historical_symbols = tuple(historical_symbols_for(conn, instrument_id))
@@ -1236,18 +1218,9 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
             instrument_id=instrument_id,
             historical_symbols=historical_symbols,
         )
-    use_current = _read_from_current_enabled()
-    if use_current:
-        treasury, treasury_as_of = _read_treasury_from_current(conn, instrument_id)
-        sql_candidates = _collect_canonical_holders_from_current(conn, instrument_id)
-        def14a_rows = _read_def14a_unmatched_from_current(conn, instrument_id)
-        matched, unmatched_def14a = _enrich_and_union_def14a(
-            conn, instrument_id, sql_candidates, def14a_rows=def14a_rows
-        )
-    else:
-        treasury, treasury_as_of = _read_treasury(conn, instrument_id)
-        sql_candidates = _collect_canonical_holders_sql(conn, instrument_id)
-        matched, unmatched_def14a = _enrich_and_union_def14a(conn, instrument_id, sql_candidates)
+    treasury, treasury_as_of = _read_treasury(conn, instrument_id)
+    sql_candidates = _collect_canonical_holders_sql(conn, instrument_id)
+    matched, unmatched_def14a = _enrich_and_union_def14a(conn, instrument_id, sql_candidates)
 
     # Split 13D/G out of the cross-source priority dedup (#837 / #788
     # P0b). 13D/G reports BENEFICIAL ownership per Rule 13d-3
