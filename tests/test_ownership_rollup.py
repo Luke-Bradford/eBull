@@ -778,6 +778,12 @@ class TestDedupPriority:
         # preserved in ownership_blockholders_observations for
         # drill-through, but the rollup just exposes the latest.
         assert block_slices[0].holders[0].winning_accession == "13D-RC-2025-001"
+        # Post-#905 invariant: rollup layer no longer surfaces earlier
+        # amendments as dropped_sources because the read path consumes
+        # ownership_blockholders_current, which is already per-(reporter_cik,
+        # nature) deduped. Earlier amendments still live in
+        # ownership_blockholders_observations for drillthrough queries.
+        assert block_slices[0].holders[0].dropped_sources == ()
 
     def test_837_regression_other_instrument_blockholder_surfaces(
         self,
