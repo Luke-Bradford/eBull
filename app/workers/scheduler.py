@@ -249,6 +249,7 @@ JOB_SEC_FILING_DOCUMENTS_INGEST = "sec_filing_documents_ingest"
 JOB_CUSIP_EXTID_SWEEP = "cusip_extid_sweep"
 JOB_OWNERSHIP_OBSERVATIONS_SYNC = "ownership_observations_sync"
 JOB_OWNERSHIP_OBSERVATIONS_BACKFILL = "ownership_observations_backfill"
+JOB_SEC_13F_FILER_DIRECTORY_SYNC = "sec_13f_filer_directory_sync"
 JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
 JOB_ETORO_LOOKUPS_REFRESH = "etoro_lookups_refresh"
 
@@ -736,6 +737,34 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # waiting for the next Sunday.
         cadence=Cadence.weekly(weekday=6, hour=4, minute=0),
         catch_up_on_boot=True,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_13F_FILER_DIRECTORY_SYNC,
+        description=(
+            "Discovery sweep of SEC's quarterly form.idx for every "
+            "active 13F-HR filer (#912 / #841 PR1). Pre-Phase-2 the "
+            "``institutional_filers`` directory holds 14 curated rows; "
+            "the real US 13F-HR universe is ~5,000 filers per quarter, "
+            "so AAPL institutional rollup is stuck at 5.94% (real "
+            "~62%). Walks the last 4 closed quarters' form.idx, "
+            "harvests every distinct 13F-HR / 13F-HR/A / 13F-NT filer "
+            "CIK + canonical name, UPSERTs into ``institutional_filers``. "
+            "Idempotent — re-run on the same quarter set produces "
+            "zero new rows but refreshes name + last_filing_at. "
+            "Cadence: weekly Sunday 04:15 UTC — staggered after the "
+            "existing 04:00 UTC slot (sec_business_summary_bootstrap "
+            "+ exchanges_metadata_refresh) and before "
+            "etoro_lookups_refresh at 04:30 so the SEC bandwidth "
+            "spike isn't aligned with the eToro slot. Does NOT "
+            "ingest holdings — that's PR2 (#913)."
+        ),
+        cadence=Cadence.weekly(weekday=6, hour=4, minute=15),
+        # Don't catch up on boot — the sweep fetches ~4×50MB of
+        # form.idx text and runs a few minutes; firing on every dev
+        # restart would burn SEC bandwidth + dev wall-clock for no
+        # operator benefit (the directory churns slowly). A missed
+        # window rolls forward to the next Sunday.
+        catch_up_on_boot=False,
     ),
     ScheduledJob(
         name=JOB_ETORO_LOOKUPS_REFRESH,
@@ -3534,6 +3563,41 @@ def ownership_observations_backfill() -> None:
             result.blockholders.observations_recorded,
             result.treasury.observations_recorded,
             result.def14a.observations_recorded,
+        )
+
+
+def sec_13f_filer_directory_sync() -> None:
+    """Discovery sweep — populate ``institutional_filers`` from SEC's
+    quarterly form.idx (#912 / #841 PR1).
+
+    Walks the last 4 closed quarters' ``form.idx``, harvests every
+    distinct 13F-HR / 13F-HR/A / 13F-NT filer CIK + canonical name,
+    UPSERTs into ``institutional_filers``. ``filer_type`` resolved
+    via the curated ETF list + N-CEN classifier (same priority as
+    :func:`app.services.ncen_classifier.compose_filer_type`),
+    defaulting to ``'INV'`` so the ≥95% non-NULL acceptance is
+    structurally satisfied.
+
+    Does NOT ingest holdings — that's PR2 (#913). This job builds
+    the operand the next two PRs operate against.
+    """
+    from app.services.sec_13f_filer_directory import sync_filer_directory
+
+    with _tracked_job(JOB_SEC_13F_FILER_DIRECTORY_SYNC) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            result = sync_filer_directory(conn)
+
+        tracker.row_count = result.filers_inserted
+        logger.info(
+            "sec_13f_filer_directory_sync: quarters_attempted=%d "
+            "quarters_failed=%d filers_seen=%d inserted=%d "
+            "refreshed=%d skipped_empty_name=%d",
+            result.quarters_attempted,
+            result.quarters_failed,
+            result.filers_seen,
+            result.filers_inserted,
+            result.filers_refreshed,
+            result.skipped_empty_name,
         )
 
 

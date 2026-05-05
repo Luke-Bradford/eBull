@@ -76,6 +76,7 @@ from app.workers.scheduler import (
     JOB_RAW_DATA_RETENTION_SWEEP,
     JOB_RETRY_DEFERRED,
     JOB_SEC_8K_EVENTS_INGEST,
+    JOB_SEC_13F_FILER_DIRECTORY_SYNC,
     JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP,
     JOB_SEC_BUSINESS_SUMMARY_INGEST,
     JOB_SEC_DEF14A_BOOTSTRAP,
@@ -113,6 +114,7 @@ from app.workers.scheduler import (
     raw_data_retention_sweep,
     retry_deferred_recommendations_job,
     sec_8k_events_ingest,
+    sec_13f_filer_directory_sync,
     sec_business_summary_bootstrap,
     sec_business_summary_ingest,
     sec_def14a_bootstrap,
@@ -183,6 +185,7 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_CUSIP_EXTID_SWEEP: cusip_extid_sweep,
     JOB_OWNERSHIP_OBSERVATIONS_SYNC: ownership_observations_sync,
     JOB_OWNERSHIP_OBSERVATIONS_BACKFILL: ownership_observations_backfill,
+    JOB_SEC_13F_FILER_DIRECTORY_SYNC: sec_13f_filer_directory_sync,
 }
 
 
