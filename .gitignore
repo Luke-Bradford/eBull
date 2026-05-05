@@ -6,6 +6,7 @@ __pycache__/
 .mypy_cache/
 .testmondata
 .testmondata-journal
+.testmondata-*
 dist/
 build/
 .DS_Store
@@ -17,6 +18,14 @@ data/
 # Never check these in — they are machine-local and session-scoped.
 .claude/codex-*.log
 .claude/codex-*-prompt.txt
+.claude/codex-*-review.txt
+.claude/codex-*-review-*.txt
+.claude/codex-*-input.diff
+.claude/codex-*-rebuttal.txt
+.claude/codex-*-rebuttal-result.txt
+.claude/codex-*-cusip-source*.txt
+.claude/codex-*-plan-review.txt
+.claude/plan-*.md
 .claude/codex.pid
 .claude/scheduled_tasks.lock
 .claude/worktrees/
