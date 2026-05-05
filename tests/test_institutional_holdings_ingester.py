@@ -80,6 +80,7 @@ _PRIMARY_DOC_XML = """<?xml version="1.0" encoding="UTF-8"?>
           <cik>0001067983</cik>
         </credentials>
       </filer>
+      <periodOfReport>09-30-2024</periodOfReport>
     </filerInfo>
   </headerData>
   <formData>
@@ -87,6 +88,12 @@ _PRIMARY_DOC_XML = """<?xml version="1.0" encoding="UTF-8"?>
       <reportCalendarOrQuarter>09-30-2024</reportCalendarOrQuarter>
       <filingManager>
         <name>BERKSHIRE HATHAWAY INC</name>
+        <address>
+          <street1>3555 Farnam Street</street1>
+          <city>Omaha</city>
+          <stateOrCountry>NE</stateOrCountry>
+          <zipCode>68131</zipCode>
+        </address>
       </filingManager>
     </coverPage>
     <signatureBlock>
