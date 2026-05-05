@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import xml.etree.ElementTree as ET  # noqa: S405 — only used to catch ET.ParseError on parse failure
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -349,6 +350,27 @@ def _safe_iso_datetime(text: str | None) -> datetime | None:
 
 def _list_active_filer_seeds(conn: psycopg.Connection[tuple]) -> list[str]:
     cur = conn.execute("SELECT cik FROM institutional_filer_seeds WHERE active = TRUE ORDER BY cik")
+    return [_zero_pad_cik(row[0]) for row in cur.fetchall()]
+
+
+def list_directory_filer_ciks(conn: psycopg.Connection[tuple]) -> list[str]:
+    """Walk every CIK in ``institutional_filers`` (the SEC 13F filer
+    directory populated by ``sec_13f_filer_directory_sync`` #912).
+
+    Used by :func:`ingest_directory_filers` (#913) — the universe
+    expansion entrypoint. Returns CIKs ordered by ``last_filing_at``
+    DESC so the most recently active filers are ingested first; a
+    deadline-budget interruption then leaves the long-tail
+    (low-activity filers) for the next sweep without losing the
+    operator-relevant household names.
+    """
+    cur = conn.execute(
+        """
+        SELECT cik
+        FROM institutional_filers
+        ORDER BY last_filing_at DESC NULLS LAST, cik
+        """
+    )
     return [_zero_pad_cik(row[0]) for row in cur.fetchall()]
 
 
@@ -848,18 +870,51 @@ def ingest_filer_13f(
 def ingest_all_active_filers(
     conn: psycopg.Connection[tuple],
     sec: SecArchiveFetcher,
+    *,
+    ciks: list[str] | None = None,
+    deadline_seconds: float | None = None,
+    source_label: str = "sec_edgar_13f",
 ) -> list[IngestSummary]:
-    """Walk every active row in institutional_filer_seeds and ingest."""
-    seeds = _list_active_filer_seeds(conn)
-    if not seeds:
-        logger.info("13F ingest: no active filer seeds; nothing to do")
+    """Walk a list of filer CIKs and ingest each filer's pending 13F-HRs.
+
+    ``ciks`` selects the universe:
+      * ``None`` (default) — walks ``institutional_filer_seeds`` for
+        operator-curated runs (legacy behaviour, kept for backward
+        compat with the existing scheduled trigger).
+      * supplied list — walks exactly those CIKs in order. The new
+        ``sec_13f_quarterly_sweep`` job (#913) passes the universe
+        from ``institutional_filers`` so every filer in the SEC
+        directory gets ingested.
+
+    ``deadline_seconds`` is a soft budget — when exceeded between
+    per-filer iterations, the loop stops cleanly and the partial
+    work commits. Already-ingested accessions are tombstoned in
+    ``institutional_holdings_ingest_log``, so the next sweep
+    resumes against the unprocessed tail rather than redoing work.
+
+    ``source_label`` distinguishes audit trails — the seed-curated
+    run keeps ``sec_edgar_13f`` so existing dashboards aren't
+    perturbed; the universe sweep passes ``sec_edgar_13f_directory``
+    so an operator can grep ``data_ingestion_runs`` to separate the
+    two paths.
+    """
+    if ciks is None:
+        ciks = _list_active_filer_seeds(conn)
+    if not ciks:
+        logger.info("13F ingest: no filer CIKs to ingest; nothing to do")
         return []
+
+    deadline_ts: float | None
+    if deadline_seconds is None:
+        deadline_ts = None
+    else:
+        deadline_ts = time.monotonic() + deadline_seconds
 
     run_id = start_ingestion_run(
         conn,
-        source="sec_edgar_13f",
+        source=source_label,
         endpoint="/Archives/edgar/data/{cik}/{accession}/",
-        instrument_count=len(seeds),
+        instrument_count=len(ciks),
     )
     conn.commit()
 
@@ -869,8 +924,19 @@ def ingest_all_active_filers(
     crash_error: str | None = None
     accession_failures = 0
     first_accession_error: str | None = None
+    deadline_hit = False
+    filers_attempted = 0
     try:
-        for cik in seeds:
+        for cik in ciks:
+            if deadline_ts is not None and time.monotonic() >= deadline_ts:
+                deadline_hit = True
+                logger.info(
+                    "13F ingest: deadline reached after %d/%d filers; remaining will be picked up by the next sweep",
+                    filers_attempted,
+                    len(ciks),
+                )
+                break
+            filers_attempted += 1
             try:
                 summary = ingest_filer_13f(conn, sec, filer_cik=cik, ingestion_run_id=run_id)
             except Exception as exc:  # noqa: BLE001 — per-filer crash must not abort the batch
@@ -887,13 +953,21 @@ def ingest_all_active_filers(
                 first_accession_error = f"{cik} {summary.first_error}"
     finally:
         # Status precedence:
+        #   * deadline hit (work was interrupted, partial by definition)
+        #     -> partial, even if every attempted filer crashed
         #   * any per-filer crash + zero successful summaries -> failed
         #   * any per-filer crash with at least one summary    -> partial
         #   * any per-accession failure across the batch       -> partial
         #   * any per-accession unresolved-CUSIP skip          -> partial
         #     (rows_skipped > 0 indicates partial coverage)
         #   * else                                              -> success
-        if crash_error and not summaries:
+        # Codex pre-push review #913: deadline_hit must beat the
+        # crash-only `failed` branch so an interrupted sweep with
+        # incidental per-filer crashes is correctly classified as
+        # resumable partial work.
+        if deadline_hit:
+            status = "partial"
+        elif crash_error and not summaries:
             status = "failed"
         elif crash_error or accession_failures > 0 or rows_skipped > 0:
             status = "partial"
@@ -914,6 +988,10 @@ def ingest_all_active_filers(
             # just unresolved CUSIPs). Surface the count as the only
             # signal so the operator can correlate with #740.
             error_parts.append(f"{rows_skipped} holdings skipped — CUSIPs unresolved (#740)")
+        if deadline_hit:
+            # Surface the deadline interruption explicitly so the
+            # operator knows the next sweep should resume the tail.
+            error_parts.append(f"deadline reached after {filers_attempted}/{len(ciks)} filers")
         finish_ingestion_run(
             conn,
             run_id=run_id,

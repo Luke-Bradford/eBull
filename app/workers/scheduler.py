@@ -250,6 +250,7 @@ JOB_CUSIP_EXTID_SWEEP = "cusip_extid_sweep"
 JOB_OWNERSHIP_OBSERVATIONS_SYNC = "ownership_observations_sync"
 JOB_OWNERSHIP_OBSERVATIONS_BACKFILL = "ownership_observations_backfill"
 JOB_SEC_13F_FILER_DIRECTORY_SYNC = "sec_13f_filer_directory_sync"
+JOB_SEC_13F_QUARTERLY_SWEEP = "sec_13f_quarterly_sweep"
 JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
 JOB_ETORO_LOOKUPS_REFRESH = "etoro_lookups_refresh"
 
@@ -737,6 +738,32 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # waiting for the next Sunday.
         cadence=Cadence.weekly(weekday=6, hour=4, minute=0),
         catch_up_on_boot=True,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_13F_QUARTERLY_SWEEP,
+        description=(
+            "Quarterly sweep — walk every CIK in ``institutional_filers`` "
+            "(populated by sec_13f_filer_directory_sync #912) and ingest "
+            "each filer's pending 13F-HRs through ``ingest_filer_13f`` "
+            "(#913 / #841 PR2). Universe-expansion entrypoint: AAPL "
+            "institutional rollup pre-sweep is 5.94%; gurufocus parity "
+            "~62% requires every active filer's holdings to land. "
+            "Per-filer crashes are isolated; already-ingested accessions "
+            "are tombstoned in institutional_holdings_ingest_log so a "
+            "deadline-interrupted sweep resumes the tail on the next "
+            "fire. Cadence: weekly Saturday 02:00 UTC — 13F-HRs have a "
+            "45-day filing deadline so weekly catches new accessions "
+            "within a week of the universe filing them. ~30 min "
+            "wall-clock in steady state (most filers up-to-date), up "
+            "to ~6h on a cold first sweep against an 11k-filer "
+            "directory. Soft 6h deadline budget keeps the job from "
+            "running unbounded; the next sweep resumes."
+        ),
+        cadence=Cadence.weekly(weekday=5, hour=2, minute=0),
+        # Don't catch up on boot — a missed window costs at most 7 days
+        # of staleness on quarterly-cadence data, and firing a 6h sweep
+        # on every dev restart would burn SEC bandwidth + DB I/O.
+        catch_up_on_boot=False,
     ),
     ScheduledJob(
         name=JOB_SEC_13F_FILER_DIRECTORY_SYNC,
@@ -3563,6 +3590,56 @@ def ownership_observations_backfill() -> None:
             result.blockholders.observations_recorded,
             result.treasury.observations_recorded,
             result.def14a.observations_recorded,
+        )
+
+
+def sec_13f_quarterly_sweep() -> None:
+    """Quarterly sweep — walk every CIK in ``institutional_filers``
+    (populated by ``sec_13f_filer_directory_sync`` #912) and ingest
+    each filer's pending 13F-HR / 13F-HR/A accessions through the
+    existing ``ingest_filer_13f`` per-filer pipeline (#913 / #841 PR2).
+
+    Soft 6h deadline budget — already-ingested accessions are
+    tombstoned in ``institutional_holdings_ingest_log`` so a
+    deadline-interrupted sweep resumes the tail on the next fire.
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.institutional_holdings import (
+        ingest_all_active_filers,
+        list_directory_filer_ciks,
+    )
+
+    deadline_seconds = settings.sec_13f_sweep_deadline_seconds
+
+    with _tracked_job(JOB_SEC_13F_QUARTERLY_SWEEP) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            ciks = list_directory_filer_ciks(conn)
+            summaries = ingest_all_active_filers(
+                conn,
+                sec,
+                ciks=ciks,
+                deadline_seconds=deadline_seconds,
+                source_label="sec_edgar_13f_directory",
+            )
+
+        total_filers = len(ciks)
+        processed = len(summaries)
+        rows_upserted = sum(s.holdings_inserted for s in summaries)
+        rows_skipped = sum(s.holdings_skipped_no_cusip for s in summaries)
+        accessions_ingested = sum(s.accessions_ingested for s in summaries)
+        tracker.row_count = rows_upserted
+        logger.info(
+            "sec_13f_quarterly_sweep: filers=%d processed=%d "
+            "accessions_ingested=%d holdings_inserted=%d "
+            "holdings_skipped_no_cusip=%d",
+            total_filers,
+            processed,
+            accessions_ingested,
+            rows_upserted,
+            rows_skipped,
         )
 
 

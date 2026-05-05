@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     # SEC EDGAR requires no API key (public API, 10 req/s fair-use limit)
     sec_user_agent: str = "eBull dev@example.com"
 
+    # Soft deadline (seconds) for the universe-wide 13F-HR quarterly
+    # sweep (#913). The sweep walks ~11k filers in ``institutional_filers``;
+    # at ~1-3s per filer the cold first sweep can run several hours.
+    # Already-ingested accessions are tombstoned in
+    # ``institutional_holdings_ingest_log`` so a deadline-interrupted
+    # run resumes the tail on the next weekly fire. Default 6h.
+    sec_13f_sweep_deadline_seconds: float = 6 * 60 * 60
+
     anthropic_api_key: str | None = None
 
     default_portfolio_mode: str = "balanced"
