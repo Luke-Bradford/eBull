@@ -142,6 +142,7 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "cik_raw_documents",
     "sec_filing_manifest",
     "data_freshness_index",
+    "sec_reference_documents",
     "decision_audit",
     "trade_recommendations",
     "operators",
