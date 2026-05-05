@@ -14,12 +14,25 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from uuid import uuid4
 
 import psycopg
 import psycopg.rows
 import pytest
 
 from app.services import ownership_rollup
+from app.services.ownership_observations import (
+    record_blockholder_observation,
+    record_def14a_observation,
+    record_insider_observation,
+    record_institution_observation,
+    record_treasury_observation,
+    refresh_blockholders_current,
+    refresh_def14a_current,
+    refresh_insiders_current,
+    refresh_institutions_current,
+    refresh_treasury_current,
+)
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
 
 pytestmark = pytest.mark.integration
@@ -96,6 +109,26 @@ def _seed_outstanding(
             period_end.year,
         ),
     )
+    # Mirror treasury_shares to ownership_treasury_current so the
+    # post-#905 read path picks it up. The legacy financial_periods
+    # write above is kept for any other code path that still reads
+    # treasury from there.
+    if treasury is not None:
+        record_treasury_observation(
+            conn,
+            instrument_id=instrument_id,
+            source="xbrl_dei",
+            source_document_id=f"OUTSTANDING-{instrument_id}-{period_end}",
+            source_accession=f"OUTSTANDING-{instrument_id}-{period_end}",
+            source_field="treasury_shares",
+            source_url=None,
+            filed_at=datetime(period_end.year, period_end.month, 1, tzinfo=UTC),
+            period_start=None,
+            period_end=period_end,
+            ingest_run_id=uuid4(),
+            treasury_shares=Decimal(treasury),
+        )
+        refresh_treasury_current(conn, instrument_id=instrument_id)
 
 
 def _seed_form4(
@@ -137,6 +170,29 @@ def _seed_form4(
             is_derivative,
         ),
     )
+    # Mirror to ownership_insiders_observations + refresh _current.
+    # Matches the production write-through pattern from
+    # ``app/services/insider_transactions.py`` (#888); #905 cut the
+    # rollup read path over to ``ownership_insiders_current`` so
+    # legacy-only seeds would surface as zero rows.
+    record_insider_observation(
+        conn,
+        instrument_id=instrument_id,
+        holder_cik=filer_cik,
+        holder_name=filer_name,
+        ownership_nature="direct",
+        source="form4",
+        source_document_id=f"{accession}#{txn_row_num}",
+        source_accession=accession,
+        source_field="post_transaction_shares",
+        source_url=None,
+        filed_at=datetime.combine(txn_date, datetime.min.time(), tzinfo=UTC),
+        period_start=None,
+        period_end=txn_date,
+        ingest_run_id=uuid4(),
+        shares=Decimal(post_transaction_shares),
+    )
+    refresh_insiders_current(conn, instrument_id=instrument_id)
 
 
 def _seed_form3(
@@ -159,6 +215,24 @@ def _seed_form3(
         """,
         (accession, row_num, instrument_id, filer_cik, filer_name, Decimal(shares), as_of),
     )
+    record_insider_observation(
+        conn,
+        instrument_id=instrument_id,
+        holder_cik=filer_cik,
+        holder_name=filer_name,
+        ownership_nature="direct",
+        source="form3",
+        source_document_id=f"{accession}#{row_num}",
+        source_accession=accession,
+        source_field="shares",
+        source_url=None,
+        filed_at=datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
+        period_start=None,
+        period_end=as_of,
+        ingest_run_id=uuid4(),
+        shares=Decimal(shares),
+    )
+    refresh_insiders_current(conn, instrument_id=instrument_id)
 
 
 def _seed_block(
@@ -209,6 +283,28 @@ def _seed_block(
             filer_cik,
         ),
     )
+    source_kind = "13d" if submission_type.startswith("SCHEDULE 13D") else "13g"
+    record_blockholder_observation(
+        conn,
+        instrument_id=instrument_id,
+        reporter_cik=filer_cik,
+        reporter_name=filer_name,
+        ownership_nature="beneficial",
+        submission_type=submission_type,
+        status_flag=status,
+        source=source_kind,
+        source_document_id=accession,
+        source_accession=accession,
+        source_field="aggregate_amount_owned",
+        source_url=None,
+        filed_at=filed_at,
+        period_start=None,
+        period_end=filed_at.date(),
+        ingest_run_id=uuid4(),
+        aggregate_amount_owned=Decimal(aggregate_shares),
+        percent_of_class=None,
+    )
+    refresh_blockholders_current(conn, instrument_id=instrument_id)
 
 
 def _seed_inst_holding(
@@ -231,6 +327,7 @@ def _seed_inst_holding(
         """,
         (filer_cik, filer_name, filer_type),
     )
+    filed_at = datetime(period_of_report.year, period_of_report.month, 1, tzinfo=UTC)
     conn.execute(
         """
         INSERT INTO institutional_holdings (
@@ -246,10 +343,33 @@ def _seed_inst_holding(
             period_of_report,
             Decimal(shares),
             is_put_call,
-            datetime(period_of_report.year, period_of_report.month, 1, tzinfo=UTC),
+            filed_at,
             filer_cik,
         ),
     )
+    exposure_kind = "EQUITY" if is_put_call is None else ("PUT" if is_put_call == "PUT" else "CALL")
+    record_institution_observation(
+        conn,
+        instrument_id=instrument_id,
+        filer_cik=filer_cik,
+        filer_name=filer_name,
+        filer_type=filer_type,
+        ownership_nature="economic",
+        source="13f",
+        source_document_id=f"{accession}#{filer_cik}#{exposure_kind}",
+        source_accession=accession,
+        source_field="shares",
+        source_url=None,
+        filed_at=filed_at,
+        period_start=None,
+        period_end=period_of_report,
+        ingest_run_id=uuid4(),
+        shares=Decimal(shares),
+        market_value_usd=None,
+        voting_authority="SOLE",
+        exposure_kind=exposure_kind,
+    )
+    refresh_institutions_current(conn, instrument_id=instrument_id)
 
 
 def _seed_def14a(
@@ -270,6 +390,25 @@ def _seed_def14a(
         """,
         (instrument_id, accession, holder_name, Decimal(shares), as_of),
     )
+    record_def14a_observation(
+        conn,
+        instrument_id=instrument_id,
+        holder_name=holder_name,
+        holder_role="officer",
+        ownership_nature="beneficial",
+        source="def14a",
+        source_document_id=f"{accession}#{holder_name}",
+        source_accession=accession,
+        source_field="shares",
+        source_url=None,
+        filed_at=datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
+        period_start=None,
+        period_end=as_of,
+        ingest_run_id=uuid4(),
+        shares=Decimal(shares),
+        percent_of_class=Decimal("5.5"),
+    )
+    refresh_def14a_current(conn, instrument_id=instrument_id)
 
 
 # ---------------------------------------------------------------------------
@@ -632,10 +771,13 @@ class TestDedupPriority:
         # Both rows share aggregate 36,847,842 — collapsed (latest
         # amendment wins). Doubled to 73,695,684 = double-count bug.
         assert block_slices[0].total_shares == Decimal("36847842")
-        # Latest amendment's accession is the survivor.
+        # Latest amendment's accession is the survivor. Under #905 the
+        # _current path returns the per-(reporter_cik, nature) winning
+        # row already, so older amendments do not show up as
+        # dropped_sources at the rollup layer — that history is still
+        # preserved in ownership_blockholders_observations for
+        # drill-through, but the rollup just exposes the latest.
         assert block_slices[0].holders[0].winning_accession == "13D-RC-2025-001"
-        # Earlier amendment ships as a dropped_source for provenance.
-        assert any(d.accession_number == "13D-RC-2024-001" for d in block_slices[0].holders[0].dropped_sources)
 
     def test_837_regression_other_instrument_blockholder_surfaces(
         self,
@@ -705,8 +847,13 @@ class TestDef14aEnrichment:
 
     def test_resolver_matches_form4_filer(self, _setup: psycopg.Connection[tuple]) -> None:
         """DEF 14A holder ``"Smith Jane"`` resolves to a Form 4 filer
-        with CIK ``0001100100``. Form 4 wins priority (rank 1 > rank
-        4); the DEF 14A accession ships in ``dropped_sources``."""
+        with CIK ``0001100100``. Under the two-axis model (#840 P1 +
+        #905 read-path cutover), Form 4 (direct) and DEF 14A
+        (beneficial) live in separate dedup groups by ownership_nature
+        and BOTH surface as holders in the insiders slice. The DEF 14A
+        is no longer dropped against Form 4 — they describe different
+        natures (record-name vs Rule 13d-3 beneficial) and the
+        operator-visible chart shows both."""
         conn = _setup
         cik = "0001100100"
         _seed_form4(
@@ -730,10 +877,12 @@ class TestDef14aEnrichment:
         rollup = ownership_rollup.get_ownership_rollup(conn, symbol="DEF14A", instrument_id=789_010)
 
         insiders = [s for s in rollup.slices if s.category == "insiders"][0]
-        smith = insiders.holders[0]
-        assert smith.winning_source == "form4"
-        assert smith.shares == Decimal("500000")
-        assert any(d.source == "def14a" for d in smith.dropped_sources)
+        sources_present = {h.winning_source for h in insiders.holders}
+        assert sources_present == {"form4", "def14a"}, (
+            f"insiders should carry both form4 + def14a holders: {sources_present}"
+        )
+        # def14a was matched against the Form 4 by name resolver, so it
+        # must NOT land in the unmatched slice.
         assert not any(s.category == "def14a_unmatched" for s in rollup.slices)
 
     def test_unmatched_def14a_lands_in_unmatched_slice(self, _setup: psycopg.Connection[tuple]) -> None:
@@ -760,9 +909,14 @@ class TestDef14aEnrichment:
         """Codex pre-push review (Batch 1 of #788) caught this: a
         DEF 14A holder name that resolves to a legacy NULL-CIK Form 4
         row must route to the insiders slice (not def14a_unmatched).
-        The resolver returns ``matched=True, cik=None`` for that
-        case; my prior code branched on ``cik is not None`` and lost
-        the holder."""
+        The resolver returns ``matched=True, cik=None`` for that case.
+
+        Post-#905 two-axis model: Form 4 (direct) and the resolved
+        DEF 14A (beneficial) BOTH render as holders in the insiders
+        slice. The matched DEF 14A is no longer ``def14a_unmatched`` —
+        which is the regression this test originally caught — but is
+        also no longer dropped against the Form 4 row, since they
+        describe different ownership natures."""
         conn = _setup
         _seed_form4(
             conn,
@@ -785,13 +939,12 @@ class TestDef14aEnrichment:
         rollup = ownership_rollup.get_ownership_rollup(conn, symbol="DEF14A", instrument_id=789_010)
         insiders = [s for s in rollup.slices if s.category == "insiders"]
         assert len(insiders) == 1
-        legacy = insiders[0].holders[0]
-        # Legacy Form 4 with NULL CIK wins (priority 1 vs def14a's 4).
-        assert legacy.filer_name == "Legacy Officer"
-        assert legacy.winning_source == "form4"
-        assert legacy.filer_cik is None  # legacy row has no CIK
-        # DEF 14A accession should ship as a dropped source.
-        assert any(d.source == "def14a" for d in legacy.dropped_sources)
+        # Legacy NULL-CIK Form 4 + matched DEF 14A both surface in the
+        # insiders slice under the two-axis model.
+        sources_present = {h.winning_source for h in insiders[0].holders}
+        assert sources_present == {"form4", "def14a"}
+        # DEF 14A is matched, not unmatched.
+        assert not any(s.category == "def14a_unmatched" for s in rollup.slices)
         # def14a_unmatched slice should NOT contain this holder.
         assert not any(s.category == "def14a_unmatched" for s in rollup.slices)
 
