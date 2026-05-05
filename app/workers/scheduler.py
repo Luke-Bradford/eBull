@@ -251,6 +251,7 @@ JOB_OWNERSHIP_OBSERVATIONS_SYNC = "ownership_observations_sync"
 JOB_OWNERSHIP_OBSERVATIONS_BACKFILL = "ownership_observations_backfill"
 JOB_SEC_13F_FILER_DIRECTORY_SYNC = "sec_13f_filer_directory_sync"
 JOB_SEC_13F_QUARTERLY_SWEEP = "sec_13f_quarterly_sweep"
+JOB_CUSIP_UNIVERSE_BACKFILL = "cusip_universe_backfill"
 JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
 JOB_ETORO_LOOKUPS_REFRESH = "etoro_lookups_refresh"
 
@@ -737,6 +738,35 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # a fresh DB picks up real descriptions instead of NULLs without
         # waiting for the next Sunday.
         cadence=Cadence.weekly(weekday=6, hour=4, minute=0),
+        catch_up_on_boot=True,
+    ),
+    ScheduledJob(
+        name=JOB_CUSIP_UNIVERSE_BACKFILL,
+        description=(
+            "Quarterly CUSIP coverage backfill (#914 / #841 PR3). "
+            "Walks SEC's Official List of Section 13(f) Securities "
+            "(the canonical free regulated source — CUSIP + issuer "
+            "name + description, ~12k rows per quarter), fuzzy-matches "
+            "each row against ``instruments.company_name``, INSERTs "
+            "confident matches into ``external_identifiers``. "
+            "Post-batch ``sweep_resolvable_unresolved_cusips`` "
+            "promotes previously-stranded 13F holdings into "
+            "``institutional_holdings``. Closes the chain: PR1 #912 "
+            "discovers filers, PR2 #913 ingests their holdings (most "
+            "of which strand on unresolved CUSIP), PR3 (this job) "
+            "populates the CUSIP map and drains the strand. "
+            "Cadence: weekly Sunday 05:00 UTC — 30 min after "
+            "ownership_observations_backfill (03:00) and 30 min after "
+            "etoro_lookups_refresh (04:30). Idempotent: already-"
+            "mapped instruments are filtered at SELECT; re-runs on a "
+            "populated install are cheap reads."
+        ),
+        cadence=Cadence.weekly(weekday=6, hour=5, minute=0),
+        # Catch up on boot — fresh install with empty external_identifiers
+        # benefits from running this immediately so the next 13F sweep
+        # has CUSIP coverage to work with. Cost is bounded: one
+        # ~600KB SEC fetch + a Python-side fuzzy match over ~12k rows
+        # (~10s wall-clock).
         catch_up_on_boot=True,
     ),
     ScheduledJob(
@@ -3590,6 +3620,40 @@ def ownership_observations_backfill() -> None:
             result.blockholders.observations_recorded,
             result.treasury.observations_recorded,
             result.def14a.observations_recorded,
+        )
+
+
+def cusip_universe_backfill() -> None:
+    """Quarterly CUSIP coverage backfill (#914 / #841 PR3).
+
+    Walks SEC's Official List of Section 13(f) Securities (the
+    canonical free regulated source — CUSIP + issuer name + description,
+    ~12k rows per quarter), fuzzy-matches each row against
+    ``instruments.company_name``, INSERTs confident matches into
+    ``external_identifiers``. Post-batch
+    :func:`sweep_resolvable_unresolved_cusips` promotes previously-
+    stranded 13F holdings into ``institutional_holdings``.
+    """
+    from app.services.sec_13f_securities_list import backfill_cusip_coverage
+
+    with _tracked_job(JOB_CUSIP_UNIVERSE_BACKFILL) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            result = backfill_cusip_coverage(conn)
+
+        tracker.row_count = result.inserted
+        logger.info(
+            "cusip_universe_backfill: list_rows=%d instruments_seen=%d "
+            "inserted=%d already_mapped=%d unresolvable=%d ambiguous=%d "
+            "conflict=%d sweep_promoted=%d sweep_rewashed=%d",
+            result.list_rows,
+            result.instruments_seen,
+            result.inserted,
+            result.skipped_already_mapped,
+            result.tombstoned_unresolvable,
+            result.tombstoned_ambiguous,
+            result.tombstoned_conflict,
+            result.sweep.promoted,
+            result.sweep.rewashed,
         )
 
 
