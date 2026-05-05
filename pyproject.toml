@@ -18,6 +18,7 @@ dependencies = [
   "platformdirs>=4.2.0",
   "apscheduler>=3.10",
   "redis[hiredis]>=5.0.0",
+  "edgartools==5.30.2",
 ]
 
 [tool.uv]

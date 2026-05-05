@@ -17,19 +17,40 @@ This module is a pure parser: XML strings in, typed dataclasses out.
 HTTP fetch + DB resolution stay in the service layer — providers
 remain thin per the settled provider-design rule.
 
-XML namespaces:
+#925 — internals are now a thin wrapper over EdgarTools'
+``edgar.thirteenf.parsers.primary_xml.parse_primary_document_xml`` and
+``edgar.thirteenf.parsers.infotable_xml.parse_infotable_xml``. EdgarTools is pinned tight
+(``edgartools==5.30.2``, ceiling ``<5.31.0``) per the license/maintenance
+review at ``.claude/codex-913-license.txt``. The wrapper preserves
+the existing :class:`ThirteenFFilerInfo` / :class:`ThirteenFHolding`
+public surface so downstream callers (institutional_holdings,
+rewash_filings) need no change.
 
-  * primary_doc.xml uses ``http://www.sec.gov/edgar/thirteenffiler``
-    for cover-page elements.
-  * infotable.xml uses
-    ``http://www.sec.gov/edgar/document/thirteenf/informationtable``.
+What we still do ourselves:
 
-Both are stripped at parse time via :func:`_strip_ns` so callers
-work with bare element names (``infoTable``, not the namespaced form).
+  * **CIK extraction** — EdgarTools' ``PrimaryDocument13F`` does not
+    surface the filer CIK; we read it from
+    ``headerData/filerInfo/filer/credentials/cik`` directly and
+    zero-pad to 10 digits.
+  * **Signature-date timezone** — EdgarTools returns the raw string
+    ``MM-DD-YYYY``; we coerce to a ``datetime`` at midnight UTC so
+    the value lands in TIMESTAMPTZ without psycopg falling back to
+    the server's local zone.
+  * **PutCall normalisation** — EdgarTools returns the raw string
+    (``Put``, ``CALL``, etc.); we collapse to the constrained
+    ``Literal["PUT", "CALL"]`` and warn on unknown values.
+  * **Type-code passthrough** — EdgarTools relabels ``SH``/``PRN``
+    to ``Shares``/``Principal``; we map back to the raw two-letter
+    SEC codes that the rest of the pipeline expects.
+  * **Empty-CUSIP drop** — EdgarTools tolerates rows with empty
+    CUSIPs (or other missing required fields) by filling defaults;
+    we drop those rows so an unresolvable holding does not silently
+    appear with a blank identifier downstream.
 
-#730 PR 1 of 4. Subsequent PRs add the ingester (PR 2),
-filer-type classifier (PR 3), and reader API + frontend wiring
-(PR 4 — the ownership card #729 follow-on).
+Offline guarantee: EdgarTools' static parsers (and the bundled
+parquet ticker mapping it consults) operate purely on the input XML
+plus an in-package data file — no SEC fetches occur during parse.
+The golden-file replay test pins this contract.
 """
 
 from __future__ import annotations
@@ -38,10 +59,25 @@ import logging
 import xml.etree.ElementTree as ET  # noqa: S405 — SEC EDGAR is the trusted source for 13F-HR XML.
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
-from typing import Final, Literal
+from decimal import Decimal
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
+
+
+# EdgarTools is imported lazily inside the public entry points. Importing
+# ``edgar`` (or any of its submodules) at module-load time triggers the
+# package's filesystem cache initialiser (``HTTP_MGR``), which mkdirs
+# ``~/.edgar/_tcache`` as a side effect. That violates the pure-parser
+# contract — the parser must be safe to import on read-only or
+# sandboxed homes (CI runners, Docker images with non-writable $HOME).
+# Lazy-importing keeps the side effect deferred until the first parse
+# call, where the operator already accepts that EdgarTools is in play.
+def _edgar_parsers() -> tuple[Any, Any]:
+    from edgar.thirteenf.parsers.infotable_xml import parse_infotable_xml
+    from edgar.thirteenf.parsers.primary_xml import parse_primary_document_xml
+
+    return parse_primary_document_xml, parse_infotable_xml
 
 
 # ---------------------------------------------------------------------------
@@ -124,15 +160,6 @@ class ThirteenFHolding:
 # ---------------------------------------------------------------------------
 
 
-_NUMERIC_FIELDS: Final[tuple[str, ...]] = (
-    "value",
-    "sshPrnamt",
-    "Sole",
-    "Shared",
-    "None",
-)
-
-
 def _strip_ns(tag: str) -> str:
     """``{http://...}foo`` -> ``foo``. Idempotent on un-namespaced tags."""
     if "}" in tag:
@@ -150,50 +177,11 @@ def _walk_text(root: ET.Element, name: str) -> str | None:
     return None
 
 
-def _find_descendant(root: ET.Element, name: str) -> ET.Element | None:
-    """Find the first descendant element whose stripped name matches.
-
-    Returns the element so callers can scope further sub-element
-    lookups to it — ``_walk_text`` searches the entire tree, which
-    is unsafe for ambiguous element names like ``<name>`` that can
-    appear in multiple unrelated subtrees (filingManager, signature
-    block, internalUseFile, etc.).
-    """
-    for el in root.iter():
-        if _strip_ns(el.tag) == name:
-            return el
-    return None
-
-
-def _child_text(parent: ET.Element, name: str) -> str | None:
-    """Like ``_walk_text`` but scoped to ``parent``'s descendants."""
-    for el in parent.iter():
-        if _strip_ns(el.tag) == name and el.text is not None:
-            text = el.text.strip()
-            if text:
-                return text
-    return None
-
-
-def _decimal_or_none(text: str | None) -> Decimal | None:
-    if text is None:
-        return None
-    try:
-        return Decimal(text.replace(",", ""))
-    except InvalidOperation:
-        return None
-
-
-def _parse_date_mmddyyyy(text: str | None) -> date | None:
-    """13F cover-page reportCalendarOrQuarter ships as MM-DD-YYYY."""
-    if text is None:
-        return None
-    for fmt in ("%m-%d-%Y", "%Y-%m-%d", "%m/%d/%Y"):
-        try:
-            return datetime.strptime(text, fmt).date()
-        except ValueError:
-            continue
-    return None
+def _zero_pad_cik(text: str) -> str:
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if not digits:
+        raise ValueError(f"primary_doc.xml carried a non-numeric CIK: {text!r}")
+    return digits.zfill(10)
 
 
 def _parse_signature_date(text: str | None) -> datetime | None:
@@ -202,17 +190,27 @@ def _parse_signature_date(text: str | None) -> datetime | None:
     ``filed_at TIMESTAMPTZ`` without psycopg falling back to the
     server's local zone (which differs from UTC on non-UTC dev hosts
     and would cause cross-tz drift in the persisted timestamp)."""
-    parsed = _parse_date_mmddyyyy(text)
-    if parsed is None:
+    if text is None:
         return None
-    return datetime(parsed.year, parsed.month, parsed.day, tzinfo=UTC)
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+    for fmt in ("%m-%d-%Y", "%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            parsed = datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+        return datetime(parsed.year, parsed.month, parsed.day, tzinfo=UTC)
+    return None
 
 
-def _zero_pad_cik(text: str) -> str:
-    digits = "".join(ch for ch in text if ch.isdigit())
-    if not digits:
-        raise ValueError(f"primary_doc.xml carried a non-numeric CIK: {text!r}")
-    return digits.zfill(10)
+# Type-code map: EdgarTools rewrites the SEC two-letter codes; we want the
+# raw SEC codes back so downstream consumers (institutional_holdings, the
+# ownership-card slice) keep their existing contract.
+_TYPE_CODE_FROM_LABEL: dict[str, str] = {
+    "Shares": "SH",
+    "Principal": "PRN",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -227,107 +225,137 @@ def parse_primary_doc(xml: str) -> ThirteenFFilerInfo:
     filing manager name, or the period of report — those three are
     the minimum viable record for an ingester to write rows against.
     """
+    # CIK lives under headerData/filerInfo/filer/credentials/cik in real
+    # SEC primary_doc.xml. EdgarTools' parser does not surface it, so we
+    # read it ourselves before delegating.
     root = ET.fromstring(xml)  # noqa: S314 — SEC EDGAR is the trusted source.
-
     cik_text = _walk_text(root, "cik")
     if cik_text is None:
         raise ValueError("primary_doc.xml is missing a <cik> element")
+    cik = _zero_pad_cik(cik_text)
 
-    # Scope the name lookup to the ``<filingManager>`` subtree so a
-    # ``<name>`` that appears under ``<signatureBlock>`` (signer's
-    # name) or any other unrelated branch can never be picked by
-    # mistake. Codex pre-push review caught this on PR review.
-    filing_manager = _find_descendant(root, "filingManager")
-    name = _child_text(filing_manager, "name") if filing_manager is not None else None
-    if name is None:
+    edgar_parse_primary, _ = _edgar_parsers()
+    parsed = edgar_parse_primary(xml)
+
+    name = (parsed.cover_page.filing_manager.name or "").strip()
+    if not name:
         raise ValueError("primary_doc.xml is missing the filingManager <name>")
 
-    period_text = _walk_text(root, "reportCalendarOrQuarter")
-    period_of_report = _parse_date_mmddyyyy(period_text)
-    if period_of_report is None:
-        raise ValueError(f"primary_doc.xml has no parseable <reportCalendarOrQuarter>; got {period_text!r}")
+    period_dt = parsed.report_period
+    period_of_report = period_dt.date() if isinstance(period_dt, datetime) else period_dt
+    if not isinstance(period_of_report, date):  # defensive
+        raise ValueError("primary_doc.xml has no parseable <periodOfReport>")
 
-    signature_date = _walk_text(root, "signatureDate")
-    filed_at = _parse_signature_date(signature_date)
+    filed_at = _parse_signature_date(parsed.signature.date)
 
-    table_value_total = _decimal_or_none(_walk_text(root, "tableValueTotal"))
+    # Defense-in-depth: EdgarTools' current 5.30.2 implementation
+    # constructs ``total_value`` from the raw XML text via
+    # ``Decimal(child_text(...))`` — never a float — but a future
+    # release that changes the type to ``float`` would silently
+    # introduce IEEE 754 rounding into our persisted total. Coerce
+    # via ``str()`` so the value rounds at the XML boundary, not at
+    # the float boundary.
+    table_value_raw = parsed.summary_page.total_value
+    table_value_total_usd: Decimal | None
+    if table_value_raw in (None, 0, Decimal(0)):
+        table_value_total_usd = None
+    else:
+        table_value_total_usd = Decimal(str(table_value_raw))
 
     return ThirteenFFilerInfo(
-        cik=_zero_pad_cik(cik_text),
-        name=name.strip(),
+        cik=cik,
+        name=name,
         period_of_report=period_of_report,
         filed_at=filed_at,
-        table_value_total_usd=table_value_total,
+        table_value_total_usd=table_value_total_usd,
     )
+
+
+def _normalise_put_call(raw: Any) -> Literal["PUT", "CALL"] | None:
+    """Map EdgarTools' raw ``putCall`` text to the constrained Literal."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    upper = text.upper()
+    if upper == "PUT":
+        return "PUT"
+    if upper == "CALL":
+        return "CALL"
+    logger.warning("13F infoTable row had unknown putCall=%r; treating as None", text)
+    return None
 
 
 def parse_infotable(xml: str) -> list[ThirteenFHolding]:
     """Parse a 13F-HR ``infotable.xml`` payload.
 
-    Returns one :class:`ThirteenFHolding` per ``<infoTable>`` element.
-    Skips rows where the CUSIP, value, or share count cannot be
-    resolved — those are malformed entries that no consumer of the
-    ingest can act on.
+    Returns one :class:`ThirteenFHolding` per ``<infoTable>`` element
+    that EdgarTools' parser surfaces. Drops rows where:
+
+      * the CUSIP is empty — unresolvable downstream and the join
+        column for ``external_identifiers``;
+      * both the dollar value and the share count are zero —
+        EdgarTools' XML parser falls back to ``0`` on missing
+        ``<value>`` / ``<sshPrnamt>`` rather than raising. Genuine
+        13F-HR rows always carry positive values for at least one of
+        those two columns, so a both-zero row is a malformed entry
+        no consumer of the ingest can act on. The bespoke parser this
+        wrapper replaces dropped these via ``_decimal_or_none``
+        returning ``None``; the explicit-zero check keeps that
+        contract.
     """
-    root = ET.fromstring(xml)  # noqa: S314 — SEC EDGAR is the trusted source.
+    _, edgar_parse_infotable = _edgar_parsers()
+    df = edgar_parse_infotable(xml)
 
     holdings: list[ThirteenFHolding] = []
-    for entry in root.iter():
-        if _strip_ns(entry.tag) != "infoTable":
+    if len(df) == 0:
+        return holdings
+
+    for record in df.to_dict(orient="records"):
+        cusip = str(record.get("Cusip") or "").strip()
+        if not cusip:
+            logger.debug("13F infoTable row dropped — empty CUSIP")
             continue
 
-        fields: dict[str, str] = {}
-        for child in entry.iter():
-            tag = _strip_ns(child.tag)
-            if child.text is not None:
-                text = child.text.strip()
-                if text:
-                    fields[tag] = text
-
-        cusip = fields.get("cusip")
-        value_text = fields.get("value")
-        shares_text = fields.get("sshPrnamt")
-        if cusip is None or value_text is None or shares_text is None:
+        value_int = int(record.get("Value") or 0)
+        shares_int = int(record.get("SharesPrnAmount") or 0)
+        if value_int == 0 and shares_int == 0:
             logger.debug(
-                "13F infoTable row dropped — missing required field; have keys=%s",
-                sorted(fields),
-            )
-            continue
-
-        value_usd = _decimal_or_none(value_text)
-        shares_or_principal = _decimal_or_none(shares_text)
-        if value_usd is None or shares_or_principal is None:
-            logger.debug(
-                "13F infoTable row dropped — non-numeric value/shares; cusip=%s",
+                "13F infoTable row dropped — both value and shares are 0; cusip=%s",
                 cusip,
             )
             continue
 
-        put_call_raw = fields.get("putCall")
-        put_call: Literal["PUT", "CALL"] | None
-        if put_call_raw is None:
-            put_call = None
-        elif put_call_raw.upper() == "PUT":
-            put_call = "PUT"
-        elif put_call_raw.upper() == "CALL":
-            put_call = "CALL"
-        else:
-            logger.warning("13F infoTable row had unknown putCall=%r; treating as None", put_call_raw)
-            put_call = None
+        type_label = str(record.get("Type") or "").strip()
+        type_code = _TYPE_CODE_FROM_LABEL.get(type_label)
+        if type_code is None:
+            # Mirror the ``putCall`` warn-and-default pattern. A
+            # silent fallback to ``SH`` would misclassify principal
+            # holdings (bonds reported via PRN) as share counts; an
+            # unrecognised label is more likely to be lib drift than
+            # genuine new SEC schema, so warn loudly.
+            if type_label:
+                logger.warning(
+                    "13F infoTable row had unknown Type label=%r; defaulting to SH (cusip=%s)",
+                    type_label,
+                    cusip,
+                )
+            type_code = "SH"
 
         holdings.append(
             ThirteenFHolding(
                 cusip=cusip,
-                name_of_issuer=fields.get("nameOfIssuer", ""),
-                title_of_class=fields.get("titleOfClass", ""),
-                value_usd=value_usd,
-                shares_or_principal=shares_or_principal,
-                shares_or_principal_type=fields.get("sshPrnamtType", "SH"),
-                put_call=put_call,
-                investment_discretion=fields.get("investmentDiscretion"),
-                voting_sole=_decimal_or_none(fields.get("Sole")) or Decimal(0),
-                voting_shared=_decimal_or_none(fields.get("Shared")) or Decimal(0),
-                voting_none=_decimal_or_none(fields.get("None")) or Decimal(0),
+                name_of_issuer=str(record.get("Issuer") or ""),
+                title_of_class=str(record.get("Class") or ""),
+                value_usd=Decimal(value_int),
+                shares_or_principal=Decimal(shares_int),
+                shares_or_principal_type=type_code,
+                put_call=_normalise_put_call(record.get("PutCall")),
+                investment_discretion=(str(record.get("InvestmentDiscretion") or "").strip() or None),
+                voting_sole=Decimal(int(record.get("SoleVoting") or 0)),
+                voting_shared=Decimal(int(record.get("SharedVoting") or 0)),
+                voting_none=Decimal(int(record.get("NonVoting") or 0)),
             )
         )
 

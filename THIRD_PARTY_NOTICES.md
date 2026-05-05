@@ -29,6 +29,7 @@ distribution.
 | platformdirs | MIT | <https://github.com/platformdirs/platformdirs> |
 | apscheduler | MIT | <https://github.com/agronholm/apscheduler> |
 | redis (with `hiredis` extras) | MIT | <https://github.com/redis/redis-py> |
+| edgartools | MIT | <https://github.com/dgunning/edgartools> |
 
 **psycopg LGPL note.** psycopg uses LGPL-3.0-or-later, which permits
 linking from non-GPL applications (including closed-source ones) so
