@@ -296,9 +296,8 @@ def _identity_key(filer_cik: str | None, filer_name: str) -> str:
     CIK when present (every modern Form 4 / 13F / 13D / Form 3 row);
     falls back to ``LOWER(TRIM(filer_name))`` for legacy NULL-CIK
     rows so two distinct NULL-CIK filers do not collapse into one
-    bucket. Mirrors the SQL DISTINCT ON expression in
-    :func:`_collect_canonical_holders_sql`. Codex review (v3 spec
-    pass) caught the prior over-collapse bug.
+    bucket. Codex review (v3 spec pass) caught the prior over-collapse
+    bug.
     """
     if filer_cik is not None and filer_cik.strip():
         return f"CIK:{filer_cik.strip()}"
@@ -322,10 +321,9 @@ _RESIDUAL_TOOLTIP = (
 
 
 def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instrument_id: int) -> list[_Candidate]:
-    """Build the canonical-holder candidate set from the new
-    ``ownership_*_current`` tables (#840.E). Mirrors the shape of
-    :func:`_collect_canonical_holders_sql` so the rest of the rollup
-    pipeline (dedup, bucket, residual, coverage) is unchanged.
+    """Build the canonical-holder candidate set from the per-source
+    ``ownership_*_current`` snapshots populated by Phase 1 write-through
+    (#888-#891) and primed by ``ownership_observations_backfill`` (#909).
 
     Maps:
       - ``ownership_insiders_current`` (form4, form3 + nature axis)
@@ -335,21 +333,12 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
       - ``ownership_institutions_current`` (13f, economic, EQUITY only;
         PUT / CALL exposures are option overlays, NOT pie wedges)
         → institutions / etfs candidates (filer_type drives bucket).
-      - ``ownership_def14a_current`` (def14a, beneficial) → def14a
-        candidates that go through the existing
-        ``_enrich_and_union_def14a`` path for CIK-resolution → matched
-        vs unmatched routing.
 
-    Treasury is read separately via the existing ``_read_treasury``
-    callsite (now optionally falling through to
-    ``ownership_treasury_current`` — see :func:`_read_treasury_from_current`).
-
-    The candidate set returned here covers insiders + blockholders +
-    institutions only. DEF 14A rows are fetched separately via
-    ``_read_def14a_unmatched_from_current`` and injected into
-    ``_enrich_and_union_def14a`` through its ``def14a_rows`` kwarg —
-    that keeps the DEF 14A unmatched-slice logic unchanged across both
-    read paths, so dual-read parity is testable on a single fixture."""
+    Treasury is read separately via :func:`_read_treasury_from_current`.
+    DEF 14A rows are fetched separately via
+    :func:`_read_def14a_unmatched_from_current` and injected into
+    :func:`_enrich_and_union_def14a` through its ``def14a_rows`` kwarg
+    so the matched/unmatched routing stays one code path."""
     rows: list[_Candidate] = []
     next_row_id = iter(range(1, 1_000_000))
 
@@ -498,8 +487,9 @@ def _read_def14a_unmatched_from_current(conn: psycopg.Connection[Any], instrumen
         cur.execute(
             """
             SELECT
-                row_number() OVER (ORDER BY holder_name_key) AS holding_id,
+                row_number() OVER (ORDER BY holder_name_key, ownership_nature) AS holding_id,
                 holder_name,
+                ownership_nature,
                 shares,
                 period_end AS as_of_date,
                 source_accession AS accession_number
@@ -512,82 +502,38 @@ def _read_def14a_unmatched_from_current(conn: psycopg.Connection[Any], instrumen
         return [dict(r) for r in cur.fetchall()]
 
 
-def _collect_canonical_holders_sql(conn: psycopg.Connection[Any], instrument_id: int) -> list[_Candidate]:
-    """Union Form 4 + Form 3 + 13D/G + 13F into one candidate list.
-
-    DEF 14A is unioned in Python after the holder-name resolver runs
-    (DEF 14A's schema has no filer_cik). The SQL pre-collapses each
-    source to one row per CIK-or-name identity to keep the Python
-    dedup pass O(N).
-
-    ``filer_type`` is carried through here because the slice
-    bucketer (institutions vs ETFs) depends on it post-dedup. Codex
-    v2 review caught a prior version that dropped it.
-    """
-    rows: list[_Candidate] = []
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(_CANONICAL_UNION_SQL, {"iid": instrument_id})
-        for row in cur.fetchall():
-            shares = row.get("shares")
-            if shares is None:
-                continue
-            rows.append(
-                _Candidate(
-                    source=str(row["source"]),  # type: ignore[arg-type]
-                    priority_rank=int(row["priority_rank"]),  # type: ignore[arg-type]
-                    filer_cik=(str(row["filer_cik"]) if row.get("filer_cik") is not None else None),
-                    filer_name=str(row["filer_name"]),  # type: ignore[arg-type]
-                    filer_type=(str(row["filer_type"]) if row.get("filer_type") is not None else None),
-                    shares=Decimal(shares),
-                    as_of_date=row.get("as_of_date"),  # type: ignore[arg-type]
-                    accession_number=str(row["accession_number"]),  # type: ignore[arg-type]
-                    source_row_id=int(row["source_row_id"]),  # type: ignore[arg-type]
-                )
-            )
-    return rows
-
-
 def _enrich_and_union_def14a(
     conn: psycopg.Connection[Any],
     instrument_id: int,
     sql_candidates: list[_Candidate],
     *,
-    def14a_rows: list[dict[str, Any]] | None = None,
+    def14a_rows: list[dict[str, Any]],
 ) -> tuple[list[_Candidate], list[_Candidate]]:
     """Resolve each DEF 14A holder to a filer_cik and union into the
     candidate set. Returns ``(matched_candidates, unmatched_candidates)``.
 
-    Matched DEF 14A rows enter dedup with their resolved CIK; they
-    will lose the priority race against Form 4 / 13D in almost every
-    case (rank 4 > rank 1/3) but the dropped accession ships in the
-    survivor's ``dropped_sources`` for provenance.
+    Under the two-axis model (#840 P1 + #905 cutover) DEF 14A
+    candidates carry ``ownership_nature='beneficial'`` and live in
+    their own dedup group separate from same-CIK Form 4 (direct) /
+    Form 3 (direct) rows. Matched DEF 14A rows therefore surface as
+    independent holders in the insiders slice rather than collapsing
+    into a Form 4 ``dropped_source``.
 
     Unmatched DEF 14A rows go directly to the ``def14a_unmatched``
     slice keyed on the holder name — no CIK is available to dedup
     against. These are mostly named officers in the proxy who never
     filed a Form 4 / Form 3.
 
-    ``def14a_rows`` (#840.E): when None, reads from the legacy
-    ``def14a_beneficial_holdings`` table — preserves the prior
-    behaviour. When supplied (e.g., by the new read-from-current
-    path), the enrichment runs against those rows instead. Same dict
-    shape either way: ``{holding_id, holder_name, shares, as_of_date,
-    accession_number}``.
+    ``def14a_rows`` shape: ``{holding_id, holder_name, ownership_nature,
+    shares, as_of_date, accession_number}`` — supplied by
+    :func:`_read_def14a_unmatched_from_current`. Codex pre-push review
+    for #905 caught the prior shape that omitted ``ownership_nature``:
+    ``ownership_def14a_current`` PK is
+    ``(instrument_id, holder_name_key, ownership_nature)`` so a single
+    holder can carry both a beneficial row and a voting row. Without
+    ``ownership_nature`` on the candidate, those rows would collapse
+    into one in :func:`_dedup_by_priority`.
     """
-    if def14a_rows is None:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(
-                """
-                SELECT holding_id, holder_name, shares, as_of_date,
-                       accession_number
-                FROM def14a_beneficial_holdings
-                WHERE instrument_id = %s
-                  AND shares IS NOT NULL
-                """,
-                (instrument_id,),
-            )
-            def14a_rows = [dict(r) for r in cur.fetchall()]
-
     matched: list[_Candidate] = list(sql_candidates)
     unmatched: list[_Candidate] = []
     for row in def14a_rows:
@@ -606,6 +552,7 @@ def _enrich_and_union_def14a(
             as_of_date=row.get("as_of_date"),  # type: ignore[arg-type]
             accession_number=str(row["accession_number"]),  # type: ignore[arg-type]
             source_row_id=int(row["holding_id"]),  # type: ignore[arg-type]
+            ownership_nature=str(row["ownership_nature"]) if row.get("ownership_nature") else None,
         )
         # Use the resolver's ``matched`` flag, not just ``cik is not
         # None``. The resolver returns ``matched=True, cik=None`` for a
@@ -636,15 +583,12 @@ def _dedup_by_priority(candidates: Iterable[_Candidate]) -> list[Holder]:
          filer-year sequence wins)
       4. ``source_row_id`` descending (final pin against ties)
 
-    Matches the SQL DISTINCT ON ordering in
-    :data:`_CANONICAL_UNION_SQL` and the pinned spec sequence Codex
-    reviewed.
+    Matches the pinned spec sequence Codex reviewed.
     """
     # Codex pre-push review for #840.E: include ``ownership_nature``
-    # in the dedup identity key whenever it's set (always under the
-    # flag-ON path, never under legacy). Without this, a holder's
-    # direct + indirect rows from ``ownership_*_current`` collapse
-    # into one and the second nature is silently dropped.
+    # in the dedup identity key. Without this, a holder's direct +
+    # indirect rows from ``ownership_*_current`` collapse into one
+    # and the second nature is silently dropped.
     groups: dict[str, list[_Candidate]] = {}
     for c in candidates:
         base_key = _identity_key(c.filer_cik, c.filer_name)
@@ -1143,34 +1087,6 @@ def _read_shares_outstanding(
     )
 
 
-def _read_treasury(conn: psycopg.Connection[Any], instrument_id: int) -> tuple[Decimal | None, date | None]:
-    """Latest non-null ``treasury_shares`` from ``financial_periods``.
-
-    Mirrors the frontend ``pickLatestBalance`` walk-the-rows
-    semantic: the most recent quarterly row with a non-null
-    treasury value wins. Returns ``(None, None)`` when no row
-    has the column populated."""
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT treasury_shares, period_end_date
-            FROM financial_periods
-            WHERE instrument_id = %s
-              AND superseded_at IS NULL
-              AND treasury_shares IS NOT NULL
-              AND period_type IN ('Q1','Q2','Q3','Q4')
-            ORDER BY period_end_date DESC,
-                     filed_date DESC NULLS LAST
-            LIMIT 1
-            """,
-            (instrument_id,),
-        )
-        row = cur.fetchone()
-    if row is None:
-        return None, None
-    return Decimal(row["treasury_shares"]), row.get("period_end_date")  # type: ignore[arg-type]
-
-
 def _read_universe_estimates(conn: psycopg.Connection[Any], instrument_id: int) -> dict[str, int | None]:
     """Per-category universe estimates. Tier 0 returns NULL for every
     category — the per-instrument 13F filer-count ingest lands in
@@ -1202,13 +1118,14 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     review caught the v1 spec attempting the inner-transaction
     anti-pattern.
 
-    Reads from the legacy typed tables (``insider_transactions`` etc.)
-    today. The new ``ownership_*_current`` snapshot lives alongside
-    via Phase 1 (#840) write-through; the cutover to read from it
-    lands in #841 along with the legacy reader retirement. The
-    previous ``EBULL_OWNERSHIP_ROLLUP_FROM_CURRENT`` flag was removed
-    in this commit — read-path selection is internal plumbing, not
-    operator config.
+    Reads from the per-source ``ownership_*_current`` snapshots built
+    by Phase 1 (#840) write-through and primed by the
+    ``ownership_observations_backfill`` job (#909). #905 retires the
+    legacy typed-table readers (``_collect_canonical_holders_sql``,
+    ``_read_treasury``) — the new ``_current`` tables are the single
+    source of truth for the rollup. ``_enrich_and_union_def14a`` still
+    runs the holder-name resolver against ``ownership_def14a_current``
+    so the matched/unmatched routing is preserved.
     """
     outstanding, outstanding_as_of, outstanding_source = _read_shares_outstanding(conn, instrument_id)
     historical_symbols = tuple(historical_symbols_for(conn, instrument_id))
@@ -1218,9 +1135,10 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
             instrument_id=instrument_id,
             historical_symbols=historical_symbols,
         )
-    treasury, treasury_as_of = _read_treasury(conn, instrument_id)
-    sql_candidates = _collect_canonical_holders_sql(conn, instrument_id)
-    matched, unmatched_def14a = _enrich_and_union_def14a(conn, instrument_id, sql_candidates)
+    treasury, treasury_as_of = _read_treasury_from_current(conn, instrument_id)
+    sql_candidates = _collect_canonical_holders_from_current(conn, instrument_id)
+    def14a_rows = _read_def14a_unmatched_from_current(conn, instrument_id)
+    matched, unmatched_def14a = _enrich_and_union_def14a(conn, instrument_id, sql_candidates, def14a_rows=def14a_rows)
 
     # Split 13D/G out of the cross-source priority dedup (#837 / #788
     # P0b). 13D/G reports BENEFICIAL ownership per Rule 13d-3
@@ -1379,172 +1297,3 @@ def _csv_safe(value: str) -> str:
     if value and value[0] in ("=", "+", "-", "@", "\t", "\r"):
         return "'" + value
     return value
-
-
-# ---------------------------------------------------------------------------
-# SQL: canonical-holder union (Form 4 + Form 3 + 13D/G + 13F)
-# ---------------------------------------------------------------------------
-#
-# DEF 14A is unioned in Python via :func:`_enrich_and_union_def14a`
-# because its schema has no ``filer_cik`` and the holder-name resolver
-# is in Python (kept there so the role-suffix strip stays the single
-# source of truth — see ``app.services.holder_name_resolver``).
-
-
-# Joint 13D/G filings — design note for future readers / reviewers:
-#
-# A multi-reporter 13D/G filing has N rows in ``blockholder_filings``
-# (one per reporting person). SEC Rule 13d-1 requires every joint
-# reporter to claim the SAME beneficial ownership figure on the cover
-# page; the figures in ``aggregate_amount_owned`` therefore overlap.
-# Summing across joint reporters double-counts the underlying block.
-#
-# The CTE below intentionally collapses to one row per accession via
-# ``DISTINCT ON (accession_number) ORDER BY ... aggregate_amount_owned
-# DESC``, mirroring the existing ``/blockholders`` reader's
-# ``per_accession_block`` MAX rollup (see ``app/api/instruments.py``
-# ``get_instrument_blockholders``). Joint co-reporters lose visibility
-# in the rollup chart by design — they share beneficial ownership with
-# the canonical primary reporter and would inflate the slice total if
-# included.
-#
-# Codex pre-push review for Batch 1 of #788 flagged this as data loss.
-# REBUTTED: the joint-filer collapse is the SEC-canonical interpretation
-# (overlap = same beneficial ownership) and matches the existing
-# blockholders reader. Per-reporter visibility lands in Batch 3's
-# provenance footer (``additional_reporters`` count + the dropped
-# accessions in the holder's ``dropped_sources``).
-#
-# ``_CANONICAL_UNION_SQL``: the union template that builds the
-# canonical-holder candidate set per instrument. The Python pass
-# deduplicates across sources (Form 4 > Form 3 > 13D/G > 13F) using
-# the ``CIK-or-name`` identity and the pinned tie-break sequence. The
-# SQL only collapses *within* each source so the Python pass sees one
-# row per filer per source. DEF 14A rows are unioned in Python after
-# the holder-name resolver runs.
-#
-# Note: the JOIN ``blockholder_filings bf ON bf.filing_id =
-# blocks.filing_id`` is on the PK of ``blockholder_filings`` and
-# therefore one-to-one — no fan-out is possible regardless of how many
-# joint reporters share an accession. Claude PR review (PR 798) round
-# 2 flagged this as a potential re-fan; REBUTTED because filing_id is
-# the BIGSERIAL PRIMARY KEY (migration 095). The `blocks` CTE
-# deliberately picks ONE filing_id per accession (the
-# largest-aggregate row) and the join returns that one row.
-
-
-_CANONICAL_UNION_SQL = """
-WITH latest_13f_period AS (
-    -- Single MAX scan instead of a correlated subquery on every
-    -- 13F candidate row. Claude PR review (PR 798) caught the prior
-    -- correlated form as a latent O(N-subqueries) perf regression for
-    -- high-13F-filer instruments.
-    SELECT MAX(period_of_report) AS period_of_report
-    FROM institutional_holdings
-    WHERE instrument_id = %(iid)s
-),
-form4_latest AS (
-    SELECT DISTINCT ON (
-        CASE WHEN filer_cik IS NOT NULL
-             THEN 'CIK:' || filer_cik
-             ELSE 'NAME:' || LOWER(TRIM(filer_name)) END
-    )
-        filer_cik, filer_name, post_transaction_shares,
-        txn_date, accession_number, id
-    FROM insider_transactions
-    WHERE instrument_id = %(iid)s
-      AND post_transaction_shares IS NOT NULL
-      AND is_derivative = FALSE
-    ORDER BY
-        CASE WHEN filer_cik IS NOT NULL
-             THEN 'CIK:' || filer_cik
-             ELSE 'NAME:' || LOWER(TRIM(filer_name)) END,
-        txn_date DESC NULLS LAST, id DESC
-),
-blocks AS (
-    SELECT DISTINCT ON (accession_number)
-           filing_id, accession_number, submission_type,
-           aggregate_amount_owned, filed_at, filer_id
-    FROM blockholder_filings
-    WHERE instrument_id = %(iid)s
-      AND aggregate_amount_owned IS NOT NULL
-    ORDER BY accession_number, aggregate_amount_owned DESC NULLS LAST
-)
-SELECT 'form4'::text AS source, 1 AS priority_rank,
-       filer_cik, filer_name,
-       NULL::text AS filer_type,
-       post_transaction_shares::numeric AS shares,
-       txn_date AS as_of_date,
-       accession_number,
-       id AS source_row_id
-FROM form4_latest
-
-UNION ALL
-
-SELECT 'form3'::text AS source, 2 AS priority_rank,
-       iih.filer_cik, iih.filer_name,
-       NULL::text AS filer_type,
-       iih.shares::numeric AS shares,
-       iih.as_of_date,
-       iih.accession_number,
-       iih.id AS source_row_id
-FROM insider_initial_holdings iih
-WHERE iih.instrument_id = %(iid)s
-  AND iih.shares IS NOT NULL
-  AND iih.is_derivative = FALSE
-  AND NOT EXISTS (
-      SELECT 1 FROM insider_transactions it
-      WHERE it.instrument_id = iih.instrument_id
-        AND it.post_transaction_shares IS NOT NULL
-        AND it.is_derivative = FALSE
-        AND (
-            (it.filer_cik IS NOT NULL AND iih.filer_cik IS NOT NULL
-             AND it.filer_cik = iih.filer_cik)
-            OR
-            (it.filer_cik IS NULL AND iih.filer_cik IS NULL
-             AND LOWER(TRIM(it.filer_name)) = LOWER(TRIM(iih.filer_name)))
-        )
-  )
-
-UNION ALL
-
-SELECT
-    CASE WHEN bf.submission_type LIKE 'SCHEDULE 13D%%' THEN '13d'
-         ELSE '13g' END AS source,
-    3 AS priority_rank,
-    -- Identity is the PRIMARY filer (filer_id → blockholder_filers.cik),
-    -- never a joint reporter. The ``blocks`` CTE arbitrarily picks one
-    -- representative row per accession via DISTINCT ON, so different
-    -- amendments in a chain can land on different ``reporter_cik``
-    -- values for the same beneficial block. Codex pre-push review for
-    -- #837 caught the prior ``COALESCE(bf.reporter_cik, f.cik)`` —
-    -- amendment-chain double-count if successive filings picked
-    -- different joint reporters as their representative. Keying on
-    -- ``f.cik`` keeps identity stable across the chain so
-    -- ``_dedup_within_source`` collapses amendments correctly.
-    f.cik AS filer_cik,
-    f.name AS filer_name,
-    NULL::text AS filer_type,
-    blocks.aggregate_amount_owned::numeric AS shares,
-    blocks.filed_at::date AS as_of_date,
-    blocks.accession_number,
-    blocks.filing_id AS source_row_id
-FROM blocks
-JOIN blockholder_filings bf ON bf.filing_id = blocks.filing_id
-JOIN blockholder_filers f ON f.filer_id = blocks.filer_id
-
-UNION ALL
-
-SELECT '13f'::text AS source, 5 AS priority_rank,
-       f.cik AS filer_cik, f.name AS filer_name,
-       COALESCE(f.filer_type, 'OTHER') AS filer_type,
-       h.shares::numeric AS shares,
-       h.period_of_report AS as_of_date,
-       h.accession_number,
-       h.holding_id AS source_row_id
-FROM institutional_holdings h
-JOIN institutional_filers f USING (filer_id)
-WHERE h.instrument_id = %(iid)s
-  AND h.is_put_call IS NULL
-  AND h.period_of_report = (SELECT period_of_report FROM latest_13f_period)
-"""
