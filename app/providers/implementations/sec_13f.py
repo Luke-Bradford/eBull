@@ -74,12 +74,8 @@ logger = logging.getLogger(__name__)
 # Lazy-importing keeps the side effect deferred until the first parse
 # call, where the operator already accepts that EdgarTools is in play.
 def _edgar_parsers() -> tuple[Any, Any]:
-    from edgar.thirteenf.parsers.infotable_xml import (
-        parse_infotable_xml as parse_infotable_xml,
-    )
-    from edgar.thirteenf.parsers.primary_xml import (
-        parse_primary_document_xml as parse_primary_document_xml,
-    )
+    from edgar.thirteenf.parsers.infotable_xml import parse_infotable_xml
+    from edgar.thirteenf.parsers.primary_xml import parse_primary_document_xml
 
     return parse_primary_document_xml, parse_infotable_xml
 
@@ -252,12 +248,19 @@ def parse_primary_doc(xml: str) -> ThirteenFFilerInfo:
 
     filed_at = _parse_signature_date(parsed.signature.date)
 
+    # Defense-in-depth: EdgarTools' current 5.30.2 implementation
+    # constructs ``total_value`` from the raw XML text via
+    # ``Decimal(child_text(...))`` — never a float — but a future
+    # release that changes the type to ``float`` would silently
+    # introduce IEEE 754 rounding into our persisted total. Coerce
+    # via ``str()`` so the value rounds at the XML boundary, not at
+    # the float boundary.
     table_value_raw = parsed.summary_page.total_value
     table_value_total_usd: Decimal | None
     if table_value_raw in (None, 0, Decimal(0)):
         table_value_total_usd = None
     else:
-        table_value_total_usd = Decimal(table_value_raw)
+        table_value_total_usd = Decimal(str(table_value_raw))
 
     return ThirteenFFilerInfo(
         cik=cik,
@@ -325,7 +328,20 @@ def parse_infotable(xml: str) -> list[ThirteenFHolding]:
             continue
 
         type_label = str(record.get("Type") or "").strip()
-        type_code = _TYPE_CODE_FROM_LABEL.get(type_label, "SH")
+        type_code = _TYPE_CODE_FROM_LABEL.get(type_label)
+        if type_code is None:
+            # Mirror the ``putCall`` warn-and-default pattern. A
+            # silent fallback to ``SH`` would misclassify principal
+            # holdings (bonds reported via PRN) as share counts; an
+            # unrecognised label is more likely to be lib drift than
+            # genuine new SEC schema, so warn loudly.
+            if type_label:
+                logger.warning(
+                    "13F infoTable row had unknown Type label=%r; defaulting to SH (cusip=%s)",
+                    type_label,
+                    cusip,
+                )
+            type_code = "SH"
 
         holdings.append(
             ThirteenFHolding(
