@@ -36,6 +36,16 @@ class Settings(BaseSettings):
     # run resumes the tail on the next weekly fire. Default 6h.
     sec_13f_sweep_deadline_seconds: float = 6 * 60 * 60
 
+    # Soft deadline (seconds) for the monthly NPORT-P fund-holdings
+    # sweep (#917). Same shape as the 13F sweep — already-attempted
+    # accessions are tombstoned in ``n_port_ingest_log`` so a
+    # deadline-interrupted run resumes on the next monthly fire.
+    # Default 6h. The MVP universe walks the
+    # ``institutional_filers`` rows where ``filer_type IN ('INV', 'INS', 'ETF')``;
+    # not every RIC is in that list, so coverage is partial until a
+    # dedicated fund-filer directory walk lands as a follow-up.
+    sec_n_port_sweep_deadline_seconds: float = 6 * 60 * 60
+
     anthropic_api_key: str | None = None
 
     default_portfolio_mode: str = "balanced"

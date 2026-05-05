@@ -251,6 +251,7 @@ JOB_OWNERSHIP_OBSERVATIONS_SYNC = "ownership_observations_sync"
 JOB_OWNERSHIP_OBSERVATIONS_BACKFILL = "ownership_observations_backfill"
 JOB_SEC_13F_FILER_DIRECTORY_SYNC = "sec_13f_filer_directory_sync"
 JOB_SEC_13F_QUARTERLY_SWEEP = "sec_13f_quarterly_sweep"
+JOB_SEC_N_PORT_INGEST = "sec_n_port_ingest"
 JOB_CUSIP_UNIVERSE_BACKFILL = "cusip_universe_backfill"
 JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
 JOB_ETORO_LOOKUPS_REFRESH = "etoro_lookups_refresh"
@@ -821,6 +822,26 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # restart would burn SEC bandwidth + dev wall-clock for no
         # operator benefit (the directory churns slowly). A missed
         # window rolls forward to the next Sunday.
+        catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_N_PORT_INGEST,
+        description=(
+            "Monthly NPORT-P fund-holdings sweep (#917 — Phase 3 PR1). "
+            "Walks the fund-filer CIK universe (today: institutional_filers "
+            "rows where filer_type IN ('INV','INS','ETF') as the MVP set; a "
+            "dedicated fund-filer directory walk is a follow-up) and "
+            "ingests every pending NPORT-P / NPORT-P/A accession into "
+            "ownership_funds_observations + ownership_funds_current. "
+            "Equity-common-Long write-side guard filters debt / preferred / "
+            "derivative / short positions; only pie-eligible holdings land. "
+            "Cadence: monthly day 22 03:00 UTC — NPORT-P has a 60-day "
+            "post-quarter publication deadline; running on the 22nd of each "
+            "month catches the bulk of new filings 1-2 weeks after they "
+            "publish. Soft 6h deadline; resumable via n_port_ingest_log "
+            "tombstones."
+        ),
+        cadence=Cadence.monthly(day=22, hour=3, minute=0),
         catch_up_on_boot=False,
     ),
     ScheduledJob(
@@ -3739,6 +3760,73 @@ def sec_13f_filer_directory_sync() -> None:
             result.filers_inserted,
             result.filers_refreshed,
             result.skipped_empty_name,
+        )
+
+
+def sec_n_port_ingest() -> None:
+    """Monthly NPORT-P fund-holdings sweep (#917 — Phase 3 PR1).
+
+    Walks the fund-filer CIK universe and ingests each filer's pending
+    NPORT-P / NPORT-P/A accessions into ``ownership_funds_observations``
+    + ``ownership_funds_current``. Per-filer crashes isolated; soft
+    deadline budget; resumable via ``n_port_ingest_log`` tombstones.
+
+    MVP universe: ``institutional_filers`` rows where ``filer_type``
+    is one of ('INV', 'INS', 'ETF') — the N-CEN-derived buckets that
+    contain registered investment companies. Not every RIC is in this
+    list (a dedicated fund-filer directory walk for N-PORT is a
+    follow-up); coverage gradually expands as the operator manually
+    seeds rows or as the 13F directory walk pulls in dual-filers.
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.n_port_ingest import ingest_all_fund_filers
+
+    deadline_seconds = settings.sec_n_port_sweep_deadline_seconds
+
+    with _tracked_job(JOB_SEC_N_PORT_INGEST) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT cik
+                    FROM institutional_filers
+                    WHERE filer_type IN ('INV', 'INS', 'ETF')
+                    ORDER BY last_filing_at DESC NULLS LAST, cik
+                    """
+                )
+                ciks = [str(row[0]).zfill(10) for row in cur.fetchall()]
+
+            summaries = ingest_all_fund_filers(
+                conn,
+                sec,
+                ciks=ciks,
+                deadline_seconds=deadline_seconds,
+                source_label="sec_n_port_ingest",
+            )
+
+        total_filers = len(ciks)
+        processed = len(summaries)
+        rows_upserted = sum(s.holdings_inserted for s in summaries)
+        rows_skipped = sum(
+            s.holdings_skipped_no_cusip
+            + s.holdings_skipped_non_equity
+            + s.holdings_skipped_short
+            + s.holdings_skipped_non_share_units
+            + s.holdings_skipped_zero_shares
+            for s in summaries
+        )
+        accessions_ingested = sum(s.accessions_ingested for s in summaries)
+        tracker.row_count = rows_upserted
+        logger.info(
+            "sec_n_port_ingest: filers=%d processed=%d accessions_ingested=%d holdings_inserted=%d holdings_skipped=%d",
+            total_filers,
+            processed,
+            accessions_ingested,
+            rows_upserted,
+            rows_skipped,
         )
 
 

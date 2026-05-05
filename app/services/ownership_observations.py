@@ -30,6 +30,7 @@ pattern in subsequent sub-PRs.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -39,6 +40,15 @@ from uuid import UUID
 
 import psycopg
 import psycopg.rows
+
+# Pinned to the SEC series identifier shape ``S0000xxxxx``. Used by
+# the fund-observation write-side guard (Codex pre-impl review #2 +
+# #8) and asserted by the ``ownership_funds_observations`` /
+# ``sec_fund_series`` CHECK constraints — this regex is the
+# application-side mirror so a guard violation surfaces as a clean
+# ``ValueError`` instead of a Postgres CHECK error rolling the
+# whole transaction.
+_FUND_SERIES_ID_RE = re.compile(r"^S[0-9]{9}$")
 
 logger = logging.getLogger(__name__)
 
@@ -859,6 +869,246 @@ def refresh_def14a_current(
         )
         row = cur.fetchone()
         return int(row[0]) if row else 0
+
+
+# ---------------------------------------------------------------------------
+# Funds — record + refresh (#917 — Phase 3 PR1, N-PORT)
+# ---------------------------------------------------------------------------
+
+
+def record_fund_observation(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    fund_series_id: str,
+    fund_series_name: str,
+    fund_filer_cik: str,
+    source_document_id: str,
+    source_accession: str | None,
+    source_field: str | None,
+    source_url: str | None,
+    filed_at: datetime,
+    period_start: date | None,
+    period_end: date,
+    ingest_run_id: UUID,
+    shares: Decimal,
+    market_value_usd: Decimal | None,
+    payoff_profile: str,
+    asset_category: str,
+) -> None:
+    """Append one N-PORT fund-holding observation. Idempotent on
+    ``(instrument_id, fund_series_id, period_end, source_document_id)``.
+
+    Write-side guards (Codex pre-impl review #3, #4, #8 — moved into
+    the helper so test seeders inherit the guards automatically per
+    the prevention-log entry "Test seed mirrors must replicate
+    production write-through guards"):
+
+    * ``fund_series_id`` must match the SEC series-id regex. Filings
+      missing a series_id are rejected upstream by the parser; this
+      guard is the second-line catch.
+    * ``asset_category`` must be ``'EC'`` (equity-common). N-PORT
+      carries debt / preferred / derivative / cash positions in the
+      same holdings array; only equity-common rows belong in the
+      ownership decomposition.
+    * ``payoff_profile`` must be ``'Long'``. A short fund position
+      is a borrow artifact, not an ownership claim — it does NOT
+      land in the ownership pie (per the spec §"Target chart
+      decomposition").
+    * ``shares`` must be positive. NULL / zero / negative are
+      rejected at the helper boundary; the schema CHECK is the
+      backstop.
+
+    ``ownership_nature`` is fixed to ``'economic'`` and ``source`` to
+    ``'nport'`` per the schema CHECK constraints — no per-call
+    parameter so a buggy caller can't widen the CHECK by passing a
+    different value.
+    """
+    if not _FUND_SERIES_ID_RE.match(fund_series_id):
+        raise ValueError(
+            f"record_fund_observation: invalid fund_series_id={fund_series_id!r} "
+            "(expected SEC series identifier matching ^S[0-9]{9}$)"
+        )
+    if asset_category != "EC":
+        raise ValueError(
+            f"record_fund_observation: asset_category={asset_category!r} "
+            "is not 'EC' (equity-common); refusing to record non-equity holding "
+            "as ownership"
+        )
+    if payoff_profile != "Long":
+        raise ValueError(
+            f"record_fund_observation: payoff_profile={payoff_profile!r} "
+            "is not 'Long'; short positions are memo overlays, not ownership "
+            "rows (spec §Target chart decomposition)"
+        )
+    if shares is None or shares <= 0:
+        raise ValueError(
+            f"record_fund_observation: shares={shares!r} must be a positive "
+            "Decimal — null/zero/negative are not ownership facts"
+        )
+    if not fund_filer_cik or not fund_filer_cik.strip():
+        raise ValueError("record_fund_observation: fund_filer_cik is required")
+    if not fund_series_name or not fund_series_name.strip():
+        raise ValueError("record_fund_observation: fund_series_name is required")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ownership_funds_observations (
+                instrument_id, fund_series_id, fund_series_name, fund_filer_cik,
+                ownership_nature,
+                source, source_document_id, source_accession, source_field, source_url,
+                filed_at, period_start, period_end, ingest_run_id,
+                shares, market_value_usd, payoff_profile, asset_category
+            ) VALUES (
+                %(iid)s, %(sid)s, %(sname)s, %(fcik)s,
+                'economic',
+                'nport', %(doc_id)s, %(accession)s, %(field)s, %(url)s,
+                %(filed_at)s, %(period_start)s, %(period_end)s, %(run_id)s,
+                %(shares)s, %(mv)s, %(payoff)s, %(asset)s
+            )
+            ON CONFLICT (instrument_id, fund_series_id, period_end, source_document_id)
+            DO UPDATE SET
+                fund_series_name = EXCLUDED.fund_series_name,
+                fund_filer_cik = EXCLUDED.fund_filer_cik,
+                source_accession = EXCLUDED.source_accession,
+                source_field = EXCLUDED.source_field,
+                source_url = EXCLUDED.source_url,
+                filed_at = EXCLUDED.filed_at,
+                period_start = EXCLUDED.period_start,
+                shares = EXCLUDED.shares,
+                market_value_usd = EXCLUDED.market_value_usd,
+                payoff_profile = EXCLUDED.payoff_profile,
+                asset_category = EXCLUDED.asset_category,
+                ingest_run_id = EXCLUDED.ingest_run_id,
+                ingested_at = clock_timestamp()
+            """,
+            {
+                "iid": instrument_id,
+                "sid": fund_series_id,
+                "sname": fund_series_name,
+                "fcik": fund_filer_cik.strip(),
+                "doc_id": source_document_id,
+                "accession": source_accession,
+                "field": source_field,
+                "url": source_url,
+                "filed_at": filed_at,
+                "period_start": period_start,
+                "period_end": period_end,
+                "run_id": str(ingest_run_id),
+                "shares": shares,
+                "mv": market_value_usd,
+                "payoff": payoff_profile,
+                "asset": asset_category,
+            },
+        )
+
+
+def refresh_funds_current(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+) -> int:
+    """Deterministically rebuild ``ownership_funds_current`` rows for
+    one instrument from its observations.
+
+    Atomicity contract identical to ``refresh_institutions_current``:
+    explicit ``conn.transaction()`` + per-instrument
+    ``pg_advisory_xact_lock`` so concurrent refreshes serialise.
+
+    Dedup picks one row per ``fund_series_id`` ordered by
+    ``filed_at DESC, period_end DESC, source_document_id ASC`` —
+    Codex pre-impl review #5: amendments (NPORT-P/A) carry the same
+    ``period_end`` as the original NPORT-P but are filed later, so
+    ordering by ``filed_at DESC`` first ensures the amendment wins."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT pg_advisory_xact_lock(
+                (hashtextextended('refresh_funds_current', 0) # %s::bigint)
+            )
+            """,
+            (instrument_id,),
+        )
+        cur.execute(
+            "DELETE FROM ownership_funds_current WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        cur.execute(
+            """
+            INSERT INTO ownership_funds_current (
+                instrument_id, fund_series_id, fund_series_name, fund_filer_cik,
+                ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, market_value_usd, payoff_profile, asset_category
+            )
+            SELECT DISTINCT ON (fund_series_id)
+                instrument_id, fund_series_id, fund_series_name, fund_filer_cik,
+                ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, market_value_usd, payoff_profile, asset_category
+            FROM ownership_funds_observations
+            WHERE instrument_id = %s
+              AND known_to IS NULL
+            ORDER BY
+                fund_series_id,
+                filed_at DESC,
+                period_end DESC,
+                source_document_id ASC
+            """,
+            (instrument_id,),
+        )
+        cur.execute(
+            "SELECT COUNT(*) FROM ownership_funds_current WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+def upsert_sec_fund_series(
+    conn: psycopg.Connection[Any],
+    *,
+    fund_series_id: str,
+    fund_series_name: str,
+    fund_filer_cik: str,
+    last_seen_period_end: date | None,
+) -> None:
+    """Idempotent upsert into ``sec_fund_series`` reference table.
+
+    Called once per ingested N-PORT accession. ``last_seen_period_end``
+    is monotonically advanced via ``GREATEST`` so an out-of-order
+    re-ingest of an older filing doesn't regress the value. Series
+    name is refreshed unconditionally — the most recent ingest wins
+    so a fund rename propagates."""
+    if not _FUND_SERIES_ID_RE.match(fund_series_id):
+        raise ValueError(f"upsert_sec_fund_series: invalid fund_series_id={fund_series_id!r}")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO sec_fund_series (
+                fund_series_id, fund_series_name, fund_filer_cik,
+                last_seen_period_end
+            ) VALUES (
+                %(sid)s, %(sname)s, %(fcik)s, %(period)s
+            )
+            ON CONFLICT (fund_series_id) DO UPDATE SET
+                fund_series_name = EXCLUDED.fund_series_name,
+                fund_filer_cik = EXCLUDED.fund_filer_cik,
+                last_seen_period_end = GREATEST(
+                    COALESCE(sec_fund_series.last_seen_period_end, '1900-01-01'),
+                    COALESCE(EXCLUDED.last_seen_period_end, '1900-01-01')
+                ),
+                updated_at = NOW()
+            """,
+            {
+                "sid": fund_series_id,
+                "sname": fund_series_name,
+                "fcik": fund_filer_cik.strip(),
+                "period": last_seen_period_end,
+            },
+        )
 
 
 def iter_insider_observations(

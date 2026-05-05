@@ -496,9 +496,16 @@ _FORM_TO_SOURCE: dict[str, ManifestSource] = {
     "DEFA14A": "sec_def14a",
     "DEFM14A": "sec_def14a",
     "PRE 14A": "sec_def14a",
-    # Fund (Phase 3)
+    # Fund (Phase 3). SEC EDGAR submissions API uses both ``NPORT-P`` /
+    # ``NPORT-P/A`` (current spelling, no internal dash, "-P" suffix
+    # marking the public-quarterly version) and ``N-PORT`` / ``N-PORT/A``
+    # (legacy spelling) on the same form-type field. #917 maps both so
+    # the manifest classifies regardless of which spelling SEC returns
+    # for a given accession (Codex pre-impl review finding #1).
     "N-PORT": "sec_n_port",
     "N-PORT/A": "sec_n_port",
+    "NPORT-P": "sec_n_port",
+    "NPORT-P/A": "sec_n_port",
     "N-CSR": "sec_n_csr",
     "N-CSR/A": "sec_n_csr",
     # Periodic

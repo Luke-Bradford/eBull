@@ -62,6 +62,7 @@ DocumentKind = Literal[
     "form4_xml",
     "form3_xml",
     "def14a_body",
+    "nport_xml",
 ]
 # submissions.json / companyfacts.json are keyed by CIK, not by SEC
 # accession number — they belong in their own per-CIK store, not in
