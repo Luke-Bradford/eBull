@@ -248,6 +248,7 @@ JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
 JOB_SEC_FILING_DOCUMENTS_INGEST = "sec_filing_documents_ingest"
 JOB_CUSIP_EXTID_SWEEP = "cusip_extid_sweep"
 JOB_OWNERSHIP_OBSERVATIONS_SYNC = "ownership_observations_sync"
+JOB_OWNERSHIP_OBSERVATIONS_BACKFILL = "ownership_observations_backfill"
 JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
 JOB_ETORO_LOOKUPS_REFRESH = "etoro_lookups_refresh"
 
@@ -633,6 +634,32 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.daily(hour=3, minute=30),
         catch_up_on_boot=True,
+    ),
+    ScheduledJob(
+        name=JOB_OWNERSHIP_OBSERVATIONS_BACKFILL,
+        description=(
+            "One-shot legacy → ownership_*_observations backfill (#909). "
+            "Phase 1 write-through (#888-#891) only fires on new "
+            "ingestion; the historical rows already in legacy typed "
+            "tables (insider_filings, institutional_holdings, "
+            "blockholder_filings, fundamentals.treasury_shares, "
+            "def14a_beneficial_holdings) never went through write-"
+            "through, so observations + _current stay empty until this "
+            "runs. Calls ownership_observations_sync.sync_all with no "
+            "since/limit, which is idempotent on the natural keys "
+            "(ON CONFLICT DO UPDATE). Operator-triggered via "
+            "POST /jobs/ownership_observations_backfill/run; auto-fires "
+            "weekly Sunday 03:00 UTC as a safety net so a fresh clone "
+            "self-heals without a manual trigger. The 03:00 slot lands "
+            "30 min after ``sec_def14a_bootstrap`` (Sun 02:30) finishes "
+            "and 30 min before the daily ``ownership_observations_sync`` "
+            "repair sweep (03:30) — that ordering means observations "
+            "land first, the repair sweep then sees zero drift, and the "
+            "two windows never overlap. Once the legacy tables are "
+            "dropped post-#905, this job can also be retired."
+        ),
+        cadence=Cadence.weekly(weekday=6, hour=3, minute=0),
+        catch_up_on_boot=False,
     ),
     ScheduledJob(
         name=JOB_CUSIP_EXTID_SWEEP,
@@ -3456,6 +3483,57 @@ def ownership_observations_sync() -> None:
             ", ".join(
                 f"{c.category}=drifted{c.drifted_instruments}/refreshed{c.refreshed_rows}" for c in stats.per_category
             ),
+        )
+
+
+def ownership_observations_backfill() -> None:
+    """One-shot legacy → ownership_*_observations backfill (#909).
+
+    Calls ``ownership_observations_sync.sync_all`` with no ``since`` /
+    ``limit`` so every legacy row is mirrored into the new
+    ``ownership_*_observations`` tables and ``ownership_*_current`` is
+    refreshed for every touched instrument. Idempotent: re-running on a
+    populated install is a no-op (the underlying ``record_*_observation``
+    helpers ON CONFLICT DO UPDATE on the natural keys, and the
+    ``refresh_*_current`` helpers DELETE-then-INSERT under a per-instrument
+    advisory lock).
+
+    Why this is its own job rather than a one-time bootstrap script:
+
+      - Operator can trigger from the UI / API after a fresh clone,
+        before #909 ships, or after a parser-version bump.
+      - Re-runnable on demand if a downstream regression empties
+        ``_current`` again.
+      - Auto-fires weekly as a defensive safety net so a future clone
+        without an explicit operator action still self-heals.
+
+    Cost on the dev panel today: ~427k insider_transactions +
+    ~1280 insider_initial_holdings + ~5882 institutional_holdings +
+    ~924 blockholder_filings + a few thousand DEF 14A rows + a few
+    thousand treasury concept snapshots. Single-pass UPSERTs at
+    psycopg INSERT throughput; expected wall-clock < 5 min on a warm
+    dev box. No external network calls — pure DB work.
+
+    Distinct from ``ownership_observations_sync`` (the daily repair
+    sweep), which only refreshes ``_current`` and assumes
+    ``_observations`` is already populated.
+    """
+    from app.services.ownership_observations_sync import sync_all
+
+    with _tracked_job(JOB_OWNERSHIP_OBSERVATIONS_BACKFILL) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            result = sync_all(conn)
+
+        tracker.row_count = result.total_observations_recorded
+        logger.info(
+            "ownership_observations_backfill: total_observations=%d "
+            "insiders=%d institutions=%d blockholders=%d treasury=%d def14a=%d",
+            result.total_observations_recorded,
+            result.insiders.observations_recorded,
+            result.institutions.observations_recorded,
+            result.blockholders.observations_recorded,
+            result.treasury.observations_recorded,
+            result.def14a.observations_recorded,
         )
 
 

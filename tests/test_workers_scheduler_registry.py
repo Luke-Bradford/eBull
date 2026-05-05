@@ -128,6 +128,50 @@ class TestFundamentalsSyncCadence:
         assert job.catch_up_on_boot is False
 
 
+class TestOwnershipObservationsBackfill:
+    """#909: one-shot legacy → ownership_*_observations backfill.
+
+    Distinct from the daily ``ownership_observations_sync`` repair sweep:
+    that sweep only refreshes ``_current`` and assumes ``_observations`` is
+    already populated. The backfill is what populates ``_observations`` from
+    legacy typed tables in the first place. Both jobs need to coexist
+    until the legacy tables are dropped post-#905.
+    """
+
+    def test_backfill_registered_in_scheduled_jobs(self) -> None:
+        names = [job.name for job in SCHEDULED_JOBS]
+        assert "ownership_observations_backfill" in names
+
+    def test_backfill_cadence_weekly_sunday_03_00(self) -> None:
+        # Weekly Sunday 03:00 UTC: between sec_def14a_bootstrap
+        # (Sun 02:30) and the daily ownership_observations_sync repair
+        # sweep (03:30). Backfill populates observations first; the
+        # repair sweep then sees zero drift on Sundays.
+        job = next(j for j in SCHEDULED_JOBS if j.name == "ownership_observations_backfill")
+        assert job.cadence.kind == "weekly"
+        assert job.cadence.weekday == 6  # Sunday
+        assert job.cadence.hour == 3
+        assert job.cadence.minute == 0
+
+    def test_backfill_does_not_catch_up_on_boot(self) -> None:
+        # Backfill is heavy (full legacy-table re-scan); the operator
+        # owns triggering it after a fresh clone, not the boot path.
+        job = next(j for j in SCHEDULED_JOBS if j.name == "ownership_observations_backfill")
+        assert job.catch_up_on_boot is False
+
+    def test_backfill_invokable_via_invokers(self) -> None:
+        from app.jobs.runtime import _INVOKERS
+
+        assert "ownership_observations_backfill" in _INVOKERS
+
+    def test_repair_sweep_and_backfill_coexist(self) -> None:
+        # Both jobs must exist. The sweep keeps _current in sync with
+        # observations; the backfill populates observations from legacy.
+        names = {job.name for job in SCHEDULED_JOBS}
+        assert "ownership_observations_sync" in names
+        assert "ownership_observations_backfill" in names
+
+
 # ---------------------------------------------------------------------------
 # Cadence validators
 # ---------------------------------------------------------------------------

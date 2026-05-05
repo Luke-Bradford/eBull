@@ -71,6 +71,7 @@ from app.workers.scheduler import (
     JOB_NIGHTLY_UNIVERSE_SYNC,
     JOB_ORCHESTRATOR_FULL_SYNC,
     JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
+    JOB_OWNERSHIP_OBSERVATIONS_BACKFILL,
     JOB_OWNERSHIP_OBSERVATIONS_SYNC,
     JOB_RAW_DATA_RETENTION_SWEEP,
     JOB_RETRY_DEFERRED,
@@ -107,6 +108,7 @@ from app.workers.scheduler import (
     nightly_universe_sync,
     orchestrator_full_sync,
     orchestrator_high_frequency_sync,
+    ownership_observations_backfill,
     ownership_observations_sync,
     raw_data_retention_sweep,
     retry_deferred_recommendations_job,
@@ -180,6 +182,7 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_SEC_FILING_DOCUMENTS_INGEST: sec_filing_documents_ingest,
     JOB_CUSIP_EXTID_SWEEP: cusip_extid_sweep,
     JOB_OWNERSHIP_OBSERVATIONS_SYNC: ownership_observations_sync,
+    JOB_OWNERSHIP_OBSERVATIONS_BACKFILL: ownership_observations_backfill,
 }
 
 
