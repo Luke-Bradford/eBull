@@ -295,7 +295,11 @@ For `EXIT`:
 
 ## Operator auth and broker-secret storage
 
-- Governed by [`docs/adr/0001-operator-auth-and-broker-secrets.md`](adr/0001-operator-auth-and-broker-secrets.md).
+- Governed by [`ADR-0001`](adr/0001-operator-auth-and-broker-secrets.md) and
+  [`ADR-0003`](adr/0003-local-secret-bootstrap-and-recovery.md) (amended
+  2026-05-07: phrase-based recovery removed in favour of operator-driven
+  re-entry; stale-cipher soft-revoke runs at boot when key material is
+  missing or mismatches existing ciphertext).
 
 ---
 
