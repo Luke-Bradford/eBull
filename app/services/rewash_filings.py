@@ -518,6 +518,23 @@ def _apply_def14a(
             as_of_date=parsed.as_of_date,
             holder=holder,
         )
+
+    # Write-through to ownership_def14a_observations + refresh
+    # ownership_def14a_current. Mirrors the first-ingest path at
+    # app/services/def14a_ingest.py:463-471. Without this, the rewash
+    # writes typed rows but leaves the rollup (#905 read-path) stale
+    # against the new parser output (#945 same-pattern as 13F).
+    from app.services.def14a_ingest import _record_def14a_observations_for_filing
+    from app.services.ownership_observations import refresh_def14a_current
+
+    _record_def14a_observations_for_filing(
+        conn,
+        instrument_id=int(instrument_id),
+        accession_number=raw_doc.accession_number,
+        as_of_date=parsed.as_of_date,
+        holders=parsed.rows,
+    )
+    refresh_def14a_current(conn, instrument_id=int(instrument_id))
     return True
 
 
@@ -640,6 +657,40 @@ def _apply_blockholders(
             filed_at=filing.filed_at or filed_at,
             person=person,
         )
+
+    # Write-through to ownership_blockholders_observations + refresh
+    # ownership_blockholders_current. Mirrors first-ingest path at
+    # app/services/blockholders.py:707-724. Same #945 pattern as 13F:
+    # rewash writes typed rows but leaves the rollup stale without
+    # this hook. ``_record_13dg_observation_for_filing`` requires an
+    # ``AccessionRef`` for the ``filed_at`` fallback — synthesise one
+    # from the rewash's known values (the filing's own ``filed_at``
+    # takes priority when present).
+    if instrument_id is not None:
+        from uuid import uuid4
+
+        from app.services.blockholders import (
+            AccessionRef,
+            _record_13dg_observation_for_filing,
+        )
+        from app.services.ownership_observations import refresh_blockholders_current
+
+        ref = AccessionRef(
+            accession_number=raw_doc.accession_number,
+            filing_type=filing.submission_type,
+            filed_at=filed_at,
+        )
+        _record_13dg_observation_for_filing(
+            conn,
+            instrument_id=int(instrument_id),
+            accession_number=raw_doc.accession_number,
+            primary_document_url="",
+            filing=filing,
+            filer_name=filer_name,
+            ref=ref,
+            run_id=uuid4(),
+        )
+        refresh_blockholders_current(conn, instrument_id=int(instrument_id))
     return True
 
 
@@ -860,6 +911,33 @@ def _apply_13f_infotable(
             holding=holding,
         )
         inserted += 1
+
+    # Write-through to observations + refresh ownership_institutions_current
+    # so the rollup (#905 read-path cutover) reflects the recovered
+    # holdings on the same transaction. Mirrors the first-ingest path
+    # in app/services/institutional_holdings.py:1260-1274. Without this,
+    # ``cusip_resolver.sweep_resolvable_unresolved_cusips`` would happily
+    # log "rewashed accession=..." while leaving every ownership rollup
+    # query showing zero institutional shares (#945).
+    if resolved:
+        from app.services.institutional_holdings import _record_13f_observations_for_filing
+        from app.services.ownership_observations import refresh_institutions_current
+
+        # ``filed_at`` from the SELECT above is a tuple-row Decimal/None
+        # type (psycopg returned timestamptz) — record_institution_observation
+        # expects a datetime. The first-ingest path threads the same
+        # value through the same helper, so the type is already what
+        # the helper accepts.
+        _record_13f_observations_for_filing(
+            conn,
+            filer_id=int(filer_id),
+            accession_number=raw_doc.accession_number,
+            period_of_report=period_of_report,
+            filed_at=filed_at,
+            resolved_holdings=resolved,
+        )
+        for unique_instrument_id in {iid for iid, _ in resolved}:
+            refresh_institutions_current(conn, instrument_id=unique_instrument_id)
 
     # Log full success.
     with conn.cursor() as cur:
