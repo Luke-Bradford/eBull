@@ -42,7 +42,11 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
-from app.providers.implementations.sec_submissions import HttpGet, check_freshness
+from app.providers.implementations.sec_submissions import (
+    HttpGet,
+    check_freshness,
+    parse_submissions_page,
+)
 from app.services.sec_manifest import ManifestSource, record_manifest_entry
 
 logger = logging.getLogger(__name__)
@@ -238,8 +242,9 @@ def _discovery_pass(
             logger.warning("sec rebuild discovery: check_freshness raised cik=%s: %s", cik, exc)
             continue
 
+        sources_set = set(sources)
         for row in delta.new_filings:
-            if row.source is None or row.source not in sources:
+            if row.source is None or row.source not in sources_set:
                 continue
             try:
                 record_manifest_entry(
@@ -260,6 +265,112 @@ def _discovery_pass(
             except ValueError as exc:
                 logger.warning("sec rebuild: rejected %s: %s", row.accession_number, exc)
 
+        # #936: ``check_freshness`` reads only the ``recent[]`` array
+        # (~1000 most-recent accessions). Older filings live in the
+        # secondary ``filings.files[]`` pages. Targeted rebuild claims
+        # full-history discovery, so it MUST follow those pages too —
+        # otherwise an aged-out accession can never be repaired.
+        # Atom / per-CIK polling intentionally stay on ``recent`` (cheap
+        # path); only rebuild pays the secondary-page cost.
+        if delta.has_more_in_files:
+            if delta.files_pages:
+                new_rows += _walk_secondary_pages(
+                    conn,
+                    http_get=http_get,
+                    cik=cik,
+                    subject_type=stype,
+                    subject_id=sid,
+                    instrument_id=instrument_id,
+                    sources_set=sources_set,
+                    files_pages=delta.files_pages,
+                )
+            else:
+                # Guard against silent skip: ``check_freshness`` already
+                # logs a warning when extraction fails, but log here too
+                # so the rebuild's own log stream surfaces the gap. Bot
+                # review BLOCKING on PR #958.
+                logger.warning(
+                    "sec rebuild discovery: cik=%s has_more_in_files=True but "
+                    "files_pages empty — secondary walk skipped",
+                    cik,
+                )
+
+    return new_rows
+
+
+def _walk_secondary_pages(
+    conn: psycopg.Connection[Any],
+    *,
+    http_get: HttpGet,
+    cik: str,
+    subject_type: str,
+    subject_id: str,
+    instrument_id: int | None,
+    sources_set: set[ManifestSource],
+    files_pages: list[str],
+) -> int:
+    """Walk every ``filings.files[]`` secondary page for one CIK (#936).
+
+    ``files_pages`` is sourced from the ``FreshnessDelta`` returned by
+    ``check_freshness`` — the primary CIK JSON has already been
+    fetched + parsed by the time this helper runs, so we re-use the
+    page list rather than re-fetching the primary body.
+
+    Mirrors the per-page UPSERT logic in
+    ``app/jobs/sec_first_install_drain.py:_drain_secondary_pages``,
+    but scoped to the rebuild's source set. Filters in-page rows to
+    ``sources_set`` so a rebuild scoped to ``sec_def14a`` does not
+    UPSERT every 8-K it happens to encounter on the same secondary
+    page.
+    """
+    cik_padded = cik.zfill(10)
+    headers = {
+        "User-Agent": "eBull research/1.0 contact@example.com",
+        "Accept-Encoding": "gzip, deflate",
+    }
+    new_rows = 0
+    for name in files_pages:
+        if not name:
+            continue
+        page_url = f"https://data.sec.gov/submissions/{name}"
+        # Codex pre-push: ``http_get`` and ``parse_submissions_page``
+        # can raise (transport errors, malformed body, unexpected JSON
+        # shape). Isolate per-page failures so one bad secondary page
+        # does not abort the whole rebuild — the rest of the scope
+        # still drains.
+        try:
+            status, body = http_get(page_url, headers)
+        except Exception as exc:  # noqa: BLE001 — per-page isolation
+            logger.warning("sec rebuild (secondary): fetch raised page=%s: %s", name, exc)
+            continue
+        if status != 200:
+            continue
+        try:
+            rows, _ = parse_submissions_page(body, cik=cik_padded)
+        except Exception as exc:  # noqa: BLE001 — per-page isolation
+            logger.warning("sec rebuild (secondary): parse raised page=%s: %s", name, exc)
+            continue
+        for row in rows:
+            if row.source is None or row.source not in sources_set:
+                continue
+            try:
+                record_manifest_entry(
+                    conn,
+                    row.accession_number,
+                    cik=row.cik,
+                    form=row.form,
+                    source=row.source,
+                    subject_type=subject_type,  # type: ignore[arg-type]
+                    subject_id=subject_id,
+                    instrument_id=instrument_id,
+                    filed_at=row.filed_at,
+                    accepted_at=row.accepted_at,
+                    primary_document_url=row.primary_document_url,
+                    is_amendment=row.is_amendment,
+                )
+                new_rows += 1
+            except ValueError as exc:
+                logger.warning("sec rebuild (secondary): rejected %s: %s", row.accession_number, exc)
     return new_rows
 
 
