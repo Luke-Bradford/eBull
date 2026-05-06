@@ -103,11 +103,11 @@ export function BootstrapProgress({
   const steps = buildSteps(stage);
 
   return (
-    <div className="border-l-2 border-blue-400 bg-blue-50/60 pl-4 pr-3 py-3">
-      <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-blue-800">
+    <div className="border-l-2 border-blue-400 bg-blue-50/60 pl-4 pr-3 py-3 dark:border-blue-700 dark:bg-blue-950/40">
+      <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-blue-800 dark:text-blue-300">
         Getting started
       </h2>
-      <p className="mt-1 text-xs text-blue-700">
+      <p className="mt-1 text-xs text-blue-700 dark:text-blue-300/80">
         {stage === "no_credentials"
           ? "Save your eToro credentials to start the data pipeline."
           : "The data pipeline is bootstrapping. This usually takes a few minutes."}
@@ -116,19 +116,19 @@ export function BootstrapProgress({
         {steps.map((step) => (
           <li key={step.label} className="flex items-center gap-2 text-sm">
             {step.done ? (
-              <span className="text-emerald-600">&#10003;</span>
+              <span className="text-emerald-600 dark:text-emerald-400">&#10003;</span>
             ) : step.active ? (
-              <span className="inline-block h-3 w-3 animate-pulse rounded-full bg-blue-400" />
+              <span className="inline-block h-3 w-3 animate-pulse rounded-full bg-blue-400 dark:bg-blue-500" />
             ) : (
               <span className="inline-block h-3 w-3 rounded-full border border-slate-300 dark:border-slate-700" />
             )}
             <span
               className={
                 step.done
-                  ? "text-slate-600"
+                  ? "text-slate-600 dark:text-slate-400"
                   : step.active
-                    ? "font-medium text-blue-800"
-                    : "text-slate-400"
+                    ? "font-medium text-blue-800 dark:text-blue-200"
+                    : "text-slate-400 dark:text-slate-500"
               }
             >
               {step.label}
