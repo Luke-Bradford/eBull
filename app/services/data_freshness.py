@@ -129,6 +129,115 @@ def predict_next_at(
 # ---------------------------------------------------------------------------
 
 
+def seed_freshness_for_manifest_row(
+    conn: psycopg.Connection[Any],
+    *,
+    subject_type: ManifestSubjectType,
+    subject_id: str,
+    source: ManifestSource,
+    cik: str | None,
+    instrument_id: int | None,
+    accession_number: str,
+    filed_at: datetime,
+) -> None:
+    """Single-row scheduler seed for one manifest write (#956).
+
+    Companion to ``seed_scheduler_from_manifest`` (the bulk full-table
+    rebuild). Called inline from ``record_manifest_entry`` so every
+    manifest discovery write — Atom fast-lane, daily-index reconcile,
+    per-CIK poll, targeted rebuild, first-install drain — leaves the
+    scheduler queryable. Pre-#956 only the drain seeded; the others
+    relied on the next full ``seed_scheduler_from_manifest`` to pick
+    up new triples, leaving them invisible until that ran.
+
+    Latest-row semantics: the freshness ``last_known_*`` columns must
+    reflect the LATEST filing per (subject, source). Discovery writers
+    can call this with an older accession (rebuild walking
+    ``filings.files[]`` secondary pages, daily-index reconcile picking
+    up a missed older row, etc.) — the conditional UPDATE preserves
+    the existing newer values rather than letting ``EXCLUDED`` clobber
+    them.
+    """
+    expected_next_at = predict_next_at(source, filed_at)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO data_freshness_index (
+                subject_type, subject_id, source,
+                cik, instrument_id,
+                last_known_filing_id, last_known_filed_at,
+                last_polled_at, last_polled_outcome,
+                expected_next_at, state
+            ) VALUES (
+                %(stype)s, %(sid)s, %(source)s,
+                %(cik)s, %(iid)s,
+                %(acc)s, %(filed_at)s,
+                NULL, 'never',
+                %(next_at)s, 'current'
+            )
+            ON CONFLICT (subject_type, subject_id, source) DO UPDATE SET
+                cik = COALESCE(EXCLUDED.cik, data_freshness_index.cik),
+                instrument_id = COALESCE(
+                    EXCLUDED.instrument_id, data_freshness_index.instrument_id
+                ),
+                -- Latest-row preservation. The "newer" gate drives
+                -- ALL watermark fields (filing_id + filed_at +
+                -- expected_next_at) uniformly so they never diverge.
+                -- Older discovery writes (rebuild's secondary-page
+                -- walk, daily-index reconcile catching up) leave the
+                -- existing watermark intact.
+                last_known_filing_id = CASE
+                    WHEN data_freshness_index.last_known_filed_at IS NULL
+                      OR EXCLUDED.last_known_filed_at > data_freshness_index.last_known_filed_at
+                    THEN EXCLUDED.last_known_filing_id
+                    ELSE data_freshness_index.last_known_filing_id
+                END,
+                last_known_filed_at = CASE
+                    WHEN data_freshness_index.last_known_filed_at IS NULL
+                      OR EXCLUDED.last_known_filed_at > data_freshness_index.last_known_filed_at
+                    THEN EXCLUDED.last_known_filed_at
+                    ELSE data_freshness_index.last_known_filed_at
+                END,
+                expected_next_at = CASE
+                    WHEN data_freshness_index.last_known_filed_at IS NULL
+                      OR EXCLUDED.last_known_filed_at > data_freshness_index.last_known_filed_at
+                    THEN EXCLUDED.expected_next_at
+                    ELSE data_freshness_index.expected_next_at
+                END,
+                -- State: only ESCALATE from ``never_filed`` to
+                -- ``current`` (manifest evidence shows the subject
+                -- has filed). Don't clobber legitimate poll-outcome
+                -- states like ``error`` / ``expected_filing_overdue``
+                -- on a duplicate / older re-discovery write — those
+                -- carry meaning from the per-CIK poll lifecycle and
+                -- a noisy Atom replay shouldn't reset them.
+                -- Codex pre-push catch.
+                state = CASE
+                    WHEN data_freshness_index.state = 'never_filed' THEN 'current'
+                    ELSE data_freshness_index.state
+                END,
+                state_reason = CASE
+                    WHEN data_freshness_index.state = 'never_filed' THEN NULL
+                    ELSE data_freshness_index.state_reason
+                END,
+                next_recheck_at = CASE
+                    WHEN data_freshness_index.state = 'never_filed' THEN NULL
+                    ELSE data_freshness_index.next_recheck_at
+                END
+            """,
+            {
+                "stype": subject_type,
+                "sid": subject_id,
+                "source": source,
+                "cik": cik,
+                "iid": instrument_id,
+                "acc": accession_number,
+                "filed_at": filed_at,
+                "next_at": expected_next_at,
+            },
+        )
+
+
 def seed_scheduler_from_manifest(conn: psycopg.Connection[Any]) -> int:
     """Bootstrap ``data_freshness_index`` rows from manifest history.
 

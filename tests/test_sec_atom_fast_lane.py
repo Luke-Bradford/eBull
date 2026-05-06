@@ -119,6 +119,60 @@ class TestFastLaneJob:
         assert blackrock_row.subject_type == "institutional_filer"
         assert blackrock_row.instrument_id is None
 
+    def test_atom_discovery_seeds_freshness_index(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # #956: every manifest discovery write must also seed
+        # data_freshness_index. Pre-fix Atom fast-lane left new
+        # (subject, source) triples scheduler-invisible until the
+        # next bulk seed_scheduler_from_manifest invocation.
+        def resolver(conn, cik):
+            if cik == "0000320193":
+                return ResolvedSubject(subject_type="issuer", subject_id="1701", instrument_id=1701)
+            if cik == "0001364742":
+                return ResolvedSubject(subject_type="institutional_filer", subject_id=cik, instrument_id=None)
+            return None
+
+        ebull_test_conn.execute(
+            """
+            INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+            VALUES (1701, 'AAPL', 'Apple', '4', 'USD', TRUE)
+            """
+        )
+        ebull_test_conn.commit()
+
+        run_atom_fast_lane(
+            ebull_test_conn,
+            http_get=_fake_get(200, _ATOM_SAMPLE),
+            subject_resolver=resolver,
+        )
+        ebull_test_conn.commit()
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT subject_type, subject_id, source, state, last_known_filing_id
+                FROM data_freshness_index
+                ORDER BY subject_type, subject_id, source
+                """
+            )
+            rows = cur.fetchall()
+
+        # Both Atom-discovered triples are now scheduler-visible.
+        triples = {(r[0], r[1], r[2]) for r in rows}
+        assert ("issuer", "1701", "sec_form4") in triples
+        assert ("institutional_filer", "0001364742", "sec_13f_hr") in triples
+        # And state is 'current' (manifest evidence shows the subject
+        # has filed) so the per-CIK poll picks them up.
+        assert all(r[3] == "current" for r in rows)
+        # last_known_filing_id matches the just-discovered accession.
+        for stype, sid, _src, _state, last_id in rows:
+            if (stype, sid) == ("issuer", "1701"):
+                assert last_id == "0000320193-26-000042"
+            elif (stype, sid) == ("institutional_filer", "0001364742"):
+                assert last_id == "0001364742-26-000099"
+
     def test_unknown_subject_skipped(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
