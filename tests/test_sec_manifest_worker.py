@@ -220,18 +220,19 @@ class TestParserRegistry:
         # because it has nothing new to write. The worker must check
         # the row's effective raw_status (``outcome.raw_status or
         # row.raw_status``), not just the outcome.
+        from app.services.sec_manifest import transition_status
+
         _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
         # Pre-stamp ``raw_status='stored'`` while keeping
         # ``ingest_status='pending'`` so the worker picks the row up
         # via ``iter_pending`` AND finds existing raw evidence. Models
         # a rebuild flow: body stored on a prior pass, parsed reset to
-        # pending for re-parse, parser doesn't restamp raw. Direct SQL
-        # because ``transition_status`` ignores ``raw_status`` on the
-        # ``pending -> pending`` self-loop branch (separate tech-debt
-        # #948 — fix lets this swap back to ``transition_status``).
-        ebull_test_conn.execute(
-            "UPDATE sec_filing_manifest SET raw_status = 'stored' WHERE accession_number = %s",
-            ("ACC-1",),
+        # pending for re-parse, parser doesn't restamp raw.
+        transition_status(
+            ebull_test_conn,
+            "ACC-1",
+            ingest_status="pending",
+            raw_status="stored",
         )
         ebull_test_conn.commit()
 
