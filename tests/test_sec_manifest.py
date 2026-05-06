@@ -573,7 +573,12 @@ class TestFormMapping:
         assert is_amendment_form("DEFA14A") is True
         assert is_amendment_form("DEFR14A") is True
         # And both still map to sec_def14a (the parent source).
+        # Codex pre-push review #939 caught the DEFR14A mapping gap:
+        # without an entry in ``_FORM_TO_SOURCE`` the discovery callers
+        # would skip the row at ``record_manifest_entry`` even though
+        # ``is_amendment_form`` recognised it.
         assert map_form_to_source("DEFA14A") == "sec_def14a"
+        assert map_form_to_source("DEFR14A") == "sec_def14a"
 
     def test_self_transition_explicit(self) -> None:
         # Bot review WARNING: ``failed -> failed`` should be EXPLICITLY

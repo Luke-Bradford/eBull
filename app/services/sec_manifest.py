@@ -492,9 +492,14 @@ _FORM_TO_SOURCE: dict[str, ManifestSource] = {
     # Proxy. ``DEFM14A`` is the merger-related proxy variant; the
     # existing ``app/services/def14a_ingest.py`` treats it as ingestible
     # so the manifest must too (Codex pre-push review #866).
+    # ``DEFA14A`` (additional definitive proxy) and ``DEFR14A``
+    # (revised definitive proxy) are amendment-style proxies; mapped
+    # to ``sec_def14a`` so discovery does not silently skip them
+    # (Codex pre-push review #939).
     "DEF 14A": "sec_def14a",
     "DEFA14A": "sec_def14a",
     "DEFM14A": "sec_def14a",
+    "DEFR14A": "sec_def14a",
     "PRE 14A": "sec_def14a",
     # Fund (Phase 3). SEC EDGAR submissions API uses both ``NPORT-P`` /
     # ``NPORT-P/A`` (current spelling, no internal dash, "-P" suffix

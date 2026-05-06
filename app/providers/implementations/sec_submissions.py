@@ -59,7 +59,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from app.services.sec_manifest import ManifestSource, map_form_to_source
+from app.services.sec_manifest import (
+    ManifestSource,
+    is_amendment_form,
+    map_form_to_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +198,7 @@ def parse_submissions_page(
                     datetime.fromisoformat(accepted_str.rstrip("Z")).replace(tzinfo=UTC) if accepted_str else None
                 ),
                 primary_document_url=primary_url,
-                is_amendment=form.endswith("/A"),
+                is_amendment=is_amendment_form(form),
             )
         )
 
