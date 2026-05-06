@@ -255,9 +255,10 @@ def check_freshness(
 
     # Extract ``filings.files[*].name`` from the same primary body so
     # ``_walk_secondary_pages`` (#936) does not re-fetch the primary
-    # JSON. Skip silently on JSON-decode error — the row parse above
-    # already succeeded, so the body is well-formed for the rows path;
-    # the files block is best-effort secondary metadata.
+    # JSON. Log on extract failure so a swallowed exception does not
+    # silently skip the secondary walk — bot review BLOCKING on PR
+    # #958: ``if delta.has_more_in_files and delta.files_pages:``
+    # would silently no-op the rebuild's secondary-page recovery.
     files_pages: list[str] = []
     try:
         payload = json.loads(body) if isinstance(body, (bytes, str)) else body
@@ -268,8 +269,27 @@ def check_freshness(
                     name = meta.get("name")
                     if isinstance(name, str) and name:
                         files_pages.append(name)
-    except json.JSONDecodeError, TypeError:
-        pass
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning(
+            "check_freshness: files_pages extraction failed for cik=%s: %s "
+            "(rows still parsed; rebuild's secondary walk will see empty list)",
+            cik_padded,
+            exc,
+        )
+
+    if has_more and not files_pages:
+        # ``has_more_in_files=True`` from the row parse but
+        # ``files_pages`` is empty — the row parse and the files
+        # extraction disagreed about the same body. Either the body
+        # mutated between parses (impossible — same bytes) or
+        # ``filings.files`` was structurally surprising (non-dict
+        # entries, missing ``name`` keys). Surface so the caller
+        # doesn't silently drop the entire secondary walk.
+        logger.warning(
+            "check_freshness: cik=%s has_more_in_files=True but files_pages "
+            "extracted empty — rebuild's secondary walk will be skipped",
+            cik_padded,
+        )
 
     # Filter to strictly newer than the watermark. SEC's recent array
     # is ordered newest-first; we walk until we hit the watermark and

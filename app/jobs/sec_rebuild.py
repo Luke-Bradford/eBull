@@ -272,17 +272,28 @@ def _discovery_pass(
         # otherwise an aged-out accession can never be repaired.
         # Atom / per-CIK polling intentionally stay on ``recent`` (cheap
         # path); only rebuild pays the secondary-page cost.
-        if delta.has_more_in_files and delta.files_pages:
-            new_rows += _walk_secondary_pages(
-                conn,
-                http_get=http_get,
-                cik=cik,
-                subject_type=stype,
-                subject_id=sid,
-                instrument_id=instrument_id,
-                sources_set=sources_set,
-                files_pages=delta.files_pages,
-            )
+        if delta.has_more_in_files:
+            if delta.files_pages:
+                new_rows += _walk_secondary_pages(
+                    conn,
+                    http_get=http_get,
+                    cik=cik,
+                    subject_type=stype,
+                    subject_id=sid,
+                    instrument_id=instrument_id,
+                    sources_set=sources_set,
+                    files_pages=delta.files_pages,
+                )
+            else:
+                # Guard against silent skip: ``check_freshness`` already
+                # logs a warning when extraction fails, but log here too
+                # so the rebuild's own log stream surfaces the gap. Bot
+                # review BLOCKING on PR #958.
+                logger.warning(
+                    "sec rebuild discovery: cik=%s has_more_in_files=True but "
+                    "files_pages empty — secondary walk skipped",
+                    cik,
+                )
 
     return new_rows
 
