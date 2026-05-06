@@ -1,0 +1,90 @@
+name: PR issue link
+
+# Why this gate exists:
+#   PR title convention ``feat(#N): description`` is human-legible but
+#   GitHub's auto-close parser does NOT recognise it as a closing
+#   reference. Authors must remember to fill the ``Closes #`` line in
+#   the existing PR template; drift is silent.
+#
+#   On 2026-05-05 a sweep found 16 ETL issues (#863-#873, #888-#892)
+#   that shipped via merged PRs but stayed OPEN, because every PR title
+#   used ``feat(#N):`` and no body had a closing verb. ``gh issue list``
+#   lied about repo state until a manual ``gh issue close`` sweep ran.
+#
+#   This workflow blocks that drift at the PR gate. See #935 / #942.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  verify-issue-link:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify PR body links every title-referenced issue
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          # Pull every ``#N`` out of the title. Empty title == no refs.
+          mapfile -t title_nums < <(printf '%s\n' "$PR_TITLE" \
+            | grep -oE '#[0-9]+' \
+            | sed 's/#//' \
+            | sort -u)
+
+          if [ ${#title_nums[@]} -eq 0 ]; then
+            echo "Title has no issue reference; nothing to verify."
+            exit 0
+          fi
+
+          # Strip HTML comments + fenced code blocks + inline code so a
+          # ``Closes #N`` inside a template comment or copy-paste example
+          # cannot satisfy the gate. Perl with ``-0`` slurps the whole
+          # body so ``.*?`` can span newlines.
+          body_clean=$(printf '%s' "$PR_BODY" | perl -0pe 's/<!--.*?-->//gs; s/```.*?```//gs; s/`[^`]*`//g')
+
+          # Recognised verbs:
+          #   Closing (auto-close on merge):    close[sd]?, closing,
+          #                                     fix(e[sd]|ing)?,
+          #                                     resolve[sd]?, resolving
+          #   Non-closing (explicit reference): refs?, references?,
+          #                                     track[sd]?, tracking,
+          #                                     "part of", umbrella
+          # Left boundary ``(^|[^[:alnum:]_])`` blocks substrings like
+          # ``unfixes #N`` from passing. ``[[:space:]:]+`` between verb
+          # and ``#`` allows ``Closes #N`` and ``Umbrella: #N`` styles.
+          verb_re='(^|[^[:alnum:]_])(close[sd]?|closing|fix(e[sd]|ing)?|resolve[sd]?|resolving|refs?|references?|track[sd]?|tracking|part of|umbrella)[[:space:]:]+#'
+
+          missing=()
+          for n in "${title_nums[@]}"; do
+            # ``([^0-9]|$)`` boundary so ``#86`` does not match ``#869``.
+            if printf '%s\n' "$body_clean" | grep -qiE "${verb_re}${n}([^0-9]|$)"; then
+              continue
+            fi
+            missing+=("$n")
+          done
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::PR title references issue(s) but body has no Closes/Fixes/Resolves/Refs/Tracks/Part of/Umbrella line for: ${missing[*]}"
+            echo ""
+            echo "Why this matters:"
+            echo "  GitHub auto-closes issues only when the body contains a closing verb"
+            echo "  (Closes / Fixes / Resolves) followed by #N. The convention"
+            echo "  'feat(#N): title' alone does NOT auto-close. 16 ETL issues drifted"
+            echo "  open until a manual sweep — see #935 / #942."
+            echo ""
+            echo "Fix one of:"
+            echo "  - Add 'Closes #N' to the PR body (auto-closes the issue on merge)."
+            echo "  - Add 'Refs #N' / 'Part of #N' / 'Umbrella #N' if this PR only"
+            echo "    partly addresses the issue and a follow-up will close it."
+            exit 1
+          fi
+
+          echo "PR body links every title-referenced issue."
