@@ -89,11 +89,20 @@ def get_operator_credential_health(
     *,
     operator_id: UUID,
     provider: str = "etoro",
+    environment: str = "demo",
 ) -> CredentialHealth:
     """Compute the operator's aggregate credential health.
 
     Joins a synthetic required-labels CTE against ``broker_credentials``
     and returns the worst-of state per the locked precedence above.
+
+    Scoped to a single (provider, environment) pair (Codex pre-push r1.2).
+    Active uniqueness on broker_credentials is
+    ``(operator_id, provider, label, environment)``, so demo and real rows
+    are independent. Without the environment filter, a demo api_key VALID
+    + real user_key VALID would falsely report VALID for either env. v1
+    only uses ``demo`` but the parameter is plumbed so the same helper
+    works when ``real`` arrives.
 
     Returns:
         CredentialHealth — REJECTED / MISSING / UNTESTED / VALID.
@@ -115,6 +124,7 @@ def get_operator_credential_health(
               FROM broker_credentials
              WHERE operator_id = %(op)s
                AND provider    = %(prov)s
+               AND environment = %(env)s
                AND revoked_at IS NULL
         ),
         label_join AS (
@@ -137,6 +147,7 @@ def get_operator_credential_health(
                 "required_labels": list(required),
                 "op": operator_id,
                 "prov": provider,
+                "env": environment,
             },
         )
         row = cur.fetchone()
@@ -275,7 +286,7 @@ def _do_health_transition(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT id, operator_id, provider, health_state
+            SELECT id, operator_id, provider, environment, health_state
               FROM broker_credentials
              WHERE id = %(id)s
                AND revoked_at IS NULL
@@ -298,6 +309,7 @@ def _do_health_transition(
         old_state: HealthState = row["health_state"]
         operator_id: UUID = row["operator_id"]
         provider: str = row["provider"]
+        environment: str = row["environment"]
 
         # Decide whether this call mutates health_state.
         will_change_health = _should_change_state(
@@ -326,8 +338,14 @@ def _do_health_transition(
 
         # Snapshot the operator aggregate BEFORE the row update.
         # Reads against the same connection within the same tx so the
-        # FOR UPDATE row is visible.
-        old_aggregate = get_operator_credential_health(conn, operator_id=operator_id, provider=provider)
+        # FOR UPDATE row is visible. Environment-scoped per Codex
+        # pre-push r1.2.
+        old_aggregate = get_operator_credential_health(
+            conn,
+            operator_id=operator_id,
+            provider=provider,
+            environment=environment,
+        )
 
         cur.execute(
             """
@@ -340,7 +358,12 @@ def _do_health_transition(
         )
 
         # Recompute aggregate after the row update.
-        new_aggregate = get_operator_credential_health(conn, operator_id=operator_id, provider=provider)
+        new_aggregate = get_operator_credential_health(
+            conn,
+            operator_id=operator_id,
+            provider=provider,
+            environment=environment,
+        )
 
         # Record the recovery timestamp ONLY on REJECTED -> VALID at
         # operator level. Other transitions (UNTESTED -> VALID,
@@ -415,6 +438,57 @@ def _should_change_state(
 # ---------------------------------------------------------------------------
 # Recovery-timestamp lookup (used by AUTH_EXPIRED suppression query in #977)
 # ---------------------------------------------------------------------------
+
+
+def notify_aggregate_if_changed(
+    conn: psycopg.Connection[Any],
+    *,
+    operator_id: UUID,
+    provider: str,
+    environment: str,
+    old_aggregate: CredentialHealth,
+) -> None:
+    """Emit pg_notify if the operator aggregate has moved since old_aggregate.
+
+    For callers that mutate broker_credentials rows directly (e.g. PUT
+    /broker-credentials/replace) and need to wake subscribers without
+    going through ``record_row_health_transition``. PUT /replace
+    revokes a possibly-VALID row and inserts an UNTESTED replacement;
+    the aggregate may move VALID → UNTESTED, and subscribers must
+    observe that transition or they'll keep treating creds as valid
+    (Codex pre-push r1.3).
+
+    Caller is expected to have:
+      1. Snapshotted ``old_aggregate`` before any row mutations.
+      2. Performed the mutations on ``conn`` inside a transaction.
+      3. Called this helper inside the same transaction. The pg_notify
+         fires when that transaction commits.
+
+    Idempotent: if the aggregate hasn't moved, no NOTIFY fires.
+    """
+    new_aggregate = get_operator_credential_health(
+        conn,
+        operator_id=operator_id,
+        provider=provider,
+        environment=environment,
+    )
+    if old_aggregate == new_aggregate:
+        return
+
+    payload = json.dumps(
+        {
+            "operator_id": str(operator_id),
+            "provider": provider,
+            "old_aggregate": old_aggregate.value,
+            "new_aggregate": new_aggregate.value,
+            "at": datetime.now(UTC).isoformat(),
+        }
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_notify(%(channel)s, %(payload)s)",
+            {"channel": NOTIFY_CHANNEL, "payload": payload},
+        )
 
 
 def get_last_recovered_at(

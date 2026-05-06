@@ -61,7 +61,11 @@ from app.services.broker_credentials import (
     revoke_credential,
     store_credential,
 )
-from app.services.credential_health import record_health_outcome
+from app.services.credential_health import (
+    get_operator_credential_health,
+    notify_aggregate_if_changed,
+    record_health_outcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -804,7 +808,10 @@ def validate_stored(
     # rows. validate-stored is THE canonical probe path — source='probe'
     # is required to clear a sticky REJECTED row, per the credential
     # health contract.
-    request_pool = getattr(request.app.state, "pool", None)
+    # Use db_pool (lifespan attribute name) — earlier draft used
+    # the wrong attribute and silently no-op'd in production
+    # (Codex pre-push r1.1).
+    request_pool = getattr(request.app.state, "db_pool", None)
     if request_pool is not None:
         for cred_id in cred_ids.values():
             try:
@@ -910,6 +917,13 @@ def replace(
     # concurrent replace calls for the same (operator, label).
     audit_pool = getattr(request.app.state, "audit_pool", None)
 
+    # Flush any implicit transaction the dependency machinery may have
+    # opened on this connection so the next ``conn.transaction()``
+    # opens a real top-level txn rather than a savepoint that defers
+    # commit until the dependency teardown (Codex pre-push r1.4).
+    # Mirrors the same pattern in POST /broker-credentials.
+    conn.commit()
+
     with conn.transaction():
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
@@ -937,6 +951,18 @@ def replace(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No active credential to replace. Use POST /broker-credentials to create.",
             )
+
+        # Snapshot the operator aggregate BEFORE the revoke+insert so
+        # we can NOTIFY subscribers of the resulting transition. Without
+        # this, a VALID -> UNTESTED move (replacing a VALID row with a
+        # fresh UNTESTED one) would silently bypass the cache (Codex
+        # pre-push r1.3).
+        old_aggregate = get_operator_credential_health(
+            conn,
+            operator_id=session.operator_id,
+            provider=provider_norm,
+            environment=env_norm,
+        )
 
         # Identical-secret short-circuit (Codex r2.3): decrypt existing
         # ciphertext and compare to new plaintext. Avoids the spurious
@@ -991,6 +1017,17 @@ def replace(
             label=label_norm,
             environment=env_norm,
             plaintext=secret_norm,
+        )
+
+        # NOTIFY subscribers if the aggregate actually moved. Inside
+        # the same tx as the row mutations so the notify commits
+        # alongside (and after) the durable state change.
+        notify_aggregate_if_changed(
+            conn,
+            operator_id=session.operator_id,
+            provider=provider_norm,
+            environment=env_norm,
+            old_aggregate=old_aggregate,
         )
 
     return ReplaceCredentialResponse(

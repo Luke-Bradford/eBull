@@ -36,6 +36,7 @@ from app.services.credential_health import (
     _should_change_state,
     get_last_recovered_at,
     get_operator_credential_health,
+    notify_aggregate_if_changed,
 )
 from tests.fixtures.ebull_test_db import (
     ebull_test_conn,  # noqa: F401
@@ -77,6 +78,7 @@ def _insert_credential(
     label: str,
     health_state: str = "untested",
     revoked: bool = False,
+    environment: str = "demo",
 ) -> UUID:
     """Insert a synthetic broker_credentials row at a given health_state."""
     cred_id = uuid4()
@@ -93,12 +95,12 @@ def _insert_credential(
                 operator_id,
                 "etoro",
                 label,
-                "demo",
+                environment,
                 b"\x00" * 32,  # bytea ciphertext placeholder; tests don't decrypt
                 "abcd",
                 1,
                 health_state,
-                "NOW()" if False else None,  # placeholder; we use a separate path for revoked
+                None,
             ),
         )
         if revoked:
@@ -261,6 +263,126 @@ class TestGetOperatorCredentialHealth:
         """Locks the etoro (api_key, user_key) requirement so a future
         provider addition doesn't accidentally relax health for etoro."""
         assert REQUIRED_LABELS_BY_PROVIDER["etoro"] == ("api_key", "user_key")
+
+    def test_environment_scoping_prevents_cross_pollination(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],  # noqa: F811
+    ) -> None:
+        """Codex pre-push r1.2: aggregate must be scoped to environment.
+
+        A demo api_key VALID + real user_key VALID should NOT make
+        either env's aggregate VALID — neither has a complete pair.
+        """
+        op_id = _insert_operator(ebull_test_conn)
+        _insert_credential(
+            ebull_test_conn,
+            operator_id=op_id,
+            label="api_key",
+            health_state="valid",
+            environment="demo",
+        )
+        _insert_credential(
+            ebull_test_conn,
+            operator_id=op_id,
+            label="user_key",
+            health_state="valid",
+            environment="real",
+        )
+
+        # demo: api_key valid, user_key absent -> MISSING
+        assert (
+            get_operator_credential_health(ebull_test_conn, operator_id=op_id, environment="demo")
+            == CredentialHealth.MISSING
+        )
+        # real: user_key valid, api_key absent -> MISSING
+        assert (
+            get_operator_credential_health(ebull_test_conn, operator_id=op_id, environment="real")
+            == CredentialHealth.MISSING
+        )
+
+
+# ---------------------------------------------------------------------------
+# notify_aggregate_if_changed (used by PUT /broker-credentials/replace)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestNotifyAggregateIfChanged:
+    def test_emits_notify_when_aggregate_moves(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],  # noqa: F811
+    ) -> None:
+        """Mutate rows directly, then call helper — NOTIFY should fire."""
+        op_id = _seed_pair(ebull_test_conn, api_state="valid", user_state="valid")
+
+        url = test_database_url()
+        listen_conn = psycopg.connect(url, autocommit=True)
+        sender_conn = psycopg.connect(url)
+        try:
+            listen_conn.execute(f"LISTEN {NOTIFY_CHANNEL}")
+
+            with sender_conn.transaction():
+                # Snapshot before mutation.
+                old = get_operator_credential_health(sender_conn, operator_id=op_id, environment="demo")
+                assert old == CredentialHealth.VALID
+
+                # Revoke the api_key row (mimics PUT /replace's first step).
+                with sender_conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE broker_credentials SET revoked_at = NOW() "
+                        "WHERE operator_id = %s AND label = 'api_key' AND revoked_at IS NULL",
+                        (op_id,),
+                    )
+
+                # Notify after mutation.
+                notify_aggregate_if_changed(
+                    sender_conn,
+                    operator_id=op_id,
+                    provider="etoro",
+                    environment="demo",
+                    old_aggregate=old,
+                )
+
+            payloads = []
+            for n in listen_conn.notifies(timeout=2.0, stop_after=1):
+                payloads.append(json.loads(n.payload))
+
+            assert payloads, "expected NOTIFY for VALID -> MISSING transition"
+            assert payloads[0]["old_aggregate"] == "valid"
+            assert payloads[0]["new_aggregate"] == "missing"
+        finally:
+            sender_conn.close()
+            listen_conn.close()
+
+    def test_no_notify_when_aggregate_unchanged(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],  # noqa: F811
+    ) -> None:
+        """Idempotent: aggregate same before+after means no NOTIFY."""
+        op_id = _seed_pair(ebull_test_conn, api_state="valid", user_state="valid")
+
+        url = test_database_url()
+        listen_conn = psycopg.connect(url, autocommit=True)
+        sender_conn = psycopg.connect(url)
+        try:
+            listen_conn.execute(f"LISTEN {NOTIFY_CHANNEL}")
+
+            with sender_conn.transaction():
+                old = get_operator_credential_health(sender_conn, operator_id=op_id, environment="demo")
+                # No mutation between snapshot and helper call.
+                notify_aggregate_if_changed(
+                    sender_conn,
+                    operator_id=op_id,
+                    provider="etoro",
+                    environment="demo",
+                    old_aggregate=old,
+                )
+
+            payloads = list(listen_conn.notifies(timeout=0.5, stop_after=1))
+            assert payloads == [], f"expected no NOTIFY; got {payloads}"
+        finally:
+            sender_conn.close()
+            listen_conn.close()
 
 
 # ---------------------------------------------------------------------------
