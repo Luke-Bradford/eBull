@@ -49,12 +49,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 import psycopg
 import psycopg_pool
 import websockets
 from websockets.asyncio.client import ClientConnection
 
+from app.services.credential_health_cache import CredentialHealthCache
 from app.services.quote_stream import QuoteBus
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,13 @@ logger = logging.getLogger(__name__)
 
 _WS_URL = "wss://ws.etoro.com/ws"
 _RECONNECT_BACKOFF_S = 5.0
+
+# Auth-failure exponential backoff (#978 / #974/D). Applied when the
+# eToro WS auth handshake itself fails (401 / Unauthorized) — distinct
+# from generic connection errors which still use _RECONNECT_BACKOFF_S.
+# Spec-locked sequence + 600s cap; reset to index 0 on first
+# successful auth. Codex pre-push r2.11 (#974).
+_AUTH_FAILURE_BACKOFF_S: tuple[float, ...] = (5.0, 30.0, 120.0, 600.0, 600.0)
 # Debounce window for portfolio reconcile after a private-channel
 # event. Multi-leg trades produce a burst of order/position pushes;
 # we collapse them into one REST reconcile so the broker endpoint
@@ -415,11 +424,29 @@ class EtoroWebSocketSubscriber:
         bus: QuoteBus | None = None,
         watched_ids_provider: Callable[[], list[int]] | None = None,
         reconcile_runner: Callable[[], None] | None = None,
+        # #978 / #974/D — credential-aware mode. When all three are
+        # supplied, the subscriber:
+        #   * Records every auth outcome through to credential health
+        #     via `record_health_outcome` (source='incidental').
+        #   * Pre-checks the cache before opening a connection — if
+        #     operator health != VALID, skips the connect entirely
+        #     (no auth flood while keys are known-bad).
+        #   * Uses exponential backoff on consecutive auth failures
+        #     (5, 30, 120, 600, 600 cap) instead of fixed 5s.
+        # Legacy callers omit them and get the original static-key
+        # behavior unchanged.
+        operator_id: UUID | None = None,
+        credential_cache: CredentialHealthCache | None = None,
+        audit_pool: psycopg_pool.ConnectionPool[Any] | None = None,
     ) -> None:
         self._api_key = api_key
         self._user_key = user_key
         self._env = env
         self._pool = pool
+        self._operator_id = operator_id
+        self._credential_cache = credential_cache
+        self._audit_pool = audit_pool
+        self._consecutive_auth_failures: int = 0
         # Optional pub/sub fan-out for sub-second UI delivery (Slice 3).
         # When None, ticks are still upserted to ``quotes`` but no SSE
         # consumer is notified — useful for the daemon-only deploy
@@ -491,6 +518,63 @@ class EtoroWebSocketSubscriber:
     def _default_watched_ids(self) -> list[int]:
         with self._pool.connection() as conn:
             return fetch_watched_instrument_ids(conn)
+
+    def _record_auth_outcome(self, *, success: bool, error_detail: str | None) -> None:
+        """Write-through to credential health for both label rows.
+
+        Legacy mode (no operator_id / cache / audit_pool): no-op.
+        Credential-aware mode: looks up the operator's two label rows
+        (api_key + user_key) and calls record_health_outcome with
+        source='incidental' for each. The validate-stored probe path
+        is the only thing that can clear REJECTED — incidental success
+        only promotes from UNTESTED to VALID per the locked stickiness
+        contract (#975).
+        """
+        if self._operator_id is None or self._audit_pool is None or self._credential_cache is None:
+            return
+
+        # Local imports avoid module-load circular paths and keep
+        # startup fast — credential_health pulls in psycopg_pool /
+        # config which is fine but unnecessary on the read-only
+        # legacy path.
+        from app.services.credential_health import record_health_outcome
+
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT id
+                          FROM broker_credentials
+                         WHERE operator_id = %s
+                           AND provider = 'etoro'
+                           AND environment = %s
+                           AND revoked_at IS NULL
+                        """,
+                        (self._operator_id, self._env),
+                    )
+                    cred_ids = [row[0] for row in cur.fetchall()]
+        except Exception:
+            logger.exception(
+                "EtoroWebSocketSubscriber: credential id lookup failed; auth outcome write-through skipped"
+            )
+            return
+
+        for cred_id in cred_ids:
+            try:
+                record_health_outcome(
+                    credential_id=cred_id,
+                    success=success,
+                    source="incidental",
+                    error_detail=error_detail,
+                    pool=self._audit_pool,
+                )
+            except Exception:
+                logger.warning(
+                    "EtoroWebSocketSubscriber: credential health write-through failed for %s",
+                    cred_id,
+                    exc_info=True,
+                )
 
     def _default_reconcile_runner(self) -> None:
         """Sync helper: REST snapshot via EtoroBrokerProvider, then
@@ -667,29 +751,75 @@ class EtoroWebSocketSubscriber:
 
     async def _run(self) -> None:
         while not self._stop_event.is_set():
+            # Credential-health pre-flight (#978 / #974/D). When the
+            # cache is wired, skip the connect attempt entirely while
+            # the operator's aggregate health is anything other than
+            # VALID. Avoids the 5s/loop auth-fail spam observed pre-
+            # #978 when keys were bad. The cache is wake-up + 5s poll
+            # so a VALID transition is observed within one cycle.
+            if self._credential_cache is not None and self._operator_id is not None:
+                health = self._credential_cache.get(operator_id=self._operator_id, environment=self._env)
+                if health.value != "valid":
+                    logger.debug(
+                        "EtoroWebSocketSubscriber: skipping connect — operator health=%s",
+                        health.value,
+                    )
+                    try:
+                        await asyncio.wait_for(self._stop_event.wait(), timeout=_RECONNECT_BACKOFF_S)
+                        return
+                    except TimeoutError:
+                        continue
+
             try:
                 await self._connect_and_listen()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.warning(
-                    "EtoroWebSocketSubscriber: connection error — backoff %.1fs then reconnect",
-                    _RECONNECT_BACKOFF_S,
+                    "EtoroWebSocketSubscriber: connection error — backoff then reconnect",
                     exc_info=True,
                 )
+            backoff = self._current_backoff()
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=_RECONNECT_BACKOFF_S)
+                await asyncio.wait_for(self._stop_event.wait(), timeout=backoff)
                 # Stop signalled during backoff — exit cleanly.
                 return
             except TimeoutError:
                 continue
+
+    def _current_backoff(self) -> float:
+        """Return the next reconnect-backoff delay in seconds.
+
+        Legacy mode (no cache): always _RECONNECT_BACKOFF_S.
+        Credential-aware mode: exponential by consecutive_auth_failures.
+        """
+        if self._credential_cache is None or self._operator_id is None:
+            return _RECONNECT_BACKOFF_S
+        idx = min(self._consecutive_auth_failures, len(_AUTH_FAILURE_BACKOFF_S) - 1)
+        return _AUTH_FAILURE_BACKOFF_S[idx]
 
     async def _connect_and_listen(self) -> None:
         async with websockets.connect(_WS_URL) as ws:
             await ws.send(build_auth_message(self._api_key, self._user_key))
             auth_reply = await _await_auth_envelope(ws, timeout_s=10.0)
             if not _is_auth_success(auth_reply):
+                # Credential-aware mode (#978 / #974/D): write the
+                # auth failure through to credential health. The
+                # orchestrator gate, admin UI, and any future
+                # subscribers see the rejected state on their next
+                # cache poll.
+                self._consecutive_auth_failures += 1
+                self._record_auth_outcome(success=False, error_detail=str(auth_reply)[:240])
                 raise RuntimeError(f"eToro WS auth failed: {auth_reply!r}")
+            # Auth succeeded — reset the failure counter so the next
+            # connection error backs off from the base interval.
+            if self._consecutive_auth_failures > 0:
+                logger.info(
+                    "EtoroWebSocketSubscriber: auth recovered after %d consecutive failures",
+                    self._consecutive_auth_failures,
+                )
+                self._consecutive_auth_failures = 0
+            self._record_auth_outcome(success=True, error_detail=None)
 
             # Hold the lock across the ``_ws`` publish + batched
             # initial Subscribe send. This serialises against every
