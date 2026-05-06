@@ -34,8 +34,9 @@ batch sizes predictable.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -142,6 +143,11 @@ class WorkerStats:
     failed: int
     skipped_no_parser: int
     raw_payload_violations: int = 0
+    # Per-source breakdown of ``skipped_no_parser``. Operators
+    # reading this from job_runs / a future status endpoint can see
+    # exactly which manifest sources are dropping work because no
+    # parser is registered (#940). Empty when ``skipped_no_parser=0``.
+    skipped_no_parser_by_source: dict[ManifestSource, int] = field(default_factory=dict)
 
 
 def run_manifest_worker(
@@ -182,6 +188,7 @@ def run_manifest_worker(
     failed = 0
     skipped = 0
     raw_violations = 0
+    skipped_by_source: dict[ManifestSource, int] = defaultdict(int)
 
     for row in rows:
         spec = _PARSERS.get(row.source)
@@ -192,6 +199,7 @@ def run_manifest_worker(
                 row.accession_number,
             )
             skipped += 1
+            skipped_by_source[row.source] += 1
             continue
 
         try:
@@ -272,6 +280,17 @@ def run_manifest_worker(
         else:
             failed += 1
 
+    # #940: surface no-parser drops at WARNING level with per-source
+    # breakdown. Per-row debug logs above let operators dig in if
+    # needed; the once-per-tick summary is the loud signal that real
+    # work is being silently dropped because no parser is registered.
+    if skipped:
+        logger.warning(
+            "manifest worker: skipped %d row(s) with no registered parser; per-source counts: %s",
+            skipped,
+            dict(sorted(skipped_by_source.items())),
+        )
+
     return WorkerStats(
         rows_processed=len(rows),
         parsed=parsed,
@@ -279,6 +298,7 @@ def run_manifest_worker(
         failed=failed,
         skipped_no_parser=skipped,
         raw_payload_violations=raw_violations,
+        skipped_no_parser_by_source=dict(skipped_by_source),
     )
 
 

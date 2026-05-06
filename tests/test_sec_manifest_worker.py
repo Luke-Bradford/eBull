@@ -78,10 +78,62 @@ class TestParserRegistry:
         assert stats.rows_processed == 1
         assert stats.parsed == 0
         assert stats.skipped_no_parser == 1
+        # #940: per-source breakdown exposes which sources lack parsers.
+        assert stats.skipped_no_parser_by_source == {"sec_form4": 1}
 
         row = get_manifest_row(ebull_test_conn, "ACC-1")
         assert row is not None
         assert row.ingest_status == "pending"  # untouched
+
+    def test_unregistered_source_emits_warning_with_breakdown(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # #940: skipped no-parser rows must surface at WARNING level
+        # with the per-source breakdown so an operator running the
+        # worker sees real work being dropped without grepping debug.
+        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="ACC-2", source="sec_form4")
+        _seed_pending(ebull_test_conn, accession="ACC-3", source="sec_def14a")
+        ebull_test_conn.commit()
+
+        with caplog.at_level("WARNING", logger="app.jobs.sec_manifest_worker"):
+            stats = run_manifest_worker(ebull_test_conn, source=None, max_rows=10)
+        ebull_test_conn.commit()
+        assert stats.skipped_no_parser == 3
+        assert stats.skipped_no_parser_by_source == {"sec_form4": 2, "sec_def14a": 1}
+
+        warnings = [rec for rec in caplog.records if rec.levelname == "WARNING"]
+        assert warnings, "expected a WARNING log line for skipped no-parser rows"
+        msg = warnings[0].getMessage()
+        assert "skipped 3 row(s)" in msg
+        assert "sec_form4" in msg
+        assert "sec_def14a" in msg
+
+    def test_no_skip_no_warning(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # When every source has a parser, the warning is not emitted —
+        # operators should only see the message when something is
+        # actually dropped.
+        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        ebull_test_conn.commit()
+
+        def parser(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
+            return ParseOutcome(status="parsed")
+
+        register_parser("sec_form4", parser)
+
+        with caplog.at_level("WARNING", logger="app.jobs.sec_manifest_worker"):
+            stats = run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=10)
+        ebull_test_conn.commit()
+        assert stats.skipped_no_parser == 0
+        assert stats.skipped_no_parser_by_source == {}
+        warnings = [rec for rec in caplog.records if rec.levelname == "WARNING"]
+        assert not warnings, f"unexpected WARNING(s): {[w.getMessage() for w in warnings]}"
 
     def test_registered_parser_drives_parsed_transition(
         self,
