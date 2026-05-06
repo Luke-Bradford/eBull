@@ -107,11 +107,13 @@ function userKeyRow(): BrokerCredentialView {
 }
 
 function withPhrase(): CreateBrokerCredentialResponse {
-  return { credential: makeRow(), recovery_phrase: PHRASE };
+  // Post-amendment 2026-05-07: recovery_phrase removed from response.
+  // Helper retained for the .skip'd phrase tests below.
+  return { credential: makeRow() };
 }
 
 function withoutPhrase(): CreateBrokerCredentialResponse {
-  return { credential: makeRow(), recovery_phrase: null };
+  return { credential: makeRow() };
 }
 
 async function completeStep1(): Promise<void> {
@@ -173,7 +175,12 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("SetupPage — integration", () => {
+// Post-amendment 2026-05-07 (#971): the broker-credential wizard step
+// is removed. The `SetupPage — integration` block below tests the
+// removed flow and is skipped pending a follow-up rewrite. New
+// single-step coverage lives in the `SetupPage — single step` block at
+// the bottom of this file.
+describe.skip("SetupPage — integration", () => {
   it("happy-path save: creates both credentials, fires universe-sync, completes wizard", async () => {
     mockedPostSetup.mockResolvedValueOnce({ operator: OPERATOR });
     mockedCreate

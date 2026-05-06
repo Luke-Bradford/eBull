@@ -24,31 +24,23 @@ type Status =
   | "loading"
   | "authenticated"
   | "unauthenticated"
-  | "needs_setup"
-  | "needs_recovery";
+  | "needs_setup";
 
 interface SessionContextValue {
   status: Status;
   operator: Operator | null;
-  /**
-   * The most recent /auth/bootstrap-state response, or null if the
-   * probe has not yet completed (or failed). Held so the LoginPage
-   * can hide the "Recover existing eBull data" link unless the
-   * latest probe says recovery_required: true (ADR-0003 §6).
-   */
   bootstrapState: authApi.BootstrapStateResponse | null;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   // Called by SetupPage on a successful POST /auth/setup. Mirrors the
-  // login flow -- the cookie is already set by the response, this just
+  // login flow — the cookie is already set by the response; this just
   // updates in-memory state so RequireAuth lets us through.
   markAuthenticated: (op: Operator) => void;
   /**
-   * Re-fetch /auth/bootstrap-state and re-apply the §6 precedence
-   * rule (recovery_required → setup → normal). Per ADR-0003 this
-   * runs at exactly three moments: app load (handled internally),
-   * after a successful POST /auth/recover, and after first-run
-   * setup completion. **Not** after every login.
+   * Re-fetch /auth/bootstrap-state and re-apply the routing rule
+   * (post-amendment 2026-05-07: needs_setup → /setup, otherwise →
+   * normal). Runs at app load (handled internally) and after first-run
+   * setup completion.
    */
   refreshBootstrapState: () => Promise<void>;
 }
@@ -92,30 +84,23 @@ export function SessionProvider({ children }: { children: ReactNode }): JSX.Elem
     return () => setUnauthorizedHandler(null);
   }, [handleUnauthorized]);
 
-  // Bootstrap (issue #116 / ADR-0003 Ticket 3 — supersedes the #106
-  // Ticket G probe of /auth/setup-status):
+  // Bootstrap (post-amendment 2026-05-07 ADR-0003):
   //
   //   1. Probe /auth/bootstrap-state. The response is fetched with
   //      `cache: "no-store"` (see api/auth.ts) and the backend sets
   //      `Cache-Control: no-store`, so the routing decision is always
   //      derived from a live network response.
   //
-  //   2. Apply the §6 precedence rule in this exact order:
-  //        recovery_required: true → status "needs_recovery"
-  //        needs_setup: true       → status "needs_setup"
-  //        otherwise               → fall through to /auth/me
+  //   2. Apply the routing rule:
+  //        needs_setup: true → status "needs_setup"
+  //        otherwise         → fall through to /auth/me
   //
-  //      In particular, recovery_required wins over needs_setup. The
-  //      Edge case A flow (existing encrypted credentials in DB but no
-  //      operators and no key file) lands here with both flags true,
-  //      and the operator must complete /recover before /setup.
-  //
-  //   3. Probe /auth/me only when neither flag is set. 401 → normal
+  //   3. Probe /auth/me only when needs_setup is false. 401 → normal
   //      "unauthenticated" path for a fresh visitor with no cookie.
   //
-  // The "fetch + apply precedence" half of step 1+2 is factored into
-  // `applyBootstrapState` so the post-recover and post-setup callers
-  // can re-run exactly the same logic without copy-pasting it.
+  // The "fetch + apply" half of step 1+2 is factored into
+  // `applyBootstrapState` so the post-setup caller can re-run exactly
+  // the same logic without copy-pasting it.
   const applyBootstrapState = useCallback(
     async (cancelled?: { current: boolean }): Promise<void> => {
       let probe: authApi.BootstrapStateResponse | null = null;
@@ -129,11 +114,6 @@ export function SessionProvider({ children }: { children: ReactNode }): JSX.Elem
       if (cancelled?.current) return;
       setBootstrapState(probe);
 
-      if (probe?.recovery_required) {
-        setOperator(null);
-        setStatus("needs_recovery");
-        return;
-      }
       if (probe?.needs_setup) {
         setOperator(null);
         setStatus("needs_setup");
@@ -147,10 +127,6 @@ export function SessionProvider({ children }: { children: ReactNode }): JSX.Elem
         setStatus("authenticated");
       } catch {
         if (cancelled?.current) return;
-        // Always drive state to unauthenticated regardless of error
-        // class. The 401 interceptor MAY have fired first; setting
-        // state unconditionally here closes the StrictMode/race
-        // window so a fresh visitor never gets stuck in "loading".
         setOperator(null);
         setStatus("unauthenticated");
       }

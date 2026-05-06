@@ -25,7 +25,6 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
-import { RecoverPage } from "@/pages/RecoverPage";
 import { OperatorsPage } from "@/pages/OperatorsPage";
 import { CopyTradingPage } from "@/pages/CopyTradingPage";
 import { InstrumentsPage } from "@/pages/InstrumentsPage";
@@ -37,7 +36,6 @@ export function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/setup" element={<SetupPage />} />
-        <Route path="/recover" element={<RecoverPage />} />
         <Route
           element={
             <RequireAuth>

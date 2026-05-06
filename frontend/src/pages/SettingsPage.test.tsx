@@ -94,11 +94,13 @@ function userKeyRow(): BrokerCredentialView {
 }
 
 function withPhrase(): CreateBrokerCredentialResponse {
-  return { credential: makeRow(), recovery_phrase: PHRASE };
+  // Post-amendment 2026-05-07: recovery_phrase removed from response.
+  // Helper kept for the .skip'd phrase tests below.
+  return { credential: makeRow() };
 }
 
 function withoutPhrase(): CreateBrokerCredentialResponse {
-  return { credential: makeRow(), recovery_phrase: null };
+  return { credential: makeRow() };
 }
 
 async function fillAndSubmit(apiKey: string, userKey: string): Promise<void> {
@@ -348,7 +350,10 @@ describe("SettingsPage — two-key save", () => {
 // Recovery phrase modal (inherited from #121, updated for two-key)
 // ---------------------------------------------------------------------------
 
-describe("SettingsPage — recovery phrase modal", () => {
+// Post-amendment 2026-05-07 (#971/#972): the recovery-phrase modal is
+// removed. These describe blocks are skipped until they can be deleted
+// alongside the helper functions in a follow-up cleanup.
+describe.skip("SettingsPage — recovery phrase modal", () => {
   it("opens the modal when the first create response carries a recovery_phrase", async () => {
     mockedCreate
       .mockResolvedValueOnce(withPhrase())   // api_key
@@ -414,7 +419,7 @@ describe("SettingsPage — recovery phrase modal", () => {
 // Phrase modal cancel gate
 // ---------------------------------------------------------------------------
 
-describe("SettingsPage — phrase modal cancel gate", () => {
+describe.skip("SettingsPage — phrase modal cancel gate", () => {
   it("routes Cancel through the confirm-cancel warning", async () => {
     const user = userEvent.setup();
     mockedCreate
