@@ -4,12 +4,23 @@
 # Dev environment
 # ---------------------------------------------------------------------------
 
+# Per-OS dispatch for the stack scripts. Windows uses the .ps1 path
+# (PowerShell-only `netstat -ano` ghost-socket handling); macOS / Linux
+# use the .sh path.
+ifeq ($(OS),Windows_NT)
+    STACK_PREPARE := pwsh -File ./stack.ps1
+    STACK_STOP    := pwsh -File ./stack-stop.ps1
+else
+    STACK_PREPARE := ./stack.sh
+    STACK_STOP    := ./stack-stop.sh
+endif
+
 .PHONY: help up migrate dev stop logs stack stack-stop frontend-install frontend-dev frontend-build frontend-typecheck
 
 help:
 	@echo "Usage:"
-	@echo "  make stack              — start the full stack (postgres + backend + frontend) in new windows"
-	@echo "  make stack-stop         — stop the full stack"
+	@echo "  make stack              — prepare the dev stack (postgres + migrations); backend/frontend launch via VS Code tasks"
+	@echo "  make stack-stop         — stop backend, frontend, jobs process, and postgres"
 	@echo "  make dev                — start postgres (if not running), apply migrations, start server"
 	@echo "  make up                 — start postgres container only"
 	@echo "  make migrate            — apply pending SQL migrations"
@@ -21,10 +32,10 @@ help:
 	@echo "  make frontend-typecheck — typecheck the frontend"
 
 stack:
-	pwsh -File ./stack.ps1
+	$(STACK_PREPARE)
 
 stack-stop:
-	pwsh -File ./stack-stop.ps1
+	$(STACK_STOP)
 
 frontend-install:
 	cd frontend && pnpm install
