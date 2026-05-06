@@ -236,9 +236,16 @@ def _resolve_auth_expired_suppression(conn: psycopg.Connection[object]) -> datet
         sole_operator_id,
     )
 
+    # Two narrow except clauses rather than `except (A, B):` because
+    # ruff format strips the parens to `except A, B:` on Python 3.14
+    # where the comma form is also valid (Codex pre-push r3.1) — the
+    # paren-less form is ambiguous to readers and Codex flags it as
+    # Python-2 syntax.
     try:
         op_id = sole_operator_id(conn)
-    except NoOperatorError, AmbiguousOperatorError:
+    except NoOperatorError:
+        return None
+    except AmbiguousOperatorError:
         return None
     return get_last_recovered_at(conn, operator_id=op_id)
 

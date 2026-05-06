@@ -135,7 +135,11 @@ def compute_layer_states_from_db(
         suppress_auth_expired_before=suppress_auth_expired_before,
     )
     running_set = _running_layers(conn, names)
-    latest_status = _latest_status_map(conn, names)
+    latest_status = _latest_status_map(
+        conn,
+        names,
+        suppress_auth_expired_before=suppress_auth_expired_before,
+    )
     latest_ages = _latest_age_seconds_map(conn, names)
     content_results = _content_ok_map(conn)
     # Snapshot a single ``now`` per state-machine evaluation so all
@@ -207,7 +211,21 @@ def _running_layers(conn: psycopg.Connection[Any], names: list[str]) -> set[str]
     return {str(r[0]) for r in rows}
 
 
-def _latest_status_map(conn: psycopg.Connection[Any], names: list[str]) -> dict[str, str]:
+def _latest_status_map(
+    conn: psycopg.Connection[Any],
+    names: list[str],
+    *,
+    suppress_auth_expired_before: datetime | None = None,
+) -> dict[str, str]:
+    """Return ``{layer_name: latest_status}`` filtered to non-suppressed rows.
+
+    AUTH_EXPIRED suppression (Codex pre-push r3.2): rows with
+    ``status='failed'`` AND ``error_category='auth_expired'`` AND
+    ``COALESCE(started_at, finished_at) < suppress_before`` are
+    excluded so an old pre-recovery auth_expired failure cannot push
+    a layer into ACTION_NEEDED after the operator has fixed their
+    keys.
+    """
     rows = conn.execute(
         """
         WITH ranked AS (
@@ -218,11 +236,17 @@ def _latest_status_map(conn: psycopg.Connection[Any], names: list[str]) -> dict[
                     ORDER BY COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC
                 ) AS rn
             FROM sync_layer_progress
-            WHERE layer_name = ANY(%s)
+            WHERE layer_name = ANY(%(names)s)
+              AND NOT (
+                %(suppress_before)s::timestamptz IS NOT NULL
+                AND status = 'failed'
+                AND error_category = 'auth_expired'
+                AND COALESCE(started_at, finished_at) < %(suppress_before)s::timestamptz
+              )
         )
         SELECT layer_name, status FROM ranked WHERE rn = 1
         """,
-        (names,),
+        {"names": names, "suppress_before": suppress_auth_expired_before},
     ).fetchall()
     out = {str(r[0]): str(r[1]) for r in rows}
     # Never-run layer: sentinel that the context-builder translates to
