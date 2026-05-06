@@ -153,6 +153,152 @@ class TestParserRegistry:
         assert row.ingest_status == "failed"
         assert row.next_retry_at == custom_retry
 
+    def test_payload_backed_parser_rejects_parsed_with_absent_raw(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # #938 audit invariant: a parser registered with
+        # ``requires_raw_payload=True`` must not transition a row to
+        # ``parsed`` while ``raw_status='absent'``. The worker
+        # converts the outcome to a ``failed`` transition with a
+        # descriptive error so the row remains auditable + retryable.
+        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        ebull_test_conn.commit()
+
+        def parser_drops_raw(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
+            return ParseOutcome(status="parsed", parser_version="v1", raw_status="absent")
+
+        register_parser("sec_form4", parser_drops_raw, requires_raw_payload=True)
+
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        stats = run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=10, now=now)
+        ebull_test_conn.commit()
+        assert stats.parsed == 0
+        assert stats.failed == 1
+        assert stats.raw_payload_violations == 1
+
+        row = get_manifest_row(ebull_test_conn, "ACC-1")
+        assert row is not None
+        assert row.ingest_status == "failed"
+        assert row.error is not None
+        assert "raw payload missing" in row.error
+        # 1h backoff so the retry path eventually re-fires the parser.
+        assert row.next_retry_at == datetime(2026, 1, 1, 13, 0, tzinfo=UTC)
+
+    def test_payload_backed_parser_accepts_parsed_with_stored_raw(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # Same flag, valid raw_status -> normal parsed transition.
+        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        ebull_test_conn.commit()
+
+        def parser_persists_raw(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
+            return ParseOutcome(status="parsed", parser_version="v1", raw_status="stored")
+
+        register_parser("sec_form4", parser_persists_raw, requires_raw_payload=True)
+
+        stats = run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=10)
+        ebull_test_conn.commit()
+        assert stats.parsed == 1
+        assert stats.raw_payload_violations == 0
+
+        row = get_manifest_row(ebull_test_conn, "ACC-1")
+        assert row is not None
+        assert row.ingest_status == "parsed"
+        assert row.raw_status == "stored"
+
+    def test_payload_backed_parser_accepts_parsed_when_row_already_has_stored_raw(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # Codex pre-push regression: ``transition_status(..., parsed,
+        # raw_status=None)`` preserves the row's existing
+        # ``raw_status`` column. The retry / rebuild flow may re-run a
+        # parser whose raw body is already on disk — the parser
+        # returns ``ParseOutcome(status='parsed', raw_status=None)``
+        # because it has nothing new to write. The worker must check
+        # the row's effective raw_status (``outcome.raw_status or
+        # row.raw_status``), not just the outcome.
+        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        # Pre-stamp ``raw_status='stored'`` while keeping
+        # ``ingest_status='pending'`` so the worker picks the row up
+        # via ``iter_pending`` AND finds existing raw evidence. Models
+        # a rebuild flow: body stored on a prior pass, parsed reset to
+        # pending for re-parse, parser doesn't restamp raw. Direct SQL
+        # because ``transition_status`` ignores ``raw_status`` on the
+        # ``pending -> pending`` self-loop branch (separate tech-debt
+        # #948 — fix lets this swap back to ``transition_status``).
+        ebull_test_conn.execute(
+            "UPDATE sec_filing_manifest SET raw_status = 'stored' WHERE accession_number = %s",
+            ("ACC-1",),
+        )
+        ebull_test_conn.commit()
+
+        def parser_no_restamp(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
+            return ParseOutcome(status="parsed", parser_version="v2", raw_status=None)
+
+        register_parser("sec_form4", parser_no_restamp, requires_raw_payload=True)
+
+        stats = run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=10)
+        ebull_test_conn.commit()
+        assert stats.parsed == 1
+        assert stats.failed == 0
+        assert stats.raw_payload_violations == 0
+
+        row = get_manifest_row(ebull_test_conn, "ACC-1")
+        assert row is not None
+        assert row.ingest_status == "parsed"
+        assert row.raw_status == "stored"  # preserved across the parsed transition
+
+    def test_payload_backed_parser_accepts_parsed_with_compacted_raw(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # ``compacted`` is a valid post-storage state (raw bytes
+        # written, then compacted into the per-quarter archive). The
+        # invariant is "evidence on disk somewhere", not "literally
+        # ``stored``".
+        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        ebull_test_conn.commit()
+
+        def parser_compacts_raw(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
+            return ParseOutcome(status="parsed", parser_version="v1", raw_status="compacted")
+
+        register_parser("sec_form4", parser_compacts_raw, requires_raw_payload=True)
+
+        stats = run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=10)
+        ebull_test_conn.commit()
+        assert stats.parsed == 1
+        assert stats.raw_payload_violations == 0
+
+    def test_non_payload_parser_allows_parsed_with_absent_raw(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # Default ``requires_raw_payload=False`` preserves backward
+        # compatibility: synthesised / non-payload parsers can mark
+        # rows ``parsed`` without a raw body. Used for sources where
+        # the manifest row IS the truth (e.g. heartbeat-style entries).
+        _seed_pending(ebull_test_conn, accession="ACC-1", source="sec_form4")
+        ebull_test_conn.commit()
+
+        def synthesised_parser(conn: psycopg.Connection, row: ManifestRow) -> ParseOutcome:
+            return ParseOutcome(status="parsed", parser_version="v1", raw_status="absent")
+
+        register_parser("sec_form4", synthesised_parser)  # default flag = False
+
+        stats = run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=10)
+        ebull_test_conn.commit()
+        assert stats.parsed == 1
+        assert stats.failed == 0
+        assert stats.raw_payload_violations == 0
+
+        row = get_manifest_row(ebull_test_conn, "ACC-1")
+        assert row is not None
+        assert row.ingest_status == "parsed"
+        assert row.raw_status == "absent"
+
     def test_tombstoned_outcome_clears_retry(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

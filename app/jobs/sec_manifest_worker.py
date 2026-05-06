@@ -78,18 +78,48 @@ fetching + parsing + persisting typed-table rows. The worker handles
 the manifest state transition based on the outcome."""
 
 
-_PARSERS: dict[ManifestSource, ParserFn] = {}
+@dataclass(frozen=True)
+class ParserSpec:
+    """Registry entry for one ManifestSource.
+
+    ``requires_raw_payload`` enforces the audit invariant from #938:
+    payload-backed parsers (Form 4, 13F-HR, 13D/G, NPORT-P, DEF 14A)
+    cannot transition a row to ``parsed`` while ``raw_status='absent'``.
+    The worker turns such an outcome into a ``failed`` transition with
+    a descriptive error rather than silently retaining unauditable
+    rows. Synthesised / non-payload parsers leave the flag at False
+    (default) and are unaffected.
+    """
+
+    fn: ParserFn
+    requires_raw_payload: bool = False
 
 
-def register_parser(source: ManifestSource, parser: ParserFn) -> None:
+_PARSERS: dict[ManifestSource, ParserSpec] = {}
+
+
+def register_parser(
+    source: ManifestSource,
+    parser: ParserFn,
+    *,
+    requires_raw_payload: bool = False,
+) -> None:
     """Register a parser callable for one ManifestSource.
 
     Idempotent on re-registration (last-write-wins). The legacy
     ingest services will register their callables in #873 when the
     write-through wiring lands; until then, ``run_manifest_worker``
     skips rows whose source has no registered parser (logs a debug
-    line per skipped row)."""
-    _PARSERS[source] = parser
+    line per skipped row).
+
+    ``requires_raw_payload=True`` opts the source into the #938 audit
+    invariant: a ``parsed`` outcome with ``raw_status not in
+    ('stored', 'compacted')`` is rejected and the row is transitioned
+    to ``failed`` instead. Use for every parser that pulls upstream
+    body bytes (Form 4 XML, 13F infotable, 13D/G primary doc, DEF 14A
+    HTML, NPORT-P XML). Leave at the default for synthesised /
+    non-payload sources."""
+    _PARSERS[source] = ParserSpec(fn=parser, requires_raw_payload=requires_raw_payload)
 
 
 def _backoff_for(attempt_count: int) -> timedelta:
@@ -111,6 +141,7 @@ class WorkerStats:
     tombstoned: int
     failed: int
     skipped_no_parser: int
+    raw_payload_violations: int = 0
 
 
 def run_manifest_worker(
@@ -150,10 +181,11 @@ def run_manifest_worker(
     tombstoned = 0
     failed = 0
     skipped = 0
+    raw_violations = 0
 
     for row in rows:
-        parser = _PARSERS.get(row.source)
-        if parser is None:
+        spec = _PARSERS.get(row.source)
+        if spec is None:
             logger.debug(
                 "manifest worker: no parser registered for source=%s; skipping accession=%s",
                 row.source,
@@ -163,7 +195,7 @@ def run_manifest_worker(
             continue
 
         try:
-            outcome = parser(conn, row)
+            outcome = spec.fn(conn, row)
         except Exception as exc:  # parser-internal failure — fail loudly
             logger.exception(
                 "manifest worker: parser raised for source=%s accession=%s",
@@ -178,6 +210,49 @@ def run_manifest_worker(
                 next_retry_at=now + _backoff_for(0),
             )
             failed += 1
+            continue
+
+        # #938 audit invariant: payload-backed parsers cannot transition
+        # to ``parsed`` while the row's effective raw_status is
+        # ``absent``. Convert to a ``failed`` transition with a
+        # descriptive error so the row remains visible to the operator
+        # + retry path. Silent ``parsed + absent`` would leave an
+        # unauditable row in the manifest forever.
+        #
+        # Effective raw_status falls back to the row's existing value
+        # when the parser doesn't restamp (``outcome.raw_status is
+        # None``). This matches ``transition_status`` semantics — a
+        # ``parsed`` transition with ``raw_status=None`` preserves the
+        # row's existing column — so a rebuild/retry flow where raw
+        # evidence already exists on disk doesn't get misclassified
+        # as a violation. (Codex pre-push catch.)
+        effective_raw_status = outcome.raw_status or row.raw_status
+        if (
+            outcome.status == "parsed"
+            and spec.requires_raw_payload
+            and effective_raw_status not in ("stored", "compacted")
+        ):
+            logger.error(
+                "manifest worker: source=%s accession=%s parser returned parsed but "
+                "effective raw_status=%r — payload-backed parsers must persist evidence; "
+                "transitioning to failed for retry",
+                row.source,
+                row.accession_number,
+                effective_raw_status,
+            )
+            transition_status(
+                conn,
+                row.accession_number,
+                ingest_status="failed",
+                error=(
+                    "raw payload missing: parser returned parsed without storing "
+                    f"the upstream body (effective raw_status={effective_raw_status!r}). "
+                    "Payload-backed parsers must persist evidence (#938)."
+                ),
+                next_retry_at=now + _backoff_for(0),
+            )
+            failed += 1
+            raw_violations += 1
             continue
 
         target_status: IngestStatus = outcome.status
@@ -203,6 +278,7 @@ def run_manifest_worker(
         tombstoned=tombstoned,
         failed=failed,
         skipped_no_parser=skipped,
+        raw_payload_violations=raw_violations,
     )
 
 
