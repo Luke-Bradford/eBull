@@ -515,10 +515,78 @@ class TestDoHealthTransition:
                 error_detail=None,
             )
 
-        # Operator aggregate moved UNTESTED -> VALID, but that's not a
-        # REJECTED -> VALID, so no transitions row.
+        # Operator aggregate moved UNTESTED -> VALID, but the
+        # recovery timestamp only matters for AUTH_EXPIRED suppression
+        # which has no relevance for an operator that was never REJECTED.
+        # No transitions row written.
         assert get_last_recovered_at(ebull_test_conn, operator_id=op_id) is None
         assert get_operator_credential_health(ebull_test_conn, operator_id=op_id) == CredentialHealth.VALID
+
+    def test_rejected_to_untested_via_replace_records_recovery(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],  # noqa: F811
+    ) -> None:
+        """REJECTED -> UNTESTED at aggregate writes the recovery row.
+
+        Mirrors the realistic flow: operator with rejected creds
+        revokes the bad row + inserts a fresh untested replacement
+        via PUT /replace. The aggregate moves REJECTED -> UNTESTED;
+        the recovery timestamp must be set so AUTH_EXPIRED
+        suppression kicks in NOW, not waiting for the later
+        validate-stored (Codex pre-push r2.1).
+        """
+        op_id = _seed_pair(ebull_test_conn, api_state="rejected", user_state="rejected")
+
+        with ebull_test_conn.transaction():
+            old = get_operator_credential_health(ebull_test_conn, operator_id=op_id)
+            assert old == CredentialHealth.REJECTED
+
+            # Simulate two PUT /replace calls that fixed both rejected
+            # rows in one operator action: revoke each row and insert
+            # a fresh untested replacement. Inlined rather than using
+            # _insert_credential because that helper commits, which
+            # is forbidden inside an active transaction context.
+            with ebull_test_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE broker_credentials SET revoked_at = NOW() WHERE operator_id = %s AND revoked_at IS NULL",
+                    (op_id,),
+                )
+                for label in ("api_key", "user_key"):
+                    cur.execute(
+                        """
+                        INSERT INTO broker_credentials
+                            (id, operator_id, provider, label, environment,
+                             ciphertext, last_four, key_version, health_state)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            uuid4(),
+                            op_id,
+                            "etoro",
+                            label,
+                            "demo",
+                            b"\x00" * 32,
+                            "abcd",
+                            1,
+                            "untested",
+                        ),
+                    )
+
+            notify_aggregate_if_changed(
+                ebull_test_conn,
+                operator_id=op_id,
+                provider="etoro",
+                environment="demo",
+                old_aggregate=old,
+            )
+
+        # Aggregate is now UNTESTED (both rows untested); recovery
+        # timestamp is set because the operator moved OUT of REJECTED.
+        # AUTH_EXPIRED suppression kicks in NOW, not waiting for the
+        # later validate-stored.
+        assert get_operator_credential_health(ebull_test_conn, operator_id=op_id) == CredentialHealth.UNTESTED
+        recovered_at = get_last_recovered_at(ebull_test_conn, operator_id=op_id)
+        assert recovered_at is not None
 
     def test_failure_writes_error_detail(
         self,

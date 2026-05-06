@@ -365,23 +365,22 @@ def _do_health_transition(
             environment=environment,
         )
 
-        # Record the recovery timestamp ONLY on REJECTED -> VALID at
-        # operator level. Other transitions (UNTESTED -> VALID,
-        # MISSING -> UNTESTED) don't write the transitions row — that
-        # row exists specifically to mark "operator has recovered from
-        # an explicit rejection" so AUTH_EXPIRED suppression has a
-        # boundary. Codex r2.4 + spec.
-        if old_aggregate == CredentialHealth.REJECTED and new_aggregate == CredentialHealth.VALID:
-            cur.execute(
-                """
-                INSERT INTO operator_credential_health_transitions
-                    (operator_id, last_recovered_at)
-                VALUES (%(op)s, NOW())
-                ON CONFLICT (operator_id) DO UPDATE
-                    SET last_recovered_at = EXCLUDED.last_recovered_at
-                """,
-                {"op": operator_id},
-            )
+        # Record the recovery timestamp on ANY move OUT of REJECTED at
+        # operator level — VALID, UNTESTED, or MISSING — not only the
+        # direct REJECTED -> VALID transition. The realistic operator
+        # flow is: REJECTED -> (PUT /replace) UNTESTED -> (validate-
+        # stored) VALID. If we only stamped on REJECTED -> VALID we
+        # would miss the recovery moment entirely (Codex pre-push
+        # r2.1). The suppression query filters AUTH_EXPIRED rows with
+        # failed_at < last_recovered_at, and any subsequent REJECTED
+        # cycle generates new rows with failed_at > last_recovered_at
+        # so they surface normally.
+        _maybe_record_recovery(
+            cur,
+            operator_id=operator_id,
+            old_aggregate=old_aggregate,
+            new_aggregate=new_aggregate,
+        )
 
         # Idempotent: if the aggregate didn't move, no NOTIFY. A row-
         # level transition that doesn't move the aggregate (e.g.
@@ -458,13 +457,19 @@ def notify_aggregate_if_changed(
     observe that transition or they'll keep treating creds as valid
     (Codex pre-push r1.3).
 
+    Also records the operator-level recovery timestamp when the
+    aggregate moves OUT of REJECTED — covers the realistic
+    REJECTED -> UNTESTED transition from PUT /replace before the
+    operator runs validate-stored (Codex pre-push r2.1).
+
     Caller is expected to have:
       1. Snapshotted ``old_aggregate`` before any row mutations.
       2. Performed the mutations on ``conn`` inside a transaction.
       3. Called this helper inside the same transaction. The pg_notify
          fires when that transaction commits.
 
-    Idempotent: if the aggregate hasn't moved, no NOTIFY fires.
+    Idempotent: if the aggregate hasn't moved, no NOTIFY fires and no
+    recovery timestamp is written.
     """
     new_aggregate = get_operator_credential_health(
         conn,
@@ -475,20 +480,61 @@ def notify_aggregate_if_changed(
     if old_aggregate == new_aggregate:
         return
 
-    payload = json.dumps(
-        {
-            "operator_id": str(operator_id),
-            "provider": provider,
-            "old_aggregate": old_aggregate.value,
-            "new_aggregate": new_aggregate.value,
-            "at": datetime.now(UTC).isoformat(),
-        }
-    )
     with conn.cursor() as cur:
+        _maybe_record_recovery(
+            cur,
+            operator_id=operator_id,
+            old_aggregate=old_aggregate,
+            new_aggregate=new_aggregate,
+        )
+
+        payload = json.dumps(
+            {
+                "operator_id": str(operator_id),
+                "provider": provider,
+                "old_aggregate": old_aggregate.value,
+                "new_aggregate": new_aggregate.value,
+                "at": datetime.now(UTC).isoformat(),
+            }
+        )
         cur.execute(
             "SELECT pg_notify(%(channel)s, %(payload)s)",
             {"channel": NOTIFY_CHANNEL, "payload": payload},
         )
+
+
+def _maybe_record_recovery(
+    cur: psycopg.Cursor[Any],
+    *,
+    operator_id: UUID,
+    old_aggregate: CredentialHealth,
+    new_aggregate: CredentialHealth,
+) -> None:
+    """UPSERT operator_credential_health_transitions when leaving REJECTED.
+
+    Marks "the moment this operator stopped being REJECTED at
+    aggregate level" — used by the AUTH_EXPIRED suppression query
+    (failed_at < last_recovered_at) so cascade rows from the rejected
+    window stop surfacing in the operator-visible streak count.
+
+    Fires on REJECTED -> {VALID, UNTESTED, MISSING}. A subsequent
+    cycle back into REJECTED is fine: the new failures' failed_at
+    will be after last_recovered_at and will surface correctly.
+    """
+    if old_aggregate != CredentialHealth.REJECTED:
+        return
+    if new_aggregate == CredentialHealth.REJECTED:
+        return
+    cur.execute(
+        """
+        INSERT INTO operator_credential_health_transitions
+            (operator_id, last_recovered_at)
+        VALUES (%(op)s, NOW())
+        ON CONFLICT (operator_id) DO UPDATE
+            SET last_recovered_at = EXCLUDED.last_recovered_at
+        """,
+        {"op": operator_id},
+    )
 
 
 def get_last_recovered_at(
