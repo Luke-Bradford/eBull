@@ -69,6 +69,35 @@ export function revokeBrokerCredential(id: string): Promise<void> {
   return apiFetch<void>(`/broker-credentials/${id}`, { method: "DELETE" });
 }
 
+/**
+ * #980 / #974/F: atomic revoke + insert in one transaction.
+ *
+ * Used by Settings + Setup wizard when an existing credential row
+ * for the same (provider, label, environment) is being replaced.
+ * Subscribers (orchestrator pre-flight gate, WS subscriber, admin
+ * banner) never observe a transient MISSING state during the swap.
+ *
+ * The backend short-circuits on identical secret (decrypts the
+ * existing row inside the transaction and compares); in that case
+ * the response carries `changed: false` and no NOTIFY fires.
+ */
+export interface ReplaceBrokerCredentialResponse {
+  changed: boolean;
+  credential: BrokerCredentialView;
+}
+
+export function replaceBrokerCredential(input: {
+  provider: BrokerProvider;
+  label: string;
+  environment: string;
+  secret: string;
+}): Promise<ReplaceBrokerCredentialResponse> {
+  return apiFetch<ReplaceBrokerCredentialResponse>("/broker-credentials/replace", {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Validate (transient probe — nothing is persisted)
 // ---------------------------------------------------------------------------

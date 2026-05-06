@@ -25,6 +25,7 @@ import {
   type CreateBrokerCredentialResponse,
   createBrokerCredential,
   listBrokerCredentials,
+  replaceBrokerCredential,
   revokeBrokerCredential,
   validateBrokerCredential,
   validateStoredCredentials,
@@ -34,6 +35,7 @@ import { ApiError } from "@/api/client";
 vi.mock("@/api/brokerCredentials", () => ({
   listBrokerCredentials: vi.fn(),
   createBrokerCredential: vi.fn(),
+  replaceBrokerCredential: vi.fn(),
   revokeBrokerCredential: vi.fn(),
   validateBrokerCredential: vi.fn(),
   validateStoredCredentials: vi.fn(),
@@ -57,6 +59,7 @@ vi.mock("@/api/budget", () => ({
 
 const mockedList = vi.mocked(listBrokerCredentials);
 const mockedCreate = vi.mocked(createBrokerCredential);
+const mockedReplace = vi.mocked(replaceBrokerCredential);
 const mockedRevoke = vi.mocked(revokeBrokerCredential);
 const mockedValidate = vi.mocked(validateBrokerCredential);
 const mockedValidateStored = vi.mocked(validateStoredCredentials);
@@ -552,23 +555,24 @@ describe("SettingsPage — edit single key", () => {
     mockedList.mockResolvedValue([apiKeyRow(), userKeyRow()]);
     mockedRevoke.mockResolvedValue(undefined);
     mockedCreate.mockResolvedValue(withoutPhrase());
+    mockedReplace.mockResolvedValue({
+      changed: true,
+      credential: makeRow({ id: "new-api-id", label: "api_key" }),
+    });
   });
 
-  it("opens edit form for API key and saves (revoke + create)", async () => {
+  it("opens edit form for API key and saves via PUT /replace (#980)", async () => {
     const user = userEvent.setup();
     render(<SettingsPage />);
     await screen.findByText("api_key");
 
-    // Click Edit on the first credential row
     const editButtons = screen.getAllByRole("button", { name: "Edit" });
     await user.click(editButtons[0]!);
 
-    // Edit form should appear
     expect(screen.getByText("Edit API key")).toBeInTheDocument();
     const input = screen.getByLabelText("New API key");
     await user.type(input, "new-secret-value");
 
-    // After save, list refreshes — set up the mock for refresh
     mockedList.mockResolvedValueOnce([
       makeRow({ id: "new-id", label: "api_key", last_four: "alue" }),
       userKeyRow(),
@@ -577,16 +581,16 @@ describe("SettingsPage — edit single key", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      // Revoke was called for the old api_key
-      expect(mockedRevoke).toHaveBeenCalledWith("aaaa-1111");
+      expect(mockedReplace).toHaveBeenCalledWith({
+        provider: "etoro",
+        label: "api_key",
+        environment: "demo",
+        secret: "new-secret-value",
+      });
     });
-    // Create was called with the new secret
-    expect(mockedCreate).toHaveBeenCalledWith({
-      provider: "etoro",
-      label: "api_key",
-      environment: "demo",
-      secret: "new-secret-value",
-    });
+    // The atomic replace endpoint replaces the legacy revoke+create.
+    expect(mockedRevoke).not.toHaveBeenCalled();
+    expect(mockedCreate).not.toHaveBeenCalled();
   });
 
   it("cancel returns to idle management panel", async () => {
@@ -604,12 +608,11 @@ describe("SettingsPage — edit single key", () => {
     expect(screen.getByRole("button", { name: /test connection/i })).toBeInTheDocument();
   });
 
-  it("surfaces partial failure when revoke succeeds but create fails", async () => {
-    mockedRevoke.mockResolvedValue(undefined);
-    mockedCreate.mockRejectedValueOnce(new Error("network"));
-    // After refresh, the revoked key is gone → repair mode
-    mockedList.mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
-    mockedList.mockResolvedValueOnce([userKeyRow()]);
+  it("surfaces an error when PUT /replace fails (#980)", async () => {
+    // Replace endpoint failure no longer leaves a partial state —
+    // the server does revoke+insert in one tx, so atomicity means
+    // either both happen or neither. The UI just reports the error.
+    mockedReplace.mockRejectedValueOnce(new Error("network"));
 
     const user = userEvent.setup();
     render(<SettingsPage />);
@@ -622,8 +625,10 @@ describe("SettingsPage — edit single key", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent(/old api_key was revoked/i);
+      expect(screen.getByRole("alert")).toHaveTextContent(/could not update credential/i);
     });
+    // No revoke happened — atomic replace either succeeds or fails.
+    expect(mockedRevoke).not.toHaveBeenCalled();
   });
 });
 
@@ -636,9 +641,13 @@ describe("SettingsPage — replace both keys", () => {
     mockedList.mockResolvedValue([apiKeyRow(), userKeyRow()]);
     mockedRevoke.mockResolvedValue(undefined);
     mockedCreate.mockResolvedValue(withoutPhrase());
+    mockedReplace.mockResolvedValue({
+      changed: true,
+      credential: makeRow({ id: "new-id", label: "api_key" }),
+    });
   });
 
-  it("opens replace form and saves (revoke both + create both)", async () => {
+  it("opens replace form and saves (PUT /replace per label) (#980)", async () => {
     const user = userEvent.setup();
     render(<SettingsPage />);
     await screen.findByText(/Credentials configured/i);
@@ -657,22 +666,21 @@ describe("SettingsPage — replace both keys", () => {
     await user.click(screen.getByRole("button", { name: /^replace both$/i }));
 
     await waitFor(() => {
-      // Both old credentials revoked
-      expect(mockedRevoke).toHaveBeenCalledTimes(2);
+      expect(mockedReplace).toHaveBeenCalledTimes(2);
     });
-    // Both new credentials created
-    expect(mockedCreate).toHaveBeenCalledTimes(2);
+    // Atomic replace per label; no DELETE+POST sequence.
+    expect(mockedRevoke).not.toHaveBeenCalled();
+    expect(mockedCreate).not.toHaveBeenCalled();
   });
 
-  it("surfaces partial failure when api_key created but user_key fails", async () => {
-    mockedRevoke.mockResolvedValue(undefined);
-    // api_key create succeeds, user_key create fails
-    mockedCreate
-      .mockResolvedValueOnce(withoutPhrase())
+  it("surfaces partial failure when api_key replaced but user_key fails (#980)", async () => {
+    // First label succeeds (api_key), second fails (user_key).
+    mockedReplace
+      .mockResolvedValueOnce({
+        changed: true,
+        credential: makeRow({ id: "new-api-id", label: "api_key" }),
+      })
       .mockRejectedValueOnce(new Error("network"));
-    // After refresh, only api_key exists → repair mode
-    mockedList.mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
-    mockedList.mockResolvedValueOnce([makeRow({ label: "api_key" })]);
 
     const user = userEvent.setup();
     render(<SettingsPage />);
