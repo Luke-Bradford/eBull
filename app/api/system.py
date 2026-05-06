@@ -439,7 +439,7 @@ def _build_credential_health_summary(conn: psycopg.Connection[object]) -> Creden
 
 def _operator_environments(conn: psycopg.Connection[object], operator_id: object) -> list[str]:
     """Return distinct active-credential environments for the operator."""
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
             SELECT DISTINCT environment
@@ -450,7 +450,7 @@ def _operator_environments(conn: psycopg.Connection[object], operator_id: object
             """,
             (operator_id,),
         )
-        return [row[0] for row in cur.fetchall()]
+        return [str(row["environment"]) for row in cur.fetchall()]
 
 
 def _is_worse(a: object, b: object) -> bool:
@@ -471,7 +471,7 @@ def _latest_credential_error(conn: psycopg.Connection[object], operator_id: obje
     rejected rows, for the admin banner's contextual error display
     (review #985 WARNING — the response model declared the field but
     the original implementation always returned None)."""
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
             SELECT last_health_error
@@ -488,7 +488,7 @@ def _latest_credential_error(conn: psycopg.Connection[object], operator_id: obje
         row = cur.fetchone()
     if row is None:
         return None
-    value = row[0]
+    value = row["last_health_error"]
     return str(value) if value is not None else None
 
 
