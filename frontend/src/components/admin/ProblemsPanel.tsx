@@ -13,6 +13,7 @@ import { Link } from "react-router-dom";
 import type {
   ActionNeededItem,
   CoverageSummaryResponse,
+  CredentialHealthSummary,
   JobsListResponse,
   SecretMissingItem,
   SyncLayersV2Response,
@@ -27,12 +28,46 @@ export interface ProblemsPanelProps {
   readonly jobs: JobsListResponse | null;
   /** Coverage payload (unchanged from v1; null_rows still surface here). */
   readonly coverage: CoverageSummaryResponse | null;
+  /**
+   * Operator credential health (#979 / #974/E). When state==='rejected'
+   * the panel surfaces a single "Credentials rejected" banner item
+   * with a Settings link — the orchestrator gate already PREREQ_SKIPs
+   * the affected layers, so without this banner the operator would
+   * see no problems at all even though the system is gated.
+   *
+   * Optional + nullable so existing tests that pre-date #979 don't
+   * have to thread a value through; the banner only renders when
+   * state==='rejected'.
+   */
+  readonly credentialHealth?: CredentialHealthSummary | null;
   readonly v2Error: boolean;
   readonly jobsError: boolean;
   readonly coverageError: boolean;
   /** Called with the root layer name when the operator clicks drill-through. */
   readonly onOpenOrchestrator: (layerName: string) => void;
 }
+
+
+/** Synthetic ActionNeededItem injected when credentialHealth.state === 'rejected'.
+ *
+ * The orchestrator gate (#977) PREREQ_SKIPs credential-using layers
+ * when the operator's aggregate health is REJECTED. Without this
+ * synthetic banner item, action_needed would be empty and the
+ * operator would see no problems despite the system being fully
+ * gated. The banner gives them the actionable "go fix Settings".
+ */
+const CREDENTIAL_REJECTED_BANNER: ActionNeededItem = {
+  root_layer: "_credential_health",
+  display_name: "Credentials rejected by provider",
+  category: "auth_expired",
+  operator_message:
+    "eToro rejected your credentials. The orchestrator has paused all credential-using layers until you save valid keys.",
+  operator_fix: "Update the API key in Settings → Providers",
+  self_heal: false,
+  consecutive_failures: 0,
+  affected_downstream: [],
+  error_excerpt: null,
+};
 
 
 interface SourceCache {
@@ -56,6 +91,7 @@ export function ProblemsPanel({
   v2,
   jobs,
   coverage,
+  credentialHealth,
   v2Error,
   jobsError,
   coverageError,
@@ -92,10 +128,20 @@ export function ProblemsPanel({
     );
   }
 
-  const actionNeeded = cache.v2?.action_needed ?? [];
+  const baseActionNeeded = cache.v2?.action_needed ?? [];
   const secretMissing = cache.v2?.secret_missing ?? [];
   const failingJobs = (cache.jobs?.jobs ?? []).filter((j) => j.last_status === "failure");
   const coverageNullRows = cache.coverage?.null_rows ?? 0;
+
+  // Inject the credential-rejected banner when the operator's aggregate
+  // health is REJECTED. Backend already PREREQ_SKIPs affected layers
+  // (#977) and AUTH_EXPIRED suppression hides stale rows post-recovery,
+  // so without this synthetic item action_needed would be empty even
+  // though the system is fully gated. Prepended so it's visually first.
+  const showCredRejectedBanner = credentialHealth?.state === "rejected";
+  const actionNeeded: ActionNeededItem[] = showCredRejectedBanner
+    ? [CREDENTIAL_REJECTED_BANNER, ...baseActionNeeded]
+    : baseActionNeeded;
 
   const totalProblems = actionNeeded.length + secretMissing.length + failingJobs.length + (coverageNullRows > 0 ? 1 : 0);
 

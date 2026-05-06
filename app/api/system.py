@@ -100,12 +100,33 @@ class JobHealthResponse(BaseModel):
     detail: str
 
 
+class CredentialHealthSummary(BaseModel):
+    """Operator-level credential health for the admin Problems banner (#979 / #974/E).
+
+    State values mirror ``app.services.credential_health.CredentialHealth``:
+      * ``valid``     — operator's credential pair validated; orchestrator
+                        runs credential-using layers freely.
+      * ``untested``  — saved but not yet probed; orchestrator will skip
+                        until validate-stored confirms.
+      * ``rejected``  — provider returned 401/403; orchestrator
+                        PREREQ_SKIPs all credential-using layers; admin
+                        UI surfaces a single banner instead of N
+                        cascading AUTH_EXPIRED rows.
+      * ``missing``   — no credential rows; first-run state.
+    """
+
+    state: Literal["valid", "untested", "rejected", "missing"]
+    last_recovered_at: datetime | None = None
+    last_error: str | None = None
+
+
 class SystemStatusResponse(BaseModel):
     checked_at: datetime
     overall_status: OverallStatus
     layers: list[LayerHealthResponse]
     jobs: list[JobHealthResponse]
     kill_switch: KillSwitchStateResponse
+    credential_health: CredentialHealthSummary
 
 
 class JobOverviewResponse(BaseModel):
@@ -350,7 +371,125 @@ def get_system_status(
             activated_by=ks.get("activated_by"),
             reason=ks.get("reason"),
         ),
+        credential_health=_build_credential_health_summary(conn),
     )
+
+
+def _build_credential_health_summary(conn: psycopg.Connection[object]) -> CredentialHealthSummary:
+    """Resolve operator-level credential health for the admin banner.
+
+    Per-operator scope (single-operator v1). Walks every environment
+    the operator has active credential rows for and returns the
+    worst-of state — REJECTED in any environment surfaces as
+    REJECTED so a live-environment rejection is not masked by a
+    valid demo pair (review #985 BLOCKING).
+
+    Falls back to MISSING when no operator yet so the admin UI shows
+    the "save credentials in Settings" path on a fresh install rather
+    than misreporting VALID.
+    """
+    from app.services.credential_health import (
+        CredentialHealth,
+        get_last_recovered_at,
+        get_operator_credential_health,
+    )
+    from app.services.operators import (
+        AmbiguousOperatorError,
+        NoOperatorError,
+        sole_operator_id,
+    )
+
+    try:
+        op_id = sole_operator_id(conn)
+    except NoOperatorError:
+        return CredentialHealthSummary(state="missing")
+    except AmbiguousOperatorError:
+        return CredentialHealthSummary(state="missing")
+
+    try:
+        environments = _operator_environments(conn, op_id)
+        if not environments:
+            return CredentialHealthSummary(state="missing")
+
+        worst_health: CredentialHealth | None = None
+        for env in environments:
+            env_health = get_operator_credential_health(conn, operator_id=op_id, environment=env)
+            if worst_health is None or _is_worse(env_health, worst_health):
+                worst_health = env_health
+
+        recovered_at = get_last_recovered_at(conn, operator_id=op_id)
+        last_error = _latest_credential_error(conn, op_id) if worst_health == CredentialHealth.REJECTED else None
+    except Exception:
+        logger.exception("credential_health summary lookup failed; reporting missing")
+        return CredentialHealthSummary(state="missing")
+
+    if worst_health is None:
+        return CredentialHealthSummary(state="missing")
+
+    state_value = worst_health.value
+    if state_value not in ("valid", "untested", "rejected", "missing"):
+        logger.error("unexpected CredentialHealth value: %s", state_value)
+        return CredentialHealthSummary(state="missing")
+    return CredentialHealthSummary(
+        state=state_value,  # type: ignore[arg-type]
+        last_recovered_at=recovered_at,
+        last_error=last_error,
+    )
+
+
+def _operator_environments(conn: psycopg.Connection[object], operator_id: object) -> list[str]:
+    """Return distinct active-credential environments for the operator."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT environment
+              FROM broker_credentials
+             WHERE operator_id = %s
+               AND revoked_at IS NULL
+             ORDER BY environment
+            """,
+            (operator_id,),
+        )
+        return [str(row["environment"]) for row in cur.fetchall()]
+
+
+def _is_worse(a: object, b: object) -> bool:
+    """Worst-of precedence on CredentialHealth (REJECTED > MISSING > UNTESTED > VALID)."""
+    from app.services.credential_health import CredentialHealth
+
+    rank = {
+        CredentialHealth.VALID: 0,
+        CredentialHealth.UNTESTED: 1,
+        CredentialHealth.MISSING: 2,
+        CredentialHealth.REJECTED: 3,
+    }
+    return rank.get(a, 0) > rank.get(b, 0)  # type: ignore[arg-type]
+
+
+def _latest_credential_error(conn: psycopg.Connection[object], operator_id: object) -> str | None:
+    """Return the most recent ``last_health_error`` across the operator's
+    rejected rows, for the admin banner's contextual error display
+    (review #985 WARNING — the response model declared the field but
+    the original implementation always returned None)."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT last_health_error
+              FROM broker_credentials
+             WHERE operator_id = %s
+               AND revoked_at IS NULL
+               AND health_state = 'rejected'
+               AND last_health_error IS NOT NULL
+             ORDER BY health_state_updated_at DESC
+             LIMIT 1
+            """,
+            (operator_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    value = row["last_health_error"]
+    return str(value) if value is not None else None
 
 
 @router.get("/jobs", response_model=JobsListResponse)

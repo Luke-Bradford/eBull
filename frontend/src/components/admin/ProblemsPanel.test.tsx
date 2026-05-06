@@ -73,6 +73,38 @@ describe("ProblemsPanel", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("injects credential-rejected banner when credential_health.state === 'rejected'", () => {
+    // #979 / #974/E: when the operator's aggregate health is REJECTED,
+    // the orchestrator gate (#977) PREREQ_SKIPs all credential-using
+    // layers — so v2.action_needed would be empty even though the
+    // system is fully gated. The banner item compensates so the
+    // operator still sees the actionable "fix Settings" surface.
+    renderPanel({
+      credentialHealth: {
+        state: "rejected",
+        last_recovered_at: null,
+        last_error: null,
+      },
+    });
+    expect(screen.getByText(/Credentials rejected by provider/i)).toBeInTheDocument();
+  });
+
+  it("does NOT inject the banner when credential_health.state === 'valid'", () => {
+    const { container } = renderPanel({
+      credentialHealth: {
+        state: "valid",
+        last_recovered_at: null,
+        last_error: null,
+      },
+    });
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("does NOT inject the banner when credential_health is null (legacy / pre-bootstrap)", () => {
+    const { container } = renderPanel({ credentialHealth: null });
+    expect(container).toBeEmptyDOMElement();
+  });
+
   it("renders a red row per action_needed entry", () => {
     const v2 = emptyV2();
     v2.system_state = "needs_attention";

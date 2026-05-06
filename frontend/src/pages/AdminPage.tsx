@@ -24,6 +24,7 @@ import { Link } from "react-router-dom";
 import { fetchCoverageSummary } from "@/api/coverage";
 import { fetchJobsOverview, runJob } from "@/api/jobs";
 import { fetchRecommendations } from "@/api/recommendations";
+import { fetchSystemStatus } from "@/api/system";
 import { fetchSyncLayersV2, fetchSyncStatus, setLayerEnabled } from "@/api/sync";
 import { ApiError } from "@/api/client";
 import type {
@@ -67,6 +68,10 @@ export function AdminPage() {
   const status = useAsync(fetchSyncStatus, []);
   const coverage = useAsync(fetchCoverageSummary, []);
   const jobs = useAsync(fetchJobsOverview, []);
+  // /system/status carries the operator credential health summary used
+  // by the Problems banner (#979 / #974/E). Fetched alongside the
+  // existing admin sources; the same auto-refresh loop polls it.
+  const systemStatus = useAsync(fetchSystemStatus, []);
   const recs = useAsync(
     () =>
       fetchRecommendations(
@@ -249,6 +254,7 @@ export function AdminPage() {
         v2={v2.data}
         jobs={jobs.data}
         coverage={coverage.data}
+        credentialHealth={systemStatus.data?.credential_health ?? null}
         v2Error={v2.error !== null}
         jobsError={jobs.error !== null}
         coverageError={coverage.error !== null}
