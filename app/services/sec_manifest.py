@@ -261,13 +261,14 @@ def transition_status(
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "SELECT ingest_status FROM sec_filing_manifest WHERE accession_number = %s FOR UPDATE",
+            "SELECT ingest_status, raw_status FROM sec_filing_manifest WHERE accession_number = %s FOR UPDATE",
             (accession_number,),
         )
         row = cur.fetchone()
         if row is None:
             raise ValueError(f"transition_status: manifest row missing for accession={accession_number}")
         current_status: IngestStatus = row[0]
+        current_raw_status: RawStatus = row[1]
         allowed = _ALLOWED_TRANSITIONS[current_status]
         # Claude bot review on PR #879 (WARNING): same-status no-op
         # was previously short-circuited unconditionally; that masked
@@ -279,6 +280,20 @@ def transition_status(
             raise ValueError(
                 f"transition_status: illegal transition {current_status!r} -> {ingest_status!r} "
                 f"(accession={accession_number})"
+            )
+
+        # Codex pre-push catch on #948: reject evidence downgrades.
+        # Once a row has ``raw_status in ('stored', 'compacted')`` we
+        # never silently flip it back to ``'absent'`` — that would
+        # break the #938 audit invariant for payload-backed parsers.
+        # Callers that genuinely need to drop evidence (e.g. a
+        # compaction job that loses bytes) should add a dedicated
+        # state, not piggyback on ``transition_status``.
+        if raw_status == "absent" and current_raw_status in ("stored", "compacted"):
+            raise ValueError(
+                f"transition_status: evidence downgrade rejected — "
+                f"raw_status={current_raw_status!r} cannot transition to 'absent' "
+                f"(accession={accession_number}, ingest_status={ingest_status!r})"
             )
 
         # Build SET clause dynamically so we only touch fields the
@@ -323,11 +338,25 @@ def transition_status(
             set_clauses.append(sql.SQL("error = %(error)s"))
             params["error"] = error
             set_clauses.append(sql.SQL("next_retry_at = NULL"))
+            # A tombstoned row may still hold body bytes from an
+            # earlier fetch (parser failed on a malformed payload).
+            # Allow the caller to update ``raw_status`` rather than
+            # silently dropping it. (#948.)
+            if raw_status is not None:
+                set_clauses.append(sql.SQL("raw_status = %(raw_status)s"))
+                params["raw_status"] = raw_status
         elif ingest_status == "pending":
             # Rebuild path: clear retry state; keep parser_version so
             # the rewash detector can compare against current.
             set_clauses.append(sql.SQL("error = NULL"))
             set_clauses.append(sql.SQL("next_retry_at = NULL"))
+            # Atom re-discovery / rebuild may want to flag that the
+            # body was retroactively persisted in a parallel job.
+            # Allow ``raw_status`` updates rather than silently
+            # dropping them. (#948.)
+            if raw_status is not None:
+                set_clauses.append(sql.SQL("raw_status = %(raw_status)s"))
+                params["raw_status"] = raw_status
 
         update_query = sql.SQL(
             "UPDATE sec_filing_manifest SET {set_clause} WHERE accession_number = %(accession)s"

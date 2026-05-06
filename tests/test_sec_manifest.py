@@ -423,6 +423,124 @@ class TestTransitionStatus:
             transition_status(ebull_test_conn, "DOES-NOT-EXIST", ingest_status="parsed")
         ebull_test_conn.rollback()
 
+    def test_evidence_downgrade_to_absent_is_rejected(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # Codex pre-push catch on #948: opening up raw_status writes
+        # to pending+tombstoned branches must not let a caller flip
+        # ``stored`` / ``compacted`` back to ``absent`` — that breaks
+        # the #938 audit invariant for payload-backed parsers.
+        accession = self._seed(ebull_test_conn)
+        # Set raw_status='stored' via the pending self-loop (the new
+        # path under test).
+        transition_status(
+            ebull_test_conn,
+            accession,
+            ingest_status="pending",
+            raw_status="stored",
+        )
+        # Attempting to flip back to absent is rejected.
+        with pytest.raises(ValueError, match="evidence downgrade rejected"):
+            transition_status(
+                ebull_test_conn,
+                accession,
+                ingest_status="pending",
+                raw_status="absent",
+            )
+        ebull_test_conn.rollback()
+
+    def test_evidence_downgrade_rejected_from_compacted(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # Same invariant from a ``compacted`` baseline. Seed via the
+        # ``fetched`` branch (which already accepts raw_status writes
+        # pre-#948) since fetched -> pending is illegal — we don't
+        # need to test that path here, just establish the baseline.
+        accession = self._seed(ebull_test_conn)
+        transition_status(
+            ebull_test_conn,
+            accession,
+            ingest_status="fetched",
+            raw_status="compacted",
+        )
+        # parsed and tombstoned are reachable from fetched; both must
+        # also reject downgrades.
+        with pytest.raises(ValueError, match="evidence downgrade rejected"):
+            transition_status(
+                ebull_test_conn,
+                accession,
+                ingest_status="parsed",
+                raw_status="absent",
+            )
+        ebull_test_conn.rollback()
+
+    def test_evidence_downgrade_rejected_on_tombstoned(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # The new tombstoned raw_status branch must also enforce the
+        # downgrade guard (#948 + Codex audit).
+        accession = self._seed(ebull_test_conn)
+        transition_status(
+            ebull_test_conn,
+            accession,
+            ingest_status="fetched",
+            raw_status="stored",
+        )
+        with pytest.raises(ValueError, match="evidence downgrade rejected"):
+            transition_status(
+                ebull_test_conn,
+                accession,
+                ingest_status="tombstoned",
+                error="malformed",
+                raw_status="absent",
+            )
+        ebull_test_conn.rollback()
+
+    def test_pending_self_loop_updates_raw_status(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # Regression for #948: pending -> pending self-loop must
+        # accept raw_status updates. Atom re-discovery / rebuild may
+        # flag that the body was retroactively persisted in a parallel
+        # job; pre-fix the value was silently dropped.
+        accession = self._seed(ebull_test_conn)
+        transition_status(
+            ebull_test_conn,
+            accession,
+            ingest_status="pending",
+            raw_status="stored",
+        )
+        row = get_manifest_row(ebull_test_conn, accession)
+        assert row is not None
+        assert row.ingest_status == "pending"
+        assert row.raw_status == "stored"
+
+    def test_tombstoned_accepts_raw_status_update(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # Regression for #948: a tombstoned row may still hold body
+        # bytes from an earlier fetch (parser failed on a malformed
+        # payload). The transition must allow ``raw_status`` updates
+        # rather than silently dropping the value.
+        accession = self._seed(ebull_test_conn)
+        transition_status(
+            ebull_test_conn,
+            accession,
+            ingest_status="tombstoned",
+            error="malformed payload",
+            raw_status="stored",
+        )
+        row = get_manifest_row(ebull_test_conn, accession)
+        assert row is not None
+        assert row.ingest_status == "tombstoned"
+        assert row.raw_status == "stored"
+        assert row.error == "malformed payload"
+
 
 # ---------------------------------------------------------------------------
 # iter_pending / iter_retryable
