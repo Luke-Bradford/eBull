@@ -35,11 +35,8 @@ export function SetupPage(): JSX.Element {
   const [setupToken, setSetupToken] = useState("");
 
   const wizard = useSetupWizard({
-    onComplete: () => {
-      const op = wizard.state.pendingOperator;
-      if (op !== null) {
-        markAuthenticated(op);
-      }
+    onComplete: (operator) => {
+      markAuthenticated(operator);
       navigate("/", { replace: true });
     },
   });

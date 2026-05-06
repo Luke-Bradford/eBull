@@ -16,7 +16,6 @@ import { useCallback, useReducer } from "react";
 
 import type { Operator } from "@/api/auth";
 import { postSetup } from "@/api/auth";
-import { ApiError } from "@/api/client";
 import { GENERIC_ERROR } from "@/pages/setupErrorMessages";
 
 // ---------------------------------------------------------------------------
@@ -67,11 +66,14 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
 
 export interface UseSetupWizardOptions {
   /**
-   * Called after a successful operator-create. The component reads
-   * `state.pendingOperator` from the latest state snapshot to drive
-   * `markAuthenticated` + navigation.
+   * Called after a successful operator-create with the operator
+   * returned by ``POST /auth/setup``. The hook MUST pass the
+   * operator through this argument rather than expect callers to
+   * read `state.pendingOperator` — a closure captured at submit
+   * time would otherwise see a stale state snapshot and skip
+   * `markAuthenticated`.
    */
-  onComplete: () => void;
+  onComplete: (operator: Operator) => void;
 }
 
 export interface UseSetupWizardResult {
@@ -104,14 +106,11 @@ export function useSetupWizard(opts: UseSetupWizardOptions): UseSetupWizardResul
           setupToken === "" ? null : setupToken,
         );
         dispatch({ type: "OPERATOR_SUBMIT_SUCCESS", operator });
-        // Defer onComplete to next tick so the dispatched state lands
-        // before the component reads pendingOperator.
-        queueMicrotask(() => opts.onComplete());
-      } catch (err) {
-        if (err instanceof ApiError) {
-          dispatch({ type: "OPERATOR_SUBMIT_ERROR" });
-          return;
-        }
+        // Pass the operator directly — relying on
+        // `state.pendingOperator` here would read a stale closure
+        // snapshot.
+        opts.onComplete(operator);
+      } catch {
         dispatch({ type: "OPERATOR_SUBMIT_ERROR" });
       }
     },

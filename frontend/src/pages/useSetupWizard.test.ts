@@ -72,9 +72,8 @@ describe("useSetupWizard.submitOperator", () => {
     expect(result.current.state.pendingOperator).toEqual(op);
     expect(result.current.state.operatorSubmitting).toBe(false);
     expect(result.current.state.operatorError).toBeNull();
-    // queueMicrotask defers onComplete; flush microtasks.
-    await Promise.resolve();
     expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(onComplete).toHaveBeenCalledWith(op);
   });
 
   it("dispatches generic error on 4xx without leaking server message", async () => {
