@@ -328,12 +328,21 @@ def _credential_health_blocks(layer: LayerPlan) -> str | None:
     request-path consumers (admin UI, WS subscriber) where DB latency
     matters; the orchestrator goes direct.
 
+    Environment scoping (review #983 BLOCKING): gates on EVERY
+    environment for which the operator has an active credential row.
+    v1 only uses 'demo' but the runtime may add 'live' at any time;
+    hardcoding 'demo' here would let a layer with invalid 'live'
+    credentials pass the gate and trade live with bad keys.
+
     Returns None when:
       * No emit requires broker credentials.
-      * Aggregate is VALID.
+      * Operator has no active environments (treated as MISSING by
+        the underlying aggregate, so the gate blocks — explicit
+        return below).
+      * All environments aggregate VALID.
       * DB lookup itself failed (don't block on infra error — let
-        the layer's adapter surface the real failure if it tries to
-        run).
+        the layer's adapter surface the real failure if it tries
+        to run).
     """
     from app.services.sync_orchestrator.registry import LAYERS
 
@@ -348,7 +357,18 @@ def _credential_health_blocks(layer: LayerPlan) -> str | None:
             except (NoOperatorError, AmbiguousOperatorError) as exc:
                 return f"operator not configured ({type(exc).__name__})"
 
-            health = get_operator_credential_health(conn, operator_id=op_id, environment="demo")
+            # Discover the operator's active environments. Any
+            # environment with active rows is gated — if any of them
+            # is not VALID, block the layer.
+            environments = _operator_active_environments(conn, op_id)
+            if not environments:
+                # Operator has no active credential rows at all.
+                return "broker credentials not configured for any environment"
+
+            for env in environments:
+                health = get_operator_credential_health(conn, operator_id=op_id, environment=env)
+                if health != CredentialHealth.VALID:
+                    return f"broker credentials not validated (env={env}, health={health.value})"
     except Exception:
         logger.exception(
             "credential_health gate: DB lookup failed for layer %s; not blocking",
@@ -356,9 +376,30 @@ def _credential_health_blocks(layer: LayerPlan) -> str | None:
         )
         return None
 
-    if health == CredentialHealth.VALID:
-        return None
-    return f"broker credentials not validated (operator health={health.value})"
+    return None
+
+
+def _operator_active_environments(
+    conn: psycopg.Connection[Any],
+    operator_id: Any,
+) -> list[str]:
+    """Return distinct environments the operator has non-revoked rows for.
+
+    Sorted for deterministic gate-skip-reason output. Empty list when
+    the operator has no active rows.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT environment
+              FROM broker_credentials
+             WHERE operator_id = %s
+               AND revoked_at IS NULL
+             ORDER BY environment
+            """,
+            (operator_id,),
+        )
+        return [row[0] for row in cur.fetchall()]
 
 
 def _layer_initialization_blocks(layer: LayerPlan) -> str | None:

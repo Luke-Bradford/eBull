@@ -185,6 +185,59 @@ class TestCredentialHealthBlocks:
         result = _credential_health_blocks(plan)
         assert result is None
 
+    def test_real_environment_with_rejected_creds_blocks(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],  # noqa: F811
+    ) -> None:
+        """Review #983 BLOCKING regression test: gate must check
+        every environment the operator has rows for, not just 'demo'.
+
+        Operator has demo=valid + real=rejected. Pre-fix the gate
+        hardcoded 'demo' so a layer would pass the check and trade
+        real with bad keys.
+        """
+        del ebull_test_conn
+        # Seed demo VALID + live REJECTED on the same operator.
+        op_id = uuid4()
+        url = test_database_url()
+        with psycopg.connect(url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO operators (operator_id, username, password_hash) VALUES (%s, %s, %s)",
+                    (op_id, f"op-{op_id.hex[:8]}", "argon2:dummy"),
+                )
+                for env, state in (
+                    ("demo", "valid"),
+                    ("real", "rejected"),
+                ):
+                    for label in ("api_key", "user_key"):
+                        cur.execute(
+                            """
+                            INSERT INTO broker_credentials
+                                (id, operator_id, provider, label, environment,
+                                 ciphertext, last_four, key_version, health_state)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (
+                                uuid4(),
+                                op_id,
+                                "etoro",
+                                label,
+                                env,
+                                b"\x00" * 32,
+                                "abcd",
+                                1,
+                                state,
+                            ),
+                        )
+            conn.commit()
+
+        plan = _make_plan("universe", ("universe",))
+        result = _credential_health_blocks(plan)
+        assert result is not None
+        assert "real" in result
+        assert "rejected" in result
+
 
 # ---------------------------------------------------------------------------
 # _layer_initialization_blocks

@@ -226,6 +226,13 @@ def _latest_status_map(
     a layer into ACTION_NEEDED after the operator has fixed their
     keys.
     """
+    # Reference the same constant used by layer_failure_history so a
+    # future rename of the FailureCategory enum value can't drift one
+    # site from the others (review #983 WARNING).
+    from app.services.sync_orchestrator.layer_failure_history import (
+        _AUTH_EXPIRED_CATEGORY,
+    )
+
     rows = conn.execute(
         """
         WITH ranked AS (
@@ -240,13 +247,17 @@ def _latest_status_map(
               AND NOT (
                 %(suppress_before)s::timestamptz IS NOT NULL
                 AND status = 'failed'
-                AND error_category = 'auth_expired'
+                AND error_category = %(auth_cat)s
                 AND COALESCE(started_at, finished_at) < %(suppress_before)s::timestamptz
               )
         )
         SELECT layer_name, status FROM ranked WHERE rn = 1
         """,
-        {"names": names, "suppress_before": suppress_auth_expired_before},
+        {
+            "names": names,
+            "suppress_before": suppress_auth_expired_before,
+            "auth_cat": _AUTH_EXPIRED_CATEGORY,
+        },
     ).fetchall()
     out = {str(r[0]): str(r[1]) for r in rows}
     # Never-run layer: sentinel that the context-builder translates to
