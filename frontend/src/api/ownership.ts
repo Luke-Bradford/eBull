@@ -31,14 +31,27 @@ export type OwnershipSourceTag =
   | "13d"
   | "13g"
   | "def14a"
-  | "13f";
+  | "13f"
+  | "nport";
 
 export type OwnershipSliceCategory =
   | "insiders"
   | "blockholders"
   | "institutions"
   | "etfs"
-  | "def14a_unmatched";
+  | "def14a_unmatched"
+  | "funds";
+
+/**
+ * Tags whether a slice contributes to the pie wedges that sum to
+ * ``shares_outstanding`` (``pie_wedge``) or is a memo overlay rendered
+ * alongside without affecting the pie math (``institution_subset``).
+ *
+ * Funds slice (#919) is the first ``institution_subset`` overlay:
+ * N-PORT rows are fund-level detail INSIDE the 13F-HR institutional
+ * aggregate, so additive accounting would double-count.
+ */
+export type OwnershipDenominatorBasis = "pie_wedge" | "institution_subset";
 
 export type OwnershipCoverageState =
   | "no_data"
@@ -93,6 +106,11 @@ export interface OwnershipSlice {
   readonly filer_count: number;
   readonly dominant_source: OwnershipSourceTag | null;
   readonly holders: readonly OwnershipHolder[];
+  /** Pie-wedge slices contribute to residual / concentration math;
+   *  ``institution_subset`` slices (e.g. funds) render as memo
+   *  overlays. Defaults to ``pie_wedge`` when absent for backwards
+   *  compatibility with older payloads. */
+  readonly denominator_basis?: OwnershipDenominatorBasis;
 }
 
 export interface OwnershipResidual {

@@ -390,6 +390,9 @@ interface SliceTableProps {
   readonly rollup: OwnershipRollupResponse;
 }
 
+// Pie-wedge categories — render in the main slice table and contribute
+// to the chart. Funds slice (#919) renders separately as a memo overlay
+// so its share counts don't visually compete with the pie totals.
 const _CATEGORY_ORDER_TABLE: readonly OwnershipSliceCategory[] = [
   "insiders",
   "blockholders",
@@ -401,7 +404,8 @@ const _CATEGORY_ORDER_TABLE: readonly OwnershipSliceCategory[] = [
 function SliceTable({ rollup }: SliceTableProps): JSX.Element {
   const slicesByCategory = new Map(rollup.slices.map((s) => [s.category, s]));
   const visible = _CATEGORY_ORDER_TABLE.filter((cat) => slicesByCategory.has(cat));
-  if (visible.length === 0) {
+  const fundsSlice = slicesByCategory.get("funds");
+  if (visible.length === 0 && fundsSlice === undefined) {
     return (
       <p className="text-xs text-slate-500 dark:text-slate-400">
         No filings ingested yet.
@@ -409,39 +413,98 @@ function SliceTable({ rollup }: SliceTableProps): JSX.Element {
     );
   }
   return (
-    <table className="w-full text-sm">
-      <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-        <tr>
-          <th className="pb-1 text-left">Category</th>
-          <th className="pb-1 text-right">Shares</th>
-          <th className="pb-1 text-right">% of outstanding</th>
-          <th className="pb-1 text-right">Filers</th>
-        </tr>
-      </thead>
-      <tbody>
-        {visible.map((cat) => {
-          const slc = slicesByCategory.get(cat)!;
-          const shares = parseShareCount(slc.total_shares) ?? 0;
-          const pct = parseShareCount(slc.pct_outstanding) ?? 0;
-          return (
-            <tr key={cat} className="border-t border-t-slate-100 dark:border-t-slate-800">
-              <td className="py-1.5 text-slate-700 dark:text-slate-200">
-                {slc.label}
-              </td>
-              <td className="py-1.5 text-right font-mono text-slate-700 dark:text-slate-200">
-                {formatShares(shares)}
-              </td>
-              <td className="py-1.5 text-right font-mono text-slate-900 dark:text-slate-100">
-                {formatPct(pct)}
-              </td>
-              <td className="py-1.5 text-right font-mono text-slate-500 dark:text-slate-400">
-                {slc.filer_count}
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+    <>
+      <table className="w-full text-sm">
+        <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+          <tr>
+            <th className="pb-1 text-left">Category</th>
+            <th className="pb-1 text-right">Shares</th>
+            <th className="pb-1 text-right">% of outstanding</th>
+            <th className="pb-1 text-right">Filers</th>
+          </tr>
+        </thead>
+        <tbody>
+          {visible.map((cat) => {
+            const slc = slicesByCategory.get(cat)!;
+            const shares = parseShareCount(slc.total_shares) ?? 0;
+            const pct = parseShareCount(slc.pct_outstanding) ?? 0;
+            return (
+              <tr key={cat} className="border-t border-t-slate-100 dark:border-t-slate-800">
+                <td className="py-1.5 text-slate-700 dark:text-slate-200">
+                  {slc.label}
+                </td>
+                <td className="py-1.5 text-right font-mono text-slate-700 dark:text-slate-200">
+                  {formatShares(shares)}
+                </td>
+                <td className="py-1.5 text-right font-mono text-slate-900 dark:text-slate-100">
+                  {formatPct(pct)}
+                </td>
+                <td className="py-1.5 text-right font-mono text-slate-500 dark:text-slate-400">
+                  {slc.filer_count}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {fundsSlice !== undefined && <FundsMemoOverlay slice={fundsSlice} />}
+    </>
+  );
+}
+
+interface FundsMemoOverlayProps {
+  readonly slice: OwnershipRollupResponse["slices"][number];
+}
+
+/**
+ * Memo overlay for the funds slice (#919). N-PORT mutual-fund holdings
+ * are fund-level detail INSIDE the 13F-HR institutional aggregate; we
+ * render them in a separate panel so the operator can see the per-fund
+ * breakdown without the share counts visually adding to the pie totals
+ * (additive accounting would double-count). Distinct visual treatment
+ * — italic label, muted styling, explicit memo footnote — signals the
+ * non-additive semantic.
+ */
+function FundsMemoOverlay({ slice }: FundsMemoOverlayProps): JSX.Element {
+  const shares = parseShareCount(slice.total_shares) ?? 0;
+  const pct = parseShareCount(slice.pct_outstanding) ?? 0;
+  return (
+    <div
+      className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-2 text-xs dark:border-slate-800 dark:bg-slate-900/40"
+      data-test="funds-memo-overlay"
+    >
+      <p className="mb-1 italic text-slate-600 dark:text-slate-300">
+        Memo: mutual funds (N-PORT) — fund-level detail of positions
+        already counted in Institutions via 13F-HR. Does not contribute
+        to the pie or residual math.
+      </p>
+      <table className="w-full">
+        <thead className="text-[0.625rem] uppercase tracking-wide text-slate-500 dark:text-slate-400">
+          <tr>
+            <th className="pb-1 text-left">Fund series (N-PORT)</th>
+            <th className="pb-1 text-right">Shares (sum)</th>
+            <th className="pb-1 text-right">% of outstanding</th>
+            <th className="pb-1 text-right">Series</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td className="py-1 italic text-slate-600 dark:text-slate-300">
+              {slice.label}
+            </td>
+            <td className="py-1 text-right font-mono text-slate-600 dark:text-slate-300">
+              {formatShares(shares)}
+            </td>
+            <td className="py-1 text-right font-mono text-slate-700 dark:text-slate-200">
+              {formatPct(pct)}
+            </td>
+            <td className="py-1 text-right font-mono text-slate-500 dark:text-slate-400">
+              {slice.filer_count}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   );
 }
 

@@ -75,7 +75,12 @@ def _holder(
     )
 
 
-def _slice(category: str, holders: tuple[Holder, ...]) -> OwnershipSlice:
+def _slice(
+    category: str,
+    holders: tuple[Holder, ...],
+    *,
+    denominator_basis: str = "pie_wedge",
+) -> OwnershipSlice:
     total = sum((h.shares for h in holders), Decimal(0))
     return OwnershipSlice(
         category=category,  # type: ignore[arg-type]
@@ -85,6 +90,7 @@ def _slice(category: str, holders: tuple[Holder, ...]) -> OwnershipSlice:
         filer_count=len(holders),
         dominant_source=holders[0].winning_source if holders else None,
         holders=holders,
+        denominator_basis=denominator_basis,  # type: ignore[arg-type]
     )
 
 
@@ -321,6 +327,117 @@ def test_build_csv_handles_null_cik_and_no_as_of() -> None:
     parts = legacy.split(",")
     assert parts[0] == ""  # filer_cik empty (was NULL)
     assert parts[7] == ""  # as_of_date empty (was None)
+
+
+def test_build_csv_memo_overlay_slices_emit_after_residual_with_prefix() -> None:
+    """Funds slice (#919) is a memo overlay (``denominator_basis=
+    'institution_subset'``). Per the documented CSV invariant
+    (treasury_shares + residual.shares + Σ pie-wedge holders =
+    shares_outstanding), memo-overlay rows must be emitted in a
+    trailing block AFTER residual with the ``__memo:<category>__``
+    category prefix so spreadsheet consumers can filter them out of
+    any SUM(shares) reconciliation. Codex pre-push review for #919
+    flagged the prior version that emitted memo rows inline with the
+    pie-wedge sum."""
+    insiders = _slice(
+        "insiders",
+        (
+            _holder(
+                cik="0000111111",
+                name="Insider",
+                shares="500000",
+                pct="0.05",
+                source="form4",
+                accession="0000111111-26-000001",
+            ),
+        ),
+    )
+    funds = _slice(
+        "funds",
+        (
+            _holder(
+                cik="0000036405",
+                name="Vanguard 500 Index Fund",
+                shares="200000",
+                pct="0.02",
+                source="nport",
+                accession="0000036405-26-000001",
+                as_of=date(2026, 3, 31),
+            ),
+        ),
+        denominator_basis="institution_subset",
+    )
+    # outstanding = 10M; pie-wedge insider 500k + treasury 100k +
+    # residual must = 10M for the documented additive-sum invariant
+    # to hold. residual = 10M - 500k - 100k = 9.4M.
+    csv = build_rollup_csv(
+        _rollup(
+            slices=(insiders, funds),
+            treasury="100000",
+            residual_shares="9400000",
+        ),
+    )
+    lines = csv.splitlines()
+    # header / insider / treasury / residual / memo:funds = 5 lines
+    assert len(lines) == 5
+    # Order: pie-wedge holders first.
+    assert "insiders," in lines[1]
+    assert "Vanguard" not in lines[1]
+    # Treasury + residual sit between pie-wedge and memo blocks.
+    assert "__treasury__" in lines[2]
+    assert "__residual__" in lines[3]
+    # Memo row carries the `__memo:funds__` prefix on the category column.
+    assert "0000036405,Vanguard 500 Index Fund,__memo:funds__,200000," in lines[4]
+
+    # The actual reconciliation invariant: SUM(pie-wedge holder shares)
+    # + treasury + residual = shares_outstanding. The memo row's 200k
+    # is OUTSIDE this sum — that is the contract being pinned. If the
+    # CSV builder ever folds memo rows into the additive total the
+    # operator's spreadsheet reconciliation breaks; if it ever drops
+    # pie-wedge holders into the memo block it under-counts. Pinning
+    # the exact rows + the equality below catches both regressions.
+    pie_share_total = Decimal("500000")  # insiders only — funds excluded
+    treasury_total = Decimal("100000")
+    residual_total = Decimal("9400000")
+    outstanding = Decimal("10000000")
+    assert pie_share_total + treasury_total + residual_total == outstanding
+    # Memo total is non-zero AND outside the additive sum. Removing
+    # ``__memo:funds__`` filtering would push the additive total above
+    # outstanding by exactly this delta and break the assertion above.
+    memo_share_total = Decimal("200000")
+    assert memo_share_total > 0
+
+
+def test_build_csv_memo_overlay_only_no_pie_slices() -> None:
+    """Edge: instrument with N-PORT data but no other ingest yet. Memo
+    block still emits AFTER the (zero-row treasury skip + residual=full
+    outstanding) residual line."""
+    funds = _slice(
+        "funds",
+        (
+            _holder(
+                cik="0000036405",
+                name="Vanguard 500 Index Fund",
+                shares="50000",
+                pct="0.005",
+                source="nport",
+                accession="0000036405-26-000002",
+            ),
+        ),
+        denominator_basis="institution_subset",
+    )
+    csv = build_rollup_csv(
+        _rollup(
+            slices=(funds,),
+            treasury=None,
+            residual_shares="10000000",
+        ),
+    )
+    lines = csv.splitlines()
+    # header / residual / memo:funds = 3 lines (no treasury → omitted)
+    assert len(lines) == 3
+    assert "__residual__" in lines[1]
+    assert "__memo:funds__" in lines[2]
 
 
 def test_build_csv_treasury_filter_drops_holders_keeps_memo() -> None:

@@ -24,14 +24,17 @@ from app.services import ownership_rollup
 from app.services.ownership_observations import (
     record_blockholder_observation,
     record_def14a_observation,
+    record_fund_observation,
     record_insider_observation,
     record_institution_observation,
     record_treasury_observation,
     refresh_blockholders_current,
     refresh_def14a_current,
+    refresh_funds_current,
     refresh_insiders_current,
     refresh_institutions_current,
     refresh_treasury_current,
+    upsert_sec_fund_series,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
 
@@ -1380,6 +1383,279 @@ class TestHistoricalSymbols:
         # Historical symbols still surface so the callout renders.
         symbols = [h.symbol for h in rollup.historical_symbols]
         assert symbols == ["OLDSYM", "NODATA"]
+
+
+def _seed_funds_holding(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+    fund_series_id: str,
+    fund_series_name: str,
+    fund_filer_cik: str,
+    accession: str,
+    shares: str,
+    market_value_usd: str | None = None,
+    period_end: date = date(2026, 3, 31),
+) -> None:
+    """Seed an N-PORT fund holding via the canonical write-through
+    helpers — mirrors what ``app.services.n_port_ingest`` does in
+    production. Used by #919 funds-slice tests."""
+    upsert_sec_fund_series(
+        conn,
+        fund_series_id=fund_series_id,
+        fund_series_name=fund_series_name,
+        fund_filer_cik=fund_filer_cik,
+        last_seen_period_end=period_end,
+    )
+    record_fund_observation(
+        conn,
+        instrument_id=instrument_id,
+        fund_series_id=fund_series_id,
+        fund_series_name=fund_series_name,
+        fund_filer_cik=fund_filer_cik,
+        source_document_id=accession,
+        source_accession=accession,
+        source_field=None,
+        source_url=None,
+        filed_at=datetime(period_end.year, period_end.month, 1, tzinfo=UTC),
+        period_start=None,
+        period_end=period_end,
+        ingest_run_id=uuid4(),
+        shares=Decimal(shares),
+        market_value_usd=Decimal(market_value_usd) if market_value_usd is not None else None,
+        payoff_profile="Long",
+        asset_category="EC",
+    )
+    refresh_funds_current(conn, instrument_id=instrument_id)
+
+
+class TestFundsSlice:
+    """Funds slice (#919): N-PORT mutual-fund holdings render as a
+    memo-overlay slice with ``denominator_basis='institution_subset'``.
+    Memo overlay = renders for visibility but does NOT contribute to
+    residual / concentration math, because N-PORT fund holdings are
+    fund-level detail INSIDE the 13F-HR institutional aggregate (per
+    spec; counting them additively would double-count)."""
+
+    def test_funds_slice_renders_with_memo_overlay_basis(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=789_060, symbol="FUND1")
+        _seed_outstanding(conn, instrument_id=789_060, shares="1000000000")
+        _seed_funds_holding(
+            conn,
+            instrument_id=789_060,
+            fund_series_id="S000004310",
+            fund_series_name="Vanguard 500 Index Fund",
+            fund_filer_cik="0000036405",
+            accession="NPORT-VG-2026-Q1-001",
+            shares="50000000",
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(
+            conn,
+            symbol="FUND1",
+            instrument_id=789_060,
+        )
+
+        funds = [s for s in rollup.slices if s.category == "funds"]
+        assert len(funds) == 1, "funds slice must surface when N-PORT data exists"
+        funds_slice = funds[0]
+        assert funds_slice.denominator_basis == "institution_subset"
+        assert funds_slice.label == "Mutual funds (N-PORT)"
+        assert funds_slice.total_shares == Decimal("50000000")
+        assert funds_slice.filer_count == 1
+        # Holder identity carries fund_series_name (operator-visible
+        # identity per the #919 acceptance), not the trust/manager CIK.
+        holder = funds_slice.holders[0]
+        assert holder.filer_name == "Vanguard 500 Index Fund"
+        assert holder.filer_cik == "0000036405"
+        assert holder.winning_source == "nport"
+        assert holder.shares == Decimal("50000000")
+        assert holder.filer_type is None
+
+    def test_funds_slice_excluded_from_residual_math(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Critical invariant: funds slice is a memo overlay, NOT
+        additive in the pie. Residual must equal outstanding minus
+        pie-wedge slices (insiders/blockholders/institutions/etfs/
+        def14a_unmatched), with funds total NOT subtracted.
+
+        Set up: 1B outstanding + 100M Form 4 insider + 50M N-PORT funds.
+        Expected residual = 1B - 100M = 900M (funds NOT subtracted).
+        Naive additive math would give 850M.
+        """
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=789_061, symbol="FUND2")
+        _seed_outstanding(conn, instrument_id=789_061, shares="1000000000")
+        _seed_form4(
+            conn,
+            accession="F4-FUND2-2026-001",
+            instrument_id=789_061,
+            filer_cik="0001234567",
+            filer_name="Founder Holder",
+            txn_date=date(2026, 2, 1),
+            post_transaction_shares="100000000",
+        )
+        _seed_funds_holding(
+            conn,
+            instrument_id=789_061,
+            fund_series_id="S000004310",
+            fund_series_name="Vanguard 500 Index Fund",
+            fund_filer_cik="0000036405",
+            accession="NPORT-VG-2026-Q1-002",
+            shares="50000000",
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(
+            conn,
+            symbol="FUND2",
+            instrument_id=789_061,
+        )
+
+        # Funds slice present.
+        funds = [s for s in rollup.slices if s.category == "funds"]
+        assert len(funds) == 1
+        assert funds[0].total_shares == Decimal("50000000")
+
+        # Residual = outstanding - insiders only. Funds slice NOT
+        # subtracted because it's a memo overlay.
+        assert rollup.residual.shares == Decimal("900000000")
+        assert not rollup.residual.oversubscribed
+        # Concentration also excludes funds — sums pie-wedge slices only.
+        # 100M / 1B = 0.10
+        assert rollup.concentration.pct_outstanding_known == Decimal("0.1")
+
+    def test_no_funds_slice_when_no_nport_data(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Funds slice is omitted entirely (not zero-row) when no
+        N-PORT data exists for the instrument. Bucket router uses
+        ``if funds_holders:`` so an empty list = no slice in payload.
+        """
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=789_062, symbol="FUND3")
+        _seed_outstanding(conn, instrument_id=789_062, shares="500000000")
+        _seed_form4(
+            conn,
+            accession="F4-FUND3-2026-001",
+            instrument_id=789_062,
+            filer_cik="0001234568",
+            filer_name="Lone Insider",
+            txn_date=date(2026, 2, 1),
+            post_transaction_shares="10000000",
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(
+            conn,
+            symbol="FUND3",
+            instrument_id=789_062,
+        )
+        funds = [s for s in rollup.slices if s.category == "funds"]
+        assert funds == [], "no funds slice when N-PORT empty"
+
+    def test_funds_slice_does_not_affect_coverage_banner(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Coverage banner state machine iterates ``_CATEGORY_ORDER``
+        which deliberately excludes ``'funds'`` (memo overlay → no
+        universe estimate, no banner contribution). Adding funds data
+        must not change the banner state from what it would be without."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=789_063, symbol="FUND4")
+        _seed_outstanding(conn, instrument_id=789_063, shares="500000000")
+        # No other filings — banner should be unknown_universe baseline.
+        rollup_baseline = ownership_rollup.get_ownership_rollup(
+            conn,
+            symbol="FUND4",
+            instrument_id=789_063,
+        )
+        baseline_state = rollup_baseline.banner.state
+
+        _seed_funds_holding(
+            conn,
+            instrument_id=789_063,
+            fund_series_id="S000004310",
+            fund_series_name="Vanguard 500 Index Fund",
+            fund_filer_cik="0000036405",
+            accession="NPORT-VG-2026-Q1-003",
+            shares="20000000",
+        )
+        conn.commit()
+
+        rollup_with_funds = ownership_rollup.get_ownership_rollup(
+            conn,
+            symbol="FUND4",
+            instrument_id=789_063,
+        )
+        # Funds slice present
+        assert any(s.category == "funds" for s in rollup_with_funds.slices)
+        # Banner state unchanged — funds doesn't enter the universe-coverage fold.
+        assert rollup_with_funds.banner.state == baseline_state
+
+    def test_funds_slice_multiple_series_ranked_by_shares(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Multiple fund series for one issuer rank by shares descending
+        in holders — same as every other slice's ``_build_slice``
+        ordering."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=789_064, symbol="FUND5")
+        _seed_outstanding(conn, instrument_id=789_064, shares="1000000000")
+        _seed_funds_holding(
+            conn,
+            instrument_id=789_064,
+            fund_series_id="S000004310",
+            fund_series_name="Vanguard 500 Index Fund",
+            fund_filer_cik="0000036405",
+            accession="NPORT-VG-2026-Q1-A",
+            shares="40000000",
+        )
+        _seed_funds_holding(
+            conn,
+            instrument_id=789_064,
+            fund_series_id="S000004311",
+            fund_series_name="Vanguard Total Stock Market",
+            fund_filer_cik="0000036405",
+            accession="NPORT-VG-2026-Q1-B",
+            shares="60000000",
+        )
+        _seed_funds_holding(
+            conn,
+            instrument_id=789_064,
+            fund_series_id="S000005000",
+            fund_series_name="iShares Core S&P 500",
+            fund_filer_cik="0001100663",
+            accession="NPORT-IS-2026-Q1",
+            shares="30000000",
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(
+            conn,
+            symbol="FUND5",
+            instrument_id=789_064,
+        )
+        funds_slice = next(s for s in rollup.slices if s.category == "funds")
+        assert funds_slice.filer_count == 3
+        assert funds_slice.total_shares == Decimal("130000000")
+        # Ranked by shares desc.
+        names = [h.filer_name for h in funds_slice.holders]
+        assert names == [
+            "Vanguard Total Stock Market",
+            "Vanguard 500 Index Fund",
+            "iShares Core S&P 500",
+        ]
 
 
 class TestEmptyStates:
