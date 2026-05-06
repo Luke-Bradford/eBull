@@ -2,7 +2,7 @@
 /**
  * Dark-mode class hygiene gate (#708).
  *
- * Four checks run line-by-line over every .tsx in frontend/src:
+ * Six checks run line-by-line over every .tsx in frontend/src:
  *
  *   A. Duplicate Tailwind variant utility on the same line. Catches
  *      the PR #707 case where two independent sweeps (#706 + #703)
@@ -28,7 +28,18 @@
  *      `bg-slate-50 hover:bg-slate-100`, dark should be `bg-slate-900
  *      hover:bg-slate-800`).
  *
+ *   F. Tinted `bg-<color>-(50|100|200)` (semantic accent colors,
+ *      not slate) without a `dark:bg-` partner on the same line.
+ *      Catches the #970 BootstrapProgress case where pale tinted
+ *      backgrounds rendered light-on-light in dark mode (washed
+ *      out, near-unreadable).
+ *
  * Exits non-zero with file:line:reason for each violation.
+ *
+ * SKIP_FILES below records pre-existing violators that are queued
+ * for a separate sweep PR. Each entry should reference the tracking
+ * issue. New files MUST NOT be added to this list — fix the
+ * violation in the same PR that introduces it.
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
@@ -36,6 +47,55 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../src", import.meta.url));
 const SKIP_DIRS = new Set(["test", "__mocks__"]);
+
+/**
+ * Files exempt from check F only — they carry pre-existing tinted-bg
+ * violations being drained in a separate sweep ticket.
+ *
+ * Tracking: #987 (sweep). When that ticket lands the entire set
+ * should empty out and this constant can be removed.
+ *
+ * Do NOT add new files here. Fix the violation in the same PR.
+ */
+const CHECK_F_SKIP_FILES = new Set([
+  "src/components/admin/LayerHealthList.tsx",
+  "src/components/admin/SeedProgressPanel.tsx",
+  "src/components/broker/ValidationResultDisplay.tsx",
+  "src/components/dashboard/AlertsStrip.tsx",
+  "src/components/dashboard/RecentRecommendations.tsx",
+  "src/components/instrument/CrossRefPopover.tsx",
+  "src/components/instrument/EightKEventsPanel.tsx",
+  "src/components/instrument/InsiderActivityPanel.tsx",
+  "src/components/instrument/KeyStatsPane.tsx",
+  "src/components/instrument/RightRail.tsx",
+  "src/components/instrument/SummaryStrip.tsx",
+  "src/components/instrument/dividendsShared.tsx",
+  "src/components/orders/ClosePositionModal.tsx",
+  "src/components/orders/DemoLivePill.tsx",
+  "src/components/orders/OrderEntryModal.tsx",
+  "src/components/rankings/RankingsTable.tsx",
+  "src/components/recommendations/AuditTrail.tsx",
+  "src/components/recommendations/RecommendationsTable.tsx",
+  "src/components/security/RecoveryPhraseConfirm.tsx",
+  "src/components/settings/BudgetConfigSection.tsx",
+  "src/components/settings/DisplayCurrencySection.tsx",
+  "src/components/states/ErrorBanner.tsx",
+  "src/components/ui/Pagination.tsx",
+  "src/pages/AdminPage.tsx",
+  "src/pages/ChartPage.tsx",
+  "src/pages/CopyTradingPage.tsx",
+  "src/pages/DashboardPage.tsx",
+  "src/pages/EightKListPage.tsx",
+  "src/pages/InstrumentPage.tsx",
+  "src/pages/InstrumentsPage.tsx",
+  "src/pages/LoginPage.tsx",
+  "src/pages/OperatorsPage.tsx",
+  "src/pages/RecoverPage.tsx",
+  "src/pages/ReportsPage.tsx",
+  "src/pages/SettingsPage.tsx",
+  "src/pages/SetupPage.tsx",
+  "src/pages/SyncDashboard.tsx",
+]);
 
 function walk(dir) {
   const out = [];
@@ -104,6 +164,33 @@ function findDeadDarkHover(line) {
   return `dark:bg-${baseMatch[1]} and dark:hover:bg-${hoverMatch[1]} are identical — hover is a no-op in dark mode`;
 }
 
+/** Check F: tinted (non-slate) `bg-<color>-(50|100|200)` without a
+ *  `dark:bg-` partner on the same line. Catches washed-out
+ *  light-on-light banners in dark mode (the BootstrapProgress
+ *  bug from #970).
+ *
+ * `bg-` must not be preceded by another utility prefix
+ * (`hover:`, `dark:`, etc.) — those are handled by checks C / D / E.
+ * Opacity suffix is accepted in either numeric (`/40`) or arbitrary
+ * (`/[.35]`) form so the lookahead doesn't reject the base class
+ * just because an opacity modifier follows.
+ *
+ * Slate is excluded — slate tints are the neutral surface and
+ * already covered by checks B / C / D / E. Same-line scope matches
+ * checks A-E; multi-element-on-one-line is a separate hygiene
+ * concern not addressed by this gate.
+ */
+const TINT_COLORS_F =
+  "blue|emerald|amber|rose|sky|cyan|orange|purple|pink|lime|teal|indigo|violet|fuchsia|yellow|red|green";
+const TINTED_BG_RE = new RegExp(
+  `(?<![\\w:-])bg-(?:${TINT_COLORS_F})-(?:50|100|200)(?:\\/(?:\\d+|\\[[^\\]]*\\]))?(?![\\w/-])`,
+);
+function findMissingTintedBgPartner(line) {
+  if (!TINTED_BG_RE.test(line)) return null;
+  if (/dark:bg-/.test(line)) return null;
+  return "tinted bg-<color>-(50|100|200) missing dark:bg- partner";
+}
+
 /** Check D: dark:bg-* base added to an element whose only light bg
  *  was a hover state — produces an always-on background in dark mode
  *  (the Sidebar permanent-hover bug from PR #711).
@@ -137,6 +224,9 @@ const violations = [];
 const files = walk(ROOT);
 for (const file of files) {
   const lines = readFileSync(file, "utf8").split("\n");
+  const rel = relative(ROOT, file).split(sep).join("/");
+  const relFromSrc = `src/${rel}`;
+  const skipCheckF = CHECK_F_SKIP_FILES.has(relFromSrc);
   lines.forEach((line, i) => {
     const lineNo = i + 1;
     const dups = findDuplicateVariants(line);
@@ -162,6 +252,12 @@ for (const file of files) {
     const deadHover = findDeadDarkHover(line);
     if (deadHover) {
       violations.push({ file, line: lineNo, reason: deadHover });
+    }
+    if (!skipCheckF) {
+      const tintedMiss = findMissingTintedBgPartner(line);
+      if (tintedMiss) {
+        violations.push({ file, line: lineNo, reason: tintedMiss });
+      }
     }
   });
 }
