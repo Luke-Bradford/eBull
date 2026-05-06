@@ -22,6 +22,7 @@ import {
   type BrokerCredentialView,
   type ValidateCredentialResponse,
   createBrokerCredential,
+  replaceBrokerCredential,
   listBrokerCredentials,
   revokeBrokerCredential,
   validateBrokerCredential,
@@ -298,21 +299,14 @@ function BrokerCredentialsSection(): JSX.Element {
     const label = manageAction === "edit-api_key" ? "api_key" : "user_key";
     setEditError(null);
     setEditing(true);
-    let revoked = false;
     try {
-      // Find the existing active credential for this label to revoke it.
-      const existing = rows?.find(
-        (r) =>
-          r.label === label &&
-          r.provider === "etoro" &&
-          r.environment === ENVIRONMENT &&
-          r.revoked_at === null,
-      );
-      if (existing) {
-        await revokeBrokerCredential(existing.id);
-        revoked = true;
-      }
-      await createBrokerCredential({
+      // #980 / #974/F: atomic revoke + insert in one server-side
+      // transaction. Pre-#980 this path issued DELETE + POST sequentially,
+      // letting subscribers (orchestrator gate, WS subscriber, admin
+      // banner) observe a transient MISSING state between the two calls.
+      // The PUT /replace endpoint does both inside one tx so no
+      // intermediate state is ever visible.
+      await replaceBrokerCredential({
         provider: "etoro",
         label,
         environment: ENVIRONMENT,
@@ -321,15 +315,25 @@ function BrokerCredentialsSection(): JSX.Element {
       setEditSecret("");
       setManageAction("idle");
     } catch (err: unknown) {
-      // If the old key was already revoked but the new save failed, the
-      // credential set is now incomplete.  After refresh() the mode will
-      // transition to "repair", hiding the edit form — so surface the
-      // error via actionError (rendered outside mode-specific sections).
-      if (revoked) {
-        const msg = `The old ${label} was revoked but the replacement failed — re-enter it below.`;
-        setActionError(msg);
-      } else if (err instanceof ApiError && err.status === 409) {
-        setEditError("A credential with that label already exists.");
+      if (err instanceof ApiError && err.status === 404) {
+        // Replace requires an existing active row. Falling here means
+        // the row was revoked between mount and submit; create instead.
+        try {
+          await createBrokerCredential({
+            provider: "etoro",
+            label,
+            environment: ENVIRONMENT,
+            secret: editSecret,
+          });
+          setEditSecret("");
+          setManageAction("idle");
+        } catch (createErr: unknown) {
+          if (createErr instanceof ApiError && createErr.status === 400) {
+            setEditError("Invalid key value.");
+          } else {
+            setEditError("Could not update credential.");
+          }
+        }
       } else if (err instanceof ApiError && err.status === 400) {
         setEditError("Invalid key value.");
       } else {
@@ -345,31 +349,22 @@ function BrokerCredentialsSection(): JSX.Element {
     e.preventDefault();
     setEditError(null);
     setEditing(true);
-    // Track progress so the error message reflects what actually happened.
-    let revokedCount = 0;
-    let createdApiKey = false;
+    // #980 / #974/F: each label is replaced via PUT /broker-credentials/replace
+    // (atomic revoke + insert in one server-side tx). Pre-#980 this
+    // path issued DELETE-DELETE-POST-POST sequentially and observers
+    // saw a transient MISSING + half-saved state; now each label is
+    // its own atomic replace, so worst case one label is replaced
+    // and the other isn't (operator-visible).
+    let savedApiKey = false;
     try {
-      // Revoke both existing active credentials.
-      const activeRows = rows?.filter(
-        (r) =>
-          r.provider === "etoro" &&
-          r.environment === ENVIRONMENT &&
-          r.revoked_at === null,
-      ) ?? [];
-      for (const row of activeRows) {
-        await revokeBrokerCredential(row.id);
-        revokedCount += 1;
-      }
-
-      // Create both new credentials.
-      await createBrokerCredential({
+      await replaceBrokerCredential({
         provider: "etoro",
         label: "api_key",
         environment: ENVIRONMENT,
         secret: apiKey,
       });
-      createdApiKey = true;
-      await createBrokerCredential({
+      savedApiKey = true;
+      await replaceBrokerCredential({
         provider: "etoro",
         label: "user_key",
         environment: ENVIRONMENT,
@@ -380,25 +375,21 @@ function BrokerCredentialsSection(): JSX.Element {
       setUserKey("");
       setManageAction("idle");
     } catch (err: unknown) {
-      // Determine the user-facing error message.  Specific API errors
-      // (409/400) take priority over generic partial-failure messaging
-      // so the operator sees the actionable detail.
       let message: string;
-      if (err instanceof ApiError && err.status === 409) {
-        message = "A credential with that label already exists.";
+      if (err instanceof ApiError && err.status === 404) {
+        // Replace endpoint requires an existing active row. If we
+        // hit this, it means the credential pair isn't actually
+        // present despite the UI being in 'replace' mode — race
+        // with another tab. Refresh will recover into the right mode.
+        message = "Credentials no longer exist — refreshing.";
       } else if (err instanceof ApiError && err.status === 400) {
         message = "Invalid key value.";
       } else {
         message = "Could not replace credentials.";
       }
 
-      // If revokes already happened, the mode will transition after
-      // refresh — surface via actionError (rendered outside mode-
-      // conditional sections) and prepend context about what was lost.
-      if (createdApiKey) {
+      if (savedApiKey) {
         setActionError(`api_key was saved but user_key failed — re-enter user_key below. ${message}`);
-      } else if (revokedCount > 0) {
-        setActionError(`Old credentials were revoked but neither replacement was saved — re-enter both below. ${message}`);
       } else {
         setEditError(message);
       }
