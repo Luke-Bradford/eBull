@@ -53,14 +53,17 @@ from uuid import uuid4
 import psycopg
 import psycopg.rows
 
+from app.providers.implementations.sec_def14a import extract_plan_name_and_trustee, is_esop_plan
 from app.services.ownership_observations import (
     record_blockholder_observation,
     record_def14a_observation,
+    record_esop_observation,
     record_insider_observation,
     record_institution_observation,
     record_treasury_observation,
     refresh_blockholders_current,
     refresh_def14a_current,
+    refresh_esop_current,
     refresh_insiders_current,
     refresh_institutions_current,
     refresh_treasury_current,
@@ -600,10 +603,52 @@ def sync_def14a(
         )
         rows = cur.fetchall()
 
+    esop_instruments_touched: set[int] = set()
     for row in rows:
         summary.rows_scanned += 1
         iid = int(row["instrument_id"])
         as_of = row["as_of_date"] or row["fetched_at"].date()
+        # ESOP rows route to ownership_esop_observations, NOT the
+        # general def14a observations path. The legacy ingest before
+        # #843 tagged ESOP rows with the section-context role
+        # ('principal' typically) — role check alone misses them.
+        # Run the same name-pattern detection the parser uses so a
+        # bootstrap / repair over pre-#843 def14a_beneficial_holdings
+        # rows correctly routes legacy plans into the ESOP slice
+        # rather than dropping them on the floor (refresh_def14a_current
+        # filters them by name regex). Codex pre-push review #843
+        # rounds 2 + 4 caught this.
+        if str(row.get("holder_role") or "") == "esop" or is_esop_plan(str(row.get("holder_name") or "")):
+            try:
+                plan_name, trustee_name = extract_plan_name_and_trustee(str(row["holder_name"]))
+                if not plan_name:
+                    continue
+                record_esop_observation(
+                    conn,
+                    instrument_id=iid,
+                    plan_name=plan_name,
+                    plan_trustee_name=trustee_name,
+                    plan_trustee_cik=None,
+                    source_document_id=str(row["accession_number"]),
+                    source_accession=str(row["accession_number"]),
+                    source_field=None,
+                    source_url=None,
+                    filed_at=row["fetched_at"] or datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
+                    period_start=None,
+                    period_end=as_of,
+                    ingest_run_id=run_id,
+                    shares=Decimal(row["shares"]),
+                    percent_of_class=(
+                        Decimal(row["percent_of_class"]) if row["percent_of_class"] is not None else None
+                    ),
+                )
+                summary.observations_recorded += 1
+                esop_instruments_touched.add(iid)
+            except Exception as exc:
+                summary.orphans.append(
+                    f"def14a-esop accession={row['accession_number']} holder={row['holder_name']}: {exc}"
+                )
+            continue
         try:
             record_def14a_observation(
                 conn,
@@ -633,6 +678,10 @@ def sync_def14a(
     summary.instruments_refreshed = _refresh_for_instruments(
         conn, instrument_ids=instruments_touched, refresh_fn=refresh_def14a_current, summary=summary
     )
+    if esop_instruments_touched:
+        summary.instruments_refreshed += _refresh_for_instruments(
+            conn, instrument_ids=esop_instruments_touched, refresh_fn=refresh_esop_current, summary=summary
+        )
     return summary
 
 

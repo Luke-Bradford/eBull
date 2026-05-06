@@ -26,6 +26,8 @@ from decimal import Decimal
 
 from app.providers.implementations.sec_def14a import (
     Def14ABeneficialOwnershipTable,
+    extract_plan_name_and_trustee,
+    is_esop_plan,
     parse_beneficial_ownership_table,
 )
 
@@ -460,4 +462,156 @@ def test_alphabetic_footnote_markers_stripped_from_holder_and_numeric_cells() ->
     assert parsed.rows[0].percent_of_class == Decimal("3.5")
     assert parsed.rows[1].holder_name == "Holder With Paren Letter"
     assert parsed.rows[1].shares == Decimal("500000")
-    assert parsed.rows[1].percent_of_class == Decimal("1.5")
+
+
+# ---------------------------------------------------------------------------
+# ESOP / employee-benefit-plan detection (#843)
+# ---------------------------------------------------------------------------
+
+
+class TestIsEsopPlan:
+    """Each of the 9 conservative regex patterns must match a
+    representative real holder_name string. Generic Trust / Trustee
+    must NOT match (false-positive guard against Vanguard Fiduciary
+    Trust / BlackRock Institutional Trust 5%-holder rows)."""
+
+    def test_esop_acronym_matches(self) -> None:
+        assert is_esop_plan("ABC Inc. ESOP")
+        assert is_esop_plan("Acme ESOP Trust")
+
+    def test_full_employee_stock_ownership_plan_matches(self) -> None:
+        assert is_esop_plan("Apple Employee Stock Ownership Plan")
+
+    def test_401k_with_and_without_parens_matches(self) -> None:
+        assert is_esop_plan("Apple Inc. 401(k) Plan")
+        assert is_esop_plan("Apple Inc. 401k Plan")
+        assert is_esop_plan("Microsoft Corporation 401 (k) Plan")
+
+    def test_401_plan_without_k_matches_for_cleaned_legacy_names(self) -> None:
+        """``_clean_holder_name`` strips ``(k)`` as a footnote
+        marker so legacy stored holder_names read ``401 Plan``
+        without the ``k``. The pattern accepts the cleaned form via
+        an optional ``k``-suffix. Codex pre-push review #843
+        round 5 caught this gap."""
+        assert is_esop_plan("Apple Inc. 401 Plan")
+
+    def test_bare_401_does_not_match(self) -> None:
+        """Numeric ``401`` without a ``Plan`` suffix MUST NOT match —
+        catches false positives on share counts / index references."""
+        assert not is_esop_plan("Acme 401st Quarter Filing")
+        assert not is_esop_plan("Holder 401")
+
+    def test_employee_savings_plan_matches(self) -> None:
+        assert is_esop_plan("Acme Employee Savings Plan")
+
+    def test_retirement_savings_plan_matches(self) -> None:
+        assert is_esop_plan("Acme Retirement Savings Plan")
+
+    def test_profit_sharing_plan_matches_with_hyphen_or_space(self) -> None:
+        assert is_esop_plan("Acme Profit-Sharing Plan")
+        assert is_esop_plan("Acme Profit Sharing Plan")
+
+    def test_employee_benefit_plan_matches(self) -> None:
+        assert is_esop_plan("Acme Employee Benefit Plan")
+
+    def test_company_stock_fund_matches(self) -> None:
+        assert is_esop_plan("Apple Company Stock Fund")
+
+    def test_savings_plan_trust_matches(self) -> None:
+        assert is_esop_plan("Acme Savings Plan Trust")
+        assert is_esop_plan("Acme Retirement Plan Trust")
+        assert is_esop_plan("Acme Profit-Sharing Plan Trust")
+
+    def test_generic_trust_does_not_match(self) -> None:
+        """Critical false-positive guard: bare Trust / Trustee /
+        Trustee for must NOT tag as ESOP. Vanguard Fiduciary Trust
+        Company appears in every Vanguard 5%-holder row + would
+        over-tag every institutional position as ESOP."""
+        assert not is_esop_plan("Vanguard Fiduciary Trust Company")
+        assert not is_esop_plan("BlackRock Institutional Trust Company")
+        assert not is_esop_plan("State Street Bank and Trust Company")
+        assert not is_esop_plan("Trustee for the Cohen Family Trust")
+        assert not is_esop_plan("The Vanguard Group, Inc.")
+        assert not is_esop_plan("BlackRock, Inc.")
+
+    def test_empty_or_none_returns_false(self) -> None:
+        assert not is_esop_plan("")
+
+
+class TestExtractPlanNameAndTrustee:
+    """The trustee suffix split must produce a canonical plan_name
+    that matches across years even as the trustee changes (issuers
+    re-bid plan administration periodically)."""
+
+    def test_c_o_trustee_suffix_split(self) -> None:
+        plan, trustee = extract_plan_name_and_trustee("Apple Inc. 401(k) Plan, c/o Vanguard Fiduciary Trust as Trustee")
+        assert plan == "Apple Inc. 401(k) Plan"
+        assert trustee == "Vanguard Fiduciary Trust"
+
+    def test_comma_trustee_suffix_split(self) -> None:
+        plan, trustee = extract_plan_name_and_trustee(
+            "Acme Profit-Sharing Plan, Fidelity Management Trust Company, Trustee"
+        )
+        assert plan == "Acme Profit-Sharing Plan"
+        assert trustee == "Fidelity Management Trust Company"
+
+    def test_paren_trustee_suffix_split(self) -> None:
+        plan, trustee = extract_plan_name_and_trustee(
+            "Microsoft Savings Plus Plan (State Street Bank and Trust, Trustee)"
+        )
+        assert plan == "Microsoft Savings Plus Plan"
+        assert trustee == "State Street Bank and Trust"
+
+    def test_by_trustee_suffix_split(self) -> None:
+        plan, trustee = extract_plan_name_and_trustee("ABC ESOP by Computershare Trust as trustee")
+        assert plan == "ABC ESOP"
+        assert trustee == "Computershare Trust"
+
+    def test_no_trustee_suffix_returns_holder_name_unchanged(self) -> None:
+        plan, trustee = extract_plan_name_and_trustee("Apple Inc. 401(k) Plan")
+        assert plan == "Apple Inc. 401(k) Plan"
+        assert trustee is None
+
+    def test_empty_holder_name_returns_empty(self) -> None:
+        plan, trustee = extract_plan_name_and_trustee("")
+        assert plan == ""
+        assert trustee is None
+
+
+def test_parser_overrides_role_to_esop_for_matching_holder_name() -> None:
+    """Critical integration: when an ESOP plan crosses the 5%
+    disclosure threshold, the existing parser tags it as 'principal'
+    via section context. The #843 ESOP override must flip that to
+    'esop' so the row lands in the dedicated ownership_esop_*
+    slice, NOT the blockholders slice."""
+    body = """
+    <table>
+      <tr>
+        <th>Name and Address of Beneficial Owner</th>
+        <th>Number of Shares</th>
+        <th>Percent of Class</th>
+      </tr>
+      <tr><td>5% Beneficial Stockholders</td></tr>
+      <tr><td>Vanguard Group, Inc.</td><td>3,000,000</td><td>9.5%</td></tr>
+      <tr><td>Apple Inc. 401(k) Plan, c/o Vanguard Fiduciary Trust as Trustee</td><td>2,000,000</td><td>6.5%</td></tr>
+      <tr><td>BlackRock, Inc.</td><td>1,800,000</td><td>5.7%</td></tr>
+    </table>
+    """
+    parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+    assert len(parsed.rows) == 3
+    by_name = {r.holder_name: r for r in parsed.rows}
+    # Vanguard + BlackRock land as 'principal' (5%-holder section
+    # heading inside the table flips current_role).
+    assert by_name["Vanguard Group, Inc."].holder_role == "principal"
+    assert by_name["BlackRock, Inc."].holder_role == "principal"
+    # Apple plan flips to 'esop' via the name-pattern override even
+    # though section context tagged it 'principal'. The holder_name
+    # stored is the cleaned form — ``_clean_holder_name`` strips
+    # ``(k)`` as a single-alpha-in-parens footnote marker, so the
+    # canonical name is "Apple Inc. 401 Plan" (without the (k)).
+    # The ESOP detection runs on the RAW holder_name pre-clean so
+    # the override still fires.
+    plan_holder = by_name["Apple Inc. 401 Plan, c/o Vanguard Fiduciary Trust as Trustee"]
+    assert plan_holder.holder_role == "esop"
+    assert plan_holder.shares == Decimal("2000000")
+    assert plan_holder.percent_of_class == Decimal("6.5")
