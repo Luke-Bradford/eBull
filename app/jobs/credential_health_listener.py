@@ -201,12 +201,18 @@ def _handle_notify(
     try:
         payload_obj = json.loads(notify.payload)
         operator_id = UUID(str(payload_obj["operator_id"]))
-        # provider is in the payload but v1 only supports etoro.
+        # v1 only supports etoro / demo; the production payload does
+        # carry environment now (#976 Codex pre-push r1.2). Default
+        # to "demo" for backward compatibility with any older queued
+        # notify; the poll fallback recovers any drift.
         environment_hint = payload_obj.get("environment", "demo")
-    except TypeError, ValueError, KeyError:
+    except (TypeError, ValueError, KeyError) as exc:
+        # Don't log payload contents — a malformed notify could be
+        # arbitrarily large or carry sensitive substrings. Log
+        # exception type only (Codex pre-push r1.4).
         logger.warning(
-            "credential_health_listener: ignoring malformed notify payload: %r",
-            notify.payload,
+            "credential_health_listener: ignoring malformed notify payload (%s)",
+            type(exc).__name__,
         )
         return
 

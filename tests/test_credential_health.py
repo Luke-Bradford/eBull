@@ -784,11 +784,13 @@ class TestDoHealthTransition:
             assert set(payload.keys()) == {
                 "operator_id",
                 "provider",
+                "environment",
                 "old_aggregate",
                 "new_aggregate",
                 "at",
             }
             assert payload["provider"] == "etoro"
+            assert payload["environment"] == "demo"
         finally:
             sender_conn.close()
             listen_conn.close()

@@ -158,7 +158,6 @@ class TestScanAllOperators:
         op_b = _seed_pair_committed(api_state="rejected", user_state="valid")
 
         pool = _open_test_pool()
-        thread: threading.Thread | None = None
         try:
             result = scan_all_operators(pool)
         finally:
@@ -193,7 +192,6 @@ class TestScanAllOperators:
             conn.commit()
 
         pool = _open_test_pool()
-        thread: threading.Thread | None = None
         try:
             result = scan_all_operators(pool)
         finally:
@@ -385,6 +383,52 @@ class TestListenerNotifyAndPoll:
                 time.sleep(0.05)
 
             assert cache.get(operator_id=op_id) == CredentialHealth.VALID
+        finally:
+            stop_event.set()
+            if thread is not None:
+                thread.join(timeout=5.0)
+            pool.close()
+
+    def test_malformed_payload_does_not_log_contents(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],  # noqa: F811
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Codex pre-push r1.4: malformed notify payloads must not be
+        logged verbatim. The handler should log only the exception
+        type, not the raw payload (which could carry secrets/large
+        content)."""
+        del ebull_test_conn
+        _seed_pair_committed(api_state="valid", user_state="valid")
+
+        cache = CredentialHealthCache()
+        stop_event = threading.Event()
+        pool = _open_test_pool()
+        thread: threading.Thread | None = None
+        try:
+            thread = threading.Thread(
+                target=listener_loop,
+                kwargs={"cache": cache, "pool": pool, "stop_event": stop_event},
+                daemon=True,
+            )
+            thread.start()
+
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and not cache.is_initialized():
+                time.sleep(0.05)
+            assert cache.is_initialized()
+
+            sentinel = "S3CR3T-NEVER-LOG-THIS-VALUE"
+            url = test_database_url()
+            with caplog.at_level("WARNING"):
+                with psycopg.connect(url, autocommit=True) as sender:
+                    with sender.cursor() as cur:
+                        cur.execute("SELECT pg_notify(%s, %s)", (NOTIFY_CHANNEL, sentinel))
+                # Give the listener a tick to receive + log.
+                time.sleep(0.5)
+
+            for record in caplog.records:
+                assert sentinel not in record.getMessage()
         finally:
             stop_event.set()
             if thread is not None:
