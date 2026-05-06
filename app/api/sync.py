@@ -388,9 +388,13 @@ def get_sync_layers_v2(
     system_summary. Designed as the sole feed for the new Admin UI
     (sub-project C). v1 /sync/layers is unchanged.
     """
-    states = compute_layer_states_from_db(conn)
-    names = list(states.keys())
+    # Resolve AUTH_EXPIRED suppression timestamp BEFORE state
+    # computation so the state machine itself observes the suppression
+    # — otherwise an old pre-recovery auth_expired could still push
+    # a layer into ACTION_NEEDED (Codex pre-push r3.2).
     suppress_before = _resolve_auth_expired_suppression(conn)
+    states = compute_layer_states_from_db(conn, suppress_auth_expired_before=suppress_before)
+    names = list(states.keys())
     streaks, categories = all_layer_histories(conn, names, suppress_auth_expired_before=suppress_before)
     error_excerpts = all_layer_error_excerpts(conn, names)
     last_updates = _layer_last_updated_map(conn, names)

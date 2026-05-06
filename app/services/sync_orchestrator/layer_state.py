@@ -101,6 +101,8 @@ MAX_STATE_ITERATIONS = 16
 
 def compute_layer_states_from_db(
     conn: psycopg.Connection[Any],
+    *,
+    suppress_auth_expired_before: datetime | None = None,
 ) -> dict[str, LayerState]:
     """Build a LayerState for every registered layer by reading
     sync_layer_progress + content predicates + layer_enabled + secrets.
@@ -108,6 +110,15 @@ def compute_layer_states_from_db(
     Fixed-point iteration propagates cascade state across DAG depth.
     Converges in at most MAX_STATE_ITERATIONS rounds; safety-capped so
     a future cycle in the registry cannot hang the planning query.
+
+    AUTH_EXPIRED suppression (#977 / #974/C):
+      ``suppress_auth_expired_before`` is plumbed through to
+      ``all_layer_histories`` so an old pre-recovery auth_expired
+      failure cannot push a layer into ACTION_NEEDED after the
+      operator has fixed their keys (Codex pre-push r3.2). Caller
+      resolves the timestamp from
+      ``credential_health.get_last_recovered_at``; passing None means
+      no suppression.
     """
     # Deferred imports to avoid circular imports at module load time.
     # layer_types is at the bottom of the import graph; registry imports
@@ -118,7 +129,11 @@ def compute_layer_states_from_db(
 
     names = list(LAYERS.keys())
     enabled = read_all_enabled(conn, names)
-    streaks, categories = all_layer_histories(conn, names)
+    streaks, categories = all_layer_histories(
+        conn,
+        names,
+        suppress_auth_expired_before=suppress_auth_expired_before,
+    )
     running_set = _running_layers(conn, names)
     latest_status = _latest_status_map(conn, names)
     latest_ages = _latest_age_seconds_map(conn, names)
