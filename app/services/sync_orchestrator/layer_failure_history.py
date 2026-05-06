@@ -34,15 +34,23 @@ Contract:
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import psycopg
 import psycopg.rows
 
+# Failure-category that the credential-health recovery suppression
+# applies to. Imported as a string here to avoid a circular import
+# back to ``layer_types``; the value matches FailureCategory.AUTH_EXPIRED.
+_AUTH_EXPIRED_CATEGORY = "auth_expired"
+
 
 def consecutive_failures(
     conn: psycopg.Connection[Any],
     layer_name: str,
+    *,
+    suppress_auth_expired_before: datetime | None = None,
 ) -> int:
     """Count how many of the most-recent progress rows were 'failed'.
 
@@ -50,6 +58,17 @@ def consecutive_failures(
     pending / running / complete / skipped / partial row breaks the
     streak. The count includes the most recent row if and only if it
     was a failure.
+
+    AUTH_EXPIRED suppression (#977 / #974/C):
+      When ``suppress_auth_expired_before`` is non-None, any failed row
+      with ``error_category='auth_expired'`` whose
+      ``COALESCE(started_at, finished_at) < suppress_auth_expired_before``
+      is filtered out as if it never existed. This implements the
+      "AUTH_EXPIRED rows from before the operator's last recovery
+      timestamp don't count toward the operator-visible streak"
+      contract. Caller resolves the timestamp via
+      ``app.services.credential_health.get_last_recovered_at``;
+      passing None means no suppression (Codex r2.4 missing-row case).
     """
     # Postgres sorts nulls first on DESC. `started_at` is nullable —
     # pending rows are inserted without it (executor.py:154), and
@@ -67,11 +86,21 @@ def consecutive_failures(
             """
             SELECT status
             FROM sync_layer_progress
-            WHERE layer_name = %s
+            WHERE layer_name = %(layer)s
+              AND NOT (
+                %(suppress_before)s::timestamptz IS NOT NULL
+                AND status = 'failed'
+                AND error_category = %(auth_cat)s
+                AND COALESCE(started_at, finished_at) < %(suppress_before)s::timestamptz
+              )
             ORDER BY COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC
             LIMIT 50
             """,
-            (layer_name,),
+            {
+                "layer": layer_name,
+                "suppress_before": suppress_auth_expired_before,
+                "auth_cat": _AUTH_EXPIRED_CATEGORY,
+            },
         )
         rows = cur.fetchall()
     streak = 0
@@ -86,6 +115,8 @@ def consecutive_failures(
 def last_error_category(
     conn: psycopg.Connection[Any],
     layer_name: str,
+    *,
+    suppress_auth_expired_before: datetime | None = None,
 ) -> str | None:
     """Return the most recent non-null error_category for the layer.
 
@@ -95,6 +126,14 @@ def last_error_category(
     category, we want to surface that. In practice the executor only
     writes `error_category` on non-success paths, so this is a
     defensive allowance rather than an observed case.
+
+    AUTH_EXPIRED suppression (Codex pre-push r3.3): when
+    ``suppress_auth_expired_before`` is non-None, rows with
+    ``error_category='auth_expired'`` whose
+    ``COALESCE(started_at, finished_at) < suppress_before`` are
+    excluded from this query so an old pre-recovery auth_expired
+    cannot surface as the "current" category in the admin Problems
+    panel after the operator has fixed their keys.
     """
     # COALESCE(started_at, finished_at) + sync_run_id tiebreak for the
     # same reason as `consecutive_failures` — see that function for the
@@ -104,11 +143,20 @@ def last_error_category(
             """
             SELECT error_category
             FROM sync_layer_progress
-            WHERE layer_name = %s AND error_category IS NOT NULL
+            WHERE layer_name = %(layer)s AND error_category IS NOT NULL
+              AND NOT (
+                %(suppress_before)s::timestamptz IS NOT NULL
+                AND error_category = %(auth_cat)s
+                AND COALESCE(started_at, finished_at) < %(suppress_before)s::timestamptz
+              )
             ORDER BY COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC
             LIMIT 1
             """,
-            (layer_name,),
+            {
+                "layer": layer_name,
+                "suppress_before": suppress_auth_expired_before,
+                "auth_cat": _AUTH_EXPIRED_CATEGORY,
+            },
         )
         row = cur.fetchone()
     if row is None:
@@ -120,6 +168,8 @@ def last_error_category(
 def all_layer_histories(
     conn: psycopg.Connection[Any],
     layer_names: list[str] | tuple[str, ...],
+    *,
+    suppress_auth_expired_before: datetime | None = None,
 ) -> tuple[dict[str, int], dict[str, str | None]]:
     """Batched equivalent of (consecutive_failures, last_error_category).
 
@@ -162,7 +212,24 @@ def all_layer_histories(
         # history).
         cur.execute(
             """
-            WITH ranked AS (
+            WITH filtered AS (
+                -- AUTH_EXPIRED suppression (#977 / #974/C): when
+                -- suppress_auth_expired_before is non-NULL, drop
+                -- failed rows with error_category='auth_expired'
+                -- older than that timestamp. Caller resolves the
+                -- timestamp via
+                -- credential_health.get_last_recovered_at.
+                SELECT *
+                FROM sync_layer_progress
+                WHERE layer_name = ANY(%(names)s)
+                  AND NOT (
+                    %(suppress_before)s::timestamptz IS NOT NULL
+                    AND status = 'failed'
+                    AND error_category = %(auth_cat)s
+                    AND COALESCE(started_at, finished_at) < %(suppress_before)s::timestamptz
+                  )
+            ),
+            ranked AS (
                 SELECT
                     layer_name,
                     status,
@@ -171,8 +238,7 @@ def all_layer_histories(
                         ORDER BY COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC
                     ) AS rn,
                     COUNT(*) OVER (PARTITION BY layer_name) AS total
-                FROM sync_layer_progress
-                WHERE layer_name = ANY(%s)
+                FROM filtered
             ),
             first_non_failed AS (
                 SELECT layer_name, MIN(rn) AS rn
@@ -181,14 +247,6 @@ def all_layer_histories(
                 GROUP BY layer_name
             ),
             totals AS (
-                -- MAX(total) is deterministic here because
-                -- COUNT(*) OVER (PARTITION BY layer_name) yields
-                -- the same value across every row within a partition.
-                -- GROUP BY ensures exactly one row per layer_name
-                -- even if a concurrent writer were somehow to let
-                -- the window see slightly different per-partition
-                -- counts — DISTINCT on a window-function column
-                -- would fan out in that (theoretical) case.
                 SELECT layer_name, MAX(total) AS total
                 FROM ranked
                 GROUP BY layer_name
@@ -199,13 +257,21 @@ def all_layer_histories(
             FROM totals t
             LEFT JOIN first_non_failed f USING (layer_name);
             """,
-            (names,),
+            {
+                "names": names,
+                "suppress_before": suppress_auth_expired_before,
+                "auth_cat": _AUTH_EXPIRED_CATEGORY,
+            },
         )
         for row in cur.fetchall():
             streaks[str(row["layer_name"])] = int(row["streak"])
 
     categories: dict[str, str | None] = {}
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # AUTH_EXPIRED suppression also applies to category lookup
+        # (Codex pre-push r3.3): an old pre-recovery auth_expired
+        # cannot surface as the "current" category once the operator
+        # has fixed their keys.
         cur.execute(
             """
             WITH ranked AS (
@@ -217,13 +283,23 @@ def all_layer_histories(
                         ORDER BY COALESCE(started_at, finished_at) DESC NULLS LAST, sync_run_id DESC
                     ) AS rn
                 FROM sync_layer_progress
-                WHERE error_category IS NOT NULL AND layer_name = ANY(%s)
+                WHERE error_category IS NOT NULL
+                  AND layer_name = ANY(%(names)s)
+                  AND NOT (
+                    %(suppress_before)s::timestamptz IS NOT NULL
+                    AND error_category = %(auth_cat)s
+                    AND COALESCE(started_at, finished_at) < %(suppress_before)s::timestamptz
+                  )
             )
             SELECT layer_name, error_category
             FROM ranked
             WHERE rn = 1;
             """,
-            (names,),
+            {
+                "names": names,
+                "suppress_before": suppress_auth_expired_before,
+                "auth_cat": _AUTH_EXPIRED_CATEGORY,
+            },
         )
         for row in cur.fetchall():
             # WHERE error_category IS NOT NULL in the CTE already

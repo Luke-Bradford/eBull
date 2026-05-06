@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from app.api.auth import require_session_or_service_token
 from app.config import settings
 from app.db import get_conn
+from app.services.credential_health import get_last_recovered_at
 from app.services.fundamentals_observability import (
     get_cik_timing_summary,
     get_seed_progress,
@@ -217,6 +218,38 @@ def post_sync(body: SyncRequest) -> Any:
     return {"request_id": request_id}
 
 
+def _resolve_auth_expired_suppression(conn: psycopg.Connection[object]) -> datetime | None:
+    """Look up the operator's last credential-recovery timestamp for
+    the AUTH_EXPIRED suppression query (#977 / #974/C).
+
+    Returns None when:
+      * No operator (single-operator v1 not yet bootstrapped).
+      * The operator has never moved out of REJECTED.
+      * The transitions row exists but ``last_recovered_at IS NULL``.
+
+    None means "no filter applied" — every AUTH_EXPIRED row stays
+    visible. Codex r2.4 missing-row + NULL-row contract.
+    """
+    from app.services.operators import (
+        AmbiguousOperatorError,
+        NoOperatorError,
+        sole_operator_id,
+    )
+
+    # Two narrow except clauses for readability. Both branches collapse
+    # to the same return — splitting them keeps each handler trivially
+    # one-purpose and avoids the `except (A, B):` form which has
+    # historically been a source of paren-less-tuple confusion on this
+    # codebase.
+    try:
+        op_id = sole_operator_id(conn)
+    except NoOperatorError:
+        return None
+    except AmbiguousOperatorError:
+        return None
+    return get_last_recovered_at(conn, operator_id=op_id)
+
+
 @router.get("/status")
 def get_sync_status(
     conn: psycopg.Connection[object] = Depends(get_conn),
@@ -280,7 +313,12 @@ def get_sync_layers(
     # Was O(N) round-trips; now O(1). The layer name filter keeps both
     # queries on an index seek regardless of how large the history
     # table grows.
-    failure_streaks, persisted_errors = all_layer_histories(conn, list(LAYERS.keys()))
+    suppress_before = _resolve_auth_expired_suppression(conn)
+    failure_streaks, persisted_errors = all_layer_histories(
+        conn,
+        list(LAYERS.keys()),
+        suppress_auth_expired_before=suppress_before,
+    )
 
     # _LAYER_TO_JOB is built and asserted-disjoint at module import.
     out: list[dict[str, Any]] = []
@@ -357,9 +395,14 @@ def get_sync_layers_v2(
     system_summary. Designed as the sole feed for the new Admin UI
     (sub-project C). v1 /sync/layers is unchanged.
     """
-    states = compute_layer_states_from_db(conn)
+    # Resolve AUTH_EXPIRED suppression timestamp BEFORE state
+    # computation so the state machine itself observes the suppression
+    # — otherwise an old pre-recovery auth_expired could still push
+    # a layer into ACTION_NEEDED (Codex pre-push r3.2).
+    suppress_before = _resolve_auth_expired_suppression(conn)
+    states = compute_layer_states_from_db(conn, suppress_auth_expired_before=suppress_before)
     names = list(states.keys())
-    streaks, categories = all_layer_histories(conn, names)
+    streaks, categories = all_layer_histories(conn, names, suppress_auth_expired_before=suppress_before)
     error_excerpts = all_layer_error_excerpts(conn, names)
     last_updates = _layer_last_updated_map(conn, names)
 
