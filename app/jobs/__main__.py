@@ -52,6 +52,9 @@ import psycopg
 from app.config import settings
 from app.db.pool import open_pool
 from app.jobs.boot_sweep import run_boot_freshness_sweep
+from app.jobs.credential_health_listener import (
+    listener_loop as credential_health_listener_loop,
+)
 from app.jobs.heartbeat import HeartbeatWriter, heartbeat_loop
 from app.jobs.listener import ListenerState, listener_loop
 from app.jobs.locks import JOBS_PROCESS_LOCK_KEY
@@ -59,6 +62,7 @@ from app.jobs.runtime import JobRuntime
 from app.jobs.supervisor import supervise
 from app.security import master_key
 from app.security.secrets_crypto import set_active_key as set_broker_encryption_key
+from app.services.credential_health_cache import CredentialHealthCache
 from app.services.sync_orchestrator.dispatcher import (
     claim_oldest_pending,
     reset_stale_in_flight,
@@ -232,6 +236,12 @@ def serve(stop_event: threading.Event | None = None) -> int:
     )
     heartbeat_threads: list[threading.Thread] = []
 
+    # Pre-declare the credential-health listener handles so the
+    # finally: clean-up block can reference them even if construction
+    # raises during startup.
+    credential_health_stop: threading.Event | None = None
+    credential_health_thread: threading.Thread | None = None
+
     try:
         # Step 4 — reaper.
         try:
@@ -274,6 +284,25 @@ def serve(stop_event: threading.Event | None = None) -> int:
 
         # Step 10 — boot freshness sweep.
         run_boot_freshness_sweep()
+
+        # Credential-health listener (#976 / #974/B). Process-local
+        # cache populated by initial full-scan + LISTEN/NOTIFY +
+        # 5s poll fallback. The orchestrator pre-flight gate (#977)
+        # reads this cache to skip credential-using layers when
+        # operator health != VALID.
+        credential_health_cache = CredentialHealthCache()
+        credential_health_stop = threading.Event()
+        credential_health_thread = threading.Thread(
+            target=credential_health_listener_loop,
+            kwargs={
+                "cache": credential_health_cache,
+                "pool": pool,
+                "stop_event": credential_health_stop,
+            },
+            name="jobs-credential-health-listener",
+            daemon=True,
+        )
+        credential_health_thread.start()
 
         # Step 12 — heartbeat threads (one per supervised subsystem).
         for subsystem in ("scheduler", "manual_listener", "queue_drainer", "main"):
@@ -322,6 +351,13 @@ def serve(stop_event: threading.Event | None = None) -> int:
     finally:
         # Reverse-order shutdown.
         listener_stop.set()
+        if credential_health_stop is not None:
+            try:
+                credential_health_stop.set()
+                if credential_health_thread is not None:
+                    credential_health_thread.join(timeout=5.0)
+            except Exception:
+                logger.exception("jobs entrypoint: credential_health listener stop raised")
         try:
             runtime.shutdown()
         except Exception:
