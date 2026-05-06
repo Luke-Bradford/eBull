@@ -161,6 +161,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "ownership_funds_observations",
     "n_port_ingest_log",
     "sec_fund_series",
+    # #963 — N-PORT RIC trust-CIK directory.
+    "sec_nport_filer_directory",
     # #893 — dev-DB writers migrated onto worker test DB; tables they
     # touched now need per-test cleanup.
     "job_runtime_heartbeat",
