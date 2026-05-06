@@ -226,6 +226,27 @@ def record_manifest_entry(
             },
         )
 
+    # #956: every manifest discovery write also seeds / updates the
+    # scheduler row for its (subject_type, subject_id, source) triple.
+    # Pre-#956 only the first-install drain (#937 / PR #957) called
+    # ``seed_scheduler_from_manifest``; Atom fast-lane / daily-index
+    # reconcile / per-CIK poll / targeted rebuild left new triples
+    # scheduler-invisible until the next full bulk seed. Lazy import
+    # to avoid a circular dependency — ``data_freshness`` imports
+    # ``ManifestSource`` from this module.
+    from app.services.data_freshness import seed_freshness_for_manifest_row
+
+    seed_freshness_for_manifest_row(
+        conn,
+        subject_type=subject_type,
+        subject_id=subject_id.strip(),
+        source=source,
+        cik=cik.strip(),
+        instrument_id=instrument_id,
+        accession_number=accession_number,
+        filed_at=filed_at,
+    )
+
 
 def transition_status(
     conn: psycopg.Connection[Any],

@@ -24,6 +24,7 @@ from app.services.data_freshness import (
     get_freshness_row,
     predict_next_at,
     record_poll_outcome,
+    seed_freshness_for_manifest_row,
     seed_scheduler_from_manifest,
     subjects_due_for_poll,
     subjects_due_for_recheck,
@@ -478,3 +479,233 @@ class TestIterators:
 
         recheck_rows = list(subjects_due_for_recheck(ebull_test_conn, source="sec_form4", limit=10))
         assert recheck_rows == []
+
+
+class TestSeedFreshnessForManifestRow:
+    """#956: single-row seed wired into ``record_manifest_entry``."""
+
+    def test_seeds_new_subject(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
+        seed_freshness_for_manifest_row(
+            ebull_test_conn,
+            subject_type="issuer",
+            subject_id="1",
+            source="sec_form4",
+            cik="0000000001",
+            instrument_id=1,
+            accession_number="ACC-1",
+            filed_at=datetime(2026, 2, 1, tzinfo=UTC),
+        )
+        ebull_test_conn.commit()
+
+        row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1", source="sec_form4")
+        assert row is not None
+        assert row.last_known_filing_id == "ACC-1"
+        assert row.last_known_filed_at == datetime(2026, 2, 1, tzinfo=UTC)
+        assert row.state == "current"
+        # Cadence = 30d for sec_form4
+        assert row.expected_next_at == datetime(2026, 3, 3, tzinfo=UTC)
+
+    def test_newer_row_advances_watermark(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
+        seed_freshness_for_manifest_row(
+            ebull_test_conn,
+            subject_type="issuer",
+            subject_id="1",
+            source="sec_form4",
+            cik="0000000001",
+            instrument_id=1,
+            accession_number="ACC-OLD",
+            filed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        seed_freshness_for_manifest_row(
+            ebull_test_conn,
+            subject_type="issuer",
+            subject_id="1",
+            source="sec_form4",
+            cik="0000000001",
+            instrument_id=1,
+            accession_number="ACC-NEW",
+            filed_at=datetime(2026, 2, 1, tzinfo=UTC),
+        )
+        ebull_test_conn.commit()
+
+        row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1", source="sec_form4")
+        assert row is not None
+        assert row.last_known_filing_id == "ACC-NEW"
+        assert row.last_known_filed_at == datetime(2026, 2, 1, tzinfo=UTC)
+
+    def test_older_row_does_not_clobber_watermark(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # Discovery writers (rebuild secondary-page walk, daily-index
+        # reconcile catching up) can call this with an OLDER accession
+        # than what's already tracked. The watermark must not regress.
+        _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
+        seed_freshness_for_manifest_row(
+            ebull_test_conn,
+            subject_type="issuer",
+            subject_id="1",
+            source="sec_form4",
+            cik="0000000001",
+            instrument_id=1,
+            accession_number="ACC-NEW",
+            filed_at=datetime(2026, 2, 1, tzinfo=UTC),
+        )
+        seed_freshness_for_manifest_row(
+            ebull_test_conn,
+            subject_type="issuer",
+            subject_id="1",
+            source="sec_form4",
+            cik="0000000001",
+            instrument_id=1,
+            accession_number="ACC-OLD",
+            filed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        ebull_test_conn.commit()
+
+        row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1", source="sec_form4")
+        assert row is not None
+        # Watermark stayed on the newer accession.
+        assert row.last_known_filing_id == "ACC-NEW"
+        assert row.last_known_filed_at == datetime(2026, 2, 1, tzinfo=UTC)
+
+    def test_re_discovery_does_not_clobber_poll_error_state(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # Codex pre-push: the inline UPSERT must NOT clobber legitimate
+        # poll-outcome states (``error`` / ``expected_filing_overdue``)
+        # on a duplicate / older re-discovery write. A noisy Atom
+        # replay of an already-known accession should leave the
+        # per-CIK poll's error state intact.
+        _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
+        seed_freshness_for_manifest_row(
+            ebull_test_conn,
+            subject_type="issuer",
+            subject_id="1",
+            source="sec_form4",
+            cik="0000000001",
+            instrument_id=1,
+            accession_number="ACC-1",
+            filed_at=datetime(2026, 2, 1, tzinfo=UTC),
+        )
+        # Simulate a poll error overwriting state to 'error'.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE data_freshness_index
+                SET state = 'error',
+                    state_reason = 'HTTP 503',
+                    next_recheck_at = %s
+                WHERE subject_type = 'issuer' AND subject_id = '1' AND source = 'sec_form4'
+                """,
+                (datetime(2026, 3, 1, tzinfo=UTC),),
+            )
+        ebull_test_conn.commit()
+
+        # Re-discovery via Atom replay (same accession or older).
+        seed_freshness_for_manifest_row(
+            ebull_test_conn,
+            subject_type="issuer",
+            subject_id="1",
+            source="sec_form4",
+            cik="0000000001",
+            instrument_id=1,
+            accession_number="ACC-1",
+            filed_at=datetime(2026, 2, 1, tzinfo=UTC),
+        )
+        ebull_test_conn.commit()
+
+        row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1", source="sec_form4")
+        assert row is not None
+        # State stayed 'error' — the manifest write did not overwrite
+        # the poll-outcome state.
+        assert row.state == "error"
+        assert row.next_recheck_at == datetime(2026, 3, 1, tzinfo=UTC)
+        # state_reason isn't on FreshnessRow; query directly.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT state_reason FROM data_freshness_index
+                WHERE subject_type = 'issuer' AND subject_id = '1' AND source = 'sec_form4'
+                """
+            )
+            (state_reason,) = cur.fetchone() or (None,)
+        assert state_reason == "HTTP 503"
+
+    def test_re_discovery_escalates_never_filed_to_current(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # The legitimate state change: ``never_filed`` → ``current``
+        # MUST happen when manifest evidence appears. This is the
+        # rescue path the bulk seed comment documents.
+        _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
+        # Seed a freshness row in 'never_filed' state (subject was
+        # tracked but no filings yet).
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO data_freshness_index (
+                    subject_type, subject_id, source, cik, instrument_id,
+                    state, expected_next_at
+                ) VALUES (
+                    'issuer', '1', 'sec_form4', '0000000001', 1,
+                    'never_filed', %s
+                )
+                """,
+                (datetime(2026, 1, 1, tzinfo=UTC),),
+            )
+        ebull_test_conn.commit()
+
+        # Manifest write rescues the row.
+        seed_freshness_for_manifest_row(
+            ebull_test_conn,
+            subject_type="issuer",
+            subject_id="1",
+            source="sec_form4",
+            cik="0000000001",
+            instrument_id=1,
+            accession_number="ACC-1",
+            filed_at=datetime(2026, 2, 1, tzinfo=UTC),
+        )
+        ebull_test_conn.commit()
+
+        row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1", source="sec_form4")
+        assert row is not None
+        assert row.state == "current"
+        assert row.last_known_filing_id == "ACC-1"
+
+    def test_record_manifest_entry_seeds_inline(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # The actual contract: every ``record_manifest_entry`` call
+        # leaves the freshness index queryable for that triple. No
+        # separate ``seed_scheduler_from_manifest`` invocation needed.
+        _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
+        record_manifest_entry(
+            ebull_test_conn,
+            "ACC-1",
+            cik="0000000001",
+            form="4",
+            source="sec_form4",
+            subject_type="issuer",
+            subject_id="1",
+            instrument_id=1,
+            filed_at=datetime(2026, 2, 1, tzinfo=UTC),
+        )
+        ebull_test_conn.commit()
+
+        row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1", source="sec_form4")
+        assert row is not None
+        assert row.last_known_filing_id == "ACC-1"
+        assert row.state == "current"
