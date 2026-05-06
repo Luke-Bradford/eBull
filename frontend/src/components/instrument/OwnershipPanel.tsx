@@ -481,7 +481,7 @@ function FundsMemoOverlay({ slice }: FundsMemoOverlayProps): JSX.Element {
       <table className="w-full">
         <thead className="text-[0.625rem] uppercase tracking-wide text-slate-500 dark:text-slate-400">
           <tr>
-            <th className="pb-1 text-left">Fund families surfaced</th>
+            <th className="pb-1 text-left">Fund series (N-PORT)</th>
             <th className="pb-1 text-right">Shares (sum)</th>
             <th className="pb-1 text-right">% of outstanding</th>
             <th className="pb-1 text-right">Series</th>
