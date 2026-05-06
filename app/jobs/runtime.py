@@ -89,6 +89,7 @@ from app.workers.scheduler import (
     JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL,
     JOB_SEC_INSIDER_TRANSACTIONS_INGEST,
     JOB_SEC_N_PORT_INGEST,
+    JOB_SEC_NPORT_FILER_DIRECTORY_SYNC,
     JOB_SEED_COST_MODELS,
     JOB_WEEKLY_REPORT,
     SCHEDULED_JOBS,
@@ -130,6 +131,7 @@ from app.workers.scheduler import (
     sec_insider_transactions_backfill,
     sec_insider_transactions_ingest,
     sec_n_port_ingest,
+    sec_nport_filer_directory_sync,
     seed_cost_models,
     weekly_report,
 )
@@ -194,6 +196,7 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_OWNERSHIP_OBSERVATIONS_BACKFILL: ownership_observations_backfill,
     JOB_SEC_13F_FILER_DIRECTORY_SYNC: sec_13f_filer_directory_sync,
     JOB_SEC_13F_QUARTERLY_SWEEP: sec_13f_quarterly_sweep,
+    JOB_SEC_NPORT_FILER_DIRECTORY_SYNC: sec_nport_filer_directory_sync,
     JOB_SEC_N_PORT_INGEST: sec_n_port_ingest,
 }
 

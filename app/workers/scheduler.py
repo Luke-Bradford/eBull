@@ -251,6 +251,7 @@ JOB_OWNERSHIP_OBSERVATIONS_SYNC = "ownership_observations_sync"
 JOB_OWNERSHIP_OBSERVATIONS_BACKFILL = "ownership_observations_backfill"
 JOB_SEC_13F_FILER_DIRECTORY_SYNC = "sec_13f_filer_directory_sync"
 JOB_SEC_13F_QUARTERLY_SWEEP = "sec_13f_quarterly_sweep"
+JOB_SEC_NPORT_FILER_DIRECTORY_SYNC = "sec_nport_filer_directory_sync"
 JOB_SEC_N_PORT_INGEST = "sec_n_port_ingest"
 JOB_CUSIP_UNIVERSE_BACKFILL = "cusip_universe_backfill"
 JOB_EXCHANGES_METADATA_REFRESH = "exchanges_metadata_refresh"
@@ -825,13 +826,36 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         catch_up_on_boot=False,
     ),
     ScheduledJob(
+        name=JOB_SEC_NPORT_FILER_DIRECTORY_SYNC,
+        description=(
+            "Discovery sweep — populate ``sec_nport_filer_directory`` "
+            "from SEC's quarterly form.idx (#963). N-PORT files under "
+            "RIC TRUST CIKs (Vanguard Index Funds, iShares Trust, etc.) "
+            "which are disjoint from the 13F-MANAGER CIKs in "
+            "``institutional_filers`` (#912). Walks the last 4 closed "
+            "quarters' form.idx, harvests every distinct NPORT-P / "
+            "NPORT-P/A filer CIK + canonical trust name, UPSERTs into "
+            "``sec_nport_filer_directory``. Idempotent — re-run on the "
+            "same quarter set produces zero new rows but refreshes "
+            "fund_trust_name + last_seen_filed_at on existing rows. "
+            "Cadence: weekly Sunday 04:20 UTC — staggered 5 min after "
+            "``sec_13f_filer_directory_sync`` so the two SEC bandwidth "
+            "spikes don't overlap. Does NOT ingest holdings — that's "
+            "``sec_n_port_ingest`` reading off this directory."
+        ),
+        cadence=Cadence.weekly(weekday=6, hour=4, minute=20),
+        # Same rationale as the 13F directory sync — directory churns
+        # slowly, ~4×50MB form.idx fetches per run, no operator
+        # benefit from firing on every dev restart.
+        catch_up_on_boot=False,
+    ),
+    ScheduledJob(
         name=JOB_SEC_N_PORT_INGEST,
         description=(
             "Monthly NPORT-P fund-holdings sweep (#917 — Phase 3 PR1). "
-            "Walks the fund-filer CIK universe (today: institutional_filers "
-            "rows where filer_type IN ('INV','INS','ETF') as the MVP set; a "
-            "dedicated fund-filer directory walk is a follow-up) and "
-            "ingests every pending NPORT-P / NPORT-P/A accession into "
+            "Walks ``sec_nport_filer_directory`` (#963 — the RIC trust "
+            "CIK universe; populated by ``sec_nport_filer_directory_sync``) "
+            "and ingests every pending NPORT-P / NPORT-P/A accession into "
             "ownership_funds_observations + ownership_funds_current. "
             "Equity-common-Long write-side guard filters debt / preferred / "
             "derivative / short positions; only pie-eligible holdings land. "
@@ -3763,6 +3787,39 @@ def sec_13f_filer_directory_sync() -> None:
         )
 
 
+def sec_nport_filer_directory_sync() -> None:
+    """Discovery sweep — populate ``sec_nport_filer_directory`` from
+    SEC's quarterly form.idx (#963).
+
+    Walks the last 4 closed quarters' ``form.idx``, harvests every
+    distinct NPORT-P / NPORT-P/A filer CIK + canonical trust name,
+    UPSERTs into ``sec_nport_filer_directory``. Sibling of
+    :func:`sec_13f_filer_directory_sync` (#912) but for the disjoint
+    N-PORT trust-CIK universe.
+
+    Does NOT ingest holdings — that's ``sec_n_port_ingest`` reading
+    off this directory.
+    """
+    from app.services.sec_nport_filer_directory import sync_nport_filer_directory
+
+    with _tracked_job(JOB_SEC_NPORT_FILER_DIRECTORY_SYNC) as tracker:
+        with psycopg.connect(settings.database_url) as conn:
+            result = sync_nport_filer_directory(conn)
+
+        tracker.row_count = result.filers_inserted
+        logger.info(
+            "sec_nport_filer_directory_sync: quarters_attempted=%d "
+            "quarters_failed=%d filers_seen=%d inserted=%d "
+            "refreshed=%d skipped_empty_name=%d",
+            result.quarters_attempted,
+            result.quarters_failed,
+            result.filers_seen,
+            result.filers_inserted,
+            result.filers_refreshed,
+            result.skipped_empty_name,
+        )
+
+
 def sec_n_port_ingest() -> None:
     """Monthly NPORT-P fund-holdings sweep (#917 — Phase 3 PR1).
 
@@ -3771,12 +3828,13 @@ def sec_n_port_ingest() -> None:
     + ``ownership_funds_current``. Per-filer crashes isolated; soft
     deadline budget; resumable via ``n_port_ingest_log`` tombstones.
 
-    MVP universe: ``institutional_filers`` rows where ``filer_type``
-    is one of ('INV', 'INS', 'ETF') — the N-CEN-derived buckets that
-    contain registered investment companies. Not every RIC is in this
-    list (a dedicated fund-filer directory walk for N-PORT is a
-    follow-up); coverage gradually expands as the operator manually
-    seeds rows or as the 13F directory walk pulls in dual-filers.
+    Universe (post-#963): ``sec_nport_filer_directory`` — the dedicated
+    RIC trust-CIK directory populated by
+    :func:`sec_nport_filer_directory_sync`. Pre-#963 this read from
+    ``institutional_filers`` (the 13F-manager CIK directory) which is
+    the WRONG entity for N-PORT — N-PORT is filed by trust CIKs, not
+    manager CIKs, leaving the standing job producing zero rows on dev
+    until #919 worked around with a hardcoded panel-targeted CIK list.
     """
     from app.providers.implementations.sec_edgar import SecFilingsProvider
     from app.services.n_port_ingest import ingest_all_fund_filers
@@ -3792,9 +3850,8 @@ def sec_n_port_ingest() -> None:
                 cur.execute(
                     """
                     SELECT cik
-                    FROM institutional_filers
-                    WHERE filer_type IN ('INV', 'INS', 'ETF')
-                    ORDER BY last_filing_at DESC NULLS LAST, cik
+                    FROM sec_nport_filer_directory
+                    ORDER BY last_seen_filed_at DESC NULLS LAST, cik
                     """
                 )
                 ciks = [str(row[0]).zfill(10) for row in cur.fetchall()]
