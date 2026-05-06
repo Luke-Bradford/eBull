@@ -401,6 +401,7 @@ def _do_health_transition(
             {
                 "operator_id": str(operator_id),
                 "provider": provider,
+                "environment": environment,
                 "old_aggregate": old_aggregate.value,
                 "new_aggregate": new_aggregate.value,
                 "at": datetime.now(UTC).isoformat(),
@@ -499,6 +500,7 @@ def notify_aggregate_if_changed(
             {
                 "operator_id": str(operator_id),
                 "provider": provider,
+                "environment": environment,
                 "old_aggregate": old_aggregate.value,
                 "new_aggregate": new_aggregate.value,
                 "at": datetime.now(UTC).isoformat(),

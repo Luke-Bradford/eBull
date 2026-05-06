@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -49,6 +50,7 @@ from app.config import settings
 from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
 from app.db.pool import open_pool
+from app.jobs.credential_health_listener import listener_loop as credential_health_listener_loop
 from app.security import master_key
 from app.security.secrets_crypto import set_active_key as set_broker_encryption_key
 from app.services.broker_credentials import (
@@ -56,6 +58,7 @@ from app.services.broker_credentials import (
     load_credential_for_provider_use,
 )
 from app.services.coverage import override_tier
+from app.services.credential_health_cache import CredentialHealthCache
 from app.services.etoro_websocket import EtoroWebSocketSubscriber
 from app.services.operator_setup import ensure_startup_token, operators_empty
 from app.services.operators import (
@@ -176,6 +179,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     quote_bus = QuoteBus()
     app.state.quote_bus = quote_bus
 
+    # Credential health cache + listener (#976 / #974/B). The cache
+    # is process-local and starts in pre-initialized state — every
+    # read returns MISSING until the listener completes its first
+    # full-table scan. Consumers (admin UI, future WS subscriber
+    # reload after #978) treat MISSING as "fail-safe; do not
+    # connect / run".
+    credential_health_cache = CredentialHealthCache()
+    app.state.credential_health_cache = credential_health_cache
+    credential_health_stop = threading.Event()
+    app.state.credential_health_stop = credential_health_stop
+    credential_health_thread = threading.Thread(
+        target=credential_health_listener_loop,
+        kwargs={
+            "cache": credential_health_cache,
+            "pool": pool,
+            "stop_event": credential_health_stop,
+        },
+        name="api-credential-health-listener",
+        daemon=True,
+    )
+    credential_health_thread.start()
+    app.state.credential_health_thread = credential_health_thread
+
     # eToro WebSocket live-price subscriber (#274 Slice 1+2+3). Starts
     # only when broker credentials are loadable — otherwise the
     # operator hasn't completed setup yet and there's nothing to
@@ -198,6 +224,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.warning("EtoroWebSocketSubscriber.stop exceeded 35s — proceeding with teardown")
         except Exception:
             logger.exception("EtoroWebSocketSubscriber.stop failed")
+
+    # Stop the credential-health listener before closing the pool so
+    # the inner LISTEN loop's connection close doesn't race a pool
+    # shutdown. Daemon thread auto-joins on process exit, but we wait
+    # briefly for clean teardown logs.
+    try:
+        credential_health_stop.set()
+        credential_health_thread.join(timeout=5.0)
+    except Exception:
+        logger.exception("credential-health listener stop raised")
 
     audit_pool.close()
     logger.info("Audit pool closed.")
