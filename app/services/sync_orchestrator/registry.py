@@ -69,6 +69,31 @@ class DataLayer:
     secret_refs: tuple[SecretRef, ...] = ()
     content_predicate: ContentPredicate | None = None
     plain_language_sla: str = ""
+    # Credential-health gate (#977 / #974/C). When True, the
+    # orchestrator pre-flight gate at executor.py PREREQ_SKIPs this
+    # layer when operator credential health != VALID. Layers whose
+    # refresh path calls eToro must set this to True; layers that
+    # only read DB-resident data leave it False.
+    requires_broker_credential: bool = False
+    # Layer-initialization gate (#977 / #974/C). Each named dep must
+    # have its data table content-initialized (per INIT_CHECKS) before
+    # this layer is eligible. Stricter than `dependencies` (per-tick).
+    # Used by portfolio_sync to wait until `instruments` is non-empty
+    # so writing positions doesn't FK-violate. Codex r2.5/r3.3.
+    requires_layer_initialized: tuple[str, ...] = ()
+
+
+# Content-initialization predicates per layer name. Each is a SQL
+# EXISTS query that returns a single boolean column. The orchestrator
+# pre-flight gate calls these to decide whether a dependent layer
+# tagged ``requires_layer_initialized=("dep_name",)`` is eligible.
+#
+# Map keys are layer names; the SQL must be plain `SELECT EXISTS(...)`
+# returning one row, one column. Tested by
+# tests/test_sync_orchestrator_credential_gate.py.
+INIT_CHECKS: dict[str, str] = {
+    "universe": "SELECT EXISTS (SELECT 1 FROM instruments WHERE is_tradable = true)",
+}
 
 
 MINUTE_LAYER_RETRY = RetryPolicy(max_attempts=5, backoff_seconds=(30, 60, 120, 300, 600))
@@ -82,6 +107,7 @@ LAYERS: dict[str, DataLayer] = {
         is_fresh=universe_is_fresh,
         refresh=refresh_universe,
         dependencies=(),
+        requires_broker_credential=True,
         plain_language_sla="Refreshed weekly — eToro instrument list.",
     ),
     "candles": DataLayer(
@@ -92,6 +118,7 @@ LAYERS: dict[str, DataLayer] = {
         is_fresh=candles_is_fresh,
         refresh=refresh_candles,
         dependencies=("universe",),
+        requires_broker_credential=True,
         content_predicate=candles_content_ok,
         plain_language_sla="Refreshed every trading day after market close.",
     ),
@@ -135,6 +162,13 @@ LAYERS: dict[str, DataLayer] = {
         refresh=refresh_portfolio_sync,
         dependencies=(),
         is_blocking=False,
+        requires_broker_credential=True,
+        # Wait for `instruments` to have at least one tradable row
+        # before writing to `positions`. Without this gate
+        # portfolio_sync FK-violates on a fresh install when eToro
+        # returns positions for instruments universe hasn't ingested
+        # yet (Codex r1.7 / r2.5).
+        requires_layer_initialized=("universe",),
         retry_policy=MINUTE_LAYER_RETRY,
         plain_language_sla="Synced every 5 minutes against eToro.",
     ),
@@ -147,6 +181,8 @@ LAYERS: dict[str, DataLayer] = {
         refresh=refresh_fx_rates,
         dependencies=(),
         is_blocking=False,
+        # FX rates come from Frankfurter (free public API), NOT eToro.
+        # Don't gate on broker credential health.
         retry_policy=MINUTE_LAYER_RETRY,
         plain_language_sla="Refreshed every 5 minutes for live valuation.",
     ),

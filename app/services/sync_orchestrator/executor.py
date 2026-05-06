@@ -30,11 +30,21 @@ from collections.abc import Mapping
 from typing import Any
 
 import psycopg
+import psycopg.sql
 
 from app.config import settings
+from app.services.credential_health import (
+    CredentialHealth,
+    get_operator_credential_health,
+)
+from app.services.operators import (
+    AmbiguousOperatorError,
+    NoOperatorError,
+    sole_operator_id,
+)
 from app.services.sync_orchestrator.exception_classifier import classify_exception
 from app.services.sync_orchestrator.planner import build_execution_plan
-from app.services.sync_orchestrator.registry import JOB_TO_LAYERS
+from app.services.sync_orchestrator.registry import INIT_CHECKS, JOB_TO_LAYERS
 from app.services.sync_orchestrator.types import (
     PREREQ_SKIP_MARKER,
     ExecutionPlan,
@@ -224,6 +234,31 @@ def _run_layers_loop(
     for layer_plan in plan.layers_to_refresh:
         upstream_outcomes = _build_upstream_outcomes(layer_plan, outcomes)
 
+        # Pre-flight gate #1 — credential health (#977 / #974/C).
+        # Layers tagged ``requires_broker_credential=True`` PREREQ_SKIP
+        # when the operator's aggregate health is anything other than
+        # VALID. Stops the cascade where every credential-using layer
+        # 401s on each tick before the operator has even fixed their
+        # keys.
+        cred_skip = _credential_health_blocks(layer_plan)
+        if cred_skip is not None:
+            for emit in layer_plan.emits:
+                _record_layer_skipped(sync_run_id, emit, cred_skip)
+                outcomes[emit] = LayerOutcome.PREREQ_SKIP
+            continue
+
+        # Pre-flight gate #2 — layer initialization (#977 / #974/C).
+        # Layers tagged ``requires_layer_initialized=("dep",)`` skip
+        # until ``INIT_CHECKS["dep"]`` returns true. Used by
+        # portfolio_sync to wait for ``instruments`` to be non-empty
+        # before writing positions (FK constraint).
+        init_skip = _layer_initialization_blocks(layer_plan)
+        if init_skip is not None:
+            for emit in layer_plan.emits:
+                _record_layer_skipped(sync_run_id, emit, init_skip)
+                outcomes[emit] = LayerOutcome.PREREQ_SKIP
+            continue
+
         blocking_failure = _blocking_dependency_failed(layer_plan, upstream_outcomes)
         if blocking_failure is not None:
             for emit in layer_plan.emits:
@@ -281,6 +316,93 @@ def _run_layers_loop(
 # ---------------------------------------------------------------------------
 # Dependency gate + upstream resolution
 # ---------------------------------------------------------------------------
+
+
+def _credential_health_blocks(layer: LayerPlan) -> str | None:
+    """Return skip_reason if any emit needs broker creds and aggregate != VALID.
+
+    Reads operator credential health on a fresh autocommit connection
+    per gate check. Per-tick DB hit is acceptable because the
+    orchestrator runs as discrete sync ticks, not per-request. The
+    cache at ``app.services.credential_health_cache`` exists for the
+    request-path consumers (admin UI, WS subscriber) where DB latency
+    matters; the orchestrator goes direct.
+
+    Returns None when:
+      * No emit requires broker credentials.
+      * Aggregate is VALID.
+      * DB lookup itself failed (don't block on infra error — let
+        the layer's adapter surface the real failure if it tries to
+        run).
+    """
+    from app.services.sync_orchestrator.registry import LAYERS
+
+    requires_creds = any(LAYERS[emit].requires_broker_credential for emit in layer.emits)
+    if not requires_creds:
+        return None
+
+    try:
+        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+            try:
+                op_id = sole_operator_id(conn)
+            except (NoOperatorError, AmbiguousOperatorError) as exc:
+                return f"operator not configured ({type(exc).__name__})"
+
+            health = get_operator_credential_health(conn, operator_id=op_id, environment="demo")
+    except Exception:
+        logger.exception(
+            "credential_health gate: DB lookup failed for layer %s; not blocking",
+            layer.name,
+        )
+        return None
+
+    if health == CredentialHealth.VALID:
+        return None
+    return f"broker credentials not validated (operator health={health.value})"
+
+
+def _layer_initialization_blocks(layer: LayerPlan) -> str | None:
+    """Return skip_reason if any required init-dep is not content-initialized.
+
+    INIT_CHECKS is a registry mapping layer name -> SQL EXISTS query.
+    Each requires_layer_initialized entry must have an INIT_CHECKS
+    mapping or the gate fails closed (logged + skipped).
+    """
+    from app.services.sync_orchestrator.registry import LAYERS
+
+    init_deps: set[str] = set()
+    for emit in layer.emits:
+        init_deps.update(LAYERS[emit].requires_layer_initialized)
+    if not init_deps:
+        return None
+
+    try:
+        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                for dep_name in sorted(init_deps):  # deterministic order
+                    init_sql = INIT_CHECKS.get(dep_name)
+                    if init_sql is None:
+                        # A layer registered as requires_layer_initialized
+                        # for a name with no INIT_CHECKS entry is a
+                        # registry config error. Fail closed.
+                        logger.error(
+                            "layer %s requires_layer_initialized=%r but no INIT_CHECKS entry exists",
+                            layer.name,
+                            dep_name,
+                        )
+                        return f"init-check missing for dep {dep_name}"
+                    cur.execute(psycopg.sql.SQL(init_sql))  # type: ignore[arg-type]
+                    row = cur.fetchone()
+                    if row is None or not row[0]:
+                        return f"layer {dep_name} not yet initialized"
+    except Exception:
+        logger.exception(
+            "init-check gate: DB lookup failed for layer %s; not blocking",
+            layer.name,
+        )
+        return None
+
+    return None
 
 
 def _blocking_dependency_failed(
