@@ -169,3 +169,125 @@ class TestDiscoveryPass:
         new_row = get_manifest_row(ebull_test_conn, "0000320193-26-000099")
         assert new_row is not None
         assert new_row.source == "sec_def14a"
+
+    def test_discovery_walks_filings_files_secondary_pages(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # #936: rebuild claims full-history discovery; ``check_freshness``
+        # reads only ``recent[]``. An accession aged out into a
+        # secondary ``filings.files[]`` page must still be recovered by
+        # the rebuild path. ``recent`` here carries no in-scope
+        # accessions; the secondary page carries the one we expect to
+        # discover.
+        _seed_aapl_with_state(ebull_test_conn)
+
+        recent_payload = {
+            "cik": "320193",
+            "filings": {
+                "recent": {
+                    "accessionNumber": ["0000320193-26-000001"],
+                    "filingDate": ["2026-02-14"],
+                    "form": ["DEF 14A"],
+                    "acceptanceDateTime": ["2026-02-14T08:00:00.000Z"],
+                    "primaryDocument": ["proxy.htm"],
+                },
+                "files": [{"name": "CIK0000320193-submissions-001.json"}],
+            },
+        }
+        secondary_payload = {
+            "accessionNumber": ["0000320193-22-000050"],
+            "filingDate": ["2022-01-15"],
+            "form": ["DEF 14A"],
+            "acceptanceDateTime": ["2022-01-15T08:00:00.000Z"],
+            "primaryDocument": ["proxy-2022.htm"],
+        }
+        recent_body = json.dumps(recent_payload).encode("utf-8")
+        secondary_body = json.dumps(secondary_payload).encode("utf-8")
+
+        seen_urls: list[str] = []
+
+        def _fake_get_routed(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+            seen_urls.append(url)
+            if url.endswith("CIK0000320193.json"):
+                return 200, recent_body
+            if "submissions-001.json" in url:
+                return 200, secondary_body
+            return 404, b""
+
+        stats = run_sec_rebuild(
+            ebull_test_conn,
+            RebuildScope(instrument_id=1701),
+            http_get=_fake_get_routed,
+            discover=True,
+        )
+        ebull_test_conn.commit()
+
+        # Aged-out accession from secondary page is now manifested.
+        secondary_row = get_manifest_row(ebull_test_conn, "0000320193-22-000050")
+        assert secondary_row is not None
+        assert secondary_row.source == "sec_def14a"
+        assert stats.discovery_new_manifest_rows >= 1
+
+        # Confirm the secondary URL was actually fetched (would fail
+        # silently without the pagination walk).
+        assert any("submissions-001.json" in u for u in seen_urls), f"rebuild did not fetch secondary page: {seen_urls}"
+
+    def test_discovery_isolates_secondary_page_failures(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # Codex pre-push: transport error or malformed secondary page
+        # must NOT abort the rebuild — the rest of the scope still
+        # drains. Two pages: page 1 raises on fetch, page 2 returns a
+        # valid body.
+        _seed_aapl_with_state(ebull_test_conn)
+
+        recent_payload = {
+            "cik": "320193",
+            "filings": {
+                "recent": {
+                    "accessionNumber": ["0000320193-26-000001"],
+                    "filingDate": ["2026-02-14"],
+                    "form": ["DEF 14A"],
+                    "acceptanceDateTime": ["2026-02-14T08:00:00.000Z"],
+                    "primaryDocument": ["proxy.htm"],
+                },
+                "files": [
+                    {"name": "CIK0000320193-submissions-001.json"},
+                    {"name": "CIK0000320193-submissions-002.json"},
+                ],
+            },
+        }
+        page2_payload = {
+            "accessionNumber": ["0000320193-21-000077"],
+            "filingDate": ["2021-06-01"],
+            "form": ["DEF 14A"],
+            "acceptanceDateTime": ["2021-06-01T08:00:00.000Z"],
+            "primaryDocument": ["proxy-2021.htm"],
+        }
+        recent_body = json.dumps(recent_payload).encode("utf-8")
+        page2_body = json.dumps(page2_payload).encode("utf-8")
+
+        def _fake_get_with_failure(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+            if url.endswith("CIK0000320193.json"):
+                return 200, recent_body
+            if "submissions-001.json" in url:
+                raise RuntimeError("simulated transport failure on page 1")
+            if "submissions-002.json" in url:
+                return 200, page2_body
+            return 404, b""
+
+        # Should not raise — the failed page is isolated; the other
+        # page still discovers its accession.
+        stats = run_sec_rebuild(
+            ebull_test_conn,
+            RebuildScope(instrument_id=1701),
+            http_get=_fake_get_with_failure,
+            discover=True,
+        )
+        ebull_test_conn.commit()
+
+        assert stats.discovery_new_manifest_rows >= 1
+        page2_row = get_manifest_row(ebull_test_conn, "0000320193-21-000077")
+        assert page2_row is not None
