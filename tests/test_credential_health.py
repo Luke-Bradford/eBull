@@ -433,9 +433,45 @@ class TestDoHealthTransition:
         # Row state is unchanged.
         state = _row_state(ebull_test_conn, api_id)
         assert state["health_state"] == "rejected"
-        # last_health_check_at is still touched (we observed the call), but
-        # last_health_error was cleared by the success outcome write.
+        # last_health_check_at IS touched (we observed the call).
         assert state["last_health_check_at"] is not None
+
+    def test_sticky_skip_preserves_last_health_error(
+        self,
+        ebull_test_conn: psycopg.Connection[Any],  # noqa: F811
+    ) -> None:
+        """PREVENTION (review #981): incidental success on a REJECTED
+        row must NOT wipe last_health_error.
+
+        Pre-fix the helper unconditionally rewrote last_health_error
+        on every call; this test pins the new contract that the
+        column is only touched when an actual transition happens.
+        """
+        op_id = _seed_pair(ebull_test_conn, api_state="rejected", user_state="valid")
+        api_id = _credential_id(ebull_test_conn, op_id, "api_key")
+
+        # Seed a non-NULL error message that the operator should keep
+        # seeing in the admin UI.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE broker_credentials SET last_health_error = %s WHERE id = %s",
+                ("HTTP 401 Unauthorized — original rejection message", api_id),
+            )
+        ebull_test_conn.commit()
+
+        # Incidental success that should be sticky-skipped.
+        with ebull_test_conn.transaction():
+            _do_health_transition(
+                ebull_test_conn,
+                credential_id=api_id,
+                new_state="valid",
+                source="incidental",
+                error_detail=None,
+            )
+
+        state = _row_state(ebull_test_conn, api_id)
+        assert state["health_state"] == "rejected"
+        assert state["last_health_error"] == "HTTP 401 Unauthorized — original rejection message"
 
     def test_rejected_cleared_by_probe_success(
         self,

@@ -73,7 +73,8 @@ CREATE INDEX idx_broker_credentials_operator_health
     WHERE revoked_at IS NULL;
 
 CREATE TABLE operator_credential_health_transitions (
-    operator_id        UUID NOT NULL,
+    operator_id        UUID NOT NULL
+        REFERENCES operators(operator_id) ON DELETE CASCADE,
     last_recovered_at  TIMESTAMPTZ,
     PRIMARY KEY (operator_id)
 );

@@ -320,20 +320,26 @@ def _do_health_transition(
 
         # Always reflect that we checked. last_health_check_at gives the
         # admin UI "last checked Nm ago" without depending on a state
-        # transition. last_health_error always reflects the most recent
-        # failure detail (or NULL on success).
+        # transition. last_health_error is intentionally NOT touched
+        # here — clearing it on a sticky-skip would silently wipe an
+        # operator-visible error string for a row whose health didn't
+        # actually change (review feedback PR #981 round 1 WARNING).
+        # The error column is rewritten below only when we commit a
+        # real state transition.
         cur.execute(
             """
             UPDATE broker_credentials
-               SET last_health_check_at = NOW(),
-                   last_health_error = %(err)s
+               SET last_health_check_at = NOW()
              WHERE id = %(id)s
             """,
-            {"id": credential_id, "err": error_detail},
+            {"id": credential_id},
         )
 
         if not will_change_health:
             # No transition. last_health_check_at was bumped; no NOTIFY.
+            # last_health_error preserved (may still describe the
+            # rejection that we couldn't clear via this incidental
+            # success).
             return
 
         # Snapshot the operator aggregate BEFORE the row update.
@@ -351,10 +357,11 @@ def _do_health_transition(
             """
             UPDATE broker_credentials
                SET health_state = %(new)s,
-                   health_state_updated_at = NOW()
+                   health_state_updated_at = NOW(),
+                   last_health_error = %(err)s
              WHERE id = %(id)s
             """,
-            {"id": credential_id, "new": new_state},
+            {"id": credential_id, "new": new_state, "err": error_detail},
         )
 
         # Recompute aggregate after the row update.
