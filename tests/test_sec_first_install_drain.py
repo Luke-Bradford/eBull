@@ -109,6 +109,38 @@ class TestDrain:
                 use_bulk_zip=True,
             )
 
+    def test_drain_seeds_data_freshness_index(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # #937: drain MUST leave both manifest AND scheduler queryable
+        # so the per-CIK poll (#870) finds work post-drain. Pre-fix
+        # the scheduler stayed empty for the drained scope.
+        _seed_aapl(ebull_test_conn)
+        stats = run_first_install_drain(
+            ebull_test_conn,
+            http_get=_fake_get(_AAPL_RECENT),
+            follow_pagination=False,
+        )
+        ebull_test_conn.commit()
+
+        assert stats.manifest_rows_upserted == 2
+        # AAPL recent has two distinct sources: sec_8k + sec_def14a.
+        # Each (issuer, instrument_id, source) triple gets one
+        # data_freshness_index row.
+        assert stats.scheduler_rows_seeded >= 2
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT source FROM data_freshness_index
+                WHERE subject_type = 'issuer' AND subject_id = '1701'
+                ORDER BY source
+                """
+            )
+            sources = [row[0] for row in cur.fetchall()]
+        assert sources == ["sec_8k", "sec_def14a"]
+
     def test_max_subjects_caps(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

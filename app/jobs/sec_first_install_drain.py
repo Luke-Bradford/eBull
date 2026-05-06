@@ -40,6 +40,7 @@ from app.providers.implementations.sec_submissions import (
     check_freshness,
     parse_submissions_page,
 )
+from app.services.data_freshness import seed_scheduler_from_manifest
 from app.services.sec_manifest import record_manifest_entry
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,11 @@ class DrainStats:
     secondary_pages_fetched: int
     manifest_rows_upserted: int
     errors: int
+    # Count of (subject_type, subject_id, source) triples written to
+    # ``data_freshness_index`` after the drain. Without this seeding
+    # step (#937), the steady-state per-CIK poll would silently no-op
+    # because the scheduler had no rows to poll.
+    scheduler_rows_seeded: int = 0
 
 
 def _iter_in_universe_subjects(
@@ -185,13 +191,30 @@ def run_first_install_drain(
                 subject=subject,
             )
 
+    # #937: seed the scheduler from manifest after the drain commits
+    # rows. Without this, the per-CIK poll (#870) silently no-ops
+    # post-drain because data_freshness_index is empty for the drained
+    # scope. ``seed_scheduler_from_manifest`` is idempotent + UPSERTs
+    # by (subject_type, subject_id, source) so re-runs are safe.
+    #
+    # Scope trade-off: ``seed_scheduler_from_manifest`` is full-table —
+    # ``SELECT DISTINCT ON ... FROM sec_filing_manifest``. With
+    # ``max_subjects=N`` (sample run) it still scans every prior
+    # manifest row, not just this drain's. Acceptable here because the
+    # drain runs rarely (first-install + explicit operator re-drain);
+    # the full-scan + ON CONFLICT UPSERT is bounded at ~12k subjects ×
+    # ~10 forms ≈ 120k rows, well under any pathological threshold. A
+    # scoped variant is filed as a follow-up if the scale ever grows.
+    scheduler_rows_seeded = seed_scheduler_from_manifest(conn)
+
     logger.info(
-        "first-install drain: ciks=%d skipped=%d errors=%d secondary_pages=%d upserted=%d",
+        "first-install drain: ciks=%d skipped=%d errors=%d secondary_pages=%d upserted=%d scheduler_seeded=%d",
         ciks_processed,
         ciks_skipped,
         errors,
         secondary_pages_fetched,
         manifest_upserted,
+        scheduler_rows_seeded,
     )
     return DrainStats(
         ciks_processed=ciks_processed,
@@ -199,6 +222,7 @@ def run_first_install_drain(
         secondary_pages_fetched=secondary_pages_fetched,
         manifest_rows_upserted=manifest_upserted,
         errors=errors,
+        scheduler_rows_seeded=scheduler_rows_seeded,
     )
 
 
