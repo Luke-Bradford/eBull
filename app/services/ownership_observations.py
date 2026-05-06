@@ -818,12 +818,44 @@ def record_def14a_observation(
         )
 
 
+_ESOP_HOLDER_NAME_SQL_REGEX = (
+    r"\m(?:ESOP"
+    r"|employee[[:space:]]+stock[[:space:]]+ownership[[:space:]]+plan"
+    r"|401(?:[[:space:]]*\(?k\)?)?[[:space:]]+plan"
+    r"|employee[[:space:]]+savings[[:space:]]+plan"
+    r"|retirement[[:space:]]+savings[[:space:]]+plan"
+    r"|profit[-[:space:]]sharing[[:space:]]+plan"
+    r"|employee[[:space:]]+benefit[[:space:]]+plan"
+    r"|company[[:space:]]+stock[[:space:]]+fund"
+    r"|(?:savings|retirement|profit[-[:space:]]sharing)[[:space:]]+plan[[:space:]]+trust"
+    r")\M"
+)
+"""SQL-side mirror of ``_ESOP_NAME_PATTERNS`` in
+``app.providers.implementations.sec_def14a``. Used by
+:func:`refresh_def14a_current` to filter out legacy ESOP-shape
+observations that were ingested before the parser ESOP override
+landed (#843). Without this defence, pre-existing observations with
+``holder_role='principal'`` and an ESOP-pattern name would still
+surface in the def14a slice alongside the new dedicated ESOP slice
+— double-count. Codex pre-push review #843 round 3 caught this."""
+
+
 def refresh_def14a_current(
     conn: psycopg.Connection[Any],
     *,
     instrument_id: int,
 ) -> int:
-    """Latest proxy per (instrument, normalised holder name) wins."""
+    """Latest proxy per (instrument, normalised holder name) wins.
+
+    ESOP-shape rows are excluded from this slice — they live in
+    ``ownership_esop_current`` instead (#843). The exclusion uses
+    BOTH ``holder_role`` (catches new-format rows from the post-#843
+    parser) AND a name-pattern regex (catches legacy rows ingested
+    before the parser ESOP override landed). Without the regex
+    fallback, a re-wash / repair / backfill that re-reads
+    ``def14a_beneficial_holdings`` would re-introduce the same
+    double-count guarded against in
+    ``def14a_ingest._record_def14a_observations_for_filing``."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
@@ -854,6 +886,8 @@ def refresh_def14a_current(
             WHERE instrument_id = %s
               AND known_to IS NULL
               AND shares IS NOT NULL  -- prevent NULL re-parse displacing prior good value
+              AND holder_role IS DISTINCT FROM 'esop'
+              AND holder_name !~* %s
             ORDER BY
                 holder_name_key,
                 ownership_nature,
@@ -861,7 +895,7 @@ def refresh_def14a_current(
                 filed_at DESC,
                 source_document_id ASC
             """,
-            (instrument_id,),
+            (instrument_id, _ESOP_HOLDER_NAME_SQL_REGEX),
         )
         cur.execute(
             "SELECT COUNT(*) FROM ownership_def14a_current WHERE instrument_id = %s",
@@ -1061,6 +1095,160 @@ def refresh_funds_current(
         )
         cur.execute(
             "SELECT COUNT(*) FROM ownership_funds_current WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+def record_esop_observation(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    plan_name: str,
+    plan_trustee_name: str | None,
+    plan_trustee_cik: str | None,
+    source_document_id: str,
+    source_accession: str | None,
+    source_field: str | None,
+    source_url: str | None,
+    filed_at: datetime,
+    period_start: date | None,
+    period_end: date,
+    ingest_run_id: UUID,
+    shares: Decimal,
+    percent_of_class: Decimal | None,
+) -> None:
+    """Append one DEF-14A ESOP / employee-benefit-plan observation
+    (#843). Idempotent on
+    ``(instrument_id, plan_name, period_end, source_document_id)``.
+
+    Write-side guards (mirror ``record_fund_observation`` shape):
+
+    * ``shares`` must be positive — null/zero/negative are not
+      ownership facts; the schema CHECK is the backstop.
+    * ``plan_name`` must be non-empty after strip — the parser's
+      plan_name extractor returns the canonicalised plan name; an
+      empty value indicates a parser bug, not a legal-empty filing.
+
+    ``ownership_nature`` is fixed to ``'beneficial'`` and ``source``
+    to ``'def14a'`` per the schema CHECK constraints — no per-call
+    parameter so a buggy caller can't widen the CHECK by passing a
+    different value."""
+    if shares is None or shares <= 0:
+        raise ValueError(
+            f"record_esop_observation: shares={shares!r} must be a positive "
+            "Decimal — null/zero/negative are not ownership facts"
+        )
+    if not plan_name or not plan_name.strip():
+        raise ValueError("record_esop_observation: plan_name is required (non-empty)")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ownership_esop_observations (
+                instrument_id, plan_name, plan_trustee_name, plan_trustee_cik,
+                ownership_nature,
+                source, source_document_id, source_accession, source_field, source_url,
+                filed_at, period_start, period_end, ingest_run_id,
+                shares, percent_of_class
+            ) VALUES (
+                %(iid)s, %(plan)s, %(trustee)s, %(trustee_cik)s,
+                'beneficial',
+                'def14a', %(doc_id)s, %(accession)s, %(field)s, %(url)s,
+                %(filed_at)s, %(period_start)s, %(period_end)s, %(run_id)s,
+                %(shares)s, %(pct)s
+            )
+            ON CONFLICT (instrument_id, plan_name, period_end, source_document_id)
+            DO UPDATE SET
+                plan_trustee_name = EXCLUDED.plan_trustee_name,
+                plan_trustee_cik = EXCLUDED.plan_trustee_cik,
+                source_accession = EXCLUDED.source_accession,
+                source_field = EXCLUDED.source_field,
+                source_url = EXCLUDED.source_url,
+                filed_at = EXCLUDED.filed_at,
+                period_start = EXCLUDED.period_start,
+                shares = EXCLUDED.shares,
+                percent_of_class = EXCLUDED.percent_of_class,
+                ingest_run_id = EXCLUDED.ingest_run_id,
+                ingested_at = clock_timestamp()
+            """,
+            {
+                "iid": instrument_id,
+                "plan": plan_name.strip(),
+                "trustee": plan_trustee_name.strip() if plan_trustee_name else None,
+                "trustee_cik": plan_trustee_cik.strip() if plan_trustee_cik else None,
+                "doc_id": source_document_id,
+                "accession": source_accession,
+                "field": source_field,
+                "url": source_url,
+                "filed_at": filed_at,
+                "period_start": period_start,
+                "period_end": period_end,
+                "run_id": str(ingest_run_id),
+                "shares": shares,
+                "pct": percent_of_class,
+            },
+        )
+
+
+def refresh_esop_current(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+) -> int:
+    """Deterministically rebuild ``ownership_esop_current`` rows for
+    one instrument from its observations (#843).
+
+    Atomicity contract identical to ``refresh_funds_current``:
+    explicit ``conn.transaction()`` + per-instrument
+    ``pg_advisory_xact_lock`` so concurrent refreshes serialise.
+
+    Dedup picks one row per ``plan_name`` ordered by
+    ``filed_at DESC, period_end DESC, source_document_id ASC`` —
+    DEF 14A amendments (DEFA14A) carry the same period_end as the
+    original DEF 14A but are filed later, so ordering by
+    ``filed_at DESC`` first ensures the amendment wins."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT pg_advisory_xact_lock(
+                (hashtextextended('refresh_esop_current', 0) # %s::bigint)
+            )
+            """,
+            (instrument_id,),
+        )
+        cur.execute(
+            "DELETE FROM ownership_esop_current WHERE instrument_id = %s",
+            (instrument_id,),
+        )
+        cur.execute(
+            """
+            INSERT INTO ownership_esop_current (
+                instrument_id, plan_name, plan_trustee_name, plan_trustee_cik,
+                ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, percent_of_class
+            )
+            SELECT DISTINCT ON (plan_name)
+                instrument_id, plan_name, plan_trustee_name, plan_trustee_cik,
+                ownership_nature,
+                source, source_document_id, source_accession, source_url,
+                filed_at, period_start, period_end,
+                shares, percent_of_class
+            FROM ownership_esop_observations
+            WHERE instrument_id = %s
+              AND known_to IS NULL
+            ORDER BY
+                plan_name,
+                filed_at DESC,
+                period_end DESC,
+                source_document_id ASC
+            """,
+            (instrument_id,),
+        )
+        cur.execute(
+            "SELECT COUNT(*) FROM ownership_esop_current WHERE instrument_id = %s",
             (instrument_id,),
         )
         row = cur.fetchone()

@@ -44,13 +44,16 @@ import psycopg.rows
 from app.providers.implementations.sec_def14a import (
     Def14ABeneficialHolder,
     Def14ABeneficialOwnershipTable,
+    extract_plan_name_and_trustee,
     parse_beneficial_ownership_table,
 )
 from app.services import raw_filings
 from app.services.fundamentals import finish_ingestion_run, start_ingestion_run
 from app.services.ownership_observations import (
     record_def14a_observation,
+    record_esop_observation,
     refresh_def14a_current,
+    refresh_esop_current,
 )
 
 _PARSER_VERSION_DEF14A = "def14a-v1"
@@ -469,6 +472,20 @@ def _ingest_single_accession(
             holders=parsed.rows,
         )
         refresh_def14a_current(conn, instrument_id=ref.instrument_id)
+        # ESOP write-through (#843). Mirrors the def14a write-through
+        # above but lands rows in ``ownership_esop_observations`` for
+        # the dedicated funds-slice overlay path (#961). Same accession
+        # / as_of semantics so the two slices reconcile against one
+        # provenance.
+        esop_rows_written = _record_esop_observations_for_filing(
+            conn,
+            instrument_id=ref.instrument_id,
+            accession_number=ref.accession_number,
+            as_of_date=parsed.as_of_date,
+            holders=parsed.rows,
+        )
+        if esop_rows_written > 0:
+            refresh_esop_current(conn, instrument_id=ref.instrument_id)
 
     return _AccessionOutcome(
         status="success",
@@ -526,6 +543,15 @@ def _record_def14a_observations_for_filing(
             continue
         if not holder.holder_name or not holder.holder_name.strip():
             continue
+        # ESOP-role rows write through to ownership_esop_observations
+        # via _record_esop_observations_for_filing INSTEAD of the
+        # general def14a observations path. Routing them through both
+        # would double-count in the rollup: the insider/blockholder
+        # def14a slice would surface the plan AND the dedicated
+        # funds-slice ESOP overlay (#961) would tag the matching
+        # fund row. Codex pre-push review (#843) caught this.
+        if holder.holder_role == "esop":
+            continue
         record_def14a_observation(
             conn,
             instrument_id=instrument_id,
@@ -544,6 +570,68 @@ def _record_def14a_observations_for_filing(
             shares=Decimal(holder.shares),
             percent_of_class=Decimal(holder.percent_of_class) if holder.percent_of_class is not None else None,
         )
+
+
+def _record_esop_observations_for_filing(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    accession_number: str,
+    as_of_date: date | None,
+    holders: list[Def14ABeneficialHolder],
+) -> int:
+    """Record one ``ownership_esop_observations`` row per
+    ``holder_role='esop'`` row from this DEF 14A accession (#843).
+
+    Returns the number of ESOP rows written so the caller can decide
+    whether to call ``refresh_esop_current`` (skip the refresh + its
+    advisory lock when the filing has zero ESOP rows — the common case
+    for large-cap issuers whose plans don't cross the 5% threshold).
+
+    ``plan_trustee_cik`` is left NULL — DEF 14A's trustee name (e.g.
+    ``"Vanguard Fiduciary Trust Company"``) is a SEPARATE corporate
+    entity from the fund-trust CIKs in ``sec_nport_filer_directory``
+    (e.g. ``"VANGUARD INDEX FUNDS"``). Resolving trustee→CIK requires
+    a fuzzy name match or a curated alias table; #961 (the funds-slice
+    ESOP overlay consumer) is the right layer to build that — this
+    layer just persists the trustee_name string for downstream lookup.
+
+    Mirrors ``_record_def14a_observations_for_filing`` for
+    period_end / filed_at semantics so the two slices reconcile
+    against the same provenance.
+    """
+    fetched_at = datetime.now(tz=UTC)
+    period_end: date = as_of_date or fetched_at.date()
+    filed_at = fetched_at
+    run_id = uuid4()
+    written = 0
+    for holder in holders:
+        if holder.holder_role != "esop":
+            continue
+        if holder.shares is None or holder.shares <= 0:
+            continue
+        plan_name, trustee_name = extract_plan_name_and_trustee(holder.holder_name)
+        if not plan_name:
+            continue
+        record_esop_observation(
+            conn,
+            instrument_id=instrument_id,
+            plan_name=plan_name,
+            plan_trustee_name=trustee_name,
+            plan_trustee_cik=None,
+            source_document_id=accession_number,
+            source_accession=accession_number,
+            source_field=None,
+            source_url=None,
+            filed_at=filed_at,
+            period_start=None,
+            period_end=period_end,
+            ingest_run_id=run_id,
+            shares=Decimal(holder.shares),
+            percent_of_class=Decimal(holder.percent_of_class) if holder.percent_of_class is not None else None,
+        )
+        written += 1
+    return written
 
 
 # ---------------------------------------------------------------------------

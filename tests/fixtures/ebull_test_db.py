@@ -163,6 +163,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "sec_fund_series",
     # #963 — N-PORT RIC trust-CIK directory.
     "sec_nport_filer_directory",
+    # #843 — DEF 14A bene-table ESOP plan extraction.
+    "ownership_esop_current",
+    "ownership_esop_observations",
     # #893 — dev-DB writers migrated onto worker test DB; tables they
     # touched now need per-test cleanup.
     "job_runtime_heartbeat",

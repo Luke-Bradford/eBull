@@ -686,6 +686,94 @@ def _detect_inline_role(holder_name: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# ESOP / employee-benefit-plan detection (#843)
+# ---------------------------------------------------------------------------
+
+
+# Conservative regex set per Codex round-1 sign-off
+# (`.claude/codex-843-r1-review.txt`). Each pattern matches a
+# canonical employee-benefit-plan label that proxies use when a plan
+# crosses the 5% disclosure threshold and lands in the bene table.
+#
+# Explicitly NOT matched (false-positive guard): generic ``trust``,
+# ``trustee``, ``trustee for`` alone — these surface on every Vanguard
+# Fiduciary Trust / BlackRock Institutional Trust 5%-holder row and
+# would over-tag.
+#
+# Spec: docs/superpowers/specs/2026-05-06-def14a-bene-table-extension-design.md
+_ESOP_NAME_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"\bESOP\b", re.IGNORECASE),
+    re.compile(r"\bemployee\s+stock\s+ownership\s+plan\b", re.IGNORECASE),
+    # ``\(?k\)?`` makes the parens optional but ``k`` was required —
+    # but ``_clean_holder_name`` strips ``(k)`` as a footnote marker
+    # so legacy stored holder_name reads ``401 Plan`` not ``401(k)
+    # Plan``. Make the entire ``k``-suffix optional and require a
+    # ``Plan`` suffix to bound the match (so a bare numeric ``401``
+    # doesn't false-match). Codex pre-push review #843 round 5.
+    re.compile(r"\b401(?:\s*\(?k\)?)?\s+plan\b", re.IGNORECASE),
+    re.compile(r"\bemployee\s+savings\s+plan\b", re.IGNORECASE),
+    re.compile(r"\bretirement\s+savings\s+plan\b", re.IGNORECASE),
+    re.compile(r"\bprofit[-\s]sharing\s+plan\b", re.IGNORECASE),
+    re.compile(r"\bemployee\s+benefit\s+plan\b", re.IGNORECASE),
+    re.compile(r"\bcompany\s+stock\s+fund\b", re.IGNORECASE),
+    re.compile(r"\b(?:savings|retirement|profit[-\s]sharing)\s+plan\s+trust\b", re.IGNORECASE),
+)
+
+
+def is_esop_plan(holder_name: str) -> bool:
+    """True when ``holder_name`` matches any of the conservative
+    ESOP-plan patterns. Used by the parser to override the
+    section-derived ``holder_role`` for plan rows, and re-used by
+    the ingester to decide whether to write through to
+    ``ownership_esop_observations``."""
+    if not holder_name:
+        return False
+    return any(pat.search(holder_name) for pat in _ESOP_NAME_PATTERNS)
+
+
+# Trustee-suffix extraction. Proxy bene tables routinely format ESOP
+# rows as ``"<plan name>, c/o <trustee> as Trustee"`` or
+# ``"<plan name> Trust (<trustee>, Trustee)"``. We split on the
+# common separators so the canonical ``plan_name`` is the issuer's
+# plan identity and ``plan_trustee_name`` carries the third-party
+# fiduciary (typically a Vanguard / Fidelity / Computershare entity
+# that's resolvable against ``external_identifiers`` for cross-
+# reference with the funds slice in #961).
+_TRUSTEE_SUFFIX_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+    # "<plan>, c/o <trustee> as Trustee"
+    re.compile(r"^(?P<plan>.+?),\s*c/o\s+(?P<trustee>.+?)\s+(?:as\s+)?trustee\b.*$", re.IGNORECASE),
+    # "<plan>, <trustee>, Trustee"
+    re.compile(r"^(?P<plan>.+?),\s*(?P<trustee>.+?),\s*trustee\b.*$", re.IGNORECASE),
+    # "<plan> (<trustee>, Trustee)"
+    re.compile(r"^(?P<plan>.+?)\s*\(\s*(?P<trustee>.+?),\s*trustee\s*\).*$", re.IGNORECASE),
+    # "<plan> by <trustee> as trustee"
+    re.compile(r"^(?P<plan>.+?)\s+by\s+(?P<trustee>.+?)\s+as\s+trustee\b.*$", re.IGNORECASE),
+)
+
+
+def extract_plan_name_and_trustee(holder_name: str) -> tuple[str, str | None]:
+    """Split a raw ESOP holder_name into ``(plan_name, trustee_name)``.
+
+    When no trustee suffix is recognised, returns the holder_name
+    as plan_name and ``None`` as trustee. The ingester treats a
+    ``None`` trustee as "trustee unknown" — the row still lands in
+    ``ownership_esop_observations`` with ``plan_trustee_name=NULL``,
+    but the funds-slice overlay in #961 cannot tag it (no key to
+    join against fund_filer_cik).
+    """
+    if not holder_name:
+        return "", None
+    cleaned = holder_name.strip()
+    for pat in _TRUSTEE_SUFFIX_PATTERNS:
+        m = pat.match(cleaned)
+        if m is not None:
+            plan = m.group("plan").strip().rstrip(",").strip()
+            trustee = m.group("trustee").strip().rstrip(",").strip()
+            return (plan, trustee or None)
+    return (cleaned, None)
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -793,6 +881,21 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
             continue
 
         role = current_role or _detect_inline_role(holder_name)
+
+        # ESOP override (#843): name-pattern detection wins over
+        # section-derived role. ESOP plans routinely land in the
+        # 5%-holders block (so section context tags them as
+        # 'principal') but we want them in the dedicated
+        # ownership_esop_* slice, not the blockholders slice.
+        #
+        # Run the detection on the RAW holder_name (pre-clean):
+        # ``_clean_holder_name`` strips ``(k)`` as a footnote marker
+        # (single-alpha-in-parens pattern), so ``Apple Inc. 401(k)
+        # Plan`` becomes ``Apple Inc. 401 Plan`` after cleaning,
+        # breaking the ``\b401\s*\(?k\)?\b`` regex. Detecting on raw
+        # avoids this without weakening the footnote stripper.
+        if is_esop_plan(holder_name_raw) or is_esop_plan(holder_name):
+            role = "esop"
 
         rows.append(
             Def14ABeneficialHolder(
