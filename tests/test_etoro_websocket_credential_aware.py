@@ -111,11 +111,15 @@ class TestRecordAuthOutcome:
 
     def test_aware_mode_writes_through_for_each_label(self, fake_pool: Any) -> None:
         """When wired, looks up label rows and calls record_health_outcome
-        once per row with source='incidental'."""
+        once per row with source='incidental' against the AUDIT pool —
+        not the request pool. Review #984 PREVENTION pins the
+        identity check on the dedicated audit_pool so a regression
+        that passed self._pool instead would be caught.
+        """
         cache = CredentialHealthCache()
         op_id = uuid4()
 
-        # Mock the cred-id lookup to return two rows.
+        # Mock the cred-id lookup on the request pool to return two rows.
         api_id, user_id = uuid4(), uuid4()
         mock_cur = MagicMock()
         mock_cur.fetchall.return_value = [(api_id,), (user_id,)]
@@ -124,7 +128,16 @@ class TestRecordAuthOutcome:
         mock_conn.__enter__.return_value = mock_conn
         fake_pool.connection.return_value = mock_conn
 
-        sub = _make_subscriber(cache=cache, operator_id=op_id, audit_pool=fake_pool, fake_pool=fake_pool)
+        # DISTINCT mock for the audit pool so the assertion below
+        # actually proves we used audit_pool, not self._pool.
+        audit_pool_mock = MagicMock(spec=ConnectionPool)
+
+        sub = _make_subscriber(
+            cache=cache,
+            operator_id=op_id,
+            audit_pool=audit_pool_mock,
+            fake_pool=fake_pool,
+        )
 
         with patch("app.services.credential_health.record_health_outcome") as mock_record:
             sub._record_auth_outcome(success=False, error_detail="HTTP 401")
@@ -136,7 +149,8 @@ class TestRecordAuthOutcome:
             assert kwargs["success"] is False
             assert kwargs["source"] == "incidental"
             assert kwargs["error_detail"] == "HTTP 401"
-            assert kwargs["pool"] is fake_pool
+            assert kwargs["pool"] is audit_pool_mock
+            assert kwargs["pool"] is not fake_pool
 
     def test_aware_mode_swallows_lookup_failure(self, fake_pool: Any) -> None:
         """A DB error during cred-id lookup is logged but doesn't raise —
