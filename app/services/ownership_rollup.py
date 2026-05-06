@@ -52,9 +52,20 @@ from app.services.instrument_history import (
 # ---------------------------------------------------------------------------
 
 
-SliceCategory = Literal["insiders", "blockholders", "institutions", "etfs", "def14a_unmatched"]
-SourceTag = Literal["form4", "form3", "13d", "13g", "def14a", "13f"]
+SliceCategory = Literal["insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds"]
+SourceTag = Literal["form4", "form3", "13d", "13g", "def14a", "13f", "nport"]
 CoverageState = Literal["no_data", "red", "unknown_universe", "amber", "green"]
+
+# Denominator-basis tag per spec
+# `docs/superpowers/specs/2026-05-04-ownership-full-decomposition-design.md`
+# §"Target chart decomposition". `pie_wedge` slices contribute to the
+# residual / concentration math (sum to ≤ shares_outstanding). Memo
+# overlays render as additional surface area without affecting the
+# pie — used by the funds slice today (N-PORT rows are fund-level
+# detail INSIDE the 13F-HR institutional aggregate; counting them
+# additively would double-count). Future ESOP / DRS / short-interest
+# overlays land here too (#961, etc.).
+DenominatorBasis = Literal["pie_wedge", "institution_subset"]
 
 
 @dataclass(frozen=True)
@@ -95,7 +106,14 @@ class OwnershipSlice:
     ``filer_count`` is the number of *deduped* holders contributing
     to ``total_shares`` — a category that resolved 7 holders shows
     7 here even when the underlying 13F filings had option exposure
-    rows on top of the equity rows."""
+    rows on top of the equity rows.
+
+    ``denominator_basis`` (added with the funds slice in #919) tags
+    whether this slice is part of the pie wedges that sum to
+    shares_outstanding (``pie_wedge``) or a memo overlay rendered
+    alongside the pie without contributing to its math
+    (``institution_subset``). The residual + concentration computations
+    only sum slices marked ``pie_wedge``."""
 
     category: SliceCategory
     label: str
@@ -104,6 +122,7 @@ class OwnershipSlice:
     filer_count: int
     dominant_source: SourceTag | None
     holders: tuple[Holder, ...]
+    denominator_basis: DenominatorBasis = "pie_wedge"
 
 
 @dataclass(frozen=True)
@@ -311,6 +330,11 @@ _PRIORITY_RANK: dict[SourceTag, int] = {
     "13g": 3,
     "def14a": 4,
     "13f": 5,
+    # N-PORT rows live in the funds memo-overlay slice (#919); they
+    # never compete with the pie-wedge sources in cross-source dedup.
+    # Lowest priority is defensive — if a row ever leaks into the
+    # priority pool, the wedge sources still win.
+    "nport": 6,
 }
 
 _RESIDUAL_TOOLTIP = (
@@ -436,6 +460,59 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
             )
 
     return rows
+
+
+def _collect_funds_from_current(conn: psycopg.Connection[Any], instrument_id: int) -> list[Holder]:
+    """Build the funds-slice holder set from ``ownership_funds_current``.
+
+    Each row in ``ownership_funds_current`` is one (fund_series, instrument)
+    position — already deduped by the table's ``(instrument_id, fund_series_id)``
+    PRIMARY KEY (the refresh function picks the latest filing per series).
+    No cross-source dedup needed: N-PORT is the only source and the funds
+    slice is a memo overlay (``denominator_basis="institution_subset"``)
+    that doesn't compete with the pie-wedge slices.
+
+    Holders surface ``filer_name = fund_series_name`` (the operator-visible
+    fund identity, e.g. "Vanguard 500 Index Fund") rather than
+    ``fund_filer_cik`` / ``fund_filer_name`` (the trust/manager) — per
+    the #919 acceptance "Fidelity Contrafund's AAPL position renders
+    separately from Fidelity's 13F-HR aggregate".
+
+    Funds always carry ``winning_source='nport'`` and ``filer_type=None``
+    (filer-type is a 13F-HR notion; N-PORT's series-level identity has
+    no analogous discriminator). ``pct_outstanding`` is filled in by
+    :func:`_build_slice` once the denominator is known.
+    """
+    holders: list[Holder] = []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT fund_series_id, fund_series_name, fund_filer_cik,
+                   shares, source_accession, period_end
+            FROM ownership_funds_current
+            WHERE instrument_id = %s
+              AND shares IS NOT NULL
+              AND shares > 0
+            """,
+            (instrument_id,),
+        )
+        for row in cur.fetchall():
+            accession = str(row.get("source_accession") or "")
+            holders.append(
+                Holder(
+                    filer_cik=str(row["fund_filer_cik"]) if row.get("fund_filer_cik") else None,
+                    filer_name=str(row["fund_series_name"]),
+                    shares=Decimal(row["shares"]),
+                    pct_outstanding=Decimal(0),  # filled by _build_slice
+                    winning_source="nport",
+                    winning_accession=accession,
+                    winning_edgar_url=edgar_archive_url(accession),
+                    as_of_date=row.get("period_end"),  # type: ignore[arg-type]
+                    filer_type=None,
+                    dropped_sources=(),
+                )
+            )
+    return holders
 
 
 def _read_treasury_from_current(
@@ -642,6 +719,7 @@ _SLICE_LABELS: dict[SliceCategory, str] = {
     "institutions": "Institutions",
     "etfs": "ETFs",
     "def14a_unmatched": "Proxy-only (DEF 14A)",
+    "funds": "Mutual funds (N-PORT)",
 }
 
 
@@ -708,13 +786,23 @@ def _bucket_into_slices(
     blockholders: list[Holder],
     unmatched_def14a: list[_Candidate],
     outstanding: Decimal,
+    *,
+    funds_holders: list[Holder] | None = None,
 ) -> list[OwnershipSlice]:
     """Split deduped survivors into slices by ``winning_source``
     (and ``filer_type`` for 13F).
 
     ``blockholders`` arrives pre-deduped from the parallel 13D/G
     pipeline (#837 split). Insiders / institutions / ETFs still come
-    from cross-source priority dedup."""
+    from cross-source priority dedup.
+
+    ``funds_holders`` (#919) arrives pre-deduped from
+    :func:`_collect_funds_from_current` (PK-deduped at table level)
+    and lands in the funds memo-overlay slice. Renders as a separate
+    slice but does NOT contribute to residual / concentration math —
+    N-PORT rows are fund-level detail of holdings already aggregated
+    in the institutions slice via 13F-HR, so additive accounting would
+    double-count."""
     by_category: dict[SliceCategory, list[Holder]] = {
         "insiders": [],
         "blockholders": list(blockholders),
@@ -761,6 +849,16 @@ def _bucket_into_slices(
             for c in unmatched_def14a
         ]
         slices.append(_build_slice("def14a_unmatched", unmatched_holders, outstanding))
+
+    if funds_holders:
+        slices.append(
+            _build_slice(
+                "funds",
+                list(funds_holders),
+                outstanding,
+                denominator_basis="institution_subset",
+            )
+        )
     return slices
 
 
@@ -768,6 +866,8 @@ def _build_slice(
     category: SliceCategory,
     holders: list[Holder],
     outstanding: Decimal,
+    *,
+    denominator_basis: DenominatorBasis = "pie_wedge",
 ) -> OwnershipSlice:
     holders.sort(key=lambda h: h.shares, reverse=True)
     total = sum((h.shares for h in holders), Decimal(0))
@@ -801,6 +901,7 @@ def _build_slice(
         filer_count=len(holders),
         dominant_source=dominant,
         holders=enriched_holders,
+        denominator_basis=denominator_basis,
     )
 
 
@@ -818,7 +919,14 @@ def _compute_residual(
     to oversubscription is the snapshot-lag class of bug, not a
     dedup mistake."""
     treasury_d = treasury if treasury is not None else Decimal(0)
-    sum_known = sum((s.total_shares for s in slices), Decimal(0))
+    # Memo-overlay slices (funds, future ESOP/DRS/short-interest) do NOT
+    # contribute to ``sum_known`` — they describe positions that are
+    # already counted via a pie-wedge slice (e.g. N-PORT funds are
+    # fund-level detail inside the 13F-HR institutional aggregate).
+    sum_known = sum(
+        (s.total_shares for s in slices if s.denominator_basis == "pie_wedge"),
+        Decimal(0),
+    )
     raw = outstanding - sum_known - treasury_d
     clamped = raw if raw > 0 else Decimal(0)
     pct = clamped / outstanding if outstanding > 0 else Decimal(0)
@@ -832,9 +940,14 @@ def _compute_residual(
 
 
 def _compute_concentration(outstanding: Decimal, slices: Sequence[OwnershipSlice]) -> ConcentrationInfo:
-    """Float concentration — sum-of-deduped-slices / outstanding.
-    Treasury excluded (the issuer doesn't invest in itself)."""
-    sum_known = sum((s.total_shares for s in slices), Decimal(0))
+    """Float concentration — sum-of-deduped-pie-wedge-slices / outstanding.
+    Treasury excluded (the issuer doesn't invest in itself). Memo-overlay
+    slices (funds, etc.) excluded so the chip doesn't double-count
+    positions surfaced via both a pie wedge and an overlay."""
+    sum_known = sum(
+        (s.total_shares for s in slices if s.denominator_basis == "pie_wedge"),
+        Decimal(0),
+    )
     pct = sum_known / outstanding if outstanding > 0 else Decimal(0)
     return ConcentrationInfo(
         pct_outstanding_known=pct,
@@ -1139,6 +1252,10 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     sql_candidates = _collect_canonical_holders_from_current(conn, instrument_id)
     def14a_rows = _read_def14a_unmatched_from_current(conn, instrument_id)
     matched, unmatched_def14a = _enrich_and_union_def14a(conn, instrument_id, sql_candidates, def14a_rows=def14a_rows)
+    # N-PORT mutual-fund holdings (#919). PK-deduped at the table level
+    # so no cross-source dedup needed; lands in a memo-overlay slice
+    # via _bucket_into_slices.
+    funds_holders = _collect_funds_from_current(conn, instrument_id)
 
     # Split 13D/G out of the cross-source priority dedup (#837 / #788
     # P0b). 13D/G reports BENEFICIAL ownership per Rule 13d-3
@@ -1157,7 +1274,13 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
 
     survivors = _dedup_by_priority(other_candidates)
     blockholders = _dedup_within_source(block_candidates)
-    slices = _bucket_into_slices(survivors, blockholders, unmatched_def14a, outstanding)
+    slices = _bucket_into_slices(
+        survivors,
+        blockholders,
+        unmatched_def14a,
+        outstanding,
+        funds_holders=funds_holders,
+    )
     residual = _compute_residual(outstanding, slices, treasury)
     concentration = _compute_concentration(outstanding, slices)
     estimates = _read_universe_estimates(conn, instrument_id)
@@ -1230,7 +1353,20 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerow(_CSV_HEADER)
 
-    for slc in rollup.slices:
+    # Emit pie-wedge slices first so the additive-sum invariant holds
+    # against (treasury_shares + residual.shares + Σ pie-wedge holders)
+    # = shares_outstanding. Memo-overlay slices (funds, future ESOP /
+    # DRS / short-interest) are emitted in a trailing block with the
+    # ``__memo:<category>__`` prefix so spreadsheet consumers can
+    # filter them OUT of any SUM(shares) reconciliation. Codex
+    # pre-push review (#919) flagged the prior build_rollup_csv that
+    # blindly iterated ``rollup.slices`` — emitting funds inline would
+    # break the documented invariant by adding the memo-overlay total
+    # to the additive sum.
+    pie_slices = [s for s in rollup.slices if s.denominator_basis == "pie_wedge"]
+    memo_slices = [s for s in rollup.slices if s.denominator_basis != "pie_wedge"]
+
+    for slc in pie_slices:
         for holder in slc.holders:
             writer.writerow(
                 [
@@ -1282,6 +1418,29 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
             "",
         ]
     )
+
+    # Memo-overlay slices land AFTER the residual row. Each row's
+    # ``category`` column carries the ``__memo:<original_category>__``
+    # prefix so spreadsheet consumers know to filter them OUT of any
+    # SUM(shares) reconciliation. Per #919 these are fund-level detail
+    # of holdings already counted in pie-wedge slices via 13F-HR;
+    # additive accounting would double-count.
+    for slc in memo_slices:
+        for holder in slc.holders:
+            writer.writerow(
+                [
+                    _csv_safe(holder.filer_cik or ""),
+                    _csv_safe(holder.filer_name),
+                    f"__memo:{slc.category}__",
+                    str(holder.shares),
+                    f"{holder.pct_outstanding}",
+                    holder.winning_source,
+                    _csv_safe(holder.winning_accession),
+                    holder.as_of_date.isoformat() if holder.as_of_date is not None else "",
+                    _csv_safe(holder.filer_type or ""),
+                    _csv_safe(holder.winning_edgar_url or ""),
+                ]
+            )
     return buf.getvalue()
 
 

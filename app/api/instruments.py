@@ -3747,7 +3747,7 @@ def get_instrument_blockholders(
 
 
 class _DroppedSourceModel(BaseModel):
-    source: Literal["form4", "form3", "13d", "13g", "def14a", "13f"]
+    source: Literal["form4", "form3", "13d", "13g", "def14a", "13f", "nport"]
     accession_number: str
     shares: Decimal
     as_of_date: date | None
@@ -3759,7 +3759,7 @@ class _HolderModel(BaseModel):
     filer_name: str
     shares: Decimal
     pct_outstanding: Decimal
-    winning_source: Literal["form4", "form3", "13d", "13g", "def14a", "13f"]
+    winning_source: Literal["form4", "form3", "13d", "13g", "def14a", "13f", "nport"]
     winning_accession: str
     winning_edgar_url: str | None
     as_of_date: date | None
@@ -3768,13 +3768,19 @@ class _HolderModel(BaseModel):
 
 
 class _SliceModel(BaseModel):
-    category: Literal["insiders", "blockholders", "institutions", "etfs", "def14a_unmatched"]
+    category: Literal["insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds"]
     label: str
     total_shares: Decimal
     pct_outstanding: Decimal
     filer_count: int
-    dominant_source: Literal["form4", "form3", "13d", "13g", "def14a", "13f"] | None
+    dominant_source: Literal["form4", "form3", "13d", "13g", "def14a", "13f", "nport"] | None
     holders: list[_HolderModel]
+    # Tag added with #919 funds slice. ``pie_wedge`` slices contribute
+    # to residual / concentration math; ``institution_subset`` is a
+    # memo overlay (the funds slice today; future ESOP/DRS overlays).
+    # Frontend filters on this to decide whether to render in the pie
+    # vs as a memo panel below the pie.
+    denominator_basis: Literal["pie_wedge", "institution_subset"] = "pie_wedge"
 
 
 class _ResidualModel(BaseModel):
@@ -3879,6 +3885,7 @@ def _rollup_to_response(
                 pct_outstanding=s.pct_outstanding,
                 filer_count=s.filer_count,
                 dominant_source=s.dominant_source,
+                denominator_basis=s.denominator_basis,
                 holders=[
                     _HolderModel(
                         filer_cik=h.filer_cik,
@@ -4113,7 +4120,7 @@ def get_instrument_ownership_rollup(
 # not a holders slice. Treated as a valid filter value below: it
 # scopes the CSV to the treasury memo + residual rows only.
 _ROLLUP_CSV_SLICE_CATEGORIES: frozenset[str] = frozenset(
-    {"insiders", "blockholders", "institutions", "etfs", "def14a_unmatched"},
+    {"insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds"},
 )
 _ROLLUP_CSV_CATEGORIES: frozenset[str] = _ROLLUP_CSV_SLICE_CATEGORIES | {"treasury"}
 
@@ -4128,10 +4135,13 @@ def get_instrument_ownership_rollup_csv(
         default=None,
         description=(
             "Optional category filter: insiders | blockholders | institutions "
-            "| etfs | def14a_unmatched | treasury. Slice categories scope the "
-            "export to that slice's holders; ``treasury`` drops all slice "
-            "holders and emits only the treasury + residual memo rows. "
-            "Without ``category``, every slice is exported."
+            "| etfs | def14a_unmatched | funds | treasury. Slice categories "
+            "scope the export to that slice's holders; ``treasury`` drops all "
+            "slice holders and emits only the treasury + residual memo rows. "
+            "``funds`` is a memo-overlay slice — its rows render with the "
+            "``__memo:funds__`` category prefix in the output CSV so they are "
+            "outside the additive (treasury + residual + Σ pie-wedge) "
+            "reconciliation. Without ``category``, every slice is exported."
         ),
     ),
     conn: psycopg.Connection[object] = Depends(get_conn),
