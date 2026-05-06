@@ -1,4 +1,10 @@
-"""Tests for /auth/bootstrap-state and /auth/recover (#114 / ADR-0003)."""
+"""Tests for /auth/bootstrap-state (#114 / ADR-0003, amended 2026-05-07).
+
+Post-amendment coverage: the recovery_phrase ceremony, ``POST
+/auth/recover`` endpoint, and ``recovery_required`` boot state are
+removed. ``BootstrapStateResponse`` is now ``{boot_state, needs_setup}``
+where needs_setup is operator-state only.
+"""
 
 from __future__ import annotations
 
@@ -16,14 +22,8 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_conn] = lambda: None  # type: ignore[misc]
-    # bootstrap-state now consults operators_empty() with the request
-    # connection. Stub it to False so the existing tests assert the
-    # in-memory app.state branch in isolation; the new "no operators"
-    # behaviour is covered by its own dedicated test below.
     monkeypatch.setattr(auth_bootstrap, "operators_empty", lambda _conn: False)
     app.state.boot_state = "clean_install"
-    app.state.needs_setup = True
-    app.state.recovery_required = False
     return TestClient(app)
 
 
@@ -34,8 +34,7 @@ class TestBootstrapState:
         body = resp.json()
         assert body == {
             "boot_state": "clean_install",
-            "needs_setup": True,
-            "recovery_required": False,
+            "needs_setup": False,
         }
 
     def test_no_store_header(self, client: TestClient) -> None:
@@ -43,121 +42,38 @@ class TestBootstrapState:
         assert resp.headers["cache-control"] == "no-store"
 
     def test_needs_setup_true_when_operators_table_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Empty operators table -> needs_setup True even if the
-        master-key bootstrap reported needs_setup=False.
-
-        This is the regression for the "wiped DB strands user at
-        sign-in screen with no account" bug: bootstrap-state used to
-        only mirror the in-memory master-key flag, so a fresh DB whose
-        master key was clean_install (needs_setup=False) routed the
-        frontend to /login instead of /setup.
-        """
+        """Empty operators table → needs_setup True regardless of
+        boot_state. needs_setup is operator-state only — the master-key
+        boot state does not gate the wizard."""
         app = FastAPI()
         app.include_router(router)
         app.dependency_overrides[get_conn] = lambda: None  # type: ignore[misc]
         monkeypatch.setattr(auth_bootstrap, "operators_empty", lambda _conn: True)
-        app.state.boot_state = "clean_install"
-        app.state.needs_setup = False  # master key is fine
-        app.state.recovery_required = False
+        app.state.boot_state = "normal"
         c = TestClient(app)
 
         resp = c.get("/auth/bootstrap-state")
         assert resp.status_code == 200
         body = resp.json()
         assert body["needs_setup"] is True
-        assert body["boot_state"] == "clean_install"
-        assert body["recovery_required"] is False
+        assert body["boot_state"] == "normal"
+        # Field removed post-amendment 2026-05-07.
+        assert "recovery_required" not in body
 
-
-class TestRecoverInputValidation:
-    def test_recover_called_outside_recovery_required_409(self, client: TestClient) -> None:
-        """The state-machine guard fires before any phrase processing."""
-        # Submit a structurally valid 24-word phrase so the test
-        # cleanly isolates the 409 (state-machine guard) from the
-        # 400 (word-count guard) -- the 409 must fire first.
-        phrase = " ".join(["abandon"] * 24)
-        resp = client.post("/auth/recover", json={"phrase": phrase})
-        assert resp.status_code == 409
-        assert resp.json()["detail"] == "recovery not required"
-
-    def test_wrong_word_count_400(self, client: TestClient) -> None:
-        client.app.state.recovery_required = True  # type: ignore[attr-defined]
-        resp = client.post("/auth/recover", json={"phrase": "abandon abandon"})
-        assert resp.status_code == 400
-        assert resp.json()["detail"] == "recovery phrase invalid"
-
-    def test_empty_phrase_422(self, client: TestClient) -> None:
-        client.app.state.recovery_required = True  # type: ignore[attr-defined]
-        # min_length=1 on the pydantic field -> 422 before reaching the
-        # handler. Important: the handler never sees an empty body.
-        resp = client.post("/auth/recover", json={"phrase": ""})
-        assert resp.status_code == 422
-
-    @pytest.mark.parametrize(
-        "exc_factory",
-        [
-            pytest.param(
-                lambda: __import__(
-                    "app.security.recovery_phrase", fromlist=["RecoveryPhraseError"]
-                ).RecoveryPhraseError("bad checksum"),
-                id="RecoveryPhraseError",
-            ),
-            pytest.param(
-                lambda: __import__(
-                    "app.security.master_key", fromlist=["RecoveryVerificationError"]
-                ).RecoveryVerificationError("phrase did not match"),
-                id="RecoveryVerificationError",
-            ),
-            pytest.param(
-                lambda: __import__(
-                    "app.security.master_key", fromlist=["RecoveryNotApplicableError"]
-                ).RecoveryNotApplicableError("no active credential"),
-                id="RecoveryNotApplicableError",
-            ),
-        ],
-    )
-    def test_all_phrase_path_failures_return_generic_400(
-        self,
-        client: TestClient,
-        monkeypatch: pytest.MonkeyPatch,
-        exc_factory: object,
-    ) -> None:
-        """ADR-0003 §6: every failure mode reachable via /auth/recover
-        in recovery_required state must return EXACTLY 400 with the
-        same generic detail. A distinct status (e.g. 409 for
-        RecoveryNotApplicableError) would let a caller fingerprint
-        "wrong phrase" vs "no row to verify against" by status code
-        alone (review feedback PR #118 round 18).
-
-        Parametrized (round 19) so each exception class gets a fresh
-        monkeypatch scope rather than stacking patches in a loop.
+    def test_recover_endpoint_is_404(self, client: TestClient) -> None:
+        """POST /auth/recover was removed in the 2026-05-07 amendment.
+        The router no longer mounts it, so any caller hits 404/405.
         """
-        from app.api import auth_bootstrap
-
-        # The ``client`` fixture seeds ``recovery_required=False``
-        # (clean_install default), so this line is REQUIRED to put
-        # the app into recovery_required state for the test -- it
-        # is not just documentation. Do not remove (review feedback
-        # PR #118 round 22).
-        client.app.state.recovery_required = True  # type: ignore[attr-defined]
-        phrase = " ".join(["abandon"] * 24)
-        exc = exc_factory()  # type: ignore[operator]
-
-        def _raise(*_a: object, **_k: object) -> None:
-            raise exc  # type: ignore[misc]
-
-        monkeypatch.setattr(auth_bootstrap.master_key, "recover_from_phrase", _raise)
-        resp = client.post("/auth/recover", json={"phrase": phrase})
-        assert resp.status_code == 400
-        assert resp.json()["detail"] == "recovery phrase invalid"
+        resp = client.post("/auth/recover", json={"phrase": "x"})
+        assert resp.status_code in (404, 405)
 
 
 class TestRequireMasterKey:
-    """Coverage for the structural require_master_key dependency (#118 round 9).
+    """Coverage for the structural require_master_key dependency.
 
-    Mounted on broker routes that need the cipher cache. Must 503
-    on every not-loaded state EXCEPT clean_install (which is the
-    legitimate entry point for the very first credential save).
+    Post-amendment: only one failure mode remains —
+    broker_key_loaded=False → 503 master key not loaded. The prior
+    recovery_required branch is gone.
     """
 
     def _app_with_route(self) -> tuple[FastAPI, TestClient]:
@@ -171,18 +87,8 @@ class TestRequireMasterKey:
 
         return app, TestClient(app)
 
-    def test_recovery_required_503(self) -> None:
-        app, c = self._app_with_route()
-        app.state.recovery_required = True
-        app.state.broker_key_loaded = False
-        app.state.boot_state = "recovery_required"
-        resp = c.get("/gated")
-        assert resp.status_code == 503
-        assert resp.json()["detail"] == "recovery required"
-
     def test_normal_state_with_key_loaded_passes(self) -> None:
         app, c = self._app_with_route()
-        app.state.recovery_required = False
         app.state.broker_key_loaded = True
         app.state.boot_state = "normal"
         resp = c.get("/gated")
@@ -190,13 +96,11 @@ class TestRequireMasterKey:
 
     def test_clean_install_no_key_503(self) -> None:
         # POST /broker-credentials does NOT mount this dependency
-        # (the create handler self-gates so it can lazy-generate
-        # on first save). Every other route mounted on this
-        # dependency must 503 in clean_install state, not pass
-        # through and hit a 500 from CredentialCryptoConfigError
-        # (review feedback PR #118 round 10).
+        # (the create handler self-gates so it can lazy-generate on
+        # first save). Every other route mounted on this dependency
+        # must 503 in clean_install state, not pass through and hit a
+        # 500 from CredentialCryptoConfigError.
         app, c = self._app_with_route()
-        app.state.recovery_required = False
         app.state.broker_key_loaded = False
         app.state.boot_state = "clean_install"
         resp = c.get("/gated")
@@ -205,10 +109,9 @@ class TestRequireMasterKey:
 
     def test_unknown_not_loaded_state_503(self) -> None:
         # An env-override misconfig or internal bug that leaves
-        # broker_key_loaded=False outside clean_install must 503,
-        # not fall through to a 500 from the cipher cache.
+        # broker_key_loaded=False outside clean_install must 503, not
+        # fall through to a 500 from the cipher cache.
         app, c = self._app_with_route()
-        app.state.recovery_required = False
         app.state.broker_key_loaded = False
         app.state.boot_state = "normal"
         resp = c.get("/gated")

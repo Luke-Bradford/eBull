@@ -43,8 +43,9 @@ class FailureCategory(StrEnum):
     # cache when an adapter tried to encrypt/decrypt. Distinct from
     # AUTH_EXPIRED (which means the credential decrypted but the
     # provider rejected it). Triggers the operator-actionable
-    # "restore EBULL_SECRETS_KEY or run /recover" banner instead of
-    # the opaque "Unclassified error" the path used to hit.
+    # "restore EBULL_SECRETS_KEY or re-add credentials in Settings"
+    # banner instead of the opaque "Unclassified error" the path
+    # used to hit.
     MASTER_KEY_MISSING = "master_key_missing"
     INTERNAL_ERROR = "internal_error"
 
@@ -96,11 +97,13 @@ REMEDIES: dict[FailureCategory, Remedy] = {
         message="Broker-encryption key not loaded — credentials cannot decrypt",
         operator_fix=(
             "Restart the backend so master_key.bootstrap() can load the persisted "
-            "root secret, or open Settings → /recover if the secret is missing"
+            "root secret, or open Settings to re-add eToro credentials if the "
+            "secret is missing"
         ),
         # No self-heal: a backoff retry won't help — the key has to
-        # come back via either the persisted root secret or the
-        # operator-driven recovery flow.
+        # come back via either the persisted root secret or operator
+        # re-entry of credentials in Settings (which lazy-generates a
+        # fresh root secret).
         self_heal=False,
     ),
     FailureCategory.INTERNAL_ERROR: Remedy(

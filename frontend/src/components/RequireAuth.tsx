@@ -30,11 +30,6 @@ export function RequireAuth({ children }: { children: ReactNode }): JSX.Element 
     );
   }
 
-  // ADR-0003 §6 precedence: recovery_required wins over needs_setup.
-  if (status === "needs_recovery") {
-    return <Navigate to="/recover" replace />;
-  }
-
   if (status === "needs_setup") {
     return <Navigate to="/setup" replace />;
   }

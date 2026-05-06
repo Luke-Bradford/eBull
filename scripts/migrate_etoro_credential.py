@@ -18,14 +18,12 @@ exits cleanly.
 Hard failures (non-zero exit):
   - No operator exists (run /auth/setup first)
   - Multiple operators exist (ambiguous — manual resolution required)
-  - Bootstrap returns no broker-encryption key. This happens when the
-    persisted root secret is missing AND the EBULL_SECRETS_KEY env
-    override is unset. Two sub-cases:
-      * ``clean_install`` — credentials table is empty; finish
-        ``/auth/setup`` so the first save lazy-generates the root
-        secret, then re-run this script.
-      * ``recovery_required`` — credentials exist but no root secret
-        is reachable; restore via ``/recover``.
+  - Bootstrap returns no broker-encryption key. Post-amendment
+    2026-05-07 (ADR-0003) the boot states are ``clean_install`` and
+    ``normal``; a None key means the persisted root secret is absent
+    and no ``EBULL_SECRETS_KEY`` env override is set. Operator must
+    add credentials in Settings (which lazy-generates the root
+    secret) before re-running this script.
   - EBULL_SECRETS_KEY env override is set but does not match the existing
     ciphertext (``master_key.bootstrap`` raises ``MasterKeyError``)
   - EBULL_SECRETS_KEY env override is malformed (not 32 bytes of base64;
@@ -90,24 +88,19 @@ def main() -> int:
                 return 1
 
             if boot.broker_encryption_key is None:
-                # Bootstrap returned no key. This can only happen when
-                # the persisted root secret file is absent AND no env
-                # override is set. The state distinguishes whether
-                # there is anything to recover.
-                if boot.state == "clean_install":
-                    print(
-                        "ERROR: no broker-encryption key (clean_install state). "
-                        "Complete /auth/setup so the first credential save "
-                        "lazy-generates the root secret, then re-run this script.",
-                        file=sys.stderr,
-                    )
-                else:
-                    print(
-                        "ERROR: no broker-encryption key (recovery_required state). "
-                        "Root secret is missing or does not match existing ciphertext. "
-                        "Restore via /recover before migrating credentials.",
-                        file=sys.stderr,
-                    )
+                # Bootstrap returned no key. Post-amendment 2026-05-07
+                # (ADR-0003) the only boot states are clean_install and
+                # normal; if there is no key, stale-cipher soft-revoke
+                # has already cleared any rows we cannot decrypt, and
+                # the script's only recourse is for the operator to
+                # re-add credentials in Settings (which lazy-generates
+                # the root secret on first save).
+                print(
+                    "ERROR: no broker-encryption key. Complete /auth/setup or "
+                    "open Settings to add eToro credentials so the first save "
+                    "lazy-generates the root secret, then re-run this script.",
+                    file=sys.stderr,
+                )
                 return 1
 
             set_active_key(boot.broker_encryption_key)

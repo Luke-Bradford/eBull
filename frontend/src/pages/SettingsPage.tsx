@@ -30,7 +30,6 @@ import {
 } from "@/api/brokerCredentials";
 import { runJob } from "@/api/jobs";
 import { ValidationResultDisplay } from "@/components/broker/ValidationResultDisplay";
-import { useRecoveryPhraseModal } from "@/components/security/RecoveryPhraseModal";
 import { BudgetConfigSection } from "@/components/settings/BudgetConfigSection";
 import { DisplayCurrencySection } from "@/components/settings/DisplayCurrencySection";
 import { deriveCredentialSetMode, ENVIRONMENT } from "@/lib/credentialSetMode";
@@ -99,13 +98,6 @@ function BrokerCredentialsSection(): JSX.Element {
     }
   }, [mode]);
 
-  const phraseModal = useRecoveryPhraseModal({
-    onClose: () => {
-      setCreateError(null);
-      void refresh();
-    },
-  });
-
   const refresh = useCallback(async () => {
     setLoadError(null);
     try {
@@ -171,23 +163,15 @@ function BrokerCredentialsSection(): JSX.Element {
     setCreating(true);
     // Capture mode before the save so we can detect first-time creation.
     const wasCreate = mode === "create";
-    // When the recovery-phrase modal opens, its onClose callback owns the
-    // refresh — skip the finally refresh so we don't double-refresh.
-    let showingPhrase = false;
     try {
-      let phrase: readonly string[] | null = null;
-
       // Save api_key if needed (Create mode or Repair with api_key missing).
       if (mode === "create" || (mode === "repair" && missingLabel === "api_key")) {
-        const response = await createBrokerCredential({
+        await createBrokerCredential({
           provider: "etoro",
           label: "api_key",
           environment: ENVIRONMENT,
           secret: apiKey,
         });
-        if (response.recovery_phrase != null && response.recovery_phrase.length > 0) {
-          phrase = response.recovery_phrase;
-        }
       }
 
       // Save user_key if needed (Create mode or Repair with user_key missing).
@@ -201,21 +185,10 @@ function BrokerCredentialsSection(): JSX.Element {
       }
 
       // First-run bootstrap: kick off the universe sync when both keys
-      // are saved for the first time.  Fire-and-forget — errors are
+      // are saved for the first time. Fire-and-forget — errors are
       // swallowed because the operator can always trigger manually.
       if (wasCreate) {
         runJob("nightly_universe_sync").catch(() => {});
-      }
-
-      // If the first save triggered a recovery phrase, show the modal
-      // now that both credentials are durable. The modal's onClose
-      // callback calls refresh(), so we skip the finally refresh.
-      if (phrase !== null) {
-        setApiKey("");
-        setUserKey("");
-        showingPhrase = true;
-        phraseModal.open(phrase);
-        return;
       }
 
       setApiKey("");
@@ -232,10 +205,7 @@ function BrokerCredentialsSection(): JSX.Element {
       setCreating(false);
       // Always re-derive mode from server state, whether success or
       // partial failure (e.g. first key saved, second failed → Repair).
-      // Skip when the phrase modal is open — its onClose owns the refresh.
-      if (!showingPhrase) {
-        await refresh();
-      }
+      await refresh();
     }
   }
 
@@ -741,8 +711,6 @@ function BrokerCredentialsSection(): JSX.Element {
           </button>
         </form>
       )}
-
-      {phraseModal.element}
     </section>
   );
 }

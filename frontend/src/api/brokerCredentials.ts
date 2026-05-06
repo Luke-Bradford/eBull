@@ -34,23 +34,11 @@ export function listBrokerCredentials(): Promise<BrokerCredentialView[]> {
 /**
  * Response shape for POST /broker-credentials.
  *
- * Mirrors the backend ``CreateCredentialResponse`` (see
- * app/api/broker_credentials.py:101). The ``recovery_phrase`` field is
- * populated exactly once in the lifetime of an installation -- on the
- * first credential save in clean_install mode, when lazy generation of
- * the root secret occurs (ADR-0003 §4 / #114). On every subsequent save
- * it is absent / null and the UI must NOT show the recovery phrase
- * modal.
- *
- * Security note: this is the only place in the frontend where a 24-word
- * phrase ever transits the API boundary. It is held in component state
- * by the caller and discarded -- never persisted to localStorage,
- * sessionStorage, or any cache. See RecoveryPhraseConfirm.tsx for the
- * display contract.
+ * Mirrors the backend ``CreateCredentialResponse`` (post-amendment
+ * 2026-05-07 ADR-0003 — no recovery phrase is surfaced).
  */
 export interface CreateBrokerCredentialResponse {
   credential: BrokerCredentialView;
-  recovery_phrase: readonly string[] | null;
 }
 
 export function createBrokerCredential(input: {

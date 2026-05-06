@@ -122,14 +122,13 @@ class CreateCredentialRequest(BaseModel):
 class CreateCredentialResponse(BaseModel):
     """POST /broker-credentials response.
 
-    Carries the standard metadata block AND -- only on the very first
-    save in clean_install mode -- the 24-word recovery phrase that the
-    operator must record. After that first save the phrase is None and
-    is never returned again from any endpoint (#114 / ADR-0003 §4).
+    Carries the credential metadata block. Post-amendment 2026-05-07
+    (ADR-0003) the response no longer includes a recovery phrase —
+    the lazy-gen path persists the root secret silently and the
+    operator never sees the underlying material.
     """
 
     credential: CredentialMetadataOut
-    recovery_phrase: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -166,27 +165,12 @@ def create(
     """Store a new credential.
 
     On the very first save in clean_install mode this triggers lazy
-    generation of the root secret (#114 / ADR-0003 §4): a fresh 32-byte
-    secret is created, persisted to disk, the derived broker-encryption
-    key is installed into the secrets_crypto cache, and the response
-    carries the 24-word recovery phrase exactly once. On every
-    subsequent save the phrase field is null.
+    generation of the root secret (#114 / ADR-0003 §4, amended
+    2026-05-07): a fresh 32-byte secret is created, persisted to disk,
+    and the derived broker-encryption key is installed into the
+    secrets_crypto cache. The response no longer carries a recovery
+    phrase — the operator never sees the underlying material.
     """
-    # Recovery-required state-machine guard: refuse credential
-    # writes while the operator must run /auth/recover. Without
-    # this guard the request would fall through to encrypt() with
-    # an empty cipher cache and return 500 instead of the
-    # documented 503 (review feedback PR #118 round 13).
-    # POST /broker-credentials does NOT mount require_master_key
-    # because the create handler self-gates so it can lazy-gen
-    # on first save -- this guard is the equivalent gate for the
-    # one boot state where lazy-gen is NOT the right answer.
-    if getattr(request.app.state, "recovery_required", False):
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="recovery required",
-        )
-
     # Pre-validate user input and pre-check for duplicate BEFORE any
     # lazy-gen sequence. We must never reach a state where the root
     # secret file is on disk but a 400 / 409 user error is then
@@ -215,8 +199,6 @@ def create(
     if _active_credential_exists(conn, session.operator_id, provider_norm, label_norm, env_norm):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="credential already exists")
 
-    phrase: list[str] | None = None
-
     # Lazy-gen path runs only on the very first credential save in
     # clean_install mode AND only when the cipher cache is empty
     # (env-override clean_install already has the key installed and
@@ -239,11 +221,9 @@ def create(
     )
     if needs_lazy_gen:
         with master_key.lazy_gen_lock:
-            # Re-check inside the lock: a concurrent recovery may
-            # have populated the key while we queued. Recovery now
-            # sets ``broker_key_loaded=True`` from inside the same
-            # lock (master_key.recover_from_phrase, round 7), so
-            # this re-check is authoritative.
+            # Re-check inside the lock: a concurrent first-save
+            # path may have populated the key while we queued. The
+            # in-lock re-check is authoritative.
             if not getattr(request.app.state, "broker_key_loaded", False):
                 # By construction, no concurrent writer can commit a
                 # broker_credentials row in this state:
@@ -252,18 +232,15 @@ def create(
                 #     above and held under the lock)
                 #   * a parallel lazy-gen path requires holding
                 #     ``lazy_gen_lock`` (we hold it)
-                #   * a recovery path also requires
-                #     ``lazy_gen_lock`` (held inside
-                #     recover_from_phrase)
-                # Therefore the outer pre-check at line 173 cannot
-                # be a false negative: any writer that committed
-                # before our outer pre-check is reflected, and no
-                # writer can commit between then and now. We do
-                # NOT re-issue _active_credential_exists -- it
-                # would share the same READ COMMITTED conn and
-                # add no isolation guarantee. The CredentialAlready
-                # Exists handler below is defense-in-depth only.
-                pending_root_secret, derived, phrase = master_key.generate_root_secret_in_memory()
+                # Therefore the outer pre-check above cannot be a
+                # false negative: any writer that committed before
+                # our outer pre-check is reflected, and no writer
+                # can commit between then and now. We do NOT
+                # re-issue _active_credential_exists -- it would
+                # share the same READ COMMITTED conn and add no
+                # isolation guarantee. The CredentialAlreadyExists
+                # handler below is defense-in-depth only.
+                pending_root_secret, derived = master_key.generate_root_secret_in_memory()
                 # Persist the file BEFORE the DB write. If persist
                 # raises (disk full, perms), nothing has been
                 # committed yet, the key is not in the cache, and
@@ -272,8 +249,6 @@ def create(
                 set_active_key(derived)
                 request.app.state.broker_key_loaded = True
                 request.app.state.boot_state = "normal"
-                request.app.state.needs_setup = False
-                request.app.state.recovery_required = False
                 logger.info("master key lazy-generated on first credential save (file persisted)")
                 try:
                     # Pass the *already-normalised* provider /
@@ -368,9 +343,9 @@ def create(
                     # observes the cleaned-up state.
                     _rollback_lazy_gen(request)
                     raise
-                return CreateCredentialResponse(credential=_to_out(meta), recovery_phrase=phrase)
-            # Fall through: a concurrent recovery populated the
-            # key while we queued; proceed as a normal store.
+                return CreateCredentialResponse(credential=_to_out(meta))
+            # Fall through: another lazy-gen path populated the key
+            # while we queued; proceed as a normal store.
 
     return _do_store(
         conn,
@@ -379,7 +354,6 @@ def create(
         label=label_norm,
         environment=env_norm,
         plaintext=secret_norm,
-        phrase=None,
     )
 
 
@@ -422,7 +396,6 @@ def _do_store(
     label: str,
     environment: str,
     plaintext: str,
-    phrase: list[str] | None,
 ) -> CreateCredentialResponse:
     # #112: caller owns transaction lifecycle. The duplicate
     # pre-check (``_active_credential_exists``) runs an earlier
@@ -456,7 +429,7 @@ def _do_store(
             status_code=status.HTTP_409_CONFLICT,
             detail="credential already exists",
         ) from exc
-    return CreateCredentialResponse(credential=_to_out(meta), recovery_phrase=phrase)
+    return CreateCredentialResponse(credential=_to_out(meta))
 
 
 def _rollback_lazy_gen(request: Request) -> None:
@@ -509,8 +482,6 @@ def _rollback_lazy_gen(request: Request) -> None:
     clear_active_key()
     request.app.state.broker_key_loaded = False
     request.app.state.boot_state = "clean_install"
-    request.app.state.needs_setup = True
-    request.app.state.recovery_required = False
 
 
 @router.delete("/{credential_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -897,12 +868,6 @@ def replace(
     endpoint and probes successfully, that probe's write-through
     fires the VALID NOTIFY.
     """
-    if getattr(request.app.state, "recovery_required", False):
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="recovery required",
-        )
-
     try:
         provider_norm = normalise_provider(body.provider)
         label_norm = normalise_label(body.label)

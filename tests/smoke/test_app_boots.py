@@ -72,8 +72,6 @@ from fastapi.testclient import TestClient
 # this tuple in one place keeps both checks in sync.
 _LIFESPAN_STATE_FLAGS: tuple[str, ...] = (
     "boot_state",
-    "needs_setup",
-    "recovery_required",
     "broker_key_loaded",
     "db_pool",
 )
@@ -239,7 +237,6 @@ def test_app_lifespan_boots_and_state_is_coherent() -> None:
             assert app.state.boot_state in {
                 "clean_install",
                 "normal",
-                "recovery_required",
             }
             # JobRuntime moved out of process in #719. The API lifespan
             # MUST NOT set ``app.state.job_runtime``; smoke test pins

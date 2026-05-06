@@ -1,8 +1,19 @@
 # ADR 0003 — Local secret bootstrap and recovery
 
-**Status:** Proposed
-**Date:** 2026-04-08
+**Status:** Amended 2026-05-07 (was: Proposed)
+**Date:** 2026-04-08 (amended 2026-05-07)
 **Relates to:** [ADR 0001](0001-operator-auth-and-broker-secrets.md), [ADR 0002](0002-local-browser-bootstrap-and-multi-operator.md)
+
+> ## Amendment 2026-05-07 (read this first)
+>
+> The 24-word recovery phrase ceremony described in §1, §3, §4, §5, §7 below
+> has been **removed**. Recovery via phrase is no longer offered. The new
+> recovery posture is **operator-driven re-entry**: if the data directory is
+> wiped, the operator creates a fresh local account and re-enters their eToro
+> credentials (eToro is the source of truth for those keys; they can always
+> be re-issued from the eToro dashboard). The pre-amendment body is preserved
+> below for historical reference; the operative current behaviour is in the
+> "Amendment 2026-05-07" section appended at the bottom of this document.
 
 ---
 
@@ -471,3 +482,108 @@ the operator recovers it.
 ## Status
 
 Proposed. Awaiting review and acceptance before Tickets 1–4 are filed.
+
+---
+
+## Amendment 2026-05-07
+
+**Status of this section: ACCEPTED. This is the operative current behaviour.**
+
+### What changed
+
+The 24-word recovery phrase ceremony is removed entirely:
+
+- Phrase generation (lazy + edge-case-C interstitial) — removed.
+- `POST /auth/recover` endpoint — removed.
+- Frontend `/recover` route + `RecoveryPhraseConfirm` + `RecoveryPhraseModal` —
+  removed.
+- `recovery_required` boot state and `BootstrapStateResponse.recovery_required`
+  field — removed.
+- 2048-word vendored wordlist + encode/decode module — removed.
+
+Encryption-at-rest (ADR-0001 contract) is **unchanged**. Broker credentials
+remain AES-256-GCM encrypted under a key derived via HKDF-SHA256 from a
+32-byte root secret persisted at `<data-dir>/secrets/master.key`. The lazy
+generation moment for that root secret is now collapsed into "first
+credential save" and the operator never sees the underlying material.
+
+### Why
+
+eToro is the source of truth for broker credentials. An operator who loses
+their data directory can always re-issue keys from the eToro dashboard and
+re-enter them in the eBull Settings page. The phrase ceremony's stated
+benefit — "recover the same encrypted ciphertext on a new machine without
+re-entering keys" — is real but disproportionate for the v1 risk posture
+(demo-first, solo-operator, local install). The friction cost (mandatory
+write-down step, 3-word challenge confirm, modal blocks copy/download by
+design, hard to back out of mid-setup over remote-desktop) outweighs the
+recovery benefit at this scale.
+
+### New state machine
+
+Three independent dimensions, never collapsed:
+
+| Dimension | Values | Source |
+|---|---|---|
+| `boot_state` (key state) | `clean_install`, `normal` | `master_key.compute_boot_state` |
+| `needs_setup` (operator state) | `true`, `false` | `operators_empty(conn)` — operators table only |
+| `broker_key_loaded` (in-memory cache) | `true`, `false` | `app.state.broker_key_loaded` |
+
+`recovery_required` is gone. `needs_setup` is operator-state only — it
+no longer follows the credential/key state.
+
+### Stale-cipher soft-revoke at boot
+
+When the bootstrap module finds existing `broker_credentials` rows that
+cannot be decrypted under the current key (no key available, or the
+on-disk key does not match), it **soft-revokes** them at boot via
+`UPDATE broker_credentials SET revoked_at = NOW()`. Audit history is
+preserved (the access log FK remains intact). Three revocation classes:
+
+1. **Orphan**: row's `operator_id` is no longer in the `operators` table.
+2. **No key**: no root secret file present and no `EBULL_SECRETS_KEY`
+   override. Every active row is unrecoverable.
+3. **Mismatch**: derived key cannot decrypt the row.
+
+Each affected operator receives one `NOTIFY ebull_credential_health`
+event so the live credential-health cache refreshes without waiting for
+the next per-row poll. Operator-facing health drops to `MISSING` /
+`REJECTED` for any pair whose required label was revoked, and the
+operator UI surfaces a "encryption key was lost — re-add eToro
+credentials in Settings" banner.
+
+### What's preserved from the original ADR
+
+- AES-256-GCM with per-row AAD binding (ADR-0001).
+- Root secret + HKDF derivation seam (`info = b"ebull-broker-encryption-key-v1"`).
+- `EBULL_SECRETS_KEY` env override path with mismatch verification at boot
+  (§9 contract).
+- Two-layer split (root secret on disk, derived key in memory).
+- `<data-dir>/secrets/master.key` location + 0600 file perms + atomic
+  same-filesystem `os.replace` (§4 + §8).
+
+### Recovery posture
+
+If the data directory is lost or corrupted:
+
+1. Operator visits the local install.
+2. If operators table is empty → first-run wizard (single-step operator
+   create).
+3. Otherwise → operator logs in and visits Settings.
+4. Stale-cipher soft-revoke has already cleared any unrecoverable rows
+   at boot, so the credential surface starts clean.
+5. Operator pastes their eToro Public/Private keys (re-issued from eToro
+   dashboard if necessary). Saving triggers lazy root-secret generation
+   if no `secrets/master.key` exists yet.
+
+There is no in-app password recovery flow. A lost local password requires
+DB-level operator wipe + redo setup; the Settings broker creds will be
+soft-revoked on the next boot under the orphan branch and the operator
+re-enters them.
+
+### Closes
+
+- #971 — drop broker step from first-run wizard
+- #972 — drop mandatory 24-word recovery phrase
+- #969 — superseded (broker step removed entirely; the bug it described
+  no longer has a host)

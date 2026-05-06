@@ -1,87 +1,43 @@
 /**
- * useSetupWizard — state machine + fetch dispatchers for SetupPage.
+ * useSetupWizard — state machine + fetch dispatcher for SetupPage.
  *
- * Reducer covers wizard-step transitions and fetch-status flags. Form-field
- * inputs (username, password, apiKey, userKey, setupToken) stay as
- * component-level `useState` in SetupPage.tsx — field churn does not belong
- * in the state machine.
+ * Post-amendment 2026-05-07 (#971): the wizard is single-step. The
+ * broker-credential step has been removed; operators add eToro keys in
+ * Settings after first-run setup.
  *
- * Wizard step is "operator" | "broker" only. Completion is a side effect
- * (markAuthenticated + navigate) driven by the component via the
- * `onComplete` callback option — there is no "done" state.
+ * Reducer covers operator-submit fetch-status flags. Form-field inputs
+ * (username, password, setupToken) stay as component-level useState in
+ * SetupPage.tsx — field churn does not belong in the state machine.
  *
- * Derived broker-mode (create/repair/complete) is a pure selector over
- * state.credRows: callers invoke deriveCredentialSetMode(state.credRows)
- * from @/lib/credentialSetMode. Never a reducer field.
+ * Completion is a side effect (markAuthenticated + navigate) driven by
+ * the component via the `onComplete` callback option.
  */
-import { useCallback, useReducer } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 
 import type { Operator } from "@/api/auth";
 import { postSetup } from "@/api/auth";
-import type {
-  BrokerCredentialView,
-  ValidateCredentialResponse,
-} from "@/api/brokerCredentials";
-import {
-  createBrokerCredential,
-  listBrokerCredentials,
-  validateBrokerCredential,
-} from "@/api/brokerCredentials";
-import { ApiError } from "@/api/client";
-import { runJob } from "@/api/jobs";
-import { deriveCredentialSetMode, ENVIRONMENT } from "@/lib/credentialSetMode";
 import { GENERIC_ERROR } from "@/pages/setupErrorMessages";
 
 // ---------------------------------------------------------------------------
 // State + actions
 // ---------------------------------------------------------------------------
 
-export type WizardStep = "operator" | "broker";
-
 export type WizardState = {
-  step: WizardStep;
   pendingOperator: Operator | null;
   operatorSubmitting: boolean;
   operatorError: string | null;
-  credRows: BrokerCredentialView[] | null;
-  credRowsLoading: boolean;
-  credRowsError: string | null;
-  brokerSubmitting: boolean;
-  brokerError: string | null;
-  validating: boolean;
-  validation: ValidateCredentialResponse | null;
-  validationError: string | null;
 };
 
 export const initialWizardState: WizardState = {
-  step: "operator",
   pendingOperator: null,
   operatorSubmitting: false,
   operatorError: null,
-  credRows: null,
-  credRowsLoading: false,
-  credRowsError: null,
-  brokerSubmitting: false,
-  brokerError: null,
-  validating: false,
-  validation: null,
-  validationError: null,
 };
 
 export type WizardAction =
   | { type: "OPERATOR_SUBMIT_START" }
   | { type: "OPERATOR_SUBMIT_SUCCESS"; operator: Operator }
-  | { type: "OPERATOR_SUBMIT_ERROR" }
-  | { type: "BROKER_CREDS_LOAD_START" }
-  | { type: "BROKER_CREDS_LOAD_SUCCESS"; rows: BrokerCredentialView[] }
-  | { type: "BROKER_CREDS_LOAD_ERROR"; error: string }
-  | { type: "BROKER_SUBMIT_START" }
-  | { type: "BROKER_SUBMIT_SUCCESS"; rows: BrokerCredentialView[] }
-  | { type: "BROKER_SUBMIT_ERROR"; error: string; rows: BrokerCredentialView[] | null }
-  | { type: "VALIDATION_START" }
-  | { type: "VALIDATION_SUCCESS"; result: ValidateCredentialResponse }
-  | { type: "VALIDATION_ERROR"; error: string }
-  | { type: "VALIDATION_CLEAR" };
+  | { type: "OPERATOR_SUBMIT_ERROR" };
 
 export function wizardReducer(state: WizardState, action: WizardAction): WizardState {
   switch (action.type) {
@@ -90,7 +46,6 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
     case "OPERATOR_SUBMIT_SUCCESS":
       return {
         ...state,
-        step: "broker",
         pendingOperator: action.operator,
         operatorSubmitting: false,
         operatorError: null,
@@ -98,65 +53,11 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
     case "OPERATOR_SUBMIT_ERROR":
       // #98 non-leaky contract: never propagate err.message into state.
       return { ...state, operatorSubmitting: false, operatorError: GENERIC_ERROR };
-    case "BROKER_CREDS_LOAD_START":
-      return { ...state, credRowsLoading: true, credRowsError: null };
-    case "BROKER_CREDS_LOAD_SUCCESS":
-      return { ...state, credRowsLoading: false, credRows: action.rows };
-    case "BROKER_CREDS_LOAD_ERROR":
-      // credRows=null → deriveCredentialSetMode returns 'create'.
-      return {
-        ...state,
-        credRowsLoading: false,
-        credRowsError: action.error,
-        credRows: null,
-      };
-    case "BROKER_SUBMIT_START":
-      return { ...state, brokerSubmitting: true, brokerError: null };
-    case "BROKER_SUBMIT_SUCCESS":
-      return {
-        ...state,
-        brokerSubmitting: false,
-        brokerError: null,
-        credRows: action.rows,
-      };
-    case "BROKER_SUBMIT_ERROR":
-      return {
-        ...state,
-        brokerSubmitting: false,
-        brokerError: action.error,
-        credRows: action.rows,
-      };
-    case "VALIDATION_START":
-      return { ...state, validating: true, validation: null, validationError: null };
-    case "VALIDATION_SUCCESS":
-      return {
-        ...state,
-        validating: false,
-        validation: action.result,
-        validationError: null,
-      };
-    case "VALIDATION_ERROR":
-      return { ...state, validating: false, validationError: action.error };
-    case "VALIDATION_CLEAR":
-      // Clears prior result/error without touching `validating` — used
-      // when inputs change so the operator doesn't see a stale pass/fail
-      // banner against new values.
-      return { ...state, validation: null, validationError: null };
+    default: {
+      const _exhaustive: never = action;
+      return _exhaustive;
+    }
   }
-}
-
-// ---------------------------------------------------------------------------
-// Error classifier (pure; unit-tested)
-// ---------------------------------------------------------------------------
-
-export function classifyBrokerSaveError(err: unknown): string {
-  if (err instanceof ApiError && err.status === 409) {
-    return "A credential with that label already exists. Revoke it from Settings to replace.";
-  }
-  if (err instanceof ApiError && err.status === 400) {
-    return "Invalid API key or user key value.";
-  }
-  return "Could not save credential.";
 }
 
 // ---------------------------------------------------------------------------
@@ -164,164 +65,66 @@ export function classifyBrokerSaveError(err: unknown): string {
 // ---------------------------------------------------------------------------
 
 export interface UseSetupWizardOptions {
-  onComplete: () => void;
+  /**
+   * Called after a successful operator-create with the operator
+   * returned by ``POST /auth/setup``. The hook MUST pass the
+   * operator through this argument rather than expect callers to
+   * read `state.pendingOperator` — a closure captured at submit
+   * time would otherwise see a stale state snapshot and skip
+   * `markAuthenticated`.
+   */
+  onComplete: (operator: Operator) => void;
 }
 
-export interface OperatorSubmitForm {
-  username: string;
-  password: string;
-  setupToken: string; // raw input; hook trims + coerces empty → null
+export interface UseSetupWizardResult {
+  state: WizardState;
+  submitOperator: (input: {
+    username: string;
+    password: string;
+    setupToken: string;
+  }) => Promise<void>;
 }
 
-export interface BrokerSubmitForm {
-  apiKey: string;
-  userKey: string;
-}
-
-export type BrokerSubmitResult =
-  | { ok: true; recoveryPhrase: readonly string[] | null }
-  | { ok: false };
-
-export function useSetupWizard({ onComplete }: UseSetupWizardOptions) {
+export function useSetupWizard(opts: UseSetupWizardOptions): UseSetupWizardResult {
   const [state, dispatch] = useReducer(wizardReducer, initialWizardState);
 
-  const loadCredentials = useCallback(async (): Promise<void> => {
-    dispatch({ type: "BROKER_CREDS_LOAD_START" });
-    try {
-      const rows = await listBrokerCredentials();
-      dispatch({ type: "BROKER_CREDS_LOAD_SUCCESS", rows });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to load credentials";
-      dispatch({ type: "BROKER_CREDS_LOAD_ERROR", error: msg });
-    }
-  }, []);
+  // Stash onComplete in a ref so submitOperator's identity stays
+  // stable across renders. Callers commonly inline a closure for
+  // onComplete each render, which would otherwise force submitOperator
+  // (via useCallback deps) to recreate on every parent state tick.
+  const onCompleteRef = useRef(opts.onComplete);
+  useEffect(() => {
+    onCompleteRef.current = opts.onComplete;
+  }, [opts.onComplete]);
 
-  const submitOperator = useCallback(async (form: OperatorSubmitForm): Promise<boolean> => {
-    dispatch({ type: "OPERATOR_SUBMIT_START" });
-    try {
-      const trimmed = form.setupToken.trim();
-      const { operator } = await postSetup(
-        form.username,
-        form.password,
-        trimmed === "" ? null : trimmed,
-      );
-      dispatch({ type: "OPERATOR_SUBMIT_SUCCESS", operator });
-      return true;
-    } catch {
-      // #98: never leak err.message. Reducer sets GENERIC_ERROR unconditionally.
-      dispatch({ type: "OPERATOR_SUBMIT_ERROR" });
-      return false;
-    }
-  }, []);
-
-  const submitBroker = useCallback(
-    async (form: BrokerSubmitForm): Promise<BrokerSubmitResult> => {
-      // Snapshot mode before save so we can decide whether to fire the
-      // first-run universe-sync bootstrap (only on first-time create).
-      const derived = deriveCredentialSetMode(state.credRows);
-      const mode = derived.mode;
-      const missingLabel = derived.missingLabel;
-      const wasCreate = mode === "create";
-
-      dispatch({ type: "BROKER_SUBMIT_START" });
+  const submitOperator = useCallback(
+    async ({
+      username,
+      password,
+      setupToken,
+    }: {
+      username: string;
+      password: string;
+      setupToken: string;
+    }): Promise<void> => {
+      dispatch({ type: "OPERATOR_SUBMIT_START" });
       try {
-        let phrase: readonly string[] | null = null;
-
-        // Save api_key if needed (Create OR Repair with api_key missing).
-        if (mode === "create" || (mode === "repair" && missingLabel === "api_key")) {
-          const response = await createBrokerCredential({
-            provider: "etoro",
-            label: "api_key",
-            environment: ENVIRONMENT,
-            secret: form.apiKey,
-          });
-          if (response.recovery_phrase != null && response.recovery_phrase.length > 0) {
-            phrase = response.recovery_phrase;
-          }
-        }
-
-        // Save user_key if needed (Create OR Repair with user_key missing).
-        if (mode === "create" || (mode === "repair" && missingLabel === "user_key")) {
-          await createBrokerCredential({
-            provider: "etoro",
-            label: "user_key",
-            environment: ENVIRONMENT,
-            secret: form.userKey,
-          });
-        }
-
-        // Refresh credRows post-save. Failure here must NOT flip the
-        // wizard into the error path — the saves already succeeded and
-        // retrying would 409 on the rows that are already persisted.
-        // Keep credRows at whatever pre-save state we had; the next
-        // step-2 mount (if any) will re-fetch.
-        let rows: BrokerCredentialView[] = state.credRows ?? [];
-        try {
-          rows = await listBrokerCredentials();
-        } catch {
-          // swallow — post-save read is best-effort
-        }
-        dispatch({ type: "BROKER_SUBMIT_SUCCESS", rows });
-
-        // First-run bootstrap: fire-and-forget universe sync, only on
-        // first-time create (not Repair). Matches SetupPage.tsx:213-219.
-        if (wasCreate) {
-          void runJob("nightly_universe_sync").catch(() => {});
-        }
-
-        return { ok: true, recoveryPhrase: phrase };
-      } catch (err) {
-        const msg = classifyBrokerSaveError(err);
-        let rows: BrokerCredentialView[] | null = null;
-        try {
-          rows = await listBrokerCredentials();
-        } catch {
-          // swallow — deriveCredentialSetMode(null) falls back to 'create'
-        }
-        dispatch({ type: "BROKER_SUBMIT_ERROR", error: msg, rows });
-        return { ok: false };
+        const { operator } = await postSetup(
+          username,
+          password,
+          setupToken === "" ? null : setupToken,
+        );
+        dispatch({ type: "OPERATOR_SUBMIT_SUCCESS", operator });
+        // Pass the operator directly — relying on
+        // `state.pendingOperator` here would read a stale closure
+        // snapshot.
+        onCompleteRef.current(operator);
+      } catch {
+        dispatch({ type: "OPERATOR_SUBMIT_ERROR" });
       }
     },
-    [state.credRows],
+    [],
   );
 
-  const skipBroker = useCallback((): void => {
-    onComplete();
-  }, [onComplete]);
-
-  const completeWizard = useCallback((): void => {
-    onComplete();
-  }, [onComplete]);
-
-  const clearValidation = useCallback((): void => {
-    dispatch({ type: "VALIDATION_CLEAR" });
-  }, []);
-
-  const validateCredentials = useCallback(async (form: BrokerSubmitForm): Promise<void> => {
-    dispatch({ type: "VALIDATION_START" });
-    try {
-      const result = await validateBrokerCredential({
-        api_key: form.apiKey,
-        user_key: form.userKey,
-        environment: ENVIRONMENT,
-      });
-      dispatch({ type: "VALIDATION_SUCCESS", result });
-    } catch {
-      dispatch({
-        type: "VALIDATION_ERROR",
-        error: "Could not reach the validation endpoint.",
-      });
-    }
-  }, []);
-
-  return {
-    state,
-    loadCredentials,
-    submitOperator,
-    submitBroker,
-    skipBroker,
-    completeWizard,
-    validateCredentials,
-    clearValidation,
-  };
+  return { state, submitOperator };
 }
