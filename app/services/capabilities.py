@@ -178,8 +178,16 @@ _PRESENCE_QUERIES: dict[tuple[str, str], str] = {
         "SELECT EXISTS(SELECT 1 FROM instrument_business_summary b WHERE b.instrument_id = %s)"
     ),
     ("insider", "sec_form4"): ("SELECT EXISTS(SELECT 1 FROM insider_transactions t WHERE t.instrument_id = %s)"),
-    # ``ownership`` (sec_13f / sec_13d_13g) — no eBull table yet,
-    # falls through to the dict-miss → False branch below.
+    # ``ownership`` panel — wired via the post-#788 ``ownership_*_current``
+    # tables (#905 read-path cutover). Without these entries, the
+    # ownership panel stayed permanently hidden even when the
+    # rollup had data — Codex pre-push catch on PR #941.
+    ("ownership", "sec_13f"): (
+        "SELECT EXISTS(SELECT 1 FROM ownership_institutions_current o WHERE o.instrument_id = %s)"
+    ),
+    ("ownership", "sec_13d_13g"): (
+        "SELECT EXISTS(SELECT 1 FROM ownership_blockholders_current o WHERE o.instrument_id = %s)"
+    ),
     # UK / EU / Asia / MENA / crypto / commodity / FX / Canada
     # providers — no eBull tables yet for any of these, so missing
     # entries fall through to ``data_present = False`` via the
