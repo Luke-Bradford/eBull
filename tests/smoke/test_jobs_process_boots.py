@@ -70,8 +70,6 @@ def test_jobs_bootstrap_master_key_installs_returned_key() -> None:
 
     fake_boot = BootResult(
         state="normal",
-        needs_setup=False,
-        recovery_required=False,
         broker_encryption_key=fake_key,
     )
 
@@ -88,9 +86,9 @@ def test_jobs_bootstrap_master_key_installs_returned_key() -> None:
 
 
 def test_jobs_bootstrap_master_key_no_op_when_bootstrap_returns_no_key() -> None:
-    """Pin the recovery / clean-install branch: when bootstrap returns
+    """Pin the clean-install branch: when bootstrap returns
     ``broker_encryption_key=None`` (no ``EBULL_SECRETS_KEY`` configured
-    or no ciphertext on disk), the helper must NOT call
+    and no ciphertext on disk), the helper must NOT call
     ``set_active_key`` — leaving the cipher unloaded so subsequent
     code paths surface ``MasterKeyNotLoadedError`` correctly rather
     than silently using a stale or zeroed key."""
@@ -109,9 +107,7 @@ def test_jobs_bootstrap_master_key_no_op_when_bootstrap_returns_no_key() -> None
     fake_pool.connection.return_value.__exit__.return_value = None
 
     fake_boot = BootResult(
-        state="recovery_required",
-        needs_setup=False,
-        recovery_required=True,
+        state="clean_install",
         broker_encryption_key=None,
     )
 

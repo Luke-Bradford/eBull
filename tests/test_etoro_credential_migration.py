@@ -29,8 +29,6 @@ def _normal_boot(key: bytes | None = None) -> BootResult:
     return BootResult(
         state="normal",
         broker_encryption_key=key if key is not None else b"\x00" * 32,
-        needs_setup=False,
-        recovery_required=False,
     )
 
 
@@ -171,8 +169,6 @@ class TestMigrateEtoroCredential:
         mock_master_key.bootstrap.return_value = BootResult(
             state="clean_install",
             broker_encryption_key=None,
-            needs_setup=True,
-            recovery_required=False,
         )
         mock_conn = MagicMock()
         mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -180,35 +176,6 @@ class TestMigrateEtoroCredential:
 
         assert main() == 1
         # active key MUST NOT be installed when bootstrap returned None
-        mock_set_active.assert_not_called()
-
-    @patch("scripts.migrate_etoro_credential.set_active_key")
-    @patch("scripts.migrate_etoro_credential.master_key")
-    @patch("scripts.migrate_etoro_credential.psycopg")
-    @patch("scripts.migrate_etoro_credential.settings")
-    @patch("scripts.migrate_etoro_credential._READ_KEY", "test-key-12345")
-    @patch("scripts.migrate_etoro_credential._WRITE_KEY", "")
-    def test_recovery_required_state_exits_nonzero(
-        self,
-        mock_settings: MagicMock,
-        mock_psycopg: MagicMock,
-        mock_master_key: MagicMock,
-        mock_set_active: MagicMock,
-    ) -> None:
-        from scripts.migrate_etoro_credential import main
-
-        mock_settings.database_url = "postgresql://test"
-        mock_master_key.bootstrap.return_value = BootResult(
-            state="recovery_required",
-            broker_encryption_key=None,
-            needs_setup=False,
-            recovery_required=True,
-        )
-        mock_conn = MagicMock()
-        mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_psycopg.connect.return_value.__exit__ = MagicMock(return_value=False)
-
-        assert main() == 1
         mock_set_active.assert_not_called()
 
     @patch("scripts.migrate_etoro_credential.master_key")
@@ -290,8 +257,6 @@ class TestMigrateEtoroCredential:
         mock_master_key.bootstrap.return_value = BootResult(
             state="clean_install",
             broker_encryption_key=env_key,
-            needs_setup=True,
-            recovery_required=False,
         )
         mock_conn = MagicMock()
         mock_psycopg.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)

@@ -118,26 +118,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     with pool.connection() as conn:
         ensure_startup_token(operators_empty=operators_empty(conn))
 
-        # Master-key bootstrap (#114 / ADR-0003). Must run AFTER the
-        # pool is open (we need the connection to verify ciphertext)
-        # and BEFORE yield (so the boot state is fixed before the
-        # first request lands). Never raises on a missing file -- a
-        # missing file with existing credentials puts the app in
-        # recovery_required mode and the frontend routes to /recover.
-        # Does raise on EBULL_SECRETS_KEY mismatch with existing
-        # ciphertext (fail-loud, ADR-0003 §6).
+        # Master-key bootstrap (#114 / ADR-0003, amended 2026-05-07).
+        # Must run AFTER the pool is open (we need the connection to
+        # verify ciphertext + run stale-cipher soft-revoke) and BEFORE
+        # yield (so the boot state is fixed before the first request
+        # lands). Never raises on a missing file. Does raise on
+        # EBULL_SECRETS_KEY mismatch with existing ciphertext
+        # (fail-loud, ADR-0003 §9).
         boot = master_key.bootstrap(conn)
     app.state.boot_state = boot.state
-    app.state.needs_setup = boot.needs_setup
-    app.state.recovery_required = boot.recovery_required
     app.state.broker_key_loaded = boot.broker_encryption_key is not None
     if boot.broker_encryption_key is not None:
         set_broker_encryption_key(boot.broker_encryption_key)
     logger.info(
-        "Master-key bootstrap: state=%s needs_setup=%s recovery_required=%s",
+        "Master-key bootstrap: state=%s broker_key_loaded=%s",
         boot.state,
-        boot.needs_setup,
-        boot.recovery_required,
+        boot.broker_encryption_key is not None,
     )
 
     # Reaper relocates to the jobs entrypoint in #719. The API

@@ -144,10 +144,9 @@ def _bootstrap_master_key(pool: Any) -> None:
     key is installed before the first job fires).
 
     Never raises on a missing ``EBULL_SECRETS_KEY`` — a clean install
-    or a recovery_required state are valid post-boot conditions and
-    the operator clears them through the API setup flow. Raises only
-    on EBULL_SECRETS_KEY mismatch with existing ciphertext (fail-loud
-    per ADR-0003 §6).
+    is a valid post-boot condition and the operator clears it through
+    the API setup flow. Raises only on EBULL_SECRETS_KEY mismatch with
+    existing ciphertext (fail-loud per ADR-0003 §9).
 
     Factored out as a module-level helper so the smoke test can drive
     it without acquiring the singleton advisory lock — the live dev
@@ -159,9 +158,8 @@ def _bootstrap_master_key(pool: Any) -> None:
     if boot.broker_encryption_key is not None:
         set_broker_encryption_key(boot.broker_encryption_key)
     logger.info(
-        "jobs entrypoint: master-key bootstrap state=%s recovery_required=%s broker_key_loaded=%s",
+        "jobs entrypoint: master-key bootstrap state=%s broker_key_loaded=%s",
         boot.state,
-        boot.recovery_required,
         boot.broker_encryption_key is not None,
     )
 

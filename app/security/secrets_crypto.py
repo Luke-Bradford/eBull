@@ -6,7 +6,7 @@ Design:
     :func:`set_active_key`. The lifespan calls master_key.bootstrap()
     which either loads the key from the persisted root secret, accepts
     an ``EBULL_SECRETS_KEY`` env override, or leaves the cache empty
-    if the server is in clean_install / recovery_required mode. This
+    if the server is in clean_install mode (no key yet). This
     module no longer reads ``settings.secrets_key`` directly --
     bootstrap policy lives in master_key, not here.
   * Every ciphertext row carries a ``key_version`` column. The version is
