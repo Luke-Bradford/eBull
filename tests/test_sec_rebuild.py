@@ -227,11 +227,28 @@ class TestDiscoveryPass:
         secondary_row = get_manifest_row(ebull_test_conn, "0000320193-22-000050")
         assert secondary_row is not None
         assert secondary_row.source == "sec_def14a"
+        # The recent payload's only DEF 14A is already seeded so it
+        # contributes 0 to discovery_new_manifest_rows; the secondary
+        # page contributes 1. Bot review NITPICK: ``>= 1`` would pass
+        # even if the secondary walk did nothing as long as recent
+        # introduced a new accession. ``>= 1`` here proves the new
+        # code path because the recent payload is intentionally
+        # already-seeded (no recent contribution).
         assert stats.discovery_new_manifest_rows >= 1
 
         # Confirm the secondary URL was actually fetched (would fail
         # silently without the pagination walk).
         assert any("submissions-001.json" in u for u in seen_urls), f"rebuild did not fetch secondary page: {seen_urls}"
+
+        # Codex pre-push: rebuild must NOT re-fetch the primary CIK
+        # JSON to read ``files[]`` — that doubles the request count
+        # and creates a new failure mode. Now that ``FreshnessDelta``
+        # carries ``files_pages`` from the original parse, the primary
+        # is fetched exactly once.
+        primary_fetches = [u for u in seen_urls if u.endswith("CIK0000320193.json")]
+        assert len(primary_fetches) == 1, (
+            f"primary CIK JSON should be fetched exactly once; saw {len(primary_fetches)}: {primary_fetches}"
+        )
 
     def test_discovery_isolates_secondary_page_failures(
         self,

@@ -35,7 +35,6 @@ missed an accession.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -273,7 +272,7 @@ def _discovery_pass(
         # otherwise an aged-out accession can never be repaired.
         # Atom / per-CIK polling intentionally stay on ``recent`` (cheap
         # path); only rebuild pays the secondary-page cost.
-        if delta.has_more_in_files:
+        if delta.has_more_in_files and delta.files_pages:
             new_rows += _walk_secondary_pages(
                 conn,
                 http_get=http_get,
@@ -282,6 +281,7 @@ def _discovery_pass(
                 subject_id=sid,
                 instrument_id=instrument_id,
                 sources_set=sources_set,
+                files_pages=delta.files_pages,
             )
 
     return new_rows
@@ -296,10 +296,16 @@ def _walk_secondary_pages(
     subject_id: str,
     instrument_id: int | None,
     sources_set: set[ManifestSource],
+    files_pages: list[str],
 ) -> int:
     """Walk every ``filings.files[]`` secondary page for one CIK (#936).
 
-    Mirrors the pagination logic in
+    ``files_pages`` is sourced from the ``FreshnessDelta`` returned by
+    ``check_freshness`` — the primary CIK JSON has already been
+    fetched + parsed by the time this helper runs, so we re-use the
+    page list rather than re-fetching the primary body.
+
+    Mirrors the per-page UPSERT logic in
     ``app/jobs/sec_first_install_drain.py:_drain_secondary_pages``,
     but scoped to the rebuild's source set. Filters in-page rows to
     ``sources_set`` so a rebuild scoped to ``sec_def14a`` does not
@@ -307,34 +313,20 @@ def _walk_secondary_pages(
     page.
     """
     cik_padded = cik.zfill(10)
-    primary_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
     headers = {
         "User-Agent": "eBull research/1.0 contact@example.com",
         "Accept-Encoding": "gzip, deflate",
     }
-    # Codex pre-push: ``http_get`` and ``parse_submissions_page`` can
-    # raise (transport errors, malformed body, unexpected JSON shape).
-    # Isolate per-page failures so one bad secondary page does not
-    # abort the whole rebuild — the rest of the scope still drains.
-    try:
-        primary_status, primary_body = http_get(primary_url, headers)
-    except Exception as exc:  # noqa: BLE001 — transport-isolated, see comment above
-        logger.warning("sec rebuild (secondary): primary fetch raised cik=%s: %s", cik, exc)
-        return 0
-    if primary_status != 200:
-        return 0
-    try:
-        primary_payload = json.loads(primary_body)
-    except json.JSONDecodeError:
-        return 0
-
-    files = (primary_payload.get("filings", {}) or {}).get("files", []) or []
     new_rows = 0
-    for page_meta in files:
-        name = page_meta.get("name") if isinstance(page_meta, dict) else None
+    for name in files_pages:
         if not name:
             continue
         page_url = f"https://data.sec.gov/submissions/{name}"
+        # Codex pre-push: ``http_get`` and ``parse_submissions_page``
+        # can raise (transport errors, malformed body, unexpected JSON
+        # shape). Isolate per-page failures so one bad secondary page
+        # does not abort the whole rebuild — the rest of the scope
+        # still drains.
         try:
             status, body = http_get(page_url, headers)
         except Exception as exc:  # noqa: BLE001 — per-page isolation

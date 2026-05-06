@@ -55,7 +55,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -100,12 +100,20 @@ class FreshnessDelta:
     ``last_known_filing_id`` (or all when watermark is None / not in
     response). ``has_more_in_files`` is true when SEC's submissions.json
     paginates older filings into ``files[]`` — meaningful for
-    first-install / rebuild paths only."""
+    first-install / rebuild paths only.
+
+    ``files_pages`` carries the names of those secondary pages
+    extracted from the same primary fetch. Callers (#936 rebuild)
+    walk these without re-issuing the primary request — pre-#959
+    rewrite, ``_walk_secondary_pages`` re-fetched the primary CIK
+    JSON purely to read ``filings.files[]`` again, doubling the
+    request count + creating a new failure mode."""
 
     cik: str
     new_filings: list[FilingIndexRow]
     last_filed_at: datetime | None
     has_more_in_files: bool
+    files_pages: list[str] = field(default_factory=list)
 
 
 def _zero_pad_cik(cik: str) -> str:
@@ -245,6 +253,24 @@ def check_freshness(
         wanted = set(sources)
         rows = [r for r in rows if r.source is not None and r.source in wanted]
 
+    # Extract ``filings.files[*].name`` from the same primary body so
+    # ``_walk_secondary_pages`` (#936) does not re-fetch the primary
+    # JSON. Skip silently on JSON-decode error — the row parse above
+    # already succeeded, so the body is well-formed for the rows path;
+    # the files block is best-effort secondary metadata.
+    files_pages: list[str] = []
+    try:
+        payload = json.loads(body) if isinstance(body, (bytes, str)) else body
+        if isinstance(payload, dict):
+            files_meta = (payload.get("filings", {}) or {}).get("files", []) or []
+            for meta in files_meta:
+                if isinstance(meta, dict):
+                    name = meta.get("name")
+                    if isinstance(name, str) and name:
+                        files_pages.append(name)
+    except json.JSONDecodeError, TypeError:
+        pass
+
     # Filter to strictly newer than the watermark. SEC's recent array
     # is ordered newest-first; we walk until we hit the watermark and
     # stop — preserves chronological order in the result and avoids
@@ -272,4 +298,5 @@ def check_freshness(
         new_filings=new_filings,
         last_filed_at=last_filed_at,
         has_more_in_files=has_more,
+        files_pages=files_pages,
     )
