@@ -36,6 +36,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import psycopg
+import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
@@ -60,6 +61,7 @@ from app.services.broker_credentials import (
     revoke_credential,
     store_credential,
 )
+from app.services.credential_health import record_health_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -780,10 +782,258 @@ def validate_stored(
     # Commit audit rows before the external probe call (audit durability).
     conn.commit()
 
+    # Look up credential_ids before the probe so we can write through
+    # health outcomes (#975 / #974/A). Side-tx writes from
+    # record_health_outcome use the request app's pool.
+    cred_ids = _lookup_active_credential_ids(
+        conn,
+        operator_id=session.operator_id,
+        provider="etoro",
+        environment=environment,
+    )
+
     try:
-        return _probe_etoro(api_key, user_key, environment)
+        result = _probe_etoro(api_key, user_key, environment)
     except CredentialValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid environment for stored credential validation.",
         ) from exc
+
+    # Write the probe outcome through to credential health for both
+    # rows. validate-stored is THE canonical probe path — source='probe'
+    # is required to clear a sticky REJECTED row, per the credential
+    # health contract.
+    request_pool = getattr(request.app.state, "pool", None)
+    if request_pool is not None:
+        for cred_id in cred_ids.values():
+            try:
+                record_health_outcome(
+                    credential_id=cred_id,
+                    success=result.auth_valid,
+                    source="probe",
+                    error_detail=result.note if not result.auth_valid else None,
+                    pool=request_pool,
+                )
+            except Exception:
+                # Best-effort beyond the side-tx contract per spec.
+                # The probe response IS the user-facing outcome — a
+                # health-write failure must not change the API result.
+                logger.warning(
+                    "validate-stored: credential health write-through failed",
+                    exc_info=True,
+                )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# PUT /broker-credentials/replace — atomic revoke + create (#975 / #974/A)
+# ---------------------------------------------------------------------------
+
+
+class ReplaceCredentialRequest(BaseModel):
+    """Atomic revoke + create for an existing label.
+
+    Replaces the active credential row for ``(operator, provider, label,
+    environment)`` in a single transaction so subscribers (orchestrator
+    pre-flight gate, WS subscriber) never observe a transient MISSING
+    state between the revoke and create. Per spec section "Atomic
+    credential replacement".
+    """
+
+    provider: str = Field(min_length=1, max_length=64)
+    label: str = Field(min_length=1, max_length=255)
+    environment: str = Field(default="demo", min_length=1, max_length=16)
+    secret: str = Field(min_length=1, max_length=4096)
+
+
+class ReplaceCredentialResponse(BaseModel):
+    """Response for PUT /broker-credentials/replace.
+
+    ``changed=False`` when the new secret is identical to the active
+    row's plaintext (identical-secret short-circuit). The credential
+    metadata still reflects the existing row.
+    """
+
+    changed: bool
+    credential: CredentialMetadataOut
+
+
+@router.put("/replace", response_model=ReplaceCredentialResponse)
+def replace(
+    body: ReplaceCredentialRequest,
+    request: Request,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> ReplaceCredentialResponse:
+    """Atomically revoke and re-insert an active broker credential row.
+
+    All work runs in one transaction:
+      1. SELECT the active row for the supplied label FOR UPDATE.
+      2. Decrypt the existing ciphertext and compare to the new
+         plaintext. If identical, short-circuit with changed=False;
+         no row update, no NOTIFY (avoids spurious VALID -> UNTESTED
+         -> VALID flap from an idempotent re-save).
+      3. Otherwise: ``revoked_at = NOW()`` on the existing row,
+         INSERT a new row with ``health_state='untested'``.
+      4. Commit.
+
+    Returns 404 if no active row exists for the label (callers should
+    POST instead). Returns 503 if the existing ciphertext cannot be
+    decrypted (key material issue).
+
+    The new row is UNTESTED until ``validate-stored`` probe success
+    flips it to VALID. Subscribers see one NOTIFY at most: the
+    underlying row update fires no NOTIFY itself (handled by the
+    insert default state); when validate-stored runs after this
+    endpoint and probes successfully, that probe's write-through
+    fires the VALID NOTIFY.
+    """
+    if getattr(request.app.state, "recovery_required", False):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="recovery required",
+        )
+
+    try:
+        provider_norm = normalise_provider(body.provider)
+        label_norm = normalise_label(body.label)
+        env_norm = normalise_environment(body.environment)
+        secret_norm = normalise_secret(body.secret)
+    except CredentialValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    # Look up the active row for this label. We need to keep the
+    # decrypt + compare + revoke + insert together in one tx; doing
+    # the lookup inside the tx with FOR UPDATE serialises against
+    # concurrent replace calls for the same (operator, label).
+    audit_pool = getattr(request.app.state, "audit_pool", None)
+
+    with conn.transaction():
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT id, last_four
+                  FROM broker_credentials
+                 WHERE operator_id = %(op)s
+                   AND provider    = %(prov)s
+                   AND label       = %(label)s
+                   AND environment = %(env)s
+                   AND revoked_at IS NULL
+                 FOR UPDATE
+                """,
+                {
+                    "op": session.operator_id,
+                    "prov": provider_norm,
+                    "label": label_norm,
+                    "env": env_norm,
+                },
+            )
+            existing = cur.fetchone()
+
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No active credential to replace. Use POST /broker-credentials to create.",
+            )
+
+        # Identical-secret short-circuit (Codex r2.3): decrypt existing
+        # ciphertext and compare to new plaintext. Avoids the spurious
+        # VALID -> UNTESTED -> VALID flap from an idempotent re-save.
+        try:
+            existing_plaintext = load_credential_for_provider_use(
+                conn,
+                operator_id=session.operator_id,
+                provider=provider_norm,
+                label=label_norm,
+                environment=env_norm,
+                caller="replace-compare",
+                audit_pool=audit_pool,
+            )
+        except CredentialDecryptError as exc:
+            logger.error("replace: decryption of existing row failed", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Existing credential decryption failed. Check server key material.",
+            ) from exc
+
+        if existing_plaintext == secret_norm:
+            # Same secret. Return the existing row's metadata; no row
+            # update, no NOTIFY.
+            existing_meta = next(
+                (m for m in list_credentials(conn, operator_id=session.operator_id) if m.id == existing["id"]),
+                None,
+            )
+            if existing_meta is None:
+                # Logical impossibility: we just selected this row inside
+                # the transaction and now list_credentials returns no
+                # match. Fail loudly rather than silently default.
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Internal: existing credential not found in same transaction.",
+                )
+            return ReplaceCredentialResponse(
+                changed=False,
+                credential=_to_out(existing_meta),
+            )
+
+        # Different secret. Revoke the existing row, then insert.
+        revoke_credential(
+            conn,
+            credential_id=existing["id"],
+            operator_id=session.operator_id,
+        )
+        new_meta = store_credential(
+            conn,
+            operator_id=session.operator_id,
+            provider=provider_norm,
+            label=label_norm,
+            environment=env_norm,
+            plaintext=secret_norm,
+        )
+
+    return ReplaceCredentialResponse(
+        changed=True,
+        credential=_to_out(new_meta),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _lookup_active_credential_ids(
+    conn: psycopg.Connection[object],
+    *,
+    operator_id: UUID,
+    provider: str,
+    environment: str,
+) -> dict[str, UUID]:
+    """Return ``{label: credential_id}`` for the operator's active rows.
+
+    Used by validate-stored to find the rows whose health to write
+    through after a probe outcome. The probe call doesn't need the IDs
+    itself — only the outcome plumbing does.
+
+    Returns an empty dict if the operator has no active rows for the
+    provider/environment. Caller is responsible for treating that as
+    "no write-throughs to perform".
+    """
+    out: dict[str, UUID] = {}
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT id, label
+              FROM broker_credentials
+             WHERE operator_id = %(op)s
+               AND provider    = %(prov)s
+               AND environment = %(env)s
+               AND revoked_at IS NULL
+            """,
+            {"op": operator_id, "prov": provider, "env": environment},
+        )
+        for row in cur.fetchall():
+            out[row["label"]] = row["id"]
+    return out
