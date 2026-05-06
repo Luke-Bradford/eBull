@@ -16,7 +16,7 @@
  * RecoveryPhraseConfirm tests.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { SettingsPage } from "@/pages/SettingsPage";
@@ -64,13 +64,6 @@ const mockedRevoke = vi.mocked(revokeBrokerCredential);
 const mockedValidate = vi.mocked(validateBrokerCredential);
 const mockedValidateStored = vi.mocked(validateStoredCredentials);
 
-const PHRASE: readonly string[] = [
-  "alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
-  "golf", "hotel", "india", "juliet", "kilo", "lima",
-  "mike", "november", "oscar", "papa", "quebec", "romeo",
-  "sierra", "tango", "uniform", "victor", "whiskey", "xray",
-];
-
 function makeRow(overrides: Partial<BrokerCredentialView> = {}): BrokerCredentialView {
   return {
     id: "11111111-1111-1111-1111-111111111111",
@@ -93,12 +86,6 @@ function userKeyRow(): BrokerCredentialView {
   return makeRow({ id: "bbbb-2222", label: "user_key", last_four: "bbbb" });
 }
 
-function withPhrase(): CreateBrokerCredentialResponse {
-  // Post-amendment 2026-05-07: recovery_phrase removed from response.
-  // Helper kept for the .skip'd phrase tests below.
-  return { credential: makeRow() };
-}
-
 function withoutPhrase(): CreateBrokerCredentialResponse {
   return { credential: makeRow() };
 }
@@ -108,24 +95,6 @@ async function fillAndSubmit(apiKey: string, userKey: string): Promise<void> {
   await user.type(screen.getByLabelText("API key"), apiKey);
   await user.type(screen.getByLabelText("User key"), userKey);
   await user.click(screen.getByRole("button", { name: /save credential/i }));
-}
-
-async function answerChallengeCorrectly(): Promise<void> {
-  const user = userEvent.setup();
-  const labels = await screen.findAllByText(/^Word #\d+$/);
-  for (const labelText of labels) {
-    const labelEl = labelText.closest("label")!;
-    const input = within(labelEl).getByRole("textbox");
-    const position = Number.parseInt(/Word #(\d+)/.exec(labelText.textContent ?? "")![1]!, 10);
-    await user.type(input, PHRASE[position - 1]!);
-  }
-  await user.click(screen.getByRole("button", { name: "Confirm" }));
-}
-
-async function advancePastWrittenDownGate(): Promise<void> {
-  const user = userEvent.setup();
-  await user.click(await screen.findByLabelText(/I have written down/i));
-  await user.click(screen.getByRole("button", { name: "Continue" }));
 }
 
 beforeEach(() => {
@@ -347,119 +316,9 @@ describe("SettingsPage — two-key save", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Recovery phrase modal (inherited from #121, updated for two-key)
+// Recovery phrase modal — removed in #971/#972 (ADR-0003 amendment
+// 2026-05-07). Prior coverage retired.
 // ---------------------------------------------------------------------------
-
-// Post-amendment 2026-05-07 (#971/#972): the recovery-phrase modal is
-// removed. These describe blocks are skipped until they can be deleted
-// alongside the helper functions in a follow-up cleanup.
-describe.skip("SettingsPage — recovery phrase modal", () => {
-  it("opens the modal when the first create response carries a recovery_phrase", async () => {
-    mockedCreate
-      .mockResolvedValueOnce(withPhrase())   // api_key
-      .mockResolvedValueOnce(withoutPhrase()); // user_key
-    mockedList
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
-
-    render(<SettingsPage />);
-    await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("test-api-key", "test-user-key");
-
-    const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveAttribute("aria-modal", "true");
-    // Both credentials should be saved before the modal opens.
-    expect(mockedCreate).toHaveBeenCalledTimes(2);
-  });
-
-  it("does NOT open the modal when create returns no recovery_phrase", async () => {
-    mockedCreate
-      .mockResolvedValueOnce(withoutPhrase())
-      .mockResolvedValueOnce(withoutPhrase());
-    mockedList
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
-
-    render(<SettingsPage />);
-    await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("test-api-key", "test-user-key");
-
-    await waitFor(() => {
-      expect(mockedList).toHaveBeenCalledTimes(2);
-    });
-    expect(screen.queryByRole("dialog")).toBeNull();
-  });
-
-  it("closes the modal and refreshes the list after challenge passes", async () => {
-    mockedCreate
-      .mockResolvedValueOnce(withPhrase())
-      .mockResolvedValueOnce(withoutPhrase());
-    mockedList
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
-
-    render(<SettingsPage />);
-    await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("test-api-key", "test-user-key");
-    await screen.findByRole("dialog");
-
-    await advancePastWrittenDownGate();
-    await answerChallengeCorrectly();
-
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog")).toBeNull();
-    });
-    await waitFor(() => {
-      expect(mockedList).toHaveBeenCalledTimes(2);
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Phrase modal cancel gate
-// ---------------------------------------------------------------------------
-
-describe.skip("SettingsPage — phrase modal cancel gate", () => {
-  it("routes Cancel through the confirm-cancel warning", async () => {
-    const user = userEvent.setup();
-    mockedCreate
-      .mockResolvedValueOnce(withPhrase())
-      .mockResolvedValueOnce(withoutPhrase());
-    mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
-
-    render(<SettingsPage />);
-    await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("test-api-key", "test-user-key");
-    const dialog = await screen.findByRole("dialog");
-
-    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(
-      screen.getByText(/you may lose recovery ability/i),
-    ).toBeInTheDocument();
-  });
-
-  it("closes and clears the phrase when the operator confirms 'Close anyway'", async () => {
-    const user = userEvent.setup();
-    mockedCreate
-      .mockResolvedValueOnce(withPhrase())
-      .mockResolvedValueOnce(withoutPhrase());
-    mockedList.mockResolvedValueOnce([]).mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
-
-    render(<SettingsPage />);
-    await screen.findByText(/No broker credentials saved yet/i);
-    await fillAndSubmit("test-api-key", "test-user-key");
-    const dialog = await screen.findByRole("dialog");
-
-    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
-    await user.click(screen.getByRole("button", { name: "Close anyway" }));
-
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog")).toBeNull();
-    });
-    expect(mockedRevoke).not.toHaveBeenCalled();
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Backend failure

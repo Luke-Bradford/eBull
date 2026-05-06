@@ -12,7 +12,7 @@
  * Completion is a side effect (markAuthenticated + navigate) driven by
  * the component via the `onComplete` callback option.
  */
-import { useCallback, useReducer } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 
 import type { Operator } from "@/api/auth";
 import { postSetup } from "@/api/auth";
@@ -88,6 +88,15 @@ export interface UseSetupWizardResult {
 export function useSetupWizard(opts: UseSetupWizardOptions): UseSetupWizardResult {
   const [state, dispatch] = useReducer(wizardReducer, initialWizardState);
 
+  // Stash onComplete in a ref so submitOperator's identity stays
+  // stable across renders. Callers commonly inline a closure for
+  // onComplete each render, which would otherwise force submitOperator
+  // (via useCallback deps) to recreate on every parent state tick.
+  const onCompleteRef = useRef(opts.onComplete);
+  useEffect(() => {
+    onCompleteRef.current = opts.onComplete;
+  }, [opts.onComplete]);
+
   const submitOperator = useCallback(
     async ({
       username,
@@ -109,12 +118,12 @@ export function useSetupWizard(opts: UseSetupWizardOptions): UseSetupWizardResul
         // Pass the operator directly — relying on
         // `state.pendingOperator` here would read a stale closure
         // snapshot.
-        opts.onComplete(operator);
+        onCompleteRef.current(operator);
       } catch {
         dispatch({ type: "OPERATOR_SUBMIT_ERROR" });
       }
     },
-    [opts],
+    [],
   );
 
   return { state, submitOperator };
