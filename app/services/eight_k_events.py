@@ -31,6 +31,8 @@ from typing import Any, Protocol
 
 import psycopg
 
+from app.services.sec_manifest import is_amendment_form
+
 logger = logging.getLogger(__name__)
 
 
@@ -240,11 +242,13 @@ def parse_8k_filing(
         return None
 
     # Document type — prefer 8-K/A when the header states an amendment.
+    # Route through ``is_amendment_form`` so every SEC amendment
+    # detection path uses the same canonical helper (#939).
     doc_match = _DOC_TYPE_RE.search(text)
     if doc_match is None:
         return None
     document_type = doc_match.group(1).upper()
-    is_amendment = document_type == "8-K/A"
+    is_amendment = is_amendment_form(document_type)
 
     date_of_report_m = _DATE_OF_REPORT_RE.search(text)
     date_of_report = _parse_date(date_of_report_m.group("when")) if date_of_report_m else None

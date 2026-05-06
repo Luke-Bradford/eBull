@@ -82,10 +82,13 @@ class SecDocFetcher(Protocol):
 
 # DEF 14A and DEFA14A both list beneficial ownership; DEFM14A
 # (merger proxies) typically don't but a few large-cap mergers
-# include the table for the surviving entity. Include all three —
-# the parser tombstones any accession whose body has no recognisable
-# table.
-_DEF14A_FORM_TYPES: frozenset[str] = frozenset(("DEF 14A", "DEFA14A", "DEFM14A"))
+# include the table for the surviving entity. ``DEFR14A`` (revised
+# definitive proxy, #939) is the amendment-style proxy that the
+# manifest now classifies as ``sec_def14a`` — keep this set in lock-
+# step with ``_FORM_TO_SOURCE`` in ``app.services.sec_manifest`` so
+# the ingester sees every accession the manifest enqueues. The parser
+# tombstones any accession whose body has no recognisable table.
+_DEF14A_FORM_TYPES: frozenset[str] = frozenset(("DEF 14A", "DEFA14A", "DEFM14A", "DEFR14A"))
 
 
 @dataclass(frozen=True)

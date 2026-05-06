@@ -33,7 +33,7 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime
 
 from app.providers.implementations.sec_submissions import FilingIndexRow
-from app.services.sec_manifest import map_form_to_source
+from app.services.sec_manifest import is_amendment_form, map_form_to_source
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ def parse_daily_index(body: bytes, *, default_filed_at: date) -> Iterator[Filing
             filed_at=filed_at,
             accepted_at=None,
             primary_document_url=primary_url,
-            is_amendment=form.endswith("/A"),
+            is_amendment=is_amendment_form(form),
         )
 
 

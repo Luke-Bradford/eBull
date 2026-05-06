@@ -97,6 +97,28 @@ class TestParseSubmissionsPage:
         assert rows[1].is_amendment is False
         assert rows[0].source == "sec_form4"  # /A still maps to base source
 
+    def test_amendment_flag_recognises_non_suffix_forms(self) -> None:
+        # Regression for #939. ``DEFA14A`` / ``DEFR14A`` are amendments
+        # of ``DEF 14A`` that encode the amendment in the form code
+        # rather than via a ``/A`` suffix. The submissions parser used
+        # ``form.endswith("/A")`` which silently mis-classified these
+        # as initial filings, breaking supersession in
+        # ``ownership_*_current``. Route every amendment check through
+        # ``app.services.sec_manifest.is_amendment_form``.
+        # Also asserts ``source == "sec_def14a"`` for both: a missing
+        # ``DEFR14A`` mapping in ``_FORM_TO_SOURCE`` would let
+        # downstream ``record_manifest_entry`` callers silently drop
+        # the row even with the amendment flag corrected.
+        block = _aapl_recent_block()
+        block["filings"]["recent"]["form"] = ["DEFA14A", "DEFR14A", "4"]  # type: ignore[index]
+        rows, _ = parse_submissions_page(block, cik="320193")
+        assert rows[0].is_amendment is True
+        assert rows[0].source == "sec_def14a"
+        assert rows[1].is_amendment is True
+        assert rows[1].source == "sec_def14a"
+        assert rows[2].is_amendment is False
+        assert rows[2].source == "sec_form4"
+
     def test_skips_unmapped_forms(self) -> None:
         # ``S-1``, ``CORRESP`` etc are not in the manifest source set.
         # They DO produce rows (we still see the form), but ``source`` is None.
@@ -254,6 +276,43 @@ class TestDailyIndex:
         rows = list(parse_daily_index(_DAILY_INDEX_SAMPLE, default_filed_at=date(2026, 4, 30)))
         sources = {r.source for r in rows}
         assert sources == {"sec_8k", "sec_form4", "sec_13f_hr"}
+
+    def test_amendment_flag_recognises_non_suffix_forms(self) -> None:
+        # Regression for #939. The daily-index parser used
+        # ``form.endswith("/A")`` which silently missed non-suffix
+        # amendments like ``DEFA14A`` / ``DEFR14A``. Route every
+        # amendment check through
+        # ``app.services.sec_manifest.is_amendment_form``.
+        sample = (
+            b"Description: Master Index of EDGAR Dissemination Feed\n"
+            b"\n"
+            b"CIK|Company Name|Form Type|Date Filed|Filename\n"
+            b"--------------------------------------------------------------------------------\n"
+            b"320193|Apple Inc.|DEFA14A|2026-04-30|edgar/data/320193/0000320193-26-000044.txt\n"
+            b"320193|Apple Inc.|DEFR14A|2026-04-30|edgar/data/320193/0000320193-26-000045.txt\n"
+            b"320193|Apple Inc.|4/A|2026-04-30|edgar/data/320193/0000320193-26-000046.txt\n"
+            b"320193|Apple Inc.|4|2026-04-30|edgar/data/320193/0000320193-26-000047.txt\n"
+        )
+        rows = list(parse_daily_index(sample, default_filed_at=date(2026, 4, 30)))
+        assert len(rows) == 4
+        amendment_by_form = {r.form: r.is_amendment for r in rows}
+        assert amendment_by_form == {
+            "DEFA14A": True,
+            "DEFR14A": True,
+            "4/A": True,
+            "4": False,
+        }
+        # Also assert source mapping so a missing ``DEFR14A`` entry in
+        # ``_FORM_TO_SOURCE`` would fail this test. Without the
+        # mapping, daily-index reconciliation would silently drop the
+        # row even with the amendment flag corrected.
+        source_by_form = {r.form: r.source for r in rows}
+        assert source_by_form == {
+            "DEFA14A": "sec_def14a",
+            "DEFR14A": "sec_def14a",
+            "4/A": "sec_form4",
+            "4": "sec_form4",
+        }
 
     def test_filed_at_from_row_date(self) -> None:
         rows = list(parse_daily_index(_DAILY_INDEX_SAMPLE, default_filed_at=date(2026, 4, 30)))
