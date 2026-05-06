@@ -4,12 +4,20 @@
     {
       "label": "stack: prepare (postgres + migrate)",
       "type": "shell",
-      "command": "./stack.ps1",
-      "options": {
-        "shell": {
-          "executable": "pwsh",
-          "args": ["-NoProfile", "-Command"]
+      "windows": {
+        "command": "./stack.ps1",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
         }
+      },
+      "osx": {
+        "command": "./stack.sh"
+      },
+      "linux": {
+        "command": "./stack.sh"
       },
       "presentation": {
         "reveal": "always",
@@ -68,12 +76,20 @@
     {
       "label": "restart: all (backend + frontend)",
       "type": "shell",
-      "command": "./stack-restart.ps1",
-      "options": {
-        "shell": {
-          "executable": "pwsh",
-          "args": ["-NoProfile", "-Command"]
+      "windows": {
+        "command": "./stack-restart.ps1",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
         }
+      },
+      "osx": {
+        "command": "./stack-restart.sh"
+      },
+      "linux": {
+        "command": "./stack-restart.sh"
       },
       "presentation": {
         "reveal": "always",
@@ -85,12 +101,20 @@
     {
       "label": "restart: backend only",
       "type": "shell",
-      "command": "./stack-restart.ps1 -Backend",
-      "options": {
-        "shell": {
-          "executable": "pwsh",
-          "args": ["-NoProfile", "-Command"]
+      "windows": {
+        "command": "./stack-restart.ps1 -Backend",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
         }
+      },
+      "osx": {
+        "command": "./stack-restart.sh --backend"
+      },
+      "linux": {
+        "command": "./stack-restart.sh --backend"
       },
       "presentation": {
         "reveal": "always",
@@ -102,12 +126,20 @@
     {
       "label": "restart: frontend only",
       "type": "shell",
-      "command": "./stack-restart.ps1 -Frontend",
-      "options": {
-        "shell": {
-          "executable": "pwsh",
-          "args": ["-NoProfile", "-Command"]
+      "windows": {
+        "command": "./stack-restart.ps1 -Frontend",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
         }
+      },
+      "osx": {
+        "command": "./stack-restart.sh --frontend"
+      },
+      "linux": {
+        "command": "./stack-restart.sh --frontend"
       },
       "presentation": {
         "reveal": "always",
