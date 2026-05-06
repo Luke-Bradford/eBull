@@ -1,5 +1,11 @@
 ## Issue reference
 
+<!-- One line. GitHub auto-closes the issue on merge ONLY when a closing verb is used.
+     Pick one:
+       Closes #N      / Fixes #N / Resolves #N    -> auto-closes on merge
+       Refs #N        / Part of #N / Umbrella #N  -> reference only, issue stays open
+     'feat(#N): title' alone does NOT count — the CI gate at .github/workflows/pr-issue-link.yml
+     fails the PR if no recognised verb is present. Background: #935, #942. -->
 Closes #
 
 ## Summary
