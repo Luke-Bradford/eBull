@@ -77,5 +77,10 @@ export async function fetchSystemStatusMock(): Promise<SystemStatusResponse> {
       activated_by: null,
       reason: null,
     },
+    credential_health: {
+      state: "valid",
+      last_recovered_at: null,
+      last_error: null,
+    },
   };
 }

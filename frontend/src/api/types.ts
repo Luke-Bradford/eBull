@@ -81,12 +81,25 @@ export interface JobHealthResponse {
   detail: string;
 }
 
+export type CredentialHealthState =
+  | "valid"
+  | "untested"
+  | "rejected"
+  | "missing";
+
+export interface CredentialHealthSummary {
+  state: CredentialHealthState;
+  last_recovered_at: string | null;
+  last_error: string | null;
+}
+
 export interface SystemStatusResponse {
   checked_at: string;
   overall_status: OverallStatus;
   layers: LayerHealthResponse[];
   jobs: JobHealthResponse[];
   kill_switch: KillSwitchStateResponse;
+  credential_health: CredentialHealthSummary;
 }
 
 export interface JobOverviewResponse {

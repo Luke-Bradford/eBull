@@ -100,12 +100,33 @@ class JobHealthResponse(BaseModel):
     detail: str
 
 
+class CredentialHealthSummary(BaseModel):
+    """Operator-level credential health for the admin Problems banner (#979 / #974/E).
+
+    State values mirror ``app.services.credential_health.CredentialHealth``:
+      * ``valid``     — operator's credential pair validated; orchestrator
+                        runs credential-using layers freely.
+      * ``untested``  — saved but not yet probed; orchestrator will skip
+                        until validate-stored confirms.
+      * ``rejected``  — provider returned 401/403; orchestrator
+                        PREREQ_SKIPs all credential-using layers; admin
+                        UI surfaces a single banner instead of N
+                        cascading AUTH_EXPIRED rows.
+      * ``missing``   — no credential rows; first-run state.
+    """
+
+    state: Literal["valid", "untested", "rejected", "missing"]
+    last_recovered_at: datetime | None = None
+    last_error: str | None = None
+
+
 class SystemStatusResponse(BaseModel):
     checked_at: datetime
     overall_status: OverallStatus
     layers: list[LayerHealthResponse]
     jobs: list[JobHealthResponse]
     kill_switch: KillSwitchStateResponse
+    credential_health: CredentialHealthSummary
 
 
 class JobOverviewResponse(BaseModel):
@@ -350,6 +371,53 @@ def get_system_status(
             activated_by=ks.get("activated_by"),
             reason=ks.get("reason"),
         ),
+        credential_health=_build_credential_health_summary(conn),
+    )
+
+
+def _build_credential_health_summary(conn: psycopg.Connection[object]) -> CredentialHealthSummary:
+    """Resolve operator-level credential health for the admin banner.
+
+    Per-operator scope (single-operator v1). Falls back to MISSING
+    when no operator yet, so the admin UI shows the "save credentials
+    in Settings" path on a fresh install rather than misreporting
+    VALID. Codex r3.2 + #979 banner contract.
+    """
+    from app.services.credential_health import (
+        get_last_recovered_at,
+        get_operator_credential_health,
+    )
+    from app.services.operators import (
+        AmbiguousOperatorError,
+        NoOperatorError,
+        sole_operator_id,
+    )
+
+    try:
+        op_id = sole_operator_id(conn)
+    except NoOperatorError:
+        return CredentialHealthSummary(state="missing")
+    except AmbiguousOperatorError:
+        return CredentialHealthSummary(state="missing")
+
+    try:
+        health = get_operator_credential_health(conn, operator_id=op_id, environment="demo")
+        recovered_at = get_last_recovered_at(conn, operator_id=op_id)
+    except Exception:
+        logger.exception("credential_health summary lookup failed; reporting missing")
+        return CredentialHealthSummary(state="missing")
+
+    state_value = health.value
+    if state_value not in ("valid", "untested", "rejected", "missing"):
+        # CredentialHealth enum values are pinned to the four literals
+        # above; any deviation is a registry change that hasn't yet
+        # been propagated to this response model. Fail-safe to missing.
+        logger.error("unexpected CredentialHealth value: %s", state_value)
+        return CredentialHealthSummary(state="missing")
+    return CredentialHealthSummary(
+        state=state_value,  # type: ignore[arg-type]
+        last_recovered_at=recovered_at,
+        last_error=None,
     )
 
 
