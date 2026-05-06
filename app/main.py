@@ -206,7 +206,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # only when broker credentials are loadable — otherwise the
     # operator hasn't completed setup yet and there's nothing to
     # subscribe to. WS failures must NOT block the rest of the app.
-    ws_subscriber = await _maybe_start_etoro_ws(pool, audit_pool, quote_bus)
+    ws_subscriber = await _maybe_start_etoro_ws(pool, audit_pool, quote_bus, credential_health_cache)
     app.state.etoro_ws = ws_subscriber
 
     yield
@@ -287,6 +287,7 @@ async def _maybe_start_etoro_ws(
     pool: ConnectionPool[Any],
     audit_pool: ConnectionPool[Any],
     bus: QuoteBus,
+    credential_cache: CredentialHealthCache,
 ) -> EtoroWebSocketSubscriber | None:
     """Boot the WS subscriber when credentials are available.
 
@@ -337,6 +338,13 @@ async def _maybe_start_etoro_ws(
         env=settings.etoro_env,
         pool=pool,
         bus=bus,
+        # Credential-aware mode (#978 / #974/D): pre-flight on cache,
+        # exponential backoff on auth failure, write-through on every
+        # auth outcome. Falls back to legacy fixed-5s reconnect when
+        # any of these is None.
+        operator_id=op_id,
+        credential_cache=credential_cache,
+        audit_pool=audit_pool,
     )
     try:
         await subscriber.start()
