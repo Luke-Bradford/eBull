@@ -353,6 +353,7 @@ class TestProductionInvokerRegistry:
             # them via JobLock + so admin Run-now still works:
             "bootstrap_orchestrator",
             "bootstrap_filings_history_seed",
+            "bootstrap_sec_13f_recent_sweep",
             "sec_first_install_drain",
             # #994 also un-retired these for bootstrap dispatch. They
             # are NOT in SCHEDULED_JOBS — daily_cik_refresh and

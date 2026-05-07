@@ -181,7 +181,11 @@ def _archive_file_url(cik: str, accession_number: str, filename: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def parse_submissions_index(payload: str) -> list[AccessionRef]:
+def parse_submissions_index(
+    payload: str,
+    *,
+    min_period_of_report: date | None = None,
+) -> list[AccessionRef]:
     """Walk ``data.sec.gov/submissions/CIK{cik}.json`` and emit one
     :class:`AccessionRef` per 13F-HR / 13F-HR/A row.
 
@@ -205,8 +209,18 @@ def parse_submissions_index(payload: str) -> list[AccessionRef]:
     Older-history shards are referenced by ``files`` and need a
     second fetch. Out of scope here — the ingester walks the
     ``recent`` array, which holds the most recent ~1,000 filings
-    per filer (12+ quarters of 13F coverage at one filing per
-    quarter, more than enough for the rolling ownership-card view).
+    per filer.
+
+    For active filers (banks, asset managers) the recent array can
+    cover 60+ years of filings since most issuers file far fewer
+    than 1,000 reports per decade. ``min_period_of_report`` (#1008)
+    bounds historical depth: when set, accessions whose
+    ``period_of_report`` is older than the cut-off are skipped.
+    Pre-2013 13F filings additionally have no machine-readable
+    primary_doc / infotable structure, so iterating them costs an
+    SEC fetch + parse and yields zero rows. First-install bootstrap
+    passes a recent cut-off (last 4 quarters); the standalone
+    weekly cron leaves it ``None`` for full historical coverage.
     """
     try:
         data: dict[str, Any] = json.loads(payload)
@@ -230,6 +244,11 @@ def parse_submissions_index(payload: str) -> list[AccessionRef]:
             continue
         filed_at = _safe_iso_datetime(filing_dates[i] if i < len(filing_dates) else "")
         period = _safe_iso_date(report_dates[i] if i < len(report_dates) else "")
+        if min_period_of_report is not None and period is not None and period < min_period_of_report:
+            # #1008 — first-install bootstrap caller passes a recent
+            # cut-off so we don't iterate pre-2013 filings whose
+            # primary_doc/infotable XML structure didn't exist yet.
+            continue
         out.append(
             AccessionRef(
                 accession_number=str(accession),
@@ -813,6 +832,7 @@ def ingest_filer_13f(
     *,
     filer_cik: str,
     ingestion_run_id: int | None = None,
+    min_period_of_report: date | None = None,
 ) -> IngestSummary:
     """Fetch + parse + upsert every pending 13F-HR for one filer.
 
@@ -821,6 +841,8 @@ def ingest_filer_13f(
     flow into the existing data_ingestion_runs row owned by the
     caller; when absent, no audit row is touched. The batch-mode
     entry point :func:`ingest_all_active_filers` always supplies one.
+    ``min_period_of_report`` (#1008) bounds historical depth — see
+    :func:`parse_submissions_index`.
     """
     cik = _zero_pad_cik(filer_cik)
     summary = _MutableSummary(cik=cik)
@@ -830,7 +852,10 @@ def ingest_filer_13f(
         logger.warning("13F ingest: submissions JSON 404/error for cik=%s", cik)
         return summary.to_immutable()
 
-    pending_accessions = parse_submissions_index(submissions_payload)
+    pending_accessions = parse_submissions_index(
+        submissions_payload,
+        min_period_of_report=min_period_of_report,
+    )
     summary.accessions_seen = len(pending_accessions)
 
     already_ingested = _existing_accessions_for_filer(conn, filer_cik=cik)
@@ -874,6 +899,7 @@ def ingest_all_active_filers(
     ciks: list[str] | None = None,
     deadline_seconds: float | None = None,
     source_label: str = "sec_edgar_13f",
+    min_period_of_report: date | None = None,
 ) -> list[IngestSummary]:
     """Walk a list of filer CIKs and ingest each filer's pending 13F-HRs.
 
@@ -897,6 +923,12 @@ def ingest_all_active_filers(
     perturbed; the universe sweep passes ``sec_edgar_13f_directory``
     so an operator can grep ``data_ingestion_runs`` to separate the
     two paths.
+
+    ``min_period_of_report`` (#1008) bounds historical depth so
+    first-install bootstrap doesn't iterate decades of pre-2013
+    13F filings whose primary_doc/infotable XML structure didn't
+    exist yet. ``None`` keeps the previous full-history behaviour
+    for the standalone weekly cron.
     """
     if ciks is None:
         ciks = _list_active_filer_seeds(conn)
@@ -938,7 +970,13 @@ def ingest_all_active_filers(
                 break
             filers_attempted += 1
             try:
-                summary = ingest_filer_13f(conn, sec, filer_cik=cik, ingestion_run_id=run_id)
+                summary = ingest_filer_13f(
+                    conn,
+                    sec,
+                    filer_cik=cik,
+                    ingestion_run_id=run_id,
+                    min_period_of_report=min_period_of_report,
+                )
             except Exception as exc:  # noqa: BLE001 — per-filer crash must not abort the batch
                 logger.exception("13F ingest: filer %s raised; continuing batch", cik)
                 crash_error = f"{cik}: {exc}"
