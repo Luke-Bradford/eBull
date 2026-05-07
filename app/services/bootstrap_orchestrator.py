@@ -430,14 +430,36 @@ def bootstrap_filings_history_seed() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _make_sec_http_get(sec_provider: object) -> Callable[[str, dict[str, str]], tuple[int, bytes]]:
+    """Adapt ``SecFilingsProvider._http`` (a ``ResilientClient``) into
+    an ``HttpGet = Callable[[str, dict[str, str]], tuple[int, bytes]]``.
+
+    The drain / poll / rebuild call sites all consume this narrowed
+    callable shape (see ``app/providers/implementations/sec_submissions.py``);
+    the closure routes through the rate-limited shared client so SEC's
+    10 req/s bucket is honoured.
+    """
+
+    def _impl(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+        # ``_http`` is the ResilientClient wrapping the SEC httpx.Client
+        # with the shared process-wide token bucket. ``.get(...)`` returns
+        # a httpx.Response; the HttpGet contract is (status, body bytes).
+        response = sec_provider._http.get(url, headers=headers)  # type: ignore[attr-defined]
+        return response.status_code, response.content
+
+    return _impl
+
+
 def sec_first_install_drain_job() -> None:
     """``_INVOKERS['sec_first_install_drain']`` — zero-arg drain wrapper.
 
-    The underlying ``run_first_install_drain`` takes parameters
-    (``http_get``, ``follow_pagination`` etc.) so it cannot be
-    registered directly. This wrapper picks the bootstrap-default
-    arguments (full universe scope, paginate enabled, real
-    ``SecFilingsProvider`` HTTP shim).
+    The underlying ``run_first_install_drain`` takes an ``http_get``
+    callable, ``follow_pagination``, etc. so it cannot be registered
+    directly. This wrapper picks the bootstrap-default arguments
+    (full universe scope, paginate enabled) and adapts the
+    ``SecFilingsProvider._http`` ResilientClient into the
+    ``HttpGet = Callable[[str, dict[str, str]], tuple[int, bytes]]``
+    contract via ``_make_sec_http_get``.
     """
     from app.jobs.sec_first_install_drain import run_first_install_drain
     from app.providers.implementations.sec_edgar import SecFilingsProvider
@@ -450,7 +472,7 @@ def sec_first_install_drain_job() -> None:
         ):
             stats = run_first_install_drain(
                 conn,
-                http_get=sec.http_get_json,  # type: ignore[arg-type]
+                http_get=_make_sec_http_get(sec),  # type: ignore[arg-type]
                 follow_pagination=True,
                 use_bulk_zip=False,
                 max_subjects=None,
