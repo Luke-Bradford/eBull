@@ -195,14 +195,14 @@ describe("ProblemsPanel", () => {
         display_name: "Layer X",
         category: "auth_expired",
         operator_message: "Credential expired",
-        operator_fix: "Update the API key in Settings → Providers",
+        operator_fix: "Update the public key in Settings → Providers",
         self_heal: false,
         consecutive_failures: 1,
         affected_downstream: [],
       },
     ];
     renderPanel({ v2 });
-    const link = screen.getByRole("link", { name: /Update the API key/i });
+    const link = screen.getByRole("link", { name: /Update the public key/i });
     expect(link).toBeInTheDocument();
     expect(link).toHaveAttribute("href", "/settings#providers");
   });
@@ -495,7 +495,7 @@ describe("ProblemsPanel", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders a Settings link when operator_fix says 'Update the API key in Settings'", () => {
+  it("renders a Settings link when operator_fix says 'Update the public key in Settings'", () => {
     const v2 = emptyV2();
     v2.system_state = "needs_attention";
     v2.action_needed = [
@@ -504,14 +504,14 @@ describe("ProblemsPanel", () => {
         display_name: "Layer X",
         category: "auth_expired",
         operator_message: "Credential expired",
-        operator_fix: "Update the API key in Settings",
+        operator_fix: "Update the public key in Settings",
         self_heal: false,
         consecutive_failures: 1,
         affected_downstream: [],
       },
     ];
     renderPanel({ v2 });
-    const link = screen.getByRole("link", { name: /Update the API key in Settings/i });
+    const link = screen.getByRole("link", { name: /Update the public key in Settings/i });
     expect(link).toBeInTheDocument();
     expect(link).toHaveAttribute("href", "/settings#providers");
   });

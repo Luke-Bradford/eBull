@@ -62,7 +62,7 @@ const CREDENTIAL_REJECTED_BANNER: ActionNeededItem = {
   category: "auth_expired",
   operator_message:
     "eToro rejected your credentials. The orchestrator has paused all credential-using layers until you save valid keys.",
-  operator_fix: "Update the API key in Settings → Providers",
+  operator_fix: "Update the public key in Settings → Providers",
   self_heal: false,
   consecutive_failures: 0,
   affected_downstream: [],
@@ -79,7 +79,7 @@ interface SourceCache {
 
 function mentionsSettings(text: string): boolean {
   // Match the canonical remedy phrasings emitted by the backend REMEDIES
-  // table — e.g. "Set X in Settings → Providers", "Update the API key in
+  // table — e.g. "Set X in Settings → Providers", "Update the public key in
   // Settings". Narrow enough that a remedy mentioning settings/providers
   // in passing (e.g. "nothing to do with Settings — inspect the row
   // manually") stays plain text rather than becoming a misleading link.
