@@ -321,3 +321,31 @@ def test_insider_initial_holdings_value_owned_column_exists() -> None:
         "insider_initial_holdings.value_owned column missing — migration 101 did not apply or was no-op'd."
     )
     assert row[1] == "numeric", f"value_owned has unexpected type {row[1]!r}; expected NUMERIC."
+
+
+def test_bootstrap_state_singleton_seeded() -> None:
+    """Recovery gate for migration 129 — bootstrap_state singleton row.
+
+    Migration 129 (#993) creates the ``bootstrap_state`` table and
+    seeds the ``id=1`` row via ``INSERT ... ON CONFLICT DO NOTHING``.
+    The scheduler prerequisite ``_bootstrap_complete`` (PR4 #996)
+    reads this row to gate dependent jobs; if the migration runs
+    without seeding the row, every gated job would hard-fail with a
+    "singleton missing" error. Pin the seed here so a regression on
+    the migration path fails at boot rather than silently breaking
+    the gate.
+    """
+    import psycopg
+
+    from app.config import settings
+
+    with psycopg.connect(settings.database_url) as conn:
+        row = conn.execute("SELECT status FROM bootstrap_state WHERE id = 1").fetchone()
+    assert row is not None, (
+        "bootstrap_state singleton row missing — sql/129_bootstrap_state.sql "
+        "did not seed it; the _bootstrap_complete prerequisite would hard-fail."
+    )
+    assert row[0] in {"pending", "running", "complete", "partial_error"}, (
+        f"bootstrap_state.status has unexpected value {row[0]!r}; "
+        "expected one of pending / running / complete / partial_error."
+    )
