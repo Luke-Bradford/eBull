@@ -98,7 +98,11 @@ function formatProgress(stage: BootstrapStageResponse): string {
 }
 
 export function BootstrapPanel() {
-  const state = useAsync(fetchBootstrapStatus, []);
+  // #1016 — preserveOnRefetch keeps the prior payload visible during the
+  // 5s poll tick so the operator's scroll position is preserved and the
+  // table doesn't flicker on every refresh. Skeleton still renders on
+  // the initial load (before the first successful fetch).
+  const state = useAsync(fetchBootstrapStatus, [], { preserveOnRefetch: true });
   const refetch = state.refetch;
 
   // Poll cadence: 5s while running, 60s otherwise. See AdminPage.tsx

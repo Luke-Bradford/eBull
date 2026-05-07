@@ -31,9 +31,10 @@ export function ConfigProvider({ children }: { children: ReactNode }): JSX.Eleme
       data: state.data,
       error: state.error,
       loading: state.loading,
+      isRevalidating: state.isRevalidating,
       refetch: state.refetch,
     }),
-    [state.data, state.error, state.loading, state.refetch],
+    [state.data, state.error, state.loading, state.isRevalidating, state.refetch],
   );
   return <ConfigContext.Provider value={value}>{children}</ConfigContext.Provider>;
 }
@@ -69,6 +70,7 @@ export function TestConfigProvider({
     data: value.data ?? null,
     error: value.error ?? null,
     loading: value.loading ?? false,
+    isRevalidating: value.isRevalidating ?? false,
     refetch: value.refetch ?? (() => {}),
   };
   return <ConfigContext.Provider value={merged}>{children}</ConfigContext.Provider>;
