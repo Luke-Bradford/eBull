@@ -170,6 +170,13 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # touched now need per-test cleanup.
     "job_runtime_heartbeat",
     "pending_job_requests",
+    # #993 — first-install bootstrap orchestrator. Truncating
+    # ``bootstrap_runs`` cascades to ``bootstrap_stages`` via FK.
+    # ``bootstrap_state`` is the singleton row and intentionally
+    # NOT FK-linked (see migration 129); test bodies that exercise
+    # state transitions are responsible for resetting the singleton
+    # back to ``status='pending'`` themselves.
+    "bootstrap_runs",
 )
 
 
