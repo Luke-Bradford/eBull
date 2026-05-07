@@ -21,6 +21,7 @@ from app.api.auth import require_session_or_service_token
 from app.api.auth_bootstrap import router as auth_bootstrap_router
 from app.api.auth_session import router as auth_session_router
 from app.api.auth_setup import router as auth_setup_router
+from app.api.bootstrap import router as bootstrap_router
 from app.api.broker_credentials import router as broker_credentials_router
 from app.api.budget import router as budget_router
 from app.api.business_summary_admin import router as business_summary_admin_router
@@ -387,6 +388,7 @@ app.include_router(scores_router)
 app.include_router(sse_quotes_router)
 app.include_router(sync_router)
 app.include_router(system_router)
+app.include_router(bootstrap_router)
 app.include_router(theses_router)
 app.include_router(instrument_thesis_router)
 app.include_router(watchlist_router)
