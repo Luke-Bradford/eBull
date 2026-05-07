@@ -336,6 +336,51 @@ def _has_scoreable_instruments(conn: psycopg.Connection[Any]) -> PrerequisiteRes
     return (False, "no scoreable instruments")
 
 
+def _all_of(*prereqs: PrerequisiteFn) -> PrerequisiteFn:
+    """Compose multiple prerequisite checks into a single one.
+
+    Returns ``(True, "")`` only if every wrapped check returns
+    ``(True, "")``. The first failing check's reason is returned
+    so the operator sees a deterministic explanation rather than a
+    concatenation that mutates with check order.
+    """
+
+    def composed(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+        for check in prereqs:
+            met, reason = check(conn)
+            if not met:
+                return (False, reason)
+        return (True, "")
+
+    return composed
+
+
+def _bootstrap_complete(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if first-install bootstrap has finalised in the ``complete`` state.
+
+    Spec: docs/superpowers/specs/2026-05-07-first-install-bootstrap.md.
+
+    Returns ``(False, ...)`` while bootstrap is ``pending``,
+    ``running``, or ``partial_error`` so dependent SEC / fundamentals
+    / orchestrator-DAG jobs stay quiet against an empty / half-populated
+    DB. Operator releases the gate by either:
+
+      1. Running the bootstrap from the admin panel until every stage
+         is ``success``, OR
+      2. Pressing "Mark complete" after manually fixing the cause of
+         a stage failure.
+
+    Per #719 the connection is opened by the caller (catch-up /
+    scheduled-fire path) and closed after the check.
+    """
+    if _exists(
+        conn,
+        psycopg.sql.SQL("SELECT EXISTS(SELECT 1 FROM bootstrap_state WHERE id = 1 AND status = 'complete')"),
+    ):
+        return (True, "")
+    return (False, "first-install bootstrap not complete; visit /admin to run")
+
+
 def _has_actionable_recommendations(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     """True if at least one proposed or approved recommendation exists."""
     if _exists(
@@ -423,6 +468,11 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # site until it finishes. If the 03:00 UTC slot is missed, the
         # operator can click "Sync now" in the admin UI.
         catch_up_on_boot=False,
+        # #996 — gated until first-install bootstrap is complete. The
+        # full-sync DAG walk fires every credential-using and
+        # filings-using layer; against an empty DB those layers
+        # produce a flood of misleading "instruments=0" log lines.
+        prerequisite=_bootstrap_complete,
     ),
     # Every-5-minutes refresh of independent high-frequency layers
     # (portfolio_sync + fx_rates). The orchestrator's partial unique
@@ -475,7 +525,14 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "later (#414)."
         ),
         cadence=Cadence.daily(hour=2, minute=30),
-        prerequisite=_has_any_coverage,
+        # #996 — compose with bootstrap gate. ``_bootstrap_complete``
+        # is strictly stronger than ``_has_any_coverage`` (bootstrap
+        # finalises only after universe sync + Tier 3 coverage seed),
+        # but keeping the original check as a defense-in-depth means
+        # an operator who forces ``mark-complete`` on an empty DB
+        # still doesn't get a fundamentals run that returns
+        # ``instruments_attempted=0``.
+        prerequisite=_all_of(_bootstrap_complete, _has_any_coverage),
         # Never catch up on boot. The job pulls SEC EDGAR data for every
         # covered CIK (tens of minutes, holds DB-pool workers and hits
         # SEC's 10 rps cap). Every dev-stack restart would otherwise
@@ -501,6 +558,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.daily(hour=3, minute=0),
         catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
     ScheduledJob(
         name=JOB_SEC_BUSINESS_SUMMARY_INGEST,
@@ -520,6 +578,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # per run (~22s at the SEC 9 req/s floor), so the worst case is
         # one 22s burst of requests per boot per 24h window.
         catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
     ScheduledJob(
         name=JOB_SEC_INSIDER_TRANSACTIONS_INGEST,
@@ -533,6 +592,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.hourly(minute=30),
         catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
     ScheduledJob(
         name=JOB_SEC_FILING_DOCUMENTS_INGEST,
@@ -546,6 +606,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.hourly(minute=35),
         catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
     ScheduledJob(
         name=JOB_SEC_8K_EVENTS_INGEST,
@@ -559,6 +620,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.hourly(minute=20),
         catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
     ScheduledJob(
         name=JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP,
@@ -573,6 +635,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.weekly(weekday=6, hour=4, minute=0),
         catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
     ScheduledJob(
         name=JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL,
@@ -588,6 +651,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.hourly(minute=45),
         catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
     ScheduledJob(
         name=JOB_SEC_FORM3_INGEST,
@@ -605,6 +669,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.daily(hour=4, minute=20),
         catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
     ScheduledJob(
         name=JOB_SEC_DEF14A_INGEST,
@@ -625,6 +690,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.daily(hour=4, minute=35),
         catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
     ScheduledJob(
         name=JOB_OWNERSHIP_OBSERVATIONS_SYNC,
@@ -639,6 +705,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.daily(hour=3, minute=30),
         catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
     ScheduledJob(
         name=JOB_OWNERSHIP_OBSERVATIONS_BACKFILL,
@@ -708,6 +775,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.weekly(weekday=6, hour=2, minute=30),
         catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
     ScheduledJob(
         name=JOB_RAW_DATA_RETENTION_SWEEP,
@@ -796,6 +864,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # of staleness on quarterly-cadence data, and firing a 6h sweep
         # on every dev restart would burn SEC bandwidth + DB I/O.
         catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
     ScheduledJob(
         name=JOB_SEC_13F_FILER_DIRECTORY_SYNC,
@@ -867,6 +936,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.monthly(day=22, hour=3, minute=0),
         catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
     ScheduledJob(
         name=JOB_ETORO_LOOKUPS_REFRESH,
