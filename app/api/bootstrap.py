@@ -110,9 +110,23 @@ def _identify_requestor(request: Request) -> str:
 
 
 def _build_status_response(conn: psycopg.Connection[object]) -> BootstrapStatusResponse:
-    """Single-transaction snapshot of bootstrap state + latest run."""
-    state = read_state(conn)
-    snap = read_latest_run_with_stages(conn)
+    """Single-transaction snapshot of bootstrap state + latest run.
+
+    Reads ``bootstrap_state`` + the latest run + its stages inside one
+    ``conn.transaction()`` so a stage transition landing between the
+    two queries cannot produce an internally-inconsistent payload.
+    Prevention-log: "Multi-query read handlers must use a single
+    snapshot".
+
+    ``read_latest_run_with_stages`` opens its own ``conn.transaction()``;
+    under psycopg v3 a nested call inside an outer transaction becomes
+    a ``SAVEPOINT``, which still observes the outer snapshot. So the
+    wrapping here gives us snapshot isolation across both reads
+    without breaking the inner helper.
+    """
+    with conn.transaction():
+        state = read_state(conn)
+        snap = read_latest_run_with_stages(conn)
     if snap is None:
         return BootstrapStatusResponse(
             status=state.status,
@@ -255,7 +269,20 @@ def retry_failed(
             detail="no prior bootstrap run to retry",
         )
 
-    reset_count = reset_failed_stages_for_retry(conn, run_id=state.last_run_id)
+    try:
+        reset_count = reset_failed_stages_for_retry(conn, run_id=state.last_run_id)
+    except BootstrapAlreadyRunning as exc:
+        # Concurrent ``start_run`` flipped state to ``running`` between
+        # our pre-check above and the FOR UPDATE acquisition inside
+        # ``reset_failed_stages_for_retry``. Treat as 409 — same
+        # contract as the /run handler.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "bootstrap_running",
+                "current_run_id": exc.run_id,
+            },
+        ) from exc
     if reset_count == 0:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -308,7 +335,18 @@ def mark_complete(
                 "current_run_id": state.last_run_id,
             },
         )
-    force_mark_complete(conn)
+    try:
+        force_mark_complete(conn)
+    except BootstrapAlreadyRunning as exc:
+        # Concurrent ``start_run`` flipped state to ``running`` between
+        # our pre-check and the FOR UPDATE acquisition.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "bootstrap_running",
+                "current_run_id": exc.run_id,
+            },
+        ) from exc
     requested_by = _identify_requestor(request)
     logger.warning(
         "bootstrap: mark-complete forced by %s (prior status=%s)",

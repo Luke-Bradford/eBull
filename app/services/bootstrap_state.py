@@ -406,21 +406,35 @@ def reset_failed_stages_for_retry(
     Spec §"retry-failed dependency-aware reset". Returns the number
     of rows reset to ``pending``.
 
-    Algorithm (one transaction):
+    Algorithm (one transaction, ``SELECT ... FOR UPDATE`` on the
+    singleton up front to prevent a concurrent ``start_run`` from
+    transitioning state to ``running`` between the API's earlier
+    status read and this reset — TOCTOU avoidance):
 
-    1. Find all failed (error) stages on the latest run.
-    2. For each lane that has at least one failed stage, find the
+    1. Lock the bootstrap_state singleton row (``FOR UPDATE``).
+    2. Raise ``BootstrapAlreadyRunning`` if status flipped to
+       ``running`` since the API's pre-check; the API maps this to
+       a 409 response.
+    3. Find all failed (error) stages on the latest run.
+    4. For each lane that has at least one failed stage, find the
        smallest ``stage_order`` of a failed stage in that lane.
-    3. Reset every stage in that lane with ``stage_order >=`` the
+    5. Reset every stage in that lane with ``stage_order >=`` the
        smallest-failed-order to ``pending``, regardless of current
        status. The orchestrator's per-stage pre-check skips stages
-       already in ``success``, so only re-running re-enqueued
+       already in ``success`` so only re-running re-enqueued
        pending stages happens.
-    4. Flip bootstrap_state.status back to ``running``.
+    6. Flip bootstrap_state.status back to ``running``.
 
     If no failed stages exist, returns 0 and leaves state untouched.
     """
     with conn.transaction():
+        state_row = conn.execute("SELECT status, last_run_id FROM bootstrap_state WHERE id = 1 FOR UPDATE").fetchone()
+        if state_row is None:
+            raise RuntimeError("bootstrap_state singleton row missing")
+        current_status, current_last_run_id = state_row
+        if current_status == "running":
+            raise BootstrapAlreadyRunning(run_id=current_last_run_id or 0)
+
         failed_rows = conn.execute(
             """
             SELECT lane, MIN(stage_order)
@@ -484,15 +498,29 @@ def force_mark_complete(
     heavy stages. Does not touch any run / stage row — those keep
     their accurate forensic history. Audit-logging of the call is the
     caller's responsibility.
+
+    Concurrency contract: takes ``SELECT ... FOR UPDATE`` on the
+    bootstrap_state singleton up front so a concurrent ``start_run``
+    cannot transition state to ``running`` between the API's
+    pre-check and this write. Raises ``BootstrapAlreadyRunning`` if
+    state is ``running`` at lock-acquisition time.
     """
-    conn.execute(
-        """
-        UPDATE bootstrap_state
-           SET status            = 'complete',
-               last_completed_at = now()
-         WHERE id = 1
-        """
-    )
+    with conn.transaction():
+        state_row = conn.execute("SELECT status, last_run_id FROM bootstrap_state WHERE id = 1 FOR UPDATE").fetchone()
+        if state_row is None:
+            raise RuntimeError("bootstrap_state singleton row missing")
+        current_status, current_last_run_id = state_row
+        if current_status == "running":
+            raise BootstrapAlreadyRunning(run_id=current_last_run_id or 0)
+
+        conn.execute(
+            """
+            UPDATE bootstrap_state
+               SET status            = 'complete',
+                   last_completed_at = now()
+             WHERE id = 1
+            """
+        )
 
 
 def reap_orphaned_running(
