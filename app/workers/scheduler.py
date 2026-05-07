@@ -1635,6 +1635,14 @@ def daily_research_refresh() -> None:
                 SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
                 psycopg.connect(settings.database_url) as conn,
             ):
+                # #1011 — daily incremental uses the same three-tier
+                # allow-list as the bootstrap. Pre-fix this was
+                # ``["10-K", "10-Q", "8-K"]`` (narrower than bootstrap),
+                # so first-install + nightly diverged in coverage.
+                # ``SEC_INGEST_KEEP_FORMS`` is the canonical union of
+                # parse-and-raw + metadata-only forms.
+                from app.services.filings import SEC_INGEST_KEEP_FORMS
+
                 sec_summary = refresh_filings(
                     provider=sec,
                     provider_name="sec",
@@ -1643,7 +1651,7 @@ def daily_research_refresh() -> None:
                     instrument_ids=instrument_ids,
                     start_date=from_date,
                     end_date=to_date,
-                    filing_types=["10-K", "10-Q", "8-K"],
+                    filing_types=sorted(SEC_INGEST_KEEP_FORMS),
                 )
             total_rows += sec_summary.filings_upserted
             logger.info(

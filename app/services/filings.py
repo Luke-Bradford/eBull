@@ -14,6 +14,25 @@ Skip behaviour:
   - missing Companies House company_number → skip CH for that instrument, record reason
   - provider HTTP error → skip that instrument for that provider, log warning
   - do not fail the whole batch for one missing identifier
+
+## SEC form-type allow-list (#1011)
+
+Spec: docs/superpowers/specs/2026-05-08-filing-allow-list-and-raw-retention.md.
+
+Three tiers govern which form types we ingest:
+
+  - SEC_PARSE_AND_RAW: active parsers consume these; raw payload
+    retained per per-form retention policy.
+  - SEC_METADATA_ONLY: no parser yet, but the form has thesis /
+    signal value an LLM or future ranking signal would consume.
+    filing_events row only — never fetched as raw.
+  - default = SKIP: pure noise / regulatory boilerplate; never
+    appears in filing_events.
+
+The union ``SEC_INGEST_KEEP_FORMS`` is what callers of
+``refresh_filings`` pass to bound the ingest. Pre-#1011 the default
+was ``filing_types=None`` (all forms), which wrote ~32% non-consumed
+rows on first install (operator audit 2026-05-07).
 """
 
 import json
@@ -26,6 +45,115 @@ import psycopg
 from app.providers.filings import FilingEvent, FilingSearchResult, FilingsProvider
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# SEC form-type allow-list (#1011)
+# ---------------------------------------------------------------------------
+
+
+# Tier 1 — active parsers consume these. Raw payload retained.
+SEC_PARSE_AND_RAW: frozenset[str] = frozenset(
+    {
+        "10-K",
+        "10-K/A",
+        "10-Q",
+        "10-Q/A",
+        "8-K",
+        "8-K/A",
+        "DEF 14A",
+        "DEFA14A",
+        "DEFM14A",
+        "DEFR14A",
+        "3",
+        "3/A",
+        "4",
+        "4/A",
+        "13F-HR",
+        "13F-HR/A",
+        "NPORT-P",
+        "NPORT-P/A",
+        "SCHEDULE 13G",
+        "SCHEDULE 13G/A",
+        "SCHEDULE 13D",
+        "SCHEDULE 13D/A",
+    }
+)
+
+
+# Tier 2 — metadata-only. No parser, no raw body. filing_events row
+# costs ~200 bytes; cheap insurance for future parsers + ad-hoc
+# operator queries. See spec for per-form rationale (Codex round 1).
+SEC_METADATA_ONLY: frozenset[str] = frozenset(
+    {
+        # Late-filing red flags — restatement / auditor-change signal.
+        "NT 10-K",
+        "NT 10-Q",
+        # Foreign-issuer classification + future parsers.
+        "20-F",
+        "20-F/A",
+        "40-F",
+        "40-F/A",
+        "6-K",
+        "6-K/A",
+        # 13F-NT — used for institutional-filer classification only.
+        "13F-NT",
+        "13F-NT/A",
+        # Capital actions — IPO / secondary / shelf / debt / M&A.
+        "S-1",
+        "S-1/A",
+        "S-3",
+        "S-3/A",
+        "S-4",
+        "S-4/A",
+        "F-1",
+        "F-1/A",
+        "F-3",
+        "F-3/A",
+        "F-4",
+        "F-4/A",
+        "424B2",
+        "424B3",
+        "424B4",
+        "424B5",
+        "424B7",
+        "424B8",
+        # Proxy variants — contested votes / dilution authorisations.
+        "PRE 14A",
+        "PRER14A",
+        # Tender offers + going-private — M&A / take-out signal.
+        "SC TO-T",
+        "SC TO-T/A",
+        "SC 14D9",
+        "SC 14D9/A",
+        "DEF 13E-3",
+        "PREM14C",
+        "DEFM14C",
+        # Delisting / deregistration — terminal-state signal.
+        "25",
+        "25-NSE",
+        "15-12B",
+        "15-12G",
+        "15-15D",
+        "15F",
+        "15F-12B",
+        "15F-12G",
+        "15F-15D",
+        # Insider compliance — late/exempt Section 16, proposed
+        # restricted-share sales (insider overhang).
+        "5",
+        "5/A",
+        "144",
+        # SEC correspondence — rare red-flag signal.
+        "CORRESP",
+        # Employer-plan stock concentration.
+        "11-K",
+    }
+)
+
+
+# Public union — pass this to ``refresh_filings(filing_types=...)``.
+SEC_INGEST_KEEP_FORMS: frozenset[str] = SEC_PARSE_AND_RAW | SEC_METADATA_ONLY
 
 
 @dataclass(frozen=True)

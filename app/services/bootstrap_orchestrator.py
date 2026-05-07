@@ -386,7 +386,7 @@ def bootstrap_filings_history_seed() -> None:
     Run-now.
     """
     from app.providers.implementations.sec_edgar import SecFilingsProvider
-    from app.services.filings import refresh_filings
+    from app.services.filings import SEC_INGEST_KEEP_FORMS, refresh_filings
     from app.workers.scheduler import _tracked_job  # type: ignore[attr-defined]
 
     with _tracked_job(JOB_BOOTSTRAP_FILINGS_HISTORY_SEED) as tracker:
@@ -424,7 +424,11 @@ def bootstrap_filings_history_seed() -> None:
                 instrument_ids=instrument_ids,
                 start_date=from_date,
                 end_date=to_date,
-                filing_types=None,
+                # #1011 — three-tier form-type allow-list. Pre-fix
+                # this was ``None`` (all forms); first-install audit
+                # 2026-05-07 measured ~32% of resulting filing_events
+                # rows were forms no parser ever consumes.
+                filing_types=sorted(SEC_INGEST_KEEP_FORMS),
             )
         tracker.row_count = summary.filings_upserted
         logger.info(
