@@ -58,6 +58,8 @@ from app.workers.scheduler import (
     JOB_CUSIP_EXTID_SWEEP,
     JOB_CUSIP_UNIVERSE_BACKFILL,
     JOB_DAILY_CANDLE_REFRESH,
+    JOB_DAILY_CIK_REFRESH,
+    JOB_DAILY_FINANCIAL_FACTS,
     JOB_DAILY_PORTFOLIO_SYNC,
     JOB_DAILY_RESEARCH_REFRESH,
     JOB_DAILY_TAX_RECONCILIATION,
@@ -100,6 +102,8 @@ from app.workers.scheduler import (
     cusip_extid_sweep,
     cusip_universe_backfill,
     daily_candle_refresh,
+    daily_cik_refresh,
+    daily_financial_facts,
     daily_portfolio_sync,
     daily_research_refresh,
     daily_tax_reconciliation,
@@ -198,7 +202,32 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
     JOB_SEC_13F_QUARTERLY_SWEEP: sec_13f_quarterly_sweep,
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC: sec_nport_filer_directory_sync,
     JOB_SEC_N_PORT_INGEST: sec_n_port_ingest,
+    # Registered for #994 (first-install bootstrap orchestrator) — these
+    # were callable as scheduled-only paths before but the orchestrator
+    # needs them in _INVOKERS so it can dispatch them via JobLock.
+    # ``daily_cik_refresh`` seeds external_identifiers SEC CIK rows;
+    # ``daily_financial_facts`` walks the SEC daily master-index.
+    # Both are also wired into SCHEDULED_JOBS unchanged.
+    JOB_DAILY_CIK_REFRESH: daily_cik_refresh,
+    JOB_DAILY_FINANCIAL_FACTS: daily_financial_facts,
 }
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap orchestrator invokers (#994)
+# ---------------------------------------------------------------------------
+#
+# Imported lazily and added to ``_INVOKERS`` below so the runtime
+# module's own import does not pull in the bootstrap orchestrator
+# transitively (the orchestrator imports from this module via
+# ``from app.jobs.runtime import _INVOKERS`` at call time).
+from app.services import bootstrap_orchestrator as _bootstrap_orchestrator  # noqa: E402
+
+_INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_ORCHESTRATOR] = _bootstrap_orchestrator.run_bootstrap_orchestrator
+_INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_FILINGS_HISTORY_SEED] = (
+    _bootstrap_orchestrator.bootstrap_filings_history_seed
+)
+_INVOKERS[_bootstrap_orchestrator.JOB_SEC_FIRST_INSTALL_DRAIN] = _bootstrap_orchestrator.sec_first_install_drain_job
 
 
 # Public registry of valid job names. The API layer (#719) imports this

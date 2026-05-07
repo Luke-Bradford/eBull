@@ -347,9 +347,20 @@ class TestProductionInvokerRegistry:
             # (no UI consumer). Function stays in _INVOKERS for manual
             # trigger from Admin "Run now".
             "attribution_summary",
-            # daily_cik_refresh + daily_financial_facts retired from _INVOKERS
-            # in Chunk 3 of the 2026-04-19 research-tool refocus; they are
-            # now called from inside fundamentals_sync.
+            # #994 (first-install bootstrap orchestrator) — these jobs
+            # are dispatched by the bootstrap orchestrator (not SCHEDULED)
+            # but registered in _INVOKERS so the orchestrator can call
+            # them via JobLock + so admin Run-now still works:
+            "bootstrap_orchestrator",
+            "bootstrap_filings_history_seed",
+            "sec_first_install_drain",
+            # #994 also un-retired these for bootstrap dispatch. They
+            # are NOT in SCHEDULED_JOBS — daily_cik_refresh and
+            # daily_financial_facts run only when the bootstrap
+            # orchestrator dispatches them or when the operator
+            # triggers them manually:
+            "daily_cik_refresh",
+            "daily_financial_facts",
             # daily_news_refresh + daily_thesis_refresh retired from _INVOKERS
             # in Phase 1.2 — thesis is now on-demand via
             # POST /instruments/{symbol}/thesis; news is deferred pending
