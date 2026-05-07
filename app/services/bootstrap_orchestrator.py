@@ -64,6 +64,10 @@ logger = logging.getLogger(__name__)
 JOB_BOOTSTRAP_ORCHESTRATOR = "bootstrap_orchestrator"
 JOB_BOOTSTRAP_FILINGS_HISTORY_SEED = "bootstrap_filings_history_seed"
 JOB_SEC_FIRST_INSTALL_DRAIN = "sec_first_install_drain"
+# #1008 — first-install-bounded 13F sweep that limits to recent quarters.
+# Distinct from JOB_SEC_13F_QUARTERLY_SWEEP (full historical sweep) so
+# the standalone weekly cron keeps full coverage.
+JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP = "bootstrap_sec_13f_recent_sweep"
 
 # These already exist as scheduled jobs but were not registered in
 # _INVOKERS until PR2; we re-use the existing job-name constants so
@@ -93,7 +97,13 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     _spec("sec_insider_transactions_backfill", 11, "sec", "sec_insider_transactions_backfill"),
     _spec("sec_form3_ingest", 12, "sec", "sec_form3_ingest"),
     _spec("sec_8k_events_ingest", 13, "sec", "sec_8k_events_ingest"),
-    _spec("sec_13f_quarterly_sweep", 14, "sec", "sec_13f_quarterly_sweep"),
+    # #1008 — first-install bootstrap uses a recency-bounded sweep
+    # (last 4 quarters, ~12 months) instead of the full historical
+    # sweep. Walking decades of pre-2013 filings yields zero rows
+    # (no machine-readable primary_doc/infotable) and turns the
+    # bootstrap into an 11+ hour wait. Standalone weekly cron
+    # keeps the full historical sweep via JOB_SEC_13F_QUARTERLY_SWEEP.
+    _spec("sec_13f_recent_sweep", 14, "sec", JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP),
     _spec("sec_n_port_ingest", 15, "sec", "sec_n_port_ingest"),
     _spec("ownership_observations_backfill", 16, "sec", "ownership_observations_backfill"),
     _spec("fundamentals_sync", 17, "sec", "fundamentals_sync"),
@@ -487,13 +497,79 @@ def sec_first_install_drain_job() -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# New invoker: bootstrap_sec_13f_recent_sweep
+# ---------------------------------------------------------------------------
+
+
+# Recency cut-off for the bootstrap-bounded 13F sweep. 13F-HRs file
+# ~quarterly so 4 quarters = current + 3 prior periods, matches the
+# rolling ownership-card window operators use today. Older 13Fs
+# add no value to current-quarter ranking and pre-2013 ones don't
+# have machine-readable holdings (#1008).
+_BOOTSTRAP_13F_QUARTERS_BACK = 4
+
+
+def bootstrap_sec_13f_recent_sweep_job() -> None:
+    """``_INVOKERS['bootstrap_sec_13f_recent_sweep']`` — recency-bounded
+    13F sweep for first-install bootstrap (#1008).
+
+    Walks the same ``institutional_filers`` directory as
+    ``sec_13f_quarterly_sweep`` but passes ``min_period_of_report``
+    so the parser skips accessions whose ``period_of_report`` is
+    older than the cut-off. On a fresh install with ~11k filers and
+    no prior tombstones this cuts the sweep from 11+ hours
+    (operator-killed in the 2026-05-07 smoke run) to ~30-45 min.
+
+    Standalone scheduled ``sec_13f_quarterly_sweep`` retains the
+    full historical sweep so an operator who wants deeper coverage
+    later can trigger it manually.
+    """
+    from datetime import timedelta
+
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.institutional_holdings import (
+        ingest_all_active_filers,
+        list_directory_filer_ciks,
+    )
+    from app.workers.scheduler import _tracked_job  # type: ignore[attr-defined]
+
+    cutoff = date.today() - timedelta(days=_BOOTSTRAP_13F_QUARTERS_BACK * 95)
+
+    with _tracked_job(JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP) as tracker:
+        with (
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as sec,
+            psycopg.connect(settings.database_url) as conn,
+        ):
+            ciks = list_directory_filer_ciks(conn)
+            summaries = ingest_all_active_filers(
+                conn,
+                sec,
+                ciks=ciks,
+                deadline_seconds=settings.sec_13f_sweep_deadline_seconds,
+                source_label="sec_edgar_13f_directory_bootstrap",
+                min_period_of_report=cutoff,
+            )
+        rows_upserted = sum(s.holdings_inserted for s in summaries)
+        tracker.row_count = rows_upserted
+        logger.info(
+            "bootstrap_sec_13f_recent_sweep: filers_total=%d processed=%d holdings_upserted=%d cutoff=%s",
+            len(ciks),
+            len(summaries),
+            rows_upserted,
+            cutoff,
+        )
+
+
 __all__ = [
     "JOB_BOOTSTRAP_FILINGS_HISTORY_SEED",
     "JOB_BOOTSTRAP_ORCHESTRATOR",
+    "JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP",
     "JOB_DAILY_CIK_REFRESH",
     "JOB_DAILY_FINANCIAL_FACTS",
     "JOB_SEC_FIRST_INSTALL_DRAIN",
     "bootstrap_filings_history_seed",
+    "bootstrap_sec_13f_recent_sweep_job",
     "get_bootstrap_stage_specs",
     "run_bootstrap_orchestrator",
     "sec_first_install_drain_job",

@@ -228,6 +228,10 @@ _INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_FILINGS_HISTORY_SEED] = (
     _bootstrap_orchestrator.bootstrap_filings_history_seed
 )
 _INVOKERS[_bootstrap_orchestrator.JOB_SEC_FIRST_INSTALL_DRAIN] = _bootstrap_orchestrator.sec_first_install_drain_job
+# #1008 — recency-bounded 13F sweep for first-install bootstrap.
+_INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP] = (
+    _bootstrap_orchestrator.bootstrap_sec_13f_recent_sweep_job
+)
 
 
 # Public registry of valid job names. The API layer (#719) imports this
