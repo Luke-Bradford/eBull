@@ -21,8 +21,9 @@
 --                        flips from running to terminal complete /
 --                        partial_error when both lane threads have
 --                        joined.
---   * bootstrap_stages — one row per stage in a run. 18 stages per
---                        run today (1 init + 1 eToro + 16 SEC).
+--   * bootstrap_stages — one row per stage in a run. 17 stages per
+--                        run today (1 init + 1 eToro + 15 SEC; S12
+--                        dividend calendar dropped — see spec).
 --   * bootstrap_state  — singleton row (id=1) carrying the canonical
 --                        scheduler-gate status. Read by
 --                        _bootstrap_complete in app/workers/scheduler.py.

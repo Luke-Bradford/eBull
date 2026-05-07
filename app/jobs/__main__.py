@@ -249,6 +249,22 @@ def serve(stop_event: threading.Event | None = None) -> int:
         except Exception:
             logger.exception("jobs entrypoint: reaper failed; continuing")
 
+        # Step 4b — bootstrap reaper (#994). If a previous jobs process
+        # crashed mid-bootstrap, ``bootstrap_state.status='running'``
+        # is now stale — no live thread is executing it. Sweep
+        # in-flight + still-pending stages on the latest run to
+        # ``error`` and transition state to ``partial_error`` so the
+        # operator can retry-failed from the admin panel rather than
+        # being stuck looking at a stale Running spinner.
+        try:
+            from app.services.bootstrap_state import reap_orphaned_running
+
+            with psycopg.connect(settings.database_url, autocommit=True) as conn:
+                if reap_orphaned_running(conn):
+                    logger.info("jobs entrypoint: bootstrap reaper transitioned a stuck running run to partial_error")
+        except Exception:
+            logger.exception("jobs entrypoint: bootstrap reaper failed; continuing")
+
         # Step 6 — queue stale-row recovery.
         try:
             with psycopg.connect(settings.database_url, autocommit=True) as conn:
