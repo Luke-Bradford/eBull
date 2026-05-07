@@ -291,10 +291,21 @@ def run_bootstrap_orchestrator() -> None:
     )
 
     # If Phase A's only init stage errored, do not start Phase B.
+    # Treat a missing post-init snapshot (e.g. transient DB
+    # connectivity blip) as an init failure too — Phase B threads
+    # would otherwise spawn against a run whose state we cannot
+    # confirm, which would race the finalize step. Failing closed
+    # here is the right default for a one-shot operator-driven run.
     init_failed = False
     with psycopg.connect(database_url) as conn:
         snap_after_init = read_latest_run_with_stages(conn)
-    if snap_after_init is not None:
+    if snap_after_init is None:
+        init_failed = True
+        logger.warning(
+            "bootstrap_orchestrator: post-init snapshot read returned None; "
+            "treating as init failure and skipping Phase B"
+        )
+    else:
         for stage in snap_after_init.stages:
             if stage.lane == "init" and stage.status == "error":
                 init_failed = True
