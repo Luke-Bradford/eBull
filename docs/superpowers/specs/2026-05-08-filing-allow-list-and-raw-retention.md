@@ -65,23 +65,29 @@ metadata in `filing_events` / persist raw / skip entirely.
 | **40-F, 40-F/A** | Canadian annual report | Same as 20-F | Coverage classifier | Persist on parse-fail | **KEEP metadata** |
 | **6-K, 6-K/A** | Foreign material event / interim (non-US ADRs) | Medium — equivalent to 8-K + 10-Q for foreign issuers | Coverage classifier | Persist on parse-fail | **KEEP metadata** |
 | **13F-NT, 13F-NT/A** | "I'm filing combined with parent X" notice | Low — used for filer classification only | Filer-directory classifier | Skip raw | **KEEP metadata** |
-| ~~**424B2/B3/B4/B5/B7**~~ | Prospectus supplements (bond/secondary offerings) | Marginal — capital-action signal IS thesis-relevant (new debt, dilutive issuance) but no parser today and the same info lands in 10-K next quarter | None | Skip | **SKIP** for v1; reconsider when offerings parser exists |
-| ~~**144**~~ | Insider notice of intent to sell restricted shares | Low — Form 4 captures the actual transaction; 144 is forward-looking but ~30-50% never execute | None | Skip | **SKIP** (Form 4 supersedes) |
+| **424B2/B3/B4/B5/B7/B8** | Prospectus supplements (bond/secondary offerings) | Capital-action signal IS thesis-relevant (new debt, dilutive issuance, ATM offerings, refinancing). Final pricing + use-of-proceeds land here weeks before 10-Q. Codex round 1 flagged the original SKIP call as underweighting capital-action signal | None | Skip raw | **METADATA-ONLY** (parser deferred — see #1015) |
+| **144** | Insider notice of intent to sell restricted shares | Form 4 captures the actual transaction afterwards, BUT 144 surfaces insider overhang + low-float pressure + founder/VC distribution intent before the sale. Codex round 1 flagged: not fully superseded by Form 4 | None | Skip raw | **METADATA-ONLY** (parser deferred) |
+| **CORRESP** | Letters between issuer and SEC review staff | High-signal in rare cases (revenue-recognition Q&A, going-concern queries, restatement-pending). 95% routine but the 5% is exactly LLM thesis material. Codex round 1: SEC says CorpFin reviews focus on disclosures that may conflict with rules / be materially deficient — exactly what an LLM deep-dive would consume | None | Skip raw | **METADATA-ONLY** (deep-dive LLM parser deferred) |
+| **5, 5/A** | Annual insider catch-all for transactions missed in Form 4 | Form 4 should capture most, but Form 5 reveals late/exempt Section 16 reporting. Codex round 1 flagged: late/missed reporting is itself an insider-quality / compliance signal | None | Skip raw | **METADATA-ONLY** (parser deferred) |
+| **S-1, S-3, S-4** | Registration statements (IPO, secondary, M&A) | S-1 = IPO / new-issuer thesis; S-3 = shelf takedowns + ATM + secondary; S-4 = merger/exchange-offer economics. Codex round 1 flagged the SKIP call as missing capital-action thesis material | None | Skip raw | **METADATA-ONLY** (IPO/M&A parser deferred to v2) |
+| **F-1, F-3, F-4** | Foreign-issuer mirrors of S-1/S-3/S-4 | Same signal as S-* for foreign issuers; thesis-relevant for ADRs and foreign-listed names | None | Skip raw | **METADATA-ONLY** |
+| **PRE 14A, PRER14A** | Preliminary proxy + revisions | Contested votes, dilution authorisations, reverse splits surface here before DEF 14A is final. Codex round 1 flagged | None | Skip raw | **METADATA-ONLY** |
+| **SC TO-T, SC 14D9, DEF 13E-3** | Tender-offer acquirer materials, target recommendation, going-private fairness | M&A / take-out signal. DEF 13E-3 is the conflict-of-interest disclosure for going-private transactions | None | Skip raw | **METADATA-ONLY** |
+| **25, 25-NSE, 15-12B, 15-12G, 15-15D, 15F variants** | Delisting / deregistration / foreign termination notices | Terminal-state signal — instrument leaving the universe. Codex round 1 flagged | None | Skip raw | **METADATA-ONLY** |
+| **11-K** | Annual report for employee stock-purchase / savings / 401(k) plans | Low priority but reveals employer-plan stock concentration | None | Skip raw | **METADATA-ONLY** |
 | ~~**FWP**~~ | Free writing prospectus (marketing material for offerings) | Near-zero — sales-pitch tier sheets, real terms land in 424B at offering close | None | Skip | **SKIP** |
-| ~~**CORRESP**~~ | Letters between issuer and SEC review staff | High-signal in rare cases (revenue-recognition Q&A, going-concern queries), but ~95% is routine review-cycle correspondence; red flags eventually surface in 8-K Item 4.02 | None | Skip | **SKIP** for v1; could be valuable LLM signal in a "deep-dive" mode later |
-| ~~**5, 5/A**~~ | Annual insider catch-all for transactions missed in Form 4 | Marginal — Form 4 should capture most | None | Skip | **SKIP** |
-| ~~**S-8**~~ | Registration of employee stock plans | Marginal — dilution disclosure already in 10-K | None | Skip | **SKIP** |
-| ~~**N-CSR, N-CSRS**~~ | Mutual-fund annual / semi-annual reports | Low — NPORT covers fund holdings monthly | None | Skip | **SKIP** (NPORT supersedes) |
-| ~~**D, D/A**~~ | Private placement notices (Reg D exempt offerings) | Low — private placement, not directly relevant to public ranking | None | Skip | **SKIP** |
-| ~~**S-1, S-3, S-4**~~ | Registration statements (IPO, secondary, M&A) | High for IPO / M&A specifically — but no parser today, deferred to v2 | None | Skip | **SKIP** for v1, defer to ticketed v2 IPO/M&A work |
+| ~~**N-CSR, N-CSRS**~~ | Mutual-fund annual / semi-annual reports | Low — NPORT covers fund holdings monthly with structured XBRL | None | Skip | **SKIP** (NPORT supersedes) |
+| ~~**D, D/A**~~ | Private placement notices (Reg D exempt offerings) | Low — private placement, not directly relevant to public-equity ranking | None | Skip | **SKIP** |
+| ~~**S-8, S-8 POS**~~ | Registration of employee stock plans | Marginal — dilution disclosure already in 10-K cover-page DEI tags + risk factors | None | Skip | **SKIP** |
 
 ### Form-type categories not in the table
 
 The dev DB shows ~125 distinct form_type values across 800k
-``filing_events`` rows. The above covers the ~30 we explicitly take
-a position on. The long tail (CT ORDER, EFFECT, COVER, SC TO-T,
-PX14A6G, PRE 14A, F-1, F-3, etc.) all default to **SKIP** unless
-the operator surfaces a concrete LLM use case + parser plan.
+``filing_events`` rows. The table above + the Tier 2 / Tier 3 code
+blocks below cover ~70 explicitly. Everything else defaults to
+**SKIP** — adding a form to PARSE+RAW or METADATA-ONLY requires a
+documented "what LLM / ranking pipeline consumes this"
+justification.
 
 Default = skip is the right posture: each new form type added to
 the allow-list should require a documented "what would the LLM /

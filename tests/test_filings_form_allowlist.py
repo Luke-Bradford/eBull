@@ -59,6 +59,7 @@ def test_active_parser_forms_are_in_parse_and_raw() -> None:
         "13F-HR",
         "13F-HR/A",
         "NPORT-P",
+        "NPORT-P/A",
         "SCHEDULE 13G",
         "SCHEDULE 13G/A",
         "SCHEDULE 13D",
@@ -126,6 +127,33 @@ def test_skipped_forms_not_in_keep_list() -> None:
     }
     overlap = skip_forms & SEC_INGEST_KEEP_FORMS
     assert overlap == set(), f"forms marked SKIP appear in keep list: {sorted(overlap)}"
+
+
+def test_spec_skip_table_matches_constants() -> None:
+    """Drift guard: every form the spec table declares as SKIP must
+    be absent from ``SEC_INGEST_KEEP_FORMS``.
+
+    PR1012 review caught the spec table contradicting the implementation
+    (424B*, CORRESP, S-1/S-3/S-4 marked SKIP in the table but METADATA-ONLY
+    in code). This test prevents that drift class from re-occurring.
+
+    The spec's authoritative SKIP table is reproduced here; updates to
+    either the table or the constants must be reflected in both places.
+    """
+    spec_skip_forms = {
+        "FWP",
+        "N-CSR",
+        "N-CSRS",
+        "D",
+        "D/A",
+        "S-8",
+        "S-8 POS",
+    }
+    overlap = spec_skip_forms & SEC_INGEST_KEEP_FORMS
+    assert overlap == set(), (
+        f"forms the spec table marks SKIP appear in SEC_INGEST_KEEP_FORMS: "
+        f"{sorted(overlap)} — spec table and code constants have drifted"
+    )
 
 
 def test_keep_list_size_is_bounded() -> None:
