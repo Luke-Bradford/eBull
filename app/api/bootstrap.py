@@ -110,19 +110,25 @@ def _identify_requestor(request: Request) -> str:
 
 
 def _build_status_response(conn: psycopg.Connection[object]) -> BootstrapStatusResponse:
-    """Single-transaction snapshot of bootstrap state + latest run.
+    """Build the status response within a single transaction.
 
-    Reads ``bootstrap_state`` + the latest run + its stages inside one
-    ``conn.transaction()`` so a stage transition landing between the
-    two queries cannot produce an internally-inconsistent payload.
-    Prevention-log: "Multi-query read handlers must use a single
-    snapshot".
+    Groups the ``bootstrap_state`` + latest-run + stages reads under
+    one ``with conn.transaction():`` so the FastAPI dependency chain
+    does not interleave commits between them. **Note** the connection
+    runs at the default Postgres isolation level (READ COMMITTED), so
+    each statement still observes its own snapshot — a writer that
+    commits between statement 1 and statement 2 *is* visible to
+    statement 2. The wrapping here is therefore *transaction
+    grouping*, not cross-statement snapshot isolation.
 
-    ``read_latest_run_with_stages`` opens its own ``conn.transaction()``;
-    under psycopg v3 a nested call inside an outer transaction becomes
-    a ``SAVEPOINT``, which still observes the outer snapshot. So the
-    wrapping here gives us snapshot isolation across both reads
-    without breaking the inner helper.
+    For v1 this is an acceptable trade-off: the orchestrator's stage
+    transitions are short single-row UPDATEs, so the read-window
+    inconsistency surface is small and the operator-facing impact is
+    "the run progress UI briefly shows stage N as running and stage
+    N+1 already started" — never a destructive read. If true
+    cross-statement isolation is needed later, switch this
+    connection to ``ISOLATION_LEVEL_REPEATABLE_READ`` for the
+    duration of the read transaction.
     """
     with conn.transaction():
         state = read_state(conn)
