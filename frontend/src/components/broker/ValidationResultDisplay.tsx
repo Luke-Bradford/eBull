@@ -19,7 +19,7 @@ export function ValidationResultDisplay({
   if (!result.auth_valid) {
     return (
       <div role="alert" className="rounded bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
-        Authentication failed — check your API key and user key.
+        Authentication failed — check your eToro public key and private key.
       </div>
     );
   }

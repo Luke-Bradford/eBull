@@ -197,7 +197,7 @@ function BrokerCredentialsSection(): JSX.Element {
       if (err instanceof ApiError && err.status === 409) {
         setCreateError("A credential with that label already exists. Revoke it first to replace.");
       } else if (err instanceof ApiError && err.status === 400) {
-        setCreateError("Invalid API key or user key value.");
+        setCreateError("Invalid public key or private key value.");
       } else {
         setCreateError("Could not save credential.");
       }
@@ -415,7 +415,13 @@ function BrokerCredentialsSection(): JSX.Element {
                 className="flex items-center justify-between px-3 py-2 text-sm"
               >
                 <div>
-                  <span className="font-medium text-slate-800 dark:text-slate-100">{row.label}</span>
+                  <span className="font-medium text-slate-800 dark:text-slate-100">
+                    {row.label === "api_key"
+                      ? "Public key"
+                      : row.label === "user_key"
+                        ? "Private key"
+                        : row.label}
+                  </span>
                   <span className="ml-2 text-xs text-slate-500">
                     {row.provider} · {row.environment} · ••••{row.last_four}
                   </span>
@@ -493,14 +499,14 @@ function BrokerCredentialsSection(): JSX.Element {
           className="max-w-sm space-y-3 rounded border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"
         >
           <h3 className="text-sm font-medium text-slate-700">
-            Edit {manageAction === "edit-api_key" ? "API key" : "user key"}
+            Edit {manageAction === "edit-api_key" ? "public key" : "private key"}
           </h3>
           <p className="text-xs text-slate-500">
             Enter the new value. The existing key will be revoked and replaced.
           </p>
           <label className="block text-sm">
             <span className="mb-1 block text-slate-600">
-              {manageAction === "edit-api_key" ? "New API key" : "New user key"}
+              {manageAction === "edit-api_key" ? "New public key" : "New private key"}
             </span>
             <input
               type="password"
@@ -549,7 +555,7 @@ function BrokerCredentialsSection(): JSX.Element {
             You can test the new credentials before saving.
           </p>
           <label className="block text-sm">
-            <span className="mb-1 block text-slate-600">New API key</span>
+            <span className="mb-1 block text-slate-600">New public key</span>
             <input
               type="password"
               name="broker-credential-api-key"
@@ -562,7 +568,7 @@ function BrokerCredentialsSection(): JSX.Element {
             />
           </label>
           <label className="block text-sm">
-            <span className="mb-1 block text-slate-600">New user key</span>
+            <span className="mb-1 block text-slate-600">New private key</span>
             <input
               type="password"
               name="broker-credential-user-key"
@@ -635,14 +641,14 @@ function BrokerCredentialsSection(): JSX.Element {
           </h3>
           {mode === "repair" && (
             <p className="text-xs text-slate-500">
-              One key was already saved. Enter the missing {missingLabel === "api_key" ? "API key" : "user key"} to
+              One key was already saved. Enter the missing {missingLabel === "api_key" ? "public key" : "private key"} to
               complete the credential pair.
             </p>
           )}
 
           {showApiKeyField && (
             <label className="block text-sm">
-              <span className="mb-1 block text-slate-600">API key</span>
+              <span className="mb-1 block text-slate-600">Public key</span>
               <input
                 type="password"
                 name="broker-credential-api-key"
@@ -658,7 +664,7 @@ function BrokerCredentialsSection(): JSX.Element {
 
           {showUserKeyField && (
             <label className="block text-sm">
-              <span className="mb-1 block text-slate-600">User key</span>
+              <span className="mb-1 block text-slate-600">Private key</span>
               <input
                 type="password"
                 name="broker-credential-user-key"

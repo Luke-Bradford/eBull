@@ -60,7 +60,7 @@ class Remedy:
 REMEDIES: dict[FailureCategory, Remedy] = {
     FailureCategory.AUTH_EXPIRED: Remedy(
         message="Credential rejected by provider",
-        operator_fix="Update the API key in Settings → Providers",
+        operator_fix="Update the public key in Settings → Providers",
         self_heal=False,
     ),
     FailureCategory.RATE_LIMITED: Remedy(

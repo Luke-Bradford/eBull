@@ -92,8 +92,8 @@ function withoutPhrase(): CreateBrokerCredentialResponse {
 
 async function fillAndSubmit(apiKey: string, userKey: string): Promise<void> {
   const user = userEvent.setup();
-  await user.type(screen.getByLabelText("API key"), apiKey);
-  await user.type(screen.getByLabelText("User key"), userKey);
+  await user.type(screen.getByLabelText("Public key"), apiKey);
+  await user.type(screen.getByLabelText("Private key"), userKey);
   await user.click(screen.getByRole("button", { name: /save credential/i }));
 }
 
@@ -118,27 +118,27 @@ describe("SettingsPage — credential-set modes", () => {
   it("shows both key fields when no credentials exist (Create mode)", async () => {
     render(<SettingsPage />);
     await screen.findByText(/No broker credentials saved yet/i);
-    expect(screen.getByLabelText("API key")).toBeInTheDocument();
-    expect(screen.getByLabelText("User key")).toBeInTheDocument();
+    expect(screen.getByLabelText("Public key")).toBeInTheDocument();
+    expect(screen.getByLabelText("Private key")).toBeInTheDocument();
   });
 
   it("shows only the missing field when one key exists (Repair mode)", async () => {
     mockedList.mockResolvedValueOnce([apiKeyRow()]);
     render(<SettingsPage />);
-    await screen.findByText("api_key");
+    await screen.findByText("Public key");
     // api_key exists, so only user_key field should be shown.
-    expect(screen.queryByLabelText("API key")).toBeNull();
-    expect(screen.getByLabelText("User key")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Public key")).toBeNull();
+    expect(screen.getByLabelText("Private key")).toBeInTheDocument();
     expect(screen.getByText(/One key was already saved/i)).toBeInTheDocument();
   });
 
   it("hides the create form when both keys exist (Complete mode)", async () => {
     mockedList.mockResolvedValueOnce([apiKeyRow(), userKeyRow()]);
     render(<SettingsPage />);
-    await screen.findByText("api_key");
+    await screen.findByText("Public key");
     expect(screen.getByText(/Credentials configured/i)).toBeInTheDocument();
-    expect(screen.queryByLabelText("API key")).toBeNull();
-    expect(screen.queryByLabelText("User key")).toBeNull();
+    expect(screen.queryByLabelText("Public key")).toBeNull();
+    expect(screen.queryByLabelText("Private key")).toBeNull();
   });
 
   it("shows environment in the credential list", async () => {
@@ -166,8 +166,8 @@ describe("SettingsPage — test connection", () => {
 
     render(<SettingsPage />);
     await screen.findByText(/No broker credentials saved yet/i);
-    await userEvent.setup().type(screen.getByLabelText("API key"), "test-api-key");
-    await user.type(screen.getByLabelText("User key"), "test-user-key");
+    await userEvent.setup().type(screen.getByLabelText("Public key"), "test-api-key");
+    await user.type(screen.getByLabelText("Private key"), "test-user-key");
     await user.click(screen.getByRole("button", { name: /test connection/i }));
 
     expect(await screen.findByText(/Connection verified/i)).toBeInTheDocument();
@@ -189,8 +189,8 @@ describe("SettingsPage — test connection", () => {
 
     render(<SettingsPage />);
     await screen.findByText(/No broker credentials saved yet/i);
-    await user.type(screen.getByLabelText("API key"), "bad-api-key");
-    await user.type(screen.getByLabelText("User key"), "bad-user-key");
+    await user.type(screen.getByLabelText("Public key"), "bad-api-key");
+    await user.type(screen.getByLabelText("Private key"), "bad-user-key");
     await user.click(screen.getByRole("button", { name: /test connection/i }));
 
     expect(
@@ -213,8 +213,8 @@ describe("SettingsPage — test connection", () => {
 
     render(<SettingsPage />);
     await screen.findByText(/No broker credentials saved yet/i);
-    await user.type(screen.getByLabelText("API key"), "test-api-key");
-    await user.type(screen.getByLabelText("User key"), "test-user-key");
+    await user.type(screen.getByLabelText("Public key"), "test-api-key");
+    await user.type(screen.getByLabelText("Private key"), "test-user-key");
     await user.click(screen.getByRole("button", { name: /test connection/i }));
 
     expect(
@@ -226,7 +226,7 @@ describe("SettingsPage — test connection", () => {
   it("disables Test connection in Repair mode", async () => {
     mockedList.mockResolvedValueOnce([apiKeyRow()]);
     render(<SettingsPage />);
-    await screen.findByText("api_key");
+    await screen.findByText("Public key");
 
     const btn = screen.getByRole("button", { name: /test connection/i });
     expect(btn).toBeDisabled();
@@ -275,10 +275,10 @@ describe("SettingsPage — two-key save", () => {
     mockedCreate.mockResolvedValueOnce(withoutPhrase());
 
     render(<SettingsPage />);
-    await screen.findByText("api_key");
+    await screen.findByText("Public key");
 
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText("User key"), "test-user-key");
+    await user.type(screen.getByLabelText("Private key"), "test-user-key");
     await user.click(screen.getByRole("button", { name: /save credential/i }));
 
     await waitFor(() => {
@@ -309,9 +309,9 @@ describe("SettingsPage — two-key save", () => {
     expect(await screen.findByText(/Could not save credential/i)).toBeInTheDocument();
     // Re-derived to Repair mode: only user_key field visible.
     await waitFor(() => {
-      expect(screen.queryByLabelText("API key")).toBeNull();
+      expect(screen.queryByLabelText("Public key")).toBeNull();
     });
-    expect(screen.getByLabelText("User key")).toBeInTheDocument();
+    expect(screen.getByLabelText("Private key")).toBeInTheDocument();
   });
 });
 
@@ -370,7 +370,7 @@ describe("SettingsPage — complete mode management", () => {
 
   it("shows Edit button on each active credential row", async () => {
     render(<SettingsPage />);
-    await screen.findByText("api_key");
+    await screen.findByText("Public key");
     const editButtons = screen.getAllByRole("button", { name: "Edit" });
     expect(editButtons).toHaveLength(2);
   });
@@ -428,13 +428,13 @@ describe("SettingsPage — edit single key", () => {
   it("opens edit form for API key and saves via PUT /replace (#980)", async () => {
     const user = userEvent.setup();
     render(<SettingsPage />);
-    await screen.findByText("api_key");
+    await screen.findByText("Public key");
 
     const editButtons = screen.getAllByRole("button", { name: "Edit" });
     await user.click(editButtons[0]!);
 
-    expect(screen.getByText("Edit API key")).toBeInTheDocument();
-    const input = screen.getByLabelText("New API key");
+    expect(screen.getByText("Edit public key")).toBeInTheDocument();
+    const input = screen.getByLabelText("New public key");
     await user.type(input, "new-secret-value");
 
     mockedList.mockResolvedValueOnce([
@@ -460,12 +460,12 @@ describe("SettingsPage — edit single key", () => {
   it("cancel returns to idle management panel", async () => {
     const user = userEvent.setup();
     render(<SettingsPage />);
-    await screen.findByText("api_key");
+    await screen.findByText("Public key");
 
     const editButtons = screen.getAllByRole("button", { name: "Edit" });
     await user.click(editButtons[0]!);
 
-    expect(screen.getByText("Edit API key")).toBeInTheDocument();
+    expect(screen.getByText("Edit public key")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
 
     // Should be back to idle — management buttons visible
@@ -480,12 +480,12 @@ describe("SettingsPage — edit single key", () => {
 
     const user = userEvent.setup();
     render(<SettingsPage />);
-    await screen.findByText("api_key");
+    await screen.findByText("Public key");
 
     const editButtons = screen.getAllByRole("button", { name: "Edit" });
     await user.click(editButtons[0]!);
 
-    await user.type(screen.getByLabelText("New API key"), "new-val");
+    await user.type(screen.getByLabelText("New public key"), "new-val");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
@@ -519,8 +519,8 @@ describe("SettingsPage — replace both keys", () => {
     await user.click(screen.getByRole("button", { name: /replace both/i }));
 
     expect(screen.getByText("Replace both keys")).toBeInTheDocument();
-    await user.type(screen.getByLabelText("New API key"), "new-api");
-    await user.type(screen.getByLabelText("New user key"), "new-user");
+    await user.type(screen.getByLabelText("New public key"), "new-api");
+    await user.type(screen.getByLabelText("New private key"), "new-user");
 
     mockedList.mockResolvedValueOnce([
       makeRow({ id: "new-api-id", label: "api_key" }),
@@ -551,8 +551,8 @@ describe("SettingsPage — replace both keys", () => {
     await screen.findByText(/Credentials configured/i);
 
     await user.click(screen.getByRole("button", { name: /replace both/i }));
-    await user.type(screen.getByLabelText("New API key"), "new-api");
-    await user.type(screen.getByLabelText("New user key"), "new-user");
+    await user.type(screen.getByLabelText("New public key"), "new-api");
+    await user.type(screen.getByLabelText("New private key"), "new-user");
     await user.click(screen.getByRole("button", { name: /^replace both$/i }));
 
     await waitFor(() => {
@@ -574,8 +574,8 @@ describe("SettingsPage — replace both keys", () => {
     await screen.findByText(/Credentials configured/i);
 
     await user.click(screen.getByRole("button", { name: /replace both/i }));
-    await user.type(screen.getByLabelText("New API key"), "test-api");
-    await user.type(screen.getByLabelText("New user key"), "test-user");
+    await user.type(screen.getByLabelText("New public key"), "test-api");
+    await user.type(screen.getByLabelText("New private key"), "test-user");
 
     await user.click(screen.getByRole("button", { name: /test connection/i }));
 
