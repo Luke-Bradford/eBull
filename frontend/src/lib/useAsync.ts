@@ -103,6 +103,12 @@ export function useAsync<T>(
       .then((result) => {
         if (cancelled) return;
         setData(result);
+        // Always clear ``error`` on success — under
+        // ``preserveOnRefetch`` we don't reset it at fetch-start, so
+        // a prior failed revalidation leaves ``error`` set; without
+        // this clear, a recovered fetch would render fresh data
+        // alongside a stale error banner. PR1017 review BLOCKING.
+        setError(null);
         setLoading(false);
         setIsRevalidating(false);
         hasLoadedRef.current = true;

@@ -135,4 +135,48 @@ describe("useAsync — preserveOnRefetch (#1016)", () => {
     expect(result.current.data).toBeNull();
     expect(result.current.error).toBeInstanceOf(Error);
   });
+
+  it("clears stale error on successful revalidation after a failed one", async () => {
+    // PR1017 review BLOCKING: if a revalidation errors then the next
+    // one succeeds, ``error`` must be cleared. Pre-fix the success
+    // path never reset ``error`` and the preserve branch skipped the
+    // fetch-start ``setError(null)``, so a recovered fetch would
+    // render fresh data alongside a stale error banner.
+    let mode: "ok" | "fail" = "ok";
+    let counter = 0;
+    const fetcher = async () => {
+      counter += 1;
+      if (mode === "fail") {
+        throw new Error("revalidation failed");
+      }
+      return counter;
+    };
+    const { result } = renderHook(() =>
+      useAsync(fetcher, [], { preserveOnRefetch: true }),
+    );
+    // First load — success.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current.data).toBe(1);
+    expect(result.current.error).toBeNull();
+
+    // Second call — fail.
+    mode = "fail";
+    await act(async () => {
+      result.current.refetch();
+      await Promise.resolve();
+    });
+    expect(result.current.error).toBeInstanceOf(Error);
+    expect(result.current.data).toBeNull();
+
+    // Third call — success again. Error must clear.
+    mode = "ok";
+    await act(async () => {
+      result.current.refetch();
+      await Promise.resolve();
+    });
+    expect(result.current.data).toBe(3);
+    expect(result.current.error).toBeNull();
+  });
 });
