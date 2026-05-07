@@ -31,6 +31,7 @@ import type {
   CoverageSummaryResponse,
   JobOverviewResponse,
 } from "@/api/types";
+import { BootstrapPanel } from "@/components/admin/BootstrapPanel";
 import { CollapsibleSection } from "@/components/admin/CollapsibleSection";
 import { FundDataRow } from "@/components/admin/FundDataRow";
 import { LayerHealthList } from "@/components/admin/LayerHealthList";
@@ -260,6 +261,8 @@ export function AdminPage() {
         coverageError={coverage.error !== null}
         onOpenOrchestrator={openOrchestratorFor}
       />
+
+      <BootstrapPanel />
 
       <FundDataRow
         coverage={coverage.data}
