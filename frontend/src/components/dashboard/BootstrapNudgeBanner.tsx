@@ -93,7 +93,7 @@ export function BootstrapNudgeBanner() {
       <div className="flex items-center gap-3">
         <Link
           to="/admin"
-          className="rounded bg-white/60 px-2 py-1 text-xs font-medium hover:bg-white"
+          className="rounded bg-white/60 dark:bg-slate-900/60 px-2 py-1 text-xs font-medium hover:bg-white dark:hover:bg-slate-900"
         >
           Open admin
         </Link>

@@ -356,10 +356,13 @@ function PrimaryButton({
   children,
   ...rest
 }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+  // ``...rest`` first, then ``type="button"`` so the default cannot
+  // accidentally promote a caller's submit-button to a form submit.
+  // Pre-PR1003-NITPICK we had the order reversed.
   return (
     <button
-      type="button"
       {...rest}
+      type="button"
       className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-white hover:bg-sky-700 disabled:bg-slate-300"
     >
       {children}
@@ -373,8 +376,8 @@ function SecondaryButton({
 }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button
-      type="button"
       {...rest}
+      type="button"
       className="rounded border border-slate-300 bg-white px-3 py-1 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
     >
       {children}
