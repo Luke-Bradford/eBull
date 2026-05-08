@@ -265,41 +265,46 @@ def ingest_13f_dataset_archive(
             voting_authority = _map_voting_authority(row)
             exposure_kind = _map_putcall(row.get("PUTCALL"))
 
+            accession_no_dashes = accession.replace("-", "")
+            source_url = f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/{accession_no_dashes}/"
+            # Per-row savepoint: a CHECK-constraint violation on one
+            # malformed dataset row would otherwise put psycopg into
+            # ``InFailedSqlTransaction`` for every subsequent
+            # ``_resolve_cusip`` / ``record_institution_observation``
+            # call. Wrapping each write in ``conn.transaction()``
+            # rolls back the bad row cleanly so the loop can keep
+            # processing. Codex review BLOCKING for PR #1031.
             try:
-                accession_no_dashes = accession.replace("-", "")
-                source_url = f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/{accession_no_dashes}/"
-                record_institution_observation(
-                    conn,
-                    instrument_id=instrument_id,
-                    filer_cik=filer_cik,
-                    filer_name=filer_name,
-                    # Spec maps 13F filers to ``filer_type='INV'``
-                    # (investment manager) by default. The schema
-                    # CHECK accepts ETF/INV/INS/BD/OTHER. INV is the
-                    # right default for typical 13F-HR filers.
-                    filer_type="INV",
-                    ownership_nature="economic",
-                    source="13f",
-                    source_document_id=accession,
-                    source_accession=accession,
-                    source_field=None,
-                    source_url=source_url,
-                    filed_at=filed_at,
-                    period_start=None,
-                    period_end=period_end,
-                    ingest_run_id=ingest_run_id,
-                    shares=shares,
-                    market_value_usd=market_value_usd,
-                    voting_authority=voting_authority,
-                    exposure_kind=exposure_kind,
-                )
+                with conn.transaction():
+                    record_institution_observation(
+                        conn,
+                        instrument_id=instrument_id,
+                        filer_cik=filer_cik,
+                        filer_name=filer_name,
+                        # Spec maps 13F filers to ``filer_type='INV'``
+                        # (investment manager) by default. The schema
+                        # CHECK accepts ETF/INV/INS/BD/OTHER. INV is
+                        # the right default for typical 13F-HR filers.
+                        filer_type="INV",
+                        ownership_nature="economic",
+                        source="13f",
+                        source_document_id=accession,
+                        source_accession=accession,
+                        source_field=None,
+                        source_url=source_url,
+                        filed_at=filed_at,
+                        period_start=None,
+                        period_end=period_end,
+                        ingest_run_id=ingest_run_id,
+                        shares=shares,
+                        market_value_usd=market_value_usd,
+                        voting_authority=voting_authority,
+                        exposure_kind=exposure_kind,
+                    )
                 result.rows_written += 1
             except Exception as exc:  # noqa: BLE001
-                # Record-level write failure (e.g. CHECK constraint
-                # violation on a malformed dataset row) — count and
-                # continue. The caller is responsible for opening a
-                # transaction so partial writes are atomic per
-                # archive batch.
+                # Record-level write failure rolled back via the
+                # savepoint; loop continues with a clean transaction.
                 logger.debug(
                     "13F ingest: record_institution_observation failed for %s/%s: %s",
                     accession,
