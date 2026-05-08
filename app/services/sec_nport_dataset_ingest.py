@@ -291,24 +291,37 @@ def ingest_nport_dataset_archive(
             # Upsert series reference once per (accession, series_id).
             series_key = f"{accn}:{series_id}"
             if series_key not in seen_series:
+                # Per-series savepoint: a CHECK violation on the
+                # series-id regex would otherwise abort the
+                # transaction. Wrap so we can record the failure and
+                # continue cleanly.
                 try:
-                    upsert_sec_fund_series(
-                        conn,
-                        fund_series_id=series_id,
-                        fund_series_name=series_name or f"Series {series_id}",
-                        fund_filer_cik=filer_cik,
-                        last_seen_period_end=period_end,
-                    )
-                    seen_series.add(series_key)
+                    with conn.transaction():
+                        upsert_sec_fund_series(
+                            conn,
+                            fund_series_id=series_id,
+                            fund_series_name=series_name or f"Series {series_id}",
+                            fund_filer_cik=filer_cik,
+                            last_seen_period_end=period_end,
+                        )
                 except Exception as exc:  # noqa: BLE001
-                    logger.debug(
-                        "nport ingest: upsert_sec_fund_series failed for %s/%s: %s",
+                    # PR review WARNING (#1033): mark the series as
+                    # SEEN even on failure so subsequent holdings
+                    # under the same accession+series do not retry
+                    # the failing upsert (each retry was incrementing
+                    # parse_errors and silently discarding the
+                    # holding). Log at WARNING so the first occurrence
+                    # surfaces in production logs.
+                    logger.warning(
+                        "nport ingest: upsert_sec_fund_series failed for accn=%s series=%s: %s",
                         accn,
                         series_id,
                         exc,
                     )
+                    seen_series.add(series_key)
                     result.parse_errors += 1
                     continue
+                seen_series.add(series_key)
 
             # ─── currency_value (market_value_usd) ─────────────
             # CURRENCY_VALUE is the value column; the dataset stores
