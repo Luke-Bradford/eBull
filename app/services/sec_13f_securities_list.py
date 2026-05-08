@@ -267,6 +267,54 @@ def _bucket_by_first_token(
     return out
 
 
+# Description tokens that mark equity/common-share rows on the SEC
+# 13F Official List. Every issuer's COM line is paired with CALL +
+# PUT (and sometimes WT/UNIT/RIGHTS) sharing the SAME issuer_name —
+# without preference filtering, every matched issuer trips the
+# ambiguity rejection (real-world bug surfaced 2026-05-08:
+# backfill returned inserted=0 because every issuer had >1 same-
+# score row across COM/CALL/PUT). Selecting the COM row over the
+# option row is unambiguous: CALL/PUT have distinct CUSIPs from the
+# underlying common but represent options on the same issuer; the
+# 13F holdings ingester filters PUTCALL separately so picking the
+# COM CUSIP is the correct identity for ownership joins.
+# UNIT is intentionally OMITTED — SPAC unit CUSIPs (which often
+# include warrants attached) are NOT the same security as the
+# common stock and would map a stock instrument to the wrong CUSIP.
+# Codex pre-push MEDIUM for #1054.
+_COMMON_SHARE_DESC_TOKENS: frozenset[str] = frozenset(
+    {
+        "COM",
+        "COMMON",
+        "SHS",
+        "SHARES",
+        "CL",  # CL A / CL B common-share class designators
+        "CLASS",
+        "ORD",  # ordinary shares
+        "ADS",  # American Depositary Shares
+        "ADR",  # American Depositary Receipts
+        "REIT",
+    }
+)
+_OPTION_DESC_TOKENS: frozenset[str] = frozenset({"CALL", "PUT", "WTS", "WARRANT", "WT", "RIGHT", "RIGHTS"})
+
+
+def _is_common_share(sec: ThirteenFSecurity) -> bool:
+    desc = (sec.description or "").upper().strip()
+    if not desc:
+        return False
+    tokens = set(desc.split())
+    if tokens & _OPTION_DESC_TOKENS:
+        return False
+    return bool(tokens & _COMMON_SHARE_DESC_TOKENS)
+
+
+def _is_option(sec: ThirteenFSecurity) -> bool:
+    desc = (sec.description or "").upper().strip()
+    tokens = set(desc.split())
+    return bool(tokens & _OPTION_DESC_TOKENS)
+
+
 def _best_match(
     target: str,
     bucket: list[tuple[str, ThirteenFSecurity]],
@@ -277,8 +325,13 @@ def _best_match(
 
     Mirrors the resolver's same-named helper: we walk the bucket,
     pick the highest similarity, return a flag when two distinct
-    CUSIPs tie at the top score (typical SPAC / share-class
-    collision — operator must disambiguate via curated mapping).
+    CUSIPs tie at the top score.
+
+    Tie-break for SEC 13F triplets (#1054): when the top-score set
+    contains both common-share and option (CALL/PUT) rows under the
+    same issuer name, prefer the common-share row. Ambiguity only
+    fires when distinct ISSUERS tie at the top (true SPAC /
+    share-class collision that needs operator disambiguation).
     """
     if not target or not bucket:
         return (None, False)
@@ -295,9 +348,25 @@ def _best_match(
             top_securities.append(sec)
     if not top_securities:
         return (None, False)
-    distinct_cusips = {s.cusip for s in top_securities}
+    # Prefer common-share rows over option rows when both share the
+    # top score (the SEC list always emits COM + CALL + PUT triplets
+    # for each underlying issuer).
+    common = [s for s in top_securities if _is_common_share(s)]
+    options = [s for s in top_securities if _is_option(s)]
+    preferred: list[ThirteenFSecurity]
+    if common and options and len(common) + len(options) == len(top_securities):
+        # Every top row is either common or option; restrict to common.
+        preferred = common
+    elif common and len(common) < len(top_securities):
+        # Mixed: prefer common, but keep ambiguity check honest by
+        # only collapsing if every non-common is an option.
+        non_common_non_option = [s for s in top_securities if not _is_common_share(s) and not _is_option(s)]
+        preferred = common if not non_common_non_option else top_securities
+    else:
+        preferred = top_securities
+    distinct_cusips = {s.cusip for s in preferred}
     is_ambiguous = len(distinct_cusips) > 1
-    return (top_securities[0], is_ambiguous)
+    return (preferred[0], is_ambiguous)
 
 
 def _insert_external_identifier(
