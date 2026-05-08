@@ -345,7 +345,101 @@ def test_bootstrap_state_singleton_seeded() -> None:
         "bootstrap_state singleton row missing — sql/129_bootstrap_state.sql "
         "did not seed it; the _bootstrap_complete prerequisite would hard-fail."
     )
-    assert row[0] in {"pending", "running", "complete", "partial_error"}, (
+    assert row[0] in {"pending", "running", "complete", "partial_error", "cancelled"}, (
         f"bootstrap_state.status has unexpected value {row[0]!r}; "
-        "expected one of pending / running / complete / partial_error."
+        "expected one of pending / running / complete / partial_error / cancelled."
     )
+
+
+def test_admin_control_hub_schema_present() -> None:
+    """Recovery gate for migrations 135–139 (#1065).
+
+    The admin control hub rewrite adds:
+
+    * ``process_stop_requests`` — cooperative-cancel signal table.
+    * ``bootstrap_runs.cancel_requested_at`` + widened status CHECK.
+    * ``job_runs.{rows_skipped_by_reason, rows_errored, error_classes,
+      cancel_requested_at, cancelled_at}`` + widened status CHECK +
+      ``job_runs_status_started_idx``.
+    * ``pending_job_requests.{process_id, mode}`` +
+      ``pending_job_requests_active_full_wash_idx`` UNIQUE partial.
+    * ``sync_runs.cancel_requested_at`` + widened status CHECK.
+
+    A missing migration here would silently break cancel + iterate +
+    full-wash flows in PR2-PR6. Pin the schema here so a regression
+    fails at boot rather than at the next operator click.
+    """
+    import psycopg
+
+    from app.config import settings
+
+    with psycopg.connect(settings.database_url) as conn:
+        # process_stop_requests table.
+        row = conn.execute("SELECT to_regclass('process_stop_requests')::text").fetchone()
+        assert row is not None and row[0] == "process_stop_requests", (
+            "process_stop_requests table missing — sql/135 did not apply."
+        )
+
+        # bootstrap_runs.cancel_requested_at column.
+        row = conn.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name='bootstrap_runs' AND column_name='cancel_requested_at'"
+        ).fetchone()
+        assert row is not None, "bootstrap_runs.cancel_requested_at missing — sql/136 did not apply."
+
+        # job_runs new columns.
+        for col in (
+            "rows_skipped_by_reason",
+            "rows_errored",
+            "error_classes",
+            "cancel_requested_at",
+            "cancelled_at",
+        ):
+            row = conn.execute(
+                "SELECT 1 FROM information_schema.columns WHERE table_name='job_runs' AND column_name=%s",
+                (col,),
+            ).fetchone()
+            assert row is not None, f"job_runs.{col} missing — sql/137 did not apply."
+
+        # job_runs history index.
+        row = conn.execute("SELECT 1 FROM pg_indexes WHERE indexname='job_runs_status_started_idx'").fetchone()
+        assert row is not None, "job_runs_status_started_idx missing — sql/137 did not apply."
+
+        # pending_job_requests new columns + UNIQUE partial index.
+        for col in ("process_id", "mode"):
+            row = conn.execute(
+                "SELECT 1 FROM information_schema.columns WHERE table_name='pending_job_requests' AND column_name=%s",
+                (col,),
+            ).fetchone()
+            assert row is not None, f"pending_job_requests.{col} missing — sql/138 did not apply."
+
+        row = conn.execute(
+            "SELECT indexdef FROM pg_indexes WHERE indexname='pending_job_requests_active_full_wash_idx'"
+        ).fetchone()
+        assert row is not None, "pending_job_requests_active_full_wash_idx missing — sql/138 did not apply."
+        assert "UNIQUE" in row[0].upper(), (
+            "pending_job_requests_active_full_wash_idx is not UNIQUE — "
+            "concurrent full-wash POSTs would race past the fence-check."
+        )
+
+        # sync_runs.cancel_requested_at + widened CHECK.
+        row = conn.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name='sync_runs' AND column_name='cancel_requested_at'"
+        ).fetchone()
+        assert row is not None, "sync_runs.cancel_requested_at missing — sql/139 did not apply."
+
+        # Verify sync_runs.status accepts 'cancelled' via the widened CHECK.
+        row = conn.execute(
+            """
+            SELECT pg_get_constraintdef(c.oid)
+              FROM pg_constraint c
+              JOIN pg_class t ON t.oid = c.conrelid
+             WHERE t.relname = 'sync_runs'
+               AND c.conname = 'sync_runs_status_check'
+            """
+        ).fetchone()
+        assert row is not None, "sync_runs_status_check missing — sql/139 did not apply."
+        assert "cancelled" in row[0], (
+            f"sync_runs_status_check does not include 'cancelled': {row[0]!r}; sql/139 did not widen the constraint."
+        )

@@ -265,6 +265,25 @@ def serve(stop_event: threading.Event | None = None) -> int:
         except Exception:
             logger.exception("jobs entrypoint: bootstrap reaper failed; continuing")
 
+        # Step 5 — process_stop boot-recovery (#1065). Sweep abandoned
+        # cooperative-cancel signals (>6h, never observed) and stuck
+        # full-wash fence rows (dispatched >6h). Frees partial-unique
+        # slots for future operator triggers.
+        try:
+            from app.services.process_stop import boot_recovery_sweep
+
+            with psycopg.connect(settings.database_url) as conn:
+                orphaned, observed_unfinished, stuck = boot_recovery_sweep(conn)
+            if orphaned or observed_unfinished or stuck:
+                logger.info(
+                    "jobs entrypoint: process_stop swept %d orphaned / %d observed-unfinished / %d stuck fence row(s)",
+                    orphaned,
+                    observed_unfinished,
+                    stuck,
+                )
+        except Exception:
+            logger.exception("jobs entrypoint: process_stop boot-recovery failed; continuing")
+
         # Step 6 — queue stale-row recovery.
         try:
             with psycopg.connect(settings.database_url, autocommit=True) as conn:
