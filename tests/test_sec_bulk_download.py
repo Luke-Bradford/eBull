@@ -279,9 +279,7 @@ class TestDownloadBulkArchives:
         assert result.mode == "skipped_disk"
 
     @pytest.mark.asyncio
-    async def test_empty_archive_list_with_disk_pass_does_not_indexerror(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_empty_archive_list_with_disk_pass_does_not_indexerror(self, tmp_path: Path) -> None:
         # Regression: if a caller passes archives=[] AND disk preflight
         # passes, the bandwidth-probe path must NOT IndexError on
         # archives[0]. Bot review BLOCKING.
