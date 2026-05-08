@@ -67,9 +67,9 @@ class TestInsidersHistory:
         run_id = uuid4()
         cik = "0001767470"
         for q_end, accession, shares in [
-            (date(2025, 6, 30), "ACC-Q2", Decimal("36000000")),
-            (date(2025, 9, 30), "ACC-Q3", Decimal("37000000")),
-            (date(2025, 12, 31), "ACC-Q4", Decimal("38347842")),
+            (date(2025, 6, 30), "0001234500-25-000220", Decimal("36000000")),
+            (date(2025, 9, 30), "0001234500-25-000221", Decimal("37000000")),
+            (date(2025, 12, 31), "0001234500-25-000207", Decimal("38347842")),
         ]:
             record_insider_observation(
                 conn,
@@ -120,8 +120,8 @@ class TestInsidersHistory:
             holder_name="Cohen Ryan",
             ownership_nature="direct",
             source="form4",
-            source_document_id="ACC-F4",
-            source_accession="ACC-F4",
+            source_document_id="0001234500-25-000202",
+            source_accession="0001234518-25-000018",
             source_field=None,
             source_url=None,
             filed_at=datetime.combine(period, datetime.min.time(), tzinfo=UTC),
@@ -137,8 +137,8 @@ class TestInsidersHistory:
             holder_name="Cohen Ryan",
             ownership_nature="indirect",
             source="form4",
-            source_document_id="ACC-F4-IND",
-            source_accession="ACC-F4-IND",
+            source_document_id="0001234500-25-000222",
+            source_accession="0001234519-25-000019",
             source_field=None,
             source_url=None,
             filed_at=datetime.combine(period, datetime.min.time(), tzinfo=UTC),
@@ -175,7 +175,7 @@ class TestInsidersHistory:
                 ownership_nature="direct",
                 source="form4",
                 source_document_id=f"ACC-{q_end}",
-                source_accession=f"ACC-{q_end}",
+                source_accession="0001234520-25-000020",
                 source_field=None,
                 source_url=None,
                 filed_at=datetime.combine(q_end, datetime.min.time(), tzinfo=UTC),
@@ -229,7 +229,7 @@ class TestInstitutionsHistory:
                 ownership_nature="economic",
                 source="13f",
                 source_document_id=f"ACC-VG-{q_end}",
-                source_accession=f"ACC-VG-{q_end}",
+                source_accession="0001234521-25-000021",
                 source_field=None,
                 source_url=None,
                 filed_at=datetime.combine(q_end, datetime.min.time(), tzinfo=UTC),
@@ -258,7 +258,7 @@ class TestInstitutionsHistory:
         # Provenance carries through.
         for p in points:
             assert p.source == "13f"
-            assert p.source_accession.startswith("ACC-VG-")  # type: ignore[union-attr]
+            assert p.source_accession == "0001234521-25-000021"  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------
@@ -277,8 +277,8 @@ class TestSmokeOtherCategories:
         run_id = uuid4()
         cik = "0001767470"
         for filed_year, accession, amount in [
-            (2024, "13D-RC-2024-001", Decimal("60000000")),
-            (2025, "13D-RC-2025-001", Decimal("75000000")),
+            (2024, "0001234500-25-000210", Decimal("60000000")),
+            (2025, "0001234500-25-000211", Decimal("75000000")),
         ]:
             record_blockholder_observation(
                 conn,
@@ -355,8 +355,8 @@ class TestSmokeOtherCategories:
         conn.commit()
         run_id = uuid4()
         for q_end, accession, name in [
-            (date(2024, 12, 31), "ACC-2024", "  Tim Cook  "),
-            (date(2025, 12, 31), "ACC-2025", "TIM COOK"),
+            (date(2024, 12, 31), "0001234500-25-000216", "  Tim Cook  "),
+            (date(2025, 12, 31), "0001234500-25-000217", "TIM COOK"),
         ]:
             record_def14a_observation(
                 conn,

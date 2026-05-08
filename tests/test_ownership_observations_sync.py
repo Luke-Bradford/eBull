@@ -120,7 +120,7 @@ class TestSyncInstitutions:
             INSERT INTO institutional_holdings (
                 filer_id, instrument_id, accession_number, period_of_report,
                 shares, voting_authority, filed_at
-            ) VALUES (%s, %s, 'ACC-BLANK', '2026-03-31', 100, 'SOLE', '2026-04-15')
+            ) VALUES (%s, %s, '0001234500-25-000402', '2026-03-31', 100, 'SOLE', '2026-04-15')
             """,
             (filer_id, 841_100),
         )
@@ -155,7 +155,7 @@ class TestSyncInstitutions:
             INSERT INTO institutional_holdings (
                 filer_id, instrument_id, accession_number, period_of_report,
                 shares, market_value_usd, voting_authority, filed_at
-            ) VALUES (%s, %s, 'ACC-VG-Q1', '2026-03-31', 1500000000, 250000000000, 'SOLE', '2026-04-15')
+            ) VALUES (%s, %s, '0001234500-25-000403', '2026-03-31', 1500000000, 250000000000, 'SOLE', '2026-04-15')
             """,
             (filer_id, 841_101),
         )
@@ -293,7 +293,7 @@ class TestSyncDef14a:
     ) -> None:
         conn = ebull_test_conn
         _seed_instrument(conn, iid=841_400, symbol="AAPL")
-        accession = "ACC-PROXY-2026"
+        accession = "0001234500-25-000137"
         conn.execute(
             """
             INSERT INTO def14a_beneficial_holdings (

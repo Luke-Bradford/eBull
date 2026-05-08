@@ -200,8 +200,8 @@ class TestParseSubmissionsIndex:
         or ``N-PORT`` (legacy). Both must surface."""
         payload = _submissions_json(
             accessions=[
-                ("0001-26-000001", "NPORT-P", "2026-02-26", "2025-12-31"),
-                ("0002-26-000002", "NPORT-P/A", "2026-03-15", "2025-12-31"),
+                ("0001234500-25-000603", "NPORT-P", "2026-02-26", "2025-12-31"),
+                ("0001234500-25-000604", "NPORT-P/A", "2026-03-15", "2025-12-31"),
                 ("0003-25-000003", "N-PORT", "2025-11-26", "2025-09-30"),
                 ("0004-25-000004", "N-PORT/A", "2025-12-15", "2025-09-30"),
                 ("0005-26-000005", "10-K", "2026-02-26", "2025-12-31"),
@@ -214,7 +214,7 @@ class TestParseSubmissionsIndex:
     def test_drops_other_forms(self) -> None:
         payload = _submissions_json(
             accessions=[
-                ("0001-26-000001", "10-K", "2026-02-26", "2025-12-31"),
+                ("0001234500-25-000603", "10-K", "2026-02-26", "2025-12-31"),
             ]
         )
         assert parse_submissions_index(payload) == []
@@ -249,8 +249,8 @@ class TestRecordFundObservation:
             fund_series_id="S000002277",
             fund_series_name="Vanguard 500 Index Fund",
             fund_filer_cik="0000036405",
-            source_document_id="0001-26-000001",
-            source_accession="0001-26-000001",
+            source_document_id="0001234500-25-000603",
+            source_accession="0001234500-25-000603",
             source_field=None,
             source_url="https://www.sec.gov/.../primary_doc.xml",
             filed_at=datetime(2026, 2, 26, tzinfo=UTC),
@@ -284,8 +284,8 @@ class TestRecordFundObservation:
                 fund_series_id="not-a-series-id",
                 fund_series_name="X",
                 fund_filer_cik="0000000001",
-                source_document_id="acc",
-                source_accession="acc",
+                source_document_id="0001234500-25-000605",
+                source_accession="0001234500-25-000605",
                 source_field=None,
                 source_url=None,
                 filed_at=datetime(2026, 2, 26, tzinfo=UTC),
@@ -306,8 +306,8 @@ class TestRecordFundObservation:
                 fund_series_id="S000002277",
                 fund_series_name="Vanguard 500",
                 fund_filer_cik="0000036405",
-                source_document_id="acc",
-                source_accession="acc",
+                source_document_id="0001234500-25-000605",
+                source_accession="0001234500-25-000605",
                 source_field=None,
                 source_url=None,
                 filed_at=datetime(2026, 2, 26, tzinfo=UTC),
@@ -328,8 +328,8 @@ class TestRecordFundObservation:
                 fund_series_id="S000002277",
                 fund_series_name="Vanguard 500",
                 fund_filer_cik="0000036405",
-                source_document_id="acc",
-                source_accession="acc",
+                source_document_id="0001234500-25-000605",
+                source_accession="0001234500-25-000605",
                 source_field=None,
                 source_url=None,
                 filed_at=datetime(2026, 2, 26, tzinfo=UTC),
@@ -350,8 +350,8 @@ class TestRecordFundObservation:
                 fund_series_id="S000002277",
                 fund_series_name="Vanguard 500",
                 fund_filer_cik="0000036405",
-                source_document_id="acc",
-                source_accession="acc",
+                source_document_id="0001234500-25-000605",
+                source_accession="0001234500-25-000605",
                 source_field=None,
                 source_url=None,
                 filed_at=datetime(2026, 2, 26, tzinfo=UTC),
@@ -375,8 +375,8 @@ class TestRecordFundObservation:
             fund_series_id="S000002277",
             fund_series_name="Vanguard 500 Index Fund",
             fund_filer_cik="0000036405",
-            source_document_id="0001-26-000001",
-            source_accession="0001-26-000001",
+            source_document_id="0001234500-25-000603",
+            source_accession="0001234500-25-000603",
             source_field=None,
             source_url="https://www.sec.gov/.../primary_doc.xml",
             filed_at=datetime(2026, 2, 26, tzinfo=UTC),
@@ -395,8 +395,8 @@ class TestRecordFundObservation:
             fund_series_id="S000002277",
             fund_series_name="Vanguard 500 Index Fund",
             fund_filer_cik="0000036405",
-            source_document_id="0002-26-000002",
-            source_accession="0002-26-000002",
+            source_document_id="0001234500-25-000604",
+            source_accession="0001234500-25-000604",
             source_field=None,
             source_url="https://www.sec.gov/.../primary_doc.xml",
             filed_at=datetime(2026, 3, 15, tzinfo=UTC),
@@ -420,7 +420,7 @@ class TestRecordFundObservation:
         assert len(rows) == 1
         # Amendment shares win.
         assert rows[0]["shares"] == Decimal("1100000.0000")
-        assert rows[0]["source_document_id"] == "0002-26-000002"
+        assert rows[0]["source_document_id"] == "0001234500-25-000604"
 
 
 # ---------------------------------------------------------------------------
@@ -755,7 +755,7 @@ class TestManifestFormCodes:
 
 def test_accession_ref_dataclass_is_frozen() -> None:
     ref = AccessionRef(
-        accession_number="0001-26-000001",
+        accession_number="0001234500-25-000603",
         filing_type="NPORT-P",
         period_of_report=date(2025, 12, 31),
         filed_at=datetime(2026, 2, 26, tzinfo=UTC),

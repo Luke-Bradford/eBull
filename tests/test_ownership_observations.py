@@ -217,8 +217,8 @@ class TestInsiderObservations:
             holder_name="Officer A",
             ownership_nature="direct",
             source="form3",
-            source_document_id="ACC-F3",
-            source_accession="ACC-F3",
+            source_document_id="0001234500-25-000201",
+            source_accession="0001234501-25-000001",
             source_field=None,
             source_url=None,
             filed_at=datetime(2024, 5, 1, tzinfo=UTC),
@@ -235,8 +235,8 @@ class TestInsiderObservations:
             holder_name="Officer A",
             ownership_nature="direct",
             source="form4",
-            source_document_id="ACC-F4",
-            source_accession="ACC-F4",
+            source_document_id="0001234500-25-000202",
+            source_accession="0001234502-25-000002",
             source_field=None,
             source_url=None,
             filed_at=datetime(2026, 1, 15, tzinfo=UTC),
@@ -281,8 +281,8 @@ class TestInsiderObservations:
             holder_name="Cohen Ryan",
             ownership_nature="direct",
             source="form4",
-            source_document_id="ACC-F4-COHEN",
-            source_accession="ACC-F4-COHEN",
+            source_document_id="0001234500-25-000203",
+            source_accession="0001234503-25-000003",
             source_field=None,
             source_url=None,
             filed_at=datetime(2026, 1, 21, tzinfo=UTC),
@@ -298,8 +298,8 @@ class TestInsiderObservations:
             holder_name="Cohen Ryan",
             ownership_nature="beneficial",
             source="13d",
-            source_document_id="ACC-13D-COHEN",
-            source_accession="ACC-13D-COHEN",
+            source_document_id="0001234500-25-000204",
+            source_accession="0001234504-25-000004",
             source_field=None,
             source_url=None,
             filed_at=datetime(2025, 1, 29, tzinfo=UTC),
@@ -345,8 +345,8 @@ class TestInsiderObservations:
             holder_name="Test Holder",
             ownership_nature="direct",
             source="form4",
-            source_document_id="ACC-1",
-            source_accession="ACC-1",
+            source_document_id="0001234500-25-000205",
+            source_accession="0001234505-25-000005",
             source_field=None,
             source_url=None,
             filed_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -390,8 +390,8 @@ class TestInsiderObservations:
                 holder_name="Idempotent Holder",
                 ownership_nature="direct",
                 source="form4",
-                source_document_id="ACC-IDEMP",
-                source_accession="ACC-IDEMP",
+                source_document_id="0001234500-25-000206",
+                source_accession="0001234506-25-000006",
                 source_field=None,
                 source_url=None,
                 filed_at=datetime(2026, 2, 1, tzinfo=UTC),
@@ -468,7 +468,7 @@ class TestInstitutionObservations:
             ownership_nature="economic",
             source="13f",
             source_document_id="0001234567-26-VG-Q1",
-            source_accession="0001234567-26-VG-Q1",
+            source_accession="0001234507-25-000007",
             source_field=None,
             source_url=None,
             filed_at=datetime(2026, 4, 15, tzinfo=UTC),
@@ -509,8 +509,8 @@ class TestInstitutionObservations:
         cik = "0000102909"
         run_id = uuid4()
         for q_end, accession, shares in [
-            (date(2025, 12, 31), "ACC-Q4", Decimal("1400000000")),
-            (date(2026, 3, 31), "ACC-Q1", Decimal("1500000000")),
+            (date(2025, 12, 31), "0001234500-25-000207", Decimal("1400000000")),
+            (date(2026, 3, 31), "0001234500-25-000208", Decimal("1500000000")),
         ]:
             record_institution_observation(
                 conn,
@@ -568,7 +568,7 @@ class TestInstitutionObservations:
         conn = _setup
         cik = "0000102909"
         run_id = uuid4()
-        accession = "ACC-3-EXPOSURE"
+        accession = "0001234500-25-000135"
         period_end = date(2026, 3, 31)
         for kind, shares in [("EQUITY", Decimal("1000000")), ("PUT", Decimal("50000")), ("CALL", Decimal("75000"))]:
             record_institution_observation(
@@ -638,8 +638,8 @@ class TestInstitutionObservations:
                 filer_type=None,
                 ownership_nature="economic",
                 source="13f",
-                source_document_id="ACC-X",
-                source_accession="ACC-X",
+                source_document_id="0001234500-25-000209",
+                source_accession="0001234508-25-000008",
                 source_field=None,
                 source_url=None,
                 filed_at=datetime(2026, 4, 15, tzinfo=UTC),
@@ -749,8 +749,8 @@ class TestBlockholderObservations:
         cik = "0001767470"
         run_id = uuid4()
         for filed_year, accession, amount in [
-            (2024, "13D-RC-2024-001", Decimal("60000000")),
-            (2025, "13D-RC-2025-001", Decimal("75000000")),
+            (2024, "0001234500-25-000210", Decimal("60000000")),
+            (2025, "0001234500-25-000211", Decimal("75000000")),
         ]:
             record_blockholder_observation(
                 conn,
@@ -788,7 +788,7 @@ class TestBlockholderObservations:
             )
             rows = cur.fetchall()
         assert len(rows) == 1
-        assert rows[0]["source_accession"] == "13D-RC-2025-001"
+        assert rows[0]["source_accession"] == "0001234500-25-000211"
         assert rows[0]["aggregate_amount_owned"] == Decimal("75000000")
 
         # History preserved.
@@ -823,8 +823,8 @@ class TestBlockholderObservations:
                 submission_type="SCHEDULE 13D",
                 status_flag="passive",  # invalid: 13D must be active
                 source="13d",
-                source_document_id="ACC-BAD",
-                source_accession="ACC-BAD",
+                source_document_id="0001234500-25-000212",
+                source_accession="0001234509-25-000009",
                 source_field=None,
                 source_url=None,
                 filed_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -850,7 +850,7 @@ class TestBlockholderObservations:
                 status_flag=None,
                 source="13d",
                 source_document_id="ACC",
-                source_accession="ACC",
+                source_accession="0001234510-25-000010",
                 source_field=None,
                 source_url=None,
                 filed_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -885,8 +885,8 @@ class TestTreasuryObservations:
         conn = _setup
         run_id = uuid4()
         for q_end, accession, shares in [
-            (date(2025, 12, 31), "ACC-Q4", Decimal("1408661319")),
-            (date(2026, 3, 31), "ACC-Q1", Decimal("1425422477")),
+            (date(2025, 12, 31), "0001234500-25-000207", Decimal("1408661319")),
+            (date(2026, 3, 31), "0001234500-25-000208", Decimal("1425422477")),
         ]:
             record_treasury_observation(
                 conn,
@@ -930,8 +930,8 @@ class TestTreasuryObservations:
             conn,
             instrument_id=840_300,
             source="xbrl_dei",
-            source_document_id="ACC-OLD",
-            source_accession="ACC-OLD",
+            source_document_id="0001234500-25-000213",
+            source_accession="0001234511-25-000011",
             source_field=None,
             source_url=None,
             filed_at=datetime(2025, 6, 30, tzinfo=UTC),
@@ -944,8 +944,8 @@ class TestTreasuryObservations:
             conn,
             instrument_id=840_300,
             source="xbrl_dei",
-            source_document_id="ACC-NEW",
-            source_accession="ACC-NEW",
+            source_document_id="0001234500-25-000214",
+            source_accession="0001234512-25-000012",
             source_field=None,
             source_url=None,
             filed_at=datetime(2026, 3, 31, tzinfo=UTC),
@@ -997,8 +997,8 @@ class TestDef14aObservations:
             holder_role="CEO",
             ownership_nature="beneficial",
             source="def14a",
-            source_document_id="ACC-PROXY-2026",
-            source_accession="ACC-PROXY-2026",
+            source_document_id="0001234500-25-000215",
+            source_accession="0001234513-25-000013",
             source_field=None,
             source_url=None,
             filed_at=datetime(2026, 1, 15, tzinfo=UTC),
@@ -1038,8 +1038,8 @@ class TestDef14aObservations:
         conn = _setup
         run_id = uuid4()
         for q_end, accession, name, shares in [
-            (date(2024, 12, 31), "ACC-2024", "  Tim Cook  ", Decimal("3000000")),
-            (date(2025, 12, 31), "ACC-2025", "TIM COOK", Decimal("3300000")),
+            (date(2024, 12, 31), "0001234500-25-000216", "  Tim Cook  ", Decimal("3000000")),
+            (date(2025, 12, 31), "0001234500-25-000217", "TIM COOK", Decimal("3300000")),
         ]:
             record_def14a_observation(
                 conn,
@@ -1085,7 +1085,7 @@ class TestDef14aObservations:
         refresh ever runs. Migration 117 fixes this."""
         conn = _setup
         run_id = uuid4()
-        accession = "ACC-PROXY-2026"  # SAME accession for both natures
+        accession = "0001234500-25-000136"  # SAME accession for both natures
         for nature, shares in [
             ("beneficial", Decimal("3300000")),
             ("voting", Decimal("3000000")),
@@ -1148,8 +1148,8 @@ class TestDef14aObservations:
         conn = _setup
         run_id = uuid4()
         for nature, accession, shares in [
-            ("beneficial", "ACC-BEN", Decimal("3300000")),
-            ("voting", "ACC-VOTE", Decimal("3000000")),
+            ("beneficial", "0001234500-25-000218", Decimal("3300000")),
+            ("voting", "0001234500-25-000219", Decimal("3000000")),
         ]:
             record_def14a_observation(
                 conn,
@@ -1203,8 +1203,8 @@ class TestDef14aObservations:
             holder_role=None,
             ownership_nature="beneficial",
             source="def14a",
-            source_document_id="ACC-OLD",
-            source_accession="ACC-OLD",
+            source_document_id="0001234500-25-000213",
+            source_accession="0001234514-25-000014",
             source_field=None,
             source_url=None,
             filed_at=datetime(2024, 1, 15, tzinfo=UTC),
@@ -1221,8 +1221,8 @@ class TestDef14aObservations:
             holder_role=None,
             ownership_nature="beneficial",
             source="def14a",
-            source_document_id="ACC-NEW",
-            source_accession="ACC-NEW",
+            source_document_id="0001234500-25-000214",
+            source_accession="0001234515-25-000015",
             source_field=None,
             source_url=None,
             filed_at=datetime(2026, 1, 15, tzinfo=UTC),
@@ -1258,8 +1258,8 @@ class TestDef14aObservations:
                 holder_role=None,
                 ownership_nature="beneficial",
                 source="def14a",
-                source_document_id="ACC-X",
-                source_accession="ACC-X",
+                source_document_id="0001234500-25-000209",
+                source_accession="0001234516-25-000016",
                 source_field=None,
                 source_url=None,
                 filed_at=datetime(2026, 1, 1, tzinfo=UTC),

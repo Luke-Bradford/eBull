@@ -129,7 +129,7 @@ class TestIngestInsiderDatasetArchive:
         archive_bytes = _build_dataset_zip(
             submissions=[
                 {
-                    "ACCESSION_NUMBER": "ACCN1",
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
                     "ISSUERCIK": "320193",
                     "DOCUMENT_TYPE": "4",
                     "FILING_DATE": "2025-11-14",
@@ -138,7 +138,7 @@ class TestIngestInsiderDatasetArchive:
             ],
             owners=[
                 {
-                    "ACCESSION_NUMBER": "ACCN1",
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
                     "RPTOWNERCIK": "1234567",
                     "RPTOWNERNAME": "Cook Tim",
                     "RPTOWNER_RELATIONSHIP": "Officer",
@@ -148,7 +148,7 @@ class TestIngestInsiderDatasetArchive:
             # transaction row (the canonical Form 4 shape per SEC).
             transactions=[
                 {
-                    "ACCESSION_NUMBER": "ACCN1",
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
                     "NONDERIV_TRANS_SK": "1",
                     "TRANS_DATE": "2025-11-12",
                     "SHRS_OWND_FOLWNG_TRANS": "3000000",
@@ -199,7 +199,7 @@ class TestIngestInsiderDatasetArchive:
         archive_bytes = _build_dataset_zip(
             submissions=[
                 {
-                    "ACCESSION_NUMBER": "ACCN_F3",
+                    "ACCESSION_NUMBER": "0001234567-25-000003",
                     "ISSUERCIK": "320193",
                     "DOCUMENT_TYPE": "3",
                     "FILING_DATE": "2025-10-01",
@@ -208,7 +208,7 @@ class TestIngestInsiderDatasetArchive:
             ],
             owners=[
                 {
-                    "ACCESSION_NUMBER": "ACCN_F3",
+                    "ACCESSION_NUMBER": "0001234567-25-000003",
                     "RPTOWNERCIK": "1234567",
                     "RPTOWNERNAME": "Founder Eve",
                     "IS_DIRECTOR": "1",
@@ -216,7 +216,7 @@ class TestIngestInsiderDatasetArchive:
             ],
             holdings=[
                 {
-                    "ACCESSION_NUMBER": "ACCN_F3",
+                    "ACCESSION_NUMBER": "0001234567-25-000003",
                     "SHRS_OWND_FOLWNG_TRANS": "100000",
                 },
             ],
@@ -252,7 +252,7 @@ class TestIngestInsiderDatasetArchive:
         archive_bytes = _build_dataset_zip(
             submissions=[
                 {
-                    "ACCESSION_NUMBER": "ACCN_DD",
+                    "ACCESSION_NUMBER": "0001234567-25-000006",
                     "ISSUERCIK": "320193",
                     "DOCUMENT_TYPE": "4",
                     "FILING_DATE": "14-NOV-2025",  # dataset format
@@ -261,7 +261,7 @@ class TestIngestInsiderDatasetArchive:
             ],
             owners=[
                 {
-                    "ACCESSION_NUMBER": "ACCN_DD",
+                    "ACCESSION_NUMBER": "0001234567-25-000006",
                     "RPTOWNERCIK": "1234567",
                     "RPTOWNERNAME": "Insider X",
                     "RPTOWNER_RELATIONSHIP": "Officer",
@@ -269,7 +269,7 @@ class TestIngestInsiderDatasetArchive:
             ],
             transactions=[
                 {
-                    "ACCESSION_NUMBER": "ACCN_DD",
+                    "ACCESSION_NUMBER": "0001234567-25-000006",
                     "NONDERIV_TRANS_SK": "1",
                     "TRANS_DATE": "12-NOV-2025",
                     "SHRS_OWND_FOLWNG_TRANS": "100",
@@ -310,7 +310,7 @@ class TestIngestInsiderDatasetArchive:
         archive_bytes = _build_dataset_zip(
             submissions=[
                 {
-                    "ACCESSION_NUMBER": "ACCN_DUP",
+                    "ACCESSION_NUMBER": "0001234567-25-000007",
                     "ISSUERCIK": "320193",
                     "DOCUMENT_TYPE": "4",
                     "FILING_DATE": "14-NOV-2025",
@@ -318,7 +318,7 @@ class TestIngestInsiderDatasetArchive:
             ],
             owners=[
                 {
-                    "ACCESSION_NUMBER": "ACCN_DUP",
+                    "ACCESSION_NUMBER": "0001234567-25-000007",
                     "RPTOWNERCIK": "1234567",
                     "RPTOWNERNAME": "Insider Y",
                     "RPTOWNER_RELATIONSHIP": "Officer",
@@ -326,13 +326,13 @@ class TestIngestInsiderDatasetArchive:
             ],
             transactions=[
                 {
-                    "ACCESSION_NUMBER": "ACCN_DUP",
+                    "ACCESSION_NUMBER": "0001234567-25-000007",
                     "NONDERIV_TRANS_SK": "100",
                     "TRANS_DATE": "12-NOV-2025",
                     "SHRS_OWND_FOLWNG_TRANS": "10",
                 },
                 {
-                    "ACCESSION_NUMBER": "ACCN_DUP",
+                    "ACCESSION_NUMBER": "0001234567-25-000007",
                     "NONDERIV_TRANS_SK": "200",
                     "TRANS_DATE": "12-NOV-2025",
                     "SHRS_OWND_FOLWNG_TRANS": "20",
@@ -369,15 +369,25 @@ class TestIngestInsiderDatasetArchive:
         _seed_universe(ebull_test_conn, symbol="AAPL", cik_padded="0000320193")
         archive_bytes = _build_dataset_zip(
             submissions=[
-                {"ACCESSION_NUMBER": "X", "ISSUERCIK": "9999999", "DOCUMENT_TYPE": "4", "FILING_DATE": "2025-11-14"}
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000010",
+                    "ISSUERCIK": "9999999",
+                    "DOCUMENT_TYPE": "4",
+                    "FILING_DATE": "2025-11-14",
+                }
             ],
             owners=[
-                {"ACCESSION_NUMBER": "X", "RPTOWNERCIK": "1", "RPTOWNERNAME": "X", "RPTOWNER_RELATIONSHIP": "Officer"}
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000010",
+                    "RPTOWNERCIK": "1",
+                    "RPTOWNERNAME": "X",
+                    "RPTOWNER_RELATIONSHIP": "Officer",
+                }
             ],
             holdings=[],
             transactions=[
                 {
-                    "ACCESSION_NUMBER": "X",
+                    "ACCESSION_NUMBER": "0001234567-25-000010",
                     "NONDERIV_TRANS_SK": "1",
                     "TRANS_DATE": "2025-11-13",
                     "SHRS_OWND_FOLWNG_TRANS": "1",
