@@ -227,9 +227,9 @@ class TestDailyCikRefreshEmptyDest:
         monkeypatch.setattr(settings, "database_url", test_database_url())
 
     def test_empty_dest_omits_if_modified_since(self, ebull_test_conn, monkeypatch) -> None:
-        self._patch_db_url(monkeypatch)
         """Stale watermark + empty dest → refresh sends no IMS so
         SEC can't return 304 against the stale validator."""
+        self._patch_db_url(monkeypatch)
         from app.services.watermarks import set_watermark
         from app.workers.scheduler import daily_cik_refresh
 
@@ -271,9 +271,9 @@ class TestDailyCikRefreshEmptyDest:
         assert row[0] == "0000320193"
 
     def test_empty_dest_with_matching_hash_still_upserts(self, ebull_test_conn, monkeypatch) -> None:
-        self._patch_db_url(monkeypatch)
         """Empty dest + 200-with-same-body-hash must still upsert.
         Pre-fix: the hash-skip branch fired and dest stayed empty."""
+        self._patch_db_url(monkeypatch)
         from app.services.watermarks import set_watermark
         from app.workers.scheduler import daily_cik_refresh
 
@@ -309,10 +309,10 @@ class TestDailyCikRefreshEmptyDest:
         assert row[0] == "0000320193"
 
     def test_empty_dest_with_none_result_raises(self, ebull_test_conn, monkeypatch) -> None:
-        self._patch_db_url(monkeypatch)
         """Defence-in-depth: if the provider returns None despite no
         IMS being sent (impossible but guarded), raise loudly so the
         bug isn't masked. Codex pre-push MEDIUM for #1056."""
+        self._patch_db_url(monkeypatch)
         from app.workers.scheduler import daily_cik_refresh
 
         self._seed_aapl_us_equity(ebull_test_conn)
