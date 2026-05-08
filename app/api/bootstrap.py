@@ -198,10 +198,18 @@ def _build_status_response(conn: psycopg.Connection[object]) -> BootstrapStatusR
                         )
                     )
             for stage_key, archive_name, rows_written, rows_skipped, completed_at in archive_rows:
-                # rows_skipped is JSONB; psycopg returns it as dict.
+                # rows_skipped is JSONB; psycopg may decode JSON
+                # numbers as int OR float depending on shape. Accept
+                # both — coerce to int. Booleans (subclass of int)
+                # are excluded so a JSON true/false doesn't ride
+                # through as 1/0. Codex pre-push WARNING for #1046.
                 skipped_dict: dict[str, int] = {}
                 if isinstance(rows_skipped, dict):
-                    skipped_dict = {str(k): int(v) for k, v in rows_skipped.items() if isinstance(v, int)}
+                    for k, v in rows_skipped.items():
+                        if isinstance(v, bool):
+                            continue
+                        if isinstance(v, (int, float)):
+                            skipped_dict[str(k)] = int(v)
                 archive_results_by_stage.setdefault(stage_key, []).append(
                     BootstrapArchiveResultResponse(
                         archive_name=archive_name,
@@ -278,12 +286,7 @@ def _read_bulk_manifest_response() -> BulkManifestResponse:
     run_id_int: int | None
     try:
         run_id_int = int(raw_run_id) if raw_run_id is not None else None
-    # Bind exception so ruff format on Python 3.14 keeps the tuple
-    # parens (PEP 758 unparenthesised except handlers strip them
-    # otherwise). Match the established workaround in
-    # app/services/sec_bulk_download.py:_zip_round_trip.
-    except (TypeError, ValueError) as _exc:
-        del _exc
+    except TypeError, ValueError:
         run_id_int = None
     return BulkManifestResponse(
         present=True,
