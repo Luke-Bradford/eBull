@@ -1,8 +1,111 @@
 # Admin control hub — full rewrite
 
 Author: claude (autonomous, supersedes 2026-05-08-admin-page-unified-processes-redesign + 2026-05-08-bootstrap-services-ui-redesign)
-Date: 2026-05-08
-Status: Draft (post-Codex round 6 — ready for implementation; remaining items are NITs only)
+Date: 2026-05-09
+Status: Operator-amendment round 1 (post-PR1 merge; addresses operator pushback on stale-detection + Iterate/Full-wash IA + per-process progress reporting)
+
+## Operator-amendment round 1 (2026-05-09, post-PR1 merge)
+
+After PR1 (#1066) shipped the schema + cancel infra, operator review of the IA surfaced four substantive corrections:
+
+### A1. Stale-detection reframed (was: "running too long")
+
+The original spec's stale-detection (`elapsed > 2 * expected_p95`) was the wrong shape for v1. The operator concern is NOT "running job is taking too long" — it's any of:
+
+1. **Schedule miss.** Cron should have fired by now, didn't.
+2. **Watermark gap.** `data_freshness_index.expected_next_at < now()` and we haven't pulled the new data yet. Source has fresh; we're behind.
+3. **Queue stuck.** `pending_job_requests.status='dispatched'` and age > 30 min with no terminal status.
+4. **Mid-flight stuck.** Job is `running` but no rows written to sink in N minutes (default 5; per-job override based on natural row-write cadence — see `sec-edgar.md`, `data-engineer.md` skills).
+
+All four are computable from data we already store (or will after the small schema additions in A3). No heartbeat infra required — `last_progress_at` IS the heartbeat (set by `record_processed()`).
+
+`ProcessRow` gains a `stale_reasons: list[Literal["schedule_missed", "watermark_gap", "queue_stuck", "mid_flight_stuck"]]` field. Adapters compute and surface; FE renders subtle row chips ("schedule missed" / "source has fresh data" / "queue stuck" / "no progress 7m"). Multiple reasons can fire simultaneously.
+
+### A2. Iterate is the primary verb; Full-wash demoted to drill-in Advanced
+
+Operator's data-engineering model: **one script per data source, parameterised**. `sec_form4_ingester.py` knows watermarks + filters. Iterate = "fetch since last watermark". Re-fetch with custom params (e.g. `since=2 years ago`) is just calling the same script differently — not a separate script, not a primary affordance.
+
+Implications:
+- Drop `Full-wash` button from primary row affordances.
+- Drop `Full-wash` button from `ProcessRow.can_full_wash` envelope field.
+- Drill-in route gains an "Advanced" tab with a custom-params trigger surface ("Re-fetch with params: since=…, filter=…"). Used for: data corruption replay, schema migration backfill, debugging.
+- The full-wash advisory-lock + `pending_job_requests.mode='full_wash'` fence machinery (PR1 sql/138) remains — it's still the correctness mechanism for ANY watermark-resetting trigger, primary or advanced. Just less surfaced to the operator.
+- `ProcessRow.full_wash_label` field deleted; `ProcessRow.iterate_label` (per-mechanism, e.g. "Run now" / "Retry failed") kept.
+
+### A3. Per-process progress reporting + four-case stale model
+
+Operator wants a live `Processed: X` ticker per running row, with optional `Rows: N · Processed: X (Y%)` when target is known, plus `⚠ N` and `✗ N` chips when warnings/errors exist.
+
+Schema additions (folded into PR2 schema or as sql/140 — TBD by PR2 author):
+
+```sql
+ALTER TABLE job_runs
+    ADD COLUMN processed_count   INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN target_count      INTEGER,                  -- NULL = unbounded
+    ADD COLUMN last_progress_at  TIMESTAMPTZ,              -- heartbeat
+    ADD COLUMN warnings_count    INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN warning_classes   JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+-- Mirror onto bootstrap_stages for parity.
+ALTER TABLE bootstrap_stages
+    ADD COLUMN processed_count   INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN target_count      INTEGER,
+    ADD COLUMN last_progress_at  TIMESTAMPTZ,
+    ADD COLUMN warnings_count    INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN warning_classes   JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+-- sync_runs already has layers_done; add the rest for parity.
+ALTER TABLE sync_runs
+    ADD COLUMN processed_count   INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN target_count      INTEGER,
+    ADD COLUMN last_progress_at  TIMESTAMPTZ,
+    ADD COLUMN warnings_count    INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN warning_classes   JSONB NOT NULL DEFAULT '{}'::jsonb;
+```
+
+Producer API extension to `JobTelemetryAggregator` (already shipped in PR1):
+
+```python
+agg.set_target(1547)                    # optional; bounded jobs only
+agg.record_processed(n=1)               # increments; updates last_progress_at
+agg.record_warning(error_class="...",   # parallel to existing record_error
+                   message="...", subject="...")
+agg.maybe_flush(conn, run_id=...)       # writes to job_runs every 5s elapsed
+```
+
+**Flush cadence (producer → DB):** 5s default elapsed-time-based. `maybe_flush` is called inside the producer's natural per-item loop; checks `now() - self._last_flush_at > 5s` and writes if so. No background thread, no timer. Per-job override: override the threshold via `JobTelemetryAggregator(flush_interval_seconds=N)` — e.g. SEC bulk-download writes one tick per archive completion (~1 per minute), so configure 60s.
+
+**Bounded vs unbounded jobs:**
+- Bounded (e.g. `bootstrap_filings_history_seed` over a CIK list): `agg.set_target(len(cik_list))` once at start; `record_processed()` per CIK. FE shows `Rows: 1547 · Processed: 312 (20%)`.
+- Unbounded (e.g. SEC drain "anything since T?"): no `set_target`; `record_processed()` per accession. FE shows `Processed: 312` only — no percentage.
+
+**Mid-flight stuck (the 4th stale case):** computed as `status='running' AND last_progress_at < now() - STALE_PROGRESS_THRESHOLD`. Default 5 min; per-job override on a per-ingester basis (constant in the ingester module sourced from skill notes).
+
+### A4. Polling-cadence tiers (live-ish without streaming)
+
+| Surface | Cadence | Justification |
+|---|---|---|
+| Producer → DB flush | 5s elapsed-time-based, per-job override | 1 DB write per 5s per running job; negligible |
+| FE poll of `/system/processes` (admin index) | 5s when any row=running, 30s otherwise | one query for the whole table; cheap |
+| FE poll of `/system/processes/{id}` (drill-in detail) | **1.5s when status=running**, 30s otherwise | a few queries/sec on one operator; fine |
+
+Drill-in feels near-live (1.5s perceived) without committing to SSE/WebSocket infra. **SSE is the v2 upgrade path** (Postgres NOTIFY on flush → SSE push to subscribed FE sockets) — filed as a follow-up ticket only if 1.5s feels laggy after PR5 ships. ~200 LoC.
+
+### A5. Bootstrap row hides on `complete`
+
+Spec was already correct on this implicitly (bootstrap status semantics in §Status enum). Tightening to invariant: **the bootstrap row is rendered in the Processes table only when `bootstrap_state.status != 'complete'`**. Once first-install completes successfully, the row disappears from the index. Operator-driven re-bootstrap (universe churn, schema migration) is a v2 affordance via `/admin/danger-zone` route with typed-name confirm, NOT a primary button. v1 path: if operator genuinely needs to re-bootstrap, restart the jobs process + manually flip `bootstrap_state.status='pending'` via SQL (documented in PR10 runbook).
+
+### A6. CIK gap rolled into PR10 (was: out-of-scope)
+
+The TSLA / GOOGL CIK→canonical-name programmatic bridge from operator quote §3.7 was originally out-of-scope. Operator-confirmed 2026-05-09: roll into PR10. Filed separately under #1064.
+
+PR10 scope adds:
+- Audit current TSLA / GOOGL gaps (which instruments lack CIK mapping; what fuzzy-match said).
+- Build CIK→canonical-name bridge via `company_tickers.json` (programmatic, not fuzzy guessing).
+- Drop fuzzy-match fallback to bound-0.92-only, last-resort.
+- Operator runbook entry: "how to diagnose missing CIK".
+
+## Codex round 6 amendments (recorded for audit)
 
 ## Codex round 4 amendments (recorded for audit)
 
