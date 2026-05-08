@@ -62,26 +62,31 @@ def _cik_from_filename(name: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _load_cik_to_instrument(conn: psycopg.Connection[Any]) -> dict[str, int]:
-    """Return ``{cik_padded: instrument_id}`` for every CIK-mapped instrument.
+def _load_cik_to_instrument(
+    conn: psycopg.Connection[Any],
+) -> dict[str, tuple[int, str]]:
+    """Return ``{cik_padded: (instrument_id, symbol)}`` for every CIK-mapped
+    instrument.
 
-    Reads ``external_identifiers`` SEC CIK rows (the table B4
-    ``cik_refresh`` populates). The CIK column is stored zero-padded
-    to 10 characters to match SEC's ``CIK<10>.json`` filename format.
+    Reads ``external_identifiers`` SEC CIK rows joined to ``instruments``
+    so the writer below can pass the canonical ticker symbol — not a
+    stringified instrument_id — to ``_normalise_submissions_block`` and
+    ``_upsert_filing`` (Codex review BLOCKING for PR #1030).
     """
-    out: dict[str, int] = {}
+    out: dict[str, tuple[int, str]] = {}
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT instrument_id, identifier_value
-            FROM external_identifiers
-            WHERE provider = 'sec' AND identifier_type = 'cik'
+            SELECT ei.instrument_id, ei.identifier_value, i.symbol
+            FROM external_identifiers ei
+            JOIN instruments i ON i.instrument_id = ei.instrument_id
+            WHERE ei.provider = 'sec' AND ei.identifier_type = 'cik'
             """,
         )
         for row in cur.fetchall():
-            instrument_id, identifier = row
+            instrument_id, identifier, symbol = row
             cik = str(identifier).zfill(10)
-            out[cik] = int(instrument_id)
+            out[cik] = (int(instrument_id), str(symbol or ""))
     return out
 
 
@@ -89,7 +94,7 @@ def ingest_submissions_archive(
     *,
     conn: psycopg.Connection[Any],
     archive_path: Path,
-    cik_to_instrument: dict[str, int] | None = None,
+    cik_to_instrument: dict[str, tuple[int, str]] | None = None,
 ) -> SubmissionsIngestResult:
     """Walk every ``CIK<10>.json`` entry in ``archive_path`` and upsert
     matching universe instruments into ``filing_events`` + ``instrument_sec_profile``.
@@ -118,12 +123,13 @@ def ingest_submissions_archive(
                 # noise we silently skip.
                 continue
             result.archive_entries_seen += 1
-            instrument_id = cik_to_instrument.get(cik)
-            if instrument_id is None:
+            entry = cik_to_instrument.get(cik)
+            if entry is None:
                 # Universe gap — most CIKs in the archive are not in
                 # our universe. This is expected, not an error.
                 result.archive_entries_skipped += 1
                 continue
+            instrument_id, symbol = entry
 
             result.instruments_matched += 1
 
@@ -145,6 +151,7 @@ def ingest_submissions_archive(
                         conn,
                         instrument_id=instrument_id,
                         cik_padded=cik,
+                        symbol=symbol,
                         payload=payload,
                         result=result,
                     )
@@ -165,10 +172,17 @@ def _ingest_one(
     *,
     instrument_id: int,
     cik_padded: str,
+    symbol: str,
     payload: dict[str, Any],
     result: SubmissionsIngestResult,
 ) -> None:
-    """Upsert one CIK's submissions payload — filings + profile."""
+    """Upsert one CIK's submissions payload — filings + profile.
+
+    ``symbol`` is the ticker for ``instrument_id``, threaded through
+    so ``_normalise_submissions_block`` and ``_upsert_filing`` write
+    the canonical symbol on every ``filing_events`` row instead of a
+    stringified instrument id (Codex review BLOCKING for PR #1030).
+    """
     profile = parse_entity_profile(payload, instrument_id=instrument_id, cik=cik_padded)
     upsert_entity_profile(conn, profile)
     result.profiles_upserted += 1
@@ -181,11 +195,14 @@ def _ingest_one(
         return
 
     # Reuse the existing per-CIK normaliser. It returns a list of
-    # ``FilingSearchResult`` ordered oldest-first.
+    # ``FilingSearchResult`` ordered oldest-first. The ``symbol``
+    # parameter is the ticker (e.g. "AAPL") — passing the
+    # stringified instrument_id here would corrupt every
+    # ``filing_events`` row. Codex review BLOCKING for PR #1030.
     filings = _normalise_submissions_block(
         recent,
         cik_padded=cik_padded,
-        symbol=str(instrument_id),
+        symbol=symbol or cik_padded,
     )
     for filing in filings:
         _upsert_filing(conn, str(instrument_id), "sec", filing)

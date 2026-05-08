@@ -189,6 +189,18 @@ class TestIngestSubmissionsArchive:
             assert row[0] == "3571"
             assert row[1] == "Electronic Computers"
 
+            # Codex review BLOCKING for PR #1030: ``raw_payload_json``
+            # must carry the canonical ticker symbol (e.g. "AAPL"),
+            # NOT a stringified instrument_id.
+            cur.execute(
+                "SELECT raw_payload_json->>'symbol' FROM filing_events "
+                "WHERE instrument_id = %s ORDER BY filing_date DESC LIMIT 1",
+                (iid_aapl,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == "AAPL", f"expected ticker AAPL, got {row[0]!r}"
+
             # MSFT also landed.
             cur.execute(
                 "SELECT COUNT(*) FROM filing_events WHERE instrument_id = %s AND provider = 'sec'",
