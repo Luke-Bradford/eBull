@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 
 BootstrapStatus = Literal["pending", "running", "complete", "partial_error"]
 RunStatus = Literal["running", "complete", "partial_error"]
-StageStatus = Literal["pending", "running", "success", "error", "skipped"]
-Lane = Literal["init", "etoro", "sec"]
+StageStatus = Literal["pending", "running", "success", "error", "skipped", "blocked"]
+Lane = Literal["init", "etoro", "sec", "sec_rate", "sec_bulk_download", "db"]
 
 
 class BootstrapAlreadyRunning(RuntimeError):
@@ -347,6 +347,37 @@ def mark_stage_error(
     )
 
 
+def mark_stage_blocked(
+    conn: psycopg.Connection[Any],
+    *,
+    run_id: int,
+    stage_key: str,
+    reason: str,
+) -> None:
+    """Mark a stage as ``blocked`` — orchestrator never invoked it
+    because an upstream `requires` stage finished `error` or `blocked`.
+
+    Distinct from `error` (which means the invoker raised). The
+    operator panel renders both with red styling but a different
+    sublabel: blocked = "Skipped — upstream failure".
+    """
+    conn.execute(
+        """
+        UPDATE bootstrap_stages
+           SET status       = 'blocked',
+               completed_at = now(),
+               last_error   = %(reason)s
+         WHERE bootstrap_run_id = %(run_id)s
+           AND stage_key        = %(stage_key)s
+        """,
+        {
+            "run_id": run_id,
+            "stage_key": stage_key,
+            "reason": reason[:1000],
+        },
+    )
+
+
 def finalize_run(
     conn: psycopg.Connection[Any],
     *,
@@ -362,11 +393,14 @@ def finalize_run(
     Returns the chosen terminal status.
     """
     with conn.transaction():
+        # Count both `error` and `blocked` — both are unsuccessful
+        # outcomes. `blocked` = upstream failure propagation; the
+        # operator must still see the run as `partial_error`.
         error_count_row = conn.execute(
             """
             SELECT COUNT(*) FROM bootstrap_stages
              WHERE bootstrap_run_id = %(run_id)s
-               AND status = 'error'
+               AND status IN ('error', 'blocked')
             """,
             {"run_id": run_id},
         ).fetchone()
@@ -440,7 +474,7 @@ def reset_failed_stages_for_retry(
             SELECT lane, MIN(stage_order)
               FROM bootstrap_stages
              WHERE bootstrap_run_id = %(run_id)s
-               AND status           = 'error'
+               AND status IN ('error', 'blocked')
              GROUP BY lane
             """,
             {"run_id": run_id},

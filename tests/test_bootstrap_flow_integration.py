@@ -4,7 +4,7 @@ Drives every public surface of the first-install bootstrap stack
 together against ``ebull_test``:
 
   1. ``POST /system/bootstrap/run`` writes a ``manual_job`` queue row
-     and seeds 17 ``bootstrap_stages``.
+     and seeds 24 ``bootstrap_stages``.
   2. The orchestrator (with stubbed invokers) runs Phase A then
      Phase B in parallel and finalises the run.
   3. ``GET /system/bootstrap/status`` returns the final shape.
@@ -101,7 +101,7 @@ def test_bootstrap_end_to_end(
     assert met is False
     assert "first-install bootstrap not complete" in reason
 
-    # 2. start_run seeds 17 stages atomically.
+    # 2. start_run seeds 24 stages atomically.
     run_id = start_run(
         ebull_test_conn,
         operator_id=None,
@@ -112,7 +112,7 @@ def test_bootstrap_end_to_end(
     snap = read_latest_run_with_stages(ebull_test_conn)
     assert snap is not None
     assert snap.run_id == run_id
-    assert len(snap.stages) == 17
+    assert len(snap.stages) == 24
     assert all(s.status == "pending" for s in snap.stages)
 
     # 3. State is running, gate stays closed.
@@ -125,7 +125,7 @@ def test_bootstrap_end_to_end(
     run_bootstrap_orchestrator()
 
     # 5. Every fake invoker fired once.
-    assert len(calls["order"]) == 17
+    assert len(calls["order"]) == 24
 
     # 6. State is complete; gate releases.
     state = read_state(ebull_test_conn)
