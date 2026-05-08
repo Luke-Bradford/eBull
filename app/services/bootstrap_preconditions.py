@@ -35,8 +35,20 @@ logger = logging.getLogger(__name__)
 
 
 # Default coverage ratios. Operator overrides via env vars.
+# CIK coverage: SEC's company_tickers.json maps every US-registered
+# company on a major exchange. A 50% floor is reasonable — most
+# us_equity instruments map. Fresh-install observation 2026-05-08:
+# 5,078 / 6,590 = 77%.
 DEFAULT_MIN_CIK_COVERAGE_RATIO = float(os.environ.get("BOOTSTRAP_MIN_CIK_COVERAGE_RATIO", "0.50"))
-DEFAULT_MIN_CUSIP_COVERAGE_RATIO = float(os.environ.get("BOOTSTRAP_MIN_CUSIP_COVERAGE_RATIO", "0.50"))
+
+# CUSIP coverage: SEC 13F Official List has ~24k entries; not every
+# us_equity instrument files 13F (small caps, recently-listed,
+# non-issuer). Fresh-install observation 2026-05-08 (post-#1057
+# COM-preference fix + post-#1060 us_equity-scoped cohort):
+# 2,858 / 7,151 = 40%. 30% floor leaves headroom for normal week-
+# on-week churn while still catching a totally-broken backfill.
+# #1060.
+DEFAULT_MIN_CUSIP_COVERAGE_RATIO = float(os.environ.get("BOOTSTRAP_MIN_CUSIP_COVERAGE_RATIO", "0.30"))
 
 
 class BootstrapPreconditionError(RuntimeError):
@@ -179,17 +191,24 @@ def compute_cik_coverage(conn: psycopg.Connection[Any]) -> CoverageRatio:
 def compute_cusip_coverage(conn: psycopg.Connection[Any]) -> CoverageRatio:
     """Compute CUSIP coverage ratio against the producer cohort.
 
-    Producer cohort matches ``backfill_cusip_coverage`` (verified at
-    ``app/services/sec_13f_securities_list.py``):
-    ``is_tradable = TRUE AND company_name IS NOT NULL AND company_name <> ''``.
+    Cohort scoped to ``us_equity`` instruments — SEC CUSIPs only
+    cover US-registered securities, so foreign / FX / crypto / index
+    rows in the universe MUST NOT count toward the denominator.
+    Pre-fix the cohort was every tradable named instrument (~12k
+    including 5k non-US/non-equity rows that can't have SEC CUSIPs
+    by definition); the resulting ratio understated real coverage
+    by ~2x and tripped the precondition floor at every fresh
+    install. #1060.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT COUNT(*) FROM instruments
-             WHERE is_tradable = TRUE
-               AND company_name IS NOT NULL
-               AND company_name <> ''
+            SELECT COUNT(*) FROM instruments i
+              JOIN exchanges e ON e.exchange_id = i.exchange
+             WHERE i.is_tradable = TRUE
+               AND i.company_name IS NOT NULL
+               AND i.company_name <> ''
+               AND e.asset_class = 'us_equity'
             """,
         )
         row = cur.fetchone()
@@ -198,6 +217,7 @@ def compute_cusip_coverage(conn: psycopg.Connection[Any]) -> CoverageRatio:
         cur.execute(
             """
             SELECT COUNT(*) FROM instruments i
+              JOIN exchanges e ON e.exchange_id = i.exchange
               JOIN external_identifiers ei
                 ON ei.instrument_id = i.instrument_id
                AND ei.provider = 'sec'
@@ -205,6 +225,7 @@ def compute_cusip_coverage(conn: psycopg.Connection[Any]) -> CoverageRatio:
              WHERE i.is_tradable = TRUE
                AND i.company_name IS NOT NULL
                AND i.company_name <> ''
+               AND e.asset_class = 'us_equity'
             """,
         )
         row = cur.fetchone()
