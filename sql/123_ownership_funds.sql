@@ -60,7 +60,7 @@ BEGIN;
 -- ownership_funds_observations — append-only fact log
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ownership_funds_observations (
-    instrument_id           INTEGER NOT NULL,
+    instrument_id           BIGINT NOT NULL,
     fund_series_id          TEXT NOT NULL CHECK (fund_series_id ~ '^S[0-9]{9}$'),
     fund_series_name        TEXT NOT NULL,
     fund_filer_cik          TEXT NOT NULL,
@@ -134,7 +134,7 @@ CREATE INDEX IF NOT EXISTS idx_funds_obs_filer_period
 -- ownership_funds_current — materialised dedup snapshot
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ownership_funds_current (
-    instrument_id           INTEGER NOT NULL,
+    instrument_id           BIGINT NOT NULL,
     fund_series_id          TEXT NOT NULL CHECK (fund_series_id ~ '^S[0-9]{9}$'),
     fund_series_name        TEXT NOT NULL,
     fund_filer_cik          TEXT NOT NULL,

@@ -25,7 +25,7 @@ import csv
 import io
 import logging
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -51,27 +51,40 @@ class Form13FIngestResult:
     rows_skipped_orphan_accession: int = 0
     rows_skipped_bad_data: int = 0
     parse_errors: int = 0
+    touched_instrument_ids: set[int] = field(default_factory=set)
 
 
-def _resolve_cusip(conn: psycopg.Connection[Any], cusip: str) -> int | None:
-    """Look up ``instrument_id`` for a CUSIP via ``external_identifiers``.
+def _load_cusip_map(conn: psycopg.Connection[Any]) -> dict[str, int]:
+    """Preload all SEC CUSIP → instrument_id mappings into a dict.
 
-    Same query shape as the existing per-filing 13F ingester.
+    13F + N-PORT INFOTABLE rows can number in the millions per
+    archive; doing one indexed DB query per row is the dominant
+    cost of the bulk ingest. Loading the entire map once at the
+    top of ingest_*_dataset_archive collapses millions of round
+    trips into one SELECT. CUSIP universe is bounded (~13k SEC
+    Form 13F securities list rows + ~1500 universe instruments),
+    so the dict fits comfortably in memory.
+
+    Codex sweep BLOCKING for #1020.
     """
-    cur = conn.execute(
-        """
-        SELECT instrument_id
-        FROM external_identifiers
-        WHERE provider = 'sec'
-          AND identifier_type = 'cusip'
-          AND identifier_value = %(cusip)s
-        ORDER BY is_primary DESC, external_identifier_id ASC
-        LIMIT 1
-        """,
-        {"cusip": cusip.strip().upper()},
-    )
-    row = cur.fetchone()
-    return int(row[0]) if row is not None else None
+    out: dict[str, int] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT identifier_value, instrument_id
+            FROM external_identifiers
+            WHERE provider = 'sec' AND identifier_type = 'cusip'
+            ORDER BY is_primary DESC, external_identifier_id ASC
+            """,
+        )
+        for row in cur.fetchall():
+            cusip, instrument_id = row
+            key = str(cusip).strip().upper()
+            # First (highest priority) wins per (CUSIP) — match the
+            # `ORDER BY is_primary DESC` shape of the per-row query
+            # this replaces.
+            out.setdefault(key, int(instrument_id))
+    return out
 
 
 def _parse_filing_date(value: str | None) -> datetime | None:
@@ -208,6 +221,10 @@ def ingest_13f_dataset_archive(
         ingest_run_id = uuid4()
 
     result = Form13FIngestResult()
+    # Preload CUSIP → instrument map once. Per-row DB lookup would
+    # otherwise dominate cost on multi-million-row INFOTABLE.tsv
+    # (Codex sweep BLOCKING).
+    cusip_map = _load_cusip_map(conn)
 
     with zipfile.ZipFile(archive_path) as zf:
         submissions = _open_tsv(zf, "SUBMISSION.tsv")
@@ -235,7 +252,7 @@ def ingest_13f_dataset_archive(
                 result.rows_skipped_bad_data += 1
                 continue
 
-            instrument_id = _resolve_cusip(conn, cusip)
+            instrument_id = cusip_map.get(cusip)
             if instrument_id is None:
                 result.rows_skipped_unresolved_cusip += 1
                 continue
@@ -302,6 +319,7 @@ def ingest_13f_dataset_archive(
                         exposure_kind=exposure_kind,
                     )
                 result.rows_written += 1
+                result.touched_instrument_ids.add(instrument_id)
             except Exception as exc:  # noqa: BLE001
                 # Record-level write failure rolled back via the
                 # savepoint; loop continues with a clean transaction.

@@ -31,7 +31,7 @@
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS ownership_institutions_observations (
-    instrument_id           INTEGER NOT NULL,
+    instrument_id           BIGINT NOT NULL,
     filer_cik               TEXT NOT NULL,
     filer_name              TEXT NOT NULL,
     filer_type              TEXT
@@ -104,7 +104,7 @@ CREATE INDEX IF NOT EXISTS idx_inst_obs_filer_period
 
 
 CREATE TABLE IF NOT EXISTS ownership_institutions_current (
-    instrument_id           INTEGER NOT NULL,
+    instrument_id           BIGINT NOT NULL,
     filer_cik               TEXT NOT NULL,
     filer_name              TEXT NOT NULL,
     filer_type              TEXT

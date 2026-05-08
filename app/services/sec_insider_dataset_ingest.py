@@ -30,7 +30,7 @@ import csv
 import io
 import logging
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -54,6 +54,7 @@ class InsiderIngestResult:
     rows_skipped_orphan_owner: int = 0
     rows_skipped_bad_data: int = 0
     parse_errors: int = 0
+    touched_instrument_ids: set[int] = field(default_factory=set)
 
 
 # ---------------------------------------------------------------------------
@@ -428,25 +429,33 @@ def _write_for_owners(
             continue
         ownership_nature = _map_relationship(owner)
 
+        # Per-row savepoint: a CHECK violation on one malformed row
+        # would otherwise put psycopg into ``InFailedSqlTransaction``
+        # for every subsequent ``record_insider_observation`` call.
+        # Wrapping each write in ``conn.transaction()`` rolls back
+        # the bad row cleanly so the loop keeps processing. Codex
+        # sweep BLOCKING for #1020.
         try:
-            record_insider_observation(
-                conn,
-                instrument_id=instrument_id,
-                holder_cik=holder_cik,
-                holder_name=holder_name,
-                ownership_nature=ownership_nature,
-                source=source,
-                source_document_id=source_document_id,
-                source_accession=accn,
-                source_field=source_field,
-                source_url=source_url,
-                filed_at=filed_at,
-                period_start=None,
-                period_end=period_end,
-                ingest_run_id=ingest_run_id,
-                shares=shares,
-            )
+            with conn.transaction():
+                record_insider_observation(
+                    conn,
+                    instrument_id=instrument_id,
+                    holder_cik=holder_cik,
+                    holder_name=holder_name,
+                    ownership_nature=ownership_nature,
+                    source=source,
+                    source_document_id=source_document_id,
+                    source_accession=accn,
+                    source_field=source_field,
+                    source_url=source_url,
+                    filed_at=filed_at,
+                    period_start=None,
+                    period_end=period_end,
+                    ingest_run_id=ingest_run_id,
+                    shares=shares,
+                )
             result.rows_written += 1
+            result.touched_instrument_ids.add(instrument_id)
         except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "insider ingest: record failed for %s/%s: %s",

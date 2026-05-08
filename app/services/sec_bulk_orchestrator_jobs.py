@@ -290,10 +290,15 @@ def sec_13f_ingest_from_dataset_job() -> None:
         return
 
     # Per-archive commit so an exception on archive N does not roll
-    # back archives 1..N-1's writes.
+    # back archives 1..N-1's writes. Defer archive deletion until
+    # the WHOLE stage has succeeded — if a later archive fails,
+    # retry needs all manifest archives on disk (Codex sweep
+    # BLOCKING).
     failed_archives: list[str] = []
     total_written = 0
     total_skipped = 0
+    succeeded: list[Path] = []
+    touched_ids: set[int] = set()
     for archive in archives:
         with psycopg.connect(settings.database_url) as conn:
             try:
@@ -304,9 +309,10 @@ def sec_13f_ingest_from_dataset_job() -> None:
                 logger.exception("sec_13f_ingest_from_dataset: archive=%s failed", archive.name)
                 failed_archives.append(f"{archive.name}: {exc}")
                 continue
-        _delete_archive_after_success(archive)
+        succeeded.append(archive)
         total_written += result.rows_written
         total_skipped += result.rows_skipped_unresolved_cusip
+        touched_ids |= result.touched_instrument_ids
         if run_id is not None:
             _record_archive_result(
                 bootstrap_run_id=run_id,
@@ -335,6 +341,42 @@ def sec_13f_ingest_from_dataset_job() -> None:
             f"sec_13f_ingest_from_dataset: aggregate rows_written=0 across {len(archives)} archives; "
             f"unresolved_cusip={total_skipped}. Check CUSIP coverage."
         )
+    # Refresh ownership_institutions_current for every instrument
+    # whose observations changed. Bulk ingest writes only to the
+    # _observations table; the rollup endpoint reads _current. Without
+    # this refresh AAPL/MSFT etc. show 0 institutional ownership even
+    # after a successful ingest. Codex sweep BLOCKING for #1020.
+    #
+    # Refresh failures MUST propagate before disk cleanup — otherwise
+    # observations land but _current is stale AND archives are deleted,
+    # leaving no retry input. Codex pre-push BLOCKING for #1020.
+    if touched_ids:
+        from app.services.ownership_observations import refresh_institutions_current
+
+        refresh_failures: list[str] = []
+        with psycopg.connect(settings.database_url) as conn:
+            for instrument_id in sorted(touched_ids):
+                try:
+                    refresh_institutions_current(conn, instrument_id=instrument_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "sec_13f_ingest_from_dataset: refresh_institutions_current failed for instrument=%d",
+                        instrument_id,
+                    )
+                    refresh_failures.append(f"instrument={instrument_id}: {exc}")
+            conn.commit()
+        if refresh_failures:
+            raise RuntimeError(
+                f"sec_13f_ingest_from_dataset: {len(refresh_failures)}/{len(touched_ids)} "
+                f"_current refreshes failed; archives retained for retry: " + "; ".join(refresh_failures[:5])
+            )
+        logger.info(
+            "sec_13f_ingest_from_dataset: refreshed ownership_institutions_current for %d instruments",
+            len(touched_ids),
+        )
+    # Stage succeeded — now safe to free disk.
+    for archive in succeeded:
+        _delete_archive_after_success(archive)
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +423,8 @@ def sec_insider_ingest_from_dataset_job() -> None:
 
     failed_archives: list[str] = []
     total_written = 0
+    succeeded: list[Path] = []
+    touched_ids: set[int] = set()
     for archive in archives:
         with psycopg.connect(settings.database_url) as conn:
             try:
@@ -391,8 +435,9 @@ def sec_insider_ingest_from_dataset_job() -> None:
                 logger.exception("sec_insider_ingest_from_dataset: archive=%s failed", archive.name)
                 failed_archives.append(f"{archive.name}: {exc}")
                 continue
-        _delete_archive_after_success(archive)
+        succeeded.append(archive)
         total_written += result.rows_written
+        touched_ids |= result.touched_instrument_ids
         if run_id is not None:
             _record_archive_result(
                 bootstrap_run_id=run_id,
@@ -420,6 +465,36 @@ def sec_insider_ingest_from_dataset_job() -> None:
             f"sec_insider_ingest_from_dataset: aggregate rows_written=0 across {len(archives)} archives. "
             "Check CIK coverage."
         )
+    # Refresh ownership_insiders_current for every instrument whose
+    # observations moved. See sec_13f_ingest_from_dataset_job rationale
+    # — refresh failures propagate before disk cleanup so the archives
+    # remain available for retry. Codex pre-push BLOCKING for #1020.
+    if touched_ids:
+        from app.services.ownership_observations import refresh_insiders_current
+
+        refresh_failures: list[str] = []
+        with psycopg.connect(settings.database_url) as conn:
+            for instrument_id in sorted(touched_ids):
+                try:
+                    refresh_insiders_current(conn, instrument_id=instrument_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "sec_insider_ingest_from_dataset: refresh_insiders_current failed for instrument=%d",
+                        instrument_id,
+                    )
+                    refresh_failures.append(f"instrument={instrument_id}: {exc}")
+            conn.commit()
+        if refresh_failures:
+            raise RuntimeError(
+                f"sec_insider_ingest_from_dataset: {len(refresh_failures)}/{len(touched_ids)} "
+                f"_current refreshes failed; archives retained for retry: " + "; ".join(refresh_failures[:5])
+            )
+        logger.info(
+            "sec_insider_ingest_from_dataset: refreshed ownership_insiders_current for %d instruments",
+            len(touched_ids),
+        )
+    for archive in succeeded:
+        _delete_archive_after_success(archive)
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +541,8 @@ def sec_nport_ingest_from_dataset_job() -> None:
 
     failed_archives: list[str] = []
     total_written = 0
+    succeeded: list[Path] = []
+    touched_ids: set[int] = set()
     for archive in archives:
         with psycopg.connect(settings.database_url) as conn:
             try:
@@ -476,8 +553,9 @@ def sec_nport_ingest_from_dataset_job() -> None:
                 logger.exception("sec_nport_ingest_from_dataset: archive=%s failed", archive.name)
                 failed_archives.append(f"{archive.name}: {exc}")
                 continue
-        _delete_archive_after_success(archive)
+        succeeded.append(archive)
         total_written += result.rows_written
+        touched_ids |= result.touched_instrument_ids
         if run_id is not None:
             _record_archive_result(
                 bootstrap_run_id=run_id,
@@ -509,3 +587,33 @@ def sec_nport_ingest_from_dataset_job() -> None:
             f"sec_nport_ingest_from_dataset: aggregate rows_written=0 across {len(archives)} archives. "
             "Check CUSIP coverage."
         )
+    # Refresh ownership_funds_current for every instrument whose
+    # fund-holdings observations moved. See C3 job rationale — refresh
+    # failures propagate before disk cleanup so archives stay
+    # retryable. Codex pre-push BLOCKING for #1020.
+    if touched_ids:
+        from app.services.ownership_observations import refresh_funds_current
+
+        refresh_failures: list[str] = []
+        with psycopg.connect(settings.database_url) as conn:
+            for instrument_id in sorted(touched_ids):
+                try:
+                    refresh_funds_current(conn, instrument_id=instrument_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "sec_nport_ingest_from_dataset: refresh_funds_current failed for instrument=%d",
+                        instrument_id,
+                    )
+                    refresh_failures.append(f"instrument={instrument_id}: {exc}")
+            conn.commit()
+        if refresh_failures:
+            raise RuntimeError(
+                f"sec_nport_ingest_from_dataset: {len(refresh_failures)}/{len(touched_ids)} "
+                f"_current refreshes failed; archives retained for retry: " + "; ".join(refresh_failures[:5])
+            )
+        logger.info(
+            "sec_nport_ingest_from_dataset: refreshed ownership_funds_current for %d instruments",
+            len(touched_ids),
+        )
+    for archive in succeeded:
+        _delete_archive_after_success(archive)
