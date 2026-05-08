@@ -310,3 +310,107 @@ class TestRefreshExchangesMetadata:
             assert row == ("Operator data", "GB", "uk_equity")
         finally:
             _cleanup(ebull_test_conn, [_TEST_ID_EXISTING])
+
+
+# ---------------------------------------------------------------------------
+# Auto-reclassify post-universe-sync (#1055)
+# ---------------------------------------------------------------------------
+
+
+import pytest as _pytest_for_reclassify  # noqa: E402
+
+from tests.fixtures.ebull_test_db import ebull_test_conn as _ebull_test_conn_for_reclassify  # noqa: E402, F401
+from tests.fixtures.ebull_test_db import test_db_available as _test_db_available_for_reclassify  # noqa: E402
+
+
+@_pytest_for_reclassify.mark.integration
+@_pytest_for_reclassify.mark.skipif(not _test_db_available_for_reclassify(), reason="ebull_test DB unavailable")
+class TestReclassifyUnknownExchanges:
+    @staticmethod
+    def _seed_us_exchange(conn, exchange_id: str, instrument_count: int) -> None:
+        # ON CONFLICT DO NOTHING — preserves any existing asset_class
+        # the test pre-seeded (e.g. operator-curated 'crypto').
+        conn.execute(
+            """
+            INSERT INTO exchanges (exchange_id, description, asset_class)
+            VALUES (%s, 'Test', 'unknown')
+            ON CONFLICT (exchange_id) DO NOTHING
+            """,
+            (exchange_id,),
+        )
+        # Seed instrument_count tradable instruments WITHOUT a suffix
+        # (US-style symbols).
+        for i in range(instrument_count):
+            iid = 900_000_000 + int(exchange_id) * 1000 + i
+            conn.execute(
+                """
+                INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+                VALUES (%s, %s, 'X', %s, 'USD', TRUE)
+                ON CONFLICT (instrument_id) DO NOTHING
+                """,
+                (iid, f"X{exchange_id}{i}", exchange_id),
+            )
+        conn.commit()
+
+    def test_us_exchange_reclassified_when_unknown(
+        self,
+        ebull_test_conn,
+    ) -> None:
+        from app.services.exchanges import reclassify_unknown_exchanges
+
+        # Use a fresh exchange_id that won't collide with seed data.
+        TEST_ID = "97"
+        ebull_test_conn.execute("DELETE FROM exchanges WHERE exchange_id = %s", (TEST_ID,))
+        ebull_test_conn.commit()
+        self._seed_us_exchange(ebull_test_conn, TEST_ID, 50)
+        ebull_test_conn.commit()
+        reclassify_unknown_exchanges(ebull_test_conn)
+        ebull_test_conn.commit()
+        row = ebull_test_conn.execute(
+            "SELECT asset_class, country FROM exchanges WHERE exchange_id = %s",
+            (TEST_ID,),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "us_equity"
+        assert row[1] == "US"
+
+    def test_operator_curated_rows_preserved(
+        self,
+        ebull_test_conn,
+    ) -> None:
+        # Pre-set asset_class to 'crypto' (non-unknown). Reclassify
+        # MUST NOT overwrite it even if the suffix heuristic would
+        # imply 'us_equity'.
+        from app.services.exchanges import reclassify_unknown_exchanges
+
+        TEST_ID = "98"
+        ebull_test_conn.execute("DELETE FROM exchanges WHERE exchange_id = %s", (TEST_ID,))
+        ebull_test_conn.execute(
+            "INSERT INTO exchanges (exchange_id, description, asset_class) VALUES (%s, 'Test', 'crypto')",
+            (TEST_ID,),
+        )
+        ebull_test_conn.commit()
+        self._seed_us_exchange(ebull_test_conn, TEST_ID, 50)
+        ebull_test_conn.commit()
+        reclassify_unknown_exchanges(ebull_test_conn)
+        ebull_test_conn.commit()
+        row = ebull_test_conn.execute("SELECT asset_class FROM exchanges WHERE exchange_id = %s", (TEST_ID,)).fetchone()
+        assert row is not None
+        assert row[0] == "crypto"  # operator-curated value preserved
+
+    def test_idempotent_rerun_classified_count_drops_to_zero(self, ebull_test_conn) -> None:
+        from app.services.exchanges import reclassify_unknown_exchanges
+
+        TEST_ID = "99"
+        ebull_test_conn.execute("DELETE FROM exchanges WHERE exchange_id = %s", (TEST_ID,))
+        ebull_test_conn.commit()
+        self._seed_us_exchange(ebull_test_conn, TEST_ID, 40)
+        ebull_test_conn.commit()
+        first = reclassify_unknown_exchanges(ebull_test_conn)
+        ebull_test_conn.commit()
+        second = reclassify_unknown_exchanges(ebull_test_conn)
+        ebull_test_conn.commit()
+        # First call promotes the unknown row; second call has no
+        # unknown rows left to promote (this run's delta = 0).
+        assert first.classified >= 1
+        assert second.classified == 0
