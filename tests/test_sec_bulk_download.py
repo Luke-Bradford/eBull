@@ -51,7 +51,12 @@ def _make_handler(
         if request.method == "HEAD":
             return httpx.Response(
                 200,
-                headers={"Content-Length": str(len(archive_body))},
+                headers={
+                    "Content-Length": str(len(archive_body)),
+                    # Mock SEC's real response so the new
+                    # Content-Type integrity check passes (#1059).
+                    "Content-Type": "application/zip",
+                },
             )
         if request.method == "GET":
             range_header = request.headers.get("Range")
@@ -235,14 +240,20 @@ class TestRateClockOrdering:
         def handler(request: httpx.Request) -> httpx.Response:
             events.append(request.method)
             if request.method == "HEAD":
-                return httpx.Response(200, headers={"content-length": str(len(body))})
+                return httpx.Response(
+                    200,
+                    headers={
+                        "content-length": str(len(body)),
+                        "content-type": "application/zip",
+                    },
+                )
             return httpx.Response(200, content=body)
 
         class _SpyLimiter:
             async def acquire(self) -> None:
                 events.append("ACQUIRE")
 
-        archive = BulkArchive(name="archive.zip", url=url, expected_min_bytes=1)
+        archive = BulkArchive(name="archive.zip", url=url)
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             result = await _download_one(client, archive, tmp_path, rate_limiter=_SpyLimiter())
         assert result.error is None
@@ -265,7 +276,7 @@ class TestDownloadOne:
     async def test_atomic_rename_on_success(self, tmp_path: Path) -> None:
         body = _build_zip_bytes()
         url = "https://example.test/archive.zip"
-        archive = BulkArchive(name="archive.zip", url=url, expected_min_bytes=1)
+        archive = BulkArchive(name="archive.zip", url=url)
         transport = httpx.MockTransport(_make_handler(url, body))
         async with httpx.AsyncClient(transport=transport) as client:
             result = await _download_one(client, archive, tmp_path)
@@ -281,7 +292,7 @@ class TestDownloadOne:
     async def test_resume_from_partial(self, tmp_path: Path) -> None:
         body = _build_zip_bytes(filenames=("CIK1.json", "CIK2.json", "CIK3.json"))
         url = "https://example.test/archive.zip"
-        archive = BulkArchive(name="archive.zip", url=url, expected_min_bytes=1)
+        archive = BulkArchive(name="archive.zip", url=url)
 
         # Pre-seed half the file as ``.partial``.
         partial_path = tmp_path / "archive.zip.partial"
@@ -301,7 +312,7 @@ class TestDownloadOne:
     async def test_skip_when_final_file_already_present_and_valid(self, tmp_path: Path) -> None:
         body = _build_zip_bytes()
         url = "https://example.test/archive.zip"
-        archive = BulkArchive(name="archive.zip", url=url, expected_min_bytes=1)
+        archive = BulkArchive(name="archive.zip", url=url)
         # Final file exists already and is a valid ZIP.
         final = tmp_path / "archive.zip"
         final.write_bytes(body)
@@ -313,28 +324,73 @@ class TestDownloadOne:
         assert result.bytes_downloaded == 0
 
     @pytest.mark.asyncio
-    async def test_rejects_truncated_archive(self, tmp_path: Path) -> None:
-        body = _build_zip_bytes()
+    async def test_rejects_non_zip_content_type(self, tmp_path: Path) -> None:
+        # SEC redirected to an HTML error page — Content-Type='text/html'
+        # must reject before downloading any bytes (#1059).
         url = "https://example.test/archive.zip"
-        archive = BulkArchive(
-            name="archive.zip",
-            url=url,
-            expected_min_bytes=10 * len(body),  # impossibly large floor
-        )
-        transport = httpx.MockTransport(_make_handler(url, body))
+        archive = BulkArchive(name="archive.zip", url=url)
+
+        def html_handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "HEAD":
+                return httpx.Response(
+                    200,
+                    headers={"Content-Length": "1024", "Content-Type": "text/html"},
+                )
+            return httpx.Response(200, content=b"<html>error</html>")
+
+        transport = httpx.MockTransport(html_handler)
         async with httpx.AsyncClient(transport=transport) as client:
             result = await _download_one(client, archive, tmp_path)
         assert result.error is not None
-        assert "below floor" in result.error
-        # No final file written.
+        assert "Content-Type" in result.error
+        assert not (tmp_path / "archive.zip").exists()
+
+    @pytest.mark.asyncio
+    async def test_rejects_missing_zip_magic_bytes(self, tmp_path: Path) -> None:
+        # SEC served Content-Type='application/zip' but the body is
+        # not a real ZIP — magic-byte check rejects (#1059).
+        body = b"NOTAZIP" * 100_000  # >>>700KB of non-zip bytes
+        url = "https://example.test/archive.zip"
+        archive = BulkArchive(name="archive.zip", url=url)
+
+        def lying_handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "HEAD":
+                return httpx.Response(
+                    200,
+                    headers={
+                        "Content-Length": str(len(body)),
+                        "Content-Type": "application/zip",
+                    },
+                )
+            return httpx.Response(200, content=body)
+
+        transport = httpx.MockTransport(lying_handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _download_one(client, archive, tmp_path)
+        assert result.error is not None
+        assert "magic bytes" in result.error
         assert not (tmp_path / "archive.zip").exists()
 
     @pytest.mark.asyncio
     async def test_corrupted_zip_keeps_partial_clean(self, tmp_path: Path) -> None:
-        body = b"NOTAZIP" * 100_000  # >>> 700KB of non-zip bytes
+        # ZIP magic present but the rest of the bytes don't form a
+        # valid ZIP — round-trip catches it.
+        body = b"PK\x03\x04" + b"BROKEN" * 100_000  # has magic, not valid zip
         url = "https://example.test/archive.zip"
-        archive = BulkArchive(name="archive.zip", url=url, expected_min_bytes=1)
-        transport = httpx.MockTransport(_make_handler(url, body))
+        archive = BulkArchive(name="archive.zip", url=url)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "HEAD":
+                return httpx.Response(
+                    200,
+                    headers={
+                        "Content-Length": str(len(body)),
+                        "Content-Type": "application/zip",
+                    },
+                )
+            return httpx.Response(200, content=body)
+
+        transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             result = await _download_one(client, archive, tmp_path)
         assert result.error is not None
@@ -381,7 +437,7 @@ class TestDownloadBulkArchives:
 
         # Threshold of 10000 Mbps is impossible to clear over a
         # MockTransport (no network), so probe always returns "below".
-        archives = [BulkArchive(name="archive.zip", url=url, expected_min_bytes=1)]
+        archives = [BulkArchive(name="archive.zip", url=url)]
         transport = httpx.MockTransport(_make_handler(url, body))
 
         # Patch the client factory to inject the mock transport.
@@ -420,8 +476,8 @@ class TestDownloadBulkArchives:
         url_a = "https://example.test/archive_a.zip"
         url_b = "https://example.test/archive_b.zip"
         archives = [
-            BulkArchive(name="archive_a.zip", url=url_a, expected_min_bytes=1),
-            BulkArchive(name="archive_b.zip", url=url_b, expected_min_bytes=1),
+            BulkArchive(name="archive_a.zip", url=url_a),
+            BulkArchive(name="archive_b.zip", url=url_b),
         ]
 
         bodies = {url_a: body_a, url_b: body_b}
@@ -432,7 +488,13 @@ class TestDownloadBulkArchives:
             if body is None:
                 return httpx.Response(404)
             if request.method == "HEAD":
-                return httpx.Response(200, headers={"Content-Length": str(len(body))})
+                return httpx.Response(
+                    200,
+                    headers={
+                        "Content-Length": str(len(body)),
+                        "Content-Type": "application/zip",
+                    },
+                )
             return httpx.Response(200, content=body, headers={"Content-Length": str(len(body))})
 
         transport = httpx.MockTransport(handler)
