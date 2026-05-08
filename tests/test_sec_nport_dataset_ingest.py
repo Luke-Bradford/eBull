@@ -100,25 +100,25 @@ class TestIngestNPortDatasetArchive:
         archive_bytes = _build_dataset_zip(
             submissions=[
                 {
-                    "ACCESSION_NUMBER": "ACCN1",
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
                     "FILING_DATE": "2025-11-30",
                     "SUB_TYPE": "NPORT-P",
                     "REPORT_DATE": "2025-09-30",
                 },
             ],
             registrants=[
-                {"ACCESSION_NUMBER": "ACCN1", "CIK": "1234567", "REGISTRANT_NAME": "Big Fund Trust"},
+                {"ACCESSION_NUMBER": "0001234567-25-000001", "CIK": "1234567", "REGISTRANT_NAME": "Big Fund Trust"},
             ],
             fund_info=[
                 {
-                    "ACCESSION_NUMBER": "ACCN1",
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
                     "SERIES_ID": "S000004310",
                     "SERIES_NAME": "Big Fund Equity Series",
                 },
             ],
             holdings=[
                 {
-                    "ACCESSION_NUMBER": "ACCN1",
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
                     "HOLDING_ID": "1",
                     "ISSUER_CUSIP": "037833100",
                     "BALANCE": "500000",

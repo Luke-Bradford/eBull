@@ -55,8 +55,8 @@ class TestRecordEsopObservation:
             plan_name="Acme Inc. 401(k) Plan",
             plan_trustee_name="Vanguard Fiduciary Trust",
             plan_trustee_cik=None,
-            source_document_id="acme-def14a-2026-001",
-            source_accession="acme-def14a-2026-001",
+            source_document_id="0001234500-25-000601",
+            source_accession="0001234500-25-000601",
             source_field=None,
             source_url=None,
             filed_at=datetime(2026, 3, 1, tzinfo=UTC),
@@ -110,8 +110,8 @@ class TestRecordEsopObservation:
         # Original filing.
         record_esop_observation(
             conn,
-            source_document_id="acme-def14a-2026-001",
-            source_accession="acme-def14a-2026-001",
+            source_document_id="0001234500-25-000601",
+            source_accession="0001234500-25-000601",
             filed_at=datetime(2026, 3, 1, tzinfo=UTC),
             **common,
         )
@@ -121,8 +121,8 @@ class TestRecordEsopObservation:
         amended["shares"] = Decimal("2500000")
         record_esop_observation(
             conn,
-            source_document_id="acme-defa14a-2026-001",
-            source_accession="acme-defa14a-2026-001",
+            source_document_id="0001234500-25-000602",
+            source_accession="0001234500-25-000602",
             filed_at=datetime(2026, 4, 15, tzinfo=UTC),
             **amended,
         )
@@ -149,7 +149,7 @@ class TestRecordEsopObservation:
                 plan_trustee_name=None,
                 plan_trustee_cik=None,
                 source_document_id="x",
-                source_accession="x",
+                source_accession="0001234500-25-000606",
                 source_field=None,
                 source_url=None,
                 filed_at=datetime(2026, 3, 1, tzinfo=UTC),
@@ -174,7 +174,7 @@ class TestRecordEsopObservation:
                 plan_trustee_name=None,
                 plan_trustee_cik=None,
                 source_document_id="x",
-                source_accession="x",
+                source_accession="0001234500-25-000607",
                 source_field=None,
                 source_url=None,
                 filed_at=datetime(2026, 3, 1, tzinfo=UTC),
@@ -220,7 +220,7 @@ class TestRecordEsopObservationsForFiling:
         written = _record_esop_observations_for_filing(
             conn,
             instrument_id=843_010,
-            accession_number="mixed-def14a-2026",
+            accession_number="0001234567-26-000603",
             as_of_date=date(2026, 3, 1),
             holders=holders,
         )
@@ -264,7 +264,7 @@ class TestRecordEsopObservationsForFiling:
         written = _record_esop_observations_for_filing(
             conn,
             instrument_id=843_011,
-            accession_number="noesop-def14a-2026",
+            accession_number="0001234567-26-000601",
             as_of_date=date(2026, 3, 1),
             holders=holders,
         )
@@ -306,7 +306,7 @@ class TestEsopRowsExcludedFromDef14aWriteThrough:
         _record_def14a_observations_for_filing(
             conn,
             instrument_id=843_020,
-            accession_number="dual-def14a-2026",
+            accession_number="0001234567-26-000602",
             as_of_date=date(2026, 3, 1),
             holders=holders,
         )
@@ -314,7 +314,7 @@ class TestEsopRowsExcludedFromDef14aWriteThrough:
         _record_esop_observations_for_filing(
             conn,
             instrument_id=843_020,
-            accession_number="dual-def14a-2026",
+            accession_number="0001234567-26-000602",
             as_of_date=date(2026, 3, 1),
             holders=holders,
         )

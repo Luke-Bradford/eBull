@@ -215,16 +215,16 @@ class TestIngest13FDatasetArchive:
         _seed_universe_with_cusip(ebull_test_conn, symbol="AAPL", cusip="037833100")
 
         archive_bytes = _build_dataset_zip(
-            submissions=[{"ACCESSION_NUMBER": "ACCN1", "CIK": "1", "FILING_DATE": "2025-11-14"}],
+            submissions=[{"ACCESSION_NUMBER": "0001234567-25-000001", "CIK": "1", "FILING_DATE": "2025-11-14"}],
             coverpages=[
                 {
-                    "ACCESSION_NUMBER": "ACCN1",
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
                     "FILINGMANAGER_NAME": "Some Fund",
                     "REPORTCALENDARORQUARTER": "2025-09-30",
                 }
             ],
             infotable=[
-                {"ACCESSION_NUMBER": "ACCN1", "CUSIP": "999999999", "VALUE": "1", "SSHPRNAMT": "1"},
+                {"ACCESSION_NUMBER": "0001234567-25-000001", "CUSIP": "999999999", "VALUE": "1", "SSHPRNAMT": "1"},
             ],
         )
         archive_path = tmp_path / "form13f.zip"
@@ -250,31 +250,31 @@ class TestIngest13FDatasetArchive:
         iid = _seed_universe_with_cusip(ebull_test_conn, symbol="AAPL", cusip="037833100")
 
         archive_bytes = _build_dataset_zip(
-            submissions=[{"ACCESSION_NUMBER": "ACCN1", "CIK": "1", "FILING_DATE": "2025-11-14"}],
+            submissions=[{"ACCESSION_NUMBER": "0001234567-25-000001", "CIK": "1", "FILING_DATE": "2025-11-14"}],
             coverpages=[
                 {
-                    "ACCESSION_NUMBER": "ACCN1",
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
                     "FILINGMANAGER_NAME": "Some Fund",
                     "REPORTCALENDARORQUARTER": "2025-09-30",
                 }
             ],
             infotable=[
                 {
-                    "ACCESSION_NUMBER": "ACCN1",
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
                     "CUSIP": "037833100",
                     "VALUE": "100",
                     "SSHPRNAMT": "10",
                     "PUTCALL": "",
                 },
                 {
-                    "ACCESSION_NUMBER": "ACCN1",
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
                     "CUSIP": "037833100",
                     "VALUE": "50",
                     "SSHPRNAMT": "5",
                     "PUTCALL": "PUT",
                 },
                 {
-                    "ACCESSION_NUMBER": "ACCN1",
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
                     "CUSIP": "037833100",
                     "VALUE": "75",
                     "SSHPRNAMT": "7",

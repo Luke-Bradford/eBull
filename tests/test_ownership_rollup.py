@@ -122,7 +122,7 @@ def _seed_outstanding(
             instrument_id=instrument_id,
             source="xbrl_dei",
             source_document_id=f"OUTSTANDING-{instrument_id}-{period_end}",
-            source_accession=f"OUTSTANDING-{instrument_id}-{period_end}",
+            source_accession="0001234517-25-000017",
             source_field="treasury_shares",
             source_url=None,
             filed_at=datetime(period_end.year, period_end.month, 1, tzinfo=UTC),
@@ -456,7 +456,7 @@ class TestDedupPriority:
         cik = "0001767470"
         _seed_form4(
             conn,
-            accession="F4-RC-2026-001",
+            accession="0001234500-25-000101",
             instrument_id=789_001,
             filer_cik=cik,
             filer_name="Cohen Ryan",
@@ -465,7 +465,7 @@ class TestDedupPriority:
         )
         _seed_block(
             conn,
-            accession="13D-RC-2025-001",
+            accession="0001234500-25-000102",
             instrument_id=789_001,
             filer_cik=cik,
             filer_name="Cohen Ryan",
@@ -504,7 +504,7 @@ class TestDedupPriority:
         cik = "0000102909"
         _seed_block(
             conn,
-            accession="13G-VG-2025-001",
+            accession="0001234500-25-000103",
             instrument_id=789_001,
             filer_cik=cik,
             filer_name="VANGUARD GROUP INC",
@@ -514,7 +514,7 @@ class TestDedupPriority:
         )
         _seed_inst_holding(
             conn,
-            accession="13F-VG-2025-Q4",
+            accession="0001234500-25-000104",
             instrument_id=789_001,
             filer_cik=cik,
             filer_name="VANGUARD GROUP INC",
@@ -548,7 +548,7 @@ class TestDedupPriority:
         conn = _setup
         _seed_form3(
             conn,
-            accession="F3-OF-2024-001",
+            accession="0001234500-25-000105",
             instrument_id=789_001,
             filer_cik="0001234001",
             filer_name="Director Alpha",
@@ -573,7 +573,7 @@ class TestDedupPriority:
         cik = "0001234002"
         _seed_form3(
             conn,
-            accession="F3-OF-2024-002",
+            accession="0001234500-25-000106",
             instrument_id=789_001,
             filer_cik=cik,
             filer_name="Director Beta",
@@ -582,7 +582,7 @@ class TestDedupPriority:
         )
         _seed_form4(
             conn,
-            accession="F4-OF-2026-002",
+            accession="0001234500-25-000107",
             instrument_id=789_001,
             filer_cik=cik,
             filer_name="Director Beta",
@@ -613,7 +613,7 @@ class TestDedupPriority:
         conn = _setup
         _seed_form4(
             conn,
-            accession="F4-NULLCIK-001",
+            accession="0001234500-25-000108",
             instrument_id=789_001,
             filer_cik=None,
             filer_name="Smith John",
@@ -622,7 +622,7 @@ class TestDedupPriority:
         )
         _seed_form4(
             conn,
-            accession="F4-NULLCIK-002",
+            accession="0001234500-25-000109",
             instrument_id=789_001,
             filer_cik=None,
             filer_name="Jones Jane",
@@ -656,7 +656,7 @@ class TestDedupPriority:
         ]:
             _seed_block(
                 conn,
-                accession="13D-JOINT-001",
+                accession="0001234500-25-000110",
                 instrument_id=789_001,
                 filer_cik="0009990000",
                 filer_name="Joint Filer Group",
@@ -748,7 +748,7 @@ class TestDedupPriority:
         ]:
             _seed_block(
                 conn,
-                accession="13D-RC-2024-001",
+                accession="0001234500-25-000111",
                 instrument_id=789_001,
                 filer_cik=primary_cik,
                 filer_name="Cohen Ryan",
@@ -765,7 +765,7 @@ class TestDedupPriority:
         ]:
             _seed_block(
                 conn,
-                accession="13D-RC-2025-001",
+                accession="0001234500-25-000112",
                 instrument_id=789_001,
                 filer_cik=primary_cik,
                 filer_name="Cohen Ryan",
@@ -790,7 +790,7 @@ class TestDedupPriority:
         # dropped_sources at the rollup layer — that history is still
         # preserved in ownership_blockholders_observations for
         # drill-through, but the rollup just exposes the latest.
-        assert block_slices[0].holders[0].winning_accession == "13D-RC-2025-001"
+        assert block_slices[0].holders[0].winning_accession == "0001234500-25-000112"
         # Post-#905 invariant: rollup layer no longer surfaces earlier
         # amendments as dropped_sources because the read path consumes
         # ownership_blockholders_current, which is already per-(reporter_cik,
@@ -813,7 +813,7 @@ class TestDedupPriority:
         _seed_outstanding(conn, instrument_id=iid, shares="100000000")
         _seed_form4(
             conn,
-            accession="F4-OTHER-2026-001",
+            accession="0001234500-25-000113",
             instrument_id=iid,
             filer_cik=cik,
             filer_name="Other Insider",
@@ -822,7 +822,7 @@ class TestDedupPriority:
         )
         _seed_block(
             conn,
-            accession="13G-OTHER-2026-001",
+            accession="0001234500-25-000114",
             instrument_id=iid,
             filer_cik=cik,
             filer_name="Other Insider",
@@ -877,7 +877,7 @@ class TestDef14aEnrichment:
         cik = "0001100100"
         _seed_form4(
             conn,
-            accession="F4-SMITH-001",
+            accession="0001234500-25-000115",
             instrument_id=789_010,
             filer_cik=cik,
             filer_name="Smith Jane",
@@ -886,7 +886,7 @@ class TestDef14aEnrichment:
         )
         _seed_def14a(
             conn,
-            accession="DEF14A-2026-001",
+            accession="0001234500-25-000116",
             instrument_id=789_010,
             holder_name="Smith Jane, Director",
             shares="500000",
@@ -910,7 +910,7 @@ class TestDef14aEnrichment:
         conn = _setup
         _seed_def14a(
             conn,
-            accession="DEF14A-2026-002",
+            accession="0001234500-25-000117",
             instrument_id=789_010,
             holder_name="Doe Jonathan III",
             shares="123456",
@@ -939,7 +939,7 @@ class TestDef14aEnrichment:
         conn = _setup
         _seed_form4(
             conn,
-            accession="F4-LEGACY-001",
+            accession="0001234500-25-000118",
             instrument_id=789_010,
             filer_cik=None,
             filer_name="Legacy Officer",
@@ -948,7 +948,7 @@ class TestDef14aEnrichment:
         )
         _seed_def14a(
             conn,
-            accession="DEF14A-2026-LEGACY",
+            accession="0001234500-25-000119",
             instrument_id=789_010,
             holder_name="Legacy Officer",
             shares="42000",
@@ -978,7 +978,7 @@ class TestDef14aEnrichment:
         conn = _setup
         _seed_form4(
             conn,
-            accession="F4-LEG-DUP-1",
+            accession="0001234500-25-000120",
             instrument_id=789_010,
             filer_cik=None,
             filer_name="Dual Identity",
@@ -987,7 +987,7 @@ class TestDef14aEnrichment:
         )
         _seed_form4(
             conn,
-            accession="F4-LEG-DUP-2",
+            accession="0001234500-25-000121",
             instrument_id=789_010,
             filer_cik="0009999009",
             filer_name="Dual Identity",
@@ -1026,7 +1026,7 @@ class TestResidualAndCoverage:
         conn = _setup
         _seed_form4(
             conn,
-            accession="F4-RESID-001",
+            accession="0001234500-25-000122",
             instrument_id=789_020,
             filer_cik="0009999001",
             filer_name="Big Holder Inc",
@@ -1049,7 +1049,7 @@ class TestResidualAndCoverage:
         conn = _setup
         _seed_block(
             conn,
-            accession="13D-OVER-2026-001",
+            accession="0001234500-25-000123",
             instrument_id=789_020,
             filer_cik="0008888001",
             filer_name="Stale Block",
@@ -1070,7 +1070,7 @@ class TestResidualAndCoverage:
         conn = _setup
         _seed_form4(
             conn,
-            accession="F4-TREAS-001",
+            accession="0001234500-25-000124",
             instrument_id=789_020,
             filer_cik="0009998001",
             filer_name="Director X",
@@ -1117,7 +1117,7 @@ class TestCoverageBanner:
         _seed_outstanding(conn, instrument_id=789_030, shares="100000000")
         _seed_form4(
             conn,
-            accession="F4-BANNER-001",
+            accession="0001234500-25-000125",
             instrument_id=789_030,
             filer_cik="0007777001",
             filer_name="Holder One",
@@ -1153,7 +1153,7 @@ class TestSnapshotIsolation:
         _seed_outstanding(conn, instrument_id=789_040, shares="100000000")
         _seed_form4(
             conn,
-            accession="F4-SNAP-001",
+            accession="0001234500-25-000126",
             instrument_id=789_040,
             filer_cik="0006666001",
             filer_name="Snap Holder",
@@ -1186,7 +1186,7 @@ class TestSnapshotIsolation:
                     """
                     INSERT INTO insider_filings (
                         accession_number, instrument_id, document_type, issuer_cik
-                    ) VALUES ('F4-SNAP-002-NEW', 789040, '4', '0000000789')
+                    ) VALUES ('0001234500-25-000404', 789040, '4', '0000000789')
                     """,
                 )
                 writer.execute(
@@ -1195,7 +1195,7 @@ class TestSnapshotIsolation:
                         accession_number, txn_row_num, instrument_id, filer_cik,
                         filer_name, txn_date, txn_code, shares,
                         post_transaction_shares, is_derivative
-                    ) VALUES ('F4-SNAP-002-NEW', 1, 789040, '0006666002',
+                    ) VALUES ('0001234500-25-000404', 1, 789040, '0006666002',
                               'Concurrent Holder', '2026-04-01', 'P', 100,
                               500000, FALSE)
                     """,
@@ -1450,7 +1450,7 @@ class TestFundsSlice:
             fund_series_id="S000004310",
             fund_series_name="Vanguard 500 Index Fund",
             fund_filer_cik="0000036405",
-            accession="NPORT-VG-2026-Q1-001",
+            accession="0001234500-25-000127",
             shares="50000000",
         )
         conn.commit()
@@ -1495,7 +1495,7 @@ class TestFundsSlice:
         _seed_outstanding(conn, instrument_id=789_061, shares="1000000000")
         _seed_form4(
             conn,
-            accession="F4-FUND2-2026-001",
+            accession="0001234500-25-000128",
             instrument_id=789_061,
             filer_cik="0001234567",
             filer_name="Founder Holder",
@@ -1508,7 +1508,7 @@ class TestFundsSlice:
             fund_series_id="S000004310",
             fund_series_name="Vanguard 500 Index Fund",
             fund_filer_cik="0000036405",
-            accession="NPORT-VG-2026-Q1-002",
+            accession="0001234500-25-000129",
             shares="50000000",
         )
         conn.commit()
@@ -1545,7 +1545,7 @@ class TestFundsSlice:
         _seed_outstanding(conn, instrument_id=789_062, shares="500000000")
         _seed_form4(
             conn,
-            accession="F4-FUND3-2026-001",
+            accession="0001234500-25-000130",
             instrument_id=789_062,
             filer_cik="0001234568",
             filer_name="Lone Insider",
@@ -1587,7 +1587,7 @@ class TestFundsSlice:
             fund_series_id="S000004310",
             fund_series_name="Vanguard 500 Index Fund",
             fund_filer_cik="0000036405",
-            accession="NPORT-VG-2026-Q1-003",
+            accession="0001234500-25-000131",
             shares="20000000",
         )
         conn.commit()
@@ -1618,7 +1618,7 @@ class TestFundsSlice:
             fund_series_id="S000004310",
             fund_series_name="Vanguard 500 Index Fund",
             fund_filer_cik="0000036405",
-            accession="NPORT-VG-2026-Q1-A",
+            accession="0001234500-25-000132",
             shares="40000000",
         )
         _seed_funds_holding(
@@ -1627,7 +1627,7 @@ class TestFundsSlice:
             fund_series_id="S000004311",
             fund_series_name="Vanguard Total Stock Market",
             fund_filer_cik="0000036405",
-            accession="NPORT-VG-2026-Q1-B",
+            accession="0001234500-25-000133",
             shares="60000000",
         )
         _seed_funds_holding(
@@ -1636,7 +1636,7 @@ class TestFundsSlice:
             fund_series_id="S000005000",
             fund_series_name="iShares Core S&P 500",
             fund_filer_cik="0001100663",
-            accession="NPORT-IS-2026-Q1",
+            accession="0001234500-25-000134",
             shares="30000000",
         )
         conn.commit()
