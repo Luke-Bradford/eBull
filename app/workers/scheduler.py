@@ -1216,6 +1216,23 @@ def nightly_universe_sync() -> None:
                     summary.deactivated,
                 )
 
+            # #1055: auto-classify exchanges.asset_class='unknown' rows
+            # from the now-populated instrument suffix patterns. The
+            # one-shot migration sql/068 ran at install when the
+            # instruments table was empty so its dominance computation
+            # produced nothing — every exchange stayed 'unknown' and
+            # downstream us_equity-cohort filters returned 0 rows.
+            # Operator-curated rows are preserved (filter scopes to
+            # asset_class='unknown' only).
+            from app.services.exchanges import reclassify_unknown_exchanges
+
+            with conn.transaction():
+                reclass = reclassify_unknown_exchanges(conn)
+                logger.info(
+                    "Universe sync: reclassified %d exchanges from 'unknown'",
+                    reclass.classified,
+                )
+
             # First-run bootstrap: if the coverage table is empty after a
             # successful universe sync, seed all tradable instruments at
             # Tier 3.  This is a no-op on subsequent runs (seed_coverage
@@ -1420,6 +1437,20 @@ def daily_candle_refresh() -> None:
     )
 
 
+def _cik_destination_is_empty(conn: psycopg.Connection) -> bool:  # type: ignore[type-arg]
+    """Return True when ``external_identifiers`` has zero SEC CIK rows.
+
+    Extracted for testability — daily_cik_refresh's force-full-upsert
+    decision pivots on this query result. Empty destination after a
+    data wipe must trigger an unconditional fetch + upsert regardless
+    of any surviving watermark / body-hash. (#1056)
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM external_identifiers WHERE provider = 'sec' AND identifier_type = 'cik'"
+    ).fetchone()
+    return row is not None and int(row[0]) == 0
+
+
 def daily_cik_refresh() -> None:
     """
     Refresh SEC ticker → CIK mapping and upsert into external_identifiers.
@@ -1448,17 +1479,38 @@ def daily_cik_refresh() -> None:
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
             psycopg.connect(settings.database_url) as conn,
         ):
+            # #1056: detect empty destination. If the operator wiped
+            # external_identifiers but the watermark survived (the
+            # admin-wipe doesn't currently clear watermarks), the
+            # 304/hash-skip branch below would silently no-op forever
+            # and AAPL/MSFT would never get CIKs. Force a full
+            # unconditional fetch + upsert when destination is empty.
+            dest_empty = _cik_destination_is_empty(conn)
+
             prior = get_watermark(conn, SOURCE, WATERMARK_KEY)
             # Explicit truthy check: an empty-string watermark from a
             # prior run where Last-Modified was absent must NOT be sent
             # as `If-Modified-Since: ` (invalid HTTP date).
-            if_modified_since = prior.watermark if (prior and prior.watermark) else None
+            # On dest_empty, send no conditional header so the SEC
+            # cannot return 304 against a stale validator.
+            if_modified_since = None if dest_empty else (prior.watermark if (prior and prior.watermark) else None)
 
             result = provider.build_cik_mapping_conditional(
                 if_modified_since=if_modified_since,
             )
 
             if result is None:
+                if dest_empty:
+                    # Should be unreachable — when dest is empty we
+                    # send no If-Modified-Since header so SEC cannot
+                    # legitimately return 304. Codex pre-push MEDIUM
+                    # for #1056: enforce the invariant explicitly so
+                    # a future provider/refactor that silently sends
+                    # IMS doesn't leave dest empty forever.
+                    raise RuntimeError(
+                        "daily_cik_refresh: provider returned 304 despite empty destination "
+                        "(no If-Modified-Since header sent). Refusing to skip upsert — investigate."
+                    )
                 # 304 — nothing changed.
                 logger.info("daily_cik_refresh: 304 Not Modified, skipping upsert")
                 tracker.row_count = 0
@@ -1466,8 +1518,11 @@ def daily_cik_refresh() -> None:
 
             mapping_size = len(result.mapping)
 
-            if prior and prior.response_hash == result.body_hash:
-                # 200 with identical bytes. Advance fetched_at only.
+            if not dest_empty and prior and prior.response_hash == result.body_hash:
+                # 200 with identical bytes AND destination already has
+                # rows — advance fetched_at only. When destination is
+                # empty we MUST upsert regardless of hash (the data
+                # was wiped; the hash-skip branch would leave it empty).
                 logger.info("daily_cik_refresh: 200 but body hash unchanged, skipping upsert")
                 with conn.transaction():
                     set_watermark(
@@ -1479,6 +1534,11 @@ def daily_cik_refresh() -> None:
                     )
                 tracker.row_count = 0
                 return
+            if dest_empty:
+                logger.warning(
+                    "daily_cik_refresh: destination external_identifiers (sec/cik) is empty — "
+                    "forcing full upsert regardless of watermark / body hash."
+                )
 
             # #475: Scope to US-listed exchanges only. SEC's
             # company_tickers.json only covers US-registered companies;

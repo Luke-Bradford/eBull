@@ -110,3 +110,198 @@ def refresh_exchanges_metadata(
         inserted=inserted,
         description_updated=description_updated,
     )
+
+
+@dataclass(frozen=True)
+class ExchangesReclassifySummary:
+    """Result of one ``reclassify_unknown_exchanges`` call."""
+
+    classified: int  # asset_class='unknown' rows promoted to a concrete class
+
+
+def _count_unknown_exchanges(conn: psycopg.Connection) -> int:  # type: ignore[type-arg]
+    """Return the count of exchanges with asset_class='unknown'."""
+    row = conn.execute("SELECT COUNT(*) FROM exchanges WHERE asset_class = 'unknown'").fetchone()
+    return int(row[0]) if row else 0
+
+
+def reclassify_unknown_exchanges(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+) -> ExchangesReclassifySummary:
+    """Auto-classify ``exchanges.asset_class='unknown'`` rows from
+    instrument-suffix patterns (#1055).
+
+    Why this exists: sql/068 ran the same classification CTE at
+    migration time when the ``instruments`` table was empty. The
+    dominance computation produced nothing and every exchange stayed
+    ``unknown``. After ``nightly_universe_sync`` populates instruments
+    the CTE has data to work with — but it never re-fires. Result:
+    fresh installs have AAPL/MSFT etc on exchanges classified as
+    'unknown', so every job that filters on
+    ``e.asset_class = 'us_equity'`` (cik_refresh, cusip backfill,
+    bootstrap_preconditions cohort queries) returns 0 rows.
+
+    Operator-curated rows are PRESERVED — the WHERE filter only
+    touches rows where ``asset_class='unknown'``. A row promoted to
+    a concrete class by a prior run STAYS at that class even if the
+    suffix pattern would now imply a different one.
+
+    The classification is the same as sql/068 — kept in lock-step;
+    extending the suffix → asset_class map requires updating both
+    sites (the migration runs once at install, this service runs
+    every nightly_universe_sync).
+
+    ``classified`` in the returned summary is the count of rows
+    PROMOTED THIS CALL (before-after delta on asset_class='unknown').
+    """
+    unknown_before = _count_unknown_exchanges(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH suffix_counts AS (
+                SELECT
+                    i.exchange AS exchange_id,
+                    CASE
+                        WHEN POSITION('.' IN i.symbol) > 0
+                            THEN UPPER(SPLIT_PART(REVERSE(i.symbol), '.', 1))
+                        ELSE NULL
+                    END AS suffix,
+                    COUNT(*) AS n
+                FROM instruments i
+                WHERE i.exchange IS NOT NULL
+                GROUP BY 1, 2
+            ),
+            ranked AS (
+                SELECT exchange_id, suffix, n,
+                       ROW_NUMBER() OVER (PARTITION BY exchange_id ORDER BY n DESC) AS rn,
+                       SUM(n) OVER (PARTITION BY exchange_id) AS total_n
+                FROM suffix_counts
+            ),
+            dominant AS (
+                SELECT
+                    r.exchange_id,
+                    REVERSE(r.suffix) AS suffix,
+                    r.n,
+                    r.total_n
+                FROM ranked r
+                WHERE r.rn = 1
+                  AND r.n::numeric / NULLIF(r.total_n, 0) > 0.80
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ranked r2
+                      WHERE r2.exchange_id = r.exchange_id
+                        AND r2.rn = 2
+                        AND r2.n = r.n
+                  )
+            )
+            UPDATE exchanges e
+               SET asset_class = m.asset_class,
+                   country     = m.country,
+                   updated_at  = NOW()
+              FROM (
+                  SELECT d.exchange_id,
+                         CASE
+                             WHEN d.suffix IS NULL AND d.total_n > 30 THEN 'us_equity'
+                             WHEN d.suffix = 'L'    THEN 'uk_equity'
+                             WHEN d.suffix = 'DE'   THEN 'eu_equity'
+                             WHEN d.suffix = 'PA'   THEN 'eu_equity'
+                             WHEN d.suffix = 'ST'   THEN 'eu_equity'
+                             WHEN d.suffix = 'OL'   THEN 'eu_equity'
+                             WHEN d.suffix = 'IM'   THEN 'eu_equity'
+                             WHEN d.suffix = 'MI'   THEN 'eu_equity'
+                             WHEN d.suffix = 'HE'   THEN 'eu_equity'
+                             WHEN d.suffix = 'NV'   THEN 'eu_equity'
+                             WHEN d.suffix = 'AS'   THEN 'eu_equity'
+                             WHEN d.suffix = 'CO'   THEN 'eu_equity'
+                             WHEN d.suffix = 'BR'   THEN 'eu_equity'
+                             WHEN d.suffix = 'MC'   THEN 'eu_equity'
+                             WHEN d.suffix = 'ZU'   THEN 'eu_equity'
+                             WHEN d.suffix = 'LS'   THEN 'eu_equity'
+                             WHEN d.suffix = 'LSB'  THEN 'eu_equity'
+                             WHEN d.suffix = 'HK'   THEN 'asia_equity'
+                             WHEN d.suffix = 'T'    THEN 'asia_equity'
+                             WHEN d.suffix = 'ASX'  THEN 'asia_equity'
+                             WHEN d.suffix = 'DH'   THEN 'mena_equity'
+                             WHEN d.suffix = 'AE'   THEN 'mena_equity'
+                             WHEN d.suffix = 'RTH'  THEN 'us_equity'
+                             WHEN d.suffix = 'FUT'  THEN 'commodity'
+                             ELSE NULL
+                         END AS asset_class,
+                         CASE
+                             WHEN d.suffix = 'L'    THEN 'GB'
+                             WHEN d.suffix = 'DE'   THEN 'DE'
+                             WHEN d.suffix = 'PA'   THEN 'FR'
+                             WHEN d.suffix = 'ST'   THEN 'SE'
+                             WHEN d.suffix = 'OL'   THEN 'NO'
+                             WHEN d.suffix IN ('IM', 'MI') THEN 'IT'
+                             WHEN d.suffix = 'HE'   THEN 'FI'
+                             WHEN d.suffix IN ('NV', 'AS') THEN 'NL'
+                             WHEN d.suffix = 'CO'   THEN 'DK'
+                             WHEN d.suffix = 'BR'   THEN 'BE'
+                             WHEN d.suffix = 'MC'   THEN 'ES'
+                             WHEN d.suffix = 'ZU'   THEN 'CH'
+                             WHEN d.suffix IN ('LS', 'LSB') THEN 'PT'
+                             WHEN d.suffix = 'HK'   THEN 'HK'
+                             WHEN d.suffix = 'T'    THEN 'JP'
+                             WHEN d.suffix = 'ASX'  THEN 'AU'
+                             WHEN d.suffix = 'DH'   THEN 'AE'
+                             WHEN d.suffix = 'AE'   THEN 'AE'
+                             WHEN d.suffix IS NULL AND d.total_n > 30 THEN 'US'
+                             WHEN d.suffix = 'RTH'  THEN 'US'
+                             ELSE NULL
+                         END AS country
+                  FROM dominant d
+              ) AS m
+             WHERE e.exchange_id = m.exchange_id
+               AND e.asset_class = 'unknown'
+               AND m.asset_class IS NOT NULL
+            """
+        )
+        # Hard-coded overrides for known special exchange ids that
+        # the suffix heuristic can't disambiguate (FX/commodity/index/
+        # crypto exchanges with no consistent suffix). Mirrors
+        # sql/068 lines 193-203 plus exchange_id='8' (crypto, seeded
+        # in production via #503 PR 3 but historically left
+        # 'unknown' on dev installs).
+        cur.execute(
+            """
+            UPDATE exchanges SET asset_class = 'fx', country = NULL, updated_at = NOW()
+             WHERE exchange_id = '1' AND asset_class = 'unknown'
+            """
+        )
+        cur.execute(
+            """
+            UPDATE exchanges SET asset_class = 'commodity', country = NULL, updated_at = NOW()
+             WHERE exchange_id = '2' AND asset_class = 'unknown'
+            """
+        )
+        cur.execute(
+            """
+            UPDATE exchanges SET asset_class = 'index', country = NULL, updated_at = NOW()
+             WHERE exchange_id = '3' AND asset_class = 'unknown'
+            """
+        )
+        cur.execute(
+            """
+            UPDATE exchanges SET asset_class = 'crypto', country = NULL, updated_at = NOW()
+             WHERE exchange_id = '8' AND asset_class = 'unknown'
+            """
+        )
+        cur.execute(
+            """
+            UPDATE exchanges SET asset_class = 'us_equity', country = 'US', updated_at = NOW()
+             WHERE exchange_id IN ('19', '20') AND asset_class = 'unknown'
+            """
+        )
+        cur.execute("SELECT COUNT(*) FROM exchanges")
+        row = cur.fetchone()
+        total = int(row[0]) if row else 0
+    unknown_after = _count_unknown_exchanges(conn)
+    classified = max(0, unknown_before - unknown_after)
+    logger.info(
+        "reclassify_unknown_exchanges: classified=%d this call (unknown %d -> %d, total exchanges=%d)",
+        classified,
+        unknown_before,
+        unknown_after,
+        total,
+    )
+    return ExchangesReclassifySummary(classified=classified)
