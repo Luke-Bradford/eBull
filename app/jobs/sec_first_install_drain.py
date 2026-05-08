@@ -4,15 +4,18 @@ Issue #871 / spec §"Mode 1 — First-install drain".
 
 Operator-triggered job for new installs and explicit drain requests.
 
-Two paths (Codex review v2 finding 3):
+Three paths:
 
-  - **In-universe-only (default)**: per-CIK submissions.json for every
-    CIK in the tradable universe. ~12k requests at 10 req/s = ~20 min.
-    Cheap, precise, respects the universe scope.
+  - **filing_events seed (default fast path, #1044)**: SELECT every
+    issuer row from ``filing_events`` (already populated by C1.a +
+    C1.b in the bulk path) and seed ``sec_filing_manifest`` from the
+    cached payloads. No HTTP. ~15s for ~12k issuer events vs ~21min
+    of per-CIK fetches.
+  - **In-universe HTTP fallback**: per-CIK submissions.json for every
+    CIK in the tradable universe. Used when ``filing_events`` is
+    empty (e.g. fallback mode where the bulk path was bypassed).
   - **Bulk-zip**: download submissions.zip + companyfacts.zip once.
-    Production / operator-explicit only — NOT the default local path.
-    Out of scope for this PR; raises NotImplementedError. The
-    in-universe path is sufficient for dev + small-capital live.
+    Out of scope; raises NotImplementedError.
 
 Crash-resume: idempotent — re-run drains the remaining pending /
 unknown subjects. ``record_manifest_entry`` UPSERTs, so duplicate
@@ -30,6 +33,7 @@ import json
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -41,7 +45,7 @@ from app.providers.implementations.sec_submissions import (
     parse_submissions_page,
 )
 from app.services.data_freshness import seed_scheduler_from_manifest
-from app.services.sec_manifest import record_manifest_entry
+from app.services.sec_manifest import is_amendment_form, map_form_to_source, record_manifest_entry
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +62,117 @@ class DrainStats:
     # step (#937), the steady-state per-CIK poll would silently no-op
     # because the scheduler had no rows to poll.
     scheduler_rows_seeded: int = 0
+    # #1044: count of manifest rows seeded from filing_events without
+    # any HTTP. Bulk path populates this; fallback path leaves it 0.
+    rows_seeded_from_filing_events: int = 0
+
+
+def seed_manifest_from_filing_events(
+    conn: psycopg.Connection[Any],
+) -> int:
+    """Seed ``sec_filing_manifest`` from already-ingested ``filing_events``.
+
+    Reads every issuer-scoped filing_events row joined to the best
+    available SEC CIK identifier (primary preferred), calls
+    ``record_manifest_entry`` per row.
+    The bulk path (C1.a + C1.b) populates filing_events ahead of this
+    drain stage, so the manifest can be seeded without ANY HTTP
+    requests — replaces the ~21min per-CIK loop with a ~15s table
+    walk. (#1044)
+
+    Returns the number of manifest rows upserted.
+
+    No-op if filing_events is empty (e.g. fallback mode bypassed the
+    bulk path entirely); the caller should follow up with the per-CIK
+    HTTP drain in that case.
+    """
+    upserted = 0
+    skipped_unmapped_form = 0
+    skipped_no_cik = 0
+    with conn.cursor() as cur:
+        # LATERAL JOIN with LIMIT 1 picks the highest-priority CIK
+        # mapping per instrument: ORDER BY is_primary DESC selects the
+        # primary mapping when one exists, else any non-primary one.
+        # Codex pre-push MED for #1044 — naive `is_primary = TRUE`
+        # would drop valid rows whose only SEC CIK mapping isn't
+        # flagged primary.
+        cur.execute(
+            """
+            SELECT
+                fe.instrument_id,
+                fe.filing_date,
+                fe.filing_type,
+                fe.provider_filing_id,
+                fe.primary_document_url,
+                cik_map.identifier_value AS cik
+            FROM filing_events fe
+            JOIN LATERAL (
+                SELECT identifier_value
+                FROM external_identifiers ei
+                WHERE ei.instrument_id = fe.instrument_id
+                  AND ei.provider = 'sec'
+                  AND ei.identifier_type = 'cik'
+                ORDER BY ei.is_primary DESC, ei.external_identifier_id ASC
+                LIMIT 1
+            ) cik_map ON TRUE
+            WHERE fe.provider = 'sec'
+            """
+        )
+        rows = cur.fetchall()
+    for instrument_id, filing_date, filing_type, provider_filing_id, primary_doc_url, cik_raw in rows:
+        if cik_raw is None or not str(cik_raw).strip():
+            skipped_no_cik += 1
+            continue
+        # Use the canonical map_form_to_source from sec_manifest so
+        # this drain stays in sync with the rest of the manifest
+        # writers (Codex pre-push HIGH for #1044).
+        source = map_form_to_source(filing_type) if filing_type else None
+        if source is None:
+            skipped_unmapped_form += 1
+            continue
+        # Accession lives in fe.provider_filing_id — that's the
+        # authoritative column. raw_payload_json mirrors it but can
+        # legitimately drift on legacy rows. Codex pre-push MED.
+        accession = provider_filing_id
+        if not accession:
+            continue
+        cik_padded = str(cik_raw).strip().zfill(10)
+        # filing_date is a date — record_manifest_entry takes filed_at
+        # as datetime. Anchor at UTC midnight; the precise time is
+        # carried only by the per-CIK HTTP path's accept_timestamp.
+        filed_at = datetime.combine(filing_date, datetime.min.time(), tzinfo=UTC)
+        # Use canonical is_amendment_form so DEFA14A and other non-/A
+        # amendment proxies are flagged correctly. Codex pre-push MED.
+        is_amendment = is_amendment_form(filing_type or "")
+        try:
+            record_manifest_entry(
+                conn,
+                str(accession),
+                cik=cik_padded,
+                form=str(filing_type or ""),
+                source=source,
+                subject_type="issuer",
+                subject_id=str(int(instrument_id)),
+                instrument_id=int(instrument_id),
+                filed_at=filed_at,
+                primary_document_url=primary_doc_url,
+                is_amendment=is_amendment,
+            )
+            upserted += 1
+        except ValueError as exc:
+            logger.debug(
+                "seed_manifest_from_filing_events: rejected accession=%s: %s",
+                accession,
+                exc,
+            )
+    if skipped_unmapped_form or skipped_no_cik:
+        logger.info(
+            "seed_manifest_from_filing_events: upserted=%d skipped_no_cik=%d skipped_unmapped_form=%d",
+            upserted,
+            skipped_no_cik,
+            skipped_unmapped_form,
+        )
+    return upserted
 
 
 def _iter_in_universe_subjects(
@@ -136,9 +251,35 @@ def run_first_install_drain(
     manifest_upserted = 0
     errors = 0
 
+    # Fast path (#1044): if filing_events has rows for the SEC
+    # provider (populated by C1.a + C1.b in the bulk path), seed the
+    # manifest from that table without any HTTP requests. The per-CIK
+    # HTTP loop below still runs to cover non-issuer subjects
+    # (institutional_filer + blockholder_filer) which filing_events
+    # doesn't carry. Newer issuer filings published since the bulk
+    # snapshot are picked up by the steady-state per-CIK poll
+    # (#870), not this drain — running another full HTTP sweep here
+    # would defeat the perf gain.
+    rows_seeded_from_filing_events = seed_manifest_from_filing_events(conn)
+    manifest_upserted += rows_seeded_from_filing_events
+    if rows_seeded_from_filing_events > 0:
+        logger.info(
+            "first-install drain: seeded %d manifest rows from filing_events (no HTTP)",
+            rows_seeded_from_filing_events,
+        )
+
+    skip_issuer_http = rows_seeded_from_filing_events > 0
     for subject, cik in _iter_in_universe_subjects(conn):  # type: ignore[misc]
         if max_subjects is not None and ciks_processed >= max_subjects:
             break
+        # #1044 fast-path: when filing_events seeded the issuer manifest
+        # rows already, skip the per-CIK HTTP fetch for issuers. Non-
+        # issuer subjects (institutional_filer + blockholder_filer)
+        # still need the HTTP fetch — filing_events only carries
+        # universe-mapped instruments.
+        if skip_issuer_http and subject.subject_type == "issuer":
+            ciks_skipped += 1
+            continue
 
         try:
             delta = check_freshness(
@@ -223,6 +364,7 @@ def run_first_install_drain(
         manifest_rows_upserted=manifest_upserted,
         errors=errors,
         scheduler_rows_seeded=scheduler_rows_seeded,
+        rows_seeded_from_filing_events=rows_seeded_from_filing_events,
     )
 
 
