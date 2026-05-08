@@ -75,26 +75,24 @@ def _run_with_conn(fn: Callable[[psycopg.Connection[tuple]], object]) -> None:
 def _current_running_bootstrap_run_id() -> int | None:
     """Read the currently-running bootstrap_run id, if any.
 
-    Returns ``None`` when no run is in progress — operator may be
-    invoking a Phase C job standalone (without an orchestrator
-    wrapper). In that case preconditions are skipped and the
-    invoker falls back to "if archive exists, ingest it" — same
-    pre-#1020 behaviour.
+    Returns ``None`` only when there is genuinely no running run —
+    the operator may be invoking a Phase C job standalone. A DB
+    error here is RAISED, not swallowed, because returning None on
+    a connection hiccup would make C-stages skip every precondition
+    and silently no-op (the very failure mode #1020 fixes).
+    PR review WARNING (bot, PR #1038).
     """
-    try:
-        with psycopg.connect(settings.database_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id FROM bootstrap_runs
-                    WHERE status = 'running'
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                )
-                row = cur.fetchone()
-                return int(row[0]) if row else None
-    except Exception:  # noqa: BLE001
-        return None
+    with psycopg.connect(settings.database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id FROM bootstrap_runs
+                WHERE status = 'running'
+                ORDER BY id DESC LIMIT 1
+                """,
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else None
 
 
 def _record_archive_result(

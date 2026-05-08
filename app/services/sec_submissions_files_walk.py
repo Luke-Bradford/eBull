@@ -209,13 +209,26 @@ def sec_submissions_files_walk_job() -> None:
         result.parse_errors,
     )
     if run_id is not None:
-        with psycopg.connect(settings.database_url) as conn:
-            record_archive_result(
-                conn,
-                bootstrap_run_id=run_id,
-                stage_key="sec_submissions_files_walk",
-                archive_name="__job__",
-                rows_written=result.filings_upserted,
-                rows_skipped={"parse_errors": result.parse_errors},
+        # The walker has already committed its writes; a failure of
+        # the post-commit audit row must NOT propagate to the
+        # orchestrator (which would mark the stage `error` and a
+        # later retry would re-run the walker AND fail
+        # ``assert_c1b_preconditions`` because the audit row is
+        # missing — permanently blocking C1.b on a transient DB
+        # hiccup). PR review WARNING (bot, PR #1038).
+        try:
+            with psycopg.connect(settings.database_url) as conn:
+                record_archive_result(
+                    conn,
+                    bootstrap_run_id=run_id,
+                    stage_key="sec_submissions_files_walk",
+                    archive_name="__job__",
+                    rows_written=result.filings_upserted,
+                    rows_skipped={"parse_errors": result.parse_errors},
+                )
+                conn.commit()
+        except Exception as exc:  # noqa: BLE001 — audit must not block stage
+            logger.warning(
+                "sec_submissions_files_walk: failed to record __job__ audit row (walker already committed): %s",
+                exc,
             )
-            conn.commit()
