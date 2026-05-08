@@ -432,22 +432,29 @@ def _phase_batched_dispatch(
         ready: list[_RunnableStage] = []
         for key in pending_keys:
             stage = by_key[key]
+            # Stages whose required upstream is unknown to this run
+            # (not in `statuses`) are treated as a failed dependency
+            # too — without this guard, a typo in _STAGE_REQUIRES
+            # would let the stage dispatch as if the dep were
+            # satisfied. Codex review BLOCKING (PR #1039).
+            unknown_reqs = [req for req in stage.requires if req not in statuses]
             failed_reqs = [req for req in stage.requires if req in statuses and statuses[req] in ("error", "blocked")]
             unmet_reqs = [req for req in stage.requires if req in statuses and statuses[req] == "pending"]
-            if failed_reqs:
+            if unknown_reqs or failed_reqs:
+                reason_parts = list(failed_reqs) + [f"{r} (unknown to run)" for r in unknown_reqs]
                 with psycopg.connect(database_url) as conn:
                     mark_stage_blocked(
                         conn,
                         run_id=run_id,
                         stage_key=key,
-                        reason=f"upstream stage(s) failed/blocked: {', '.join(failed_reqs)}",
+                        reason=f"upstream stage(s) failed/blocked: {', '.join(reason_parts)}",
                     )
                     conn.commit()
                 statuses[key] = "blocked"
                 logger.warning(
                     "bootstrap dispatcher: %s BLOCKED (upstream %s)",
                     key,
-                    failed_reqs,
+                    reason_parts,
                 )
                 continue
             if unmet_reqs:
@@ -455,10 +462,27 @@ def _phase_batched_dispatch(
             ready.append(stage)
 
         if not ready:
-            # All remaining pending stages have unmet but in-progress
-            # requirements that are no longer pending themselves —
-            # which can't happen given our state machine. Defensive:
-            # break to avoid infinite loop.
+            # No stage advanced this iteration. Any stage still in
+            # `pending` means its requirements are stuck (e.g. all
+            # in unmet_reqs) — the dispatcher cannot make progress.
+            # Mark them blocked so finalize_run sees a terminal state
+            # and the operator panel doesn't show "pending forever".
+            # Codex review BLOCKING (PR #1039).
+            stuck_keys = [k for k, s in statuses.items() if s == "pending"]
+            for key in stuck_keys:
+                with psycopg.connect(database_url) as conn:
+                    mark_stage_blocked(
+                        conn,
+                        run_id=run_id,
+                        stage_key=key,
+                        reason="dispatcher could not resolve dependencies; stage abandoned",
+                    )
+                    conn.commit()
+                statuses[key] = "blocked"
+                logger.warning(
+                    "bootstrap dispatcher: %s ABANDONED (deadlock in dependency graph)",
+                    key,
+                )
             break
 
         # Group ready by lane; dispatch each lane's batch concurrently.
