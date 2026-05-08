@@ -18,9 +18,18 @@ export type BootstrapStageStatus =
   | "running"
   | "success"
   | "error"
-  | "skipped";
+  | "skipped"
+  // ``blocked`` (#1020): orchestrator never invoked the stage because
+  // a `requires` upstream stage finished error/blocked.
+  | "blocked";
 
-export type BootstrapLane = "init" | "etoro" | "sec";
+export type BootstrapLane =
+  | "init"
+  | "etoro"
+  | "sec"
+  | "sec_rate"
+  | "sec_bulk_download"
+  | "db";
 
 export interface BootstrapStageResponse {
   stage_key: string;

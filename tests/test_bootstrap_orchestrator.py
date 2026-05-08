@@ -77,9 +77,15 @@ def _bind_settings_to_test_db(monkeypatch: pytest.MonkeyPatch) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_stage_catalogue_has_seventeen_stages() -> None:
+def test_stage_catalogue_has_twenty_four_stages() -> None:
+    """Catalogue size pinned to surface adds/removes in code review.
+
+    24 = 1 init + 1 etoro + 4 sec_rate (B-stages) + 1 sec_bulk_download
+    + 5 db (Phase C ingesters) + 1 sec_rate (C1.b) + 7 sec_rate (legacy
+    chain) + 2 sec_rate (legacy 13F/N-PORT recent sweeps) + 2 db (E-stages).
+    """
     specs = get_bootstrap_stage_specs()
-    assert len(specs) == 17
+    assert len(specs) == 24
 
 
 def test_stage_catalogue_lane_composition() -> None:
@@ -87,7 +93,14 @@ def test_stage_catalogue_lane_composition() -> None:
     by_lane: dict[str, int] = {}
     for spec in specs:
         by_lane[spec.lane] = by_lane.get(spec.lane, 0) + 1
-    assert by_lane == {"init": 1, "etoro": 1, "sec": 15}
+    # 1 + 1 + (4 + 1 + 7 + 2) + 1 + (5 + 2) = 24
+    assert by_lane == {
+        "init": 1,
+        "etoro": 1,
+        "sec_rate": 14,
+        "sec_bulk_download": 1,
+        "db": 7,
+    }
 
 
 def test_stage_orders_are_unique_and_contiguous() -> None:
@@ -250,8 +263,8 @@ def test_orchestrator_happy_path_completes(
     state = read_state(ebull_test_conn)
     assert state.status == "complete"
 
-    # All 17 invokers called.
-    assert len(calls["order"]) == 17
+    # All 24 invokers called.
+    assert len(calls["order"]) == 24
     # Phase A's universe sync was first.
     assert calls["order"][0] == "nightly_universe_sync"
 
@@ -273,11 +286,14 @@ def test_orchestrator_init_failure_skips_phase_b(
     assert snap is not None
     statuses = {stage.stage_key: stage.status for stage in snap.stages}
     assert statuses["universe_sync"] == "error"
-    # Phase B never ran — every other stage stays pending.
+    # New dispatcher (#1020): downstream stages with `requires` on
+    # the failed stage propagate to `blocked` instead of staying
+    # pending. Distinguishes upstream-failure from "operator hasn't
+    # triggered yet".
     for key, status in statuses.items():
         if key == "universe_sync":
             continue
-        assert status == "pending", (key, status)
+        assert status == "blocked", (key, status)
 
     state = read_state(ebull_test_conn)
     assert state.status == "partial_error"

@@ -60,8 +60,8 @@ router = APIRouter(
 
 
 BootstrapApiStatus = Literal["pending", "running", "complete", "partial_error"]
-LaneApi = Literal["init", "etoro", "sec"]
-StageApiStatus = Literal["pending", "running", "success", "error", "skipped"]
+LaneApi = Literal["init", "etoro", "sec", "sec_rate", "sec_bulk_download", "db"]
+StageApiStatus = Literal["pending", "running", "success", "error", "skipped", "blocked"]
 
 
 class BootstrapStageResponse(BaseModel):

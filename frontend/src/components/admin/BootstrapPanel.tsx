@@ -58,18 +58,28 @@ const STATUS_LABEL: Record<BootstrapStatus, string> = {
   partial_error: "Partial — errors",
 };
 
-const LANE_BADGE: Record<BootstrapStageResponse["lane"], string> = {
+const LANE_BADGE: Record<string, string> = {
   init: "bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200",
   etoro: "bg-sky-100 dark:bg-sky-900/40 text-sky-800 dark:text-sky-200",
   sec: "bg-violet-100 dark:bg-violet-900/40 text-violet-800 dark:text-violet-200",
+  sec_rate: "bg-violet-100 dark:bg-violet-900/40 text-violet-800 dark:text-violet-200",
+  sec_bulk_download: "bg-purple-100 dark:bg-purple-900/40 text-purple-800 dark:text-purple-200",
+  db: "bg-teal-100 dark:bg-teal-900/40 text-teal-800 dark:text-teal-200",
 };
 
-const STAGE_STATUS_TONE: Record<BootstrapStageResponse["status"], string> = {
+const STAGE_STATUS_TONE: Record<string, string> = {
   pending: "text-slate-400",
   running: "text-amber-700",
   success: "text-emerald-700",
   error: "text-red-700",
   skipped: "text-slate-400",
+  // ``blocked`` = upstream-failure propagation (#1020). Same red tone
+  // as ``error`` but the sublabel below distinguishes it.
+  blocked: "text-red-700",
+};
+
+const STAGE_STATUS_SUBLABEL: Record<string, string> = {
+  blocked: "Skipped — upstream failure",
 };
 
 function formatElapsed(startedAt: string | null, completedAt: string | null): string {
@@ -149,7 +159,11 @@ export function BootstrapPanel() {
 
   const failedCount = useMemo(() => {
     if (state.data === null) return 0;
-    return state.data.stages.filter((s) => s.status === "error").length;
+    // Count both `error` and `blocked` — both are unsuccessful
+    // outcomes that retry-failed needs to reset (#1020).
+    return state.data.stages.filter(
+      (s) => s.status === "error" || s.status === "blocked",
+    ).length;
   }, [state.data]);
 
   return (
@@ -324,9 +338,16 @@ function StagesTable({
                     {stage.lane}
                   </span>
                 </td>
-                <td className={`py-2 pr-4 text-xs ${STAGE_STATUS_TONE[stage.status]}`}>
-                  {stage.status}
-                  {stage.attempt_count > 1 ? ` (×${stage.attempt_count})` : ""}
+                <td className={`py-2 pr-4 text-xs ${STAGE_STATUS_TONE[stage.status] ?? ""}`}>
+                  <div>
+                    {stage.status}
+                    {stage.attempt_count > 1 ? ` (×${stage.attempt_count})` : ""}
+                  </div>
+                  {STAGE_STATUS_SUBLABEL[stage.status] !== undefined ? (
+                    <div className="text-[10px] text-slate-500">
+                      {STAGE_STATUS_SUBLABEL[stage.status]}
+                    </div>
+                  ) : null}
                 </td>
                 <td className="py-2 pr-4 text-xs text-slate-600">
                   {formatProgress(stage)}
