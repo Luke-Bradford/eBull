@@ -31,6 +31,13 @@ export type BootstrapLane =
   | "sec_bulk_download"
   | "db";
 
+export interface BootstrapArchiveResultResponse {
+  archive_name: string;
+  rows_written: number;
+  rows_skipped: Record<string, number>;
+  completed_at: string | null;
+}
+
 export interface BootstrapStageResponse {
   stage_key: string;
   stage_order: number;
@@ -44,6 +51,17 @@ export interface BootstrapStageResponse {
   units_done: number | null;
   last_error: string | null;
   attempt_count: number;
+  // #1046: per-archive ingest progress for C-stages.
+  archive_results: BootstrapArchiveResultResponse[];
+}
+
+export type BulkManifestMode = "bulk" | "fallback";
+
+export interface BulkManifestResponse {
+  present: boolean;
+  mode: BulkManifestMode | null;
+  bootstrap_run_id: number | null;
+  archive_count: number;
 }
 
 export interface BootstrapStatusResponse {
@@ -51,6 +69,7 @@ export interface BootstrapStatusResponse {
   current_run_id: number | null;
   last_completed_at: string | null;
   stages: BootstrapStageResponse[];
+  bulk_manifest: BulkManifestResponse | null;
 }
 
 export interface BootstrapRunQueuedResponse {

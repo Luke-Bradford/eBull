@@ -21,7 +21,7 @@
  * (mirrors AdminPage's running-vs-idle cadence pattern).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   fetchBootstrapStatus,
@@ -31,6 +31,7 @@ import {
   type BootstrapStageResponse,
   type BootstrapStatus,
   type BootstrapStatusResponse,
+  type BulkManifestResponse,
 } from "@/api/bootstrap";
 import {
   Section,
@@ -226,6 +227,7 @@ function BootstrapPanelBody({
           {data.current_run_id !== null ? (
             <span className="text-xs text-slate-500">run #{data.current_run_id}</span>
           ) : null}
+          <ManifestBadge manifest={data.bulk_manifest} currentRunId={data.current_run_id} />
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {data.status === "pending" ? (
@@ -324,7 +326,8 @@ function StagesTable({
             const truncated =
               errorText.length > 80 ? `${errorText.slice(0, 80)}…` : errorText;
             return (
-              <tr key={stage.stage_key} className="align-top">
+              <Fragment key={stage.stage_key}>
+              <tr className="align-top">
                 <td className="py-2 pr-4">
                   <div className="font-medium text-slate-700">{stage.stage_key}</div>
                   <div className="text-xs text-slate-500">{stage.job_name}</div>
@@ -369,6 +372,8 @@ function StagesTable({
                   )}
                 </td>
               </tr>
+              <ArchiveSubRows archiveResults={stage.archive_results} />
+              </Fragment>
             );
           })}
         </tbody>
@@ -376,6 +381,102 @@ function StagesTable({
     </div>
   );
 }
+
+function ManifestBadge({
+  manifest,
+  currentRunId,
+}: {
+  manifest: BulkManifestResponse | null;
+  currentRunId: number | null;
+}) {
+  if (manifest === null || !manifest.present) {
+    return (
+      <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[10px] uppercase tracking-wide text-slate-500">
+        manifest: missing
+      </span>
+    );
+  }
+  // Stale when the manifest run-id doesn't match the current run.
+  // Treat null manifest run-id as also stale during a current run —
+  // a present manifest that can't be tied to the run is suspicious
+  // and should be flagged. Codex pre-push P2 for #1046.
+  const stale =
+    currentRunId !== null &&
+    manifest.bootstrap_run_id !== currentRunId;
+  if (stale) {
+    return (
+      <span
+        className="rounded bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-800 dark:text-amber-200"
+        title={`stale manifest from run #${manifest.bootstrap_run_id}`}
+      >
+        manifest: stale
+      </span>
+    );
+  }
+  if (manifest.mode === "fallback") {
+    return (
+      <span className="rounded bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-800 dark:text-amber-200">
+        manifest: fallback
+      </span>
+    );
+  }
+  return (
+    <span className="rounded bg-emerald-100 dark:bg-emerald-900/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-emerald-800 dark:text-emerald-200">
+      manifest: bulk · {manifest.archive_count} archives
+    </span>
+  );
+}
+
+
+function ArchiveSubRows({
+  archiveResults,
+}: {
+  archiveResults: BootstrapStageResponse["archive_results"];
+}) {
+  if (archiveResults.length === 0) {
+    return null;
+  }
+  return (
+    <tr className="bg-slate-50 dark:bg-slate-900/40 align-top">
+      <td colSpan={6} className="px-4 py-2">
+        <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">
+          archives ({archiveResults.length})
+        </div>
+        <table className="w-full text-xs">
+          <thead className="text-[10px] uppercase tracking-wide text-slate-500">
+            <tr>
+              <th className="py-1 pr-3 text-left">Archive</th>
+              <th className="py-1 pr-3 text-right">Rows written</th>
+              <th className="py-1 pr-3 text-left">Skipped</th>
+              <th className="py-1 pr-3 text-left">Completed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {archiveResults.map((r) => (
+              <tr key={r.archive_name}>
+                <td className="py-1 pr-3 font-mono">{r.archive_name}</td>
+                <td className="py-1 pr-3 text-right">{r.rows_written.toLocaleString()}</td>
+                <td className="py-1 pr-3 text-slate-500">
+                  {Object.keys(r.rows_skipped).length === 0
+                    ? "—"
+                    : Object.entries(r.rows_skipped)
+                        .map(([k, v]) => `${k}=${v.toLocaleString()}`)
+                        .join(", ")}
+                </td>
+                <td className="py-1 pr-3 text-slate-500">
+                  {r.completed_at !== null
+                    ? new Date(r.completed_at).toLocaleTimeString()
+                    : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </td>
+    </tr>
+  );
+}
+
 
 function PrimaryButton({
   children,
