@@ -445,6 +445,8 @@ class TestRealArchiveEdgeCases:
                 "SELECT market_value_usd FROM ownership_institutions_observations WHERE instrument_id=%s",
                 (iid,),
             )
-            mv = cur.fetchone()[0]
+            row = cur.fetchone()
+            assert row is not None
+            mv = row[0]
         # 5,000,000 thousands = 5B USD (pre-2023 multiplier applied).
         assert mv == Decimal("5000000000.00")

@@ -39,6 +39,14 @@ from app.services.ownership_observations import record_institution_observation
 logger = logging.getLogger(__name__)
 
 
+# SEC FORM13F_metadata.json column description: "Starting on
+# January 3, 2023, market value is reported rounded to the nearest
+# dollar.  Previously, market value was reported in thousands."
+# Hoisted to module level so the cutover constant isn't re-built
+# on every INFOTABLE row. Codex pre-push NITPICK for #1054.
+_VALUE_DOLLARS_CUTOVER = date(2023, 1, 3)
+
+
 @dataclass
 class Form13FIngestResult:
     """Per-archive ingest outcome."""
@@ -306,16 +314,11 @@ def ingest_13f_dataset_archive(
                 continue
             shares = _parse_decimal(row.get("SSHPRNAMT"))
             # VALUE column unit changed 2023-01-03 — pre-cutover it
-            # was reported in $thousands, post-cutover in $dollars
-            # (SEC metadata FORM13F_metadata.json:
-            # "Starting on January 3, 2023, market value is reported
-            # rounded to the nearest dollar.  Previously, market value
-            # was reported in thousands."). Discriminate on FILED_AT
-            # (when the filer reported), NOT period_end — a 2022Q4
-            # restatement filed in March 2023 reports in dollars even
-            # though period_end is pre-cutover. Codex pre-push MEDIUM
-            # for #1054.
-            _VALUE_DOLLARS_CUTOVER = date(2023, 1, 3)
+            # was reported in $thousands, post-cutover in $dollars.
+            # See _VALUE_DOLLARS_CUTOVER constant at module top.
+            # Discriminate on FILED_AT (when the filer reported), NOT
+            # period_end — a 2022Q4 restatement filed in March 2023
+            # reports in dollars even though period_end is pre-cutover.
             value_raw = _parse_decimal(row.get("VALUE"))
             if value_raw is None:
                 market_value_usd = None
