@@ -36,12 +36,15 @@ from app.services.bootstrap_orchestrator import (
 )
 from app.services.bootstrap_state import (
     BootstrapAlreadyRunning,
+    BootstrapNotRunning,
+    cancel_run,
     force_mark_complete,
     read_latest_run_with_stages,
     read_state,
     reset_failed_stages_for_retry,
     start_run,
 )
+from app.services.process_stop import StopAlreadyPendingError
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request
 
 logger = logging.getLogger(__name__)
@@ -59,7 +62,7 @@ router = APIRouter(
 # ---------------------------------------------------------------------------
 
 
-BootstrapApiStatus = Literal["pending", "running", "complete", "partial_error"]
+BootstrapApiStatus = Literal["pending", "running", "complete", "partial_error", "cancelled"]
 LaneApi = Literal["init", "etoro", "sec", "sec_rate", "sec_bulk_download", "db"]
 StageApiStatus = Literal["pending", "running", "success", "error", "skipped", "blocked"]
 
@@ -444,6 +447,86 @@ def retry_failed(
 
 class BootstrapMarkCompleteResponse(BaseModel):
     status: BootstrapApiStatus
+
+
+class BootstrapCancelResponse(BaseModel):
+    """Response for ``POST /system/bootstrap/cancel``.
+
+    Operator-visible payload: which run got the stop signal so the FE
+    can pin the cancel-pending UI to that run id (rather than the
+    eventual ``last_run_id`` from a future re-run).
+    """
+
+    run_id: int
+    status: Literal["cancel_requested"]
+
+
+@router.post(
+    "/cancel",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=BootstrapCancelResponse,
+)
+def cancel_bootstrap(
+    request: Request,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> BootstrapCancelResponse:
+    """Cooperatively cancel the in-flight bootstrap run.
+
+    Spec §Cancel semantics — cooperative + §PR2.
+
+    Atomic flow inside ``cancel_run`` (one tx):
+      1. ``SELECT ... FOR UPDATE`` on ``bootstrap_state`` singleton
+         (TOCTOU-safe per prevention-log).
+      2. Verify status='running' + last_run_id IS NOT NULL — else 409.
+      3. ``SELECT ... FOR UPDATE`` on the active ``bootstrap_runs``
+         row to pin the target id.
+      4. INSERT ``process_stop_requests`` row (target_run_kind=
+         'bootstrap_run', mode='cooperative'). Partial-unique violation
+         (operator double-clicked) raises ``StopAlreadyPendingError``
+         → 409.
+      5. UPDATE ``bootstrap_runs.cancel_requested_at = now()`` for
+         worker fast-path observation.
+
+    The orchestrator's per-batch checkpoint observes the stop row,
+    transitions the run + state to ``cancelled``, and exits cleanly.
+    Worst-case observation latency = duration of the longest
+    in-flight stage (~30 min for 13F sweep, ~30s for CIK refresh).
+
+    Returns 202 with the run id. The FE polls ``/status`` and shows
+    ``cancelling…`` until the worker observes the stop, then
+    ``cancelled``.
+    """
+    requested_by = _identify_requestor(request)
+    try:
+        run_id = cancel_run(conn, requested_by_operator_id=None)
+    except BootstrapNotRunning as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "no_active_run",
+                "message": str(exc),
+            },
+        ) from exc
+    except StopAlreadyPendingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "stop_already_pending",
+                "message": str(exc),
+            },
+        ) from exc
+
+    logger.warning(
+        "bootstrap: cancel requested run_id=%d requested_by=%s",
+        run_id,
+        requested_by,
+    )
+    return BootstrapCancelResponse(run_id=run_id, status="cancel_requested")
+
+
+# ---------------------------------------------------------------------------
+# POST /mark-complete
+# ---------------------------------------------------------------------------
 
 
 @router.post("/mark-complete", response_model=BootstrapMarkCompleteResponse)

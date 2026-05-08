@@ -30,14 +30,20 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
+from uuid import UUID
 
 import psycopg
+
+from app.services.process_stop import (
+    StopAlreadyPendingError,
+    request_stop,
+)
 
 logger = logging.getLogger(__name__)
 
 
-BootstrapStatus = Literal["pending", "running", "complete", "partial_error"]
-RunStatus = Literal["running", "complete", "partial_error"]
+BootstrapStatus = Literal["pending", "running", "complete", "partial_error", "cancelled"]
+RunStatus = Literal["running", "complete", "partial_error", "cancelled"]
 StageStatus = Literal["pending", "running", "success", "error", "skipped", "blocked"]
 Lane = Literal["init", "etoro", "sec", "sec_rate", "sec_bulk_download", "db"]
 
@@ -53,6 +59,13 @@ class BootstrapAlreadyRunning(RuntimeError):
     def __init__(self, run_id: int) -> None:
         super().__init__(f"bootstrap run {run_id} is already running")
         self.run_id = run_id
+
+
+class BootstrapNotRunning(RuntimeError):
+    """Raised by ``cancel_run`` when no bootstrap run is currently in flight.
+
+    The API layer maps this to 409 Conflict — there is nothing to cancel.
+    """
 
 
 @dataclass(frozen=True)
@@ -423,7 +436,12 @@ def finalize_run(
     Updates the run row, the bootstrap_state singleton, and
     ``last_completed_at`` in one transaction.
 
-    Returns the chosen terminal status.
+    Cooperative-cancel guard: if the run row is already in a terminal
+    state (e.g. ``cancelled``, written by the orchestrator's cancel
+    checkpoint via ``mark_run_cancelled``), the UPDATEs no-op via the
+    ``status='running'`` predicate and the existing terminal state is
+    preserved. We then return whatever the run row's current status is
+    so callers see the truth.
     """
     with conn.transaction():
         # Count both `error` and `blocked` — both are unsuccessful
@@ -438,16 +456,17 @@ def finalize_run(
             {"run_id": run_id},
         ).fetchone()
         error_count = error_count_row[0] if error_count_row is not None else 0
-        terminal: RunStatus = "partial_error" if error_count > 0 else "complete"
+        candidate: RunStatus = "partial_error" if error_count > 0 else "complete"
 
         conn.execute(
             """
             UPDATE bootstrap_runs
                SET status       = %(status)s,
                    completed_at = now()
-             WHERE id = %(run_id)s
+             WHERE id     = %(run_id)s
+               AND status = 'running'
             """,
-            {"status": terminal, "run_id": run_id},
+            {"status": candidate, "run_id": run_id},
         )
         conn.execute(
             """
@@ -455,10 +474,23 @@ def finalize_run(
                SET status            = %(status)s,
                    last_run_id       = %(run_id)s,
                    last_completed_at = now()
-             WHERE id = 1
+             WHERE id     = 1
+               AND status = 'running'
             """,
-            {"status": terminal, "run_id": run_id},
+            {"status": candidate, "run_id": run_id},
         )
+
+        # Re-read the post-UPDATE truth. If the orchestrator's cancel
+        # checkpoint already terminalised the run as ``cancelled``, the
+        # status='running' guards above no-op'd and we return the
+        # actual terminal state, not the candidate we computed.
+        terminal_row = conn.execute(
+            "SELECT status FROM bootstrap_runs WHERE id = %(run_id)s",
+            {"run_id": run_id},
+        ).fetchone()
+        if terminal_row is None:
+            raise RuntimeError(f"finalize_run: bootstrap_runs row {run_id} disappeared")
+        terminal: RunStatus = terminal_row[0]
 
     return terminal
 
@@ -590,6 +622,174 @@ def force_mark_complete(
         )
 
 
+def cancel_run(
+    conn: psycopg.Connection[Any],
+    *,
+    requested_by_operator_id: UUID | None,
+) -> int:
+    """Cooperatively cancel the in-flight bootstrap run.
+
+    Spec §Cancel semantics — cooperative + §PR2.
+
+    One-transaction flow that mirrors ``start_run``'s singleton-locking
+    contract (prevention-log: "TOCTOU on singleton state — read-then-
+    mutate without `FOR UPDATE`"):
+
+    1. ``SELECT ... FOR UPDATE`` on ``bootstrap_state`` — pins the
+       singleton; concurrent ``start_run`` / ``mark_complete`` cannot
+       race past us.
+    2. Verify ``status='running'`` and ``last_run_id IS NOT NULL``;
+       raise ``BootstrapNotRunning`` otherwise (API → 409).
+    3. ``SELECT ... FOR UPDATE`` on the active ``bootstrap_runs`` row
+       (also ``status='running'``) — pins the run id we're targeting,
+       so the worker cannot finish + start a new run between our read
+       and insert.
+    4. ``request_stop`` writes the ``process_stop_requests`` row with
+       ``target_run_kind='bootstrap_run'`` and the locked run id.
+       Internally wraps the INSERT in a SAVEPOINT so a
+       ``UniqueViolation`` (active stop already pending) rolls back
+       cleanly without poisoning the outer transaction.
+    5. UPDATE ``bootstrap_runs.cancel_requested_at = now()`` for the
+       worker's fast-path observation.
+
+    Returns the cancelled run id.
+
+    Raises:
+        BootstrapNotRunning: nothing to cancel.
+        StopAlreadyPendingError: an active stop is already pending
+            for this run (operator double-clicked).
+    """
+    with conn.transaction():
+        state_row = conn.execute("SELECT status, last_run_id FROM bootstrap_state WHERE id = 1 FOR UPDATE").fetchone()
+        if state_row is None:
+            raise RuntimeError("bootstrap_state singleton row missing")
+        current_status, last_run_id = state_row
+        if current_status != "running" or last_run_id is None:
+            raise BootstrapNotRunning(
+                f"bootstrap is not running (status={current_status!r}, last_run_id={last_run_id!r})"
+            )
+
+        run_row = conn.execute(
+            """
+            SELECT id FROM bootstrap_runs
+             WHERE id = %(run_id)s AND status = 'running'
+             FOR UPDATE
+            """,
+            {"run_id": last_run_id},
+        ).fetchone()
+        if run_row is None:
+            # State says running but the run row already terminated —
+            # singleton is out of sync. Treat as not-running per the
+            # prevention-log "Post-step DB re-read must fail closed"
+            # rule: a race-window read that disagrees with the gate is
+            # the failure case, not the optimistic one.
+            raise BootstrapNotRunning(
+                f"bootstrap_state.status='running' but bootstrap_runs row {last_run_id} is not running"
+            )
+        run_id: int = run_row[0]
+
+        # Insert the stop signal. ``request_stop`` raises
+        # StopAlreadyPendingError on partial-unique violation; the
+        # exception escapes the inner SAVEPOINT cleanly so the outer
+        # tx stays usable.
+        request_stop(
+            conn,
+            process_id="bootstrap",
+            mechanism="bootstrap",
+            target_run_kind="bootstrap_run",
+            target_run_id=run_id,
+            mode="cooperative",
+            requested_by_operator_id=requested_by_operator_id,
+        )
+
+        update_cur = conn.execute(
+            """
+            UPDATE bootstrap_runs
+               SET cancel_requested_at = now()
+             WHERE id = %(run_id)s
+            """,
+            {"run_id": run_id},
+        )
+        # Single-row UPDATE: if rowcount is 0 the run row vanished
+        # between our FOR UPDATE and now (impossible — we hold the
+        # lock — but guard against silent no-ops per prevention-log
+        # "UPDATE-by-PK helpers must assert rowcount").
+        if update_cur.rowcount != 1:
+            raise RuntimeError(
+                f"cancel_run: expected 1 bootstrap_runs row for run_id={run_id}, got rowcount={update_cur.rowcount}"
+            )
+
+    return run_id
+
+
+def mark_run_cancelled(
+    conn: psycopg.Connection[Any],
+    *,
+    run_id: int,
+    notes_line: str = "cancelled by operator",
+) -> None:
+    """Transition the bootstrap run to the terminal ``cancelled`` state.
+
+    Called from the orchestrator after observing the stop signal at a
+    cancel checkpoint, AND from boot recovery on a jobs restart.
+
+    Idempotent: if the run row is already ``cancelled``, the UPDATEs
+    no-op (status guard in WHERE clause).
+
+    Sweeps stages still in ``running`` or ``pending`` to ``error`` —
+    the run is cancelled, the in-flight stage didn't finish cleanly.
+    Subsequent Iterate / Re-run uses the existing
+    ``reset_failed_stages_for_retry`` path (treats ``error`` as
+    retryable).
+    """
+    with conn.transaction():
+        conn.execute(
+            """
+            UPDATE bootstrap_stages
+               SET status       = 'error',
+                   completed_at = now(),
+                   last_error   = COALESCE(last_error, %(reason)s)
+             WHERE bootstrap_run_id = %(run_id)s
+               AND status           = 'running'
+            """,
+            {"run_id": run_id, "reason": notes_line},
+        )
+        conn.execute(
+            """
+            UPDATE bootstrap_stages
+               SET status       = 'error',
+                   completed_at = now(),
+                   last_error   = %(reason)s
+             WHERE bootstrap_run_id = %(run_id)s
+               AND status           = 'pending'
+            """,
+            {"run_id": run_id, "reason": notes_line},
+        )
+        conn.execute(
+            """
+            UPDATE bootstrap_runs
+               SET status       = 'cancelled',
+                   completed_at = now(),
+                   notes        = TRIM(BOTH E'\n' FROM
+                                       COALESCE(notes, '') || E'\n' || %(reason)s)
+             WHERE id     = %(run_id)s
+               AND status = 'running'
+            """,
+            {"run_id": run_id, "reason": notes_line},
+        )
+        conn.execute(
+            """
+            UPDATE bootstrap_state
+               SET status            = 'cancelled',
+                   last_completed_at = now()
+             WHERE id          = 1
+               AND last_run_id = %(run_id)s
+               AND status      = 'running'
+            """,
+            {"run_id": run_id},
+        )
+
+
 def reap_orphaned_running(
     conn: psycopg.Connection[Any],
 ) -> bool:
@@ -603,8 +803,13 @@ def reap_orphaned_running(
         last_error='jobs process restarted mid-run'.
       - Latest run's stages with ``status='pending'`` → ``error``,
         last_error='orchestrator did not dispatch before restart'.
-      - Latest ``bootstrap_runs`` row → ``partial_error``.
-      - ``bootstrap_state`` → ``partial_error``.
+      - Latest ``bootstrap_runs`` row →
+          * ``cancelled`` if ``cancel_requested_at IS NOT NULL`` (an
+            operator cancel that the worker never observed before
+            jobs restarted — Codex round 2 R2-B3 + spec §sql/136
+            "boot recovery handles cancelled");
+          * ``partial_error`` otherwise.
+      - ``bootstrap_state`` → matching terminal status.
 
     All in one transaction. Idempotent on a state that is not
     ``running``; returns True if a sweep occurred, False otherwise.
@@ -617,6 +822,17 @@ def reap_orphaned_running(
         if last_run_id is None:
             conn.execute("UPDATE bootstrap_state SET status = 'partial_error' WHERE id = 1")
             return True
+
+        # Distinguish operator-cancel-then-restart from generic crash.
+        run_meta = conn.execute(
+            """
+            SELECT cancel_requested_at IS NOT NULL
+              FROM bootstrap_runs
+             WHERE id = %(run_id)s
+            """,
+            {"run_id": last_run_id},
+        ).fetchone()
+        cancel_requested = bool(run_meta[0]) if run_meta is not None else False
 
         conn.execute(
             """
@@ -640,29 +856,56 @@ def reap_orphaned_running(
             """,
             {"run_id": last_run_id},
         )
-        conn.execute(
-            """
-            UPDATE bootstrap_runs
-               SET status       = 'partial_error',
-                   completed_at = now()
-             WHERE id = %(run_id)s
-            """,
-            {"run_id": last_run_id},
-        )
-        conn.execute(
-            """
-            UPDATE bootstrap_state
-               SET status            = 'partial_error',
-                   last_completed_at = now()
-             WHERE id = 1
-            """
-        )
+
+        if cancel_requested:
+            # Operator clicked Cancel; jobs restarted before the
+            # worker observed. Honour the cancel intent rather than
+            # masking it as partial_error.
+            conn.execute(
+                """
+                UPDATE bootstrap_runs
+                   SET status       = 'cancelled',
+                       completed_at = now(),
+                       notes        = TRIM(BOTH E'\n' FROM
+                                           COALESCE(notes, '') || E'\n' ||
+                                           'terminated by operator before jobs restart')
+                 WHERE id = %(run_id)s
+                """,
+                {"run_id": last_run_id},
+            )
+            conn.execute(
+                """
+                UPDATE bootstrap_state
+                   SET status            = 'cancelled',
+                       last_completed_at = now()
+                 WHERE id = 1
+                """
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE bootstrap_runs
+                   SET status       = 'partial_error',
+                       completed_at = now()
+                 WHERE id = %(run_id)s
+                """,
+                {"run_id": last_run_id},
+            )
+            conn.execute(
+                """
+                UPDATE bootstrap_state
+                   SET status            = 'partial_error',
+                       last_completed_at = now()
+                 WHERE id = 1
+                """
+            )
 
     return True
 
 
 __all__ = [
     "BootstrapAlreadyRunning",
+    "BootstrapNotRunning",
     "BootstrapState",
     "BootstrapStatus",
     "Lane",
@@ -671,8 +914,11 @@ __all__ = [
     "StageRow",
     "StageSpec",
     "StageStatus",
+    "StopAlreadyPendingError",
+    "cancel_run",
     "finalize_run",
     "force_mark_complete",
+    "mark_run_cancelled",
     "mark_stage_blocked",
     "mark_stage_error",
     "mark_stage_running",
