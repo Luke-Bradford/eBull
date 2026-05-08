@@ -195,6 +195,65 @@ class TestBandwidthProbe:
             with pytest.raises(RuntimeError):
                 await measure_bandwidth_mbps(client, probe_url="https://example.test/missing.zip")
 
+    @pytest.mark.asyncio
+    async def test_probe_acquires_shared_rate_clock(self) -> None:
+        # When a rate_limiter is supplied, the probe must call .acquire()
+        # before issuing the GET so the request counts against the
+        # shared SEC budget (#1042).
+        body = b"x" * (PROBE_BYTES * 2)
+        handler = _make_handler("https://example.test/probe.zip", body)
+        transport = httpx.MockTransport(handler)
+
+        acquire_calls: list[None] = []
+
+        class _SpyLimiter:
+            async def acquire(self) -> None:
+                acquire_calls.append(None)
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            await measure_bandwidth_mbps(
+                client,
+                probe_url="https://example.test/probe.zip",
+                rate_limiter=_SpyLimiter(),
+            )
+        assert len(acquire_calls) == 1
+
+
+class TestRateClockOrdering:
+    """Spy-transport tests pinning the #1042 contract: every SEC HTTP
+    request issued by the bulk downloader is preceded by an acquire()
+    on the shared rate clock."""
+
+    @pytest.mark.asyncio
+    async def test_download_one_acquires_before_head_and_get(self, tmp_path: Path) -> None:
+        from app.services.sec_bulk_download import _download_one
+
+        events: list[str] = []
+        body = _build_zip_bytes()
+        url = "https://example.test/archive.zip"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            events.append(request.method)
+            if request.method == "HEAD":
+                return httpx.Response(200, headers={"content-length": str(len(body))})
+            return httpx.Response(200, content=body)
+
+        class _SpyLimiter:
+            async def acquire(self) -> None:
+                events.append("ACQUIRE")
+
+        archive = BulkArchive(name="archive.zip", url=url, expected_min_bytes=1)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result = await _download_one(client, archive, tmp_path, rate_limiter=_SpyLimiter())
+        assert result.error is None
+        # ACQUIRE must precede HEAD; ACQUIRE must precede GET.
+        assert events.index("ACQUIRE") < events.index("HEAD")
+        # The HEAD acquire is at index 0; the GET acquire happens before
+        # the GET request, so two ACQUIREs total.
+        assert events.count("ACQUIRE") == 2
+        # Order is ACQUIRE, HEAD, ACQUIRE, GET.
+        assert events == ["ACQUIRE", "HEAD", "ACQUIRE", "GET"]
+
 
 # ---------------------------------------------------------------------------
 # Per-archive download
