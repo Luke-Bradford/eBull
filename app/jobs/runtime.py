@@ -237,6 +237,28 @@ _INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP] = (
     _bootstrap_orchestrator.bootstrap_sec_13f_recent_sweep_job
 )
 
+# ---------------------------------------------------------------------------
+# Bulk-archive Phase C ingester invokers (#1027 — #1020)
+# ---------------------------------------------------------------------------
+# Each ingester is a zero-arg wrapper that opens its own connection
+# and reads cached archives from ``resolve_data_dir() / "sec" / "bulk"``.
+# Skip silently if the archive is missing (slow-connection fallback
+# bypassed Phase A3).
+from app.services import sec_bulk_download as _sec_bulk_download  # noqa: E402
+from app.services import sec_bulk_orchestrator_jobs as _bulk_jobs  # noqa: E402
+from app.services import sec_submissions_files_walk as _files_walk  # noqa: E402
+
+# Phase A3 — bulk archive download (#1021 / #1020). Registered here
+# so PR7 is self-consistent if PR #1029 has not yet landed; the
+# duplicate dict-key assignment when both PRs are merged is a no-op.
+_INVOKERS[_sec_bulk_download.JOB_SEC_BULK_DOWNLOAD] = _sec_bulk_download.sec_bulk_download_job
+_INVOKERS[_bulk_jobs.JOB_SEC_SUBMISSIONS_INGEST] = _bulk_jobs.sec_submissions_ingest_job
+_INVOKERS[_bulk_jobs.JOB_SEC_COMPANYFACTS_INGEST] = _bulk_jobs.sec_companyfacts_ingest_job
+_INVOKERS[_bulk_jobs.JOB_SEC_13F_INGEST_FROM_DATASET] = _bulk_jobs.sec_13f_ingest_from_dataset_job
+_INVOKERS[_bulk_jobs.JOB_SEC_INSIDER_INGEST_FROM_DATASET] = _bulk_jobs.sec_insider_ingest_from_dataset_job
+_INVOKERS[_bulk_jobs.JOB_SEC_NPORT_INGEST_FROM_DATASET] = _bulk_jobs.sec_nport_ingest_from_dataset_job
+_INVOKERS[_files_walk.JOB_SEC_SUBMISSIONS_FILES_WALK] = _files_walk.sec_submissions_files_walk_job
+
 
 # Public registry of valid job names. The API layer (#719) imports this
 # to validate ``POST /jobs/{name}/run`` before writing a queue row, so
