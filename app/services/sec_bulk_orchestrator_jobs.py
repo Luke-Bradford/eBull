@@ -29,6 +29,7 @@ import psycopg
 from app.config import settings
 from app.security.master_key import resolve_data_dir
 from app.services.sec_13f_dataset_ingest import ingest_13f_dataset_archive
+from app.services.sec_bulk_download import build_bulk_archive_inventory
 from app.services.sec_companyfacts_ingest import ingest_companyfacts_archive
 from app.services.sec_insider_dataset_ingest import ingest_insider_dataset_archive
 from app.services.sec_nport_dataset_ingest import ingest_nport_dataset_archive
@@ -71,6 +72,52 @@ def _run_with_conn(fn: Callable[[psycopg.Connection[tuple]], object]) -> None:
         conn.commit()
 
 
+def _current_running_bootstrap_run_id() -> int | None:
+    """Read the currently-running bootstrap_run id, if any.
+
+    Returns ``None`` only when there is genuinely no running run —
+    the operator may be invoking a Phase C job standalone. A DB
+    error here is RAISED, not swallowed, because returning None on
+    a connection hiccup would make C-stages skip every precondition
+    and silently no-op (the very failure mode #1020 fixes).
+    PR review WARNING (bot, PR #1038).
+    """
+    with psycopg.connect(settings.database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id FROM bootstrap_runs
+                WHERE status = 'running'
+                ORDER BY id DESC LIMIT 1
+                """,
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else None
+
+
+def _record_archive_result(
+    *,
+    bootstrap_run_id: int,
+    stage_key: str,
+    archive_name: str,
+    rows_written: int,
+    rows_skipped: dict[str, int] | None = None,
+) -> None:
+    """Write an audit-trail row in ``bootstrap_archive_results``."""
+    from app.services.bootstrap_preconditions import record_archive_result
+
+    with psycopg.connect(settings.database_url) as conn:
+        record_archive_result(
+            conn,
+            bootstrap_run_id=bootstrap_run_id,
+            stage_key=stage_key,
+            archive_name=archive_name,
+            rows_written=rows_written,
+            rows_skipped=rows_skipped,
+        )
+        conn.commit()
+
+
 def _delete_archive_after_success(archive: Path) -> None:
     """Delete a successfully-ingested archive from the bulk cache.
 
@@ -98,13 +145,35 @@ def _delete_archive_after_success(archive: Path) -> None:
 
 
 def sec_submissions_ingest_job() -> None:
+    from app.services.bootstrap_preconditions import assert_c1a_preconditions
+
+    run_id = _current_running_bootstrap_run_id()
     archive = _archive_path("submissions.zip")
-    if not archive.exists():
-        logger.info("sec_submissions_ingest: archive %s not present, skipping", archive)
+
+    # Within an orchestrated run: preconditions must pass before any
+    # write. Standalone manual invocation (no run): fall back to the
+    # legacy "ingest if archive exists" path.
+    if run_id is not None:
+        with psycopg.connect(settings.database_url) as conn:
+            assert_c1a_preconditions(conn, bootstrap_run_id=run_id, bulk_dir=_bulk_dir())
+        if not archive.exists():
+            from app.services.sec_bulk_download import BootstrapPartialDownloadError
+
+            raise BootstrapPartialDownloadError(
+                f"sec_submissions_ingest: archive {archive} not present; "
+                f"upstream sec_bulk_download did not land submissions.zip."
+            )
+    elif not archive.exists():
+        logger.info("sec_submissions_ingest: archive %s not present, skipping (no run)", archive)
         return
+
+    captured: dict[str, int] = {}
 
     def _do(conn: psycopg.Connection[tuple]) -> None:
         result = ingest_submissions_archive(conn=conn, archive_path=archive)
+        captured["filings_upserted"] = result.filings_upserted
+        captured["profiles_upserted"] = result.profiles_upserted
+        captured["parse_errors"] = result.parse_errors
         logger.info(
             "sec_submissions_ingest: matched=%d filings_upserted=%d profiles=%d parse_errors=%d",
             result.instruments_matched,
@@ -114,6 +183,14 @@ def sec_submissions_ingest_job() -> None:
         )
 
     _run_with_conn(_do)
+    if run_id is not None:
+        _record_archive_result(
+            bootstrap_run_id=run_id,
+            stage_key="sec_submissions_ingest",
+            archive_name="submissions.zip",
+            rows_written=captured.get("filings_upserted", 0),
+            rows_skipped={"parse_errors": captured.get("parse_errors", 0)},
+        )
     _delete_archive_after_success(archive)
 
 
@@ -123,13 +200,31 @@ def sec_submissions_ingest_job() -> None:
 
 
 def sec_companyfacts_ingest_job() -> None:
+    from app.services.bootstrap_preconditions import assert_c2_preconditions
+
+    run_id = _current_running_bootstrap_run_id()
     archive = _archive_path("companyfacts.zip")
-    if not archive.exists():
-        logger.info("sec_companyfacts_ingest: archive %s not present, skipping", archive)
+
+    if run_id is not None:
+        with psycopg.connect(settings.database_url) as conn:
+            assert_c2_preconditions(conn, bootstrap_run_id=run_id, bulk_dir=_bulk_dir())
+        if not archive.exists():
+            from app.services.sec_bulk_download import BootstrapPartialDownloadError
+
+            raise BootstrapPartialDownloadError(
+                f"sec_companyfacts_ingest: archive {archive} not present; "
+                f"upstream sec_bulk_download did not land companyfacts.zip."
+            )
+    elif not archive.exists():
+        logger.info("sec_companyfacts_ingest: archive %s not present, skipping (no run)", archive)
         return
+
+    captured: dict[str, int] = {}
 
     def _do(conn: psycopg.Connection[tuple]) -> None:
         result = ingest_companyfacts_archive(conn=conn, archive_path=archive)
+        captured["facts_upserted"] = result.facts_upserted
+        captured["parse_errors"] = result.parse_errors
         logger.info(
             "sec_companyfacts_ingest: matched=%d facts_upserted=%d parse_errors=%d",
             result.instruments_matched,
@@ -138,6 +233,14 @@ def sec_companyfacts_ingest_job() -> None:
         )
 
     _run_with_conn(_do)
+    if run_id is not None:
+        _record_archive_result(
+            bootstrap_run_id=run_id,
+            stage_key="sec_companyfacts_ingest",
+            archive_name="companyfacts.zip",
+            rows_written=captured.get("facts_upserted", 0),
+            rows_skipped={"parse_errors": captured.get("parse_errors", 0)},
+        )
     _delete_archive_after_success(archive)
 
 
@@ -147,13 +250,48 @@ def sec_companyfacts_ingest_job() -> None:
 
 
 def sec_13f_ingest_from_dataset_job() -> None:
+    from app.services.bootstrap_preconditions import assert_c3_preconditions
+    from app.services.sec_bulk_download import BootstrapPartialDownloadError
+
+    run_id = _current_running_bootstrap_run_id()
     archives = _list_archives_matching("form13f_")
-    if not archives:
-        logger.info("sec_13f_ingest_from_dataset: no form13f_*.zip cached, skipping")
+
+    expected: list[str] | None = None
+    if run_id is not None:
+        expected = [a.name for a in build_bulk_archive_inventory() if a.name.startswith("form13f_")]
+        with psycopg.connect(settings.database_url) as conn:
+            assert_c3_preconditions(
+                conn,
+                bootstrap_run_id=run_id,
+                bulk_dir=_bulk_dir(),
+                expected_archive_names=expected,
+            )
+        # Restrict loop to the expected manifest-backed names so
+        # stale archives left on disk from a prior run are NOT
+        # ingested under the current run.
+        archives = [a for a in archives if a.name in set(expected)]
+        # All expected files MUST be on disk after manifest provenance
+        # passes; missing physical file is a partial-download failure.
+        present_names = {a.name for a in archives}
+        missing = [n for n in expected if n not in present_names]
+        if missing:
+            from app.services.sec_bulk_download import BootstrapPartialDownloadError
+
+            raise BootstrapPartialDownloadError(
+                f"expected archives missing on disk after preconditions passed: {missing}"
+            )
+        if not archives:
+            raise BootstrapPartialDownloadError(
+                "sec_13f_ingest_from_dataset: no form13f_*.zip cached; "
+                "upstream sec_bulk_download did not land 13F archives."
+            )
+    elif not archives:
+        logger.info("sec_13f_ingest_from_dataset: no form13f_*.zip cached, skipping (no run)")
         return
 
     # Per-archive commit so an exception on archive N does not roll
-    # back archives 1..N-1's writes (Codex review WARNING for PR #1035).
+    # back archives 1..N-1's writes.
+    failed_archives: list[str] = []
     total_written = 0
     total_skipped = 0
     for archive in archives:
@@ -161,13 +299,22 @@ def sec_13f_ingest_from_dataset_job() -> None:
             try:
                 result = ingest_13f_dataset_archive(conn=conn, archive_path=archive)
                 conn.commit()
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
                 conn.rollback()
                 logger.exception("sec_13f_ingest_from_dataset: archive=%s failed", archive.name)
+                failed_archives.append(f"{archive.name}: {exc}")
                 continue
         _delete_archive_after_success(archive)
         total_written += result.rows_written
         total_skipped += result.rows_skipped_unresolved_cusip
+        if run_id is not None:
+            _record_archive_result(
+                bootstrap_run_id=run_id,
+                stage_key="sec_13f_ingest_from_dataset",
+                archive_name=archive.name,
+                rows_written=result.rows_written,
+                rows_skipped={"unresolved_cusip": result.rows_skipped_unresolved_cusip},
+            )
         logger.info(
             "sec_13f_ingest_from_dataset: archive=%s rows_written=%d unresolved_cusip=%d",
             archive.name,
@@ -179,6 +326,15 @@ def sec_13f_ingest_from_dataset_job() -> None:
         total_written,
         total_skipped,
     )
+    if failed_archives:
+        raise RuntimeError(
+            f"sec_13f_ingest_from_dataset: {len(failed_archives)} archives failed: " + "; ".join(failed_archives)
+        )
+    if run_id is not None and total_written == 0:
+        raise RuntimeError(
+            f"sec_13f_ingest_from_dataset: aggregate rows_written=0 across {len(archives)} archives; "
+            f"unresolved_cusip={total_skipped}. Check CUSIP coverage."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -187,24 +343,64 @@ def sec_13f_ingest_from_dataset_job() -> None:
 
 
 def sec_insider_ingest_from_dataset_job() -> None:
+    from app.services.bootstrap_preconditions import assert_c4_preconditions
+    from app.services.sec_bulk_download import BootstrapPartialDownloadError
+
+    run_id = _current_running_bootstrap_run_id()
     archives = _list_archives_matching("insider_")
-    if not archives:
-        logger.info("sec_insider_ingest_from_dataset: no insider_*.zip cached, skipping")
+
+    expected: list[str] | None = None
+    if run_id is not None:
+        expected = [a.name for a in build_bulk_archive_inventory() if a.name.startswith("insider_")]
+        with psycopg.connect(settings.database_url) as conn:
+            assert_c4_preconditions(
+                conn,
+                bootstrap_run_id=run_id,
+                bulk_dir=_bulk_dir(),
+                expected_archive_names=expected,
+            )
+        archives = [a for a in archives if a.name in set(expected)]
+        # All expected files MUST be on disk after manifest provenance
+        # passes; missing physical file is a partial-download failure.
+        present_names = {a.name for a in archives}
+        missing = [n for n in expected if n not in present_names]
+        if missing:
+            from app.services.sec_bulk_download import BootstrapPartialDownloadError
+
+            raise BootstrapPartialDownloadError(
+                f"expected archives missing on disk after preconditions passed: {missing}"
+            )
+        if not archives:
+            raise BootstrapPartialDownloadError(
+                "sec_insider_ingest_from_dataset: no insider_*.zip cached; "
+                "upstream sec_bulk_download did not land insider archives."
+            )
+    elif not archives:
+        logger.info("sec_insider_ingest_from_dataset: no insider_*.zip cached, skipping (no run)")
         return
 
-    # Per-archive commit per Codex review WARNING for PR #1035.
+    failed_archives: list[str] = []
     total_written = 0
     for archive in archives:
         with psycopg.connect(settings.database_url) as conn:
             try:
                 result = ingest_insider_dataset_archive(conn=conn, archive_path=archive)
                 conn.commit()
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
                 conn.rollback()
                 logger.exception("sec_insider_ingest_from_dataset: archive=%s failed", archive.name)
+                failed_archives.append(f"{archive.name}: {exc}")
                 continue
         _delete_archive_after_success(archive)
         total_written += result.rows_written
+        if run_id is not None:
+            _record_archive_result(
+                bootstrap_run_id=run_id,
+                stage_key="sec_insider_ingest_from_dataset",
+                archive_name=archive.name,
+                rows_written=result.rows_written,
+                rows_skipped={"unresolved_cik": result.rows_skipped_unresolved_cik},
+            )
         logger.info(
             "sec_insider_ingest_from_dataset: archive=%s rows_written=%d unresolved_cik=%d",
             archive.name,
@@ -215,6 +411,15 @@ def sec_insider_ingest_from_dataset_job() -> None:
         "sec_insider_ingest_from_dataset: total_rows_written=%d",
         total_written,
     )
+    if failed_archives:
+        raise RuntimeError(
+            f"sec_insider_ingest_from_dataset: {len(failed_archives)} archives failed: " + "; ".join(failed_archives)
+        )
+    if run_id is not None and total_written == 0:
+        raise RuntimeError(
+            f"sec_insider_ingest_from_dataset: aggregate rows_written=0 across {len(archives)} archives. "
+            "Check CIK coverage."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -223,24 +428,67 @@ def sec_insider_ingest_from_dataset_job() -> None:
 
 
 def sec_nport_ingest_from_dataset_job() -> None:
+    from app.services.bootstrap_preconditions import assert_c5_preconditions
+    from app.services.sec_bulk_download import BootstrapPartialDownloadError
+
+    run_id = _current_running_bootstrap_run_id()
     archives = _list_archives_matching("nport_")
-    if not archives:
-        logger.info("sec_nport_ingest_from_dataset: no nport_*.zip cached, skipping")
+
+    expected: list[str] | None = None
+    if run_id is not None:
+        expected = [a.name for a in build_bulk_archive_inventory() if a.name.startswith("nport_")]
+        with psycopg.connect(settings.database_url) as conn:
+            assert_c5_preconditions(
+                conn,
+                bootstrap_run_id=run_id,
+                bulk_dir=_bulk_dir(),
+                expected_archive_names=expected,
+            )
+        archives = [a for a in archives if a.name in set(expected)]
+        # All expected files MUST be on disk after manifest provenance
+        # passes; missing physical file is a partial-download failure.
+        present_names = {a.name for a in archives}
+        missing = [n for n in expected if n not in present_names]
+        if missing:
+            from app.services.sec_bulk_download import BootstrapPartialDownloadError
+
+            raise BootstrapPartialDownloadError(
+                f"expected archives missing on disk after preconditions passed: {missing}"
+            )
+        if not archives:
+            raise BootstrapPartialDownloadError(
+                "sec_nport_ingest_from_dataset: no nport_*.zip cached; "
+                "upstream sec_bulk_download did not land NPORT archives."
+            )
+    elif not archives:
+        logger.info("sec_nport_ingest_from_dataset: no nport_*.zip cached, skipping (no run)")
         return
 
-    # Per-archive commit per Codex review WARNING for PR #1035.
+    failed_archives: list[str] = []
     total_written = 0
     for archive in archives:
         with psycopg.connect(settings.database_url) as conn:
             try:
                 result = ingest_nport_dataset_archive(conn=conn, archive_path=archive)
                 conn.commit()
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
                 conn.rollback()
                 logger.exception("sec_nport_ingest_from_dataset: archive=%s failed", archive.name)
+                failed_archives.append(f"{archive.name}: {exc}")
                 continue
         _delete_archive_after_success(archive)
         total_written += result.rows_written
+        if run_id is not None:
+            _record_archive_result(
+                bootstrap_run_id=run_id,
+                stage_key="sec_nport_ingest_from_dataset",
+                archive_name=archive.name,
+                rows_written=result.rows_written,
+                rows_skipped={
+                    "unresolved_cusip": result.rows_skipped_unresolved_cusip,
+                    "non_equity": result.rows_skipped_non_equity,
+                },
+            )
         logger.info(
             "sec_nport_ingest_from_dataset: archive=%s rows_written=%d unresolved_cusip=%d non_equity=%d",
             archive.name,
@@ -252,3 +500,12 @@ def sec_nport_ingest_from_dataset_job() -> None:
         "sec_nport_ingest_from_dataset: total_rows_written=%d",
         total_written,
     )
+    if failed_archives:
+        raise RuntimeError(
+            f"sec_nport_ingest_from_dataset: {len(failed_archives)} archives failed: " + "; ".join(failed_archives)
+        )
+    if run_id is not None and total_written == 0:
+        raise RuntimeError(
+            f"sec_nport_ingest_from_dataset: aggregate rows_written=0 across {len(archives)} archives. "
+            "Check CUSIP coverage."
+        )
