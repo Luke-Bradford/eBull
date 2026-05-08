@@ -44,7 +44,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import httpx
 
@@ -304,6 +304,7 @@ async def measure_bandwidth_mbps(
     *,
     probe_url: str,
     probe_bytes: int = PROBE_BYTES,
+    rate_limiter: Any | None = None,
 ) -> float:
     """Range-GET the first ``probe_bytes`` of ``probe_url`` and return
     measured Mbps.
@@ -312,7 +313,13 @@ async def measure_bandwidth_mbps(
     bandwidth estimate on typical broadband links. Smaller windows
     (e.g. 1 MB) read significantly slower than steady-state; larger
     windows are more accurate but slow down the probe itself.
+
+    ``rate_limiter`` (optional) acquires the shared SEC rate clock
+    before the probe so the GET counts against the per-IP budget
+    shared with sec_edgar / pipelined fetcher (#1042).
     """
+    if rate_limiter is not None:
+        await rate_limiter.acquire()
     headers = {"Range": f"bytes=0-{probe_bytes - 1}"}
     started = time.monotonic()
     response = await client.get(probe_url, headers=headers)
@@ -354,8 +361,19 @@ def _zip_round_trip(path: Path) -> bool:
         return False
 
 
-async def _head_size(client: httpx.AsyncClient, url: str) -> int:
-    """Return Content-Length of ``url`` via HEAD."""
+async def _head_size(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    rate_limiter: Any | None = None,
+) -> int:
+    """Return Content-Length of ``url`` via HEAD.
+
+    ``rate_limiter`` acquires the shared SEC rate clock before the
+    HEAD so it counts against the per-IP budget (#1042).
+    """
+    if rate_limiter is not None:
+        await rate_limiter.acquire()
     response = await client.head(url)
     if response.status_code != 200:
         raise RuntimeError(f"HEAD failed: status={response.status_code} url={url}")
@@ -383,6 +401,7 @@ async def _download_one_with_retry(
     chunk_size: int = 1024 * 1024,
     max_attempts: int = 3,
     backoff_base_s: float = 2.0,
+    rate_limiter: Any | None = None,
 ) -> ArchiveDownloadResult:
     """Wrap ``_download_one`` with retry-on-transient-error.
 
@@ -401,7 +420,7 @@ async def _download_one_with_retry(
     last_error: str | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            result = await _download_one(client, archive, target_dir, chunk_size=chunk_size)
+            result = await _download_one(client, archive, target_dir, chunk_size=chunk_size, rate_limiter=rate_limiter)
         except _TRANSIENT_HTTPX_ERRORS as exc:
             last_error = f"transient error attempt {attempt}: {type(exc).__name__}: {exc}"
             logger.warning("download retry: %s — %s", archive.name, last_error)
@@ -450,8 +469,14 @@ async def _download_one(
     target_dir: Path,
     *,
     chunk_size: int = 1024 * 1024,
+    rate_limiter: Any | None = None,
 ) -> ArchiveDownloadResult:
-    """Download one archive with atomic write + resume-from-partial."""
+    """Download one archive with atomic write + resume-from-partial.
+
+    ``rate_limiter`` acquires the shared SEC rate clock before each
+    HEAD/GET so the bulk downloader counts against the per-IP budget
+    shared with sec_edgar / pipelined fetcher (#1042).
+    """
     final_path = target_dir / archive.name
     partial_path = final_path.with_suffix(final_path.suffix + ".partial")
 
@@ -465,7 +490,7 @@ async def _download_one(
         )
 
     try:
-        expected_total = await _head_size(client, archive.url)
+        expected_total = await _head_size(client, archive.url, rate_limiter=rate_limiter)
     except Exception as exc:  # noqa: BLE001 — operator-visible message
         return ArchiveDownloadResult(
             name=archive.name,
@@ -496,6 +521,8 @@ async def _download_one(
             headers["Range"] = f"bytes={existing}-"
 
     try:
+        if rate_limiter is not None:
+            await rate_limiter.acquire()
         async with client.stream("GET", archive.url, headers=headers) as response:
             if resume_from and response.status_code != 206:
                 # Server ignored Range; restart from zero.
@@ -503,6 +530,8 @@ async def _download_one(
                 resume_from = 0
                 if partial_path.exists():
                     partial_path.unlink()
+                if rate_limiter is not None:
+                    await rate_limiter.acquire()
                 async with client.stream("GET", archive.url) as fresh:
                     if fresh.status_code != 200:
                         return ArchiveDownloadResult(
@@ -708,11 +737,29 @@ async def download_bulk_archives(
             archives=[],
         )
 
+    # Acquire a shared SEC rate clock that coordinates with sec_edgar's
+    # synchronous ResilientClient AND the pipelined fetcher's async
+    # limiter — without this, A3's HEAD/GET requests don't count
+    # against the per-IP 7 req/s budget and a future orchestrator
+    # change running A3 concurrently with another SEC stage could
+    # exceed SEC's 10 req/s limit. (#1042)
+    from app.providers.implementations.sec_edgar import (
+        _PROCESS_RATE_LIMIT_CLOCK,
+        _PROCESS_RATE_LIMIT_LOCK,
+    )
+    from app.services.sec_pipelined_fetcher import _AsyncRateLimiter
+
+    rate_limiter = _AsyncRateLimiter(
+        target_rps=7.0,
+        shared_clock=_PROCESS_RATE_LIMIT_CLOCK,
+        shared_lock=_PROCESS_RATE_LIMIT_LOCK,
+    )
+
     async with _make_client(user_agent) as client:
         # Bandwidth probe against the first archive (submissions.zip).
         probe_url = archives[0].url
         try:
-            measured = await measure_bandwidth_mbps(client, probe_url=probe_url)
+            measured = await measure_bandwidth_mbps(client, probe_url=probe_url, rate_limiter=rate_limiter)
         except Exception as exc:  # noqa: BLE001
             logger.warning("bandwidth probe failed: %s", exc)
             return BulkDownloadResult(
@@ -735,7 +782,7 @@ async def download_bulk_archives(
             async with sem:
                 # Use the retry wrapper so transient network blips
                 # (Codex sweep BLOCKING) don't condemn an archive.
-                return await _download_one_with_retry(client, archive, target_dir)
+                return await _download_one_with_retry(client, archive, target_dir, rate_limiter=rate_limiter)
 
         results = await asyncio.gather(*(_bounded(a) for a in archives))
 
