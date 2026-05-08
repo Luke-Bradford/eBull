@@ -16,6 +16,7 @@ from app.services.sec_bulk_download import (
     BulkArchive,
     BulkDownloadResult,
     _download_one,
+    _preflight_cleanup_stale_partials,
     _zip_round_trip,
     build_bulk_archive_inventory,
     check_disk_space,
@@ -135,6 +136,23 @@ class TestInventory:
 # ---------------------------------------------------------------------------
 # Disk pre-flight
 # ---------------------------------------------------------------------------
+
+
+class TestPreflightCleanup:
+    def test_removes_partial_files_keeps_complete_zips(self, tmp_path: Path) -> None:
+        # Pre-existing complete archive must be preserved (resume path);
+        # stale .partial must be wiped (#1020 disk hygiene).
+        complete = tmp_path / "submissions.zip"
+        complete.write_bytes(b"complete payload")
+        partial = tmp_path / "companyfacts.zip.partial"
+        partial.write_bytes(b"truncated payload")
+        _preflight_cleanup_stale_partials(tmp_path)
+        assert complete.exists()
+        assert not partial.exists()
+
+    def test_no_op_when_dir_missing(self, tmp_path: Path) -> None:
+        # Should not raise on absent directory.
+        _preflight_cleanup_stale_partials(tmp_path / "does-not-exist")
 
 
 class TestDiskPreflight:
