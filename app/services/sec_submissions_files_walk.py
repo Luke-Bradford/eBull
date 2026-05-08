@@ -196,7 +196,10 @@ def sec_submissions_files_walk_job() -> None:
             row = cur.fetchone()
             run_id = int(row[0]) if row else None
         if run_id is not None:
-            assert_c1b_preconditions(conn, bootstrap_run_id=run_id)
+            from app.security.master_key import resolve_data_dir
+
+            bulk_dir = resolve_data_dir() / "sec" / "bulk"
+            assert_c1b_preconditions(conn, bootstrap_run_id=run_id, bulk_dir=bulk_dir)
 
     with psycopg.connect(settings.database_url) as conn:
         result = walk_files_pages(conn=conn)

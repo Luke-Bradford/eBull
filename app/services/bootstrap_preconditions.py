@@ -48,6 +48,18 @@ class BootstrapPreconditionError(RuntimeError):
     """
 
 
+class BootstrapPhaseSkipped(Exception):
+    """Raised by Phase C preconditions when A3 wrote a fallback
+    manifest (slow-connection path bypasses the bulk archives, #1041).
+
+    The orchestrator catches this distinct type and marks the stage
+    ``skipped`` (not ``error``) so the run still finalises ``complete``
+    when the legacy chain handles ingest. Inheriting from ``Exception``
+    rather than ``RuntimeError`` keeps it out of the generic catch-all
+    in third-party code.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Provenance — bootstrap_archive_results row existence
 # ---------------------------------------------------------------------------
@@ -255,10 +267,56 @@ def assert_archives_in_manifest(
     Catches both stale-archive (prior run's leftover) and partial-set
     (some quarterly archives failed to land) failure modes.
     """
-    from app.services.sec_bulk_download import assert_archive_belongs_to_run
+    from app.services.sec_bulk_download import assert_archive_belongs_to_run, read_run_manifest
+
+    # Detect fallback-mode manifest: A3 measured bandwidth below
+    # threshold, wrote a stub manifest with mode=fallback + no
+    # archives, and the legacy chain handles ingest. Phase C should
+    # be marked `skipped` instead of forcing the whole run to
+    # partial_error. (#1041)
+    manifest = read_run_manifest(target_dir)
+    if manifest is not None and manifest.get("mode") == "fallback":
+        if int(manifest.get("bootstrap_run_id", -1)) != bootstrap_run_id:
+            # Stale fallback manifest from a prior run — treat as
+            # missing, the regular provenance check will raise.
+            pass
+        else:
+            raise BootstrapPhaseSkipped(
+                "sec_bulk_download landed in fallback mode (slow connection); "
+                "Phase C bypassed in favour of legacy per-CIK chain."
+            )
 
     for name in expected_names:
         assert_archive_belongs_to_run(target_dir, name, bootstrap_run_id=bootstrap_run_id)
+
+
+def assert_not_fallback_mode(
+    bulk_dir: Any,
+    *,
+    bootstrap_run_id: int,
+) -> None:
+    """Raise BootstrapPhaseSkipped if A3 wrote a fallback manifest.
+
+    Called at the top of every Phase C / C' precondition so the slow-
+    connection bypass cascades cleanly to ``skipped`` for the entire
+    bulk-ingest chain (#1041). Without this, downstream stages that
+    don't load archives directly (e.g. C1.b sec_submissions_files_walk)
+    would raise ``BootstrapPreconditionError`` because their upstream
+    C1.a is `skipped` not `success`, inflating the failed-stage count.
+    """
+    from app.services.sec_bulk_download import read_run_manifest
+
+    manifest = read_run_manifest(bulk_dir)
+    if manifest is None:
+        return
+    if manifest.get("mode") != "fallback":
+        return
+    if int(manifest.get("bootstrap_run_id", -1)) != bootstrap_run_id:
+        return
+    raise BootstrapPhaseSkipped(
+        "sec_bulk_download landed in fallback mode (slow connection); "
+        "bulk-ingest stage bypassed in favour of legacy per-CIK chain."
+    )
 
 
 def assert_c1a_preconditions(
@@ -268,6 +326,8 @@ def assert_c1a_preconditions(
     bulk_dir: Any | None = None,
 ) -> None:
     """C1.a (sec_submissions_ingest): B4 invocation + CIK coverage + manifest provenance."""
+    if bulk_dir is not None:
+        assert_not_fallback_mode(bulk_dir, bootstrap_run_id=bootstrap_run_id)
     assert_archive_result_exists(
         conn,
         bootstrap_run_id=bootstrap_run_id,
@@ -286,6 +346,8 @@ def assert_c2_preconditions(
     bulk_dir: Any | None = None,
 ) -> None:
     """C2 (sec_companyfacts_ingest): B4 invocation + CIK coverage + manifest provenance."""
+    if bulk_dir is not None:
+        assert_not_fallback_mode(bulk_dir, bootstrap_run_id=bootstrap_run_id)
     assert_archive_result_exists(
         conn,
         bootstrap_run_id=bootstrap_run_id,
@@ -305,6 +367,8 @@ def assert_c3_preconditions(
     expected_archive_names: list[str] | None = None,
 ) -> None:
     """C3 (13F): B1 invocation + CUSIP coverage + ALL 4 quarterly archives landed."""
+    if bulk_dir is not None:
+        assert_not_fallback_mode(bulk_dir, bootstrap_run_id=bootstrap_run_id)
     assert_archive_result_exists(
         conn,
         bootstrap_run_id=bootstrap_run_id,
@@ -324,6 +388,8 @@ def assert_c4_preconditions(
     expected_archive_names: list[str] | None = None,
 ) -> None:
     """C4 (insider): B4 invocation + CIK coverage + ALL 8 quarterly archives landed."""
+    if bulk_dir is not None:
+        assert_not_fallback_mode(bulk_dir, bootstrap_run_id=bootstrap_run_id)
     assert_archive_result_exists(
         conn,
         bootstrap_run_id=bootstrap_run_id,
@@ -343,6 +409,8 @@ def assert_c5_preconditions(
     expected_archive_names: list[str] | None = None,
 ) -> None:
     """C5 (N-PORT): B1 invocation + CUSIP coverage + ALL 4 quarterly archives landed."""
+    if bulk_dir is not None:
+        assert_not_fallback_mode(bulk_dir, bootstrap_run_id=bootstrap_run_id)
     assert_archive_result_exists(
         conn,
         bootstrap_run_id=bootstrap_run_id,
@@ -358,6 +426,7 @@ def assert_c1b_preconditions(
     conn: psycopg.Connection[Any],
     *,
     bootstrap_run_id: int,
+    bulk_dir: Any | None = None,
 ) -> None:
     """C1.b: C1.a succeeded in current run AND wrote ≥ 1 row.
 
@@ -366,6 +435,8 @@ def assert_c1b_preconditions(
     C1.b proceed to walk an empty CIK list. Codex review
     BLOCKING for #1020.
     """
+    if bulk_dir is not None:
+        assert_not_fallback_mode(bulk_dir, bootstrap_run_id=bootstrap_run_id)
     assert_stage_succeeded_in_run(
         conn,
         bootstrap_run_id=bootstrap_run_id,
