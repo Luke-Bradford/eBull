@@ -222,12 +222,10 @@ def build_bulk_archive_inventory(
         BulkArchive(
             name="submissions.zip",
             url=f"{SEC_BASE_URL}/Archives/edgar/daily-index/bulkdata/submissions.zip",
-            # 1.2 GB floor; observed 1.54 GB on 2026-05-08.),
         ),
         BulkArchive(
             name="companyfacts.zip",
             url=f"{SEC_BASE_URL}/Archives/edgar/daily-index/xbrl/companyfacts.zip",
-            # 1.0 GB floor; observed 1.38 GB on 2026-05-08.),
         ),
     ]
     for label in last_n_13f_periods(n_quarters_13f, today=today):
@@ -432,12 +430,18 @@ def _classify_content_type(content_type: str) -> Literal["known", "unknown", "ba
     return "unknown"
 
 
-# ZIP magic bytes for non-split single-volume archives — the only
-# kind SEC publishes today. Multi-disk / spanned archives (signature
-# PK\\x07\\x08) are intentionally NOT accepted here because Python's
-# zipfile module rejects multi-disk archives anyway, so accepting
-# their magic at pre-check would mislead the operator. Codex pre-push
-# for #1059.
+# ZIP magic bytes for single-volume archives — the only kind SEC
+# publishes today.
+#   PK\\x03\\x04 = local-file-header signature (start of any
+#                 non-empty single-volume archive).
+#   PK\\x05\\x06 = end-of-central-directory signature (only header
+#                 in an empty archive).
+# Multi-disk / spanned archives (PK\\x06\\x06 / PK\\x06\\x07) are
+# intentionally rejected — Python's ``zipfile`` would reject them
+# downstream anyway, so accepting their magic at pre-check would
+# mislead the operator. ``PK\\x07\\x08`` is the data-descriptor
+# signature inside a stream-zip body, not a file header — also not
+# a valid first-bytes signature.
 _ZIP_MAGIC_BYTES: tuple[bytes, ...] = (b"PK\x03\x04", b"PK\x05\x06")
 
 
