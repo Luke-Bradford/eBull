@@ -240,6 +240,13 @@ Read and apply these before pushing:
 - `.claude/skills/frontend/api-shape-and-types.md`
 - `.claude/skills/frontend/operator-ui-conventions.md`
 
+### Data foundation skills (read before SEC ingest / schema / parser / metric work)
+
+- `.claude/skills/data-sources/sec-edgar.md` — source-of-truth: endpoints, formats, identifiers, gotchas (DD-MMM-YYYY dates, 13F PRN/SH, VALUE-cutover 2023-01-03, 13D/G XML mandate, etc.), rate-limit discipline, reference impls.
+- `.claude/skills/data-sources/edgartools.md` — library reference: coverage matrix, API cheat-sheet, Pydantic validation cliff (#932), version pinning, decision tree for use-vs-roll-our-own.
+- `.claude/skills/ebull/data-engineer.md` — what we own: schema invariants, two-layer ownership model, write-through pattern, settled-decisions cross-reference, "where does X come from?" FAQ.
+- `.claude/skills/ebull/metrics-analyst.md` — every operator-visible metric: source → transform → table → endpoint → chart, with caveats and validation steps.
+
 ## Settled decisions
 
 → Covered in the Working order above (steps 2 and 4).
