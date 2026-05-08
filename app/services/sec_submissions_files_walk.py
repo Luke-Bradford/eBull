@@ -177,7 +177,27 @@ JOB_SEC_SUBMISSIONS_FILES_WALK = "sec_submissions_files_walk"
 
 
 def sec_submissions_files_walk_job() -> None:
-    """Zero-arg job invoker for the runtime registry."""
+    """Zero-arg job invoker for the runtime registry.
+
+    Within an orchestrated bootstrap run, validates C1.a's
+    rows_written > 0 before walking. Records its own per-run
+    archive_result row so D-stages can verify provenance.
+    """
+    from app.services.bootstrap_preconditions import (
+        assert_c1b_preconditions,
+        record_archive_result,
+    )
+
+    # Find current bootstrap_run.
+    run_id: int | None = None
+    with psycopg.connect(settings.database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM bootstrap_runs WHERE status='running' ORDER BY id DESC LIMIT 1")
+            row = cur.fetchone()
+            run_id = int(row[0]) if row else None
+        if run_id is not None:
+            assert_c1b_preconditions(conn, bootstrap_run_id=run_id)
+
     with psycopg.connect(settings.database_url) as conn:
         result = walk_files_pages(conn=conn)
         conn.commit()
@@ -188,3 +208,14 @@ def sec_submissions_files_walk_job() -> None:
         result.filings_upserted,
         result.parse_errors,
     )
+    if run_id is not None:
+        with psycopg.connect(settings.database_url) as conn:
+            record_archive_result(
+                conn,
+                bootstrap_run_id=run_id,
+                stage_key="sec_submissions_files_walk",
+                archive_name="__job__",
+                rows_written=result.filings_upserted,
+                rows_skipped={"parse_errors": result.parse_errors},
+            )
+            conn.commit()

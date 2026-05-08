@@ -209,6 +209,30 @@ def _run_one_stage(
             conn.commit()
         return _StageOutcome(stage_key=stage_key, success=False, error=message)
 
+    # Auto-record the __job__ row in bootstrap_archive_results so
+    # downstream stages can verify provenance via the precondition
+    # checker. C-stages write their own per-archive rows; this catches
+    # the B-stages and any other invoker that doesn't self-record.
+    # Idempotent ON CONFLICT — no-op if the C-stage already wrote.
+    from app.services.bootstrap_preconditions import record_archive_result
+
+    with psycopg.connect(database_url) as conn:
+        try:
+            record_archive_result(
+                conn,
+                bootstrap_run_id=run_id,
+                stage_key=stage_key,
+                archive_name="__job__",
+                rows_written=0,
+            )
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001 — auditing must not fail the stage
+            logger.warning(
+                "bootstrap stage %s: failed to record __job__ result: %s",
+                stage_key,
+                exc,
+            )
+
     with psycopg.connect(database_url) as conn:
         mark_stage_success(conn, run_id=run_id, stage_key=stage_key)
         conn.commit()

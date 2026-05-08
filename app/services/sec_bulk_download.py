@@ -258,23 +258,31 @@ def build_bulk_archive_inventory(
 
 
 def _preflight_cleanup_stale_partials(target_dir: Path) -> None:
-    """Delete any leftover ``*.partial`` files from a previous interrupted run.
+    """Delete leftover ``*.partial`` AND complete ``*.zip`` files
+    from previous runs.
 
-    Disk-hygiene policy (#1020 follow-up): completed ``.zip`` files
-    are preserved so an interrupted bootstrap can resume Phase C
-    without re-downloading. Stale ``.partial`` files however are
-    never useful — the resume path on a complete-download retry
-    issues a fresh HTTP Range request and would overwrite any
-    partial. Deleting them up-front frees disk + removes ambiguity
-    if a previous transfer aborted at an unknown byte count.
+    Originally only cleaned partials — but the run-manifest provenance
+    contract (#1020) requires every archive in the current run's
+    manifest to have been physically downloaded in THIS run. Promoting
+    a prior-run complete ``.zip`` into the current manifest would let
+    stale data pass provenance. Solution: nuke everything, every run
+    re-downloads. Resume-from-partial (within the same run) still
+    works because the per-run download itself can interrupt and
+    leave a ``.partial`` that the next-attempt pre-flight wipes
+    before retrying.
+
+    The run-manifest itself is also wiped so a stale manifest cannot
+    leak into the next run.
     """
     if not target_dir.exists():
         return
     for path in target_dir.iterdir():
-        if path.is_file() and path.name.endswith(".partial"):
+        if not path.is_file():
+            continue
+        if path.name.endswith(".partial") or path.name.endswith(".zip") or path.name == RUN_MANIFEST_NAME:
             try:
                 path.unlink()
-                logger.info("preflight cleanup: removed stale partial %s", path)
+                logger.info("preflight cleanup: removed %s", path)
             except OSError as exc:
                 logger.warning("preflight cleanup: failed to remove %s: %s", path, exc)
 
@@ -504,6 +512,80 @@ async def _make_client(user_agent: str) -> AsyncIterator[httpx.AsyncClient]:
         yield client
 
 
+RUN_MANIFEST_NAME: Final[str] = ".run_manifest.json"
+
+
+def write_run_manifest(
+    target_dir: Path,
+    *,
+    bootstrap_run_id: int,
+    archives: Sequence[ArchiveDownloadResult],
+) -> None:
+    """Persist a per-run archive manifest at ``<bulk>/.run_manifest.json``.
+
+    Phase C preconditions read this to verify each archive landed in
+    the CURRENT bootstrap run, not a previous one. Stale archives left
+    on disk from a prior run will have a different ``bootstrap_run_id``
+    and fail the provenance check (Codex review BLOCKING for #1020).
+    """
+    import json
+
+    manifest = {
+        "bootstrap_run_id": bootstrap_run_id,
+        "archives": [
+            {
+                "name": r.name,
+                "bytes_downloaded": r.bytes_downloaded,
+                "error": r.error,
+            }
+            for r in archives
+            if r.error is None and r.path is not None
+        ],
+    }
+    path = target_dir / RUN_MANIFEST_NAME
+    path.write_text(json.dumps(manifest))
+
+
+def read_run_manifest(target_dir: Path) -> dict | None:
+    """Return the manifest dict at ``<bulk>/.run_manifest.json`` or None."""
+    import json
+
+    path = target_dir / RUN_MANIFEST_NAME
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.debug("read_run_manifest failed: %s", exc)
+        return None
+
+
+def assert_archive_belongs_to_run(
+    target_dir: Path,
+    archive_name: str,
+    *,
+    bootstrap_run_id: int,
+) -> None:
+    """Raise if the archive at ``<bulk>/<archive_name>`` is not in the
+    current run's manifest."""
+    manifest = read_run_manifest(target_dir)
+    if manifest is None:
+        raise RuntimeError(
+            f"PRECONDITION: bulk run manifest missing at {target_dir / RUN_MANIFEST_NAME}; "
+            f"sec_bulk_download did not complete in the current run."
+        )
+    if int(manifest.get("bootstrap_run_id", -1)) != bootstrap_run_id:
+        raise RuntimeError(
+            f"PRECONDITION: bulk manifest run_id={manifest.get('bootstrap_run_id')!r} "
+            f"!= current bootstrap_run_id={bootstrap_run_id}; archive is stale."
+        )
+    archive_names = {a["name"] for a in manifest.get("archives", [])}
+    if archive_name not in archive_names:
+        raise RuntimeError(
+            f"PRECONDITION: archive {archive_name!r} not in current-run manifest; sec_bulk_download did not land it."
+        )
+
+
 async def download_bulk_archives(
     *,
     target_dir: Path,
@@ -591,8 +673,34 @@ async def download_bulk_archives(
 JOB_SEC_BULK_DOWNLOAD: Final[str] = "sec_bulk_download"
 
 
+class BootstrapPartialDownloadError(RuntimeError):
+    """Raised when ``sec_bulk_download`` lands fewer than the full
+    archive inventory.
+
+    The orchestrator catches this and marks the A3 stage ``error``
+    with the failed-archive list, so downstream Phase C stages see
+    the failure (= status `blocked`) rather than no-op'ing on
+    missing files. Closes the silent-success bug observed in the
+    first live attempt: 2 of 14 archives errored mid-transfer,
+    stage marked `success`, C1.a + C2 skipped silently.
+
+    Spec: docs/superpowers/specs/2026-05-08-bootstrap-etl-orchestration.md
+    """
+
+
 def sec_bulk_download_job() -> None:
-    """Zero-arg job invoker for the runtime registry."""
+    """Zero-arg job invoker for the runtime registry.
+
+    Raises ``BootstrapPartialDownloadError`` if the bulk-mode run
+    finished with any archive in error state. Slow-connection
+    fallback (mode=fallback) is NOT treated as an error — it
+    intentionally bypasses Phase C and falls through to the legacy
+    per-CIK chain.
+
+    Writes ``<bulk>/.run_manifest.json`` after a complete success
+    so Phase C preconditions can verify each archive belongs to
+    the current bootstrap run (not a stale prior run's leftover).
+    """
     from app.config import settings
     from app.security.master_key import resolve_data_dir
 
@@ -603,20 +711,58 @@ def sec_bulk_download_job() -> None:
             user_agent=settings.sec_user_agent,
         )
     )
+
+    # Read the current bootstrap_run_id for the manifest stamp.
+    import psycopg
+
+    run_id: int | None = None
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM bootstrap_runs WHERE status='running' ORDER BY id DESC LIMIT 1")
+                row = cur.fetchone()
+                run_id = int(row[0]) if row else None
+    except Exception:  # noqa: BLE001
+        pass
+
     if result.mode == "bulk":
         ok = sum(1 for r in result.archives if r.error is None)
-        failed = sum(1 for r in result.archives if r.error is not None)
+        failed_archives = [r for r in result.archives if r.error is not None]
         logger.info(
             "sec_bulk_download: mode=bulk mbps=%.1f archives_ok=%d archives_failed=%d",
             result.measured_mbps or 0.0,
             ok,
-            failed,
+            len(failed_archives),
         )
+        if failed_archives:
+            # Surface partial-failure as a stage error so downstream
+            # Phase C stages don't silently no-op on missing archives.
+            details = "; ".join(f"{r.name}: {r.error}" for r in failed_archives)
+            raise BootstrapPartialDownloadError(
+                f"sec_bulk_download landed {ok}/{len(result.archives)} archives; failed: {details}"
+            )
+        # All archives landed; write the run manifest so Phase C
+        # preconditions can verify provenance. The manifest is part
+        # of the A3 success contract — without it Phase C cannot
+        # validate archive run-id, so refusing to mark success when
+        # we couldn't determine the run id keeps the contract honest.
+        if run_id is None:
+            raise BootstrapPartialDownloadError(
+                "sec_bulk_download: could not determine current bootstrap_run_id; "
+                "manifest cannot be written. Refuse to mark stage success without "
+                "manifest provenance."
+            )
+        write_run_manifest(target_dir, bootstrap_run_id=run_id, archives=result.archives)
     elif result.mode == "fallback":
         logger.warning(
             "sec_bulk_download: mode=fallback mbps=%s reason=%s",
             result.measured_mbps,
             result.error,
         )
+    elif result.mode == "skipped_disk":
+        # Disk pre-flight refused — surface as error so operator
+        # knows to free space; downstream Phase C will be `blocked`.
+        raise BootstrapPartialDownloadError(f"sec_bulk_download refused: {result.error}")
     else:
         logger.error("sec_bulk_download: mode=%s error=%s", result.mode, result.error)
+        raise BootstrapPartialDownloadError(f"sec_bulk_download unexpected mode={result.mode!r}: {result.error}")
