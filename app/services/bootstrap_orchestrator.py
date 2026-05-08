@@ -81,17 +81,19 @@ def _spec(stage_key: str, stage_order: int, lane: str, job_name: str) -> StageSp
 
 
 # Bulk-archive job names for the #1020 first-install bulk-datasets-first
-# pipeline. Each archive is downloaded by Phase A3 (sec_bulk_download)
-# and ingested locally by the matching DB-bound stage. Stages skip
-# silently if the archive is missing (slow-connection fallback bypass).
-JOB_SEC_BULK_DOWNLOAD = "sec_bulk_download"
-JOB_SEC_SUBMISSIONS_INGEST = "sec_submissions_ingest"
-JOB_SEC_COMPANYFACTS_INGEST = "sec_companyfacts_ingest"
-JOB_SEC_13F_INGEST_FROM_DATASET = "sec_13f_ingest_from_dataset"
-JOB_SEC_INSIDER_INGEST_FROM_DATASET = "sec_insider_ingest_from_dataset"
-JOB_SEC_NPORT_INGEST_FROM_DATASET = "sec_nport_ingest_from_dataset"
-JOB_SEC_SUBMISSIONS_FILES_WALK = "sec_submissions_files_walk"
-
+# pipeline. Re-exported from the canonical owners so duplicate-constant
+# drift is impossible (Codex review WARNING for PR #1035).
+from app.services.sec_bulk_download import JOB_SEC_BULK_DOWNLOAD  # noqa: E402
+from app.services.sec_bulk_orchestrator_jobs import (  # noqa: E402
+    JOB_SEC_13F_INGEST_FROM_DATASET,
+    JOB_SEC_COMPANYFACTS_INGEST,
+    JOB_SEC_INSIDER_INGEST_FROM_DATASET,
+    JOB_SEC_NPORT_INGEST_FROM_DATASET,
+    JOB_SEC_SUBMISSIONS_INGEST,
+)
+from app.services.sec_submissions_files_walk import (  # noqa: E402
+    JOB_SEC_SUBMISSIONS_FILES_WALK,
+)
 
 _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # Phase A (init, sequential)

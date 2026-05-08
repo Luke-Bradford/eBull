@@ -50,31 +50,33 @@ class FilesWalkResult:
     parse_errors: int = 0
 
 
-def _list_cik_secondary_pages(conn: psycopg.Connection[Any]) -> list[tuple[int, str, list[str]]]:
-    """Return ``[(instrument_id, cik_padded, secondary_filenames)]`` for
-    every universe instrument that recorded ``filings.files[]`` entries
-    during the C1.a bulk pass.
+def _list_cik_secondary_pages(
+    conn: psycopg.Connection[Any],
+) -> list[tuple[int, str, str]]:
+    """Return ``[(instrument_id, cik_padded, symbol)]`` for every
+    CIK-mapped universe instrument.
 
-    NOTE: this assumes the C1.a pass persisted secondary-page filenames.
-    For v1 we recompute on the fly: the bulk archive entry is small
-    enough to re-read. The callsite below performs the per-CIK
-    secondary-page expansion via the existing ``SecFilingsProvider``
-    pagination, which is the same code path the per-filing
-    ``sec_first_install_drain`` exercises.
+    Joins ``external_identifiers`` to ``instruments`` so the writer
+    below threads the canonical ticker through to
+    ``_normalise_submissions_block`` + ``_upsert_filing``. Passing
+    ``str(instrument_id)`` as the symbol corrupts every
+    ``filing_events.raw_payload_json`` row — Codex review BLOCKING
+    for PR #1035, parity with the same fix in PR #1030 (C1.a).
     """
-    out: list[tuple[int, str, list[str]]] = []
+    out: list[tuple[int, str, str]] = []
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT instrument_id, identifier_value
-            FROM external_identifiers
-            WHERE provider = 'sec' AND identifier_type = 'cik'
+            SELECT ei.instrument_id, ei.identifier_value, i.symbol
+            FROM external_identifiers ei
+            JOIN instruments i ON i.instrument_id = ei.instrument_id
+            WHERE ei.provider = 'sec' AND ei.identifier_type = 'cik'
             """,
         )
         for row in cur.fetchall():
-            instrument_id, identifier = row
+            instrument_id, identifier, symbol = row
             cik = str(identifier).zfill(10)
-            out.append((int(instrument_id), cik, []))
+            out.append((int(instrument_id), cik, str(symbol or "")))
     return out
 
 
@@ -95,7 +97,7 @@ def walk_files_pages(
     targets = _list_cik_secondary_pages(conn)
 
     with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
-        for instrument_id, cik, _hint in targets:
+        for instrument_id, cik, symbol in targets:
             result.ciks_visited += 1
             try:
                 # Fetch primary submissions.json (rate-limited).
@@ -139,10 +141,15 @@ def walk_files_pages(
 
                 result.secondary_pages_fetched += 1
                 try:
+                    # ``symbol`` is the canonical ticker (e.g. "AAPL"),
+                    # NOT a stringified instrument_id. Threaded from
+                    # the universe lookup at the top of the walk so
+                    # ``filing_events.raw_payload_json`` carries the
+                    # right value. Codex review BLOCKING for PR #1035.
                     filings = _normalise_submissions_block(
                         page,
                         cik_padded=cik,
-                        symbol=str(instrument_id),
+                        symbol=symbol or cik,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("files walk: normalise failed for %s: %s", page_name, exc)

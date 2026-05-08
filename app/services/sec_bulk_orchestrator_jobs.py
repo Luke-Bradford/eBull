@@ -129,26 +129,32 @@ def sec_13f_ingest_from_dataset_job() -> None:
         logger.info("sec_13f_ingest_from_dataset: no form13f_*.zip cached, skipping")
         return
 
-    def _do(conn: psycopg.Connection[tuple]) -> None:
-        total_written = 0
-        total_skipped = 0
-        for archive in archives:
-            result = ingest_13f_dataset_archive(conn=conn, archive_path=archive)
-            total_written += result.rows_written
-            total_skipped += result.rows_skipped_unresolved_cusip
-            logger.info(
-                "sec_13f_ingest_from_dataset: archive=%s rows_written=%d unresolved_cusip=%d",
-                archive.name,
-                result.rows_written,
-                result.rows_skipped_unresolved_cusip,
-            )
+    # Per-archive commit so an exception on archive N does not roll
+    # back archives 1..N-1's writes (Codex review WARNING for PR #1035).
+    total_written = 0
+    total_skipped = 0
+    for archive in archives:
+        with psycopg.connect(settings.database_url) as conn:
+            try:
+                result = ingest_13f_dataset_archive(conn=conn, archive_path=archive)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                logger.exception("sec_13f_ingest_from_dataset: archive=%s failed", archive.name)
+                continue
+        total_written += result.rows_written
+        total_skipped += result.rows_skipped_unresolved_cusip
         logger.info(
-            "sec_13f_ingest_from_dataset: total_rows_written=%d total_unresolved=%d",
-            total_written,
-            total_skipped,
+            "sec_13f_ingest_from_dataset: archive=%s rows_written=%d unresolved_cusip=%d",
+            archive.name,
+            result.rows_written,
+            result.rows_skipped_unresolved_cusip,
         )
-
-    _run_with_conn(_do)
+    logger.info(
+        "sec_13f_ingest_from_dataset: total_rows_written=%d total_unresolved=%d",
+        total_written,
+        total_skipped,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -162,23 +168,28 @@ def sec_insider_ingest_from_dataset_job() -> None:
         logger.info("sec_insider_ingest_from_dataset: no insider_*.zip cached, skipping")
         return
 
-    def _do(conn: psycopg.Connection[tuple]) -> None:
-        total_written = 0
-        for archive in archives:
-            result = ingest_insider_dataset_archive(conn=conn, archive_path=archive)
-            total_written += result.rows_written
-            logger.info(
-                "sec_insider_ingest_from_dataset: archive=%s rows_written=%d unresolved_cik=%d",
-                archive.name,
-                result.rows_written,
-                result.rows_skipped_unresolved_cik,
-            )
+    # Per-archive commit per Codex review WARNING for PR #1035.
+    total_written = 0
+    for archive in archives:
+        with psycopg.connect(settings.database_url) as conn:
+            try:
+                result = ingest_insider_dataset_archive(conn=conn, archive_path=archive)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                logger.exception("sec_insider_ingest_from_dataset: archive=%s failed", archive.name)
+                continue
+        total_written += result.rows_written
         logger.info(
-            "sec_insider_ingest_from_dataset: total_rows_written=%d",
-            total_written,
+            "sec_insider_ingest_from_dataset: archive=%s rows_written=%d unresolved_cik=%d",
+            archive.name,
+            result.rows_written,
+            result.rows_skipped_unresolved_cik,
         )
-
-    _run_with_conn(_do)
+    logger.info(
+        "sec_insider_ingest_from_dataset: total_rows_written=%d",
+        total_written,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -192,21 +203,26 @@ def sec_nport_ingest_from_dataset_job() -> None:
         logger.info("sec_nport_ingest_from_dataset: no nport_*.zip cached, skipping")
         return
 
-    def _do(conn: psycopg.Connection[tuple]) -> None:
-        total_written = 0
-        for archive in archives:
-            result = ingest_nport_dataset_archive(conn=conn, archive_path=archive)
-            total_written += result.rows_written
-            logger.info(
-                "sec_nport_ingest_from_dataset: archive=%s rows_written=%d unresolved_cusip=%d non_equity=%d",
-                archive.name,
-                result.rows_written,
-                result.rows_skipped_unresolved_cusip,
-                result.rows_skipped_non_equity,
-            )
+    # Per-archive commit per Codex review WARNING for PR #1035.
+    total_written = 0
+    for archive in archives:
+        with psycopg.connect(settings.database_url) as conn:
+            try:
+                result = ingest_nport_dataset_archive(conn=conn, archive_path=archive)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                logger.exception("sec_nport_ingest_from_dataset: archive=%s failed", archive.name)
+                continue
+        total_written += result.rows_written
         logger.info(
-            "sec_nport_ingest_from_dataset: total_rows_written=%d",
-            total_written,
+            "sec_nport_ingest_from_dataset: archive=%s rows_written=%d unresolved_cusip=%d non_equity=%d",
+            archive.name,
+            result.rows_written,
+            result.rows_skipped_unresolved_cusip,
+            result.rows_skipped_non_equity,
         )
-
-    _run_with_conn(_do)
+    logger.info(
+        "sec_nport_ingest_from_dataset: total_rows_written=%d",
+        total_written,
+    )
