@@ -222,7 +222,11 @@ _INVOKERS: Final[dict[str, Callable[[], None]]] = {
 # transitively (the orchestrator imports from this module via
 # ``from app.jobs.runtime import _INVOKERS`` at call time).
 from app.services import bootstrap_orchestrator as _bootstrap_orchestrator  # noqa: E402
+from app.services import sec_bulk_download as _sec_bulk_download  # noqa: E402
 
+# #1021 — bulk-archive download stage A3 of the bulk-datasets-first
+# bootstrap (#1020). Registered so the orchestrator can dispatch it.
+_INVOKERS[_sec_bulk_download.JOB_SEC_BULK_DOWNLOAD] = _sec_bulk_download.sec_bulk_download_job
 _INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_ORCHESTRATOR] = _bootstrap_orchestrator.run_bootstrap_orchestrator
 _INVOKERS[_bootstrap_orchestrator.JOB_BOOTSTRAP_FILINGS_HISTORY_SEED] = (
     _bootstrap_orchestrator.bootstrap_filings_history_seed
