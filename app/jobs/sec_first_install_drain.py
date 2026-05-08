@@ -89,6 +89,7 @@ def seed_manifest_from_filing_events(
     upserted = 0
     skipped_unmapped_form = 0
     skipped_no_cik = 0
+    skipped_non_issuer_source = 0
     with conn.cursor() as cur:
         # LATERAL JOIN with LIMIT 1 picks the highest-priority CIK
         # mapping per instrument: ORDER BY is_primary DESC selects the
@@ -130,6 +131,17 @@ def seed_manifest_from_filing_events(
         if source is None:
             skipped_unmapped_form += 1
             continue
+        # subject_type='issuer' is hard-coded below — must therefore
+        # exclude non-issuer-scoped sources. 13F-HR / N-PORT / N-CSR
+        # are filer-scoped (subject_id = filer CIK, instrument_id NULL)
+        # and need a different code path. Filing_events does carry
+        # 13F-HR / NPORT-P rows for instruments that ALSO have those
+        # filings on file (e.g. fund families), so we must filter
+        # them out at the seed boundary. PR #1051 review WARNING for
+        # #1044.
+        if source in ("sec_13f_hr", "sec_n_port", "sec_n_csr"):
+            skipped_non_issuer_source += 1
+            continue
         # Accession lives in fe.provider_filing_id — that's the
         # authoritative column. raw_payload_json mirrors it but can
         # legitimately drift on legacy rows. Codex pre-push MED.
@@ -165,12 +177,14 @@ def seed_manifest_from_filing_events(
                 accession,
                 exc,
             )
-    if skipped_unmapped_form or skipped_no_cik:
+    if skipped_unmapped_form or skipped_no_cik or skipped_non_issuer_source:
         logger.info(
-            "seed_manifest_from_filing_events: upserted=%d skipped_no_cik=%d skipped_unmapped_form=%d",
+            "seed_manifest_from_filing_events: upserted=%d skipped_no_cik=%d "
+            "skipped_unmapped_form=%d skipped_non_issuer_source=%d",
             upserted,
             skipped_no_cik,
             skipped_unmapped_form,
+            skipped_non_issuer_source,
         )
     return upserted
 

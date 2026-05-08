@@ -223,6 +223,54 @@ class TestSeedFromFilingEvents:
             assert row.instrument_id == 1701
             assert row.cik == "0000320193"
 
+    def test_skips_non_issuer_sources(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # PR #1051 review WARNING: 13F-HR / N-PORT / N-CSR rows in
+        # filing_events must NOT be seeded as subject_type='issuer'
+        # — they're filer-scoped manifest rows (instrument_id=NULL,
+        # subject_id=filer CIK). The seed must skip them so the
+        # legacy/per-CIK path can correctly classify them.
+        _seed_aapl(ebull_test_conn)
+        ebull_test_conn.execute(
+            """
+            INSERT INTO external_identifiers
+                (instrument_id, provider, identifier_type, identifier_value, is_primary)
+            VALUES (1701, 'sec', 'cik', '0000320193', TRUE)
+            ON CONFLICT DO NOTHING
+            """
+        )
+        # Insert one issuer-scoped (10-K) and one filer-scoped (13F-HR).
+        ebull_test_conn.execute(
+            """
+            INSERT INTO filing_events (
+                instrument_id, filing_date, filing_type, provider,
+                provider_filing_id, source_url, primary_document_url, raw_payload_json
+            )
+            VALUES
+                (1701, %s, '10-K', 'sec', '0000320193-26-000010',
+                 'https://www.sec.gov/...', NULL, %s::jsonb),
+                (1701, %s, '13F-HR', 'sec', '0000320193-26-000011',
+                 'https://www.sec.gov/...', NULL, %s::jsonb)
+            """,
+            (
+                date(2026, 1, 15),
+                json.dumps({"provider_filing_id": "0000320193-26-000010"}),
+                date(2026, 2, 14),
+                json.dumps({"provider_filing_id": "0000320193-26-000011"}),
+            ),
+        )
+        ebull_test_conn.commit()
+
+        n = seed_manifest_from_filing_events(ebull_test_conn)
+        ebull_test_conn.commit()
+
+        # Only the 10-K should land — 13F-HR is filer-scoped.
+        assert n == 1
+        assert get_manifest_row(ebull_test_conn, "0000320193-26-000010") is not None
+        assert get_manifest_row(ebull_test_conn, "0000320193-26-000011") is None
+
     def test_run_first_install_drain_uses_filing_events_fast_path(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
