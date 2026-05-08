@@ -485,10 +485,25 @@ def _phase_batched_dispatch(
                 )
             break
 
-        # Group ready by lane; dispatch each lane's batch concurrently.
+        # Group ready by lane. Per-lane, dispatch only up to
+        # ``max_concurrency`` stages in this iteration — the rest stay
+        # pending and roll into the next iteration. This prevents a
+        # long-running stage in one lane (e.g. sec_first_install_drain
+        # in sec_rate) from blocking blocked-status propagation in
+        # other lanes (e.g. db lane's C-stages waiting on a failed
+        # sec_bulk_download). Without this cap, ``wait()`` blocks on
+        # the entire heterogeneous batch, leaving the operator panel
+        # showing C-stages as ``pending`` long after their upstream
+        # has failed.
         by_lane_batch: dict[str, list[_RunnableStage]] = {}
         for stage in ready:
             by_lane_batch.setdefault(stage.lane, []).append(stage)
+
+        # Cap each lane to its max_concurrency. Stages over the cap
+        # stay in `pending` and re-enter the next outer iteration.
+        for lane, stages in list(by_lane_batch.items()):
+            cap = _LANE_MAX_CONCURRENCY.get(lane, 1)
+            by_lane_batch[lane] = stages[:cap]
 
         logger.info(
             "bootstrap dispatcher: ready batch — %s",
@@ -497,7 +512,7 @@ def _phase_batched_dispatch(
 
         # One ThreadPoolExecutor per lane, sized to lane's concurrency.
         # Lanes run concurrently with each other; within a lane,
-        # max_concurrency bounds the in-flight count.
+        # the cap above ensures we submit no more than max_concurrency.
         lane_executors: list[ThreadPoolExecutor] = []
         all_futures = []
         try:
