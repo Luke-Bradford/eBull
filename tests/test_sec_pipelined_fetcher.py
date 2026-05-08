@@ -250,3 +250,87 @@ class TestPipelinedSecFetcher:
         # If the budget were NOT shared, two fetchers at 3 req each
         # would interleave at 10 req/s combined and finish in ~0.4 s.
         assert elapsed >= 0.95
+
+
+class TestPrefetchDocumentTexts:
+    def test_returns_empty_dict_for_empty_input(self) -> None:
+        from app.services.sec_pipelined_fetcher import prefetch_document_texts
+
+        result = prefetch_document_texts([], user_agent="test/1.0")
+        assert result == {}
+
+    def _patch_transport(self, monkeypatch: pytest.MonkeyPatch, handler) -> None:  # type: ignore[no-untyped-def]
+        transport = httpx.MockTransport(handler)
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            kwargs["transport"] = transport
+            original_init(self, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
+
+    def test_404_cached_as_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Permanent 404 maps to cached None (matches sync
+        # fetch_document_text's `return None` path).
+        from app.services.sec_pipelined_fetcher import prefetch_document_texts
+
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(404))
+        result = prefetch_document_texts(["https://www.sec.gov/missing.htm"], user_agent="test/1.0")
+        assert result == {"https://www.sec.gov/missing.htm": None}
+
+    def test_5xx_omitted_from_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 5xx is transient — must be OMITTED so cache-miss falls
+        # through to the underlying sync provider's retry path.
+        from app.services.sec_pipelined_fetcher import prefetch_document_texts
+
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(503))
+        result = prefetch_document_texts(["https://www.sec.gov/transient.htm"], user_agent="test/1.0")
+        assert "https://www.sec.gov/transient.htm" not in result
+
+    def test_200_cached_as_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import prefetch_document_texts
+
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(200, text="<html>ok</html>"))
+        result = prefetch_document_texts(["https://www.sec.gov/ok.htm"], user_agent="test/1.0")
+        assert result == {"https://www.sec.gov/ok.htm": "<html>ok</html>"}
+
+
+class TestCachedDocFetcher:
+    def test_cache_hit_with_string_returns_cached(self) -> None:
+        from app.services.sec_pipelined_fetcher import _CachedDocFetcher
+
+        class _Stub:
+            def fetch_document_text(self, url: str) -> str | None:  # noqa: ARG002
+                raise AssertionError("should not be called on cache hit")
+
+        wrapped = _CachedDocFetcher(_Stub(), {"u": "body"})
+        assert wrapped.fetch_document_text("u") == "body"
+        assert wrapped.cache_hits == 1
+        assert wrapped.cache_misses == 0
+
+    def test_cache_hit_with_none_returns_none_no_fallback(self) -> None:
+        # Cached None = permanent 404/410. Don't fall back to underlying.
+        from app.services.sec_pipelined_fetcher import _CachedDocFetcher
+
+        calls: list[str] = []
+
+        class _Stub:
+            def fetch_document_text(self, url: str) -> str | None:
+                calls.append(url)
+                return "fallback"
+
+        wrapped = _CachedDocFetcher(_Stub(), {"u": None})
+        assert wrapped.fetch_document_text("u") is None
+        assert calls == []  # no fallback for cached permanent failure
+
+    def test_cache_miss_falls_back_to_underlying(self) -> None:
+        from app.services.sec_pipelined_fetcher import _CachedDocFetcher
+
+        class _Stub:
+            def fetch_document_text(self, url: str) -> str | None:  # noqa: ARG002
+                return "from_underlying"
+
+        wrapped = _CachedDocFetcher(_Stub(), {})
+        assert wrapped.fetch_document_text("u") == "from_underlying"
+        assert wrapped.cache_misses == 1
+        assert wrapped.cache_hits == 0
