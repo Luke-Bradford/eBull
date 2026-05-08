@@ -257,6 +257,28 @@ def build_bulk_archive_inventory(
 # ---------------------------------------------------------------------------
 
 
+def _preflight_cleanup_stale_partials(target_dir: Path) -> None:
+    """Delete any leftover ``*.partial`` files from a previous interrupted run.
+
+    Disk-hygiene policy (#1020 follow-up): completed ``.zip`` files
+    are preserved so an interrupted bootstrap can resume Phase C
+    without re-downloading. Stale ``.partial`` files however are
+    never useful — the resume path on a complete-download retry
+    issues a fresh HTTP Range request and would overwrite any
+    partial. Deleting them up-front frees disk + removes ambiguity
+    if a previous transfer aborted at an unknown byte count.
+    """
+    if not target_dir.exists():
+        return
+    for path in target_dir.iterdir():
+        if path.is_file() and path.name.endswith(".partial"):
+            try:
+                path.unlink()
+                logger.info("preflight cleanup: removed stale partial %s", path)
+            except OSError as exc:
+                logger.warning("preflight cleanup: failed to remove %s: %s", path, exc)
+
+
 def check_disk_space(target_dir: Path, *, min_free_bytes: int = DEFAULT_MIN_FREE_BYTES) -> tuple[bool, int]:
     """Return ``(has_enough, free_bytes)`` for ``target_dir``.
 
@@ -504,6 +526,7 @@ async def download_bulk_archives(
     recorded on the result and surfaced in the admin UI.
     """
     target_dir.mkdir(parents=True, exist_ok=True)
+    _preflight_cleanup_stale_partials(target_dir)
     has_space, free_bytes = check_disk_space(target_dir, min_free_bytes=min_free_bytes)
     if not has_space:
         return BulkDownloadResult(

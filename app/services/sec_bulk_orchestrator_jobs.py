@@ -71,6 +71,27 @@ def _run_with_conn(fn: Callable[[psycopg.Connection[tuple]], object]) -> None:
         conn.commit()
 
 
+def _delete_archive_after_success(archive: Path) -> None:
+    """Delete a successfully-ingested archive from the bulk cache.
+
+    Disk-hygiene policy (#1020 follow-up): once an archive's contents
+    are durably committed to Postgres, the multi-GB ZIP on disk is
+    dead weight — leaving it around bloats ``<data_dir>/sec/bulk/``
+    by ~5–6 GB per bootstrap and stales every subsequent download
+    (the next run's pre-flight then has to re-download anyway, but
+    cleanly via ``download_bulk_archives``).
+
+    Failures elsewhere in the pipeline are unaffected — only the
+    successful-ingest path deletes. ``OSError`` is logged and
+    swallowed so a permission glitch does not unwind the commit.
+    """
+    try:
+        archive.unlink(missing_ok=True)
+        logger.info("disk hygiene: deleted ingested archive %s", archive)
+    except OSError as exc:
+        logger.warning("disk hygiene: failed to delete %s: %s", archive, exc)
+
+
 # ---------------------------------------------------------------------------
 # C1.a — submissions.zip ingester
 # ---------------------------------------------------------------------------
@@ -93,6 +114,7 @@ def sec_submissions_ingest_job() -> None:
         )
 
     _run_with_conn(_do)
+    _delete_archive_after_success(archive)
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +138,7 @@ def sec_companyfacts_ingest_job() -> None:
         )
 
     _run_with_conn(_do)
+    _delete_archive_after_success(archive)
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +165,7 @@ def sec_13f_ingest_from_dataset_job() -> None:
                 conn.rollback()
                 logger.exception("sec_13f_ingest_from_dataset: archive=%s failed", archive.name)
                 continue
+        _delete_archive_after_success(archive)
         total_written += result.rows_written
         total_skipped += result.rows_skipped_unresolved_cusip
         logger.info(
@@ -179,6 +203,7 @@ def sec_insider_ingest_from_dataset_job() -> None:
                 conn.rollback()
                 logger.exception("sec_insider_ingest_from_dataset: archive=%s failed", archive.name)
                 continue
+        _delete_archive_after_success(archive)
         total_written += result.rows_written
         logger.info(
             "sec_insider_ingest_from_dataset: archive=%s rows_written=%d unresolved_cik=%d",
@@ -214,6 +239,7 @@ def sec_nport_ingest_from_dataset_job() -> None:
                 conn.rollback()
                 logger.exception("sec_nport_ingest_from_dataset: archive=%s failed", archive.name)
                 continue
+        _delete_archive_after_success(archive)
         total_written += result.rows_written
         logger.info(
             "sec_nport_ingest_from_dataset: archive=%s rows_written=%d unresolved_cusip=%d non_equity=%d",
