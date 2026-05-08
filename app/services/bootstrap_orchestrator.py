@@ -80,33 +80,66 @@ def _spec(stage_key: str, stage_order: int, lane: str, job_name: str) -> StageSp
     return StageSpec(stage_key=stage_key, stage_order=stage_order, lane=lane, job_name=job_name)  # type: ignore[arg-type]
 
 
+# Bulk-archive job names for the #1020 first-install bulk-datasets-first
+# pipeline. Each archive is downloaded by Phase A3 (sec_bulk_download)
+# and ingested locally by the matching DB-bound stage. Stages skip
+# silently if the archive is missing (slow-connection fallback bypass).
+JOB_SEC_BULK_DOWNLOAD = "sec_bulk_download"
+JOB_SEC_SUBMISSIONS_INGEST = "sec_submissions_ingest"
+JOB_SEC_COMPANYFACTS_INGEST = "sec_companyfacts_ingest"
+JOB_SEC_13F_INGEST_FROM_DATASET = "sec_13f_ingest_from_dataset"
+JOB_SEC_INSIDER_INGEST_FROM_DATASET = "sec_insider_ingest_from_dataset"
+JOB_SEC_NPORT_INGEST_FROM_DATASET = "sec_nport_ingest_from_dataset"
+JOB_SEC_SUBMISSIONS_FILES_WALK = "sec_submissions_files_walk"
+
+
 _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # Phase A (init, sequential)
     _spec("universe_sync", 1, "init", "nightly_universe_sync"),
     # Phase B — eToro lane
     _spec("candle_refresh", 2, "etoro", "daily_candle_refresh"),
-    # Phase B — SEC lane (15 stages, sequential)
+    # Phase B — SEC lane (sequential, shared rate budget).
     _spec("cusip_universe_backfill", 3, "sec", "cusip_universe_backfill"),
     _spec("sec_13f_filer_directory_sync", 4, "sec", "sec_13f_filer_directory_sync"),
     _spec("sec_nport_filer_directory_sync", 5, "sec", "sec_nport_filer_directory_sync"),
     _spec("cik_refresh", 6, "sec", JOB_DAILY_CIK_REFRESH),
-    _spec("filings_history_seed", 7, "sec", JOB_BOOTSTRAP_FILINGS_HISTORY_SEED),
-    _spec("sec_first_install_drain", 8, "sec", JOB_SEC_FIRST_INSTALL_DRAIN),
-    _spec("sec_def14a_bootstrap", 9, "sec", "sec_def14a_bootstrap"),
-    _spec("sec_business_summary_bootstrap", 10, "sec", "sec_business_summary_bootstrap"),
-    _spec("sec_insider_transactions_backfill", 11, "sec", "sec_insider_transactions_backfill"),
-    _spec("sec_form3_ingest", 12, "sec", "sec_form3_ingest"),
-    _spec("sec_8k_events_ingest", 13, "sec", "sec_8k_events_ingest"),
+    # Phase A3 — bulk archive download (#1020). Ships the heavy data
+    # in <10 min on a fast connection; the C-stages below ingest
+    # locally with no rate-budget cost.
+    _spec("sec_bulk_download", 7, "sec", JOB_SEC_BULK_DOWNLOAD),
+    # Phase C — DB-bound bulk ingesters (#1020). Each skips silently
+    # if its archive is missing (slow-connection bypass).
+    _spec("sec_submissions_ingest", 8, "sec", JOB_SEC_SUBMISSIONS_INGEST),
+    _spec("sec_companyfacts_ingest", 9, "sec", JOB_SEC_COMPANYFACTS_INGEST),
+    _spec("sec_13f_ingest_from_dataset", 10, "sec", JOB_SEC_13F_INGEST_FROM_DATASET),
+    _spec("sec_insider_ingest_from_dataset", 11, "sec", JOB_SEC_INSIDER_INGEST_FROM_DATASET),
+    _spec("sec_nport_ingest_from_dataset", 12, "sec", JOB_SEC_NPORT_INGEST_FROM_DATASET),
+    # Phase C' — per-CIK secondary-pages walk for deep-history parity
+    # with the existing per-CIK drain (#1020).
+    _spec("sec_submissions_files_walk", 13, "sec", JOB_SEC_SUBMISSIONS_FILES_WALK),
+    # Legacy per-filing stages — kept as a fallback path. After the
+    # bulk pass these are largely idempotent DB no-ops on populated
+    # observation tables; on the slow-connection bypass path they are
+    # the primary write path.
+    _spec("filings_history_seed", 14, "sec", JOB_BOOTSTRAP_FILINGS_HISTORY_SEED),
+    _spec("sec_first_install_drain", 15, "sec", JOB_SEC_FIRST_INSTALL_DRAIN),
+    _spec("sec_def14a_bootstrap", 16, "sec", "sec_def14a_bootstrap"),
+    _spec("sec_business_summary_bootstrap", 17, "sec", "sec_business_summary_bootstrap"),
+    _spec("sec_insider_transactions_backfill", 18, "sec", "sec_insider_transactions_backfill"),
+    _spec("sec_form3_ingest", 19, "sec", "sec_form3_ingest"),
+    _spec("sec_8k_events_ingest", 20, "sec", "sec_8k_events_ingest"),
     # #1008 — first-install bootstrap uses a recency-bounded sweep
     # (last 4 quarters, ~12 months) instead of the full historical
     # sweep. Walking decades of pre-2013 filings yields zero rows
     # (no machine-readable primary_doc/infotable) and turns the
     # bootstrap into an 11+ hour wait. Standalone weekly cron
     # keeps the full historical sweep via JOB_SEC_13F_QUARTERLY_SWEEP.
-    _spec("sec_13f_recent_sweep", 14, "sec", JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP),
-    _spec("sec_n_port_ingest", 15, "sec", "sec_n_port_ingest"),
-    _spec("ownership_observations_backfill", 16, "sec", "ownership_observations_backfill"),
-    _spec("fundamentals_sync", 17, "sec", "fundamentals_sync"),
+    # On the bulk path (#1020) C3 has already populated
+    # ownership_institutions_observations; this stage tops up.
+    _spec("sec_13f_recent_sweep", 21, "sec", JOB_BOOTSTRAP_SEC_13F_RECENT_SWEEP),
+    _spec("sec_n_port_ingest", 22, "sec", "sec_n_port_ingest"),
+    _spec("ownership_observations_backfill", 23, "sec", "ownership_observations_backfill"),
+    _spec("fundamentals_sync", 24, "sec", "fundamentals_sync"),
 )
 
 
@@ -583,7 +616,8 @@ __all__ = [
 # Stage count assertion — pin so a future refactor that adds /
 # removes a spec deliberately surfaces in code review and doesn't
 # silently break the tests + frontend that hardcode "17 stages".
-assert len(_BOOTSTRAP_STAGE_SPECS) == 17, (
-    f"_BOOTSTRAP_STAGE_SPECS expected 17 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
-    "update the spec, frontend, and stage_count tests in lockstep."
+assert len(_BOOTSTRAP_STAGE_SPECS) == 24, (
+    f"_BOOTSTRAP_STAGE_SPECS expected 24 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
+    "update the spec, frontend, and stage_count tests in lockstep. "
+    "#1027 added 7 bulk-archive stages (sec_bulk_download + C1.a/C2/C3/C4/C5 ingesters + C1.b walker)."
 )
