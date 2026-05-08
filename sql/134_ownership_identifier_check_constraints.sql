@@ -116,7 +116,7 @@ ALTER TABLE ownership_funds_current
     CHECK (source_accession IS NULL OR source_accession ~ '^[0-9]{10}-[0-9]{2}-[0-9]{6}$');
 
 -- ---------------------------------------------------------------------
--- ESOP (sql/127) — accession-only (filer linked via fund_series_id chain)
+-- ESOP (sql/127) — accession + plan_trustee_cik (nullable)
 -- ---------------------------------------------------------------------
 
 ALTER TABLE ownership_esop_observations
