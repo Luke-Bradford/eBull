@@ -356,15 +356,20 @@ def sec_13f_ingest_from_dataset_job() -> None:
         refresh_failures: list[str] = []
         with psycopg.connect(settings.database_url) as conn:
             for instrument_id in sorted(touched_ids):
+                # Per-iteration savepoint — refresh_institutions_current
+                # owns its own ``with conn.transaction()`` (sql/.py:404),
+                # so this is defence-in-depth against a future refactor
+                # of the helper that drops its internal txn wrap. PR
+                # review BLOCKING for #1047.
                 try:
-                    refresh_institutions_current(conn, instrument_id=instrument_id)
+                    with conn.transaction():
+                        refresh_institutions_current(conn, instrument_id=instrument_id)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
                         "sec_13f_ingest_from_dataset: refresh_institutions_current failed for instrument=%d",
                         instrument_id,
                     )
                     refresh_failures.append(f"instrument={instrument_id}: {exc}")
-            conn.commit()
         if refresh_failures:
             raise RuntimeError(
                 f"sec_13f_ingest_from_dataset: {len(refresh_failures)}/{len(touched_ids)} "
@@ -476,14 +481,14 @@ def sec_insider_ingest_from_dataset_job() -> None:
         with psycopg.connect(settings.database_url) as conn:
             for instrument_id in sorted(touched_ids):
                 try:
-                    refresh_insiders_current(conn, instrument_id=instrument_id)
+                    with conn.transaction():
+                        refresh_insiders_current(conn, instrument_id=instrument_id)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
                         "sec_insider_ingest_from_dataset: refresh_insiders_current failed for instrument=%d",
                         instrument_id,
                     )
                     refresh_failures.append(f"instrument={instrument_id}: {exc}")
-            conn.commit()
         if refresh_failures:
             raise RuntimeError(
                 f"sec_insider_ingest_from_dataset: {len(refresh_failures)}/{len(touched_ids)} "
@@ -598,14 +603,14 @@ def sec_nport_ingest_from_dataset_job() -> None:
         with psycopg.connect(settings.database_url) as conn:
             for instrument_id in sorted(touched_ids):
                 try:
-                    refresh_funds_current(conn, instrument_id=instrument_id)
+                    with conn.transaction():
+                        refresh_funds_current(conn, instrument_id=instrument_id)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
                         "sec_nport_ingest_from_dataset: refresh_funds_current failed for instrument=%d",
                         instrument_id,
                     )
                     refresh_failures.append(f"instrument={instrument_id}: {exc}")
-            conn.commit()
         if refresh_failures:
             raise RuntimeError(
                 f"sec_nport_ingest_from_dataset: {len(refresh_failures)}/{len(touched_ids)} "

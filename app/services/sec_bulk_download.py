@@ -417,7 +417,14 @@ async def _download_one_with_retry(
             err = result.error
             if any(
                 tok in err
-                for tok in ("ConnectError", "ReadTimeout", "WriteTimeout", "PoolTimeout", "RemoteProtocolError")
+                for tok in (
+                    "ConnectError",
+                    "ReadTimeout",
+                    "WriteTimeout",
+                    "PoolTimeout",
+                    "RemoteProtocolError",
+                    "NetworkError",
+                )
             ):
                 last_error = f"transient (in result) attempt {attempt}: {err}"
                 logger.warning("download retry: %s — %s", archive.name, last_error)
