@@ -64,17 +64,24 @@ DEFAULT_TIMEOUT_S: Final[float] = 600.0  # multi-GB transfers can take many minu
 
 @dataclass(frozen=True)
 class BulkArchive:
-    """One archive to download.
+    """One archive to download. ``url`` is fully qualified.
 
-    ``url`` is fully qualified. ``expected_min_bytes`` is the floor
-    used to reject a corrupted / truncated transfer — set ~20% below
-    the observed Content-Length so SEC's normal week-on-week archive
-    growth does not trip it.
+    Content validation is performed at three points downstream — none
+    of which depend on a hard-coded size floor:
+
+      1. ``Content-Type`` HEAD check (must be application/zip-ish);
+         catches SEC redirects to HTML error pages without any
+         download.
+      2. HEAD-Content-Length-vs-streamed-bytes match; catches
+         network truncation mid-stream. This is the streaming
+         protocol's correctness check, NOT content validation.
+      3. Magic-byte check (PK\\x03\\x04 prefix) + ``zipfile.ZipFile``
+         round-trip after the bytes land; catches non-ZIP content
+         and corruption that survived 1+2.
     """
 
     name: str
     url: str
-    expected_min_bytes: int
 
 
 @dataclass
@@ -215,14 +222,12 @@ def build_bulk_archive_inventory(
         BulkArchive(
             name="submissions.zip",
             url=f"{SEC_BASE_URL}/Archives/edgar/daily-index/bulkdata/submissions.zip",
-            # 1.2 GB floor; observed 1.54 GB on 2026-05-08.
-            expected_min_bytes=int(1.2 * 1024**3),
+            # 1.2 GB floor; observed 1.54 GB on 2026-05-08.),
         ),
         BulkArchive(
             name="companyfacts.zip",
             url=f"{SEC_BASE_URL}/Archives/edgar/daily-index/xbrl/companyfacts.zip",
-            # 1.0 GB floor; observed 1.38 GB on 2026-05-08.
-            expected_min_bytes=int(1.0 * 1024**3),
+            # 1.0 GB floor; observed 1.38 GB on 2026-05-08.),
         ),
     ]
     for label in last_n_13f_periods(n_quarters_13f, today=today):
@@ -230,7 +235,6 @@ def build_bulk_archive_inventory(
             BulkArchive(
                 name=f"form13f_{label}.zip",
                 url=f"{SEC_BASE_URL}/files/structureddata/data/form-13f-data-sets/{label}_form13f.zip",
-                expected_min_bytes=50 * 1024**2,
             )
         )
     for q in last_n_quarters(n_quarters_insider, today=today):
@@ -238,7 +242,6 @@ def build_bulk_archive_inventory(
             BulkArchive(
                 name=f"insider_{q}.zip",
                 url=f"{SEC_BASE_URL}/files/structureddata/data/insider-transactions-data-sets/{q}_form345.zip",
-                expected_min_bytes=8 * 1024**2,
             )
         )
     for q in last_n_quarters(n_quarters_nport, today=today):
@@ -246,7 +249,6 @@ def build_bulk_archive_inventory(
             BulkArchive(
                 name=f"nport_{q}.zip",
                 url=f"{SEC_BASE_URL}/files/dera/data/form-n-port-data-sets/{q}_nport.zip",
-                expected_min_bytes=300 * 1024**2,
             )
         )
     return archives
@@ -361,16 +363,23 @@ def _zip_round_trip(path: Path) -> bool:
         return False
 
 
-async def _head_size(
+async def _head_size_and_type(
     client: httpx.AsyncClient,
     url: str,
     *,
     rate_limiter: Any | None = None,
-) -> int:
-    """Return Content-Length of ``url`` via HEAD.
+) -> tuple[int, str]:
+    """Return (Content-Length, Content-Type) for ``url`` via HEAD.
 
     ``rate_limiter`` acquires the shared SEC rate clock before the
     HEAD so it counts against the per-IP budget (#1042).
+
+    Content-Type is the real integrity signal — SEC serves bulk
+    archives as ``application/zip`` (or ``application/x-zip-compressed``);
+    an HTML error page would be ``text/html``. Returning the type
+    lets the caller reject non-archive responses BEFORE downloading
+    bytes, replacing the brittle ``expected_min_bytes`` floor that
+    conflated "small file" with "corrupted file" (#1059).
     """
     if rate_limiter is not None:
         await rate_limiter.acquire()
@@ -380,7 +389,66 @@ async def _head_size(
     length = response.headers.get("content-length")
     if length is None:
         raise RuntimeError(f"HEAD missing Content-Length: url={url}")
-    return int(length)
+    content_type = (response.headers.get("content-type") or "").lower()
+    return int(length), content_type
+
+
+# Acceptable Content-Type values for SEC bulk archives. Real-world
+# observation 2026-05-08 against www.sec.gov: archives served as
+# ``application/zip``. SEC's API docs don't contractually pin the
+# MIME header so we also accept common ZIP variants. An obvious-bad
+# CT (e.g. ``text/html`` for an error page) is rejected pre-flight;
+# anything else falls through to the post-download magic-byte +
+# ZipFile round-trip checks. Codex pre-push for #1059.
+_KNOWN_ARCHIVE_CONTENT_TYPES: tuple[str, ...] = (
+    "application/zip",
+    "application/x-zip",
+    "application/x-zip-compressed",
+    "application/octet-stream",
+)
+_OBVIOUS_BAD_CONTENT_TYPES: tuple[str, ...] = (
+    "text/html",
+    "text/plain",
+    "application/json",
+    "application/xml",
+)
+
+
+def _classify_content_type(content_type: str) -> Literal["known", "unknown", "bad"]:
+    """Classify HEAD Content-Type for archive pre-flight.
+
+    - 'known': matches a documented ZIP MIME → proceed.
+    - 'bad':   matches a known error-page MIME → reject pre-flight.
+    - 'unknown': anything else → proceed and let magic-byte +
+      ZipFile post-checks decide.
+    """
+    if not content_type:
+        return "unknown"
+    head = content_type.split(";", 1)[0].strip().lower()
+    if head in _KNOWN_ARCHIVE_CONTENT_TYPES:
+        return "known"
+    if head in _OBVIOUS_BAD_CONTENT_TYPES:
+        return "bad"
+    return "unknown"
+
+
+# ZIP magic bytes for non-split single-volume archives — the only
+# kind SEC publishes today. Multi-disk / spanned archives (signature
+# PK\\x07\\x08) are intentionally NOT accepted here because Python's
+# zipfile module rejects multi-disk archives anyway, so accepting
+# their magic at pre-check would mislead the operator. Codex pre-push
+# for #1059.
+_ZIP_MAGIC_BYTES: tuple[bytes, ...] = (b"PK\x03\x04", b"PK\x05\x06")
+
+
+def _has_zip_magic(path: Path) -> bool:
+    """Return True when the first 4 bytes of ``path`` match a ZIP signature."""
+    try:
+        with open(path, "rb") as fh:
+            header = fh.read(4)
+    except OSError:
+        return False
+    return any(header.startswith(magic) for magic in _ZIP_MAGIC_BYTES)
 
 
 _TRANSIENT_HTTPX_ERRORS = (
@@ -490,7 +558,7 @@ async def _download_one(
         )
 
     try:
-        expected_total = await _head_size(client, archive.url, rate_limiter=rate_limiter)
+        expected_total, content_type = await _head_size_and_type(client, archive.url, rate_limiter=rate_limiter)
     except Exception as exc:  # noqa: BLE001 — operator-visible message
         return ArchiveDownloadResult(
             name=archive.name,
@@ -499,14 +567,18 @@ async def _download_one(
             error=f"HEAD failed: {exc}",
         )
 
-    if expected_total < archive.expected_min_bytes:
+    # Pre-flight integrity check on the HEAD response. Three cases:
+    # known-archive MIME → proceed; obvious-bad MIME (text/html etc)
+    # → reject before downloading; anything else → proceed and let
+    # the post-download magic-byte + ZipFile round-trip catch it.
+    # #1059.
+    ct_class = _classify_content_type(content_type)
+    if ct_class == "bad":
         return ArchiveDownloadResult(
             name=archive.name,
             path=None,
             bytes_downloaded=0,
-            error=(
-                f"Content-Length {expected_total} below floor {archive.expected_min_bytes} — archive likely truncated"
-            ),
+            error=(f"Content-Type {content_type!r} is not an archive — SEC may have served an error page"),
         )
 
     # Resume from partial if present and shorter than expected.
@@ -566,6 +638,18 @@ async def _download_one(
             path=None,
             bytes_downloaded=final_size,
             error=f"size mismatch: got {final_size} bytes, expected {expected_total}",
+        )
+
+    # Magic-byte check before the more expensive ZIP round-trip.
+    # ZIP files start with PK\\x03\\x04 (or one of the central-
+    # directory variants); an HTML error page or random text would
+    # fail this faster than zipfile.ZipFile(). #1059.
+    if not _has_zip_magic(partial_path):
+        return ArchiveDownloadResult(
+            name=archive.name,
+            path=None,
+            bytes_downloaded=final_size,
+            error="missing ZIP magic bytes — content is not a ZIP archive",
         )
 
     if not _zip_round_trip(partial_path):
