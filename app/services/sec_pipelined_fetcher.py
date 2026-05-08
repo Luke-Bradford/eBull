@@ -213,3 +213,106 @@ class PipelinedSecFetcher:
         coros = [self.fetch_one(t) for t in task_list]
         for coro in asyncio.as_completed(coros):
             yield await coro
+
+
+# ---------------------------------------------------------------------------
+# Sync wrapper for D-stage services (#1045)
+# ---------------------------------------------------------------------------
+
+
+def prefetch_document_texts(
+    urls: list[str],
+    *,
+    user_agent: str,
+    target_rps: float = DEFAULT_TARGET_RPS,
+    concurrency: int = DEFAULT_CONCURRENCY,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+) -> dict[str, str | None]:
+    """Bulk-fetch SEC document bodies via the pipelined fetcher.
+
+    Sync wrapper that builds an event loop, runs ``PipelinedSecFetcher.fetch_many``
+    against ``urls``, and returns a ``{url: body_or_None}`` dict.
+
+    Bodies returned as decoded text (``response.text``). 404/410 responses
+    map to ``None`` (filing withdrawn — same semantics as
+    ``SecFilingsProvider.fetch_document_text``). Transport errors,
+    429, 5xx, and other non-permanent failures are OMITTED from the
+    returned dict so ``_CachedDocFetcher``'s cache-miss path falls
+    through to the underlying sync provider's retry / quarantine
+    contract.
+
+    Designed for D-stage services (sec_def14a / sec_business_summary /
+    sec_8k_events) that previously fetched per-filing serially. Hand
+    the candidate URL list here; iterate the result dict in the
+    existing per-filing loop without changing parsing logic.
+
+    Acquires the same shared SEC rate clock as the synchronous
+    ``ResilientClient`` SEC traffic, so concurrent jobs can co-exist
+    safely under the per-IP 7 req/s ceiling.
+    """
+    if not urls:
+        return {}
+    deduped = list(dict.fromkeys(urls))
+    headers = {
+        "User-Agent": user_agent,
+        "Accept-Encoding": "gzip, deflate",
+    }
+
+    async def _run() -> dict[str, str | None]:
+        out: dict[str, str | None] = {}
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            fetcher = PipelinedSecFetcher(
+                client=client,
+                target_rps=target_rps,
+                concurrency=concurrency,
+            )
+            tasks = [FetchTask(key=u, url=u, headers=headers) for u in deduped]
+            async for result in fetcher.fetch_many(tasks):
+                key = str(result.key)
+                # Failure-mode parity with sync fetch_document_text:
+                # ONLY cache None for permanent 404/410. Transport
+                # errors, 429, 5xx, 4xx are OMITTED so the cache-miss
+                # path falls through to the underlying sync provider,
+                # preserving its retry/quarantine contract. Codex
+                # pre-push MED for #1045.
+                if result.error is not None or result.response is None:
+                    continue
+                resp = result.response
+                if resp.status_code in (404, 410):
+                    out[key] = None
+                    continue
+                if 200 <= resp.status_code < 300:
+                    out[key] = resp.text
+                # Else: omit from cache.
+        return out
+
+    return asyncio.run(_run())
+
+
+class _CachedDocFetcher:
+    """Wraps a sync ``SecFilingsProvider`` with a prefetch cache.
+
+    D-stage ingest loops call ``fetcher.fetch_document_text(url)``
+    serially. When a bootstrap entrypoint pre-fetches the cohort
+    URLs via ``prefetch_document_texts`` ahead of the loop, this
+    wrapper serves cached bodies on hit and falls back to the
+    underlying sync fetcher on miss (e.g. URL added between prefetch
+    and ingest).
+
+    Bookkeeping for telemetry: ``cache_hits`` / ``cache_misses``
+    counters expose how much of the cohort the prefetch covered.
+    """
+
+    def __init__(self, underlying: object, cache: dict[str, str | None]) -> None:
+        self._underlying = underlying
+        self._cache = cache
+        self.cache_hits = 0
+        self.cache_misses = 0
+
+    def fetch_document_text(self, absolute_url: str) -> str | None:
+        if absolute_url in self._cache:
+            self.cache_hits += 1
+            return self._cache[absolute_url]
+        self.cache_misses += 1
+        # type: ignore[misc, attr-defined] — duck-typed fallback.
+        return self._underlying.fetch_document_text(absolute_url)  # type: ignore[attr-defined]

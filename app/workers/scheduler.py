@@ -3466,7 +3466,17 @@ def sec_business_summary_bootstrap() -> None:
             psycopg.connect(settings.database_url) as conn,
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
         ):
-            result = bootstrap_business_summaries(conn, provider)
+            # #1045: prefetch cohort URLs via PipelinedSecFetcher for
+            # 4-way concurrent in-flight fetches at the shared 7 req/s
+            # ceiling. Bootstrap-only — the steady-state daily ingest
+            # path (sec_business_summary_ingest) keeps the per-filing
+            # serial fetch since it processes ~200 candidates / day.
+            result = bootstrap_business_summaries(
+                conn,
+                provider,
+                prefetch_urls=True,
+                prefetch_user_agent=settings.sec_user_agent,
+            )
 
         tracker.row_count = result.rows_inserted + result.rows_updated
         logger.info(
@@ -3642,7 +3652,13 @@ def sec_def14a_bootstrap() -> None:
             psycopg.connect(settings.database_url) as conn,
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
         ):
-            result = bootstrap_def14a(conn, provider)
+            # #1045: prefetch DEF 14A primary docs via PipelinedSecFetcher.
+            result = bootstrap_def14a(
+                conn,
+                provider,
+                prefetch_urls=True,
+                prefetch_user_agent=settings.sec_user_agent,
+            )
 
         tracker.row_count = result.rows_inserted + result.rows_updated
         logger.info(
@@ -4055,7 +4071,14 @@ def sec_8k_events_ingest() -> None:
             psycopg.connect(settings.database_url) as conn,
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
         ):
-            result = ingest_8k_events(conn, provider)
+            # #1045: prefetch 8-K primary docs via PipelinedSecFetcher
+            # for 4-way concurrent fetches at the shared 7 req/s ceiling.
+            result = ingest_8k_events(
+                conn,
+                provider,
+                prefetch_urls=True,
+                prefetch_user_agent=settings.sec_user_agent,
+            )
 
         tracker.row_count = result.items_inserted
         logger.info(

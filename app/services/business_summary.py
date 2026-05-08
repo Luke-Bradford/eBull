@@ -1395,6 +1395,8 @@ def bootstrap_business_summaries(
     *,
     chunk_limit: int = 500,
     max_runtime_seconds: int = 3600,
+    prefetch_urls: bool = False,
+    prefetch_user_agent: str | None = None,
 ) -> IngestResult:
     """One-shot drain of the entire business_summary candidate set.
 
@@ -1423,7 +1425,13 @@ def bootstrap_business_summaries(
     total_parse_misses = 0
 
     while time.monotonic() < deadline:
-        chunk = ingest_business_summaries(conn, fetcher, limit=chunk_limit)
+        chunk = ingest_business_summaries(
+            conn,
+            fetcher,
+            limit=chunk_limit,
+            prefetch_urls=prefetch_urls,
+            prefetch_user_agent=prefetch_user_agent,
+        )
         total_scanned += chunk.filings_scanned
         total_inserted += chunk.rows_inserted
         total_updated += chunk.rows_updated
@@ -1477,6 +1485,8 @@ def ingest_business_summaries(
     fetcher: _DocFetcher,
     *,
     limit: int = 200,
+    prefetch_urls: bool = False,
+    prefetch_user_agent: str | None = None,
 ) -> IngestResult:
     """Scan 10-K filings, fetch primary doc, extract Item 1, upsert.
 
@@ -1569,6 +1579,19 @@ def ingest_business_summaries(
     updated = 0
     fetch_errors = 0
     parse_misses = 0
+
+    # #1045 fast path: prefetch the cohort's primary documents via the
+    # pipelined fetcher (4-way concurrent at the shared 7 req/s ceiling)
+    # then wrap the sync fetcher with a cache. Per-filing TCP+SSL
+    # handshake overlaps with adjacent fetches, hiding latency on
+    # large 10-K backfills without breaching the rate floor.
+    if prefetch_urls and candidates:
+        from app.services.sec_pipelined_fetcher import _CachedDocFetcher, prefetch_document_texts
+
+        urls = [c[2] for c in candidates]
+        ua = prefetch_user_agent or "eBull research/1.0"
+        cache = prefetch_document_texts(urls, user_agent=ua)
+        fetcher = _CachedDocFetcher(fetcher, cache)  # type: ignore[assignment]
 
     for instrument_id, accession, url, filing_type in candidates:
         try:

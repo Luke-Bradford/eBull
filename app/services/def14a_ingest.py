@@ -645,6 +645,8 @@ def ingest_def14a(
     *,
     instrument_id: int | None = None,
     limit: int = 100,
+    prefetch_urls: bool = False,
+    prefetch_user_agent: str | None = None,
 ) -> IngestSummary:
     """Discover pending DEF 14A accessions and ingest each.
 
@@ -668,6 +670,20 @@ def ingest_def14a(
             rows_inserted=0,
             rows_updated=0,
         )
+
+    # #1045 fast path: prefetch the cohort's primary documents via the
+    # pipelined fetcher (4-way concurrent at the shared 7 req/s ceiling).
+    # Wraps the sync fetcher so per-filing fetch_document_text reads
+    # from cache when available; cache misses fall back to the
+    # underlying fetcher transparently.
+    if prefetch_urls:
+        from app.services.sec_pipelined_fetcher import _CachedDocFetcher, prefetch_document_texts
+
+        urls = [ref.primary_document_url for ref in pending if ref.primary_document_url]
+        if urls:
+            ua = prefetch_user_agent or "eBull research/1.0"
+            cache = prefetch_document_texts(urls, user_agent=ua)
+            fetcher = _CachedDocFetcher(fetcher, cache)  # type: ignore[assignment]
 
     run_id = start_ingestion_run(
         conn,
@@ -826,6 +842,8 @@ def bootstrap_def14a(
     *,
     chunk_limit: int = 500,
     max_runtime_seconds: int = 3600,
+    prefetch_urls: bool = False,
+    prefetch_user_agent: str | None = None,
 ) -> IngestSummary:
     """One-shot drain of the entire DEF 14A candidate set.
 
@@ -861,7 +879,13 @@ def bootstrap_def14a(
     first_error: str | None = None
 
     while time.monotonic() < deadline:
-        chunk = ingest_def14a(conn, fetcher, limit=chunk_limit)
+        chunk = ingest_def14a(
+            conn,
+            fetcher,
+            limit=chunk_limit,
+            prefetch_urls=prefetch_urls,
+            prefetch_user_agent=prefetch_user_agent,
+        )
         total_seen += chunk.accessions_seen
         total_succeeded += chunk.accessions_succeeded
         total_partial += chunk.accessions_partial

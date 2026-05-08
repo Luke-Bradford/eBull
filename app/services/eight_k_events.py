@@ -689,6 +689,8 @@ def ingest_8k_events(
     fetcher: _DocFetcher,
     *,
     limit: int = 200,
+    prefetch_urls: bool = False,
+    prefetch_user_agent: str | None = None,
 ) -> IngestResult:
     """Scan 8-K filings lacking an ``eight_k_filings`` row, fetch the
     primary document, parse, upsert.
@@ -739,6 +741,17 @@ def ingest_8k_events(
     items_inserted = 0
     fetch_errors = 0
     parse_misses = 0
+
+    # #1045 fast path: prefetch the cohort's primary documents via the
+    # pipelined fetcher so per-filing fetch_document_text reads from
+    # cache. Misses fall back to the underlying sync fetcher.
+    if prefetch_urls and candidates:
+        from app.services.sec_pipelined_fetcher import _CachedDocFetcher, prefetch_document_texts
+
+        urls = [c[2] for c in candidates]
+        ua = prefetch_user_agent or "eBull research/1.0"
+        cache = prefetch_document_texts(urls, user_agent=ua)
+        fetcher = _CachedDocFetcher(fetcher, cache)  # type: ignore[assignment]
 
     for instrument_id, accession, url, known_items in candidates:
         try:
