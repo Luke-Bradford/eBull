@@ -64,6 +64,20 @@ LaneApi = Literal["init", "etoro", "sec", "sec_rate", "sec_bulk_download", "db"]
 StageApiStatus = Literal["pending", "running", "success", "error", "skipped", "blocked"]
 
 
+class BootstrapArchiveResultResponse(BaseModel):
+    """Per-archive ingest outcome from ``bootstrap_archive_results``.
+
+    Surfaced under the parent stage so the operator panel can render
+    per-archive progress (which form13f / insider / nport quarter
+    landed) + skipped counts (unresolved_cusip, unresolved_cik, etc).
+    """
+
+    archive_name: str
+    rows_written: int
+    rows_skipped: dict[str, int] = {}
+    completed_at: datetime | None
+
+
 class BootstrapStageResponse(BaseModel):
     stage_key: str
     stage_order: int
@@ -77,6 +91,26 @@ class BootstrapStageResponse(BaseModel):
     units_done: int | None
     last_error: str | None
     attempt_count: int
+    # #1046 archive-level progress: per-archive rows from
+    # bootstrap_archive_results filtered to this stage_key. Empty list
+    # for B-stages and one-shot lifecycle stages that don't track
+    # per-archive outcomes.
+    archive_results: list[BootstrapArchiveResultResponse] = []
+
+
+class BulkManifestResponse(BaseModel):
+    """Snapshot of ``<bulk>/.run_manifest.json`` (#1046).
+
+    ``mode`` is "bulk" when A3 downloaded all archives, "fallback"
+    when A3 measured bandwidth below threshold and bypassed Phase C
+    in favour of the legacy chain, or null when no manifest exists
+    (e.g. before A3 has run, or after a wipe).
+    """
+
+    present: bool
+    mode: Literal["bulk", "fallback"] | None = None
+    bootstrap_run_id: int | None = None
+    archive_count: int = 0
 
 
 class BootstrapStatusResponse(BaseModel):
@@ -84,6 +118,7 @@ class BootstrapStatusResponse(BaseModel):
     current_run_id: int | None
     last_completed_at: datetime | None
     stages: list[BootstrapStageResponse]
+    bulk_manifest: BulkManifestResponse | None = None
 
 
 class BootstrapRunQueuedResponse(BaseModel):
@@ -133,12 +168,63 @@ def _build_status_response(conn: psycopg.Connection[object]) -> BootstrapStatusR
     with conn.transaction():
         state = read_state(conn)
         snap = read_latest_run_with_stages(conn)
+        # #1046: per-archive results grouped by stage_key.
+        archive_results_by_stage: dict[str, list[BootstrapArchiveResultResponse]] = {}
+        archive_rows: list[tuple[str, str, int, object, datetime | None]] = []
+        if snap is not None:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT stage_key, archive_name, rows_written,
+                           rows_skipped, completed_at
+                    FROM bootstrap_archive_results
+                    WHERE bootstrap_run_id = %s
+                      AND archive_name <> '__job__'
+                    ORDER BY stage_key, archive_name
+                    """,
+                    (snap.run_id,),
+                )
+                for row in cur.fetchall():
+                    # psycopg returns each row as a tuple; the typed
+                    # row factory is `object` here so cast for pyright.
+                    row_tuple = row if isinstance(row, tuple) else tuple(row)  # type: ignore[arg-type]
+                    archive_rows.append(
+                        (
+                            str(row_tuple[0]),
+                            str(row_tuple[1]),
+                            int(row_tuple[2] or 0),
+                            row_tuple[3],
+                            row_tuple[4],
+                        )
+                    )
+            for stage_key, archive_name, rows_written, rows_skipped, completed_at in archive_rows:
+                # rows_skipped is JSONB; psycopg may decode JSON
+                # numbers as int OR float depending on shape. Accept
+                # both — coerce to int. Booleans (subclass of int)
+                # are excluded so a JSON true/false doesn't ride
+                # through as 1/0. Codex pre-push WARNING for #1046.
+                skipped_dict: dict[str, int] = {}
+                if isinstance(rows_skipped, dict):
+                    for k, v in rows_skipped.items():
+                        if isinstance(v, bool):
+                            continue
+                        if isinstance(v, (int, float)):
+                            skipped_dict[str(k)] = int(v)
+                archive_results_by_stage.setdefault(stage_key, []).append(
+                    BootstrapArchiveResultResponse(
+                        archive_name=archive_name,
+                        rows_written=int(rows_written or 0),
+                        rows_skipped=skipped_dict,
+                        completed_at=completed_at,
+                    )
+                )
     if snap is None:
         return BootstrapStatusResponse(
             status=state.status,
             current_run_id=None,
             last_completed_at=state.last_completed_at,
             stages=[],
+            bulk_manifest=_read_bulk_manifest_response(),
         )
 
     stages = [
@@ -155,6 +241,7 @@ def _build_status_response(conn: psycopg.Connection[object]) -> BootstrapStatusR
             units_done=stage.units_done,
             last_error=stage.last_error,
             attempt_count=stage.attempt_count,
+            archive_results=archive_results_by_stage.get(stage.stage_key, []),
         )
         for stage in snap.stages
     ]
@@ -163,6 +250,49 @@ def _build_status_response(conn: psycopg.Connection[object]) -> BootstrapStatusR
         current_run_id=snap.run_id,
         last_completed_at=state.last_completed_at,
         stages=stages,
+        bulk_manifest=_read_bulk_manifest_response(),
+    )
+
+
+def _read_bulk_manifest_response() -> BulkManifestResponse:
+    """Read ``<bulk>/.run_manifest.json`` and project it for the API.
+
+    Operator-facing — answers "is the bulk path on disk and what mode
+    did it land in?". Errors are swallowed (e.g. before A3 has run
+    the directory may not exist) and surface as ``present=False``.
+    """
+    try:
+        from app.security.master_key import resolve_data_dir
+        from app.services.sec_bulk_download import read_run_manifest
+
+        manifest = read_run_manifest(resolve_data_dir() / "sec" / "bulk")
+    except Exception as exc:  # noqa: BLE001 — UI-side enrichment must not fail status
+        # Log at warning so corrupt/malformed manifests are visible to
+        # operators without breaking the status payload. Codex pre-push
+        # P3 for #1046.
+        logger.warning("bulk manifest read failed: %s", exc)
+        return BulkManifestResponse(present=False)
+    if manifest is None:
+        return BulkManifestResponse(present=False)
+    raw_mode = manifest.get("mode")
+    mode: Literal["bulk", "fallback"] | None
+    if raw_mode in ("bulk", "fallback"):
+        mode = raw_mode  # type: ignore[assignment]
+    else:
+        mode = None
+    archives = manifest.get("archives", [])
+    archive_count = len(archives) if isinstance(archives, list) else 0
+    raw_run_id = manifest.get("bootstrap_run_id")
+    run_id_int: int | None
+    try:
+        run_id_int = int(raw_run_id) if raw_run_id is not None else None
+    except TypeError, ValueError:
+        run_id_int = None
+    return BulkManifestResponse(
+        present=True,
+        mode=mode,
+        bootstrap_run_id=run_id_int,
+        archive_count=archive_count,
     )
 
 
