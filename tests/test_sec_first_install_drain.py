@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import psycopg
 import pytest
 
-from app.jobs.sec_first_install_drain import run_first_install_drain
+from app.jobs.sec_first_install_drain import (
+    run_first_install_drain,
+    seed_manifest_from_filing_events,
+)
 from app.services.sec_manifest import get_manifest_row
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401
 
@@ -164,3 +168,153 @@ class TestDrain:
         )
         ebull_test_conn.commit()
         assert stats.ciks_processed == 1
+
+
+class TestSeedFromFilingEvents:
+    def test_seeds_manifest_from_filing_events_no_http(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # #1044: when filing_events has rows for the SEC provider,
+        # the drain seeds sec_filing_manifest from that table without
+        # any HTTP. The fake_get below would raise if called — proves
+        # the fast path was taken.
+        _seed_aapl(ebull_test_conn)
+        ebull_test_conn.execute(
+            """
+            INSERT INTO external_identifiers
+                (instrument_id, provider, identifier_type, identifier_value, is_primary)
+            VALUES
+                (1701, 'sec', 'cik', '0000320193', TRUE)
+            ON CONFLICT DO NOTHING
+            """
+        )
+        ebull_test_conn.execute(
+            """
+            INSERT INTO filing_events (
+                instrument_id, filing_date, filing_type, provider,
+                provider_filing_id, source_url, primary_document_url, raw_payload_json
+            )
+            VALUES
+                (1701, %s, '8-K', 'sec', '0000320193-26-000001',
+                 'https://www.sec.gov/...', 'https://www.sec.gov/.../item502.htm',
+                 %s::jsonb),
+                (1701, %s, 'DEF 14A', 'sec', '0000320193-26-000002',
+                 'https://www.sec.gov/...', 'https://www.sec.gov/.../proxy.htm',
+                 %s::jsonb)
+            """,
+            (
+                date(2026, 1, 15),
+                json.dumps({"provider_filing_id": "0000320193-26-000001"}),
+                date(2026, 2, 14),
+                json.dumps({"provider_filing_id": "0000320193-26-000002"}),
+            ),
+        )
+        ebull_test_conn.commit()
+
+        n = seed_manifest_from_filing_events(ebull_test_conn)
+        ebull_test_conn.commit()
+
+        assert n == 2
+        for accession in ("0000320193-26-000001", "0000320193-26-000002"):
+            row = get_manifest_row(ebull_test_conn, accession)
+            assert row is not None
+            assert row.subject_type == "issuer"
+            assert row.instrument_id == 1701
+            assert row.cik == "0000320193"
+
+    def test_skips_non_issuer_sources(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # PR #1051 review WARNING: 13F-HR / N-PORT / N-CSR rows in
+        # filing_events must NOT be seeded as subject_type='issuer'
+        # — they're filer-scoped manifest rows (instrument_id=NULL,
+        # subject_id=filer CIK). The seed must skip them so the
+        # legacy/per-CIK path can correctly classify them.
+        _seed_aapl(ebull_test_conn)
+        ebull_test_conn.execute(
+            """
+            INSERT INTO external_identifiers
+                (instrument_id, provider, identifier_type, identifier_value, is_primary)
+            VALUES (1701, 'sec', 'cik', '0000320193', TRUE)
+            ON CONFLICT DO NOTHING
+            """
+        )
+        # Insert one issuer-scoped (10-K) and one filer-scoped (13F-HR).
+        ebull_test_conn.execute(
+            """
+            INSERT INTO filing_events (
+                instrument_id, filing_date, filing_type, provider,
+                provider_filing_id, source_url, primary_document_url, raw_payload_json
+            )
+            VALUES
+                (1701, %s, '10-K', 'sec', '0000320193-26-000010',
+                 'https://www.sec.gov/...', NULL, %s::jsonb),
+                (1701, %s, '13F-HR', 'sec', '0000320193-26-000011',
+                 'https://www.sec.gov/...', NULL, %s::jsonb)
+            """,
+            (
+                date(2026, 1, 15),
+                json.dumps({"provider_filing_id": "0000320193-26-000010"}),
+                date(2026, 2, 14),
+                json.dumps({"provider_filing_id": "0000320193-26-000011"}),
+            ),
+        )
+        ebull_test_conn.commit()
+
+        n = seed_manifest_from_filing_events(ebull_test_conn)
+        ebull_test_conn.commit()
+
+        # Only the 10-K should land — 13F-HR is filer-scoped.
+        assert n == 1
+        assert get_manifest_row(ebull_test_conn, "0000320193-26-000010") is not None
+        assert get_manifest_row(ebull_test_conn, "0000320193-26-000011") is None
+
+    def test_run_first_install_drain_uses_filing_events_fast_path(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        # #1044: when filing_events seeds the issuer rows, the per-CIK
+        # HTTP path is skipped for issuer subjects. Run with a fake
+        # get that raises — proves no HTTP was issued for the issuer.
+        _seed_aapl(ebull_test_conn)
+        ebull_test_conn.execute(
+            """
+            INSERT INTO external_identifiers
+                (instrument_id, provider, identifier_type, identifier_value, is_primary)
+            VALUES
+                (1701, 'sec', 'cik', '0000320193', TRUE)
+            ON CONFLICT DO NOTHING
+            """
+        )
+        ebull_test_conn.execute(
+            """
+            INSERT INTO filing_events (
+                instrument_id, filing_date, filing_type, provider,
+                provider_filing_id, source_url, primary_document_url, raw_payload_json
+            )
+            VALUES (1701, %s, '8-K', 'sec', '0000320193-26-000001',
+                    'https://www.sec.gov/...', NULL, %s::jsonb)
+            """,
+            (
+                date(2026, 1, 15),
+                json.dumps({"provider_filing_id": "0000320193-26-000001"}),
+            ),
+        )
+        ebull_test_conn.commit()
+
+        def _raising_get(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+            raise AssertionError(f"HTTP fast-path bypass failed: {url}")
+
+        stats = run_first_install_drain(
+            ebull_test_conn,
+            http_get=_raising_get,
+            follow_pagination=False,
+        )
+        ebull_test_conn.commit()
+
+        assert stats.rows_seeded_from_filing_events == 1
+        # ciks_skipped picks up the issuer subject the loop short-circuited.
+        assert stats.ciks_skipped >= 1
+        assert stats.manifest_rows_upserted >= 1
