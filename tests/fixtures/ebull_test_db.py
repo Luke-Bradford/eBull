@@ -177,6 +177,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # state transitions are responsible for resetting the singleton
     # back to ``status='pending'`` themselves.
     "bootstrap_runs",
+    # #1065 — admin control hub cooperative-cancel signals.
+    "process_stop_requests",
 )
 
 
