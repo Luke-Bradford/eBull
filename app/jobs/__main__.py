@@ -273,11 +273,12 @@ def serve(stop_event: threading.Event | None = None) -> int:
             from app.services.process_stop import boot_recovery_sweep
 
             with psycopg.connect(settings.database_url) as conn:
-                orphaned, stuck = boot_recovery_sweep(conn)
-            if orphaned or stuck:
+                orphaned, observed_unfinished, stuck = boot_recovery_sweep(conn)
+            if orphaned or observed_unfinished or stuck:
                 logger.info(
-                    "jobs entrypoint: process_stop swept %d orphaned stop / %d stuck fence row(s)",
+                    "jobs entrypoint: process_stop swept %d orphaned / %d observed-unfinished / %d stuck fence row(s)",
                     orphaned,
+                    observed_unfinished,
                     stuck,
                 )
         except Exception:

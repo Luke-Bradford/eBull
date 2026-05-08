@@ -119,35 +119,46 @@ def request_stop(
     Raises:
         StopAlreadyPendingError: if the partial-unique index
             ``process_stop_requests_active_unq`` rejects the insert
-            (a previous active stop request exists for this run).
+            (a previous active stop request exists for this run). The
+            INSERT is wrapped in ``conn.transaction()`` so a
+            UniqueViolation rolls back to a SAVEPOINT and the outer
+            transaction stays usable — the caller can continue issuing
+            SQL after catching this exception. Without the savepoint,
+            psycopg3 would leave the connection in
+            ``InFailedSqlTransaction`` state (review-bot 2026-05-08
+            BLOCKING).
     """
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO process_stop_requests (
-                    process_id,
-                    mechanism,
-                    target_run_kind,
-                    target_run_id,
-                    mode,
-                    requested_by_operator_id
+        # ``conn.transaction()`` on an already-open tx creates an inner
+        # SAVEPOINT; psycopg3 rolls back to that savepoint on raised
+        # exception, leaving the outer tx clean.
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO process_stop_requests (
+                        process_id,
+                        mechanism,
+                        target_run_kind,
+                        target_run_id,
+                        mode,
+                        requested_by_operator_id
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        process_id,
+                        mechanism,
+                        target_run_kind,
+                        target_run_id,
+                        mode,
+                        requested_by_operator_id,
+                    ),
                 )
-                VALUES (%s, %s, %s, %s, %s, %s)
-                RETURNING id
-                """,
-                (
-                    process_id,
-                    mechanism,
-                    target_run_kind,
-                    target_run_id,
-                    mode,
-                    requested_by_operator_id,
-                ),
-            )
-            row = cur.fetchone()
-            assert row is not None  # INSERT ... RETURNING always yields a row
-            return int(row[0])
+                row = cur.fetchone()
+                assert row is not None  # INSERT ... RETURNING always yields a row
+                return int(row[0])
     except psycopg.errors.UniqueViolation as exc:
         raise StopAlreadyPendingError(f"active stop already pending for {target_run_kind} {target_run_id}") from exc
 
@@ -259,6 +270,41 @@ def reap_orphaned_stop_requests(conn: psycopg.Connection[Any], *, max_age_hours:
         return cur.rowcount
 
 
+def reap_observed_unfinished_stop_requests(conn: psycopg.Connection[Any], *, max_age_hours: int = 24) -> int:
+    """Boot-recovery sweep: free observed-but-never-completed stop rows.
+
+    A worker that observed the stop signal (set ``observed_at``) but
+    crashed before calling ``mark_completed`` leaves the row in
+    ``observed_at IS NOT NULL AND completed_at IS NULL`` indefinitely.
+    The partial-unique index keeps blocking future cancels against the
+    same target_run_id forever (review-bot 2026-05-08 WARNING).
+
+    Default threshold is more generous than the never-observed reaper
+    (24h vs 6h) because observed-but-incomplete is a less-clear-cut
+    abandonment signal — the worker may have been mid-cleanup. After
+    24h though, the row is unambiguously orphaned.
+
+    Mutation:
+
+        SET completed_at = now()             -- frees partial-unique slot
+        -- observed_at left as-is (worker DID see it)
+
+    Returns the count of swept rows for caller logging.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE process_stop_requests
+               SET completed_at = now()
+             WHERE completed_at IS NULL
+               AND observed_at IS NOT NULL
+               AND requested_at < now() - (%s::int * INTERVAL '1 hour')
+            """,
+            (int(max_age_hours),),
+        )
+        return cur.rowcount
+
+
 def reap_stuck_full_wash_fences(conn: psycopg.Connection[Any], *, max_age_hours: int = 6) -> int:
     """Boot-recovery sweep: free stuck full-wash fence rows.
 
@@ -285,22 +331,25 @@ def reap_stuck_full_wash_fences(conn: psycopg.Connection[Any], *, max_age_hours:
         return cur.rowcount
 
 
-def boot_recovery_sweep(conn: psycopg.Connection[Any]) -> tuple[int, int]:
-    """Run both boot-recovery sweeps and commit. Called from jobs startup.
+def boot_recovery_sweep(conn: psycopg.Connection[Any]) -> tuple[int, int, int]:
+    """Run all boot-recovery sweeps and commit. Called from jobs startup.
 
-    Returns ``(orphaned_stop_count, stuck_fence_count)`` for caller
-    logging. Idempotent — safe to invoke multiple times.
+    Returns ``(orphaned_stop_count, observed_unfinished_count,
+    stuck_fence_count)`` for caller logging. Idempotent — safe to
+    invoke multiple times.
     """
     orphaned = reap_orphaned_stop_requests(conn)
+    observed_unfinished = reap_observed_unfinished_stop_requests(conn)
     stuck = reap_stuck_full_wash_fences(conn)
     conn.commit()
-    if orphaned or stuck:
+    if orphaned or observed_unfinished or stuck:
         logger.info(
-            "process_stop boot-recovery: orphaned_stop=%d stuck_fence=%d",
+            "process_stop boot-recovery: orphaned_stop=%d observed_unfinished=%d stuck_fence=%d",
             orphaned,
+            observed_unfinished,
             stuck,
         )
-    return orphaned, stuck
+    return orphaned, observed_unfinished, stuck
 
 
 __all__ = [
@@ -315,6 +364,7 @@ __all__ = [
     "is_stop_requested",
     "mark_completed",
     "mark_observed",
+    "reap_observed_unfinished_stop_requests",
     "reap_orphaned_stop_requests",
     "reap_stuck_full_wash_fences",
     "request_stop",

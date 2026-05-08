@@ -34,6 +34,7 @@ from app.services.process_stop import (
     is_stop_requested,
     mark_completed,
     mark_observed,
+    reap_observed_unfinished_stop_requests,
     reap_orphaned_stop_requests,
     reap_stuck_full_wash_fences,
     request_stop,
@@ -371,6 +372,139 @@ def test_boot_recovery_sweep_runs_both_reapers(
     )
     ebull_test_conn.commit()
 
-    orphaned, stuck = boot_recovery_sweep(ebull_test_conn)
+    orphaned, observed_unfinished, stuck = boot_recovery_sweep(ebull_test_conn)
     assert orphaned == 1
+    assert observed_unfinished == 0
     assert stuck == 1
+
+
+def test_reap_orphaned_skips_observed_rows(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Review-bot WARNING regression: never-observed-only reaper must NOT sweep
+    rows whose worker already set ``observed_at``. Those rows belong to the
+    longer-threshold ``reap_observed_unfinished_stop_requests`` sweep."""
+    operator_id = _make_operator(ebull_test_conn)
+
+    # >6h old, never observed → swept by reap_orphaned.
+    ebull_test_conn.execute(
+        """
+        INSERT INTO process_stop_requests
+            (process_id, mechanism, target_run_kind, target_run_id, mode,
+             requested_by_operator_id, requested_at, observed_at)
+        VALUES ('p', 'bootstrap', 'bootstrap_run', 5001, 'cooperative',
+                %s, now() - interval '7 hours', NULL)
+        """,
+        (operator_id,),
+    )
+    # >6h old but ALREADY observed → must NOT be swept by reap_orphaned.
+    ebull_test_conn.execute(
+        """
+        INSERT INTO process_stop_requests
+            (process_id, mechanism, target_run_kind, target_run_id, mode,
+             requested_by_operator_id, requested_at, observed_at)
+        VALUES ('p', 'bootstrap', 'bootstrap_run', 5002, 'cooperative',
+                %s, now() - interval '7 hours', now() - interval '5 hours')
+        """,
+        (operator_id,),
+    )
+    ebull_test_conn.commit()
+
+    swept = reap_orphaned_stop_requests(ebull_test_conn, max_age_hours=6)
+    ebull_test_conn.commit()
+    assert swept == 1
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT target_run_id, completed_at IS NOT NULL FROM process_stop_requests "
+            "WHERE target_run_id IN (5001, 5002) ORDER BY target_run_id",
+        )
+        rows = cur.fetchall()
+        # 5001 (never observed) swept; 5002 (observed) untouched.
+        assert rows[0] == (5001, True)
+        assert rows[1] == (5002, False)
+
+
+def test_reap_observed_unfinished_sweeps_observed_orphans(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A worker observed the stop but crashed before mark_completed →
+    row sits in ``observed_at IS NOT NULL AND completed_at IS NULL``.
+    Without this reaper the partial-unique slot would block future
+    cancels forever (review-bot 2026-05-08 WARNING)."""
+    operator_id = _make_operator(ebull_test_conn)
+
+    # >24h old, observed but not completed → swept.
+    ebull_test_conn.execute(
+        """
+        INSERT INTO process_stop_requests
+            (process_id, mechanism, target_run_kind, target_run_id, mode,
+             requested_by_operator_id, requested_at, observed_at)
+        VALUES ('p', 'bootstrap', 'bootstrap_run', 6001, 'cooperative',
+                %s, now() - interval '25 hours', now() - interval '24 hours')
+        """,
+        (operator_id,),
+    )
+    # 12h old, observed but not completed → must NOT be swept (under threshold).
+    ebull_test_conn.execute(
+        """
+        INSERT INTO process_stop_requests
+            (process_id, mechanism, target_run_kind, target_run_id, mode,
+             requested_by_operator_id, requested_at, observed_at)
+        VALUES ('p', 'bootstrap', 'bootstrap_run', 6002, 'cooperative',
+                %s, now() - interval '13 hours', now() - interval '12 hours')
+        """,
+        (operator_id,),
+    )
+    ebull_test_conn.commit()
+
+    swept = reap_observed_unfinished_stop_requests(ebull_test_conn, max_age_hours=24)
+    ebull_test_conn.commit()
+    assert swept == 1
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT target_run_id, completed_at IS NOT NULL FROM process_stop_requests "
+            "WHERE target_run_id IN (6001, 6002) ORDER BY target_run_id",
+        )
+        rows = cur.fetchall()
+        assert rows[0] == (6001, True)
+        assert rows[1] == (6002, False)
+
+
+def test_request_stop_after_unique_violation_outer_tx_still_usable(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Review-bot BLOCKING regression: psycopg3's aborted-tx state must
+    NOT leak past a UniqueViolation. The savepoint inside request_stop
+    rolls back to a clean state and the caller can continue using the
+    connection."""
+    operator_id = _make_operator(ebull_test_conn)
+
+    request_stop(
+        ebull_test_conn,
+        process_id="bootstrap",
+        mechanism="bootstrap",
+        target_run_kind="bootstrap_run",
+        target_run_id=7777,
+        mode="cooperative",
+        requested_by_operator_id=operator_id,
+    )
+
+    with pytest.raises(StopAlreadyPendingError):
+        request_stop(
+            ebull_test_conn,
+            process_id="bootstrap",
+            mechanism="bootstrap",
+            target_run_kind="bootstrap_run",
+            target_run_id=7777,
+            mode="cooperative",
+            requested_by_operator_id=operator_id,
+        )
+
+    # The aborted-state regression would manifest as InFailedSqlTransaction
+    # on this query. With the savepoint it succeeds.
+    row = is_stop_requested(ebull_test_conn, target_run_kind="bootstrap_run", target_run_id=7777)
+    assert row is not None
+    assert row.target_run_id == 7777
+    ebull_test_conn.commit()  # outer tx commits cleanly
