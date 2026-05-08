@@ -365,6 +365,85 @@ async def _head_size(client: httpx.AsyncClient, url: str) -> int:
     return int(length)
 
 
+_TRANSIENT_HTTPX_ERRORS = (
+    httpx.ConnectError,
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.PoolTimeout,
+    httpx.RemoteProtocolError,
+    httpx.NetworkError,
+)
+
+
+async def _download_one_with_retry(
+    client: httpx.AsyncClient,
+    archive: BulkArchive,
+    target_dir: Path,
+    *,
+    chunk_size: int = 1024 * 1024,
+    max_attempts: int = 3,
+    backoff_base_s: float = 2.0,
+) -> ArchiveDownloadResult:
+    """Wrap ``_download_one`` with retry-on-transient-error.
+
+    First live test: 3 of 18 archives failed mid-transfer (network
+    flakes — N-PORT 463 MB × 4). PR1 marked the stage error and
+    blocked Phase C, but a single TCP hiccup shouldn't condemn
+    the whole bulk pipeline. Retry transient ``httpx`` errors with
+    exponential backoff before declaring the archive failed.
+
+    Resume-from-partial in ``_download_one`` means each retry picks
+    up where the prior left off — no wasted bandwidth on the bytes
+    already received.
+
+    Codex sweep BLOCKING for #1020.
+    """
+    last_error: str | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = await _download_one(client, archive, target_dir, chunk_size=chunk_size)
+        except _TRANSIENT_HTTPX_ERRORS as exc:
+            last_error = f"transient error attempt {attempt}: {type(exc).__name__}: {exc}"
+            logger.warning("download retry: %s — %s", archive.name, last_error)
+        else:
+            # On non-transient error in `result.error`, retry once
+            # in case the server briefly returned 5xx; otherwise
+            # the result is final.
+            if result.error is None:
+                return result
+            # Detect transient-shaped error strings inside the result
+            # (the underlying try/except in _download_one converted them
+            # to ArchiveDownloadResult.error).
+            err = result.error
+            if any(
+                tok in err
+                for tok in (
+                    "ConnectError",
+                    "ReadTimeout",
+                    "WriteTimeout",
+                    "PoolTimeout",
+                    "RemoteProtocolError",
+                    "NetworkError",
+                )
+            ):
+                last_error = f"transient (in result) attempt {attempt}: {err}"
+                logger.warning("download retry: %s — %s", archive.name, last_error)
+            else:
+                # Non-transient (e.g. floor mismatch, ZIP corrupt).
+                # Don't retry — the cause won't change.
+                return result
+        if attempt < max_attempts:
+            wait_s = backoff_base_s * (2 ** (attempt - 1))
+            logger.info("download retry: sleeping %.1fs before attempt %d", wait_s, attempt + 1)
+            await asyncio.sleep(wait_s)
+    return ArchiveDownloadResult(
+        name=archive.name,
+        path=None,
+        bytes_downloaded=0,
+        error=last_error or f"download failed after {max_attempts} attempts",
+    )
+
+
 async def _download_one(
     client: httpx.AsyncClient,
     archive: BulkArchive,
@@ -654,7 +733,9 @@ async def download_bulk_archives(
 
         async def _bounded(archive: BulkArchive) -> ArchiveDownloadResult:
             async with sem:
-                return await _download_one(client, archive, target_dir)
+                # Use the retry wrapper so transient network blips
+                # (Codex sweep BLOCKING) don't condemn an archive.
+                return await _download_one_with_retry(client, archive, target_dir)
 
         results = await asyncio.gather(*(_bounded(a) for a in archives))
 

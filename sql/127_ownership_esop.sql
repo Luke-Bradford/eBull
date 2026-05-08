@@ -64,7 +64,7 @@ BEGIN;
 -- ownership_esop_observations — append-only fact log
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ownership_esop_observations (
-    instrument_id           INTEGER NOT NULL,
+    instrument_id           BIGINT NOT NULL,
     plan_name               TEXT NOT NULL,
     plan_trustee_name       TEXT,
     plan_trustee_cik        TEXT,
@@ -132,7 +132,7 @@ CREATE INDEX IF NOT EXISTS idx_esop_obs_trustee_cik
 -- ownership_esop_current — materialised latest-per-plan snapshot
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ownership_esop_current (
-    instrument_id           INTEGER NOT NULL,
+    instrument_id           BIGINT NOT NULL,
     plan_name               TEXT NOT NULL,
     plan_trustee_name       TEXT,
     plan_trustee_cik        TEXT,

@@ -120,17 +120,18 @@ _STAGE_REQUIRES: Final[dict[str, tuple[str, ...]]] = {
     "sec_nport_ingest_from_dataset": ("sec_bulk_download", "cusip_universe_backfill"),
     # Phase C' — secondary-pages walker (rate-bound)
     "sec_submissions_files_walk": ("sec_submissions_ingest",),
-    # Legacy chain — keeps fallback if any bulk path failed.
-    # Required upstream: universe_sync (B-stages handled by graph).
-    "filings_history_seed": ("universe_sync",),
-    "sec_first_install_drain": ("universe_sync",),
+    # Legacy chain — fallback when bulk path failed.
+    # All require cik_refresh because their per-CIK fetches need
+    # the CIK mapping populated first (Codex sweep BLOCKING).
+    "filings_history_seed": ("cik_refresh",),
+    "sec_first_install_drain": ("cik_refresh",),
     "sec_def14a_bootstrap": ("sec_submissions_ingest", "sec_submissions_files_walk"),
     "sec_business_summary_bootstrap": ("sec_submissions_ingest", "sec_submissions_files_walk"),
-    "sec_insider_transactions_backfill": ("universe_sync",),
-    "sec_form3_ingest": ("universe_sync",),
+    "sec_insider_transactions_backfill": ("cik_refresh",),
+    "sec_form3_ingest": ("cik_refresh",),
     "sec_8k_events_ingest": ("sec_submissions_ingest", "sec_submissions_files_walk"),
-    "sec_13f_recent_sweep": ("universe_sync",),
-    "sec_n_port_ingest": ("universe_sync",),
+    "sec_13f_recent_sweep": ("cik_refresh",),
+    "sec_n_port_ingest": ("cik_refresh",),
     "ownership_observations_backfill": (
         "sec_13f_ingest_from_dataset",
         "sec_insider_ingest_from_dataset",

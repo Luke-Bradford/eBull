@@ -25,7 +25,7 @@
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS ownership_blockholders_observations (
-    instrument_id           INTEGER NOT NULL,
+    instrument_id           BIGINT NOT NULL,
     reporter_cik            TEXT NOT NULL,         -- primary filer cik per #837 lesson
     reporter_name           TEXT NOT NULL,
     ownership_nature        TEXT NOT NULL
@@ -100,7 +100,7 @@ CREATE INDEX IF NOT EXISTS idx_block_obs_reporter_period
 
 
 CREATE TABLE IF NOT EXISTS ownership_blockholders_current (
-    instrument_id           INTEGER NOT NULL,
+    instrument_id           BIGINT NOT NULL,
     reporter_cik            TEXT NOT NULL,
     reporter_name           TEXT NOT NULL,
     ownership_nature        TEXT NOT NULL

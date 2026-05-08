@@ -211,11 +211,15 @@ def test_bootstrap_partial_error_then_retry_failed(
 
     # Pass 2 should have called only the failed stage + later-numbered SEC-lane peers.
     # The init + eToro stages stay 'success' from pass 1 and are skipped.
+    # Cross-lane downstreams (e.g. fundamentals_sync on db lane) ALSO stay
+    # 'success' from pass 1 — reset_failed_stages_for_retry only walks the
+    # SAME lane as the failed stage, see bootstrap_state.reset_failed_stages_for_retry.
     assert "nightly_universe_sync" not in calls_pass2["order"]
     assert "daily_candle_refresh" not in calls_pass2["order"]
-    # Failed stage and downstream peers re-fired.
+    assert "fundamentals_sync" not in calls_pass2["order"]
+    # Failed stage and downstream peers in the SAME (sec_rate) lane re-fired.
     assert "sec_def14a_bootstrap" in calls_pass2["order"]
-    assert "fundamentals_sync" in calls_pass2["order"]
+    assert "sec_business_summary_bootstrap" in calls_pass2["order"]
 
     state = read_state(ebull_test_conn)
     assert state.status == "complete"

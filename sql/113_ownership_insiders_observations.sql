@@ -43,7 +43,7 @@ BEGIN;
 -- ownership_insiders_observations — append-only fact log
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ownership_insiders_observations (
-    instrument_id           INTEGER NOT NULL,
+    instrument_id           BIGINT NOT NULL,
     holder_cik              TEXT,                      -- nullable: legacy NULL-CIK Form 4 rows
     holder_name             TEXT NOT NULL,
     holder_identity_key     TEXT NOT NULL GENERATED ALWAYS AS (
@@ -123,7 +123,7 @@ CREATE INDEX IF NOT EXISTS idx_insiders_obs_holder_period
 -- guard if the lock is ever bypassed.
 
 CREATE TABLE IF NOT EXISTS ownership_insiders_current (
-    instrument_id           INTEGER NOT NULL,
+    instrument_id           BIGINT NOT NULL,
     holder_cik              TEXT,
     holder_name             TEXT NOT NULL,
     holder_identity_key     TEXT NOT NULL,

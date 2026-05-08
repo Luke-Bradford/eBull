@@ -31,7 +31,7 @@ import csv
 import io
 import logging
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -64,6 +64,7 @@ class NPortIngestResult:
     rows_skipped_missing_series: int = 0
     rows_skipped_bad_data: int = 0
     parse_errors: int = 0
+    touched_instrument_ids: set[int] = field(default_factory=set)
 
 
 # ---------------------------------------------------------------------------
@@ -104,22 +105,26 @@ def _parse_decimal(value: str | None) -> Decimal | None:
         return None
 
 
-def _resolve_cusip(conn: psycopg.Connection[Any], cusip: str) -> int | None:
-    """CUSIP → instrument lookup via ``external_identifiers``."""
-    cur = conn.execute(
-        """
-        SELECT instrument_id
-        FROM external_identifiers
-        WHERE provider = 'sec'
-          AND identifier_type = 'cusip'
-          AND identifier_value = %(cusip)s
-        ORDER BY is_primary DESC, external_identifier_id ASC
-        LIMIT 1
-        """,
-        {"cusip": cusip.strip().upper()},
-    )
-    row = cur.fetchone()
-    return int(row[0]) if row is not None else None
+def _load_cusip_map(conn: psycopg.Connection[Any]) -> dict[str, int]:
+    """Preload the SEC CUSIP → instrument_id map (perf, Codex sweep BLOCKING).
+
+    See ``sec_13f_dataset_ingest._load_cusip_map`` for rationale —
+    same pattern duplicated here to keep ingester modules independent.
+    """
+    out: dict[str, int] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT identifier_value, instrument_id
+            FROM external_identifiers
+            WHERE provider = 'sec' AND identifier_type = 'cusip'
+            ORDER BY is_primary DESC, external_identifier_id ASC
+            """,
+        )
+        for row in cur.fetchall():
+            cusip, instrument_id = row
+            out.setdefault(str(cusip).strip().upper(), int(instrument_id))
+    return out
 
 
 def _open_tsv(zf: zipfile.ZipFile, *candidate_names: str) -> list[dict[str, str]]:
@@ -196,6 +201,7 @@ def ingest_nport_dataset_archive(
     if ingest_run_id is None:
         ingest_run_id = uuid4()
     result = NPortIngestResult()
+    cusip_map = _load_cusip_map(conn)
 
     with zipfile.ZipFile(archive_path) as zf:
         submissions = _open_tsv(zf, "SUBMISSION.tsv")
@@ -259,7 +265,7 @@ def ingest_nport_dataset_archive(
             if not cusip:
                 result.rows_skipped_unresolved_cusip += 1
                 continue
-            instrument_id = _resolve_cusip(conn, cusip)
+            instrument_id = cusip_map.get(cusip)
             if instrument_id is None:
                 result.rows_skipped_unresolved_cusip += 1
                 continue
@@ -335,27 +341,36 @@ def ingest_nport_dataset_archive(
             else:
                 market_value_usd = None
 
+            # Per-row savepoint: a CHECK violation on one malformed
+            # holding row would otherwise put psycopg into
+            # ``InFailedSqlTransaction`` for every subsequent
+            # ``record_fund_observation`` call. Wrapping each write
+            # in ``conn.transaction()`` rolls back the bad row cleanly
+            # so the loop keeps processing. Codex pre-push BLOCKING
+            # for #1020.
             try:
-                record_fund_observation(
-                    conn,
-                    instrument_id=instrument_id,
-                    fund_series_id=series_id,
-                    fund_series_name=series_name or f"Series {series_id}",
-                    fund_filer_cik=filer_cik,
-                    source_document_id=source_document_id,
-                    source_accession=accn,
-                    source_field=holding_id,
-                    source_url=source_url,
-                    filed_at=filed_at,
-                    period_start=None,
-                    period_end=period_end,
-                    ingest_run_id=ingest_run_id,
-                    shares=balance,
-                    market_value_usd=market_value_usd,
-                    payoff_profile=payoff,
-                    asset_category=asset_cat,
-                )
+                with conn.transaction():
+                    record_fund_observation(
+                        conn,
+                        instrument_id=instrument_id,
+                        fund_series_id=series_id,
+                        fund_series_name=series_name or f"Series {series_id}",
+                        fund_filer_cik=filer_cik,
+                        source_document_id=source_document_id,
+                        source_accession=accn,
+                        source_field=holding_id,
+                        source_url=source_url,
+                        filed_at=filed_at,
+                        period_start=None,
+                        period_end=period_end,
+                        ingest_run_id=ingest_run_id,
+                        shares=balance,
+                        market_value_usd=market_value_usd,
+                        payoff_profile=payoff,
+                        asset_category=asset_cat,
+                    )
                 result.rows_written += 1
+                result.touched_instrument_ids.add(instrument_id)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "nport ingest: record_fund_observation failed for %s/%s: %s",

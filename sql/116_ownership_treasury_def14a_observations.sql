@@ -25,7 +25,7 @@ BEGIN;
 -- Treasury observations
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ownership_treasury_observations (
-    instrument_id           INTEGER NOT NULL,
+    instrument_id           BIGINT NOT NULL,
     ownership_nature        TEXT NOT NULL DEFAULT 'economic'
         CHECK (ownership_nature IN ('direct', 'indirect', 'beneficial', 'voting', 'economic')),
 
@@ -78,7 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_treasury_obs_instrument_period
     ON ownership_treasury_observations (instrument_id, period_end DESC);
 
 CREATE TABLE IF NOT EXISTS ownership_treasury_current (
-    instrument_id           INTEGER NOT NULL,
+    instrument_id           BIGINT NOT NULL,
     ownership_nature        TEXT NOT NULL DEFAULT 'economic'
         CHECK (ownership_nature IN ('direct', 'indirect', 'beneficial', 'voting', 'economic')),
 
@@ -105,7 +105,7 @@ COMMENT ON TABLE ownership_treasury_current IS
 -- DEF 14A observations
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ownership_def14a_observations (
-    instrument_id           INTEGER NOT NULL,
+    instrument_id           BIGINT NOT NULL,
     holder_name             TEXT NOT NULL,
     holder_name_key         TEXT NOT NULL GENERATED ALWAYS AS (lower(trim(holder_name))) STORED,
     holder_role             TEXT,
@@ -166,7 +166,7 @@ CREATE INDEX IF NOT EXISTS idx_def14a_obs_holder_period
 
 
 CREATE TABLE IF NOT EXISTS ownership_def14a_current (
-    instrument_id           INTEGER NOT NULL,
+    instrument_id           BIGINT NOT NULL,
     holder_name             TEXT NOT NULL,
     holder_name_key         TEXT NOT NULL,
     holder_role             TEXT,

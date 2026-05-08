@@ -139,15 +139,19 @@ class TestInventory:
 
 
 class TestPreflightCleanup:
-    def test_removes_partial_files_keeps_complete_zips(self, tmp_path: Path) -> None:
-        # Pre-existing complete archive must be preserved (resume path);
-        # stale .partial must be wiped (#1020 disk hygiene).
+    def test_removes_partial_and_complete_zips_for_run_manifest_contract(self, tmp_path: Path) -> None:
+        # Run-manifest provenance (#1020) demands every archive in the
+        # current run's manifest was physically downloaded in THIS run.
+        # Promoting a prior-run complete .zip into the manifest would let
+        # stale data pass provenance, so the pre-flight nukes BOTH
+        # complete .zip and stale .partial files. See
+        # _preflight_cleanup_stale_partials docstring.
         complete = tmp_path / "submissions.zip"
         complete.write_bytes(b"complete payload")
         partial = tmp_path / "companyfacts.zip.partial"
         partial.write_bytes(b"truncated payload")
         _preflight_cleanup_stale_partials(tmp_path)
-        assert complete.exists()
+        assert not complete.exists()
         assert not partial.exists()
 
     def test_no_op_when_dir_missing(self, tmp_path: Path) -> None:
