@@ -156,6 +156,32 @@ def reclassify_unknown_exchanges(
     """
     unknown_before = _count_unknown_exchanges(conn)
     with conn.cursor() as cur:
+        # Hard-coded overrides FIRST so the suffix-CTE doesn't
+        # mis-classify them as us_equity (e.g. exchange '1' = FX has
+        # no suffix and would match the 'no suffix + total_n>30 →
+        # us_equity' rule). Each override only fires when
+        # asset_class='unknown', preserving operator-curated values.
+        # Mirrors sql/068 lines 193-203 plus exchange_id='8' crypto.
+        cur.execute(
+            "UPDATE exchanges SET asset_class='fx', country=NULL, updated_at=NOW() "
+            "WHERE exchange_id='1' AND asset_class='unknown'"
+        )
+        cur.execute(
+            "UPDATE exchanges SET asset_class='commodity', country=NULL, updated_at=NOW() "
+            "WHERE exchange_id='2' AND asset_class='unknown'"
+        )
+        cur.execute(
+            "UPDATE exchanges SET asset_class='index', country=NULL, updated_at=NOW() "
+            "WHERE exchange_id='3' AND asset_class='unknown'"
+        )
+        cur.execute(
+            "UPDATE exchanges SET asset_class='crypto', country=NULL, updated_at=NOW() "
+            "WHERE exchange_id='8' AND asset_class='unknown'"
+        )
+        cur.execute(
+            "UPDATE exchanges SET asset_class='us_equity', country='US', updated_at=NOW() "
+            "WHERE exchange_id IN ('19','20') AND asset_class='unknown'"
+        )
         cur.execute(
             """
             WITH suffix_counts AS (
@@ -254,42 +280,6 @@ def reclassify_unknown_exchanges(
              WHERE e.exchange_id = m.exchange_id
                AND e.asset_class = 'unknown'
                AND m.asset_class IS NOT NULL
-            """
-        )
-        # Hard-coded overrides for known special exchange ids that
-        # the suffix heuristic can't disambiguate (FX/commodity/index/
-        # crypto exchanges with no consistent suffix). Mirrors
-        # sql/068 lines 193-203 plus exchange_id='8' (crypto, seeded
-        # in production via #503 PR 3 but historically left
-        # 'unknown' on dev installs).
-        cur.execute(
-            """
-            UPDATE exchanges SET asset_class = 'fx', country = NULL, updated_at = NOW()
-             WHERE exchange_id = '1' AND asset_class = 'unknown'
-            """
-        )
-        cur.execute(
-            """
-            UPDATE exchanges SET asset_class = 'commodity', country = NULL, updated_at = NOW()
-             WHERE exchange_id = '2' AND asset_class = 'unknown'
-            """
-        )
-        cur.execute(
-            """
-            UPDATE exchanges SET asset_class = 'index', country = NULL, updated_at = NOW()
-             WHERE exchange_id = '3' AND asset_class = 'unknown'
-            """
-        )
-        cur.execute(
-            """
-            UPDATE exchanges SET asset_class = 'crypto', country = NULL, updated_at = NOW()
-             WHERE exchange_id = '8' AND asset_class = 'unknown'
-            """
-        )
-        cur.execute(
-            """
-            UPDATE exchanges SET asset_class = 'us_equity', country = 'US', updated_at = NOW()
-             WHERE exchange_id IN ('19', '20') AND asset_class = 'unknown'
             """
         )
         cur.execute("SELECT COUNT(*) FROM exchanges")
