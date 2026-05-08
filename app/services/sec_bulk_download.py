@@ -44,7 +44,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import httpx
 
@@ -628,6 +628,7 @@ def write_run_manifest(
     *,
     bootstrap_run_id: int,
     archives: Sequence[ArchiveDownloadResult],
+    mode: Literal["bulk", "fallback"] = "bulk",
 ) -> None:
     """Persist a per-run archive manifest at ``<bulk>/.run_manifest.json``.
 
@@ -635,11 +636,17 @@ def write_run_manifest(
     the CURRENT bootstrap run, not a previous one. Stale archives left
     on disk from a prior run will have a different ``bootstrap_run_id``
     and fail the provenance check (Codex review BLOCKING for #1020).
+
+    ``mode='fallback'`` writes a stub manifest with no archives so
+    Phase C preconditions can detect intentional bypass and mark the
+    stage ``skipped`` instead of ``error``. See assert_archives_in_manifest
+    + BootstrapPhaseSkipped in app/services/bootstrap_preconditions.py.
     """
     import json
 
     manifest = {
         "bootstrap_run_id": bootstrap_run_id,
+        "mode": mode,
         "archives": [
             {
                 "name": r.name,
@@ -650,8 +657,15 @@ def write_run_manifest(
             if r.error is None and r.path is not None
         ],
     }
-    path = target_dir / RUN_MANIFEST_NAME
-    path.write_text(json.dumps(manifest))
+    # Atomic write: write to a sibling tempfile then rename. Without
+    # this, a crash mid-write leaves a partial JSON that read_run_manifest
+    # silently treats as "no manifest" → Phase C errors as "manifest
+    # missing" instead of detecting fallback. Codex pre-push LOW for
+    # #1041.
+    final_path = target_dir / RUN_MANIFEST_NAME
+    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(manifest))
+    tmp_path.replace(final_path)
 
 
 def read_run_manifest(target_dir: Path) -> dict | None:
@@ -887,6 +901,17 @@ def sec_bulk_download_job() -> None:
             result.measured_mbps,
             result.error,
         )
+        # Fallback manifest is part of the success contract — without
+        # it Phase C cannot detect intentional bypass and would error
+        # as "manifest missing". Refuse to mark stage success without
+        # a writable run_id, matching the bulk-mode contract above.
+        # Codex pre-push MEDIUM for #1041.
+        if run_id is None:
+            raise BootstrapPartialDownloadError(
+                "sec_bulk_download: could not determine current bootstrap_run_id; "
+                "fallback manifest cannot be written. Refuse to mark stage success."
+            )
+        write_run_manifest(target_dir, bootstrap_run_id=run_id, archives=[], mode="fallback")
     elif result.mode == "skipped_disk":
         # Disk pre-flight refused — surface as error so operator
         # knows to free space; downstream Phase C will be `blocked`.
