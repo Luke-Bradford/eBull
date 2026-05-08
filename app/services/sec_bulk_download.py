@@ -513,6 +513,16 @@ async def download_bulk_archives(
         )
 
     archives = archives if archives is not None else build_bulk_archive_inventory()
+    if not archives:
+        # Defensive guard for callers that pass an empty list (e.g. a
+        # test that wants to exercise only the disk-preflight branch).
+        # Without this the bandwidth probe below would IndexError —
+        # PR review BLOCKING.
+        return BulkDownloadResult(
+            mode="bulk",
+            measured_mbps=None,
+            archives=[],
+        )
 
     async with _make_client(user_agent) as client:
         # Bandwidth probe against the first archive (submissions.zip).

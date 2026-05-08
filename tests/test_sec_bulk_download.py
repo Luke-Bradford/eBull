@@ -279,6 +279,23 @@ class TestDownloadBulkArchives:
         assert result.mode == "skipped_disk"
 
     @pytest.mark.asyncio
+    async def test_empty_archive_list_with_disk_pass_does_not_indexerror(
+        self, tmp_path: Path
+    ) -> None:
+        # Regression: if a caller passes archives=[] AND disk preflight
+        # passes, the bandwidth-probe path must NOT IndexError on
+        # archives[0]. Bot review BLOCKING.
+        result = await download_bulk_archives(
+            target_dir=tmp_path,
+            user_agent="ebull/test (admin@example.com)",
+            min_free_bytes=1,  # disk preflight will pass
+            archives=[],
+        )
+        assert result.mode == "bulk"
+        assert result.archives == []
+        assert result.measured_mbps is None
+
+    @pytest.mark.asyncio
     async def test_slow_connection_routes_to_fallback(self, tmp_path: Path) -> None:
         body = _build_zip_bytes()
         url = "https://example.test/archive.zip"
