@@ -88,15 +88,37 @@ def _load_cusip_map(conn: psycopg.Connection[Any]) -> dict[str, int]:
 
 
 def _parse_filing_date(value: str | None) -> datetime | None:
+    """Parse a filing-date that may be ISO or SEC's ``DD-MMM-YYYY``.
+
+    Real-world 13F dataset (verified 2026-05-08 against
+    form13f_01dec2025-28feb2026.zip) emits ``FILING_DATE`` as
+    ``31-DEC-2025``, NOT ISO. Without the fallback every 13F holding
+    is rejected as bad_data — verified with a probe ingest that
+    produced 0 rows_written.
+    """
     if not value:
         return None
+    text = value.strip()
     try:
-        return datetime.fromisoformat(value).replace(tzinfo=UTC)
+        return datetime.fromisoformat(text).replace(tzinfo=UTC)
     except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(text[:10]).replace(tzinfo=UTC)
+    except ValueError:
+        pass
+    for fmt in ("%d-%b-%Y", "%d-%b-%y"):
         try:
-            return datetime.fromisoformat(value[:10]).replace(tzinfo=UTC)
+            return datetime.strptime(text, fmt).replace(tzinfo=UTC)
         except ValueError:
-            return None
+            continue
+    titled = text.title()
+    for fmt in ("%d-%b-%Y", "%d-%b-%y"):
+        try:
+            return datetime.strptime(titled, fmt).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
 
 
 def _parse_period_end(value: str | None) -> date | None:
@@ -274,10 +296,33 @@ def ingest_13f_dataset_archive(
                 result.rows_skipped_bad_data += 1
                 continue
 
+            # SSHPRNAMT carries shares OR principal-amount depending on
+            # SSHPRNAMTTYPE (SH | PRN). PRN rows hold bond principal in
+            # dollars, NOT shares — must skip to avoid silent
+            # corruption (PR #1054 finding: 20k PRN rows in 2026Q1).
+            shprn_type = (row.get("SSHPRNAMTTYPE") or "").strip().upper()
+            if shprn_type and shprn_type != "SH":
+                result.rows_skipped_bad_data += 1
+                continue
             shares = _parse_decimal(row.get("SSHPRNAMT"))
-            value_thousands = _parse_decimal(row.get("VALUE"))
-            # SEC reports VALUE in $thousands. Multiply for canonical USD.
-            market_value_usd = (value_thousands * Decimal("1000")) if value_thousands is not None else None
+            # VALUE column unit changed 2023-01-03 — pre-cutover it
+            # was reported in $thousands, post-cutover in $dollars
+            # (SEC metadata FORM13F_metadata.json:
+            # "Starting on January 3, 2023, market value is reported
+            # rounded to the nearest dollar.  Previously, market value
+            # was reported in thousands."). Discriminate on FILED_AT
+            # (when the filer reported), NOT period_end — a 2022Q4
+            # restatement filed in March 2023 reports in dollars even
+            # though period_end is pre-cutover. Codex pre-push MEDIUM
+            # for #1054.
+            _VALUE_DOLLARS_CUTOVER = date(2023, 1, 3)
+            value_raw = _parse_decimal(row.get("VALUE"))
+            if value_raw is None:
+                market_value_usd = None
+            elif filed_at.date() >= _VALUE_DOLLARS_CUTOVER:
+                market_value_usd = value_raw
+            else:
+                market_value_usd = value_raw * Decimal("1000")
 
             voting_authority = _map_voting_authority(row)
             exposure_kind = _map_putcall(row.get("PUTCALL"))

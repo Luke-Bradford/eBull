@@ -200,8 +200,12 @@ class TestIngest13FDatasetArchive:
             assert nature == "economic"
             assert source == "13f"
             assert shares == Decimal("100000.0000")
-            # 5_000_000 thousands = 5_000_000_000 USD.
-            assert mv == Decimal("5000000000.00")
+            # Post-2023-01-03 SEC reports VALUE in dollars (not
+            # thousands) — period_end here is 2025-09-30 so no
+            # multiplier applied. SEC FORM13F_metadata.json column
+            # description: "Starting on January 3, 2023, market value
+            # is reported rounded to the nearest dollar."
+            assert mv == Decimal("5000000.00")
             assert voting == "SOLE"
             assert exposure == "EQUITY"
             assert period.isoformat() == "2025-09-30"
@@ -301,3 +305,146 @@ class TestIngest13FDatasetArchive:
             )
             kinds = [r[0] for r in cur.fetchall()]
             assert kinds == ["CALL", "EQUITY", "PUT"]
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestRealArchiveEdgeCases:
+    """Pin behaviour against real-archive edge cases discovered
+    2026-05-08 by ingesting form13f_01dec2025-28feb2026.zip
+    end-to-end (#1054)."""
+
+    def test_dd_mmm_yyyy_filing_date_format_parses(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        # Real SEC 13F dataset emits FILING_DATE as DD-MMM-YYYY
+        # ('31-DEC-2025'), NOT ISO. Pre-fix every row was rejected
+        # as bad_data — verified end-to-end produced 0 rows_written.
+        _seed_universe_with_cusip(ebull_test_conn, symbol="AAPL", cusip="037833100")
+        archive_bytes = _build_dataset_zip(
+            submissions=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "CIK": "1234567",
+                    "FILING_DATE": "31-DEC-2025",  # SEC dataset format
+                },
+            ],
+            coverpages=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "FILINGMANAGER_NAME": "Big Fund LLC",
+                    "REPORTCALENDARORQUARTER": "30-SEP-2025",
+                },
+            ],
+            infotable=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "CUSIP": "037833100",
+                    "VALUE": "1000",
+                    "SSHPRNAMT": "100",
+                    "SSHPRNAMTTYPE": "SH",
+                },
+            ],
+        )
+        archive_path = tmp_path / "form13f.zip"
+        archive_path.write_bytes(archive_bytes)
+        result = ingest_13f_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+        assert result.rows_written == 1, f"expected 1, got {result}"
+
+    def test_prn_rows_skipped_as_bad_data(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        # SSHPRNAMT carries shares (SH) OR principal-amount (PRN)
+        # depending on SSHPRNAMTTYPE. Real archive 2026Q1 had 20k
+        # PRN rows. Without filter they'd get stored as shares —
+        # silent data corruption.
+        _seed_universe_with_cusip(ebull_test_conn, symbol="AAPL", cusip="037833100")
+        archive_bytes = _build_dataset_zip(
+            submissions=[
+                {"ACCESSION_NUMBER": "0001234567-25-000001", "CIK": "1", "FILING_DATE": "2025-11-14"},
+            ],
+            coverpages=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "FILINGMANAGER_NAME": "Bond Fund",
+                    "REPORTCALENDARORQUARTER": "2025-09-30",
+                },
+            ],
+            infotable=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-25-000001",
+                    "CUSIP": "037833100",
+                    "VALUE": "1000",
+                    "SSHPRNAMT": "1000000",
+                    "SSHPRNAMTTYPE": "PRN",  # bond principal — must skip
+                },
+            ],
+        )
+        archive_path = tmp_path / "form13f.zip"
+        archive_path.write_bytes(archive_bytes)
+        result = ingest_13f_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+        assert result.rows_written == 0
+        assert result.rows_skipped_bad_data == 1
+
+    def test_value_pre_2023_cutover_multiplied_by_thousands(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        tmp_path: Path,
+    ) -> None:
+        # Pre-2023-01-03 SEC reported VALUE in $thousands.
+        # Post-cutover in dollars. SEC FORM13F_metadata.json:
+        # "Starting on January 3, 2023, market value is reported
+        # rounded to the nearest dollar."
+        iid = _seed_universe_with_cusip(ebull_test_conn, symbol="AAPL", cusip="037833100")
+        archive_bytes = _build_dataset_zip(
+            submissions=[
+                {"ACCESSION_NUMBER": "0001234567-22-000001", "CIK": "1", "FILING_DATE": "2022-12-15"},
+            ],
+            coverpages=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-22-000001",
+                    "FILINGMANAGER_NAME": "Old Fund",
+                    "REPORTCALENDARORQUARTER": "2022-09-30",  # pre-cutover
+                },
+            ],
+            infotable=[
+                {
+                    "ACCESSION_NUMBER": "0001234567-22-000001",
+                    "CUSIP": "037833100",
+                    "VALUE": "5000000",  # $thousands → 5B dollars
+                    "SSHPRNAMT": "100000",
+                    "SSHPRNAMTTYPE": "SH",
+                },
+            ],
+        )
+        archive_path = tmp_path / "form13f.zip"
+        archive_path.write_bytes(archive_bytes)
+        result = ingest_13f_dataset_archive(
+            conn=ebull_test_conn,
+            archive_path=archive_path,
+            ingest_run_id=uuid4(),
+        )
+        ebull_test_conn.commit()
+        assert result.rows_written == 1
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT market_value_usd FROM ownership_institutions_observations WHERE instrument_id=%s",
+                (iid,),
+            )
+            mv = cur.fetchone()[0]
+        # 5,000,000 thousands = 5B USD (pre-2023 multiplier applied).
+        assert mv == Decimal("5000000000.00")

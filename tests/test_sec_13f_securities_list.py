@@ -456,3 +456,113 @@ class TestBackfillCusipCoverage:
         backfill_cusip_coverage(conn, today=date(2026, 5, 5), fetch=_fake)
         # 2026-05-05 → most recent closed quarter is 2026 Q1.
         assert captured["q"] == (2026, 1)
+
+
+# ---------------------------------------------------------------------------
+# CUSIP matcher COM/CALL/PUT triplet handling (#1054)
+# ---------------------------------------------------------------------------
+
+
+class TestBestMatchCommonSharePreference:
+    """Pin the matcher's behaviour against the real-archive collision
+    pattern: SEC 13F Official List ALWAYS lists each issuer 3 times
+    (COM + CALL + PUT) sharing the same issuer name. Naive ambiguity
+    detection collapses every equity issuer."""
+
+    @staticmethod
+    def _bucket(rows: list[tuple[str, str, str]]) -> list:
+        from app.services.sec_13f_securities_list import ThirteenFSecurity
+
+        return [
+            (
+                "APPLE",
+                ThirteenFSecurity(
+                    cusip=cusip, issuer_name=name, description=desc, is_added_since_last=False, status="E"
+                ),
+            )
+            for cusip, name, desc in rows
+        ]
+
+    def test_com_call_put_collapses_to_com(self) -> None:
+        from app.services.cusip_resolver import MATCH_THRESHOLD
+        from app.services.sec_13f_securities_list import _best_match
+
+        bucket = self._bucket(
+            [
+                ("037833100", "APPLE INC", "COM"),
+                ("037833900", "APPLE INC", "CALL"),
+                ("037833950", "APPLE INC", "PUT"),
+            ]
+        )
+        best, ambig = _best_match("APPLE", bucket, threshold=MATCH_THRESHOLD)
+        assert best is not None
+        assert best.cusip == "037833100"
+        assert ambig is False
+
+    def test_unit_call_put_does_not_collapse_to_unit(self) -> None:
+        # SPAC unit CUSIPs are distinct from common-stock CUSIPs;
+        # without a COM row the matcher must NOT pick the UNIT row
+        # silently. Codex pre-push MEDIUM for #1054.
+        from app.services.cusip_resolver import MATCH_THRESHOLD
+        from app.services.sec_13f_securities_list import _best_match
+
+        bucket = self._bucket(
+            [
+                ("UNIT12345", "APPLE INC", "UNIT"),
+                ("OPTC12345", "APPLE INC", "CALL"),
+                ("OPTP12345", "APPLE INC", "PUT"),
+            ]
+        )
+        best, ambig = _best_match("APPLE", bucket, threshold=MATCH_THRESHOLD)
+        # No common-share row → no collapse; ambig stays True since
+        # UNIT vs CALL/PUT remain distinct CUSIPs.
+        assert ambig is True
+
+    def test_distinct_issuers_at_top_score_stay_ambiguous(self) -> None:
+        # True share-class collision: distinct issuers normalising to
+        # same first-token name. Must remain ambiguous.
+        from app.services.cusip_resolver import MATCH_THRESHOLD
+        from app.services.sec_13f_securities_list import ThirteenFSecurity, _best_match
+
+        bucket = [
+            (
+                "APPLE",
+                ThirteenFSecurity(
+                    cusip="037833100",
+                    issuer_name="APPLE INC",
+                    description="COM",
+                    is_added_since_last=False,
+                    status="E",
+                ),
+            ),
+            (
+                "APPLE",
+                ThirteenFSecurity(
+                    cusip="03784Y200",
+                    issuer_name="APPLE HOSPITALITY REIT INC",
+                    description="COM NEW",
+                    is_added_since_last=False,
+                    status="E",
+                ),
+            ),
+        ]
+        # With score-1.0 to "APPLE" the COM/COM-NEW tie is real.
+        best, ambig = _best_match("APPLE", bucket, threshold=MATCH_THRESHOLD)
+        assert ambig is True
+
+
+class TestParseDateNPORT:
+    def test_dd_mmm_yyyy_format_parses(self) -> None:
+        # Regression for #1054: real N-PORT archive emits
+        # `25-FEB-2026` for FILING_DATE and `31-DEC-2025` for
+        # REPORT_ENDING_PERIOD. ISO-only parser silently dropped
+        # every row.
+        from app.services.sec_nport_dataset_ingest import _parse_filing_date, _parse_iso_date
+
+        d = _parse_iso_date("31-DEC-2025")
+        assert d is not None
+        assert d.isoformat() == "2025-12-31"
+
+        ts = _parse_filing_date("25-FEB-2026")
+        assert ts is not None
+        assert ts.date().isoformat() == "2026-02-25"
