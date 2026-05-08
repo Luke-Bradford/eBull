@@ -35,20 +35,17 @@ logger = logging.getLogger(__name__)
 
 
 # Default coverage ratios. Operator overrides via env vars.
-# CIK coverage: SEC's company_tickers.json maps every US-registered
-# company on a major exchange. A 50% floor is reasonable — most
-# us_equity instruments map. Fresh-install observation 2026-05-08:
-# 5,078 / 6,590 = 77%.
-DEFAULT_MIN_CIK_COVERAGE_RATIO = float(os.environ.get("BOOTSTRAP_MIN_CIK_COVERAGE_RATIO", "0.50"))
-
-# CUSIP coverage: SEC 13F Official List has ~24k entries; not every
-# us_equity instrument files 13F (small caps, recently-listed,
-# non-issuer). Fresh-install observation 2026-05-08 (post-#1057
-# COM-preference fix + post-#1060 us_equity-scoped cohort):
-# 2,858 / 7,151 = 40%. 30% floor leaves headroom for normal week-
-# on-week churn while still catching a totally-broken backfill.
-# #1060.
-DEFAULT_MIN_CUSIP_COVERAGE_RATIO = float(os.environ.get("BOOTSTRAP_MIN_CUSIP_COVERAGE_RATIO", "0.30"))
+# Coverage floors are advisory by default — bulk ingest is correct
+# at any coverage ratio (SEC publishes archives independently of our
+# mapping coverage; the ingester writes rows for any CUSIP/CIK that
+# maps and drops the rest). No reference SEC ETL impl
+# (datamule / edgartools / secedgar) gates ingest on a coverage
+# floor. We log the ratio for operator visibility but DO NOT fail
+# the precondition — the bulk archives ingest independently of how
+# many of our universe instruments are mapped. Operator can override
+# via env to enforce a hard gate. (#1061)
+DEFAULT_MIN_CIK_COVERAGE_RATIO = float(os.environ.get("BOOTSTRAP_MIN_CIK_COVERAGE_RATIO", "0.0"))
+DEFAULT_MIN_CUSIP_COVERAGE_RATIO = float(os.environ.get("BOOTSTRAP_MIN_CUSIP_COVERAGE_RATIO", "0.0"))
 
 
 class BootstrapPreconditionError(RuntimeError):
@@ -238,16 +235,25 @@ def assert_cik_coverage(
     *,
     min_ratio: float = DEFAULT_MIN_CIK_COVERAGE_RATIO,
 ) -> None:
-    """Raise unless CIK coverage in the US-equity cohort meets the floor."""
+    """Log CIK coverage; raise only when an empty cohort indicates
+    universe_sync didn't run, OR when an explicit non-zero floor
+    is configured and not met (#1061)."""
     coverage = compute_cik_coverage(conn)
     if coverage.cohort == 0:
         raise BootstrapPreconditionError(
             "PRECONDITION: CIK cohort is empty (no tradable us_equity instruments); A1 universe_sync may have not run."
         )
-    if coverage.ratio < min_ratio:
+    logger.info(
+        "CIK coverage: %d/%d = %.2f%% (floor %.0f%%)",
+        coverage.mapped,
+        coverage.cohort,
+        coverage.ratio * 100,
+        min_ratio * 100,
+    )
+    if min_ratio > 0 and coverage.ratio < min_ratio:
         raise BootstrapPreconditionError(
             f"PRECONDITION: CIK coverage {coverage.mapped}/{coverage.cohort} "
-            f"= {coverage.ratio:.2%} below floor {min_ratio:.0%}; "
+            f"= {coverage.ratio:.2%} below operator-configured floor {min_ratio:.0%}; "
             f"daily_cik_refresh has not adequately mapped the current universe."
         )
 
@@ -257,16 +263,25 @@ def assert_cusip_coverage(
     *,
     min_ratio: float = DEFAULT_MIN_CUSIP_COVERAGE_RATIO,
 ) -> None:
-    """Raise unless CUSIP coverage in the named-tradable cohort meets the floor."""
+    """Log CUSIP coverage; raise only when an empty cohort indicates
+    universe_sync didn't run, OR when an explicit non-zero floor is
+    configured and not met (#1061)."""
     coverage = compute_cusip_coverage(conn)
     if coverage.cohort == 0:
         raise BootstrapPreconditionError(
             "PRECONDITION: CUSIP cohort is empty (no tradable named instruments); A1 universe_sync may have not run."
         )
-    if coverage.ratio < min_ratio:
+    logger.info(
+        "CUSIP coverage: %d/%d = %.2f%% (floor %.0f%%)",
+        coverage.mapped,
+        coverage.cohort,
+        coverage.ratio * 100,
+        min_ratio * 100,
+    )
+    if min_ratio > 0 and coverage.ratio < min_ratio:
         raise BootstrapPreconditionError(
             f"PRECONDITION: CUSIP coverage {coverage.mapped}/{coverage.cohort} "
-            f"= {coverage.ratio:.2%} below floor {min_ratio:.0%}; "
+            f"= {coverage.ratio:.2%} below operator-configured floor {min_ratio:.0%}; "
             f"cusip_universe_backfill has not adequately mapped the current universe."
         )
 
