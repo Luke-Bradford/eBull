@@ -347,6 +347,39 @@ def mark_stage_error(
     )
 
 
+def mark_stage_skipped(
+    conn: psycopg.Connection[Any],
+    *,
+    run_id: int,
+    stage_key: str,
+    reason: str,
+) -> None:
+    """Mark a stage as ``skipped`` — operator-policy bypass.
+
+    Distinct from ``blocked`` (which means upstream failure forced
+    the skip). ``skipped`` is the right state for intentional bypass
+    paths like the slow-connection fallback (#1041) where Phase C
+    is bypassed in favour of the legacy chain. ``finalize_run`` does
+    NOT count ``skipped`` as a failure, so the run still reaches
+    ``complete`` when only skips remain.
+    """
+    conn.execute(
+        """
+        UPDATE bootstrap_stages
+           SET status       = 'skipped',
+               completed_at = now(),
+               last_error   = %(reason)s
+         WHERE bootstrap_run_id = %(run_id)s
+           AND stage_key        = %(stage_key)s
+        """,
+        {
+            "run_id": run_id,
+            "stage_key": stage_key,
+            "reason": reason[:1000],
+        },
+    )
+
+
 def mark_stage_blocked(
     conn: psycopg.Connection[Any],
     *,
@@ -640,8 +673,10 @@ __all__ = [
     "StageStatus",
     "finalize_run",
     "force_mark_complete",
+    "mark_stage_blocked",
     "mark_stage_error",
     "mark_stage_running",
+    "mark_stage_skipped",
     "mark_stage_success",
     "read_latest_run_with_stages",
     "read_state",

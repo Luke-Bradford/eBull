@@ -44,12 +44,14 @@ import psycopg
 
 from app.config import settings
 from app.jobs.locks import JobAlreadyRunning, JobLock
+from app.services.bootstrap_preconditions import BootstrapPhaseSkipped
 from app.services.bootstrap_state import (
     StageSpec,
     finalize_run,
     mark_stage_blocked,
     mark_stage_error,
     mark_stage_running,
+    mark_stage_skipped,
     mark_stage_success,
     read_latest_run_with_stages,
 )
@@ -133,9 +135,20 @@ _STAGE_REQUIRES: Final[dict[str, tuple[str, ...]]] = {
     "sec_13f_recent_sweep": ("cik_refresh",),
     "sec_n_port_ingest": ("cik_refresh",),
     "ownership_observations_backfill": (
+        # Bulk path — direct writes to ownership_*_observations.
         "sec_13f_ingest_from_dataset",
         "sec_insider_ingest_from_dataset",
         "sec_nport_ingest_from_dataset",
+        # Legacy chain — populates the legacy typed tables
+        # (insider_transactions, institutional_holdings, n_port_*) that
+        # the backfill mirrors into observations. In fallback mode the
+        # bulk stages skip, so the legacy chain becomes the sole source;
+        # without these requires the backfill could fire BEFORE the
+        # legacy chain populates rows. Codex pre-push BLOCKING for #1041.
+        "sec_insider_transactions_backfill",
+        "sec_form3_ingest",
+        "sec_13f_recent_sweep",
+        "sec_n_port_ingest",
     ),
     "fundamentals_sync": ("sec_companyfacts_ingest",),
 }
@@ -252,6 +265,7 @@ class _StageOutcome:
     stage_key: str
     success: bool
     error: str | None
+    skipped: bool = False
 
 
 def _run_one_stage(
@@ -287,6 +301,17 @@ def _run_one_stage(
             mark_stage_error(conn, run_id=run_id, stage_key=stage_key, error_message=message)
             conn.commit()
         return _StageOutcome(stage_key=stage_key, success=False, error=message)
+    except BootstrapPhaseSkipped as exc:
+        # Operator-policy skip: A3 wrote a fallback manifest because
+        # bandwidth was below threshold, and the legacy chain handles
+        # ingest. Mark the stage `skipped` so finalize_run does NOT
+        # count it as a failure (#1041).
+        message = f"skipped: {exc}"
+        logger.info("bootstrap stage %s skipped: %s", stage_key, exc)
+        with psycopg.connect(database_url) as conn:
+            mark_stage_skipped(conn, run_id=run_id, stage_key=stage_key, reason=message)
+            conn.commit()
+        return _StageOutcome(stage_key=stage_key, success=True, error=None, skipped=True)
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}"
         logger.exception("bootstrap stage %s raised; lane continues", stage_key)
@@ -541,10 +566,14 @@ def _phase_batched_dispatch(
 
         for stage_key, fut in all_futures:
             outcome = fut.result()
-            statuses[stage_key] = "success" if outcome.success else "error"
-            if outcome.success:
+            if outcome.skipped:
+                statuses[stage_key] = "skipped"
+                logger.info("bootstrap dispatcher: %s SKIPPED", stage_key)
+            elif outcome.success:
+                statuses[stage_key] = "success"
                 logger.info("bootstrap dispatcher: %s OK", stage_key)
             else:
+                statuses[stage_key] = "error"
                 logger.warning("bootstrap dispatcher: %s ERROR (%s)", stage_key, outcome.error)
 
     return statuses
