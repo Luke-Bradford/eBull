@@ -438,8 +438,14 @@ def run_with_prelude(
     *,
     bypass_fence_check: bool = False,
     linked_request_id: int | None = None,
-) -> None:
+) -> bool:
     """Run ``invoker`` after the lock+fence prelude.
+
+    Returns True when the invoker was called, False when the prelude
+    wrote a ``status='skipped'`` row and the invoker was not called
+    (full-wash fence held). Caller uses the return to decide queue-row
+    transitions — a skipped run must NOT be marked completed (PR #1072
+    review BLOCKING — `mark_request_completed` after skip).
 
     No-op when the fence is held. The caller (``_wrap_invoker`` /
     ``_run_manual``) does not need to handle the skip path — this
@@ -474,12 +480,13 @@ def run_with_prelude(
         linked_request_id=linked_request_id,
     )
     if run_id is None:
-        return  # fence held; skipped row already committed
+        return False  # fence held; skipped row already committed
     token = _prelude_run_id.set(run_id)
     try:
         invoker()
     finally:
         _prelude_run_id.reset(token)
+    return True
 
 
 class UnknownJob(KeyError):
@@ -1158,15 +1165,29 @@ class JobRuntime:
                         # never finalises. Bootstrap's fence is
                         # ``bootstrap_state.status``, not a queue row.
                         invoker()
+                        invoked = True
                     else:
-                        run_with_prelude(
+                        invoked = run_with_prelude(
                             self._database_url,
                             job_name,
                             invoker,
                             bypass_fence_check=bypass_fence_check,
                             linked_request_id=request_id,
                         )
-                    if request_id is not None:
+                    if request_id is not None and not invoked:
+                        # Prelude wrote a 'skipped' job_runs row +
+                        # returned without invoking. Mark the queue row
+                        # rejected so the operator's `/jobs/requests`
+                        # view reflects reality (PR #1072 review BLOCKING
+                        # — `mark_request_completed` after skip masks
+                        # the audit trail).
+                        with psycopg.connect(self._database_url, autocommit=True) as conn:
+                            mark_request_rejected(
+                                conn,
+                                request_id,
+                                error_msg=_FENCE_HELD_ERROR_MSG,
+                            )
+                    elif request_id is not None:
                         with psycopg.connect(self._database_url, autocommit=True) as conn:
                             mark_request_completed(conn, request_id)
             except JobAlreadyRunning:

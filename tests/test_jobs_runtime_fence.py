@@ -64,7 +64,7 @@ def test_prelude_no_fence_writes_running_row_and_runs_invoker(
     def _invoker() -> None:
         captured_run_id.append(jobs_runtime.consume_prelude_run_id())
 
-    jobs_runtime.run_with_prelude(test_database_url(), "fence_test_no_fence", _invoker)
+    invoked_signal = jobs_runtime.run_with_prelude(test_database_url(), "fence_test_no_fence", _invoker)
 
     # Reload from a fresh connection-side snapshot.
     ebull_test_conn.rollback()  # release any open implicit tx
@@ -73,6 +73,7 @@ def test_prelude_no_fence_writes_running_row_and_runs_invoker(
     assert error_msg is None
     # The invoker captured the same run_id the prelude wrote.
     assert captured_run_id == [run_id]
+    assert invoked_signal is True
 
 
 def test_prelude_fence_held_writes_skipped_and_does_not_run_invoker(
@@ -96,7 +97,7 @@ def test_prelude_fence_held_writes_skipped_and_does_not_run_invoker(
     def _invoker() -> None:
         invoked.append(True)
 
-    jobs_runtime.run_with_prelude(test_database_url(), "fence_test_held", _invoker)
+    invoked_signal = jobs_runtime.run_with_prelude(test_database_url(), "fence_test_held", _invoker)
 
     ebull_test_conn.rollback()
     _, status, error_msg = _read_latest_job_run(ebull_test_conn, job_name="fence_test_held")
@@ -104,6 +105,9 @@ def test_prelude_fence_held_writes_skipped_and_does_not_run_invoker(
     assert error_msg == "full-wash in progress for this process"
     # Invoker was skipped — caller observes a clean no-op return.
     assert invoked == []
+    # Return value gates the queue-row transition in _run_manual
+    # (PR #1072 review BLOCKING fix).
+    assert invoked_signal is False
 
 
 def test_prelude_bypass_fence_runs_invoker_even_with_fence_row(

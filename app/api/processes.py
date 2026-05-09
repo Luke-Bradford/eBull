@@ -489,6 +489,13 @@ def _check_bootstrap_preconditions(conn: psycopg.Connection[Any], *, mode: Liter
         )
     if state == "running":
         raise _conflict("bootstrap_already_running", advice="cancel first or wait for completion")
+    # Fence check FIRST so an iterate-with-fence-active trigger reports
+    # the spec-aligned ``full_wash_already_pending`` reason (which the
+    # FE renders as "wait for the active full-wash"), rather than the
+    # less-specific ``iterate_already_pending`` it would get from the
+    # inflight check that follows. PR #1072 review WARNING.
+    if _has_pending_full_wash_fence(conn, process_id="bootstrap"):
+        raise _conflict("full_wash_already_pending", advice="wait for the active full-wash")
     if _has_inflight_manual_job(conn, job_name=JOB_BOOTSTRAP_ORCHESTRATOR):
         # A queued bootstrap trigger is awaiting dispatch. Without this
         # check, the second trigger could land while bootstrap_state is
@@ -507,8 +514,6 @@ def _check_bootstrap_preconditions(conn: psycopg.Connection[Any], *, mode: Liter
             "bootstrap_not_resumable",
             advice=(f"iterate is retry-failed; current state is {state!r}, no failed stages to resume"),
         )
-    if _has_pending_full_wash_fence(conn, process_id="bootstrap"):
-        raise _conflict("full_wash_already_pending", advice="wait for the active full-wash")
 
 
 def _check_scheduled_job_preconditions(conn: psycopg.Connection[Any], *, job_name: str) -> None:
@@ -528,13 +533,17 @@ def _check_scheduled_job_preconditions(conn: psycopg.Connection[Any], *, job_nam
     """
     if _kill_switch_active(conn):
         raise _conflict("kill_switch_active", advice="deactivate kill switch")
+    # Fence check FIRST per PR #1072 review WARNING — full-wash fence
+    # blocks iterate too, and the spec-aligned reason is
+    # ``full_wash_already_pending`` (which the FE renders as a different
+    # tooltip than plain dedup).
+    if _has_pending_full_wash_fence(conn, process_id=job_name):
+        raise _conflict("full_wash_already_pending", advice="wait for the active full-wash")
     if _has_inflight_manual_job(conn, job_name=job_name):
         raise _conflict(
             "iterate_already_pending",
             advice="a manual run for this job is already in flight",
         )
-    if _has_pending_full_wash_fence(conn, process_id=job_name):
-        raise _conflict("full_wash_already_pending", advice="wait for the active full-wash")
 
 
 def _publish_within_tx(

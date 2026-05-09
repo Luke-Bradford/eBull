@@ -298,31 +298,30 @@ def get_row(conn: psycopg.Connection[Any]) -> ProcessRow | None:
     active_row = _read_active_run(conn) if state_status == "running" else None
     terminal_row = _read_latest_terminal_run(conn)
 
-    aggregates_target_run_id: int | None = None
+    # Aggregates are per-run — review #1072 BLOCKING/WARNING fix: when
+    # both an active row AND a terminal row exist, the active run's
+    # aggregates must NOT leak into ``last_run``. Read each aggregate
+    # set against its OWN run id.
+    active_aggregates: dict[str, Any] | None = None
     if active_row is not None:
-        aggregates_target_run_id = int(active_row["id"])
-    elif terminal_row is not None:
-        aggregates_target_run_id = int(terminal_row["id"])
+        active_aggregates = _read_stage_aggregates(conn, run_id=int(active_row["id"]))
 
-    aggregates: dict[str, Any]
-    if aggregates_target_run_id is not None:
-        aggregates = _read_stage_aggregates(conn, run_id=aggregates_target_run_id)
-    else:
-        aggregates = {
-            "total_stages": 0,
-            "finished_stages": 0,
-            "rows_processed": 0,
-            "processed_count": 0,
-        }
+    terminal_aggregates: dict[str, Any] | None = None
+    if terminal_row is not None:
+        terminal_aggregates = _read_stage_aggregates(conn, run_id=int(terminal_row["id"]))
 
-    active_run = _build_active_run(active_row, aggregates) if active_row is not None else None
+    active_run = (
+        _build_active_run(active_row, active_aggregates)
+        if active_row is not None and active_aggregates is not None
+        else None
+    )
 
     last_run: ProcessRunSummary | None = None
     failed_stages: list[dict[str, Any]] = []
-    if terminal_row is not None:
+    if terminal_row is not None and terminal_aggregates is not None:
         skip_reasons = _aggregate_run_skip_reasons(conn, run_id=int(terminal_row["id"]))
         failed_stages = _read_failed_stages(conn, run_id=int(terminal_row["id"]))
-        last_run = _build_last_run(terminal_row, aggregates, skip_reasons, failed_stages)
+        last_run = _build_last_run(terminal_row, terminal_aggregates, skip_reasons, failed_stages)
 
     fence_held = _has_pending_full_wash_fence(conn)
     last_n_errors: tuple[ErrorClassSummary, ...] = ()
