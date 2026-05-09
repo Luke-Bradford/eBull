@@ -14,11 +14,12 @@
 
 import { Link } from "react-router-dom";
 
-import type { ProcessRowResponse } from "@/api/types";
+import type { ProcessRowResponse, StaleReason } from "@/api/types";
 import { formatDateTime } from "@/lib/format";
 
 import {
   REASON_TOOLTIP,
+  STALE_REASON_LABEL,
   STATUS_VISUAL,
   reasonTooltip,
 } from "@/components/admin/processStatus";
@@ -46,8 +47,16 @@ export function ProcessRow({
   onCancel,
 }: ProcessRowProps) {
   const visual = STATUS_VISUAL[row.status];
-  const pulseBorder =
-    visual.pulse
+  // Pulse precedence (spec §"Visible-motion rules"): stale rows pulse
+  // amber even while running, because mid_flight_stuck overlaps
+  // status="running" by definition. `motion-reduce:animate-none`
+  // keeps the colour but stops the animation for operators with
+  // prefers-reduced-motion (PR8 carve-out from PR9 a11y sweep — avoid
+  // a regression window).
+  const isStale = row.stale_reasons.length > 0;
+  const pulseBorder = isStale
+    ? "border-l-4 border-l-amber-500 animate-pulse motion-reduce:animate-none"
+    : visual.pulse
       ? "border-l-4 border-l-sky-500 animate-pulse motion-reduce:animate-none"
       : "border-l-4 border-l-transparent";
 
@@ -103,6 +112,7 @@ export function ProcessRow({
       </td>
       <td className="px-2 py-2">
         <StatusPill row={row} />
+        {isStale ? <StaleChips row={row} /> : null}
       </td>
       <td className="px-2 py-2 text-xs text-slate-600 dark:text-slate-400">
         {lastRunLabel}
@@ -157,6 +167,52 @@ export function ProcessRow({
         ) : null}
       </td>
     </tr>
+  );
+}
+
+function StaleChips({ row }: { row: ProcessRowResponse }) {
+  // Stale-reason chips (PR8 / #1083). One subtle pill per reason;
+  // mid_flight_stuck includes the elapsed-since-heartbeat suffix
+  // computed from `active_run.last_progress_at` (or `started_at` as
+  // fallback) so the operator sees "no progress 7m" rather than just
+  // "no progress".
+  const heartbeatBase =
+    row.active_run?.last_progress_at ?? row.active_run?.started_at ?? null;
+  return (
+    <div
+      className="mt-1 flex flex-wrap gap-1"
+      data-testid="stale-chips"
+    >
+      {row.stale_reasons.map((reason) => (
+        <StaleChip
+          key={reason}
+          reason={reason}
+          heartbeatBase={heartbeatBase}
+        />
+      ))}
+    </div>
+  );
+}
+
+function StaleChip({
+  reason,
+  heartbeatBase,
+}: {
+  reason: StaleReason;
+  heartbeatBase: string | null;
+}) {
+  const label = STALE_REASON_LABEL[reason];
+  const text =
+    reason === "mid_flight_stuck" && heartbeatBase !== null
+      ? `${label} ${formatElapsedSince(heartbeatBase)}`
+      : label;
+  return (
+    <span
+      data-stale-reason={reason}
+      className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-800 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-200"
+    >
+      {text}
+    </span>
   );
 }
 
@@ -245,6 +301,19 @@ function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = Math.round(seconds - m * 60);
   return `${m}m ${s.toString().padStart(2, "0")}s`;
+}
+
+/**
+ * Coarse "Nm" formatter for the mid_flight_stuck chip suffix (PR8).
+ * The polling cadence is 5s when any row is running, so sub-minute
+ * precision is theatre — round to whole minutes.
+ */
+function formatElapsedSince(iso: string): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (sec < 60) return `${sec}s`;
+  return `${Math.round(sec / 60)}m`;
 }
 
 // Re-export so test files can assert on the canonical mapping rather

@@ -24,6 +24,7 @@ cursor.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -36,6 +37,13 @@ from app.services.processes import (
     ProcessRunSummary,
     ProcessStatus,
     RunStatus,
+    StaleReason,
+)
+from app.services.processes.stale_detection import (
+    QUEUE_STUCK_THRESHOLD_S,
+)
+from app.services.processes.stale_detection import (
+    compute as compute_stale_reasons,
 )
 from app.services.processes.watermarks import resolve_watermark
 
@@ -118,7 +126,13 @@ def _read_latest_terminal_run(
 
 
 def _read_stage_aggregates(conn: psycopg.Connection[Any], *, run_id: int) -> dict[str, Any]:
-    """Aggregate progress + processed counts across a run's stages."""
+    """Aggregate progress + processed counts across a run's stages.
+
+    Also surfaces the per-run heartbeat as ``MAX(last_progress_at)``
+    across stages — bootstrap mid_flight_stuck reads this so a single
+    actively-progressing stage keeps the row out of the stale set even
+    while sibling stages are still ``pending`` (PR8 / #1083).
+    """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -128,7 +142,8 @@ def _read_stage_aggregates(conn: psycopg.Connection[Any], *, run_id: int) -> dic
                     WHERE status IN ('success', 'error', 'skipped', 'blocked', 'cancelled')
                 )                                                         AS finished_stages,
                 COALESCE(SUM(rows_processed), 0)                          AS rows_processed,
-                COALESCE(SUM(processed_count), 0)                         AS processed_count
+                COALESCE(SUM(processed_count), 0)                         AS processed_count,
+                MAX(last_progress_at)                                     AS last_progress_at
               FROM bootstrap_stages
              WHERE bootstrap_run_id = %(run_id)s
             """,
@@ -192,6 +207,36 @@ def _aggregate_run_skip_reasons(conn: psycopg.Connection[Any], *, run_id: int) -
     return {key: int(total) for key, total in rows}
 
 
+def _has_dispatched_queue_age(
+    conn: psycopg.Connection[Any],
+    *,
+    deadline: datetime,
+) -> bool:
+    """True when bootstrap has a stuck ``status='dispatched'`` queue row.
+
+    Bootstrap's ``pending_job_requests`` rows carry
+    ``process_id='bootstrap'`` (set by ``app/api/processes.py
+    ::_publish_within_tx`` when the trigger fires the orchestrator).
+    The queue_stuck rule (PR8 §A1.3) reads
+    ``COALESCE(claimed_at, requested_at)`` so a buggy NULL ``claimed_at``
+    on a dispatched row still surfaces — defence-in-depth against
+    dispatcher bugs.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+              FROM pending_job_requests
+             WHERE process_id = %(pid)s
+               AND status     = 'dispatched'
+               AND COALESCE(claimed_at, requested_at) < %(deadline)s
+             LIMIT 1
+            """,
+            {"pid": _PROCESS_ID, "deadline": deadline},
+        )
+        return cur.fetchone() is not None
+
+
 def _has_pending_full_wash_fence(conn: psycopg.Connection[Any]) -> bool:
     """True if a sql/138 full-wash fence row exists for this process.
 
@@ -228,9 +273,8 @@ def _build_active_run(active_row: dict[str, Any], aggregates: dict[str, Any]) ->
         rows_processed_so_far=rows_processed_so_far,
         progress_units_done=progress_units_done,
         progress_units_total=progress_units_total,
-        expected_p95_seconds=None,  # PR8: rolling p95
+        last_progress_at=aggregates.get("last_progress_at"),
         is_cancelling=active_row["cancel_requested_at"] is not None,
-        is_stale=False,  # PR8
     )
 
 
@@ -334,6 +378,27 @@ def get_row(conn: psycopg.Connection[Any]) -> ProcessRow | None:
     # success or when bootstrap_runs is empty.
     watermark = resolve_watermark(conn, process_id=_PROCESS_ID, mechanism="bootstrap")
 
+    # Stale-reason probes — operator-amendment §A1 four-case model
+    # (PR8 / #1083). Bootstrap NEVER schedule_misses (on-demand) and
+    # NEVER watermark_gaps (no data_freshness_index row). Only
+    # queue_stuck + mid_flight_stuck are reachable.
+    now = datetime.now(UTC)
+    has_dispatched_queue_age = _has_dispatched_queue_age(
+        conn,
+        deadline=now - timedelta(seconds=QUEUE_STUCK_THRESHOLD_S),
+    )
+    stale_reasons: tuple[StaleReason, ...] = compute_stale_reasons(
+        mechanism="bootstrap",
+        status=process_status,
+        expected_fire_at=None,  # bootstrap is on-demand; no schedule
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=has_dispatched_queue_age,
+        last_progress_at=active_run.last_progress_at if active_run is not None else None,
+        active_run_started_at=active_run.started_at if active_run is not None else None,
+        process_id=_PROCESS_ID,
+        now=now,
+    )
+
     return ProcessRow(
         process_id=_PROCESS_ID,
         display_name=_DISPLAY_NAME,
@@ -353,6 +418,7 @@ def get_row(conn: psycopg.Connection[Any]) -> ProcessRow | None:
         can_full_wash=(state_status != "running") and not fence_held,
         can_cancel=(state_status == "running"),
         last_n_errors=last_n_errors,
+        stale_reasons=stale_reasons,
     )
 
 

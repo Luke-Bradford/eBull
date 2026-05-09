@@ -1169,10 +1169,20 @@ export interface ActiveRunSummaryResponse {
   rows_processed_so_far: number | null;
   progress_units_done: number | null;
   progress_units_total: number | null;
-  expected_p95_seconds: number | null;
+  last_progress_at: string | null;
   is_cancelling: boolean;
-  is_stale: boolean;
 }
+
+/**
+ * Operator-amendment §A1 four-case stale model (PR8 / #1083).
+ * Multiple reasons can fire on one row simultaneously; empty array
+ * means the row is not stale.
+ */
+export type StaleReason =
+  | "schedule_missed"
+  | "watermark_gap"
+  | "queue_stuck"
+  | "mid_flight_stuck";
 
 export interface ProcessWatermarkResponse {
   cursor_kind: CursorKind;
@@ -1197,6 +1207,7 @@ export interface ProcessRowResponse {
   can_full_wash: boolean;
   can_cancel: boolean;
   last_n_errors: ErrorClassSummaryResponse[];
+  stale_reasons: StaleReason[];
 }
 
 export interface ProcessListResponse {

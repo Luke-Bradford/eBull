@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -56,6 +56,13 @@ from app.services.processes import (
     ProcessRunSummary,
     ProcessStatus,
     RunStatus,
+    StaleReason,
+)
+from app.services.processes.stale_detection import (
+    WATERMARK_GAP_TOLERANCE_S,
+)
+from app.services.processes.stale_detection import (
+    compute as compute_stale_reasons,
 )
 from app.services.processes.watermarks import resolve_watermark
 
@@ -372,6 +379,37 @@ def _coerce_error_rows(
     return tuple(summaries)
 
 
+def _has_data_freshness_gap(
+    conn: psycopg.Connection[Any],
+    *,
+    source: str,
+    deadline: datetime,
+) -> bool:
+    """True when the sweep's freshness source has at least one row whose
+    ``expected_next_at < deadline`` (PR8 §A1.2 watermark_gap).
+
+    NULL ``expected_next_at`` rows are excluded — a filer with no
+    historical filed_at has nothing to predict; the rule must not fire
+    on them (Codex pre-impl review WARNING). Mirrors the scheduled
+    adapter helper of the same name; kept module-local rather than
+    factored to a shared util because the SQL is tiny and duplication
+    is honest.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+              FROM data_freshness_index
+             WHERE source = %(source)s
+               AND expected_next_at IS NOT NULL
+               AND expected_next_at < %(deadline)s
+             LIMIT 1
+            """,
+            {"source": source, "deadline": deadline},
+        )
+        return cur.fetchone() is not None
+
+
 def _has_freshness_errors(conn: psycopg.Connection[Any], *, source: str) -> bool:
     with conn.cursor() as cur:
         cur.execute(
@@ -526,6 +564,38 @@ def _build_row(
 
     watermark = resolve_watermark(conn, process_id=spec.process_id, mechanism="ingest_sweep")
 
+    # Stale-reason probes — operator-amendment §A1 four-case model
+    # (PR8 / #1083). Sweeps have no active_run + no own schedule + no
+    # own pending_job_requests rows in v1 (the underlying scheduled_job
+    # is the trigger surface — `app/api/processes.py:1228` rejects
+    # mechanism=='ingest_sweep' triggers with 409). Only watermark_gap
+    # is reachable; the other rules trivially evaluate to False.
+    now = datetime.now(UTC)
+    has_data_freshness_gap = (
+        spec.freshness_source is not None
+        and status != "running"
+        and _has_data_freshness_gap(
+            conn,
+            source=spec.freshness_source,
+            deadline=now - timedelta(seconds=WATERMARK_GAP_TOLERANCE_S),
+        )
+    )
+    stale_reasons: tuple[StaleReason, ...] = compute_stale_reasons(
+        mechanism="ingest_sweep",
+        status=status,
+        expected_fire_at=None,  # sweeps share their underlying job's schedule
+        has_data_freshness_gap=has_data_freshness_gap,
+        # Sweeps have no own pending_job_requests rows in v1 (the
+        # underlying scheduled_job is the trigger surface — Codex
+        # pre-push WARNING flagged this; documented as a deliberate v1
+        # trade-off pending v2 sweep-trigger plumbing).
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=None,
+        process_id=spec.process_id,
+        now=now,
+    )
+
     return ProcessRow(
         process_id=spec.process_id,
         display_name=spec.display_name,
@@ -545,6 +615,7 @@ def _build_row(
         can_full_wash=False,
         can_cancel=False,
         last_n_errors=last_n_errors,
+        stale_reasons=stale_reasons,
     )
 
 

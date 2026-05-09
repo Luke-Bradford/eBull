@@ -71,6 +71,7 @@ export function makeProcessRow(
     can_full_wash: true,
     can_cancel: false,
     last_n_errors: [],
+    stale_reasons: [],
     ...overrides,
   };
 }

@@ -79,6 +79,18 @@ def test_list_processes_returns_envelope_shape(conn_override: None, ebull_test_c
     process_ids = {r["process_id"] for r in payload["rows"]}
     assert "bootstrap" in process_ids
     assert JOB_RETRY_DEFERRED in process_ids
+    # PR8 (#1083): every row carries `stale_reasons`; the legacy
+    # `is_stale` / `expected_p95_seconds` fields on `active_run` are
+    # gone. A regression that re-adds them would silently break the FE
+    # Pydantic mirror.
+    for row in payload["rows"]:
+        assert "stale_reasons" in row
+        assert isinstance(row["stale_reasons"], list)
+        if row["active_run"] is not None:
+            active = row["active_run"]
+            assert "is_stale" not in active
+            assert "expected_p95_seconds" not in active
+            assert "last_progress_at" in active
 
 
 def test_get_process_unknown_returns_404(conn_override: None) -> None:
