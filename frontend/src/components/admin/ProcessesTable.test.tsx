@@ -207,4 +207,26 @@ describe("ProcessesTable", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Ownership/ }));
     expect(screen.getByText(/No processes match/)).toBeTruthy();
   });
+
+  // ---------------------------------------------------------------------
+  // PR8 (#1083) — stale banner integration. Banner unit-behaviour lives
+  // in StaleBanner.test.tsx; here we just confirm the table mounts it
+  // when at least one row is stale and hides it otherwise.
+  // ---------------------------------------------------------------------
+
+  it("does NOT render stale banner when all rows have empty stale_reasons", () => {
+    renderTable([makeProcessRow({ stale_reasons: [] })]);
+    expect(screen.queryByTestId("stale-banner")).toBeNull();
+  });
+
+  it("renders stale banner when at least one row has stale_reasons", () => {
+    renderTable([
+      makeProcessRow({ process_id: "a", stale_reasons: [] }),
+      makeProcessRow({
+        process_id: "b",
+        stale_reasons: ["watermark_gap"],
+      }),
+    ]);
+    expect(screen.getByTestId("stale-banner")).toBeTruthy();
+  });
 });

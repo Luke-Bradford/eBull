@@ -7,7 +7,11 @@
  * + §"Trigger preconditions matrix".
  */
 
-import type { ProcessStatus, TriggerConflictReason } from "@/api/types";
+import type {
+  ProcessStatus,
+  StaleReason,
+  TriggerConflictReason,
+} from "@/api/types";
 
 export interface StatusVisual {
   /** Short human label rendered inside the pill. */
@@ -125,6 +129,19 @@ export function reasonTooltip(err: unknown): string {
   if (reason !== null) return REASON_TOOLTIP[reason];
   return "Request rejected. Check the browser console for details.";
 }
+
+/**
+ * Stale-reason chip labels (PR8 / #1083 — operator-amendment §A1).
+ * The mid_flight_stuck chip is rendered with the elapsed-since-
+ * heartbeat appended client-side ("no progress 7m"), computed from
+ * `active_run.last_progress_at`; the label here is the prefix.
+ */
+export const STALE_REASON_LABEL: Record<StaleReason, string> = {
+  schedule_missed: "schedule missed",
+  watermark_gap: "source has fresh data",
+  queue_stuck: "queue stuck",
+  mid_flight_stuck: "no progress",
+};
 
 /**
  * Sort priority: failed/stale first, running next, terminal states by

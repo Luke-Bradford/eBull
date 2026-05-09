@@ -59,6 +59,16 @@ WatermarkCursorKind = Literal[
     "atom_etag",
 ]
 
+# Operator-amendment §A1 (PR8 / #1083): four-case stale model. Supersedes
+# the original PR8 spec text ("rolling p95 + last log timestamp" — line
+# 953-958) which was a v0 sketch. Multiple reasons can fire on one row.
+StaleReason = Literal[
+    "schedule_missed",
+    "watermark_gap",
+    "queue_stuck",
+    "mid_flight_stuck",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class ErrorClassSummary:
@@ -107,9 +117,14 @@ class ActiveRunSummary:
     ``record_processed``. ``rows_processed_so_far`` is the same scalar
     surfaced as the "Processed: N" ticker even when no target is known.
 
-    ``is_stale`` defaults False in PR3 — the rolling-p95 stale rule is
-    PR8. ``is_cancelling`` reflects ``cancel_requested_at`` non-NULL on
-    the underlying run row.
+    ``last_progress_at`` is the heartbeat (sql/140 §A3): the producer's
+    ``record_processed`` bumps it. The FE renders the elapsed-since-
+    heartbeat on the mid_flight_stuck chip. ``None`` when the producer
+    has not yet recorded its first tick — adapters fall back to
+    ``started_at`` when computing stale_reasons.
+
+    ``is_cancelling`` reflects ``cancel_requested_at`` non-NULL on the
+    underlying run row.
     """
 
     run_id: int
@@ -117,9 +132,8 @@ class ActiveRunSummary:
     rows_processed_so_far: int | None
     progress_units_done: int | None
     progress_units_total: int | None
-    expected_p95_seconds: float | None
+    last_progress_at: datetime | None
     is_cancelling: bool
-    is_stale: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +158,11 @@ class ProcessRow:
     the latest terminal run is a failure AND a retry is currently in
     flight; full grouped errors otherwise. The FE just renders.
 
+    ``stale_reasons`` is computed by the adapter under the four-case
+    stale model (operator-amendment §A1, PR8 / #1083). Empty tuple
+    means not stale; multiple reasons can fire simultaneously. See
+    ``app/services/processes/stale_detection.py`` for the rule shapes.
+
     PR3 leaves ``watermark`` at ``None``; PR4 wires the resolver and
     the per-mechanism `human` strings that surface on Iterate tooltips.
     """
@@ -163,6 +182,7 @@ class ProcessRow:
     can_full_wash: bool
     can_cancel: bool
     last_n_errors: tuple[ErrorClassSummary, ...]
+    stale_reasons: tuple[StaleReason, ...]
 
 
 @dataclass(frozen=True, slots=True)

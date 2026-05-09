@@ -29,6 +29,7 @@ import { Modal } from "@/components/ui/Modal";
 
 import { LaneFilter } from "@/components/admin/LaneFilter";
 import { ProcessRow } from "@/components/admin/ProcessRow";
+import { StaleBanner } from "@/components/admin/StaleBanner";
 import {
   STATUS_SORT_PRIORITY,
   reasonTooltip,
@@ -172,6 +173,8 @@ export function ProcessesTable({
           {visibleRows.length} of {snapshot.rows.length} processes
         </div>
       </div>
+
+      <StaleBanner rows={snapshot.rows} />
 
       {snapshot.partial ? (
         <div

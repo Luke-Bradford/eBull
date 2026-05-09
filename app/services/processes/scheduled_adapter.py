@@ -26,7 +26,7 @@ resolution.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -40,6 +40,14 @@ from app.services.processes import (
     ProcessRunSummary,
     ProcessStatus,
     RunStatus,
+    StaleReason,
+)
+from app.services.processes.stale_detection import (
+    QUEUE_STUCK_THRESHOLD_S,
+    WATERMARK_GAP_TOLERANCE_S,
+)
+from app.services.processes.stale_detection import (
+    compute as compute_stale_reasons,
 )
 from app.services.processes.watermarks import (
     freshness_source_for,
@@ -292,6 +300,74 @@ def _has_inflight_manual_request(conn: psycopg.Connection[Any], *, job_name: str
         return cur.fetchone() is not None
 
 
+def _has_data_freshness_gap(
+    conn: psycopg.Connection[Any],
+    *,
+    source: str,
+    deadline: datetime,
+) -> bool:
+    """True when at least one ``data_freshness_index`` row for ``source``
+    has ``expected_next_at IS NOT NULL`` AND ``expected_next_at <
+    deadline``.
+
+    Operator-amendment §A1.2 watermark_gap probe (PR8 / #1083). NULL
+    ``expected_next_at`` rows are excluded — a filer with no historical
+    filed_at has nothing to predict, so a NULL must NOT fire the gap
+    rule (Codex pre-impl review WARNING).
+
+    The query uses LIMIT 1 — adapters only need the boolean signal,
+    not the count, and the partial index on
+    ``(expected_next_at, source)`` (sql/120:115) makes the probe cheap.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+              FROM data_freshness_index
+             WHERE source = %(source)s
+               AND expected_next_at IS NOT NULL
+               AND expected_next_at < %(deadline)s
+             LIMIT 1
+            """,
+            {"source": source, "deadline": deadline},
+        )
+        return cur.fetchone() is not None
+
+
+def _has_dispatched_queue_age(
+    conn: psycopg.Connection[Any],
+    *,
+    process_id: str,
+    deadline: datetime,
+) -> bool:
+    """True when at least one ``pending_job_requests`` row for
+    ``process_id`` has ``status='dispatched'`` AND worker pickup older
+    than ``deadline``.
+
+    Operator-amendment §A1.3 queue_stuck probe (PR8 / #1083). The
+    timestamp used is ``COALESCE(claimed_at, requested_at)`` —
+    ``claimed_at`` is set on ``pending → claimed`` (sql/084:24,
+    dispatcher.py:183) and a row in ``status='dispatched'`` will
+    almost always have it populated, but a buggy NULL would otherwise
+    silently skip the stuck row. Falling back to ``requested_at`` is
+    conservative (older or equal to claimed_at) so the rule is still
+    correct.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+              FROM pending_job_requests
+             WHERE process_id = %(pid)s
+               AND status     = 'dispatched'
+               AND COALESCE(claimed_at, requested_at) < %(deadline)s
+             LIMIT 1
+            """,
+            {"pid": process_id, "deadline": deadline},
+        )
+        return cur.fetchone() is not None
+
+
 def _has_pending_full_wash_fence(conn: psycopg.Connection[Any], *, process_id: str) -> bool:
     with conn.cursor() as cur:
         cur.execute(
@@ -417,15 +493,15 @@ def _is_failed_scope_covered(
 def _build_active_run(active_row: dict[str, Any]) -> ActiveRunSummary:
     target = active_row["target_count"]
     processed = int(active_row["processed_count"]) if active_row["processed_count"] is not None else 0
+    last_progress_at = active_row.get("last_progress_at")
     return ActiveRunSummary(
         run_id=int(active_row["run_id"]),
         started_at=active_row["started_at"],
         rows_processed_so_far=processed if processed > 0 else None,
         progress_units_done=processed if target is not None else None,
         progress_units_total=int(target) if target is not None else None,
-        expected_p95_seconds=None,  # PR8
+        last_progress_at=last_progress_at,
         is_cancelling=active_row["cancel_requested_at"] is not None,
-        is_stale=False,  # PR8
     )
 
 
@@ -539,6 +615,38 @@ def _build_row(
     if process_status == "failed" and terminal_row is not None:
         last_n_errors = _build_error_summaries(terminal_row.get("error_classes"))
 
+    # Stale-reason probes — operator-amendment §A1 four-case model
+    # (PR8 / #1083). Each probe is a LIMIT 1 read; only run them when
+    # the rule's mechanism gate could fire to keep the snapshot read
+    # cheap.
+    now = datetime.now(UTC)
+    freshness_source = freshness_source_for(job.name)
+    has_data_freshness_gap = (
+        freshness_source is not None
+        and process_status != "running"
+        and _has_data_freshness_gap(
+            conn,
+            source=freshness_source,
+            deadline=now - timedelta(seconds=WATERMARK_GAP_TOLERANCE_S),
+        )
+    )
+    has_dispatched_queue_age = _has_dispatched_queue_age(
+        conn,
+        process_id=job.name,
+        deadline=now - timedelta(seconds=QUEUE_STUCK_THRESHOLD_S),
+    )
+    stale_reasons: tuple[StaleReason, ...] = compute_stale_reasons(
+        mechanism="scheduled_job",
+        status=process_status,
+        next_fire_at=next_fire_at,
+        has_data_freshness_gap=has_data_freshness_gap,
+        has_dispatched_queue_age=has_dispatched_queue_age,
+        last_progress_at=active_run.last_progress_at if active_run is not None else None,
+        active_run_started_at=active_run.started_at if active_run is not None else None,
+        process_id=job.name,
+        now=now,
+    )
+
     # PR4 watermark — surface the resume cursor on the FE tooltip.
     # Returns None for jobs without a registered source (heartbeat,
     # monitor_positions, …); the FE renders that as "no resume cursor".
@@ -570,6 +678,7 @@ def _build_row(
         can_full_wash=(not kill_switch_active and not fence_held and process_status != "running"),
         can_cancel=can_cancel,
         last_n_errors=last_n_errors,
+        stale_reasons=stale_reasons,
     )
 
 

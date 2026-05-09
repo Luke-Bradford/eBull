@@ -68,6 +68,7 @@ from app.services.processes import (
     ProcessStatus,
     ProcessWatermark,
     RunStatus,
+    StaleReason,
     bootstrap_adapter,
     ingest_sweep_adapter,
     scheduled_adapter,
@@ -127,9 +128,8 @@ class ActiveRunSummaryResponse(BaseModel):
     rows_processed_so_far: int | None
     progress_units_done: int | None
     progress_units_total: int | None
-    expected_p95_seconds: float | None
+    last_progress_at: datetime | None
     is_cancelling: bool
-    is_stale: bool
 
 
 class ProcessWatermarkResponse(BaseModel):
@@ -162,6 +162,7 @@ class ProcessRowResponse(BaseModel):
     can_full_wash: bool
     can_cancel: bool
     last_n_errors: list[ErrorClassSummaryResponse]
+    stale_reasons: list[StaleReason]
 
 
 class ProcessListResponse(BaseModel):
@@ -329,9 +330,8 @@ def _convert_active_run(active: ActiveRunSummary) -> ActiveRunSummaryResponse:
         rows_processed_so_far=active.rows_processed_so_far,
         progress_units_done=active.progress_units_done,
         progress_units_total=active.progress_units_total,
-        expected_p95_seconds=active.expected_p95_seconds,
+        last_progress_at=active.last_progress_at,
         is_cancelling=active.is_cancelling,
-        is_stale=active.is_stale,
     )
 
 
@@ -371,6 +371,7 @@ def _convert_row(row: ProcessRow) -> ProcessRowResponse:
         can_full_wash=row.can_full_wash,
         can_cancel=row.can_cancel,
         last_n_errors=[_convert_error(e) for e in row.last_n_errors],
+        stale_reasons=list(row.stale_reasons),
     )
 
 

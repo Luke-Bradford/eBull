@@ -375,3 +375,120 @@ def test_list_runs_rejects_non_positive_days(
 
     with pytest.raises(ValueError):
         ingest_sweep_adapter.list_runs(ebull_test_conn, process_id="nport_sweep", days=0)
+
+
+# ---------------------------------------------------------------------------
+# PR8 (#1083) — four-case stale model, ingest_sweep adapter integration.
+# ---------------------------------------------------------------------------
+
+
+def _insert_freshness_with_expected_next_at(
+    conn: psycopg.Connection[tuple],
+    *,
+    subject_id: str,
+    source: str,
+    state: str,
+    expected_next_at_offset_minutes: int,
+    instrument_id: int,
+) -> None:
+    """Helper for PR8 stale-detection tests — sets
+    ``expected_next_at`` to ``now() + offset`` so the watermark_gap
+    rule can find an overdue row.
+    """
+    conn.execute(
+        f"""
+        INSERT INTO data_freshness_index (
+            subject_type, subject_id, source, state, expected_next_at,
+            instrument_id
+        ) VALUES ('issuer', %s, %s, %s,
+                  now() + interval '{expected_next_at_offset_minutes} minutes',
+                  %s)
+        ON CONFLICT (subject_type, subject_id, source) DO UPDATE
+        SET state            = EXCLUDED.state,
+            expected_next_at = EXCLUDED.expected_next_at,
+            instrument_id    = EXCLUDED.instrument_id
+        """,
+        (subject_id, source, state, instrument_id),
+    )
+
+
+def test_sweep_watermark_gap_fires_when_freshness_overdue(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A freshness-driven sweep with at least one
+    ``data_freshness_index`` row in ``expected_next_at`` past the gap
+    tolerance surfaces ``watermark_gap``."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_test_state(ebull_test_conn)
+    instrument_id = _seed_instrument(ebull_test_conn)
+    _insert_freshness_with_expected_next_at(
+        ebull_test_conn,
+        subject_id=str(instrument_id),
+        source="sec_form3",
+        state="current",
+        expected_next_at_offset_minutes=-30,
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.commit()
+
+    row = ingest_sweep_adapter.get_row(ebull_test_conn, process_id="sec_form3_sweep")
+    assert row is not None
+    assert "watermark_gap" in row.stale_reasons
+
+
+def test_sweep_never_schedule_misses_or_queue_stucks(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Sweeps have no own cron + no own pending_job_requests rows in
+    v1. Even with stale freshness fixtures, the sweep row must NOT
+    surface schedule_missed or queue_stuck."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_test_state(ebull_test_conn)
+    instrument_id = _seed_instrument(ebull_test_conn)
+    _insert_freshness_with_expected_next_at(
+        ebull_test_conn,
+        subject_id=str(instrument_id),
+        source="sec_form3",
+        state="current",
+        expected_next_at_offset_minutes=-120,
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.commit()
+
+    row = ingest_sweep_adapter.get_row(ebull_test_conn, process_id="sec_form3_sweep")
+    assert row is not None
+    assert "schedule_missed" not in row.stale_reasons
+    assert "queue_stuck" not in row.stale_reasons
+    # No active_run on a sweep — mid_flight_stuck cannot fire either.
+    assert "mid_flight_stuck" not in row.stale_reasons
+
+
+def test_sweep_running_suppresses_watermark_gap(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """When the underlying scheduled job is in flight the sweep is
+    ``running``; watermark_gap is suppressed because we ARE the
+    catch-up."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_test_state(ebull_test_conn)
+    instrument_id = _seed_instrument(ebull_test_conn)
+    _insert_freshness_with_expected_next_at(
+        ebull_test_conn,
+        subject_id=str(instrument_id),
+        source="sec_form3",
+        state="current",
+        expected_next_at_offset_minutes=-30,
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO job_runs (job_name, started_at, status)
+        VALUES ('sec_form3_ingest', now(), 'running')
+        """
+    )
+    ebull_test_conn.commit()
+
+    row = ingest_sweep_adapter.get_row(ebull_test_conn, process_id="sec_form3_sweep")
+    assert row is not None
+    assert row.status == "running"
+    assert "watermark_gap" not in row.stale_reasons

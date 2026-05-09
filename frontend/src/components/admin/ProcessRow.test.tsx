@@ -142,4 +142,87 @@ describe("ProcessRow", () => {
     const note = screen.getByText("trigger rejected");
     expect(note.getAttribute("title")).toContain("browser console");
   });
+
+  // ---------------------------------------------------------------------
+  // PR8 (#1083) — four-case stale model chips + pulsing border.
+  // ---------------------------------------------------------------------
+
+  it("renders no stale chips when stale_reasons is empty", () => {
+    const { container } = renderRow({
+      row: makeProcessRow({ status: "ok", stale_reasons: [] }),
+    });
+    expect(
+      container.querySelector("[data-testid='stale-chips']"),
+    ).toBeNull();
+  });
+
+  it("renders one chip per stale reason (multiple can fire)", () => {
+    const { container } = renderRow({
+      row: makeProcessRow({
+        status: "ok",
+        stale_reasons: ["schedule_missed", "watermark_gap"],
+      }),
+    });
+    const chips = container.querySelector(
+      "[data-testid='stale-chips']",
+    ) as HTMLElement;
+    expect(chips).toBeTruthy();
+    expect(
+      chips.querySelectorAll("[data-stale-reason='schedule_missed']").length,
+    ).toBe(1);
+    expect(
+      chips.querySelectorAll("[data-stale-reason='watermark_gap']").length,
+    ).toBe(1);
+    expect(chips.textContent).toContain("schedule missed");
+    expect(chips.textContent).toContain("source has fresh data");
+  });
+
+  it("mid_flight_stuck chip suffixes elapsed-since-heartbeat", () => {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const { container } = renderRow({
+      row: makeProcessRow({
+        status: "running",
+        stale_reasons: ["mid_flight_stuck"],
+        active_run: {
+          run_id: 99,
+          started_at: fiveMinutesAgo,
+          rows_processed_so_far: 42,
+          progress_units_done: null,
+          progress_units_total: null,
+          last_progress_at: fiveMinutesAgo,
+          is_cancelling: false,
+        },
+      }),
+    });
+    const chip = container.querySelector(
+      "[data-stale-reason='mid_flight_stuck']",
+    ) as HTMLElement;
+    expect(chip).toBeTruthy();
+    expect(chip.textContent).toMatch(/no progress\s+\d+m/);
+  });
+
+  it("pulsing amber border applies when stale_reasons non-empty", () => {
+    const { container } = renderRow({
+      row: makeProcessRow({
+        status: "ok",
+        stale_reasons: ["watermark_gap"],
+      }),
+    });
+    const tr = container.querySelector("tr") as HTMLElement;
+    expect(tr.className).toContain("animate-pulse");
+    expect(tr.className).toContain("motion-reduce:animate-none");
+    expect(tr.className).toContain("border-l-amber-500");
+  });
+
+  it("amber stale border outranks sky running border on overlap", () => {
+    const { container } = renderRow({
+      row: makeProcessRow({
+        status: "running",
+        stale_reasons: ["mid_flight_stuck"],
+      }),
+    });
+    const tr = container.querySelector("tr") as HTMLElement;
+    expect(tr.className).toContain("border-l-amber-500");
+    expect(tr.className).not.toContain("border-l-sky-500");
+  });
 });

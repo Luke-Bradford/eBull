@@ -43,6 +43,7 @@ def _make_row(**overrides: object) -> ProcessRow:
         "can_full_wash": True,
         "can_cancel": False,
         "last_n_errors": (),
+        "stale_reasons": (),
     }
     base.update(overrides)
     return ProcessRow(**base)  # type: ignore[arg-type]
@@ -74,8 +75,37 @@ def test_process_row_carries_all_envelope_fields() -> None:
         "can_full_wash",
         "can_cancel",
         "last_n_errors",
+        "stale_reasons",
     }
     assert set(row.__slots__) == expected
+
+
+def test_process_row_default_stale_reasons_empty() -> None:
+    """An adapter that doesn't set ``stale_reasons`` would TypeError under
+    `slots`; this guard pins the empty-tuple default semantic so callers
+    treat empty-tuple as the canonical "not stale" value (vs None or
+    missing field)."""
+    row = _make_row(stale_reasons=())
+    assert row.stale_reasons == ()
+
+
+def test_active_run_envelope_drops_legacy_fields() -> None:
+    """``is_stale`` and ``expected_p95_seconds`` were PR3 placeholders
+    superseded by §A1 ``stale_reasons`` (PR8 / #1083). They must NOT
+    reappear on ActiveRunSummary — a regression here would carry stale
+    semantics back into the wire format."""
+    from app.services.processes import ActiveRunSummary
+
+    expected = {
+        "run_id",
+        "started_at",
+        "rows_processed_so_far",
+        "progress_units_done",
+        "progress_units_total",
+        "last_progress_at",
+        "is_cancelling",
+    }
+    assert set(ActiveRunSummary.__slots__) == expected
 
 
 def test_error_class_summary_truncates_at_construction_boundary() -> None:
@@ -117,13 +147,13 @@ def test_active_run_pristine_no_progress() -> None:
         rows_processed_so_far=100,
         progress_units_done=None,
         progress_units_total=None,
-        expected_p95_seconds=None,
+        last_progress_at=None,
         is_cancelling=False,
-        is_stale=False,
     )
     assert active.progress_units_total is None
     assert active.progress_units_done is None
     assert active.rows_processed_so_far == 100
+    assert active.last_progress_at is None
 
 
 def test_watermark_dataclass_round_trip() -> None:

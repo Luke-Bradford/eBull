@@ -356,3 +356,121 @@ def test_full_wash_fence_disables_buttons(
     assert row is not None
     assert row.can_iterate is False
     assert row.can_full_wash is False
+
+
+# ---------------------------------------------------------------------------
+# PR8 (#1083) — four-case stale model, bootstrap adapter integration.
+# ---------------------------------------------------------------------------
+
+
+def test_stale_reasons_default_empty_on_pending(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _seed_state(ebull_test_conn, status="pending")
+    ebull_test_conn.commit()
+
+    row = bootstrap_adapter.get_row(ebull_test_conn)
+    assert row is not None
+    assert row.stale_reasons == ()
+
+
+def test_bootstrap_queue_stuck_when_dispatched_row_aged(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A dispatched bootstrap trigger whose ``claimed_at`` is 45 min
+    old is queue_stuck. (Boot-recovery sweep handles >6h; this is the
+    in-window display.)"""
+    _seed_state(ebull_test_conn, status="pending")
+    ebull_test_conn.execute(
+        """
+        INSERT INTO pending_job_requests
+            (request_kind, job_name, process_id, mode, status,
+             claimed_at, claimed_by)
+        VALUES ('manual_job', 'bootstrap_orchestrator', 'bootstrap',
+                'iterate', 'dispatched',
+                now() - interval '45 minutes', 'test-boot-id')
+        """
+    )
+    ebull_test_conn.commit()
+
+    row = bootstrap_adapter.get_row(ebull_test_conn)
+    assert row is not None
+    assert "queue_stuck" in row.stale_reasons
+
+
+def test_bootstrap_mid_flight_stuck_uses_max_stage_heartbeat(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Bootstrap's heartbeat is ``MAX(last_progress_at)`` across its
+    active run's stages — a single live stage keeps the row fresh
+    even while siblings are pending. With every stage's heartbeat
+    older than the 30-min override (1800s) the row is stale."""
+    run_id = _create_run(ebull_test_conn, status="running")
+    _create_stage(
+        ebull_test_conn,
+        run_id=run_id,
+        stage_key="init",
+        stage_order=0,
+        lane="init",
+        status="success",
+        completed=True,
+    )
+    _create_stage(
+        ebull_test_conn,
+        run_id=run_id,
+        stage_key="etoro_meta",
+        stage_order=1,
+        lane="etoro",
+        status="running",
+    )
+    # Set both stage heartbeats to 35 min ago — well past bootstrap's
+    # 30-min override.
+    ebull_test_conn.execute(
+        """
+        UPDATE bootstrap_stages
+           SET last_progress_at = now() - interval '35 minutes',
+               started_at       = now() - interval '40 minutes'
+         WHERE bootstrap_run_id = %s
+        """,
+        (run_id,),
+    )
+    _seed_state(ebull_test_conn, status="running", last_run_id=run_id)
+    ebull_test_conn.commit()
+
+    row = bootstrap_adapter.get_row(ebull_test_conn)
+    assert row is not None
+    assert row.status == "running"
+    assert "mid_flight_stuck" in row.stale_reasons
+
+
+def test_bootstrap_never_schedule_misses_or_watermark_gaps(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Bootstrap is on-demand (no cron) and has no
+    ``data_freshness_index`` row. Even with stale freshness rows for
+    SEC sources, bootstrap's stale_reasons must NOT include
+    schedule_missed or watermark_gap."""
+    _seed_state(ebull_test_conn, status="pending")
+    ebull_test_conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange,
+                                  currency, is_tradable)
+        VALUES (9100050, 'TST_BS', 'TST_BS Co', 'TEST', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO data_freshness_index
+            (subject_type, subject_id, source, state, expected_next_at,
+             instrument_id)
+        VALUES ('issuer', '9100050', 'sec_form3', 'current',
+                now() - interval '1 hour', 9100050)
+        """
+    )
+    ebull_test_conn.commit()
+
+    row = bootstrap_adapter.get_row(ebull_test_conn)
+    assert row is not None
+    assert "schedule_missed" not in row.stale_reasons
+    assert "watermark_gap" not in row.stale_reasons

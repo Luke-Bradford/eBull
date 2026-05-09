@@ -400,3 +400,120 @@ def test_list_run_errors_decodes_jsonb(
     assert errors[0].error_class == "X"
     assert errors[0].count == 3
     assert errors[0].sample_subject == "subj"
+
+
+# ---------------------------------------------------------------------------
+# PR8 (#1083) — four-case stale model, scheduled adapter integration.
+# ---------------------------------------------------------------------------
+
+
+def test_stale_reasons_default_empty_on_healthy_row(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(ebull_test_conn, job_name=JOB_RETRY_DEFERRED, status="success", finished=True)
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.stale_reasons == ()
+
+
+def test_watermark_gap_surfaces_when_freshness_overdue(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """SEC freshness-driven scheduled job with an
+    ``expected_next_at`` past the gap tolerance → ``watermark_gap``."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange,
+                                  currency, is_tradable)
+        VALUES (9100009, 'TST_WG', 'TST_WG Co', 'TEST', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO data_freshness_index
+            (subject_type, subject_id, source, state, expected_next_at,
+             instrument_id)
+        VALUES ('issuer', '9100009', 'sec_form3', 'current',
+                now() - interval '10 minutes', 9100009)
+        """
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id="sec_form3_ingest")
+    assert row is not None
+    assert "watermark_gap" in row.stale_reasons
+
+
+def test_queue_stuck_surfaces_when_dispatched_row_aged(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """``status='dispatched'`` row whose ``claimed_at`` is older than
+    the 30-min queue_stuck threshold → ``queue_stuck``."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(ebull_test_conn, job_name=JOB_RETRY_DEFERRED, status="success", finished=True)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO pending_job_requests
+            (request_kind, job_name, process_id, mode, status,
+             claimed_at, claimed_by)
+        VALUES ('manual_job', %s, %s, 'iterate', 'dispatched',
+                now() - interval '45 minutes', 'test-boot-id')
+        """,
+        (JOB_RETRY_DEFERRED, JOB_RETRY_DEFERRED),
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert "queue_stuck" in row.stale_reasons
+
+
+def test_mid_flight_stuck_fires_on_aged_heartbeat(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Running job whose ``last_progress_at`` is older than the
+    per-process threshold → ``mid_flight_stuck``."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO job_runs
+               (job_name, started_at, status, processed_count, last_progress_at)
+        VALUES (%s, now() - interval '20 minutes', 'running', 5,
+                now() - interval '10 minutes')
+        """,
+        (JOB_RETRY_DEFERRED,),
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.status == "running"
+    assert "mid_flight_stuck" in row.stale_reasons
+    assert row.active_run is not None
+    assert row.active_run.last_progress_at is not None
+
+
+def test_mid_flight_stuck_does_not_fire_on_first_tick_lag(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A run that just started (10s ago, no first tick) is NOT stale —
+    first-tick lag is benign on unbounded jobs."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO job_runs
+               (job_name, started_at, status)
+        VALUES (%s, now() - interval '10 seconds', 'running')
+        """,
+        (JOB_RETRY_DEFERRED,),
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert "mid_flight_stuck" not in row.stale_reasons
