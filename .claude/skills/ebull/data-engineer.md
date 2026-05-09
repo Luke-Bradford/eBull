@@ -501,6 +501,91 @@ Notable triggers: `POST /jobs/sec_rebuild/run`, `POST /jobs/ownership_observatio
 **Settled decisions**: `docs/settled-decisions.md`.
 **Review prevention log**: `docs/review-prevention-log.md`.
 
+## 6.5. Pipeline orchestration — invariants
+
+> **State:** This section describes the **post-#1064 target state.** PR1 introduces source-level `JobLock` + `ParamMetadata` + `params_snapshot`; PR3 unifies the `bootstrap_state` gate across scheduled-fire and manual-trigger paths. Pre-PR1 reality: `JobLock` keys on `job_name`, scheduled jobs are zero-arg, and manual `/processes/{id}/trigger` bypasses prerequisites. The "Pre-PRn history" notes below mark each transition.
+>
+> Read before adding a new scheduled job, bootstrap stage, or operator-exposed parameter on an existing job. Cross-reference: [`docs/wiki/job-registry-audit.md`](../../../docs/wiki/job-registry-audit.md) for the per-job parameter surface; [`docs/superpowers/specs/2026-05-08-admin-control-hub-rewrite.md`](../../../docs/superpowers/specs/2026-05-08-admin-control-hub-rewrite.md) for the umbrella decisions.
+
+### 6.5.1 Source-level concurrency (PR1 target state)
+
+`JobLock` keys on `source` (the rate-bucket bound), NOT on `job_name`. Same-source jobs serialise under one lock; cross-source jobs run in parallel. Sources:
+
+| Source | What it bounds | Lock contention |
+|---|---|---|
+| `init` | universe-sync only | One job total |
+| `etoro` | eToro REST budget | execute_approved_orders + candle_refresh + lookups serialise |
+| `sec_rate` | SEC 10 req/s shared per-IP bucket | Every per-CIK fetch + every per-accession fetch competes here |
+| `sec_bulk_download` | Fixed-URL SEC archive downloads | Disjoint from `sec_rate` — large fixed downloads, no per-issuer iteration |
+| `db` | DB-bound bulk ingest of pre-staged data | Same-source jobs serialise under the source lock |
+
+The reason this matters: SEC's 10 req/s is per-IP, not per-job. Two SEC jobs running concurrently DO compete for the same bucket — serialising them at the lock layer is the right model. But SEC's bulk-download endpoints (`sec_bulk_download` source) have a separate budget — a `cusip_universe_backfill` (12k rows of CUSIP map data) does NOT compete with a `daily_cik_refresh` (per-CIK submissions polls), so they should run concurrently. Per-job locking would conflate them.
+
+Within-source same-`job_name` semantics: triggering `sec_def14a_ingest` twice with different `params` **still serialises** under the source lock — the second invocation waits for the first to release. Per-param-set lock identity (one lock per `(job_name, params_hash)`) is deferred to v2.
+
+**Bootstrap dispatcher concurrency vs JobLock — separate mechanisms.** The bootstrap orchestrator's `_LANE_MAX_CONCURRENCY` map ([`bootstrap_orchestrator.py:98`](../../../app/services/bootstrap_orchestrator.py#L98)) historically allowed up to 5 parallel `db`-lane stages WITHIN a single bootstrap run. That is a dispatcher knob, not a `JobLock` semantic. Under PR1 source-level locking, same-source jobs serialise across the entire process — the dispatcher's lane-concurrency map is either retired or reinterpreted as a "max queued before the lock kicks in" hint. The locked decision is unambiguous: same-source = serialised at the lock; the lane-concurrency map does not override this.
+
+**`sec_rate` starvation risk.** A 1-hour `sec_def14a_bootstrap` drain holding the `sec_rate` lock will skip every hourly SEC ingest fired during that window (`sec_form4`, `sec_filing_documents_ingest`, `sec_8k_events_ingest`). Weekly bounded — acceptable. Repeated manual drains chain together to multiple-hour starvation — operator visibility required. Admin process table must surface "skipped — `sec_rate` source lock held by `sec_def14a_bootstrap`" with the holder identified, otherwise the operator sees mysterious skips during a drain and triggers it again, deepening the starvation. This goes in PR1's REASON_TOOLTIP map under `lock_held_by_other_source_member`.
+
+### 6.5.2 ParamMetadata discipline
+
+Every job in `SCHEDULED_JOBS` declares a tuple of `ParamMetadata` describing its operator-exposable parameter surface:
+
+```python
+@dataclass(frozen=True)
+class ParamMetadata:
+    name: str
+    label: str
+    help_text: str
+    field_type: Literal["string", "int", "float", "date", "quarter", "ticker", "cik", "bool", "enum", "multi_enum"]
+    default: Any | None
+    advanced_group: bool
+    enum_values: tuple[str, ...] | None = None
+```
+
+The Pydantic mirror in [`frontend/src/api/types.ts`](../../../frontend/src/api/types.ts) is the API contract. **Drift between the BE model and the FE types is a PREVENTION-log-grade risk** — the FE renders generic Advanced disclosure fields off this metadata; if the contract drifts, operators see the wrong inputs or no inputs at all. Round-trip tests cover one job (canonical) every PR; full-mirror coverage is bot-enforced via `frontend/src/api/types.ts` review.
+
+Field types collapse to ~10 archetypes — see [`job-registry-audit.md` §6](../../../docs/wiki/job-registry-audit.md). Ticker / CIK fields render as typeaheads resolving to internal IDs operator-side; the BE receives the resolved `int` / `str`.
+
+### 6.5.3 Bootstrap orchestration is parameter overrides — not bespoke wrappers
+
+A bootstrap stage is `(stage_key, stage_order, lane, job_name, params dict)`. The orchestrator passes `params` to the registered callable; the callable validates against its `ParamMetadata`. There are NO separate bootstrap-only callables.
+
+Pre-PR1 history: [`bootstrap_orchestrator.py`](../../../app/services/bootstrap_orchestrator.py) carried three bespoke wrappers (`bootstrap_filings_history_seed`, `sec_first_install_drain_job`, `bootstrap_sec_13f_recent_sweep_job`) that re-implemented the dispatch + `_tracked_job` wrapping just to override default params. PR1 lifts the shared workflow into the lower-level helpers (`refresh_filings`, `run_first_install_drain`, `ingest_all_active_filers`); bootstrap stages become data, not code; bespoke wrapper files disappear.
+
+Practical consequence: any job invokable from bootstrap is ALSO invokable post-bootstrap from the admin process table with the same param surface. Operators never get stuck in a "this only runs during bootstrap" UX trap.
+
+### 6.5.4 `bootstrap_state.status` as universal gate
+
+Both scheduled-fire AND manual-trigger paths check `bootstrap_state.status='complete'` before running any gated job. `partial_error` is NOT-complete: scheduled fires reject, manual triggers reject by default. Manual remediation requires explicit `?override_bootstrap_gate=true` and writes a `decision_audit` row.
+
+Pre-PR3 history: scheduled-fire honoured `_bootstrap_complete` prerequisite; manual `/processes/{id}/trigger` bypassed it. PR3 collapses both paths through `_check_bootstrap_state_gate(conn, *, allow_manual_remediation=...)`.
+
+The 409 surfaces with reason `bootstrap_not_complete` and copy "Bootstrap is not complete. Finish first-install before triggering scheduled jobs." in [`frontend/src/components/admin/processStatus.ts::REASON_TOOLTIP`](../../../frontend/src/components/admin/processStatus.ts).
+
+### 6.5.5 `job_runs.params_snapshot JSONB`
+
+Every job_runs row records the params dict that produced it. Manual triggers write the operator-supplied dict; scheduled fires write the registry default + cadence-derived overrides. Operator history visibility — clicking a row in the admin process table reveals "this run used `chunk_limit=200, since=2026-01-01`" rather than just "ran for 47s".
+
+Default `'{}'::jsonb` for jobs with no operator-exposable params.
+
+This is the audit trail for "why did this run pull only 200 rows instead of the usual 500?" — answer is in `params_snapshot`. The pre-PR1 path lost this signal.
+
+### 6.5.6 Prerequisite enforcement is unified
+
+Every job in `SCHEDULED_JOBS` declares a `prerequisite: PrerequisiteFn | None`. Scheduled fire and manual trigger both call the same prereq through `_check_bootstrap_state_gate`. There is no manual-bypass shortcut. If the operator needs to fire a job whose prereq is unmet (e.g. `_has_actionable_recommendations` is False but they want to dry-run), the path is `?override_bootstrap_gate=true` (or future `?override_prerequisite=true`) with audit row, NOT a separate untracked code path.
+
+### 6.5.7 Discipline summary — when adding a new scheduled job
+
+1. **Pick a source.** Match the rate-bucket reality. Don't invent a new source unless the budget really is disjoint.
+2. **Declare `ParamMetadata`.** Even if empty tuple. The decl forces the question "what should the operator be able to override?". Reject implementation-strategy knobs (`prefetch_urls`, `follow_pagination`, `use_bulk_zip`) and provenance labels (`source_label`, `match_threshold` outside narrow bounds) — those belong in code review, not Advanced disclosure. The audit `docs/wiki/job-registry-audit.md` §6 has the canonical exposable-vs-internal split.
+3. **Mirror in `frontend/src/api/types.ts`.** Same PR. Drift = bug.
+4. **Wire `prerequisite` if applicable.** `_bootstrap_complete` is the most common; compose with `_all_of(...)` for additional gates.
+5. **Decide `catch_up_on_boot`.** Rule of thumb: TRUE for cheap idempotent reads (lookups, classification refreshes); FALSE for anything that hits a rate budget or holds DB workers.
+6. **Audit row schema.** `_tracked_job(JOB_NAME)` writes the `job_runs` row; ensure the constant is in `__all__` so the registry-shape test catches drift.
+7. **Test invariants.** Every job needs a registry-shape test (`tests/test_job_registry.py`) covering source non-NULL + params_metadata validates + prerequisite is callable.
+8. **Queue/audit terminal-state correctness.** When the prelude (source lock acquisition, prereq check, `bootstrap_state` gate, fence-held opt-out) skips the body without invoking the underlying job, the corresponding `pending_job_requests` row MUST transition to `rejected` (not `completed`) with a structured `error_msg`. `mark_request_completed` after a skipped body produces an audit row that says "ran successfully" when the job never ran. PREVENTION-log-grade hazard — see PR #1072 BLOCKING and PR #1078 (orchestrator opt-out fence). The skipped/rejected vs completed distinction is the operator's only signal that a manual trigger didn't actually do what they asked. Grep `mark_request_completed` and verify each call site has the matching `mark_request_rejected` for the prelude-skip path.
+
 ## 6. Known live caveats / tech debt
 
 - **Coverage = telemetry not gate**: per-category universe estimates still NULL for Tier 0 (`_read_universe_estimates` returns all-None). Banner reports `unknown_universe` on most instruments. Real estimates seeded in #790 / Batch 2.
