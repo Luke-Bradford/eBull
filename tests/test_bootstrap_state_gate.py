@@ -136,6 +136,37 @@ class TestPrereqEnforcement:
         mock_reject.assert_not_called()
         runtime.submit_manual_with_request.assert_called_once()
 
+    def test_unmet_prereq_with_failing_rejection_write_does_not_dispatch(self) -> None:
+        """Review-bot PR1b BLOCKING regression — if mark_request_rejected
+        raises (transient write failure), the job MUST NOT fall through
+        to submit_manual_with_request. A prerequisite that explicitly
+        returned (False, reason) MUST NOT dispatch even if the rejection
+        write fails."""
+        runtime = _runtime_mock()
+        fake_job = _job_with_prereq("sec_form3_ingest", met=False, reason="bootstrap not complete")
+        with (
+            patch("app.jobs.listener.SCHEDULED_JOBS", [fake_job]),
+            patch("app.jobs.listener.VALID_JOB_NAMES", {"sec_form3_ingest"}),
+            patch("app.jobs.listener.psycopg.connect") as mock_connect,
+            patch(
+                "app.jobs.listener.mark_request_rejected",
+                side_effect=RuntimeError("write failed"),
+            ),
+        ):
+            mock_connect.return_value.__enter__.return_value = MagicMock()
+            try:
+                _dispatch_manual_job(
+                    runtime=runtime,
+                    request_id=42,
+                    job_name="sec_form3_ingest",
+                )
+            except RuntimeError:
+                # Rejection write failure escapes — _route_claim's broad
+                # except will mark the request rejected. That's correct.
+                pass
+        # The critical invariant: dispatch MUST NOT have fired.
+        runtime.submit_manual_with_request.assert_not_called()
+
     def test_connect_failure_fails_open(self) -> None:
         """Codex round-2 BLOCKING regression — psycopg.connect raising MUST
         fail-open (not escape to _route_claim, which would silently

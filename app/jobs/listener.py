@@ -137,40 +137,52 @@ def _dispatch_manual_job(
     # §6.5.7 step 8).
     job = next((j for j in SCHEDULED_JOBS if j.name == job_name), None)
     if job is not None and job.prerequisite is not None:
-        # Fail-open posture covers BOTH connection-open failures AND
-        # prerequisite-callable raises. Codex round-2 BLOCKING fix —
-        # the try MUST wrap psycopg.connect because if connection-open
-        # raises while inside the `with`, the exception escapes the
-        # listener's _dispatch_manual_job entirely and _route_claim's
-        # broad except marks the request rejected — silent divergence
-        # from the scheduled-fire posture (which fails-open on the
-        # same class of errors at app/jobs/runtime.py::_wrap_invoker).
+        # Two-stage try/except (review-bot PR1b BLOCKING fix):
+        #   1. Inner try wraps ONLY the prereq evaluation (connect +
+        #      callable). Failures fail-open (mirrors scheduled-fire
+        #      posture at app/jobs/runtime.py::_wrap_invoker).
+        #   2. The rejection write (mark_request_rejected + return)
+        #      lives OUTSIDE the inner try — if it raises, the failure
+        #      escapes to _route_claim's broad except, which is correct
+        #      (rejecting a rejected job is the safe direction). It
+        #      MUST NOT fall through to submit_manual_with_request.
+        prereq_decision: tuple[bool, str] | None = None
         try:
             with psycopg.connect(settings.database_url, autocommit=True) as conn:
-                met, reason = job.prerequisite(conn)
-                if not met:
-                    logger.info(
-                        "listener: rejecting manual_job request_id=%d for %r — prerequisite not met: %s",
-                        request_id,
-                        job_name,
-                        reason,
-                    )
-                    mark_request_rejected(
-                        conn,
-                        request_id,
-                        error_msg=reason,
-                    )
-                    return
+                prereq_decision = job.prerequisite(conn)
         except Exception:
-            # Mirrors scheduled-fire posture — silently dropping a real
-            # run is worse than running against a partial DB where the
-            # body itself can detect + skip. Logged loud so ops_monitor
+            # Connection-open OR prerequisite-callable raised. Mirrors
+            # scheduled-fire posture — silently dropping a real run is
+            # worse than running against a partial DB where the body
+            # itself can detect + skip. Logged loud so ops_monitor
             # surfaces a repeating failure pattern.
             logger.warning(
                 "listener: prerequisite check for %r failed (connect or callable raised); running anyway",
                 job_name,
                 exc_info=True,
             )
+
+        if prereq_decision is not None:
+            met, reason = prereq_decision
+            if not met:
+                # Rejection write lives OUTSIDE the fail-open try so a
+                # transient mark_request_rejected failure cannot fall
+                # through to submit_manual_with_request — a job whose
+                # prerequisite explicitly returned (False, reason) MUST
+                # NOT dispatch even if the rejection write fails.
+                logger.info(
+                    "listener: rejecting manual_job request_id=%d for %r — prerequisite not met: %s",
+                    request_id,
+                    job_name,
+                    reason,
+                )
+                with psycopg.connect(settings.database_url, autocommit=True) as conn:
+                    mark_request_rejected(
+                        conn,
+                        request_id,
+                        error_msg=reason,
+                    )
+                return
 
     # Submit to the runtime's manual executor. The runtime's own
     # wrapper handles the linked_request_id / dispatched / completed
