@@ -476,9 +476,14 @@ def _phase_batched_dispatch(
         # first batch", "between any two ready batches", "before
         # kicking off Phase B lanes", and "between stages within a
         # lane" (the loop body re-enters here after every wait()).
-        # Each check uses its own short tx so a cancel arriving while
-        # we're between iterations is observed before the next batch
-        # spawns.
+        #
+        # Single-tx atomicity (Codex pre-push round 1 WARNING W4):
+        # observation, cancellation, and stop-completion all commit
+        # together. A worker crash between two of three separate
+        # commits would otherwise leave the stop row observed-but-
+        # unfinished with the run still ``running``. Boot-recovery
+        # would still clean up after the next jobs restart, but
+        # collapsing into one tx makes the happy path clean.
         with psycopg.connect(database_url) as cancel_conn:
             stop = is_stop_requested(
                 cancel_conn,
@@ -492,16 +497,14 @@ def _phase_batched_dispatch(
                     stop.id,
                     stop.mode,
                 )
-                mark_stop_observed(cancel_conn, stop.id)
-                cancel_conn.commit()
-                mark_run_cancelled(
-                    cancel_conn,
-                    run_id=run_id,
-                    notes_line="cancelled by operator at dispatcher checkpoint",
-                )
-                cancel_conn.commit()
-                mark_stop_completed(cancel_conn, stop.id)
-                cancel_conn.commit()
+                with cancel_conn.transaction():
+                    mark_stop_observed(cancel_conn, stop.id)
+                    mark_run_cancelled(
+                        cancel_conn,
+                        run_id=run_id,
+                        notes_line="cancelled by operator at dispatcher checkpoint",
+                    )
+                    mark_stop_completed(cancel_conn, stop.id)
                 return statuses, True
 
         pending_keys = [k for k, s in statuses.items() if s == "pending"]

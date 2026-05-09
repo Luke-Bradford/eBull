@@ -223,6 +223,36 @@ def test_mark_run_cancelled_idempotent(
 # ---------------------------------------------------------------------------
 
 
+def test_finalize_run_terminalises_late_cancel(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Codex pre-push round 1 BLOCKING B2 regression: dispatcher
+    finished its loop without observing the stop signal, then operator
+    clicks Cancel in the gap before finalize_run runs. Without the
+    cancel_requested_at branch in finalize_run, the run terminalises
+    as 'complete' and the stop row is orphaned. With the fix, finalize
+    routes the run to 'cancelled'.
+    """
+    _reset_state(ebull_test_conn)
+    run_id = start_run(ebull_test_conn, operator_id=None, stage_specs=_SPECS)
+    for spec in _SPECS:
+        mark_stage_running(ebull_test_conn, run_id=run_id, stage_key=spec.stage_key)
+        mark_stage_success(ebull_test_conn, run_id=run_id, stage_key=spec.stage_key)
+    ebull_test_conn.commit()
+
+    # Operator cancels AFTER all stages finished — dispatcher loop
+    # already exited; checkpoint never observed the stop row.
+    cancel_run(ebull_test_conn, requested_by_operator_id=None)
+    ebull_test_conn.commit()
+
+    terminal = finalize_run(ebull_test_conn, run_id=run_id)
+    ebull_test_conn.commit()
+
+    assert terminal == "cancelled"
+    state = read_state(ebull_test_conn)
+    assert state.status == "cancelled"
+
+
 def test_finalize_run_preserves_cancelled(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
