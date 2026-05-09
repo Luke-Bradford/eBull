@@ -260,11 +260,15 @@ class BootstrapTimelineArchiveResponse(BaseModel):
 class BootstrapTimelineStageResponse(BaseModel):
     """One ``bootstrap_stages`` row joined to ``get_bootstrap_stage_specs()``.
 
-    ``display_name`` + ``stage_order`` (when known) come from the spec
-    catalogue; rows whose ``stage_key`` is NOT in the current catalogue
-    (e.g. legacy run from a prior catalogue) fall back to a humanised
-    ``stage_key`` and the DB ``stage_order`` value. Mirrors PR6's
-    ``LAYERS`` registry-fallback shape.
+    ``display_name`` is always derived by humanising ``stage_key``
+    (title-cased, underscores → spaces) — ``StageSpec`` (defined at
+    ``app/services/bootstrap_state.py``) intentionally does NOT carry
+    a separate display_name field in v1, so the humaniser is the sole
+    canonical source. ``stage_order`` + ``job_name`` come from the
+    spec catalogue when the stage_key matches a current spec; rows
+    whose ``stage_key`` is NOT in the catalogue (e.g. legacy run from
+    a prior version) fall back to the DB ``stage_order`` + ``job_name``
+    columns. Mirrors PR6's ``LAYERS`` registry-fallback shape.
     """
 
     stage_key: str
