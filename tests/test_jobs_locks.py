@@ -25,15 +25,15 @@ pytestmark = pytest.mark.skipif(
 
 class TestJobLockAcquire:
     def test_first_acquire_succeeds(self) -> None:
-        with JobLock(test_database_url(), "test_first_acquire"):
+        with JobLock.test_only_per_name(test_database_url(), "test_first_acquire"):
             pass  # acquired and released cleanly
 
     def test_second_acquire_while_held_raises(self) -> None:
-        outer = JobLock(test_database_url(), "test_second_acquire")
+        outer = JobLock.test_only_per_name(test_database_url(), "test_second_acquire")
         outer.__enter__()
         try:
             with pytest.raises(JobAlreadyRunning) as exc_info:
-                with JobLock(test_database_url(), "test_second_acquire"):
+                with JobLock.test_only_per_name(test_database_url(), "test_second_acquire"):
                     pass
             assert exc_info.value.job_name == "test_second_acquire"
         finally:
@@ -41,15 +41,15 @@ class TestJobLockAcquire:
 
     def test_acquire_after_release_succeeds(self) -> None:
         # First holder releases, second holder must be able to acquire.
-        with JobLock(test_database_url(), "test_acquire_after_release"):
+        with JobLock.test_only_per_name(test_database_url(), "test_acquire_after_release"):
             pass
-        with JobLock(test_database_url(), "test_acquire_after_release"):
+        with JobLock.test_only_per_name(test_database_url(), "test_acquire_after_release"):
             pass  # would raise JobAlreadyRunning if release was broken
 
     def test_different_names_do_not_block(self) -> None:
         # Two locks with different names must be holdable concurrently.
-        with JobLock(test_database_url(), "test_different_names_a"):
-            with JobLock(test_database_url(), "test_different_names_b"):
+        with JobLock.test_only_per_name(test_database_url(), "test_different_names_a"):
+            with JobLock.test_only_per_name(test_database_url(), "test_different_names_b"):
                 pass
 
     def test_release_on_exception_in_body(self) -> None:
@@ -59,9 +59,9 @@ class TestJobLockAcquire:
             pass
 
         with pytest.raises(_BodyError):
-            with JobLock(test_database_url(), "test_release_on_exception"):
+            with JobLock.test_only_per_name(test_database_url(), "test_release_on_exception"):
                 raise _BodyError("boom")
 
         # Re-acquire must succeed.
-        with JobLock(test_database_url(), "test_release_on_exception"):
+        with JobLock.test_only_per_name(test_database_url(), "test_release_on_exception"):
             pass

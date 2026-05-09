@@ -99,6 +99,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("No pending migrations.")
 
+    # PR1a #1064 — fail-fast at lifespan startup if SCHEDULED_JOBS and
+    # _BOOTSTRAP_STAGE_SPECS disagree on a job_name's source. Codex
+    # round-1 BLOCKING: silent fallback violates the source-lock
+    # decision; lazy resolution defers the failure to first JobLock
+    # acquisition (after a bootstrap stage may already be marked
+    # running). Forcing here surfaces the conflict at boot, before any
+    # job dispatch.
+    from app.jobs.sources import get_job_name_to_source
+
+    get_job_name_to_source()
+
     # Open the connection pool after migrations so the schema is up to date.
     pool = open_pool("db_pool", min_size=1, max_size=10)
     logger.info("Connection pool opened (min=1, max=10).")

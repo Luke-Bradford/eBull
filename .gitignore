@@ -44,3 +44,7 @@ tmp_pytest/
 
 # Session-private agent prompts
 .claude/prompts/
+
+# Working scratchpads (plans, drafts) — not committed
+docs/internal/
+

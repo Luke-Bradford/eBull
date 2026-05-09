@@ -1,38 +1,61 @@
-"""Per-job advisory locks.
+"""Source-level advisory locks.
 
-A job that is already running must not be allowed to start again
-concurrently -- whether the second start comes from a manual trigger
-double-click, an APScheduler fire that overlaps a still-running manual
-run, or two operators clicking the same button at once. The
-serialisation primitive is a Postgres session-scoped advisory lock
-keyed on a deterministic hash of the job name.
+A job that hits a shared rate-bucket must not be allowed to start
+concurrently with another job in the same bucket -- whether the second
+start comes from a manual trigger double-click, an APScheduler fire
+overlapping a still-running manual run, two operators clicking the
+same button at once, OR a different job_name that happens to share
+the same source. The serialisation primitive is a Postgres
+session-scoped advisory lock keyed on a deterministic hash of the
+job's **source** (operator-locked decision #1064; PR1a refactor).
 
-Why session-scoped (``pg_try_advisory_lock``) rather than
-transaction-scoped (``pg_try_advisory_xact_lock``):
+## Source-level vs per-job semantics
 
-* The job functions in ``app/workers/scheduler.py`` open and close
-  *their own* connections during execution. A transaction-scoped lock
-  would be tied to the wrapper's transaction and either be released
-  before the job finishes, or force every job to run on the same
-  connection it was launched from -- both wrong.
-* A session-scoped lock is held for the lifetime of the connection
-  that took it. We hold that connection in the ``JobLock`` context
-  manager and release the lock explicitly on exit. The lock is
-  guaranteed to be released even if the job raises (the ``finally``
-  in ``__exit__``) and is also released by Postgres if the connection
-  dies (e.g. process crash, network partition) -- so a crashed worker
-  cannot leave a job permanently locked.
+Pre-PR1a: lock keyed on ``hashtext(job_name)``. Two different SEC jobs
+running concurrently would each acquire their own lock and starve the
+shared SEC 10 req/s rate budget — the budget is per-IP, not per-job,
+so per-job locking conflated independent rate buckets.
 
-Why ``hashtext`` and not the bare name:
+Post-PR1a: lock keyed on ``hashtext(f'job_source:{source}')`` where
+``source`` is resolved from the canonical
+``app.jobs.sources.JOB_NAME_TO_SOURCE`` registry. Same-source jobs
+serialise under one lock; cross-source jobs run in parallel. This
+matches the rate-bucket reality: ``sec_rate`` is one bucket;
+``etoro`` is another; ``db`` is another; ``sec_bulk_download`` is
+disjoint from ``sec_rate``.
 
-``pg_advisory_lock`` takes a ``bigint`` (or two ``int4``s). The job
-name is a Python string. ``hashtext`` is a stable Postgres function
-that returns an ``int4`` from a string and is the conventional way to
-key advisory locks on a textual identifier. Two distinct job names
-producing the same hash is theoretically possible but vanishingly
-unlikely with the small set of names in ``SCHEDULED_JOBS``; the
-collision risk is acceptable for v1 and would manifest as "two
-unrelated jobs cannot run concurrently", not as a correctness bug.
+Same-``job_name`` + different ``params`` semantics: the second
+invocation still serialises under the source lock (Codex round-1
+WARNING — per-param-set lock identity is deferred to v2).
+
+## Why session-scoped (``pg_try_advisory_lock``)
+
+The job functions in ``app/workers/scheduler.py`` open and close
+*their own* connections during execution. A transaction-scoped lock
+would be tied to the wrapper's transaction and either be released
+before the job finishes, or force every job to run on the same
+connection it was launched from -- both wrong. A session-scoped lock
+is held for the lifetime of the connection that took it; we hold that
+connection in the ``JobLock`` context manager and release the lock
+explicitly on exit. Postgres also releases automatically if the
+connection dies, so a crashed worker cannot leave a source
+permanently locked.
+
+## Why ``hashtext``
+
+``pg_advisory_lock`` takes a ``bigint`` (or two ``int4``s). The
+``job_source:{source}`` key is a Python string. ``hashtext`` is the
+stable Postgres function that returns an ``int4`` from a string. With
+only five distinct sources, hash collisions are vanishingly unlikely.
+
+## Test fixtures
+
+Production callers MUST resolve job_name through the registry —
+unknown names raise ``KeyError`` at lock acquisition. Tests that need
+a lock keyed on an arbitrary string can use
+``JobLock.test_only_per_name``, which keys the lock on
+``hashtext(job_name)`` directly (the pre-PR1a behaviour). Production
+code never calls this constructor.
 """
 
 from __future__ import annotations
@@ -41,6 +64,8 @@ import logging
 from types import TracebackType
 
 import psycopg
+
+from app.jobs.sources import source_for
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +99,7 @@ class JobAlreadyRunning(RuntimeError):
 
 
 class JobLock:
-    """Context manager that holds a session-scoped advisory lock.
+    """Context manager that holds a session-scoped source-level advisory lock.
 
     Usage::
 
@@ -82,25 +107,54 @@ class JobLock:
             run_the_job()
 
     On enter:
-      * Opens a dedicated short-lived connection (independent of any
-        connection the job itself uses).
-      * Calls ``pg_try_advisory_lock(hashtext(name)::int)``. If the
-        function returns false, raises :class:`JobAlreadyRunning`
+      * Resolves ``job_name -> source`` via ``app.jobs.sources.source_for``.
+        Raises ``KeyError`` if ``job_name`` is unknown (production
+        callers MUST register; tests use
+        :meth:`JobLock.test_only_per_name`).
+      * Opens a dedicated short-lived connection.
+      * Calls ``pg_try_advisory_lock(hashtext('job_source:{source}')::int)``.
+        If the function returns false, raises :class:`JobAlreadyRunning`
         without holding the connection open.
       * If it returns true, the connection is kept open until exit.
 
     On exit:
       * Calls ``pg_advisory_unlock(...)`` and closes the connection.
-        ``pg_advisory_unlock`` returning false at this point would
-        indicate the lock was not held -- it never should be -- and
-        is logged as a warning rather than raised, because the exit
-        path must not mask an in-flight exception.
+        ``pg_advisory_unlock`` returning false would indicate the lock
+        was not held — it never should be — and is logged as a warning
+        rather than raised, because the exit path must not mask an
+        in-flight exception.
     """
 
     def __init__(self, database_url: str, job_name: str) -> None:
         self._database_url = database_url
         self._job_name = job_name
+        self._lock_key = self._lock_key_for(job_name)
         self._conn: psycopg.Connection[object] | None = None
+
+    @staticmethod
+    def _lock_key_for(job_name: str) -> str:
+        """Resolve the source-level lock key for ``job_name``.
+
+        Production path. Raises ``KeyError`` for unknown job_name —
+        the registry is the single source of truth and silent fallback
+        violates the source-lock decision (Codex round-1 BLOCKING).
+        """
+        return f"job_source:{source_for(job_name)}"
+
+    @classmethod
+    def test_only_per_name(cls, database_url: str, job_name: str) -> JobLock:
+        """Test-only escape hatch: lock keyed on ``hashtext(job_name)``.
+
+        Reproduces the pre-PR1a per-name behaviour for unit tests that
+        construct synthetic job names. Production code MUST NOT call
+        this — the registry is the source of truth.
+        """
+        instance = cls.__new__(cls)
+        instance._database_url = database_url
+        instance._job_name = job_name
+        instance._lock_key = job_name  # raw, not source-prefixed
+        instance._conn = None
+        return instance
 
     def __enter__(self) -> JobLock:
         # autocommit=True so we do NOT hold an implicit transaction
@@ -114,7 +168,7 @@ class JobLock:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT pg_try_advisory_lock(hashtext(%s)::int)",
-                    (self._job_name,),
+                    (self._lock_key,),
                 )
                 row = cur.fetchone()
             if row is None or not row[0]:
@@ -143,7 +197,7 @@ class JobLock:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT pg_advisory_unlock(hashtext(%s)::int)",
-                    (self._job_name,),
+                    (self._lock_key,),
                 )
                 row = cur.fetchone()
             released = bool(row and row[0])  # type: ignore[index]
@@ -153,13 +207,15 @@ class JobLock:
                 # successful acquire. Log loud rather than raise so we
                 # do not clobber a real exception unwinding through us.
                 logger.warning(
-                    "JobLock release for %r returned false -- lock was not held by this session at exit time",
+                    "JobLock release for %r (key=%r) returned false -- lock was not held by this session at exit time",
                     self._job_name,
+                    self._lock_key,
                 )
         except Exception:
             logger.exception(
-                "JobLock release for %r failed; closing connection anyway",
+                "JobLock release for %r (key=%r) failed; closing connection anyway",
                 self._job_name,
+                self._lock_key,
             )
         finally:
             with _suppress_close_errors():

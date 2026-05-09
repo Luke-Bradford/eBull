@@ -26,7 +26,7 @@ handlers cannot both succeed. The partial unique index on
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
@@ -81,6 +81,18 @@ class StageSpec:
     stage_order: int
     lane: Lane
     job_name: str
+    # PR1a #1064 — params dict the bootstrap dispatcher passes to the
+    # registered invoker. Default empty mapping = "use the invoker's
+    # registry-default params" (PR1b's materialise_scheduled_params
+    # path). Stages 14, 15, 21 will populate this in PR1c when the
+    # bespoke wrappers collapse — at that point the bootstrap-only
+    # param overrides (e.g. ``min_period_of_report`` for the bounded
+    # 13F sweep, ``filing_types`` for the seed) live here as data,
+    # not in a separate code path. See
+    # ``docs/wiki/job-registry-audit.md`` §4 for the per-wrapper
+    # collapse plan. Mapping rather than dict to signal read-only
+    # consumption — dispatcher must not mutate.
+    params: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
