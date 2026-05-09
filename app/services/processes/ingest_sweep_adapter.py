@@ -583,8 +583,12 @@ def _build_row(
     stale_reasons: tuple[StaleReason, ...] = compute_stale_reasons(
         mechanism="ingest_sweep",
         status=status,
-        next_fire_at=None,
+        expected_fire_at=None,  # sweeps share their underlying job's schedule
         has_data_freshness_gap=has_data_freshness_gap,
+        # Sweeps have no own pending_job_requests rows in v1 (the
+        # underlying scheduled_job is the trigger surface — Codex
+        # pre-push WARNING flagged this; documented as a deliberate v1
+        # trade-off pending v2 sweep-trigger plumbing).
         has_dispatched_queue_age=False,
         last_progress_at=None,
         active_run_started_at=None,

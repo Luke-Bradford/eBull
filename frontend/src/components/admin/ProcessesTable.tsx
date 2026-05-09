@@ -243,8 +243,20 @@ export function ProcessesTable({
 }
 
 function compareRows(a: ProcessRowResponse, b: ProcessRowResponse): number {
-  const sa = STATUS_SORT_PRIORITY[a.status] ?? 99;
-  const sb = STATUS_SORT_PRIORITY[b.status] ?? 99;
+  // PR8 (#1083): stale rows float up to just below `failed`. The new
+  // four-case stale model surfaces via `stale_reasons` rather than
+  // flipping `status` to `"stale"`, so the sort must consult the
+  // tuple directly. Codex pre-push WARNING — without this, an `ok` /
+  // `idle` row that goes stale stays buried below `failed` and is
+  // easy to miss despite the chips + banner.
+  const aStale = a.stale_reasons.length > 0;
+  const bStale = b.stale_reasons.length > 0;
+  const sa = aStale
+    ? STATUS_SORT_PRIORITY.stale
+    : (STATUS_SORT_PRIORITY[a.status] ?? 99);
+  const sb = bStale
+    ? STATUS_SORT_PRIORITY.stale
+    : (STATUS_SORT_PRIORITY[b.status] ?? 99);
   if (sa !== sb) return sa - sb;
   // Failed jobs without a next-fire (one-shot) come after the ones
   // that will actually retry — operator action vs auto-recovery.

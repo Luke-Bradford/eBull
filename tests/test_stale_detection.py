@@ -42,7 +42,7 @@ def test_idle_row_with_no_signals_is_not_stale() -> None:
         compute(
             mechanism="scheduled_job",
             status="idle",
-            next_fire_at=_seconds_ago(0) + timedelta(minutes=5),  # future fire
+            expected_fire_at=_seconds_ago(0) + timedelta(minutes=5),  # future fire
             has_data_freshness_gap=False,
             has_dispatched_queue_age=False,
             last_progress_at=None,
@@ -59,7 +59,7 @@ def test_running_row_with_fresh_heartbeat_is_not_stale() -> None:
         compute(
             mechanism="scheduled_job",
             status="running",
-            next_fire_at=_seconds_ago(120),  # past fire — but row is running
+            expected_fire_at=_seconds_ago(120),  # past fire — but row is running
             has_data_freshness_gap=False,
             has_dispatched_queue_age=False,
             last_progress_at=_seconds_ago(30),
@@ -80,7 +80,7 @@ def test_schedule_missed_fires_when_next_fire_is_past_tolerance() -> None:
     reasons = compute(
         mechanism="scheduled_job",
         status="ok",
-        next_fire_at=_seconds_ago(SCHEDULE_MISS_TOLERANCE_S + 10),
+        expected_fire_at=_seconds_ago(SCHEDULE_MISS_TOLERANCE_S + 10),
         has_data_freshness_gap=False,
         has_dispatched_queue_age=False,
         last_progress_at=None,
@@ -96,7 +96,7 @@ def test_schedule_missed_does_not_fire_within_tolerance() -> None:
     reasons = compute(
         mechanism="scheduled_job",
         status="ok",
-        next_fire_at=_seconds_ago(SCHEDULE_MISS_TOLERANCE_S - 1),
+        expected_fire_at=_seconds_ago(SCHEDULE_MISS_TOLERANCE_S - 1),
         has_data_freshness_gap=False,
         has_dispatched_queue_age=False,
         last_progress_at=None,
@@ -113,7 +113,7 @@ def test_schedule_missed_suppressed_while_running() -> None:
     reasons = compute(
         mechanism="scheduled_job",
         status="running",
-        next_fire_at=_seconds_ago(SCHEDULE_MISS_TOLERANCE_S + 600),
+        expected_fire_at=_seconds_ago(SCHEDULE_MISS_TOLERANCE_S + 600),
         has_data_freshness_gap=False,
         has_dispatched_queue_age=False,
         last_progress_at=_seconds_ago(30),
@@ -129,7 +129,7 @@ def test_bootstrap_never_schedule_misses() -> None:
     reasons = compute(
         mechanism="bootstrap",
         status="ok",
-        next_fire_at=None,
+        expected_fire_at=None,
         has_data_freshness_gap=False,
         has_dispatched_queue_age=False,
         last_progress_at=None,
@@ -146,7 +146,7 @@ def test_ingest_sweep_never_schedule_misses() -> None:
     reasons = compute(
         mechanism="ingest_sweep",
         status="ok",
-        next_fire_at=None,
+        expected_fire_at=None,
         has_data_freshness_gap=False,
         has_dispatched_queue_age=False,
         last_progress_at=None,
@@ -166,7 +166,7 @@ def test_watermark_gap_fires_for_scheduled_job() -> None:
     reasons = compute(
         mechanism="scheduled_job",
         status="ok",
-        next_fire_at=NOW + timedelta(minutes=5),
+        expected_fire_at=NOW + timedelta(minutes=5),
         has_data_freshness_gap=True,
         has_dispatched_queue_age=False,
         last_progress_at=None,
@@ -181,7 +181,7 @@ def test_watermark_gap_fires_for_ingest_sweep() -> None:
     reasons = compute(
         mechanism="ingest_sweep",
         status="ok",
-        next_fire_at=None,
+        expected_fire_at=None,
         has_data_freshness_gap=True,
         has_dispatched_queue_age=False,
         last_progress_at=None,
@@ -197,7 +197,7 @@ def test_watermark_gap_suppressed_while_running() -> None:
     reasons = compute(
         mechanism="scheduled_job",
         status="running",
-        next_fire_at=None,
+        expected_fire_at=None,
         has_data_freshness_gap=True,
         has_dispatched_queue_age=False,
         last_progress_at=_seconds_ago(10),
@@ -214,7 +214,7 @@ def test_bootstrap_never_watermark_gaps() -> None:
     reasons = compute(
         mechanism="bootstrap",
         status="ok",
-        next_fire_at=None,
+        expected_fire_at=None,
         has_data_freshness_gap=True,  # defensively set; gate must skip
         has_dispatched_queue_age=False,
         last_progress_at=None,
@@ -240,7 +240,7 @@ def test_queue_stuck_fires_for_all_mechanisms_when_signal_set() -> None:
         reasons = compute(
             mechanism=mechanism,  # type: ignore[arg-type]
             status="idle",
-            next_fire_at=None,
+            expected_fire_at=None,
             has_data_freshness_gap=False,
             has_dispatched_queue_age=True,
             last_progress_at=None,
@@ -264,7 +264,7 @@ def test_mid_flight_stuck_fires_when_heartbeat_past_threshold() -> None:
     reasons = compute(
         mechanism="scheduled_job",
         status="running",
-        next_fire_at=None,
+        expected_fire_at=None,
         has_data_freshness_gap=False,
         has_dispatched_queue_age=False,
         last_progress_at=_seconds_ago(DEFAULT_THRESHOLD_S + 30),
@@ -282,7 +282,7 @@ def test_mid_flight_stuck_fallback_to_started_at_when_no_heartbeat() -> None:
     reasons = compute(
         mechanism="scheduled_job",
         status="running",
-        next_fire_at=None,
+        expected_fire_at=None,
         has_data_freshness_gap=False,
         has_dispatched_queue_age=False,
         last_progress_at=None,
@@ -300,7 +300,7 @@ def test_mid_flight_stuck_no_false_positive_on_first_tick_lag() -> None:
     reasons = compute(
         mechanism="scheduled_job",
         status="running",
-        next_fire_at=None,
+        expected_fire_at=None,
         has_data_freshness_gap=False,
         has_dispatched_queue_age=False,
         last_progress_at=None,
@@ -321,7 +321,7 @@ def test_mid_flight_stuck_uses_per_process_threshold_override() -> None:
     reasons_under = compute(
         mechanism="bootstrap",
         status="running",
-        next_fire_at=None,
+        expected_fire_at=None,
         has_data_freshness_gap=False,
         has_dispatched_queue_age=False,
         last_progress_at=_seconds_ago(360),
@@ -335,7 +335,7 @@ def test_mid_flight_stuck_uses_per_process_threshold_override() -> None:
     reasons_over = compute(
         mechanism="bootstrap",
         status="running",
-        next_fire_at=None,
+        expected_fire_at=None,
         has_data_freshness_gap=False,
         has_dispatched_queue_age=False,
         last_progress_at=_seconds_ago(threshold_s + 60),
@@ -353,7 +353,7 @@ def test_mid_flight_stuck_does_not_fire_on_terminal_status() -> None:
         reasons = compute(
             mechanism="scheduled_job",
             status=status,  # type: ignore[arg-type]
-            next_fire_at=None,
+            expected_fire_at=None,
             has_data_freshness_gap=False,
             has_dispatched_queue_age=False,
             last_progress_at=_seconds_ago(DEFAULT_THRESHOLD_S * 10),
@@ -370,7 +370,7 @@ def test_mid_flight_stuck_at_exact_threshold_does_not_fire() -> None:
     reasons = compute(
         mechanism="scheduled_job",
         status="running",
-        next_fire_at=None,
+        expected_fire_at=None,
         has_data_freshness_gap=False,
         has_dispatched_queue_age=False,
         last_progress_at=_seconds_ago(DEFAULT_THRESHOLD_S),
@@ -393,7 +393,7 @@ def test_multiple_reasons_fire_in_canonical_order() -> None:
     reasons = compute(
         mechanism="scheduled_job",
         status="ok",  # not running — schedule_missed + watermark_gap can fire
-        next_fire_at=_seconds_ago(SCHEDULE_MISS_TOLERANCE_S + 30),
+        expected_fire_at=_seconds_ago(SCHEDULE_MISS_TOLERANCE_S + 30),
         has_data_freshness_gap=True,
         has_dispatched_queue_age=True,
         last_progress_at=None,
@@ -411,7 +411,7 @@ def test_running_row_can_fire_queue_and_midflight_simultaneously() -> None:
     reasons = compute(
         mechanism="scheduled_job",
         status="running",
-        next_fire_at=_seconds_ago(SCHEDULE_MISS_TOLERANCE_S + 30),
+        expected_fire_at=_seconds_ago(SCHEDULE_MISS_TOLERANCE_S + 30),
         has_data_freshness_gap=True,
         has_dispatched_queue_age=True,
         last_progress_at=_seconds_ago(DEFAULT_THRESHOLD_S + 60),

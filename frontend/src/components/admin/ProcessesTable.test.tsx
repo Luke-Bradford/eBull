@@ -229,4 +229,47 @@ describe("ProcessesTable", () => {
     ]);
     expect(screen.getByTestId("stale-banner")).toBeTruthy();
   });
+
+  it("sorts stale rows above non-stale ok rows (status='ok' + stale_reasons populated)", () => {
+    const { container } = renderTable([
+      makeProcessRow({
+        process_id: "ok_one",
+        status: "ok",
+        display_name: "A_ok",
+      }),
+      makeProcessRow({
+        process_id: "ok_stale",
+        status: "ok",
+        display_name: "B_stale",
+        stale_reasons: ["watermark_gap"],
+      }),
+    ]);
+    const links = Array.from(container.querySelectorAll("tbody a")).map(
+      (a) => a.textContent ?? "",
+    );
+    // Stale row floats up above ok row even though both have status='ok'.
+    expect(links[0]).toBe("B_stale");
+    expect(links[1]).toBe("A_ok");
+  });
+
+  it("failed rows still outrank stale rows", () => {
+    const { container } = renderTable([
+      makeProcessRow({
+        process_id: "stale",
+        status: "ok",
+        display_name: "A_stale",
+        stale_reasons: ["queue_stuck"],
+      }),
+      makeProcessRow({
+        process_id: "fail",
+        status: "failed",
+        display_name: "B_failed",
+      }),
+    ]);
+    const links = Array.from(container.querySelectorAll("tbody a")).map(
+      (a) => a.textContent ?? "",
+    );
+    expect(links[0]).toBe("B_failed");
+    expect(links[1]).toBe("A_stale");
+  });
 });

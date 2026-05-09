@@ -61,7 +61,7 @@ def compute(
     *,
     mechanism: ProcessMechanism,
     status: ProcessStatus,
-    next_fire_at: datetime | None,
+    expected_fire_at: datetime | None,
     has_data_freshness_gap: bool,
     has_dispatched_queue_age: bool,
     last_progress_at: datetime | None,
@@ -75,8 +75,17 @@ def compute(
         mechanism: Row's mechanism (``bootstrap`` / ``scheduled_job`` /
             ``ingest_sweep``).
         status: Row's ``ProcessStatus``.
-        next_fire_at: Adapter-computed next-fire timestamp; ``None`` for
-            on-demand / one-shot rows.
+        expected_fire_at: The FIRST cadence-occurrence strictly after
+            the latest terminal run's ``started_at``. ``None`` when the
+            job has never run (``pending_first_run`` already covers
+            that surface) or when the mechanism has no schedule. The
+            rule fires when this timestamp is more than
+            ``SCHEDULE_MISS_TOLERANCE_S`` in the past — i.e., we should
+            have fired again by now and didn't. Computed from
+            ``compute_next_run(cadence, latest_terminal.started_at)``
+            in the scheduled adapter; pure-future ``next_fire_at``
+            values would never be reachable so the rule could never
+            fire (Codex pre-push BLOCKING).
         has_data_freshness_gap: True when at least one
             ``data_freshness_index`` row for this process's freshness
             source has ``expected_next_at IS NOT NULL`` AND
@@ -105,14 +114,16 @@ def compute(
     """
     reasons: list[StaleReason] = []
 
-    # Rule 1: schedule_missed — scheduled_job only. Negative when the
-    # job is currently running (overlap-suppression is intentional, not
-    # a miss).
+    # Rule 1: schedule_missed — scheduled_job only. ``expected_fire_at``
+    # is the first cadence-occurrence after the latest terminal run; if
+    # it's now > tolerance seconds in the past we should have fired
+    # again by now and didn't. Negative when the job is currently
+    # running (overlap-suppression is intentional, not a miss).
     if (
         mechanism == "scheduled_job"
         and status != "running"
-        and next_fire_at is not None
-        and next_fire_at < now - _seconds(SCHEDULE_MISS_TOLERANCE_S)
+        and expected_fire_at is not None
+        and expected_fire_at < now - _seconds(SCHEDULE_MISS_TOLERANCE_S)
     ):
         reasons.append("schedule_missed")
 

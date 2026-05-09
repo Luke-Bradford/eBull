@@ -517,3 +517,116 @@ def test_mid_flight_stuck_does_not_fire_on_first_tick_lag(
     row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
     assert row is not None
     assert "mid_flight_stuck" not in row.stale_reasons
+
+
+def test_schedule_missed_when_terminal_run_predates_cadence_window(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """``retry_deferred_recommendations`` runs every 5 minutes. A
+    successful terminal run from 2 hours ago means we should have
+    fired ~24 more times since — schedule_missed must surface.
+
+    Codex pre-push BLOCKING: the rule must compare against the
+    cadence-occurrence after the latest run, not the strictly-future
+    ``next_fire_at`` (which compute_next_run anchors to ``now`` and so
+    can never be in the past).
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO job_runs
+               (job_name, started_at, finished_at, status)
+        VALUES (%s, now() - interval '2 hours',
+                now() - interval '2 hours' + interval '30 seconds',
+                'success')
+        """,
+        (JOB_RETRY_DEFERRED,),
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert "schedule_missed" in row.stale_reasons
+
+
+def test_schedule_missed_does_not_fire_when_running(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """An active run that's been going for 2 hours has not "missed" its
+    fire — the cadence is suppressed by the in-flight run."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    # Seed a 2h-old terminal AND a currently-running row.
+    ebull_test_conn.execute(
+        """
+        INSERT INTO job_runs
+               (job_name, started_at, finished_at, status)
+        VALUES (%s, now() - interval '3 hours',
+                now() - interval '3 hours' + interval '30 seconds',
+                'success')
+        """,
+        (JOB_RETRY_DEFERRED,),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO job_runs
+               (job_name, started_at, status, last_progress_at)
+        VALUES (%s, now() - interval '2 hours', 'running',
+                now() - interval '30 seconds')
+        """,
+        (JOB_RETRY_DEFERRED,),
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.status == "running"
+    assert "schedule_missed" not in row.stale_reasons
+
+
+def test_queue_stuck_with_null_claimed_at_falls_back_to_requested_at(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A buggy ``status='dispatched'`` row with NULL claimed_at must
+    still surface queue_stuck — fallback to ``requested_at`` keeps the
+    rule honest under dispatcher misbehaviour."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(ebull_test_conn, job_name=JOB_RETRY_DEFERRED, status="success", finished=True)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO pending_job_requests
+            (request_kind, job_name, process_id, mode, status,
+             requested_at, claimed_at, claimed_by)
+        VALUES ('manual_job', %s, %s, 'iterate', 'dispatched',
+                now() - interval '60 minutes', NULL, NULL)
+        """,
+        (JOB_RETRY_DEFERRED, JOB_RETRY_DEFERRED),
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert "queue_stuck" in row.stale_reasons
+
+
+def test_queue_stuck_does_not_fire_on_recently_claimed_dispatched(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A dispatched row whose ``claimed_at`` is only 5 minutes old is
+    well within the 30-min queue_stuck threshold — not stale."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(ebull_test_conn, job_name=JOB_RETRY_DEFERRED, status="success", finished=True)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO pending_job_requests
+            (request_kind, job_name, process_id, mode, status,
+             claimed_at, claimed_by)
+        VALUES ('manual_job', %s, %s, 'iterate', 'dispatched',
+                now() - interval '5 minutes', 'test-boot-id')
+        """,
+        (JOB_RETRY_DEFERRED, JOB_RETRY_DEFERRED),
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert "queue_stuck" not in row.stale_reasons

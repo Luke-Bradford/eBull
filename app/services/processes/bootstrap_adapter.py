@@ -390,7 +390,7 @@ def get_row(conn: psycopg.Connection[Any]) -> ProcessRow | None:
     stale_reasons: tuple[StaleReason, ...] = compute_stale_reasons(
         mechanism="bootstrap",
         status=process_status,
-        next_fire_at=None,
+        expected_fire_at=None,  # bootstrap is on-demand; no schedule
         has_data_freshness_gap=False,
         has_dispatched_queue_age=has_dispatched_queue_age,
         last_progress_at=active_run.last_progress_at if active_run is not None else None,

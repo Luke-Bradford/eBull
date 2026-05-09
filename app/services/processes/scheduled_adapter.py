@@ -620,6 +620,15 @@ def _build_row(
     # the rule's mechanism gate could fire to keep the snapshot read
     # cheap.
     now = datetime.now(UTC)
+    # ``expected_fire_at`` is the first cadence-occurrence after the
+    # latest terminal run's ``started_at``. When that timestamp is in
+    # the past (now > expected + tolerance), the schedule was missed.
+    # Codex pre-push BLOCKING: ``next_fire_at`` is the strictly-future
+    # next fire from compute_next_run(cadence, now), so it could never
+    # satisfy ``< now - tolerance`` and the rule was unreachable.
+    expected_fire_at: datetime | None = None
+    if terminal_row is not None and terminal_row.get("started_at") is not None:
+        expected_fire_at = compute_next_run(job.cadence, terminal_row["started_at"])
     freshness_source = freshness_source_for(job.name)
     has_data_freshness_gap = (
         freshness_source is not None
@@ -638,7 +647,7 @@ def _build_row(
     stale_reasons: tuple[StaleReason, ...] = compute_stale_reasons(
         mechanism="scheduled_job",
         status=process_status,
-        next_fire_at=next_fire_at,
+        expected_fire_at=expected_fire_at,
         has_data_freshness_gap=has_data_freshness_gap,
         has_dispatched_queue_age=has_dispatched_queue_age,
         last_progress_at=active_run.last_progress_at if active_run is not None else None,
