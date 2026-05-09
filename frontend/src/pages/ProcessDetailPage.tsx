@@ -17,12 +17,16 @@ import { Link, useParams } from "react-router-dom";
 import { ApiError } from "@/api/client";
 import {
   cancelProcess,
+  fetchBootstrapTimeline,
   fetchOrchestratorDag,
   fetchProcess,
   fetchProcessRuns,
   triggerProcess,
 } from "@/api/processes";
 import type {
+  BootstrapTimelineArchiveResponse,
+  BootstrapTimelineResponse,
+  BootstrapTimelineStageResponse,
   CancelMode,
   OrchestratorDagLayerResponse,
   OrchestratorDagResponse,
@@ -44,9 +48,24 @@ import {
 import { useAsync } from "@/lib/useAsync";
 import { formatDateTime } from "@/lib/format";
 
-type TabKey = "overview" | "history" | "errors" | "dag";
+type TabKey = "overview" | "history" | "errors" | "dag" | "timeline";
 
 const ORCHESTRATOR_FULL_SYNC_ID = "orchestrator_full_sync";
+const BOOTSTRAP_PROCESS_ID = "bootstrap";
+
+// Lane order for the bootstrap timeline tab. Stages within a lane are
+// sorted by stage_order ASC; lanes themselves render in the order
+// declared by the orchestrator (init runs before etoro / sec lanes;
+// db lane is the cross-source ingestion sink). Unknown lanes from
+// legacy runs sort last so the operator still sees them.
+const BOOTSTRAP_LANE_ORDER = [
+  "init",
+  "etoro",
+  "sec_rate",
+  "sec_bulk_download",
+  "db",
+  "sec",
+] as const;
 
 export function ProcessDetailPage() {
   const params = useParams<{ id: string }>();
@@ -68,6 +87,7 @@ export function ProcessDetailPage() {
   // keeps the rendered grid stable while a tick re-fetches (the
   // useAsync default is false — Codex pre-impl review M2).
   const isOrchestrator = id === ORCHESTRATOR_FULL_SYNC_ID;
+  const isBootstrap = id === BOOTSTRAP_PROCESS_ID;
   const dag = useAsync<OrchestratorDagResponse | null>(
     () =>
       tab === "dag" && isOrchestrator
@@ -76,15 +96,32 @@ export function ProcessDetailPage() {
     [id, tab, isOrchestrator],
     { preserveOnRefetch: true },
   );
+  // Bootstrap timeline drill-in fetcher (#1080). Mirrors the DAG fetcher's
+  // gating contract: BOTH (process_id is bootstrap) AND (active tab is
+  // timeline). Restricted endpoint — non-bootstrap ids 404. URL-derived
+  // `id` (not `detail.data?.process_id`) drives the gate so the fetch
+  // can fire without waiting for the row read to land.
+  const timeline = useAsync<BootstrapTimelineResponse | null>(
+    () =>
+      tab === "timeline" && isBootstrap
+        ? fetchBootstrapTimeline(id)
+        : Promise.resolve(null),
+    [id, tab, isBootstrap],
+    { preserveOnRefetch: true },
+  );
 
-  // Reset tab to overview if currently on DAG and the route param
-  // changes to a non-orchestrator id (operator clicked a different
-  // process row from the table). Codex pre-impl review M-r2-2.
+  // Reset tab to overview if currently on a process-specific tab and the
+  // route param changes to an id that no longer owns that tab (operator
+  // clicked a different process row from the table). Codex pre-impl
+  // review M-r2-2 originally pinned the DAG variant; PR7 extends to
+  // timeline.
   useEffect(() => {
     if (tab === "dag" && !isOrchestrator) {
       setTab("overview");
+    } else if (tab === "timeline" && !isBootstrap) {
+      setTab("overview");
     }
-  }, [tab, isOrchestrator]);
+  }, [tab, isOrchestrator, isBootstrap]);
 
   // Extract the refetch refs as local const bindings so ESLint can
   // see their identity and verify the dep array — `useAsync` wraps
@@ -97,12 +134,14 @@ export function ProcessDetailPage() {
   const refetchDetail = detail.refetch;
   const refetchRuns = runs.refetch;
   const refetchDag = dag.refetch;
+  const refetchTimeline = timeline.refetch;
 
   const refetchAll = useCallback(() => {
     refetchDetail();
     refetchRuns();
     refetchDag();
-  }, [refetchDetail, refetchRuns, refetchDag]);
+    refetchTimeline();
+  }, [refetchDetail, refetchRuns, refetchDag, refetchTimeline]);
 
   const handleIterate = useCallback(async () => {
     setTriggerError(null);
@@ -196,7 +235,12 @@ export function ProcessDetailPage() {
         ) : null}
       </div>
 
-      <TabBar tab={tab} setTab={setTab} showDag={isOrchestrator} />
+      <TabBar
+        tab={tab}
+        setTab={setTab}
+        showDag={isOrchestrator}
+        showTimeline={isBootstrap}
+      />
 
       <Section title={tabTitle(tab)}>
         {tab === "overview" ? (
@@ -220,14 +264,21 @@ export function ProcessDetailPage() {
             error={detail.error}
             onRetry={detail.refetch}
           />
-        ) : (
+        ) : tab === "dag" && isOrchestrator ? (
           <DagTab
             payload={dag.data}
             loading={dag.loading}
             error={dag.error}
             onRetry={dag.refetch}
           />
-        )}
+        ) : tab === "timeline" && isBootstrap ? (
+          <TimelineTab
+            payload={timeline.data}
+            loading={timeline.loading}
+            error={timeline.error}
+            onRetry={timeline.refetch}
+          />
+        ) : null}
       </Section>
 
       {showFullWash && detail.data ? (
@@ -338,16 +389,19 @@ function TabBar({
   tab,
   setTab,
   showDag,
+  showTimeline,
 }: {
   tab: TabKey;
   setTab: (t: TabKey) => void;
   showDag: boolean;
+  showTimeline: boolean;
 }) {
   const tabs: { key: TabKey; label: string }[] = [
     { key: "overview", label: "Overview" },
     { key: "history", label: "History" },
     { key: "errors", label: "Errors" },
     ...(showDag ? [{ key: "dag" as TabKey, label: "DAG" }] : []),
+    ...(showTimeline ? [{ key: "timeline" as TabKey, label: "Timeline" }] : []),
   ];
   return (
     <div role="tablist" className="flex gap-1 border-b border-slate-200 dark:border-slate-800">
@@ -375,13 +429,18 @@ function TabBar({
 }
 
 function tabTitle(tab: TabKey): string {
-  return tab === "overview"
-    ? "Overview"
-    : tab === "history"
-      ? "Run history (last 7 days)"
-      : tab === "errors"
-        ? "Errors (latest terminal run)"
-        : "DAG (latest sync run)";
+  switch (tab) {
+    case "overview":
+      return "Overview";
+    case "history":
+      return "Run history (last 7 days)";
+    case "errors":
+      return "Errors (latest terminal run)";
+    case "dag":
+      return "DAG (latest sync run)";
+    case "timeline":
+      return "Bootstrap timeline (latest run)";
+  }
 }
 
 function OverviewTab({
@@ -713,6 +772,314 @@ function DagLayerTable({ layers }: { layers: OrchestratorDagLayerResponse[] }) {
         })}
       </tbody>
     </table>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Bootstrap timeline drill-in tab (#1080 — bootstrap process_id only)
+// ---------------------------------------------------------------------------
+
+const STAGE_STATUS_TONE: Record<string, string> = {
+  pending:
+    "border-slate-300 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400",
+  running:
+    "border-sky-300 bg-sky-50 text-sky-700 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-300",
+  success:
+    "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300",
+  error:
+    "border-red-300 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300",
+  skipped:
+    "border-slate-300 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400",
+  blocked:
+    "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300",
+};
+
+const ARCHIVE_TONE: Record<string, string> = {
+  // Archive squares mirror their stage's status by default; once we have
+  // a per-archive status surface (see #1064 follow-up) the tone can
+  // diverge. For now: error stage → red square, success → emerald, else
+  // sky.
+  error: "bg-red-200 dark:bg-red-900/60 hover:bg-red-300 dark:hover:bg-red-900",
+  success:
+    "bg-emerald-200 dark:bg-emerald-900/60 hover:bg-emerald-300 dark:hover:bg-emerald-900",
+};
+
+function TimelineTab({
+  payload,
+  loading,
+  error,
+  onRetry,
+}: {
+  payload: BootstrapTimelineResponse | null;
+  loading: boolean;
+  error: unknown;
+  onRetry: () => void;
+}) {
+  const [archive, setArchive] = useState<{
+    stageDisplayName: string;
+    archive: BootstrapTimelineArchiveResponse;
+  } | null>(null);
+
+  if (loading) return <SectionSkeleton rows={6} />;
+  if (error) return <SectionError onRetry={onRetry} />;
+  if (!payload || payload.run === null) {
+    return (
+      <p className="text-sm text-slate-500 dark:text-slate-400">
+        No bootstrap run yet. Trigger Run from the action bar above to populate
+        the timeline.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <TimelineRunSummary run={payload.run} />
+      <TimelineLanesGrid
+        stages={payload.stages}
+        onArchiveClick={(stage, archiveRow) =>
+          setArchive({
+            stageDisplayName: stage.display_name,
+            archive: archiveRow,
+          })
+        }
+      />
+      {archive ? (
+        <ArchiveDetailModal
+          stageDisplayName={archive.stageDisplayName}
+          archive={archive.archive}
+          onClose={() => setArchive(null)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function TimelineRunSummary({
+  run,
+}: {
+  run: NonNullable<BootstrapTimelineResponse["run"]>;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <Cell label="Run id" value={`#${run.run_id}`} />
+      <Cell label="Status" value={run.status} />
+      <Cell label="Triggered" value={formatDateTime(run.triggered_at)} />
+      <Cell
+        label="Completed"
+        value={run.completed_at ? formatDateTime(run.completed_at) : "—"}
+      />
+      <Cell
+        label="Cancel signal"
+        value={
+          run.cancel_requested_at
+            ? formatDateTime(run.cancel_requested_at)
+            : "—"
+        }
+      />
+    </div>
+  );
+}
+
+function TimelineLanesGrid({
+  stages,
+  onArchiveClick,
+}: {
+  stages: BootstrapTimelineStageResponse[];
+  onArchiveClick: (
+    stage: BootstrapTimelineStageResponse,
+    archive: BootstrapTimelineArchiveResponse,
+  ) => void;
+}) {
+  if (stages.length === 0) {
+    return (
+      <p className="text-sm text-slate-500 dark:text-slate-400">
+        Run is in flight; no stage rows materialised yet. Reload in a few
+        seconds.
+      </p>
+    );
+  }
+  // Group stages by lane; within each lane sort by stage_order ASC.
+  const byLane = new Map<string, BootstrapTimelineStageResponse[]>();
+  for (const stage of stages) {
+    const list = byLane.get(stage.lane) ?? [];
+    list.push(stage);
+    byLane.set(stage.lane, list);
+  }
+  for (const list of byLane.values()) {
+    list.sort((a, b) => a.stage_order - b.stage_order);
+  }
+  // Lane order: declared order first, then any trailing unknown lanes
+  // sorted alphabetically so legacy rows still render.
+  const orderedLanes: string[] = [];
+  for (const lane of BOOTSTRAP_LANE_ORDER) {
+    if (byLane.has(lane)) orderedLanes.push(lane);
+  }
+  const trailingLanes = [...byLane.keys()]
+    .filter((lane) => !BOOTSTRAP_LANE_ORDER.includes(lane as never))
+    .sort();
+  orderedLanes.push(...trailingLanes);
+
+  return (
+    <div className="grid gap-3 lg:grid-cols-2">
+      {orderedLanes.map((lane) => {
+        const laneStages = byLane.get(lane) ?? [];
+        return (
+          <div
+            key={lane}
+            className="rounded border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900/40"
+          >
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              {lane}{" "}
+              <span className="ml-1 font-normal text-slate-400 dark:text-slate-500">
+                ({laneStages.length})
+              </span>
+            </h3>
+            <ul className="space-y-2">
+              {laneStages.map((stage) => (
+                <TimelineStageRow
+                  key={stage.stage_key}
+                  stage={stage}
+                  onArchiveClick={(arch) => onArchiveClick(stage, arch)}
+                />
+              ))}
+            </ul>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function TimelineStageRow({
+  stage,
+  onArchiveClick,
+}: {
+  stage: BootstrapTimelineStageResponse;
+  onArchiveClick: (archive: BootstrapTimelineArchiveResponse) => void;
+}) {
+  const tone =
+    STAGE_STATUS_TONE[stage.status] ?? STAGE_STATUS_TONE["pending"];
+  const archiveTone =
+    ARCHIVE_TONE[stage.status] ??
+    "bg-sky-200 dark:bg-sky-900/60 hover:bg-sky-300 dark:hover:bg-sky-900";
+  return (
+    <li className="rounded border border-slate-200 p-2 text-sm dark:border-slate-800">
+      <div className="flex items-start gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline gap-2">
+            <span
+              className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${tone}`}
+            >
+              {stage.status}
+            </span>
+            <span
+              className="truncate font-medium text-slate-700 dark:text-slate-200"
+              title={stage.display_name}
+            >
+              {stage.display_name}
+            </span>
+          </div>
+          <div className="text-xs text-slate-500 dark:text-slate-400">
+            {stage.job_name || stage.stage_key}
+          </div>
+          {stage.last_error ? (
+            <div
+              className="mt-1 truncate text-xs text-red-700 dark:text-red-300"
+              title={stage.last_error}
+            >
+              {stage.last_error}
+            </div>
+          ) : null}
+        </div>
+        {stage.archives.length > 0 ? (
+          <div
+            className="flex flex-wrap gap-1"
+            aria-label={`${stage.archives.length} archive results`}
+          >
+            {stage.archives.map((archive) => (
+              <button
+                key={archive.archive_name}
+                type="button"
+                onClick={() => onArchiveClick(archive)}
+                title={archive.archive_name}
+                aria-label={`Open archive detail: ${archive.archive_name}`}
+                className={`h-4 w-4 rounded ${archiveTone}`}
+              />
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </li>
+  );
+}
+
+function ArchiveDetailModal({
+  stageDisplayName,
+  archive,
+  onClose,
+}: {
+  stageDisplayName: string;
+  archive: BootstrapTimelineArchiveResponse;
+  onClose: () => void;
+}) {
+  const skipEntries = Object.entries(archive.rows_skipped_by_reason);
+  return (
+    <Modal isOpen={true} onRequestClose={onClose} labelledBy="archive-detail-title">
+      <h2
+        id="archive-detail-title"
+        className="text-sm font-semibold text-slate-800 dark:text-slate-100"
+      >
+        {archive.archive_name}
+      </h2>
+      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+        {stageDisplayName}
+      </p>
+      <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
+        <dt className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+          Rows written
+        </dt>
+        <dd className="tabular-nums text-slate-700 dark:text-slate-200">
+          {archive.rows_written.toLocaleString()}
+        </dd>
+        <dt className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+          Completed
+        </dt>
+        <dd className="text-slate-700 dark:text-slate-200">
+          {formatDateTime(archive.completed_at)}
+        </dd>
+      </dl>
+      <div className="mt-3">
+        <h3 className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+          Rows skipped by reason
+        </h3>
+        {skipEntries.length === 0 ? (
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            None.
+          </p>
+        ) : (
+          <ul className="mt-1 space-y-0.5 text-sm">
+            {skipEntries.map(([reason, count]) => (
+              <li
+                key={reason}
+                className="flex justify-between font-mono text-xs text-slate-700 dark:text-slate-200"
+              >
+                <span>{reason}</span>
+                <span className="tabular-nums">{count.toLocaleString()}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className="mt-4 flex justify-end">
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800/40"
+        >
+          Close
+        </button>
+      </div>
+    </Modal>
   );
 }
 

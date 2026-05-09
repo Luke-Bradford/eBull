@@ -5,12 +5,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/api/client";
 import {
   cancelProcess,
+  fetchBootstrapTimeline,
   fetchOrchestratorDag,
   fetchProcess,
   fetchProcessRuns,
   triggerProcess,
 } from "@/api/processes";
-import type { OrchestratorDagResponse } from "@/api/types";
+import type {
+  BootstrapTimelineResponse,
+  OrchestratorDagResponse,
+} from "@/api/types";
 import {
   makeProcessRow,
   makeError,
@@ -27,6 +31,7 @@ vi.mock("@/api/processes", async () => {
     triggerProcess: vi.fn(),
     cancelProcess: vi.fn(),
     fetchOrchestratorDag: vi.fn(),
+    fetchBootstrapTimeline: vi.fn(),
   };
 });
 
@@ -35,6 +40,7 @@ const mockedRuns = vi.mocked(fetchProcessRuns);
 const mockedTrigger = vi.mocked(triggerProcess);
 const mockedCancel = vi.mocked(cancelProcess);
 const mockedDag = vi.mocked(fetchOrchestratorDag);
+const mockedTimeline = vi.mocked(fetchBootstrapTimeline);
 
 beforeEach(() => {
   mockedDetail.mockReset();
@@ -42,6 +48,7 @@ beforeEach(() => {
   mockedTrigger.mockReset();
   mockedCancel.mockReset();
   mockedDag.mockReset();
+  mockedTimeline.mockReset();
 });
 
 function renderAt(path = "/admin/processes/sec_form4_ingest") {
@@ -320,5 +327,163 @@ describe("ProcessDetailPage — DAG tab (orchestrator_full_sync)", () => {
     renderOrchestrator();
     fireEvent.click(await screen.findByRole("tab", { name: "DAG" }));
     expect(await screen.findByText(/No recent sync run/i)).toBeTruthy();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// PR7 (#1080) — Timeline drill-in tab on /admin/processes/bootstrap
+// ---------------------------------------------------------------------------
+
+function makeTimelinePayload(): BootstrapTimelineResponse {
+  return {
+    run: {
+      run_id: 7,
+      status: "running",
+      triggered_at: "2026-05-09T10:00:00Z",
+      completed_at: null,
+      cancel_requested_at: null,
+    },
+    stages: [
+      {
+        stage_key: "universe_sync",
+        display_name: "Universe Sync",
+        stage_order: 1,
+        lane: "init",
+        job_name: "nightly_universe_sync",
+        status: "success",
+        started_at: "2026-05-09T10:00:01Z",
+        completed_at: "2026-05-09T10:00:30Z",
+        last_error: null,
+        rows_processed: 4520,
+        processed_count: 4520,
+        target_count: null,
+        archives: [
+          {
+            archive_name: "__job__",
+            rows_written: 0,
+            rows_skipped_by_reason: {},
+            completed_at: "2026-05-09T10:00:30Z",
+          },
+        ],
+      },
+      {
+        stage_key: "cik_refresh",
+        display_name: "Cik Refresh",
+        stage_order: 6,
+        lane: "sec_rate",
+        job_name: "daily_cik_refresh",
+        status: "running",
+        started_at: "2026-05-09T10:00:31Z",
+        completed_at: null,
+        last_error: null,
+        rows_processed: null,
+        processed_count: 12,
+        target_count: null,
+        archives: [
+          {
+            archive_name: "cik_index_2026Q2.zip",
+            rows_written: 420,
+            rows_skipped_by_reason: { unresolved_cik: 12 },
+            completed_at: "2026-05-09T10:00:45Z",
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function renderBootstrap() {
+  return render(
+    <MemoryRouter initialEntries={["/admin/processes/bootstrap"]}>
+      <Routes>
+        <Route path="admin/processes/:id" element={<ProcessDetailPage />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+describe("ProcessDetailPage — Timeline tab (bootstrap)", () => {
+  it("renders the Timeline tab on the bootstrap detail page", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "bootstrap", display_name: "First-install bootstrap" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    renderBootstrap();
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Timeline" })).toBeTruthy(),
+    );
+  });
+
+  it("does NOT render the Timeline tab on a non-bootstrap detail page", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "sec_form4_ingest", display_name: "Form 4 ingest" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    renderAt();
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Overview" })).toBeTruthy(),
+    );
+    expect(screen.queryByRole("tab", { name: "Timeline" })).toBeNull();
+    // Non-bootstrap pages must NEVER call /timeline — restricted endpoint.
+    expect(mockedTimeline).not.toHaveBeenCalled();
+  });
+
+  it("does NOT fetch /timeline on initial load when tab is overview", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "bootstrap", display_name: "First-install bootstrap" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    renderBootstrap();
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Timeline" })).toBeTruthy(),
+    );
+    // Fetch is gated on (tab === "timeline") AND bootstrap id.
+    expect(mockedTimeline).not.toHaveBeenCalled();
+  });
+
+  it("fetches /timeline and renders stages grouped by lane when Timeline tab is opened", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "bootstrap", display_name: "First-install bootstrap" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    mockedTimeline.mockResolvedValueOnce(makeTimelinePayload());
+    renderBootstrap();
+    fireEvent.click(await screen.findByRole("tab", { name: "Timeline" }));
+    await waitFor(() => expect(mockedTimeline).toHaveBeenCalledWith("bootstrap"));
+    expect(await screen.findByText("Universe Sync")).toBeTruthy();
+    expect(screen.getByText("Cik Refresh")).toBeTruthy();
+    // Lane headers render in declared order.
+    expect(screen.getByText(/^init$/)).toBeTruthy();
+    expect(screen.getByText(/^sec_rate$/)).toBeTruthy();
+  });
+
+  it("renders 'no bootstrap run yet' when /timeline returns null run", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "bootstrap", display_name: "First-install bootstrap" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    mockedTimeline.mockResolvedValueOnce({ run: null, stages: [] });
+    renderBootstrap();
+    fireEvent.click(await screen.findByRole("tab", { name: "Timeline" }));
+    expect(await screen.findByText(/No bootstrap run yet/i)).toBeTruthy();
+  });
+
+  it("opens the archive-detail modal when an archive square is clicked", async () => {
+    mockedDetail.mockResolvedValueOnce(
+      makeProcessRow({ process_id: "bootstrap", display_name: "First-install bootstrap" }),
+    );
+    mockedRuns.mockResolvedValueOnce([]);
+    mockedTimeline.mockResolvedValueOnce(makeTimelinePayload());
+    renderBootstrap();
+    fireEvent.click(await screen.findByRole("tab", { name: "Timeline" }));
+    const button = await screen.findByRole("button", {
+      name: /Open archive detail: cik_index_2026Q2.zip/,
+    });
+    fireEvent.click(button);
+    // Nested drawer carries the archive name as the modal heading.
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("cik_index_2026Q2.zip");
+    expect(dialog.textContent).toContain("unresolved_cik");
   });
 });

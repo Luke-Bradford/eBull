@@ -84,6 +84,7 @@ from app.services.processes.watermarks import (
 from app.services.sync_orchestrator.dispatcher import NOTIFY_CHANNEL
 
 JOB_ORCHESTRATOR_FULL_SYNC = "orchestrator_full_sync"
+BOOTSTRAP_PROCESS_ID = "bootstrap"
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +243,64 @@ class OrchestratorDagResponse(BaseModel):
 
     sync_run: OrchestratorDagSyncRunResponse | None
     layers: list[OrchestratorDagLayerResponse]
+
+
+class BootstrapTimelineArchiveResponse(BaseModel):
+    """One ``bootstrap_archive_results`` row.
+
+    Issue #1080 (umbrella #1064) — admin control hub PR7.
+    """
+
+    archive_name: str
+    rows_written: int
+    rows_skipped_by_reason: dict[str, int]
+    completed_at: datetime
+
+
+class BootstrapTimelineStageResponse(BaseModel):
+    """One ``bootstrap_stages`` row joined to ``get_bootstrap_stage_specs()``.
+
+    ``display_name`` is always derived by humanising ``stage_key``
+    (title-cased, underscores → spaces) — ``StageSpec`` (defined at
+    ``app/services/bootstrap_state.py``) intentionally does NOT carry
+    a separate display_name field in v1, so the humaniser is the sole
+    canonical source. ``stage_order`` + ``job_name`` come from the
+    spec catalogue when the stage_key matches a current spec; rows
+    whose ``stage_key`` is NOT in the catalogue (e.g. legacy run from
+    a prior version) fall back to the DB ``stage_order`` + ``job_name``
+    columns. Mirrors PR6's ``LAYERS`` registry-fallback shape.
+    """
+
+    stage_key: str
+    display_name: str
+    stage_order: int
+    lane: str
+    job_name: str
+    status: Literal["pending", "running", "success", "error", "skipped", "blocked"]
+    started_at: datetime | None
+    completed_at: datetime | None
+    last_error: str | None
+    rows_processed: int | None
+    processed_count: int
+    target_count: int | None
+    archives: list[BootstrapTimelineArchiveResponse]
+
+
+class BootstrapTimelineRunResponse(BaseModel):
+    """Latest ``bootstrap_runs`` row surfaced in the timeline drill-in."""
+
+    run_id: int
+    status: Literal["running", "complete", "partial_error", "cancelled"]
+    triggered_at: datetime
+    completed_at: datetime | None
+    cancel_requested_at: datetime | None
+
+
+class BootstrapTimelineResponse(BaseModel):
+    """Timeline drill-in payload for ``bootstrap``."""
+
+    run: BootstrapTimelineRunResponse | None
+    stages: list[BootstrapTimelineStageResponse]
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +602,149 @@ def get_orchestrator_dag(
         )
 
     return OrchestratorDagResponse(sync_run=sync_run_payload, layers=layers_payload)
+
+
+def _humanise_stage_key(stage_key: str) -> str:
+    """Fallback display name for stage_keys not in the current catalogue.
+
+    Used only when a legacy ``bootstrap_stages`` row carries a
+    ``stage_key`` that ``get_bootstrap_stage_specs()`` no longer lists
+    (catalogue evolution over the install's lifetime). Mirrors PR6's
+    ``LAYERS`` defensive fallback at line 526.
+    """
+    return stage_key.replace("_", " ").strip().title() or stage_key
+
+
+@router.get("/{process_id}/timeline", response_model=BootstrapTimelineResponse)
+def get_bootstrap_timeline(
+    process_id: str = Path(..., min_length=1),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> BootstrapTimelineResponse:
+    """Bootstrap timeline drill-in — restricted endpoint.
+
+    Issue #1080 (umbrella #1064) — admin control hub PR7.
+    Spec §"PR7 — Bootstrap timeline drawer + decommission BootstrapPanel".
+
+    Returns ``{run: null, stages: []}`` (200, NOT 404) when no
+    ``bootstrap_runs`` row exists yet (fresh install pre-first-trigger).
+    Returns 404 for any process_id other than ``"bootstrap"`` — the
+    endpoint is intentionally restricted because no other process has
+    the parallel-lane stage tree drill-in shape.
+    """
+    if process_id != BOOTSTRAP_PROCESS_ID:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Bootstrap timeline not available for {process_id!r}",
+        )
+
+    spec_by_key = {spec.stage_key: spec for spec in get_bootstrap_stage_specs()}
+
+    with snapshot_read(conn):
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT id, status, triggered_at, completed_at, cancel_requested_at
+                  FROM bootstrap_runs
+                 ORDER BY id DESC
+                 LIMIT 1
+                """
+            )
+            run_row = cur.fetchone()
+
+        if run_row is None:
+            return BootstrapTimelineResponse(run=None, stages=[])
+
+        run_id = int(run_row["id"])
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT stage_key, stage_order, lane, job_name, status,
+                       started_at, completed_at, last_error,
+                       rows_processed, processed_count, target_count
+                  FROM bootstrap_stages
+                 WHERE bootstrap_run_id = %s
+                 ORDER BY stage_order ASC, stage_key ASC
+                """,
+                (run_id,),
+            )
+            stage_rows = cur.fetchall()
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT stage_key, archive_name, rows_written, rows_skipped,
+                       completed_at
+                  FROM bootstrap_archive_results
+                 WHERE bootstrap_run_id = %s
+                 ORDER BY stage_key ASC, archive_name ASC
+                """,
+                (run_id,),
+            )
+            archive_rows = cur.fetchall()
+
+    archives_by_stage: dict[str, list[BootstrapTimelineArchiveResponse]] = {}
+    for row in archive_rows:
+        # ``rows_skipped`` is JSONB DEFAULT '{}' (sql/130); psycopg3 +
+        # ``dict_row`` decodes it directly to a Python dict. Cast values
+        # to int so the operator-facing payload is unambiguous (the
+        # producer-side `_aggregate_run_skip_reasons` query already
+        # casts via ``::bigint`` — keep parity here).
+        rows_skipped_raw = row.get("rows_skipped") or {}
+        rows_skipped: dict[str, int] = {str(key): int(value) for key, value in rows_skipped_raw.items()}
+        stage_key = str(row["stage_key"])
+        archives_by_stage.setdefault(stage_key, []).append(
+            BootstrapTimelineArchiveResponse(
+                archive_name=str(row["archive_name"]),
+                rows_written=int(row["rows_written"]),
+                rows_skipped_by_reason=rows_skipped,
+                completed_at=row["completed_at"],
+            )
+        )
+
+    stage_payload: list[BootstrapTimelineStageResponse] = []
+    for row in stage_rows:
+        stage_key = str(row["stage_key"])
+        display_name = _humanise_stage_key(stage_key)
+        spec = spec_by_key.get(stage_key)
+        if spec is not None:
+            stage_order = int(spec.stage_order)
+            job_name = str(spec.job_name)
+        else:
+            # Defensive: stage rows that don't match the current catalogue
+            # (legacy install on a prior version of the spec list) fall
+            # back to the DB columns rather than 500. The DB carries the
+            # historical truth — the catalogue is the deployable contract.
+            stage_order = int(row["stage_order"])
+            job_name = str(row["job_name"])
+
+        stage_payload.append(
+            BootstrapTimelineStageResponse(
+                stage_key=stage_key,
+                display_name=display_name,
+                stage_order=stage_order,
+                lane=str(row["lane"]),
+                job_name=job_name,
+                status=row["status"],
+                started_at=row.get("started_at"),
+                completed_at=row.get("completed_at"),
+                last_error=row.get("last_error"),
+                rows_processed=row.get("rows_processed"),
+                processed_count=int(row.get("processed_count") or 0),
+                target_count=row.get("target_count"),
+                archives=archives_by_stage.get(stage_key, []),
+            )
+        )
+
+    run_payload = BootstrapTimelineRunResponse(
+        run_id=run_id,
+        status=run_row["status"],
+        triggered_at=run_row["triggered_at"],
+        completed_at=run_row.get("completed_at"),
+        cancel_requested_at=run_row.get("cancel_requested_at"),
+    )
+
+    return BootstrapTimelineResponse(run=run_payload, stages=stage_payload)
 
 
 @router.get(
