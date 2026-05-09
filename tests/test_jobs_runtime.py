@@ -75,6 +75,15 @@ def _reset_fake_locks() -> Iterator[None]:
 @pytest.fixture
 def patched_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.jobs.runtime.JobLock", _FakeLock)
+    # #1071 — admin control hub PR3 added a lock+fence prelude inside
+    # _wrap_invoker / _run_manual that opens its own DB connection.
+    # Tests in this module pass a stub URL ("postgresql://stub/stub")
+    # and exercise the JobRuntime shape without staging a real DB —
+    # bypass the prelude entirely so the invoker still runs.
+    monkeypatch.setattr(
+        "app.jobs.runtime.run_with_prelude",
+        lambda _url, _name, invoker, **_kw: invoker(),
+    )
 
 
 def _make_runtime(invokers: dict[str, object]) -> JobRuntime:
@@ -366,6 +375,17 @@ class TestProductionInvokerRegistry:
             # in Phase 1.2 — thesis is now on-demand via
             # POST /instruments/{symbol}/thesis; news is deferred pending
             # a concrete NewsProvider wiring.
+            # #1020 / #1027 / #1029 — bulk-archive Phase A3/C ingesters.
+            # Registered in _INVOKERS so the bootstrap orchestrator can
+            # dispatch them; NOT in SCHEDULED_JOBS (only fire via
+            # bootstrap-driven dispatch or operator Run-now).
+            "sec_bulk_download",
+            "sec_submissions_ingest",
+            "sec_submissions_files_walk",
+            "sec_companyfacts_ingest",
+            "sec_13f_ingest_from_dataset",
+            "sec_insider_ingest_from_dataset",
+            "sec_nport_ingest_from_dataset",
         }
         assert on_demand == expected_on_demand, (
             f"Unexpected on-demand invokers (update this test if intentional): "
@@ -446,6 +466,14 @@ def _make_catchup_runtime(
     mock_conn.__enter__ = MagicMock(return_value=mock_conn)
     mock_conn.__exit__ = MagicMock(return_value=False)
     monkeypatch.setattr("app.jobs.runtime.psycopg.connect", lambda _url, **_kw: mock_conn)
+    # #1071 — bypass the lock+fence prelude in catch-up tests; this
+    # fixture's mocked psycopg.connect would otherwise return a
+    # MagicMock whose ``cur.fetchone()`` reads as truthy and triggers
+    # a false "fence held" branch, skipping every catch-up invoker.
+    monkeypatch.setattr(
+        "app.jobs.runtime.run_with_prelude",
+        lambda _url, _name, invoker, **_kw: invoker(),
+    )
 
     # Pin the clock.
     monkeypatch.setattr(

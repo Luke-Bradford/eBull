@@ -106,6 +106,8 @@ def publish_manual_job_request(
     job_name: str,
     *,
     requested_by: str | None = None,
+    process_id: str | None = None,
+    mode: Literal["iterate", "full_wash"] | None = None,
 ) -> int:
     """Publish a manual job request through the durable queue.
 
@@ -113,17 +115,33 @@ def publish_manual_job_request(
     Caller is responsible for validating ``job_name`` against the
     invoker registry before publishing — the queue stores arbitrary
     job names and the jobs-process listener rejects unknown ones.
+
+    ``process_id`` and ``mode`` (sql/138, #1071) populate the full-wash
+    fence columns. The trigger handler in ``app/api/processes.py`` sets
+    both for every Iterate / Full-wash click; legacy callers that have
+    not migrated leave them ``None`` so the columns stay nullable for
+    pre-existing rows.
+
+    UNIQUE partial index ``pending_job_requests_active_full_wash_idx``
+    catches a concurrent INSERT racing past the trigger handler's
+    fence-check as ``UniqueViolation`` — handler maps to 409.
     """
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO pending_job_requests
-                    (request_kind, job_name, requested_by)
-                VALUES ('manual_job', %(job_name)s, %(requested_by)s)
+                    (request_kind, job_name, requested_by, process_id, mode)
+                VALUES ('manual_job', %(job_name)s, %(requested_by)s,
+                        %(process_id)s, %(mode)s)
                 RETURNING request_id
                 """,
-                {"job_name": job_name, "requested_by": requested_by},
+                {
+                    "job_name": job_name,
+                    "requested_by": requested_by,
+                    "process_id": process_id,
+                    "mode": mode,
+                },
             )
             row = cur.fetchone()
             if row is None:
@@ -166,7 +184,7 @@ def claim_request_by_id(
                 claimed_by = %(boot_id)s
             WHERE request_id = %(request_id)s
               AND status = 'pending'
-            RETURNING request_id, request_kind, job_name, payload
+            RETURNING request_id, request_kind, job_name, payload, mode
             """,
             {"request_id": request_id, "boot_id": boot_id},
         )
@@ -178,6 +196,7 @@ def claim_request_by_id(
             "request_kind": str(row[1]),
             "job_name": row[2],
             "payload": row[3],
+            "mode": row[4],
         }
 
 
@@ -213,7 +232,7 @@ def claim_oldest_pending(
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )
-            RETURNING request_id, request_kind, job_name, payload
+            RETURNING request_id, request_kind, job_name, payload, mode
             """,
             {"boot_id": boot_id, "ttl_hours": ttl_hours},
         )
@@ -225,6 +244,7 @@ def claim_oldest_pending(
             "request_kind": str(row[1]),
             "job_name": row[2],
             "payload": row[3],
+            "mode": row[4],
         }
 
 

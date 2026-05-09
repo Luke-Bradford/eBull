@@ -90,12 +90,19 @@ def _dispatch_manual_job(
     runtime: JobRuntime,
     request_id: int,
     job_name: str | None,
+    mode: str | None = None,
 ) -> None:
     """Inner-loop dispatch for ``request_kind='manual_job'``.
 
     Validation: an unknown job_name is rejected directly (mark_request_rejected
     on its own conn) without touching the runtime — the API also pre-validates,
     but the listener must be defensive against direct INSERTs into the queue.
+
+    ``mode`` (#1071) carries the ``pending_job_requests.mode`` column the
+    claim helper returned. Passed through to the runtime so the prelude
+    can bypass the fence check when this worker IS the full-wash fence
+    holder (``mode='full_wash'``); otherwise the worker would self-skip
+    because its own queue row matches the fence query.
     """
     if job_name is None or job_name not in VALID_JOB_NAMES:
         logger.warning(
@@ -114,7 +121,7 @@ def _dispatch_manual_job(
     # Submit to the runtime's manual executor. The runtime's own
     # wrapper handles the linked_request_id / dispatched / completed
     # transitions inside the executor task.
-    runtime.submit_manual_with_request(job_name, request_id=request_id)
+    runtime.submit_manual_with_request(job_name, request_id=request_id, mode=mode)
 
 
 def _dispatch_sync_request(
@@ -358,7 +365,12 @@ def _route_claim(
     kind = claim["request_kind"]
     if kind == "manual_job":
         try:
-            _dispatch_manual_job(runtime=runtime, request_id=request_id, job_name=claim["job_name"])
+            _dispatch_manual_job(
+                runtime=runtime,
+                request_id=request_id,
+                job_name=claim["job_name"],
+                mode=claim.get("mode"),
+            )
             state.claims_dispatched += 1
         except Exception as exc:
             logger.exception("listener: manual_job dispatch raised for request_id=%d", request_id)

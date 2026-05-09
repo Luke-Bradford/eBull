@@ -267,6 +267,23 @@ def test_app_lifespan_boots_and_state_is_coherent() -> None:
             resp = client.get("/budget")
             assert resp.status_code == 200, resp.text
             assert "available_for_deployment" in resp.json()
+
+            # /system/processes is the unified admin control hub list
+            # endpoint (#1071, umbrella #1064 PR3). The smoke test hits
+            # it after a fresh lifespan to catch:
+            #   * router not wired into app.main,
+            #   * adapter import-time failures,
+            #   * envelope ↔ Pydantic conversion drift.
+            # 200 means every adapter responded; 200 with `partial=true`
+            # means at least one adapter raised but the page still
+            # rendered (spec §Failure-mode invariants). Both are valid
+            # smoke-pass; 500 is the regression to catch.
+            resp = client.get("/system/processes")
+            assert resp.status_code == 200, resp.text
+            payload = resp.json()
+            assert "rows" in payload and "partial" in payload, resp.text
+            assert isinstance(payload["rows"], list)
+            assert isinstance(payload["partial"], bool)
     finally:
         # Restore the snapshot regardless of how the body exited.
         # On the success path TestClient's exit hook has already run

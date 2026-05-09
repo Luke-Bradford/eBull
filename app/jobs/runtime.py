@@ -38,6 +38,7 @@ scheduler's recurring jobs run on their own pool, and the per-job
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import threading
@@ -53,6 +54,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.config import settings
 from app.jobs.locks import JobAlreadyRunning, JobLock
 from app.services.ops_monitor import fetch_latest_successful_runs, record_job_skip
+from app.services.process_stop import acquire_prelude_lock
 from app.workers.scheduler import (
     JOB_ATTRIBUTION_SUMMARY,
     JOB_CUSIP_EXTID_SWEEP,
@@ -265,6 +267,219 @@ _INVOKERS[_files_walk.JOB_SEC_SUBMISSIONS_FILES_WALK] = _files_walk.sec_submissi
 # unknown names return 404 from the API rather than landing as a
 # ``rejected`` row the operator must reconcile.
 VALID_JOB_NAMES: Final[frozenset[str]] = frozenset(_INVOKERS.keys())
+
+
+# ---------------------------------------------------------------------------
+# Tracked-job prelude (#1071 — admin control hub PR3)
+# ---------------------------------------------------------------------------
+#
+# Spec: docs/superpowers/specs/2026-05-08-admin-control-hub-rewrite.md
+#       §Full-wash execution fence + §Scheduled run interaction.
+#
+# Every entry path that opens a ``job_runs`` row (scheduled fire via
+# ``_wrap_invoker``, manual trigger via ``_run_manual``) routes through
+# ``run_with_prelude`` first. The prelude opens ONE transaction that:
+#
+#   1. acquires ``pg_advisory_xact_lock(hashtext(process_id)::bigint)``
+#      — same key as the full-wash trigger, so the fence-check + active
+#      marker publish happens atomically against any concurrent path,
+#   2. checks the durable full-wash fence on
+#      ``pending_job_requests`` (sql/138 partial UNIQUE),
+#   3. writes the ``job_runs`` INSERT — either ``status='running'`` (no
+#      fence held) or ``status='skipped'`` with
+#      ``error_msg='full-wash in progress for this process'`` (fence
+#      held). R5-W1: the skip row is COMMITTED, not rolled back, so the
+#      audit trail survives.
+#
+# The pre-allocated ``run_id`` is stashed in a ``ContextVar`` so the
+# inner ``_tracked_job`` (in ``app/workers/scheduler.py``) reuses it
+# rather than opening a second ``job_runs`` row. This is R5-W2 — one
+# writer per run, no double-write between the prelude tx and the
+# tracker tx.
+#
+# Direct invocation of ``_tracked_job`` outside of the prelude
+# wrappers (legacy / tests) still works — the tracker falls back to the
+# pre-#1071 ``record_job_start`` path when the ContextVar is unset.
+
+_FENCE_HELD_ERROR_MSG = "full-wash in progress for this process"
+
+
+# Jobs whose invokers do NOT use ``_tracked_job`` and therefore must not
+# go through the lock+fence prelude (Codex round 2). The prelude opens a
+# ``job_runs`` row that the invoker never finalises — orphan-row source.
+# These jobs own their own canonical state machine outside ``job_runs``:
+#
+# * ``bootstrap_orchestrator`` writes ``bootstrap_state`` + ``bootstrap_runs``
+#   directly. The bootstrap fence is ``bootstrap_state.status='running'``,
+#   not the ``pending_job_requests`` partial UNIQUE — the trigger handler's
+#   atomic lock+precondition+INSERT is what enforces "no two bootstrap
+#   triggers in flight"; the worker prelude has nothing to add.
+#
+# Opting out keeps the runtime honest: the queue-row fence semantics still
+# enforce against scheduled-job mechanisms (where ``process_id`` ==
+# ``job_name``), and bootstrap stays governed by its own state machine.
+
+_PRELUDE_OPT_OUT_JOBS: frozenset[str] = frozenset({_bootstrap_orchestrator.JOB_BOOTSTRAP_ORCHESTRATOR})
+
+
+# Carries the prelude-allocated run_id into ``_tracked_job``. Module-
+# scoped ContextVar so async refactors stay safe; under the current
+# synchronous BackgroundScheduler / ThreadPoolExecutor model each worker
+# thread runs one invoker at a time and the var lives only for the
+# duration of that invoker call.
+_prelude_run_id: contextvars.ContextVar[int | None] = contextvars.ContextVar("_prelude_run_id", default=None)
+
+
+def consume_prelude_run_id() -> int | None:
+    """Pop the prelude-allocated ``job_runs.run_id`` for this invoker.
+
+    ``_tracked_job`` calls this on entry. Returns the pre-allocated id
+    (and clears it so a nested ``_tracked_job`` does not reuse), or
+    ``None`` when the invoker was started outside the prelude wrappers
+    (legacy direct call / tests). The ``None`` case falls back to the
+    pre-#1071 ``record_job_start`` path inside ``_tracked_job``.
+    """
+    run_id = _prelude_run_id.get()
+    if run_id is not None:
+        _prelude_run_id.set(None)
+    return run_id
+
+
+def _run_prelude(
+    database_url: str,
+    job_name: str,
+    *,
+    bypass_fence_check: bool = False,
+    linked_request_id: int | None = None,
+) -> int | None:
+    """One-tx prelude: acquire lock, check fence, write job_runs INSERT.
+
+    Returns the ``run_id`` of the newly opened ``job_runs`` row when no
+    fence is held (or ``bypass_fence_check`` is True). Returns ``None``
+    when the fence rejects the run — the caller MUST NOT invoke the
+    underlying job in that case (the ``status='skipped'`` row is already
+    committed for audit).
+
+    Process_id == job_name for scheduled jobs. The advisory-lock key is
+    ``hashtext(process_id)::bigint`` so the same key is acquired by every
+    path that mutates this process's state (full-wash trigger, Iterate
+    handler, scheduled prelude).
+
+    ``linked_request_id`` is populated on both branches (running + skipped)
+    when supplied so boot-recovery's ``reset_stale_in_flight`` NOT EXISTS
+    clause sees the terminal/in-flight job_runs row and suppresses
+    double-replay of the queue request.
+    """
+    process_id = job_name
+    # autocommit=False so ``BEGIN`` opens an explicit top-level tx. The
+    # default ``with conn.transaction():`` block COMMITS on clean exit
+    # and ROLLBACKs on exception — same shape as the bootstrap cancel
+    # path and the snapshot_read read path.
+    fence_held = False
+    with psycopg.connect(database_url) as conn:
+        with conn.transaction():
+            acquire_prelude_lock(conn, process_id)
+            with conn.cursor() as cur:
+                if not bypass_fence_check:
+                    cur.execute(
+                        """
+                        SELECT 1
+                          FROM pending_job_requests
+                         WHERE process_id = %s
+                           AND mode       = 'full_wash'
+                           AND status     IN ('pending', 'claimed', 'dispatched')
+                         LIMIT 1
+                        """,
+                        (process_id,),
+                    )
+                    fence_held = cur.fetchone() is not None
+                if fence_held:
+                    cur.execute(
+                        """
+                        INSERT INTO job_runs (
+                            job_name, started_at, finished_at, status, row_count,
+                            error_msg, linked_request_id
+                        ) VALUES (
+                            %s, now(), now(), 'skipped', 0, %s, %s
+                        )
+                        RETURNING run_id
+                        """,
+                        (job_name, _FENCE_HELD_ERROR_MSG, linked_request_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO job_runs (
+                            job_name, started_at, status, linked_request_id
+                        ) VALUES (%s, now(), 'running', %s)
+                        RETURNING run_id
+                        """,
+                        (job_name, linked_request_id),
+                    )
+                row = cur.fetchone()
+                if row is None:
+                    raise RuntimeError("prelude: job_runs INSERT returned no row")
+                run_id = int(row[0])
+    if fence_held:
+        logger.info(
+            "prelude: skipping %r — %s (job_runs.run_id=%d committed)",
+            job_name,
+            _FENCE_HELD_ERROR_MSG,
+            run_id,
+        )
+        return None
+    return run_id
+
+
+def run_with_prelude(
+    database_url: str,
+    job_name: str,
+    invoker: Callable[[], None],
+    *,
+    bypass_fence_check: bool = False,
+    linked_request_id: int | None = None,
+) -> None:
+    """Run ``invoker`` after the lock+fence prelude.
+
+    No-op when the fence is held. The caller (``_wrap_invoker`` /
+    ``_run_manual``) does not need to handle the skip path — this
+    function returns cleanly and the invoker is never called.
+
+    ``bypass_fence_check=True`` skips the full-wash fence query: this is
+    the path used when the listener dispatches a ``mode='full_wash'``
+    request — the worker IS the fence holder, so the fence row matches
+    its own request_id. Without bypass the worker would self-skip and
+    the full-wash work would never run. The advisory lock is still
+    acquired so the prelude serialises against concurrent triggers.
+
+    Prelude failure handling: any exception inside the prelude
+    propagates to the caller — we do NOT fall through to the invoker.
+    The prelude is the FENCE for full-wash safety, not an opportunistic
+    telemetry write; silently running the invoker on prelude failure
+    would let a scheduled / iterate run race past an active full-wash
+    when the fence query happens to error. The caller (``_wrap_invoker``
+    / ``_run_manual``) catches Exception around this call and logs the
+    failure.
+
+    ``linked_request_id`` (when supplied — the listener-dispatched
+    manual_job path) is written into the new ``job_runs.linked_request_id``
+    so boot-recovery's ``reset_stale_in_flight`` NOT EXISTS clause can
+    suppress double-replay of completed runs. Scheduled fires pass
+    ``None``.
+    """
+    run_id = _run_prelude(
+        database_url,
+        job_name,
+        bypass_fence_check=bypass_fence_check,
+        linked_request_id=linked_request_id,
+    )
+    if run_id is None:
+        return  # fence held; skipped row already committed
+    token = _prelude_run_id.set(run_id)
+    try:
+        invoker()
+    finally:
+        _prelude_run_id.reset(token)
 
 
 class UnknownJob(KeyError):
@@ -728,7 +943,13 @@ class JobRuntime:
             inflight.release()
             raise
 
-    def submit_manual_with_request(self, job_name: str, *, request_id: int) -> None:
+    def submit_manual_with_request(
+        self,
+        job_name: str,
+        *,
+        request_id: int,
+        mode: str | None = None,
+    ) -> None:
         """Submit a manual run associated with a queue request_id (#719).
 
         Like :meth:`trigger` but routes through a wrapper that ALSO
@@ -740,6 +961,13 @@ class JobRuntime:
         Used by the listener (#719). API-side callers should keep using
         :meth:`trigger` — the listener is the only path that holds a
         request_id.
+
+        ``mode`` (#1071) is the ``pending_job_requests.mode`` value the
+        listener decoded from the claimed row (``'iterate'`` or
+        ``'full_wash'``; ``None`` for legacy rows). When ``mode`` is
+        ``'full_wash'`` the invoker IS the fence holder, so the prelude
+        bypasses the fence check (otherwise the worker would self-skip
+        because its own queue row matches the fence query).
 
         Unlike :meth:`trigger`, this method does NOT raise
         ``JobAlreadyRunning`` when the in-process inflight lock is
@@ -773,7 +1001,7 @@ class JobRuntime:
             return
 
         try:
-            fut = self._manual_executor.submit(self._run_manual, job_name, invoker, request_id)
+            fut = self._manual_executor.submit(self._run_manual, job_name, invoker, request_id, mode)
             fut.add_done_callback(self._log_future_exception)
         except Exception:
             inflight.release()
@@ -846,7 +1074,15 @@ class JobRuntime:
 
             try:
                 with JobLock(database_url, job_name):
-                    invoker()
+                    # #1071 — admin control hub PR3: route through the
+                    # lock+fence prelude. Scheduled fires never bypass the
+                    # fence (they are not the full-wash holder), so the
+                    # default ``bypass_fence_check=False`` applies.
+                    # Self-tracked invokers opt out of the prelude.
+                    if job_name in _PRELUDE_OPT_OUT_JOBS:
+                        invoker()
+                    else:
+                        run_with_prelude(database_url, job_name, invoker)
             except JobAlreadyRunning:
                 logger.info(
                     "scheduled fire of %r skipped: another instance is "
@@ -867,6 +1103,7 @@ class JobRuntime:
         job_name: str,
         invoker: Callable[[], None],
         request_id: int | None,
+        mode: str | None = None,
     ) -> None:
         """Worker-thread entry point for manual triggers.
 
@@ -907,10 +1144,28 @@ class JobRuntime:
         # ``reset_stale_in_flight`` already accepts both 'claimed' and
         # 'dispatched' in its WHERE, so dropping the intermediate
         # transition is forwards-compatible.
+        # #1071 — admin control hub PR3: route through the lock+fence
+        # prelude. ``mode='full_wash'`` is the listener-decoded marker that
+        # this worker IS the fence holder, so bypass the fence check
+        # (otherwise the worker would self-skip on its own queue row).
+        bypass_fence_check = mode == "full_wash"
         try:
             try:
                 with JobLock(self._database_url, job_name):
-                    invoker()
+                    if job_name in _PRELUDE_OPT_OUT_JOBS:
+                        # Self-tracked invoker; running the prelude
+                        # would orphan a ``job_runs`` row the invoker
+                        # never finalises. Bootstrap's fence is
+                        # ``bootstrap_state.status``, not a queue row.
+                        invoker()
+                    else:
+                        run_with_prelude(
+                            self._database_url,
+                            job_name,
+                            invoker,
+                            bypass_fence_check=bypass_fence_check,
+                            linked_request_id=request_id,
+                        )
                     if request_id is not None:
                         with psycopg.connect(self._database_url, autocommit=True) as conn:
                             mark_request_completed(conn, request_id)

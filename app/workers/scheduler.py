@@ -1041,8 +1041,70 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
             tracker.row_count = summary.inserted + summary.updated
 
     If the body raises, the job is recorded as failure with the error message.
+
+    Prelude integration (#1071): when invoked from
+    ``app.jobs.runtime.run_with_prelude`` (the standard wrapper for
+    scheduled fires + queue-dispatched manual triggers), the prelude has
+    already opened the ``job_runs`` row in a single tx that also acquired
+    the per-process advisory lock + ran the full-wash fence check. The
+    pre-allocated ``run_id`` is exposed via
+    ``app.jobs.runtime.consume_prelude_run_id`` so this context manager
+    reuses it instead of opening a second row (R5-W2: one writer per
+    run, no double-write). When invoked outside the prelude wrappers
+    (legacy direct call, tests with no runtime), the pre-allocated id
+    is ``None`` and we fall back to ``record_job_start``.
     """
     tracker = _JobTracker(job_name)
+    # Function-local import: app.jobs.runtime imports this module's
+    # invokers at top level, so the reverse import has to be lazy.
+    from app.jobs.runtime import consume_prelude_run_id
+
+    pre_allocated_run_id = consume_prelude_run_id()
+    if pre_allocated_run_id is not None:
+        tracker.run_id = pre_allocated_run_id
+        # Advance straight to the body — the prelude already wrote the
+        # ``status='running'`` row in its own committed tx.
+        try:
+            yield tracker
+        except Exception as exc:
+            try:
+                from app.services.sync_orchestrator.exception_classifier import (
+                    classify_exception,
+                )
+
+                with psycopg.connect(settings.database_url) as conn:
+                    record_job_finish(
+                        conn,
+                        tracker.run_id,
+                        status="failure",
+                        error_msg=str(exc),
+                        error_category=classify_exception(exc),
+                    )
+            except Exception:
+                logger.error("Failed to record job failure for %s", job_name, exc_info=True)
+            raise
+        else:
+            try:
+                with psycopg.connect(settings.database_url) as conn:
+                    record_job_finish(
+                        conn,
+                        tracker.run_id,
+                        status="success",
+                        row_count=tracker.row_count,
+                    )
+                    if tracker.row_count is not None:
+                        spike = check_row_count_spike(
+                            conn,
+                            job_name,
+                            tracker.row_count,
+                            exclude_run_id=tracker.run_id,
+                        )
+                        if spike.flagged:
+                            logger.warning("Row-count spike detected: %s", spike.detail)
+            except Exception:
+                logger.error("Failed to record job success for %s", job_name, exc_info=True)
+        return
+
     try:
         with psycopg.connect(settings.database_url) as conn:
             tracker.run_id = record_job_start(conn, job_name)
