@@ -225,10 +225,14 @@ describe("admin a11y — confirm modals", () => {
       makeProcessRow({ can_cancel: true }),
     ]);
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    const dialog = await screen.findByRole("dialog");
-    const moreToggle = Array.from(dialog.querySelectorAll("button")).find(
-      (b) => b.textContent?.includes("More — terminate"),
-    ) as HTMLButtonElement;
+    await screen.findByRole("dialog");
+    // Bot WARNING: previously used `Array.from(...).find(...) as HTMLButtonElement`
+    // which crashes with TypeError if the disclosure copy ever changes,
+    // instead of a clean assertion failure. `getByRole` throws a
+    // descriptive error pointing at the missing accessible name.
+    const moreToggle = screen.getByRole("button", {
+      name: /More — terminate/,
+    });
     fireEvent.click(moreToggle);
     expect(await axe(container, AXE_OPTIONS)).toHaveNoViolations();
   });

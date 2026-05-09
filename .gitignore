@@ -41,3 +41,6 @@ tmp_pytest/
 
 # Playwright session screenshots dropped at repo root by the MCP
 /*.png
+
+# Session-private agent prompts
+.claude/prompts/
