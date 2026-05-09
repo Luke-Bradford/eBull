@@ -36,6 +36,7 @@ import { CollapsibleSection } from "@/components/admin/CollapsibleSection";
 import { FundDataRow } from "@/components/admin/FundDataRow";
 import { LayerHealthList } from "@/components/admin/LayerHealthList";
 import { ProblemsPanel } from "@/components/admin/ProblemsPanel";
+import { ProcessesTable } from "@/components/admin/ProcessesTable";
 import { SeedProgressPanel } from "@/components/admin/SeedProgressPanel";
 import {
   SectionError,
@@ -43,6 +44,7 @@ import {
 } from "@/components/dashboard/Section";
 import { useAsync } from "@/lib/useAsync";
 import { formatDateTime } from "@/lib/format";
+import { useProcesses } from "@/lib/useProcesses";
 import { useSyncTrigger } from "@/lib/useSyncTrigger";
 import { SyncDashboard } from "@/pages/SyncDashboard";
 
@@ -82,6 +84,12 @@ export function AdminPage() {
       ),
     [],
   );
+
+  // Admin control hub processes view (#1076 / #1064). Self-polls via
+  // its own cadence-flip interval (5s while running, 30s otherwise);
+  // mounted alongside the legacy panels during the migration window.
+  // PR6/PR7 decommission BootstrapPanel + LayerHealthList + SyncDashboard.
+  const processes = useProcesses();
 
   // Extract the refetch refs as local const bindings so ESLint can
   // see their identity and verify the dep array without the suppression
@@ -161,6 +169,7 @@ export function AdminPage() {
   }, [triggerKind, triggerClearQueued, refreshInterval]);
 
   const [orchestratorOpen, setOrchestratorOpen] = useState(false);
+  const [processesOpen, setProcessesOpen] = useState(true);
   const [rowState, setRowState] = useState<Record<string, RowState>>({});
   const [toast, setToast] = useState<string | null>(null);
 
@@ -263,6 +272,24 @@ export function AdminPage() {
       />
 
       <BootstrapPanel />
+
+      <CollapsibleSection
+        title="Processes"
+        summary="control hub"
+        open={processesOpen}
+        onOpenChange={setProcessesOpen}
+      >
+        {processes.loading ? (
+          <SectionSkeleton rows={5} />
+        ) : processes.error !== null ? (
+          <SectionError onRetry={processes.refetch} />
+        ) : processes.data ? (
+          <ProcessesTable
+            snapshot={processes.data}
+            onMutationSuccess={processes.refetch}
+          />
+        ) : null}
+      </CollapsibleSection>
 
       <FundDataRow
         coverage={coverage.data}
