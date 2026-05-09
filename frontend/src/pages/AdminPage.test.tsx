@@ -1,11 +1,11 @@
 /**
  * Tests for AdminPage after the #1064 admin control hub rewrite.
  *
- * Post-PR7 (#1080) AdminPage shape:
+ * Post-PR9 (#1085) AdminPage shape:
  *   1. ProblemsPanel — failing layers + failing jobs + coverage anomalies.
  *   2. Processes table — unified mechanism rows; bootstrap row + DAG drill-in
  *      + Timeline drill-in routes live under /admin/processes/:id.
- *   3. FundDataRow + SeedProgressPanel + Background tasks + Filings coverage.
+ *   3. FundDataRow + Background tasks + Filings coverage.
  *
  * Decommissioned in PR6 (no longer covered here):
  *   - Sync-now button (top-level)
@@ -15,6 +15,10 @@
  *
  * Decommissioned in PR7:
  *   - BootstrapPanel mount on /admin (data lives on the bootstrap drill-in).
+ *
+ * Decommissioned in PR9:
+ *   - SeedProgressPanel — SEC ingest progress now surfaces as the
+ *     SEC ingest process rows in ProcessesTable.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -35,22 +39,6 @@ vi.mock("@/api/jobs", () => ({ fetchJobsOverview: vi.fn(), runJob: vi.fn() }));
 vi.mock("@/api/sync", () => ({
   fetchSyncLayersV2: vi.fn(),
   fetchSyncStatus: vi.fn(),
-  // SeedProgressPanel still mounts on AdminPage (decommission in PR9).
-  fetchSeedProgress: vi.fn().mockResolvedValue({
-    sources: [],
-    latest_run: null,
-    ingest_paused: false,
-  }),
-  fetchCikTimingLatest: vi.fn().mockResolvedValue({
-    ingestion_run_id: null,
-    run_source: null,
-    run_started_at: null,
-    run_finished_at: null,
-    run_status: null,
-    modes: [],
-    slowest: [],
-  }),
-  setIngestEnabled: vi.fn(),
 }));
 vi.mock("@/api/coverage", () => ({ fetchCoverageSummary: vi.fn() }));
 vi.mock("@/api/recommendations", () => ({ fetchRecommendations: vi.fn() }));
@@ -393,6 +381,42 @@ describe("AdminPage — PR7 decommission", () => {
     ).toBeNull();
     expect(
       screen.queryByRole("button", { name: /^Retry failed/i }),
+    ).toBeNull();
+  });
+});
+
+describe("AdminPage — PR9 decommission", () => {
+  // SeedProgressPanel surfaced "SEC ingest progress" with a per-source
+  // progress bar, latest-run card, per-CIK timing percentiles, and a
+  // Pause/Resume ingest toggle. PR9 deletes the panel; the SEC ingest
+  // process rows in ProcessesTable + the per-process drill-in cover
+  // the same operator signals.
+  it("does not render the SeedProgressPanel section header", async () => {
+    renderPage();
+    await waitFor(() => screen.getByText("Admin"));
+    expect(screen.queryByText(/SEC ingest progress/i)).toBeNull();
+  });
+
+  it("does not render the Pause/Resume ingest toggle", async () => {
+    renderPage();
+    await waitFor(() => screen.getByText("Admin"));
+    expect(
+      screen.queryByRole("button", { name: /Pause ingest/i }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /Resume ingest/i }),
+    ).toBeNull();
+  });
+
+  it("does not render the seed-progress per-source progressbar", async () => {
+    renderPage();
+    await waitFor(() => screen.getByText("Admin"));
+    // The panel rendered each source as `role="progressbar"` with an
+    // aria-label ending in "seed progress". Scope to that label so a
+    // legitimate progressbar elsewhere on AdminPage won't false-fail
+    // this assertion (Codex pre-push LOW — query was previously broad).
+    expect(
+      screen.queryByRole("progressbar", { name: /seed progress/i }),
     ).toBeNull();
   });
 });

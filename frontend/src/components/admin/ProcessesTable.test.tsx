@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -271,5 +272,45 @@ describe("ProcessesTable", () => {
     );
     expect(links[0]).toBe("B_failed");
     expect(links[1]).toBe("A_stale");
+  });
+
+  // ---------------------------------------------------------------------
+  // PR9 (#1085) — keyboard nav. Within an enabled row, the operator can
+  // tab from the drill-in link through Iterate → Full-wash → Cancel
+  // without picking up any unexpected focus stop. The lane-filter
+  // buttons render above the table and are NOT in scope here — the
+  // test starts focus on the row link to scope the assertion to the
+  // row's own DOM order.
+  // ---------------------------------------------------------------------
+
+  it("row keyboard order: link → Iterate → Full-wash → Cancel (all enabled)", async () => {
+    const user = userEvent.setup();
+    renderTable([
+      makeProcessRow({
+        process_id: "kbd",
+        display_name: "Keyboard Row",
+        can_iterate: true,
+        can_full_wash: true,
+        can_cancel: true,
+      }),
+    ]);
+    const link = screen.getByRole("link", { name: "Keyboard Row" });
+    link.focus();
+    expect(document.activeElement).toBe(link);
+
+    await user.tab();
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Iterate" }),
+    );
+
+    await user.tab();
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Full-wash" }),
+    );
+
+    await user.tab();
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Cancel" }),
+    );
   });
 });
