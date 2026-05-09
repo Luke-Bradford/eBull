@@ -19,9 +19,26 @@
  *     utilities and several React libraries probe for these at import
  *     time. Stubbing now keeps cryptic failures away from future tests.
  */
-import { afterEach } from "vitest";
+import { afterEach, expect } from "vitest";
 import { cleanup } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
+import * as axeMatchers from "vitest-axe/matchers";
+// Type augmentation for `expect(...).toHaveNoViolations()` lives at
+// `./vitest-axe.d.ts` and is loaded automatically via tsconfig's
+// `include: ["src"]` — vitest-axe 0.1.0's bundled augmentation targets
+// the removed `Vi.Assertion` namespace, so we re-augment the live
+// vitest 2.x `@vitest/expect` Assertion ourselves. No runtime import
+// needed; the matcher itself is registered below via `expect.extend`.
+
+// vitest-axe (#1086 — replaces external Lighthouse + axe CLI runs with
+// an in-repo a11y suite). Registers `toHaveNoViolations` on `expect(...)`
+// so admin-surface tests can assert axe-core finds zero accessibility
+// violations on the rendered DOM tree. jsdom does not compute CSS, so
+// rules that depend on layout / contrast (color-contrast, focus-order
+// when relying on layout) are skipped by axe automatically — those
+// remain covered by `frontend/scripts/check-dark-classes.mjs` and the
+// keyboard-nav tests in `ProcessesTable.test.tsx`.
+expect.extend(axeMatchers);
 
 afterEach(() => {
   cleanup();
