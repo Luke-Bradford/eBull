@@ -728,6 +728,15 @@ def _check_cancel_signal(sync_run_id: int) -> None:
         )
         if stop is None:
             return
+        # Bot review WARNING (PR #1079): all stop-request writes must
+        # COMMIT regardless of the rowcount guard outcome. A bare
+        # ``raise RuntimeError`` inside the tx would ROLLBACK
+        # ``mark_observed`` and the stop_request row would be stranded
+        # ``observed_at IS NULL`` forever (the boot reaper cannot
+        # reconcile sync_run-kind stop rows that never observed). Do
+        # ``mark_observed`` + ``UPDATE`` + ``mark_completed`` inside
+        # the tx, capture the rowcount, exit the tx so writes durably
+        # commit, then decide which exception to raise.
         with conn.transaction():
             mark_observed(conn, stop.id)
             with conn.cursor() as cur:
@@ -741,23 +750,26 @@ def _check_cancel_signal(sync_run_id: int) -> None:
                     """,
                     (sync_run_id,),
                 )
-                if cur.rowcount != 1:
-                    # rowcount=0 means status was already terminal; this
-                    # is a producer-bug shape because the cancel
-                    # checkpoint runs strictly inside the loop and
-                    # ``_finalize_sync_run`` only fires after the loop
-                    # exits. Raising preserves the signal — boot reaper
-                    # will reconcile if we crashed mid-sequence.
-                    raise RuntimeError(
-                        f"cancel checkpoint: expected 1 sync_runs row for "
-                        f"sync_run_id={sync_run_id}, got rowcount={cur.rowcount}"
-                    )
+                update_rowcount = cur.rowcount
             mark_completed(conn, stop.id)
         logger.info(
             "sync run %s: cancel signal observed (stop_request_id=%d, mode=%s)",
             sync_run_id,
             stop.id,
             stop.mode,
+        )
+    if update_rowcount != 1:
+        # rowcount=0 indicates the sync_runs row was already terminal
+        # when the checkpoint ran. By design this is impossible — the
+        # cancel checkpoint runs strictly inside the loop and
+        # ``_finalize_sync_run`` only fires after the loop exits, AND
+        # the partial-unique index on ``process_stop_requests`` prevents
+        # two active stop rows for the same target_run_id from racing.
+        # Raise so the bug surfaces; the stop_request row was already
+        # marked observed+completed above so the active-stop slot is
+        # released and a future cancel for a re-run can succeed.
+        raise RuntimeError(
+            f"cancel checkpoint: expected 1 sync_runs row for sync_run_id={sync_run_id}, got rowcount={update_rowcount}"
         )
     raise SyncCancelled(sync_run_id)
 

@@ -246,14 +246,15 @@ def test_crash_branch_finalize_preserves_cancelled_status(
     assert row[0] == "cancelled"  # guard preserved the cancel terminal status
 
 
-def test_check_cancel_signal_rowcount_zero_raises(
+def test_check_cancel_signal_rowcount_zero_commits_then_raises(
     ebull_test_conn: psycopg.Connection[tuple],
     settings_use_test_db: str,
 ) -> None:
-    """If sync_runs.status is already terminal when the checkpoint
-    runs, the UPDATE rowcount is 0 — Codex M-r2-1 says this is
-    impossible by design (the loop runs strictly before the finalizer)
-    so we raise rather than silently no-op."""
+    """If sync_runs.status is already terminal when the checkpoint runs
+    (impossible by design), the UPDATE rowcount is 0 and we raise
+    RuntimeError. Bot review WARNING on PR #1079: ``mark_observed`` +
+    ``mark_completed`` MUST commit regardless so the stop_request row
+    is not stranded observed_at IS NULL forever."""
     _wipe_sync_state(ebull_test_conn)
     sync_run_id = _seed_running_sync_run(ebull_test_conn, layers=["universe"])
     # Pre-flip the row to a terminal state to simulate the impossible
@@ -262,11 +263,21 @@ def test_check_cancel_signal_rowcount_zero_raises(
         "UPDATE sync_runs SET status='cancelled', finished_at=now() WHERE sync_run_id=%s",
         (sync_run_id,),
     )
-    _insert_stop_request(ebull_test_conn, sync_run_id=sync_run_id)
+    stop_id = _insert_stop_request(ebull_test_conn, sync_run_id=sync_run_id)
     ebull_test_conn.commit()
 
     with pytest.raises(RuntimeError, match="cancel checkpoint"):
         executor._check_cancel_signal(sync_run_id)
+
+    # Stop request row terminalised even on the impossible-rowcount
+    # path — releases the partial-unique active-stop slot.
+    stop_row = ebull_test_conn.execute(
+        "SELECT observed_at, completed_at FROM process_stop_requests WHERE id = %s",
+        (stop_id,),
+    ).fetchone()
+    assert stop_row is not None
+    assert stop_row[0] is not None, "mark_observed write was rolled back — stop row stranded"
+    assert stop_row[1] is not None, "mark_completed write was rolled back — slot not released"
 
 
 def test_resolver_active_sync_run_returns_running_id(
