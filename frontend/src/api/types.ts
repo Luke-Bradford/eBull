@@ -1305,3 +1305,62 @@ export interface OrchestratorDagResponse {
   sync_run: OrchestratorDagSyncRunResponse | null;
   layers: OrchestratorDagLayerResponse[];
 }
+
+// ---------------------------------------------------------------------------
+// Bootstrap timeline drill-in (#1080, umbrella #1064 — PR7)
+// ---------------------------------------------------------------------------
+//
+// Mirrors app/api/processes.py::BootstrapTimelineResponse. Only used on
+// the /admin/processes/bootstrap detail page; the fetch is gated on
+// (process_id === "bootstrap") AND (tab === "timeline") so non-bootstrap
+// detail pages never hit the endpoint.
+
+export type BootstrapRunStatus =
+  | "running"
+  | "complete"
+  | "partial_error"
+  | "cancelled";
+
+export type BootstrapStageStatus =
+  | "pending"
+  | "running"
+  | "success"
+  | "error"
+  | "skipped"
+  | "blocked";
+
+export interface BootstrapTimelineArchiveResponse {
+  archive_name: string;
+  rows_written: number;
+  rows_skipped_by_reason: Record<string, number>;
+  completed_at: string;
+}
+
+export interface BootstrapTimelineStageResponse {
+  stage_key: string;
+  display_name: string;
+  stage_order: number;
+  lane: string;
+  job_name: string;
+  status: BootstrapStageStatus;
+  started_at: string | null;
+  completed_at: string | null;
+  last_error: string | null;
+  rows_processed: number | null;
+  processed_count: number;
+  target_count: number | null;
+  archives: BootstrapTimelineArchiveResponse[];
+}
+
+export interface BootstrapTimelineRunResponse {
+  run_id: number;
+  status: BootstrapRunStatus;
+  triggered_at: string;
+  completed_at: string | null;
+  cancel_requested_at: string | null;
+}
+
+export interface BootstrapTimelineResponse {
+  run: BootstrapTimelineRunResponse | null;
+  stages: BootstrapTimelineStageResponse[];
+}

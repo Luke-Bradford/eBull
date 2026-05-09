@@ -1,17 +1,20 @@
 /**
  * Tests for AdminPage after the #1064 admin control hub rewrite.
  *
- * Post-PR6 (#1078) AdminPage shape:
+ * Post-PR7 (#1080) AdminPage shape:
  *   1. ProblemsPanel — failing layers + failing jobs + coverage anomalies.
- *   2. BootstrapPanel — kept verbatim (PR7 decommissions).
- *   3. Processes table — unified mechanism rows + DAG drill-in route.
- *   4. FundDataRow + SeedProgressPanel + Background tasks + Filings coverage.
+ *   2. Processes table — unified mechanism rows; bootstrap row + DAG drill-in
+ *      + Timeline drill-in routes live under /admin/processes/:id.
+ *   3. FundDataRow + SeedProgressPanel + Background tasks + Filings coverage.
  *
  * Decommissioned in PR6 (no longer covered here):
  *   - Sync-now button (top-level)
  *   - Orchestrator details collapsible (SyncDashboard)
  *   - Layer health collapsible (LayerHealthList)
  *   - Layer toggle wire (setLayerEnabled)
+ *
+ * Decommissioned in PR7:
+ *   - BootstrapPanel mount on /admin (data lives on the bootstrap drill-in).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -375,5 +378,21 @@ describe("AdminPage — PR6 decommission", () => {
     renderPage();
     await waitFor(() => screen.getByText("Admin"));
     expect(screen.queryByText("Layer health")).toBeNull();
+  });
+});
+
+describe("AdminPage — PR7 decommission", () => {
+  it("does not render the legacy BootstrapPanel 'Run bootstrap' control", async () => {
+    // BootstrapPanel surfaced the run/retry/mark-complete buttons keyed
+    // off /system/bootstrap/status. PR7 deletes the panel; the bootstrap
+    // row + Timeline drill-in own the surface now.
+    renderPage();
+    await waitFor(() => screen.getByText("Admin"));
+    expect(
+      screen.queryByRole("button", { name: /^Run bootstrap$/i }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /^Retry failed/i }),
+    ).toBeNull();
   });
 });

@@ -925,6 +925,34 @@ def test_get_orchestrator_dag_404_for_non_orchestrator(
     assert resp.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# Bootstrap timeline drill-in (#1080, PR7)
+# ---------------------------------------------------------------------------
+
+
+def test_get_bootstrap_timeline_empty_when_no_run(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """Wiring sanity: detailed contract lives in test_bootstrap_timeline_endpoint."""
+    ebull_test_conn.execute("DELETE FROM bootstrap_archive_results")
+    ebull_test_conn.execute("DELETE FROM bootstrap_stages")
+    ebull_test_conn.execute("DELETE FROM bootstrap_runs")
+    ebull_test_conn.commit()
+
+    resp = client.get("/system/processes/bootstrap/timeline")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body == {"run": None, "stages": []}
+
+
+def test_get_bootstrap_timeline_404_for_non_bootstrap(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """Restricted endpoint: only ``bootstrap`` resolves; orchestrator → 404."""
+    resp = client.get("/system/processes/orchestrator_full_sync/timeline")
+    assert resp.status_code == 404
+
+
 def test_trigger_ingest_sweep_returns_409_trigger_not_supported(
     conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
 ) -> None:

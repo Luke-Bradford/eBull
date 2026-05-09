@@ -9,15 +9,14 @@
  *      for summaries we don't yet have endpoints for.
  *   3. Processes table — unified view of bootstrap + scheduled jobs +
  *      ingest sweeps. Drill-in lives at /admin/processes/{id}.
- *      Background-tasks table + filings coverage stay during PR6/PR7
+ *      Background-tasks table + filings coverage stay during the
  *      migration; PR9 decommissions the rest.
  *
- * #1078 — admin control hub PR6. The legacy SyncDashboard (Sync-now
- * button + 15-layer grid + recent-runs feed) and LayerHealthList have
- * been decommissioned: the orchestrator surfaces as one row in the
- * Processes table and its DAG drill-in lives on
- * /admin/processes/orchestrator_full_sync. SeedProgressPanel +
- * BootstrapPanel + Background-tasks table stay until PR7 / PR9.
+ * #1080 — admin control hub PR7. The legacy BootstrapPanel has been
+ * decommissioned: the bootstrap row surfaces in the Processes table
+ * and its parallel-lane Timeline drill-in lives on
+ * /admin/processes/bootstrap. SeedProgressPanel + Background-tasks
+ * table stay until PR9.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -33,7 +32,6 @@ import type {
   CoverageSummaryResponse,
   JobOverviewResponse,
 } from "@/api/types";
-import { BootstrapPanel } from "@/components/admin/BootstrapPanel";
 import { CollapsibleSection } from "@/components/admin/CollapsibleSection";
 import { FundDataRow } from "@/components/admin/FundDataRow";
 import { ProblemsPanel } from "@/components/admin/ProblemsPanel";
@@ -182,8 +180,6 @@ export function AdminPage() {
         coverageError={coverage.error !== null}
         onOpenOrchestrator={openOrchestratorFor}
       />
-
-      <BootstrapPanel />
 
       <CollapsibleSection
         title="Processes"

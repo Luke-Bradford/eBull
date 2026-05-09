@@ -8,6 +8,7 @@
 
 import { apiFetch } from "@/api/client";
 import type {
+  BootstrapTimelineResponse,
   CancelRequestBody,
   CancelResponse,
   ErrorClassSummaryResponse,
@@ -81,5 +82,20 @@ export function fetchOrchestratorDag(
 ): Promise<OrchestratorDagResponse> {
   return apiFetch<OrchestratorDagResponse>(
     `/system/processes/${encodeURIComponent(processId)}/dag`,
+  );
+}
+
+/**
+ * Bootstrap timeline drill-in (#1080).
+ *
+ * Restricted endpoint: returns 404 for any process_id other than
+ * `bootstrap`. Callers MUST gate on the process_id before calling —
+ * `ProcessDetailPage` does this via the Timeline-tab fetch closure.
+ */
+export function fetchBootstrapTimeline(
+  processId: string,
+): Promise<BootstrapTimelineResponse> {
+  return apiFetch<BootstrapTimelineResponse>(
+    `/system/processes/${encodeURIComponent(processId)}/timeline`,
   );
 }
