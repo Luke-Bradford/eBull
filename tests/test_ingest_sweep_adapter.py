@@ -394,21 +394,25 @@ def _insert_freshness_with_expected_next_at(
     """Helper for PR8 stale-detection tests — sets
     ``expected_next_at`` to ``now() + offset`` so the watermark_gap
     rule can find an overdue row.
+
+    Offset is parameterised through ``make_interval`` rather than
+    f-string interpolated to keep the SQL a literal string for
+    pyright (LiteralString constraint on `psycopg.execute`).
     """
     conn.execute(
-        f"""
+        """
         INSERT INTO data_freshness_index (
             subject_type, subject_id, source, state, expected_next_at,
             instrument_id
         ) VALUES ('issuer', %s, %s, %s,
-                  now() + interval '{expected_next_at_offset_minutes} minutes',
+                  now() + make_interval(mins => %s),
                   %s)
         ON CONFLICT (subject_type, subject_id, source) DO UPDATE
         SET state            = EXCLUDED.state,
             expected_next_at = EXCLUDED.expected_next_at,
             instrument_id    = EXCLUDED.instrument_id
         """,
-        (subject_id, source, state, instrument_id),
+        (subject_id, source, state, expected_next_at_offset_minutes, instrument_id),
     )
 
 
