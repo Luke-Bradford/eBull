@@ -64,6 +64,11 @@ from app.services.processes import (
     ingest_sweep_adapter,
     scheduled_adapter,
 )
+from app.services.processes.watermarks import (
+    atom_etag_target_for,
+    freshness_source_for,
+    manifest_source_for,
+)
 from app.services.sync_orchestrator.dispatcher import NOTIFY_CHANNEL
 
 logger = logging.getLogger(__name__)
@@ -516,12 +521,36 @@ def _check_bootstrap_preconditions(conn: psycopg.Connection[Any], *, mode: Liter
         )
 
 
+def _has_active_job_run(conn: psycopg.Connection[Any], *, job_name: str) -> bool:
+    """True if a ``job_runs`` row is currently ``status='running'``.
+
+    The advisory lock serialises preludes only — once a worker has
+    started the body of its run, the lock is released. Any trigger
+    that arrives during that window must still see the active run and
+    refuse rather than (a) double-enqueue an iterate or (b) reset
+    watermarks under the running worker's feet (Codex pre-push BLOCKING).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+              FROM job_runs
+             WHERE job_name = %s
+               AND status   = 'running'
+             LIMIT 1
+            """,
+            (job_name,),
+        )
+        return cur.fetchone() is not None
+
+
 def _check_scheduled_job_preconditions(conn: psycopg.Connection[Any], *, job_name: str) -> None:
     """Raise 409 if scheduled-job trigger preconditions are not met.
 
     The bootstrap-gate (``_bootstrap_complete``) check is left to the
     job's own prerequisite at fire time — the trigger endpoint only
-    enforces the universal preconditions (kill_switch, dedup, fence).
+    enforces the universal preconditions (kill_switch, dedup, fence,
+    active-run).
     Trying to short-circuit a gated job here would duplicate the
     job-level prerequisite and risk drift (e.g. a future pause flag).
 
@@ -530,6 +559,16 @@ def _check_scheduled_job_preconditions(conn: psycopg.Connection[Any], *, job_nam
     second one's ``_has_inflight_manual_job`` check sees the first's
     committed row and 409s. (sql/138 only has a partial UNIQUE for
     ``mode='full_wash'``; iterate dedup relies entirely on this lock.)
+
+    Active-run gate (Codex pre-push BLOCKING + spec §"Full-wash
+    execution fence" step 4): a scheduled fire that has already
+    advanced past the prelude into its body holds no lock and is
+    invisible to ``pending_job_requests`` (its trigger row is already
+    transitioned to ``completed``/``rejected``). A trigger landing
+    while that body is in flight must be refused with
+    ``active_run_in_progress`` — full-wash MUST NOT mutate watermark
+    state under the running worker, and a second iterate would
+    double-enqueue.
     """
     if _kill_switch_active(conn):
         raise _conflict("kill_switch_active", advice="deactivate kill switch")
@@ -539,11 +578,124 @@ def _check_scheduled_job_preconditions(conn: psycopg.Connection[Any], *, job_nam
     # tooltip than plain dedup).
     if _has_pending_full_wash_fence(conn, process_id=job_name):
         raise _conflict("full_wash_already_pending", advice="wait for the active full-wash")
+    if _has_active_job_run(conn, job_name=job_name):
+        raise _conflict("active_run_in_progress", advice="cancel the active run first")
     if _has_inflight_manual_job(conn, job_name=job_name):
         raise _conflict(
             "iterate_already_pending",
             advice="a manual run for this job is already in flight",
         )
+
+
+def _apply_full_wash_reset(
+    conn: psycopg.Connection[Any],
+    *,
+    process_id: str,
+    mechanism: ProcessMechanism,
+) -> None:
+    """Reset the watermark to mechanism-specific minimum BEFORE INSERT.
+
+    Spec §"Full-wash semantics" step 5 + §"Full-wash execution fence"
+    step 5. Caller MUST be inside ``conn.transaction()`` and MUST hold
+    the per-process advisory lock acquired by
+    ``acquire_prelude_lock`` so the reset + the durable fence INSERT
+    are atomic against any racing scheduled prelude / iterate trigger.
+
+    Reset shape per mechanism:
+
+    * **bootstrap** — `UPDATE bootstrap_stages SET status='pending',
+      started_at=NULL, completed_at=NULL, last_error=NULL WHERE
+      bootstrap_run_id = (latest) AND status IN
+      ('success','error','blocked','skipped')`. Pending+running rows
+      are NOT touched (precondition gate already rejected the trigger
+      if status='running'); a stage in 'pending' is the natural
+      starting state and overwriting it would just rewrite the same
+      values.
+    * **scheduled_job** with freshness source — full epoch reset:
+      ``UPDATE data_freshness_index SET last_known_filed_at = NULL,
+      last_known_filing_id = NULL, expected_next_at = NULL,
+      next_recheck_at = NULL, state = 'unknown' WHERE source = ?``.
+      Codex pre-push BLOCKING: clearing only ``last_known_filed_at``
+      leaves the prior filing_id pointer + future
+      ``expected_next_at`` / ``next_recheck_at``, so the next poll
+      may not run immediately AND ``check_freshness`` would skip
+      historical filings against the stale ``last_known_filing_id``.
+      The full reset gives the freshness sweeper a clean slate; rows
+      qualify for ``idx_freshness_due_for_poll`` immediately
+      (``state='unknown'`` AND ``expected_next_at IS NULL``).
+    * **scheduled_job** with manifest source — `UPDATE
+      sec_filing_manifest SET ingest_status='pending',
+      last_attempted_at=NULL, next_retry_at=NULL WHERE source = ?`.
+      ON CONFLICT idempotency on the per-source ingester provides the
+      de-dupe guarantee — no row corruption from the re-fetch.
+    * **scheduled_job** with atom ETag target — `DELETE FROM
+      external_data_watermarks WHERE source = ? AND key = ?`. A
+      missing row is the "no prior state, do full backfill" signal
+      consumed by ``app/services/watermarks.py::get_watermark``.
+    * **scheduled_job** with no registered source — no-op. Full-wash
+      on a no-watermark job is just "rerun"; the queue INSERT alone
+      is sufficient.
+    * **ingest_sweep** — never reaches this code path (caller 404s
+      ingest_sweep triggers in PR3).
+    """
+    if mechanism == "bootstrap":
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE bootstrap_stages
+                   SET status='pending',
+                       started_at=NULL,
+                       completed_at=NULL,
+                       last_error=NULL
+                 WHERE bootstrap_run_id = (
+                       SELECT MAX(id) FROM bootstrap_runs
+                 )
+                   AND status IN ('success', 'error', 'blocked', 'skipped')
+                """
+            )
+        return
+    if mechanism == "ingest_sweep":
+        # Stub adapter — caller already 404'd. Defence-in-depth no-op.
+        return
+    # mechanism == 'scheduled_job'
+    freshness_source = freshness_source_for(process_id)
+    if freshness_source is not None:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE data_freshness_index
+                   SET last_known_filed_at  = NULL,
+                       last_known_filing_id = NULL,
+                       expected_next_at     = NULL,
+                       next_recheck_at      = NULL,
+                       state                = 'unknown',
+                       state_reason         = NULL,
+                       new_filings_since    = 0
+                 WHERE source = %s
+                """,
+                (freshness_source,),
+            )
+    manifest_source = manifest_source_for(process_id)
+    if manifest_source is not None:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sec_filing_manifest
+                   SET ingest_status   = 'pending',
+                       last_attempted_at = NULL,
+                       next_retry_at   = NULL
+                 WHERE source = %s
+                """,
+                (manifest_source,),
+            )
+    atom_target = atom_etag_target_for(process_id)
+    if atom_target is not None:
+        atom_source, atom_key = atom_target
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM external_data_watermarks WHERE source = %s AND key = %s",
+                (atom_source, atom_key),
+            )
 
 
 def _publish_within_tx(
@@ -649,6 +801,13 @@ def trigger_process(
                 _check_bootstrap_preconditions(conn, mode=body.mode)
             else:
                 _check_scheduled_job_preconditions(conn, job_name=target_job_name)
+            # PR4: full-wash resets the watermark BEFORE enqueueing
+            # the worker. The reset + fence INSERT happen in the same
+            # advisory-lock-held tx so a racing scheduled prelude /
+            # iterate either sees the reset state + the fence row, or
+            # neither (Codex round 4 R4-B1 invariant).
+            if body.mode == "full_wash":
+                _apply_full_wash_reset(conn, process_id=target_process_id, mechanism=mechanism)
             request_id = _publish_within_tx(
                 conn,
                 job_name=target_job_name,

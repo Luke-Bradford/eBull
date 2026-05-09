@@ -262,6 +262,119 @@ def test_list_runs_returns_terminal_history(
     assert statuses == {"success", "failure"}
 
 
+def test_watermark_surfaces_filed_at_for_sec_ingest_job(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """PR4: SEC freshness-driven jobs surface a ``filed_at`` watermark
+    on the ProcessRow."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange,
+                                  currency, is_tradable)
+        VALUES (9100001, 'TST_F3', 'TST_F3 Co', 'TEST', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO data_freshness_index
+            (subject_type, subject_id, source, last_known_filed_at, state,
+             instrument_id)
+        VALUES ('issuer', '9100001', 'sec_form3', '2026-05-08T12:00:00Z',
+                'current', 9100001)
+        """
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id="sec_form3_ingest")
+    assert row is not None
+    assert row.watermark is not None
+    assert row.watermark.cursor_kind == "filed_at"
+    assert row.watermark.cursor_value.startswith("2026-05-08")
+
+
+def test_pending_retry_status_when_freshness_recheck_covers_failed_scope(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """PR4: spec §"Auto-hide-on-retry rule" / "Covered" check.
+
+    Latest terminal run is failure, no inflight Iterate, but
+    data_freshness_index has an error-state subject with
+    ``next_recheck_at`` <= next_fire_at — the next scheduled fire will
+    reattempt the failed scope. Status flips from ``failed`` to
+    ``pending_retry`` with empty errors.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(
+        ebull_test_conn,
+        job_name="sec_form3_ingest",
+        status="failure",
+        finished=True,
+        rows_errored=1,
+        error_classes={
+            "RateLimited": {
+                "count": 1,
+                "sample_message": "429",
+                "last_subject": "AAPL",
+                "last_seen_at": "2026-05-09T11:00:00+00:00",
+            }
+        },
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange,
+                                  currency, is_tradable)
+        VALUES (9100002, 'TST_RC', 'TST_RC Co', 'TEST', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO data_freshness_index
+            (subject_type, subject_id, source, state, next_recheck_at,
+             instrument_id)
+        VALUES ('issuer', '9100002', 'sec_form3', 'error',
+                now() + interval '5 minutes', 9100002)
+        """
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id="sec_form3_ingest")
+    assert row is not None
+    assert row.status == "pending_retry"
+    assert row.last_n_errors == ()
+
+
+def test_failed_status_when_no_freshness_recheck_covers_failed_scope(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The covered-check is conservative — without an error-state
+    freshness row inside the next-fire window, the row stays ``failed``."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(
+        ebull_test_conn,
+        job_name="sec_form3_ingest",
+        status="failure",
+        finished=True,
+        rows_errored=1,
+        error_classes={
+            "RateLimited": {
+                "count": 1,
+                "sample_message": "429",
+                "last_subject": "AAPL",
+                "last_seen_at": "2026-05-09T11:00:00+00:00",
+            }
+        },
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id="sec_form3_ingest")
+    assert row is not None
+    assert row.status == "failed"
+    assert len(row.last_n_errors) == 1
+
+
 def test_list_run_errors_decodes_jsonb(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
