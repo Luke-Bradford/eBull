@@ -182,14 +182,12 @@ def test_trigger_scheduled_full_wash_blocks_subsequent_iterate(
         json={"mode": "iterate"},
     )
     assert second.status_code == 409
-    # Both reasons are valid here (the precondition fires first):
-    # full_wash_already_pending OR iterate_already_pending — full_wash counts
-    # as a manual_job request too. Our matrix puts full-wash fence check
-    # AFTER the iterate-dedup check, so iterate dedup fires first.
-    assert second.json()["detail"]["reason"] in {
-        "full_wash_already_pending",
-        "iterate_already_pending",
-    }
+    # Fence check runs FIRST in `_check_scheduled_job_preconditions`
+    # (PR #1072 review WARNING fix), so the iterate POST during an
+    # active full-wash always reports the spec-aligned fence reason —
+    # never `iterate_already_pending`. Pin the exact reason so a
+    # future precondition reorder shows up as a test diff.
+    assert second.json()["detail"]["reason"] == "full_wash_already_pending"
 
 
 def test_trigger_invalid_mode_returns_422(conn_override: None) -> None:
